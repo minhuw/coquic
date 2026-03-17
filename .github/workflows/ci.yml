@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
@@ -34,6 +36,14 @@ jobs:
 
       - name: Test
         run: nix develop -c zig build coverage
+
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage/lcov.info
+          disable_search: true
+          fail_ci_if_error: true
+          use_oidc: true
 
       - name: Upload Coverage Artifacts
         if: success()

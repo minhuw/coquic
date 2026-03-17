@@ -1,5 +1,7 @@
 # coquic
 
+[![codecov](https://codecov.io/github/minhuw/coquic/graph/badge.svg?branch=main)](https://app.codecov.io/github/minhuw/coquic)
+
 coquic is an experimental project to see how far a feature-complete QUIC implementation can be built using only GPT-5.4 + Codex, documenting the progress, limits, and lessons from that effort.
 
 ## Development
@@ -32,4 +34,4 @@ GitHub Actions runs the same four checks through `nix develop`:
 - format check
 - lint
 - build
-- test and coverage artifact export
+- test, Codecov upload, and coverage artifact export

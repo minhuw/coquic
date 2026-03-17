@@ -6,5 +6,7 @@ namespace coquic {
 
 std::string_view project_name();
 bool openssl_available();
+void init_logging();
+bool logging_ready();
 
 } // namespace coquic

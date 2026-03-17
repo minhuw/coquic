@@ -11,7 +11,7 @@ from coquic_rag.config import ProjectPaths
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
 
-DEFAULT_EMBEDDING_MODEL = "mixedbread-ai/mxbai-embed-large-v1"
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _DEFAULT_KEYWORDS = (
     "ack",

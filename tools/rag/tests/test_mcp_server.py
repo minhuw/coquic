@@ -4,12 +4,13 @@ import shutil
 from pathlib import Path
 
 import anyio
+import pytest
 
 from coquic_rag.cli.main import main as cli_main
 from coquic_rag.config import ProjectPaths
 from coquic_rag.embed.provider import FakeEmbedder
-from coquic_rag.mcp_server.server import create_mcp_server
-from coquic_rag.query.service import QueryService
+from coquic_rag.mcp_server.server import create_mcp_server, main as mcp_main
+from coquic_rag.query.service import IndexNotBuiltError, QueryService
 
 
 def _copy_query_fixtures(source_dir: Path) -> None:
@@ -114,3 +115,40 @@ def test_mcp_server_exposes_section_resource_template(tmp_path: Path) -> None:
         "quic://rfc/9000/section/18.2",
     )
     assert "Transport Parameter Definitions" in contents[0].content
+
+
+def test_create_mcp_server_fails_fast_when_index_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _copy_query_fixtures(source_dir)
+    paths = ProjectPaths(
+        repo_root=tmp_path,
+        rfc_source=source_dir,
+        state_dir=state_dir,
+        model_cache_dir=state_dir / "cache" / "models",
+    )
+
+    with pytest.raises(IndexNotBuiltError, match="ready: no"):
+        create_mcp_server(paths=paths)
+
+
+def test_mcp_main_returns_nonzero_when_index_is_incomplete(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _copy_query_fixtures(source_dir)
+    paths = ProjectPaths(
+        repo_root=tmp_path,
+        rfc_source=source_dir,
+        state_dir=state_dir,
+        model_cache_dir=state_dir / "cache" / "models",
+    )
+
+    assert mcp_main(paths=paths) == 1
+
+    error_output = capsys.readouterr().err
+    assert "QUIC index is not ready" in error_output

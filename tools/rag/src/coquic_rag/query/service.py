@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +23,112 @@ class IndexNotBuiltError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class IndexStatus:
+    source_ok: bool
+    artifacts_ok: bool
+    qdrant_ok: bool
+    qdrant_status: str
+    section_count: int | None
+    indexed_count: int | None
+
+    @property
+    def ready(self) -> bool:
+        return self.source_ok and self.artifacts_ok and self.qdrant_ok
+
+    def lines(self) -> list[str]:
+        lines = [
+            f"source_docs: {'ok' if self.source_ok else 'missing'}",
+            f"artifacts: {'ok' if self.artifacts_ok else 'missing'}",
+            f"qdrant: {self.qdrant_status}",
+        ]
+        if self.section_count is not None and self.indexed_count is not None:
+            lines.append(f"indexed_sections: {self.indexed_count}/{self.section_count}")
+        lines.append(f"ready: {'yes' if self.ready else 'no'}")
+        return lines
+
+    def failure_message(self, paths: ProjectPaths) -> str:
+        command = (
+            "uv run --project tools/rag python -m coquic_rag.cli.main "
+            f"build-index --source {paths.rfc_source} --state-dir {paths.state_dir}"
+        )
+        return "\n".join(
+            [
+                f"QUIC index is not ready under {paths.state_dir}",
+                *self.lines(),
+                f"rebuild with: {command}",
+            ]
+        )
+
+
 def _normalize_term_name(term: str) -> str:
     return term.strip().lower().replace(" ", "_")
 
 
 def _section_citation(record: dict[str, object]) -> str:
     return f"RFC {record['rfc']} Section {record['section_id']}"
+
+
+def _required_artifact_paths(paths: ProjectPaths) -> tuple[Path, Path, Path]:
+    return (
+        paths.artifacts_dir / _SECTION_ARTIFACT,
+        paths.artifacts_dir / _GRAPH_NODES_ARTIFACT,
+        paths.artifacts_dir / _GRAPH_EDGES_ARTIFACT,
+    )
+
+
+def get_index_status(
+    paths: ProjectPaths | None = None,
+    *,
+    collection_name: str = "quic_sections",
+) -> IndexStatus:
+    resolved_paths = paths or ProjectPaths.default()
+    source_ok = resolved_paths.rfc_source.is_dir() and bool(
+        sorted(path for path in resolved_paths.rfc_source.glob("*.txt") if path.is_file())
+    )
+
+    required_paths = _required_artifact_paths(resolved_paths)
+    artifacts_ok = all(path.is_file() for path in required_paths)
+    section_count: int | None = None
+    if artifacts_ok:
+        section_count = len(read_section_records(required_paths[0]))
+
+    store = QdrantSectionStore(
+        state_dir=resolved_paths.qdrant_dir,
+        collection_name=collection_name,
+    )
+    indexed_count = store.section_count()
+
+    if indexed_count is None:
+        qdrant_status = "missing"
+        qdrant_ok = False
+    elif section_count is not None and indexed_count != section_count:
+        qdrant_status = "stale"
+        qdrant_ok = False
+    else:
+        qdrant_status = "ok"
+        qdrant_ok = True
+
+    return IndexStatus(
+        source_ok=source_ok,
+        artifacts_ok=artifacts_ok,
+        qdrant_ok=qdrant_ok,
+        qdrant_status=qdrant_status,
+        section_count=section_count,
+        indexed_count=indexed_count,
+    )
+
+
+def require_index_ready(
+    paths: ProjectPaths | None = None,
+    *,
+    collection_name: str = "quic_sections",
+) -> IndexStatus:
+    resolved_paths = paths or ProjectPaths.default()
+    status = get_index_status(resolved_paths, collection_name=collection_name)
+    if not status.ready:
+        raise IndexNotBuiltError(status.failure_message(resolved_paths))
+    return status
 
 
 class QueryService:
@@ -269,14 +370,9 @@ class QueryService:
         if self._loaded:
             return
 
-        sections_path = self._paths.artifacts_dir / _SECTION_ARTIFACT
-        nodes_path = self._paths.artifacts_dir / _GRAPH_NODES_ARTIFACT
-        edges_path = self._paths.artifacts_dir / _GRAPH_EDGES_ARTIFACT
-        required_paths = (sections_path, nodes_path, edges_path)
-        if not all(path.is_file() for path in required_paths) or not self._store.collection_exists():
-            raise IndexNotBuiltError(
-                f"QUIC index is not built under {self._paths.state_dir}"
-            )
+        require_index_ready(self._paths, collection_name=self._store.collection_name)
+
+        sections_path, nodes_path, edges_path = _required_artifact_paths(self._paths)
 
         sections = read_section_records(sections_path)
         nodes = read_graph_nodes(nodes_path)

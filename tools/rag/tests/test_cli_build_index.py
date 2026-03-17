@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 from coquic_rag.cli.main import main
+from coquic_rag.embed.provider import DEFAULT_EMBEDDING_MODEL
 from coquic_rag.store.artifacts import (
     read_graph_edges,
     read_graph_nodes,
@@ -48,6 +49,30 @@ def test_build_index_writes_artifacts_and_qdrant_state(
     assert "indexed 1 RFC" in output
 
 
+def test_build_index_reports_progress_stages(tmp_path: Path, capsys) -> None:
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _copy_fixture_rfc(source_dir)
+
+    exit_code = main(
+        [
+            "build-index",
+            "--source",
+            str(source_dir),
+            "--state-dir",
+            str(state_dir),
+            "--embedder",
+            "fake",
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "parse RFCs" in output
+    assert "embed sections" in output
+    assert "100%" in output
+
+
 def test_doctor_reports_ready_after_build_index(tmp_path: Path, capsys) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
@@ -83,3 +108,7 @@ def test_doctor_reports_ready_after_build_index(tmp_path: Path, capsys) -> None:
     assert "artifacts: ok" in output
     assert "qdrant: ok" in output
     assert "ready: yes" in output
+
+
+def test_default_embedding_model_uses_small_cpu_friendly_model() -> None:
+    assert DEFAULT_EMBEDDING_MODEL == "sentence-transformers/all-MiniLM-L6-v2"

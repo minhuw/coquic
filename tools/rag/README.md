@@ -21,7 +21,8 @@ uv run --project tools/rag python -m coquic_rag.cli.main build-index --source do
 uv run --project tools/rag python -m coquic_rag.cli.main doctor --source docs/rfc --state-dir .rag
 ```
 
-The default embedding model is `mixedbread-ai/mxbai-embed-large-v1`, stored under `.rag/cache/models`.
+The default embedding model is `sentence-transformers/all-MiniLM-L6-v2`, stored under `.rag/cache/models`.
+`build-index` now shows parse and embedding progress, and the MCP server exits early with a clear error if `.rag` is incomplete.
 
 Start the MCP server for Codex:
 

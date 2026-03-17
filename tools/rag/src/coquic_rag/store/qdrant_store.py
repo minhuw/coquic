@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 from typing import Any
 
 from qdrant_client import QdrantClient
@@ -60,6 +61,10 @@ class QdrantSectionStore:
         self._collection_name = collection_name
         self._client: QdrantClient | None = None
 
+    @property
+    def collection_name(self) -> str:
+        return self._collection_name
+
     def collection_exists(self) -> bool:
         return self._client_or_create().collection_exists(self._collection_name)
 
@@ -68,45 +73,68 @@ class QdrantSectionStore:
         if client.collection_exists(self._collection_name):
             client.delete_collection(self._collection_name)
 
+    def section_count(self) -> int | None:
+        client = self._client_or_create()
+        if not client.collection_exists(self._collection_name):
+            return None
+        return int(client.count(self._collection_name, exact=True).count)
+
     def upsert_sections(
         self,
         section_records: list[dict[str, object]],
         embedder: EmbeddingProvider,
+        *,
+        batch_size: int = 32,
+        progress: Callable[[int, int], None] | None = None,
     ) -> None:
         if not section_records:
             return
-
-        embeddings = embedder.embed([_embed_input(record) for record in section_records])
-        if not embeddings:
-            return
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
 
         client = self._client_or_create()
-        if not client.collection_exists(self._collection_name):
-            client.create_collection(
-                self._collection_name,
-                vectors_config=VectorParams(
-                    size=len(embeddings[0]),
-                    distance=Distance.COSINE,
-                ),
-                on_disk_payload=True,
-            )
+        total = len(section_records)
+        if progress is not None:
+            progress(0, total)
 
-        points = [
-            PointStruct(
-                id=_point_id(str(record["node_id"])),
-                vector=embedding,
-                payload={
-                    "node_id": str(record["node_id"]),
-                    "rfc": int(record["rfc"]),
-                    "section_id": str(record["section_id"]),
-                    "section_kind": _section_kind(str(record["section_id"])),
-                    "title": str(record["title"]),
-                    "text": str(record["text"]),
-                },
+        processed = 0
+        for start in range(0, total, batch_size):
+            batch_records = section_records[start : start + batch_size]
+            embeddings = embedder.embed(
+                [_embed_input(record) for record in batch_records]
             )
-            for record, embedding in zip(section_records, embeddings, strict=True)
-        ]
-        client.upsert(self._collection_name, points=points, wait=True)
+            if not embeddings:
+                continue
+
+            if not client.collection_exists(self._collection_name):
+                client.create_collection(
+                    self._collection_name,
+                    vectors_config=VectorParams(
+                        size=len(embeddings[0]),
+                        distance=Distance.COSINE,
+                    ),
+                    on_disk_payload=True,
+                )
+
+            points = [
+                PointStruct(
+                    id=_point_id(str(record["node_id"])),
+                    vector=embedding,
+                    payload={
+                        "node_id": str(record["node_id"]),
+                        "rfc": int(record["rfc"]),
+                        "section_id": str(record["section_id"]),
+                        "section_kind": _section_kind(str(record["section_id"])),
+                        "title": str(record["title"]),
+                        "text": str(record["text"]),
+                    },
+                )
+                for record, embedding in zip(batch_records, embeddings, strict=True)
+            ]
+            client.upsert(self._collection_name, points=points, wait=True)
+            processed += len(batch_records)
+            if progress is not None:
+                progress(processed, total)
 
     def search_sections(
         self,

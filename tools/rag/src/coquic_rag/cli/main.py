@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from coquic_rag.config import ProjectPaths
@@ -11,6 +12,7 @@ from coquic_rag.embed.provider import (
 )
 from coquic_rag.graph.extractor import build_graph_artifacts
 from coquic_rag.ingest.rfc_parser import parse_rfc_document
+from coquic_rag.query.service import get_index_status
 from coquic_rag.store.artifacts import (
     write_graph_edges,
     write_graph_nodes,
@@ -21,6 +23,29 @@ from coquic_rag.store.qdrant_store import QdrantSectionStore
 _SECTION_ARTIFACT = "sections.jsonl"
 _GRAPH_NODES_ARTIFACT = "graph_nodes.jsonl"
 _GRAPH_EDGES_ARTIFACT = "graph_edges.jsonl"
+
+
+class _ProgressBar:
+    def __init__(self, label: str, total: int) -> None:
+        self._label = label
+        self._total = max(total, 1)
+        self._stream = sys.stdout
+        self._is_tty = self._stream.isatty()
+
+    def update(self, current: int, detail: str | None = None) -> None:
+        clamped = min(max(current, 0), self._total)
+        filled = int((clamped / self._total) * 20)
+        bar = "#" * filled + "-" * (20 - filled)
+        percent = int((clamped / self._total) * 100)
+        line = f"{self._label:<14} [{bar}] {clamped}/{self._total} {percent:>3}%"
+        if detail:
+            line = f"{line} {detail}"
+        if self._is_tty:
+            print(f"\r{line}", end="", file=self._stream, flush=True)
+            if clamped == self._total:
+                print(file=self._stream, flush=True)
+            return
+        print(line, file=self._stream, flush=True)
 
 
 def _runtime_paths(source: Path, state_dir: Path) -> ProjectPaths:
@@ -53,7 +78,9 @@ def _build_index(args: argparse.Namespace) -> int:
     graph_nodes: list[dict[str, object]] = []
     graph_edges: list[dict[str, object]] = []
 
-    for path in rfc_paths:
+    parse_progress = _ProgressBar("parse RFCs", len(rfc_paths))
+    parse_progress.update(0)
+    for index, path in enumerate(rfc_paths, start=1):
         document = parse_rfc_document(path)
         doc_section_records, doc_graph_nodes, doc_graph_edges = build_graph_artifacts(
             document
@@ -61,6 +88,7 @@ def _build_index(args: argparse.Namespace) -> int:
         section_records.extend(doc_section_records)
         graph_nodes.extend(doc_graph_nodes)
         graph_edges.extend(doc_graph_edges)
+        parse_progress.update(index, path.name)
 
     write_section_records(paths.artifacts_dir / _SECTION_ARTIFACT, section_records)
     write_graph_nodes(paths.artifacts_dir / _GRAPH_NODES_ARTIFACT, graph_nodes)
@@ -71,9 +99,11 @@ def _build_index(args: argparse.Namespace) -> int:
         collection_name=args.collection_name,
     )
     store.reset_collection()
+    embed_progress = _ProgressBar("embed sections", len(section_records))
     store.upsert_sections(
         section_records,
         _build_embedder(args.embedder, paths, args.model_name),
+        progress=lambda current, total: embed_progress.update(current),
     )
 
     print(
@@ -85,26 +115,10 @@ def _build_index(args: argparse.Namespace) -> int:
 
 def _doctor(args: argparse.Namespace) -> int:
     paths = _runtime_paths(Path(args.source), Path(args.state_dir))
-    source_ok = paths.rfc_source.is_dir() and bool(_iter_rfc_paths(paths.rfc_source))
-    artifacts_ok = all(
-        artifact_path.is_file()
-        for artifact_path in (
-            paths.artifacts_dir / _SECTION_ARTIFACT,
-            paths.artifacts_dir / _GRAPH_NODES_ARTIFACT,
-            paths.artifacts_dir / _GRAPH_EDGES_ARTIFACT,
-        )
-    )
-    qdrant_ok = QdrantSectionStore(
-        state_dir=paths.qdrant_dir,
-        collection_name=args.collection_name,
-    ).collection_exists()
-    ready = source_ok and artifacts_ok and qdrant_ok
-
-    print(f"source_docs: {'ok' if source_ok else 'missing'}")
-    print(f"artifacts: {'ok' if artifacts_ok else 'missing'}")
-    print(f"qdrant: {'ok' if qdrant_ok else 'missing'}")
-    print(f"ready: {'yes' if ready else 'no'}")
-    return 0 if ready else 1
+    status = get_index_status(paths, collection_name=args.collection_name)
+    for line in status.lines():
+        print(line)
+    return 0 if status.ready else 1
 
 
 def _build_parser() -> argparse.ArgumentParser:

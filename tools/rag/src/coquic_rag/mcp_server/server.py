@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import sys
+
 from mcp.server.fastmcp import FastMCP
 
-from coquic_rag.query.service import QueryService
+from coquic_rag.config import ProjectPaths
+from coquic_rag.query.service import IndexNotBuiltError, QueryService, require_index_ready
 
 
-def create_mcp_server(service: QueryService | None = None) -> FastMCP:
-    query_service = service or QueryService()
+def create_mcp_server(
+    service: QueryService | None = None,
+    *,
+    paths: ProjectPaths | None = None,
+    collection_name: str = "quic_sections",
+) -> FastMCP:
+    query_service = service
+    if query_service is None:
+        resolved_paths = paths or ProjectPaths.default()
+        require_index_ready(resolved_paths, collection_name=collection_name)
+        query_service = QueryService(
+            paths=resolved_paths,
+            collection_name=collection_name,
+        )
     app = FastMCP(
         name="coquic-rag",
         instructions="Local QUIC RFC knowledge base for Codex queries.",
@@ -70,9 +85,18 @@ def create_mcp_server(service: QueryService | None = None) -> FastMCP:
     return app
 
 
-def main() -> None:
-    create_mcp_server().run()
+def main(
+    *,
+    paths: ProjectPaths | None = None,
+    collection_name: str = "quic_sections",
+) -> int:
+    try:
+        create_mcp_server(paths=paths, collection_name=collection_name).run()
+    except IndexNotBuiltError as error:
+        print(error, file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

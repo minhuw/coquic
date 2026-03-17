@@ -1,0 +1,7 @@
+BasedOnStyle: LLVM
+AllowShortFunctionsOnASingleLine: None
+ColumnLimit: 100
+IndentWidth: 4
+SortIncludes: false
+Standard: c++20
+UseTab: Never

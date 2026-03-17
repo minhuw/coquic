@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  ci:
+    name: Format, Lint, Build, Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Enable Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Format Check
+        run: nix develop -c pre-commit run clang-format --all-files --show-diff-on-failure
+
+      - name: Lint
+        run: nix develop -c pre-commit run coquic-clang-tidy --all-files --show-diff-on-failure
+
+      - name: Build
+        run: nix develop -c zig build
+
+      - name: Test
+        run: nix develop -c zig build test

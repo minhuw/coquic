@@ -2,3 +2,4 @@
 zig-out/
 build/
 out/
+.pre-commit-config.yaml

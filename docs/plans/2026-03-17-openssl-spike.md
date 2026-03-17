@@ -4,7 +4,7 @@
 
 **Goal:** Prove that `coquic` can consume OpenSSL from the Nix shell and Zig build by linking the library and calling one harmless OpenSSL API from project code.
 
-**Architecture:** `flake.nix` adds OpenSSL to the dev shell, `build.zig` links the reusable project library against OpenSSL via pkg-config, and the project exposes one tiny helper that returns whether OpenSSL reports a non-zero version number. The helper is called from both `main` and a GoogleTest so the dependency is exercised in build and test flows.
+**Architecture:** `flake.nix` adds OpenSSL to the dev shell and exports its include path, `build.zig` compiles the reusable project library against OpenSSL headers and links the final binaries against OpenSSL via pkg-config, and the project exposes one tiny helper that returns whether OpenSSL reports a non-zero version number. The helper is called from both `main` and a GoogleTest so the dependency is exercised in build and test flows.
 
 **Tech Stack:** Nix flakes, Zig build system, C++20, OpenSSL, pkg-config, GoogleTest
 
@@ -23,7 +23,13 @@ Update `flake.nix` so `devShells.default.packages` includes:
 openssl
 ```
 
-alongside the existing toolchain packages.
+alongside the existing toolchain packages, and export:
+
+```sh
+OPENSSL_INCLUDE_DIR
+```
+
+from the shell hook.
 
 **Step 2: Verify the package is visible in the shell**
 
@@ -86,8 +92,9 @@ git commit -m "test: add failing openssl spike test"
 
 **Step 1: Link OpenSSL in Zig**
 
-Update the reusable project library in `build.zig` to link OpenSSL through
-pkg-config using Zig's system-library integration.
+Update `build.zig` so the reusable project library uses `OPENSSL_INCLUDE_DIR`
+for header compilation, and the final executable and test binaries link
+OpenSSL through pkg-config using Zig's system-library integration.
 
 **Step 2: Implement the helper**
 

@@ -26,15 +26,16 @@ dependency is wired correctly.
 ### Dependency Management
 
 - Add `openssl` to `flake.nix`.
-- Keep `pkg-config` in the shell and let Zig resolve OpenSSL through
+- Keep `pkg-config` in the shell and let Zig resolve OpenSSL link flags through
   `pkg-config`.
-- Do not hard-code include or library paths in `build.zig`.
+- Export the OpenSSL include directory from the Nix shell so the reusable
+  project library can compile sources that include OpenSSL headers.
 
 ### Build Integration
 
-- Link OpenSSL once at the reusable project library layer so the main
-  executable and test binary both inherit the dependency.
-- Use Zig's `linkSystemLibrary2` with pkg-config enabled for `openssl`.
+- Compile the reusable project library against OpenSSL headers.
+- Link the main executable and test binaries against OpenSSL with Zig's
+  `linkSystemLibrary2` and pkg-config enabled for `openssl`.
 - Keep the rest of the build structure unchanged.
 
 ### OpenSSL Usage

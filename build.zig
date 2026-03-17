@@ -24,6 +24,7 @@ fn addProjectLibrary(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     cpp_flags: []const []const u8,
+    openssl_include_dir: []const u8,
 ) *std.Build.Step.Compile {
     const lib = b.addStaticLibrary(.{
         .name = name,
@@ -31,6 +32,7 @@ fn addProjectLibrary(
         .optimize = optimize,
     });
     lib.addIncludePath(b.path("."));
+    lib.addIncludePath(.{ .cwd_relative = openssl_include_dir });
     lib.addCSourceFiles(.{
         .root = b.path("."),
         .files = &.{"src/coquic.cpp"},
@@ -38,6 +40,12 @@ fn addProjectLibrary(
     });
     lib.linkLibCpp();
     return lib;
+}
+
+fn linkOpenSSL(compile: *std.Build.Step.Compile) void {
+    compile.linkSystemLibrary2("openssl", .{
+        .use_pkg_config = .force,
+    });
 }
 
 fn addTestBinary(
@@ -88,6 +96,7 @@ pub fn build(b: *std.Build) void {
         "-fcoverage-mapping",
     });
     const gtest_root = requireEnv(b, "GTEST_SOURCE_DIR");
+    const openssl_include_dir = requireEnv(b, "OPENSSL_INCLUDE_DIR");
     const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");
 
     const exe = b.addExecutable(.{
@@ -96,13 +105,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.addIncludePath(b.path("."));
-    const project_lib = addProjectLibrary(b, "coquic", target, optimize, cpp_flags);
+    const project_lib = addProjectLibrary(
+        b,
+        "coquic",
+        target,
+        optimize,
+        cpp_flags,
+        openssl_include_dir,
+    );
     exe.addCSourceFiles(.{
         .root = b.path("."),
         .files = &.{"src/main.cpp"},
         .flags = cpp_flags,
     });
     exe.linkLibrary(project_lib);
+    linkOpenSSL(exe);
     exe.linkLibCpp();
     b.installArtifact(exe);
 
@@ -123,6 +140,7 @@ pub fn build(b: *std.Build) void {
         project_lib,
         gtest_root,
     );
+    linkOpenSSL(smoke);
     const smoke_run = b.addRunArtifact(smoke);
     const test_step = b.step("test", "Run the GoogleTest suite");
     test_step.dependOn(&smoke_run.step);
@@ -133,6 +151,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         coverage_cpp_flags,
+        openssl_include_dir,
     );
     const coverage_test = addTestBinary(
         b,
@@ -143,6 +162,7 @@ pub fn build(b: *std.Build) void {
         coverage_lib,
         gtest_root,
     );
+    linkOpenSSL(coverage_test);
     coverage_test.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     coverage_test.forceUndefinedSymbol("__llvm_profile_runtime");
     const coverage_cmd = b.addSystemCommand(&.{ "bash" });

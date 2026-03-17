@@ -59,6 +59,7 @@
             export GTEST_INCLUDE_DIR="${pkgs.gtest.dev}/include"
             export GTEST_SOURCE_DIR="${pkgs.gtest.src}"
             export GTEST_LIB_DIR="${pkgs.gtest}/lib"
+            export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
             export LLVM_COV="${pkgs.llvmPackages_20.llvm}/bin/llvm-cov"
             export LLVM_PROFDATA="${pkgs.llvmPackages_20.llvm}/bin/llvm-profdata"
             export LLVM_PROFILE_RT="${pkgs.llvmPackages_20.compiler-rt}/lib/linux/libclang_rt.profile-x86_64.a"

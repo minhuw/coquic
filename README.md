@@ -4,6 +4,22 @@
 
 coquic is an experimental project to see how far a feature-complete QUIC implementation can be built using only GPT-5.4 + Codex, documenting the progress, limits, and lessons from that effort.
 
+## QUIC Knowledge Base
+
+The repository now includes a local QUIC RFC knowledge base under `tools/rag/`.
+
+- Source corpus: `docs/rfc/`
+- Generated local state: `.rag/`
+- Index build: `tools/rag/scripts/build-index --source docs/rfc --state-dir .rag`
+- MCP server: `tools/rag/scripts/run-mcp`
+
+After `uv sync --project tools/rag`, you can rebuild the local index with:
+
+```bash
+uv run --project tools/rag python -m coquic_rag.cli.main build-index --source docs/rfc --state-dir .rag
+uv run --project tools/rag python -m coquic_rag.cli.main doctor --source docs/rfc --state-dir .rag
+```
+
 ## Development
 
 Enter the reproducible development shell with:

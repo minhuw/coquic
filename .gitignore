@@ -5,3 +5,7 @@ out/
 .pre-commit-config.yaml
 .worktrees/
 coverage/
+.rag/
+tools/rag/.venv/
+tools/rag/**/__pycache__/
+tools/rag/**/*.egg-info/

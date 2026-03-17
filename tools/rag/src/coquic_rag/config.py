@@ -18,6 +18,14 @@ class ProjectPaths:
     state_dir: Path
     model_cache_dir: Path
 
+    @property
+    def artifacts_dir(self) -> Path:
+        return self.state_dir / "artifacts"
+
+    @property
+    def qdrant_dir(self) -> Path:
+        return self.state_dir / "qdrant"
+
     @classmethod
     def default(cls) -> "ProjectPaths":
         repo_root = discover_repo_root(Path(__file__).resolve().parent)

@@ -63,6 +63,11 @@ class QdrantSectionStore:
     def collection_exists(self) -> bool:
         return self._client_or_create().collection_exists(self._collection_name)
 
+    def reset_collection(self) -> None:
+        client = self._client_or_create()
+        if client.collection_exists(self._collection_name):
+            client.delete_collection(self._collection_name)
+
     def upsert_sections(
         self,
         section_records: list[dict[str, object]],

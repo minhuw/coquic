@@ -7,7 +7,10 @@ from coquic_rag.ingest.models import RfcDocument, RfcSection, SectionCitation
 
 _RFC_NUMBER_RE = re.compile(r"Request for Comments:\s*(\d+)\b")
 _TITLE_RE = re.compile(r"\n\s{2,}([^\n]+)\n\nAbstract\b")
-_SECTION_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\.\s{2,}(.+?)\s*$", re.MULTILINE)
+_SECTION_HEADING_RE = re.compile(
+    r"^(?:(?:Appendix\s+(?P<appendix>[A-Z]))|(?P<section>\d+(?:\.\d+)*|[A-Z](?:\.\d+)*))\.\s{2,}(?P<title>.+?)\s*$",
+    re.MULTILINE,
+)
 _CITATION_RE = re.compile(
     r"\bSection\s+(\d+(?:\.\d+)*)(?:\s*(?:-|to)\s*(\d+(?:\.\d+)*))?"
 )
@@ -47,8 +50,8 @@ def parse_rfc_document(path: Path) -> RfcDocument:
     headings = list(_SECTION_HEADING_RE.finditer(text))
     sections = []
     for index, heading in enumerate(headings):
-        section_id = heading.group(1)
-        section_title = heading.group(2).strip()
+        section_id = heading.group("appendix") or heading.group("section")
+        section_title = heading.group("title").strip()
         start = heading.end()
         end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
         section_text = text[start:end].strip()

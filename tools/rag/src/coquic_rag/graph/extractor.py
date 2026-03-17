@@ -64,8 +64,12 @@ def _extract_terms(section: RfcSection) -> Iterable[tuple[str, str]]:
 
 
 def _term_mention_pattern(term_name: str) -> re.Pattern[str]:
-    tokens = [re.escape(token) for token in term_name.split("_")]
-    pattern = r"\b" + r"[_\s]+".join(tokens) + r"\b"
+    raw_tokens = term_name.split("_")
+    tokens = [re.escape(token) for token in raw_tokens]
+    if len(raw_tokens) == 1 and len(raw_tokens[0]) <= 3:
+        pattern = rf"(?<![\w-]){tokens[0]}(?![\w-])"
+    else:
+        pattern = r"\b" + r"[_\s]+".join(tokens) + r"\b"
     return re.compile(pattern, re.IGNORECASE)
 
 

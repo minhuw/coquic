@@ -67,6 +67,15 @@ def test_build_graph_artifacts_from_rfc9000() -> None:
     ]
     assert frame_mentions_edges
 
+    ack_false_positive_mentions = [
+        edge
+        for edge in graph_edges
+        if edge["edge_type"] == "mentions"
+        and edge["source"] == "rfc9000#4.1"
+        and edge["target"] == frame_term_id
+    ]
+    assert ack_false_positive_mentions == []
+
     frame_encoding_error_id = "term:transport_error_code:frame_encoding_error"
     crypto_error_id = "term:transport_error_code:crypto_error"
     error_node_ids = {

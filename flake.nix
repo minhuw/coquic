@@ -61,9 +61,35 @@
           };
         };
       };
+      qdrant-dev-app = pkgs.writeShellApplication {
+        name = "qdrant-dev";
+        runtimeInputs = [
+          pkgs.bash
+          pkgs.python3
+          pkgs.qdrant
+        ];
+        text = ''
+          search_dir="$PWD"
+          while true; do
+            if [ -f "$search_dir/build.zig" ] && [ -d "$search_dir/docs/rfc" ]; then
+              exec "$search_dir/tools/rag/scripts/qdrant-dev" "$@"
+            fi
+            if [ "$search_dir" = "/" ]; then
+              echo "Unable to find repository root from $PWD" >&2
+              exit 1
+            fi
+            search_dir="$(dirname "$search_dir")"
+          done
+        '';
+      };
     in
     {
       checks.${system}.pre-commit-check = pre-commit-check;
+
+      apps.${system}.qdrant-dev = {
+        type = "app";
+        program = "${qdrant-dev-app}/bin/qdrant-dev";
+      };
 
       devShells.${system}.default = pkgs.mkShell {
         packages =
@@ -76,6 +102,8 @@
             openssl
             spdlog
             pkg-config
+            python3
+            qdrant
           ])
           ++ pre-commit-check.enabledPackages;
 

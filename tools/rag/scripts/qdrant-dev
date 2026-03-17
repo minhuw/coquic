@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+
+HTTP_PORT = 6333
+STARTUP_POLL_SECONDS = 0.5
+STARTUP_POLL_INTERVAL_SECONDS = 0.05
+STOP_WAIT_SECONDS = 10.0
+
+
+def discover_repo_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "build.zig").is_file() and (candidate / "docs" / "rfc").is_dir():
+            return candidate
+    raise RuntimeError(f"Unable to find repository root from {start}")
+
+
+def pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def read_pid(pid_path: Path) -> int | None:
+    if not pid_path.is_file():
+        return None
+    try:
+        return int(pid_path.read_text(encoding="utf-8").strip())
+    except ValueError:
+        return None
+
+
+def yaml_quote(value: Path) -> str:
+    return json.dumps(str(value))
+
+
+def read_cmdline(pid: int) -> list[str] | None:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    if not raw:
+        return []
+    return [
+        argument.decode("utf-8", errors="surrogateescape")
+        for argument in raw.rstrip(b"\0").split(b"\0")
+    ]
+
+
+def is_expected_qdrant_process(pid: int, config_path: Path) -> bool:
+    cmdline = read_cmdline(pid)
+    if not cmdline:
+        return False
+    expected_binary = Path(os.getenv("COQUIC_QDRANT_BINARY", "qdrant")).name
+    if Path(cmdline[0]).name != expected_binary:
+        return False
+    for index, argument in enumerate(cmdline[:-1]):
+        if argument == "--config-path" and Path(cmdline[index + 1]) == config_path:
+            return True
+        if argument.startswith("--config-path=") and Path(
+            argument.partition("=")[2]
+        ) == config_path:
+            return True
+    return False
+
+
+def send_signal(pid: int, sig: signal.Signals) -> bool:
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def write_config(config_path: Path, storage_path: Path, snapshots_path: Path) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_path.mkdir(parents=True, exist_ok=True)
+    snapshots_path.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                "storage:",
+                f"  storage_path: {yaml_quote(storage_path)}",
+                f"  snapshots_path: {yaml_quote(snapshots_path)}",
+                "service:",
+                "  host: 127.0.0.1",
+                f"  http_port: {HTTP_PORT}",
+                "  grpc_port: null",
+                "  enable_cors: false",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def status_lines(repo_root: Path) -> list[str]:
+    dev_dir = repo_root / ".rag" / "dev"
+    pid_path = dev_dir / "qdrant.pid"
+    log_path = dev_dir / "qdrant.log"
+    config_path = dev_dir / "qdrant.yaml"
+    pid = read_pid(pid_path)
+    if pid is None:
+        state = "not running"
+    elif not pid_is_alive(pid):
+        state = f"stale pid file (pid {pid})"
+    elif is_expected_qdrant_process(pid, config_path):
+        state = f"running (pid {pid})"
+    else:
+        state = f"pid file points to unrelated live process (pid {pid})"
+    return [
+        f"repo_root: {repo_root}",
+        f"status: {state}",
+        f"pid_file: {pid_path}",
+        f"log_file: {log_path}",
+        f"config_file: {config_path}",
+    ]
+
+
+def start(repo_root: Path) -> int:
+    dev_dir = repo_root / ".rag" / "dev"
+    server_dir = repo_root / ".rag" / "qdrant-server"
+    config_path = dev_dir / "qdrant.yaml"
+    pid_path = dev_dir / "qdrant.pid"
+    log_path = dev_dir / "qdrant.log"
+    storage_path = server_dir / "storage"
+    snapshots_path = server_dir / "snapshots"
+
+    pid = read_pid(pid_path)
+    if pid is not None:
+        if pid_is_alive(pid):
+            if is_expected_qdrant_process(pid, config_path):
+                print(f"qdrant-dev already running with pid {pid}", file=sys.stderr)
+            else:
+                print(
+                    f"qdrant-dev pid file points to unrelated live process {pid}",
+                    file=sys.stderr,
+                )
+            return 1
+        pid_path.unlink(missing_ok=True)
+
+    write_config(config_path, storage_path, snapshots_path)
+
+    if os.getenv("COQUIC_QDRANT_DEV_DRY_RUN") == "1":
+        print(f"dry-run: config written to {config_path}")
+        return 0
+
+    dev_dir.mkdir(parents=True, exist_ok=True)
+    qdrant_binary = os.getenv("COQUIC_QDRANT_BINARY", "qdrant")
+    try:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            process = subprocess.Popen(
+                [qdrant_binary, "--config-path", str(config_path)],
+                cwd=repo_root,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except OSError as error:
+        print(f"failed to launch qdrant-dev: {error}", file=sys.stderr)
+        return 1
+
+    deadline = time.monotonic() + STARTUP_POLL_SECONDS
+    while time.monotonic() < deadline:
+        exit_code = process.poll()
+        if exit_code is not None:
+            print(
+                f"qdrant-dev failed to start: qdrant exited with code {exit_code}",
+                file=sys.stderr,
+            )
+            return 1
+        time.sleep(STARTUP_POLL_INTERVAL_SECONDS)
+
+    pid_path.write_text(f"{process.pid}\n", encoding="utf-8")
+    print(f"started qdrant-dev with pid {process.pid}")
+    return 0
+
+
+def stop(repo_root: Path) -> int:
+    pid_path = repo_root / ".rag" / "dev" / "qdrant.pid"
+    config_path = repo_root / ".rag" / "dev" / "qdrant.yaml"
+    pid = read_pid(pid_path)
+    if pid is None:
+        print("qdrant-dev is not running")
+        return 0
+    if not pid_is_alive(pid):
+        pid_path.unlink(missing_ok=True)
+        print("removed stale qdrant-dev pid file")
+        return 0
+    if not is_expected_qdrant_process(pid, config_path):
+        print(
+            f"qdrant-dev pid file does not belong to this repo's daemon: {pid}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not send_signal(pid, signal.SIGTERM):
+        pid_path.unlink(missing_ok=True)
+        print(f"qdrant-dev pid {pid} exited before shutdown")
+        return 0
+
+    deadline = time.monotonic() + STOP_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if not pid_is_alive(pid):
+            pid_path.unlink(missing_ok=True)
+            print(f"stopped qdrant-dev pid {pid}")
+            return 0
+        time.sleep(0.1)
+
+    if not is_expected_qdrant_process(pid, config_path):
+        print(
+            f"qdrant-dev pid {pid} no longer belongs to this repo's daemon",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not send_signal(pid, signal.SIGKILL):
+        pid_path.unlink(missing_ok=True)
+        print(f"qdrant-dev pid {pid} exited during shutdown")
+        return 0
+
+    pid_path.unlink(missing_ok=True)
+    print(f"killed qdrant-dev pid {pid}")
+    return 0
+
+
+def logs(repo_root: Path) -> int:
+    log_path = repo_root / ".rag" / "dev" / "qdrant.log"
+    print(f"log_file: {log_path}")
+    if not log_path.is_file():
+        print("no log file yet")
+        return 0
+    sys.stdout.write(log_path.read_text(encoding="utf-8"))
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2 or argv[1] not in {"start", "stop", "status", "logs"}:
+        print("usage: qdrant-dev {start|stop|status|logs}", file=sys.stderr)
+        return 2
+
+    try:
+        repo_root = discover_repo_root(Path.cwd().resolve())
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
+    command = argv[1]
+    if command == "start":
+        return start(repo_root)
+    if command == "stop":
+        return stop(repo_root)
+    if command == "status":
+        print("\n".join(status_lines(repo_root)))
+        return 0
+    return logs(repo_root)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

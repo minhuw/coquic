@@ -6,3 +6,5 @@ out/
 .worktrees/
 .rag/
 tools/rag/.venv/
+tools/rag/**/__pycache__/
+tools/rag/**/*.egg-info/

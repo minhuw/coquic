@@ -10,6 +10,7 @@ _TRANSPORT_PARAMETER_RE = re.compile(
     re.MULTILINE,
 )
 _FRAME_NAME_RE = re.compile(r"\b([A-Z][A-Z0-9_ ]+)\s+FRAME\b")
+_FRAME_SECTION_TITLE_RE = re.compile(r"^\s*([A-Z][A-Z0-9_ ]+)\s+Frames?\s*$")
 _TRANSPORT_ERROR_RE = re.compile(r"\b([A-Z][A-Z0-9_]+)\s+\(0x[0-9a-fA-F]+\):")
 
 
@@ -32,16 +33,33 @@ def _build_section_record(section: RfcSection) -> dict[str, object]:
 
 
 def _extract_terms(section: RfcSection) -> Iterable[tuple[str, str]]:
+    seen_terms: set[tuple[str, str]] = set()
+
+    frame_title_match = _FRAME_SECTION_TITLE_RE.match(section.title)
+    if section.section_id.startswith("19.") and frame_title_match:
+        frame_term = ("frame_name", _normalize_term(frame_title_match.group(1)))
+        seen_terms.add(frame_term)
+        yield frame_term
+
     for match in _TRANSPORT_PARAMETER_RE.finditer(section.text):
-        yield ("transport_parameter", _normalize_term(match.group(1)))
+        term = ("transport_parameter", _normalize_term(match.group(1)))
+        if term not in seen_terms:
+            seen_terms.add(term)
+            yield term
 
     for match in _FRAME_NAME_RE.finditer(section.text):
-        yield ("frame_name", _normalize_term(match.group(1)))
+        term = ("frame_name", _normalize_term(match.group(1)))
+        if term not in seen_terms:
+            seen_terms.add(term)
+            yield term
 
     for match in _TRANSPORT_ERROR_RE.finditer(section.text):
         term_name = _normalize_term(match.group(1))
         if "frame" not in term_name:
-            yield ("transport_error_code", term_name)
+            term = ("transport_error_code", term_name)
+            if term not in seen_terms:
+                seen_terms.add(term)
+                yield term
 
 
 def build_graph_artifacts(

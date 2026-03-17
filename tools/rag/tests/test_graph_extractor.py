@@ -45,6 +45,19 @@ def test_build_graph_artifacts_from_rfc9000() -> None:
     ]
     assert defines_edges
 
+    frame_term_id = "term:frame_name:ack"
+    frame_nodes = [node for node in graph_nodes if node["id"] == frame_term_id]
+    assert frame_nodes
+
+    frame_defines_edges = [
+        edge
+        for edge in graph_edges
+        if edge["edge_type"] == "defines"
+        and edge["source"] == "rfc9000#19.3"
+        and edge["target"] == frame_term_id
+    ]
+    assert frame_defines_edges
+
     section_record_ids = {record["node_id"] for record in section_records}
     assert "rfc9000#18.2" in section_record_ids
 

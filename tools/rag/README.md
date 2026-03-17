@@ -13,13 +13,3 @@ Bootstrap:
 uv sync --project tools/rag
 uv run --project tools/rag pytest tools/rag/tests/test_project_smoke.py -q
 ```
-
-Heavy embedding dependency:
-
-- `sentence-transformers` is tracked as the `embed` extra.
-- Install it only when embedding/indexing work starts:
-
-```bash
-uv sync --project tools/rag --extra embed
-```
-

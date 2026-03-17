@@ -155,10 +155,6 @@ source = { editable = "." }
 dependencies = [
     { name = "mcp" },
     { name = "qdrant-client" },
-]
-
-[package.optional-dependencies]
-embed = [
     { name = "sentence-transformers" },
 ]
 
@@ -171,9 +167,8 @@ dev = [
 requires-dist = [
     { name = "mcp" },
     { name = "qdrant-client" },
-    { name = "sentence-transformers", marker = "extra == 'embed'" },
+    { name = "sentence-transformers" },
 ]
-provides-extras = ["embed"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest" }]

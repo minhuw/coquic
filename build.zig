@@ -23,8 +23,10 @@ fn addProjectLibrary(
     name: []const u8,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    cpp_flags: []const []const u8,
+    project_cpp_flags: []const []const u8,
     openssl_include_dir: []const u8,
+    spdlog_include_dir: []const u8,
+    fmt_include_dir: []const u8,
 ) *std.Build.Step.Compile {
     const lib = b.addStaticLibrary(.{
         .name = name,
@@ -33,10 +35,12 @@ fn addProjectLibrary(
     });
     lib.addIncludePath(b.path("."));
     lib.addIncludePath(.{ .cwd_relative = openssl_include_dir });
+    lib.addIncludePath(.{ .cwd_relative = spdlog_include_dir });
+    lib.addIncludePath(.{ .cwd_relative = fmt_include_dir });
     lib.addCSourceFiles(.{
         .root = b.path("."),
         .files = &.{"src/coquic.cpp"},
-        .flags = cpp_flags,
+        .flags = project_cpp_flags,
     });
     lib.linkLibCpp();
     return lib;
@@ -44,6 +48,12 @@ fn addProjectLibrary(
 
 fn linkOpenSSL(compile: *std.Build.Step.Compile) void {
     compile.linkSystemLibrary2("openssl", .{
+        .use_pkg_config = .force,
+    });
+}
+
+fn linkSpdlog(compile: *std.Build.Step.Compile) void {
+    compile.linkSystemLibrary2("spdlog", .{
         .use_pkg_config = .force,
     });
 }
@@ -91,12 +101,24 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const cpp_flags = &.{"-std=c++20"};
+    const spdlog_cpp_flags = withExtraFlags(b, cpp_flags, &.{
+        "-DSPDLOG_SHARED_LIB",
+        "-DSPDLOG_COMPILED_LIB",
+        "-DSPDLOG_FMT_EXTERNAL",
+    });
     const coverage_cpp_flags = withExtraFlags(b, cpp_flags, &.{
         "-fprofile-instr-generate",
         "-fcoverage-mapping",
     });
+    const coverage_spdlog_cpp_flags = withExtraFlags(b, coverage_cpp_flags, &.{
+        "-DSPDLOG_SHARED_LIB",
+        "-DSPDLOG_COMPILED_LIB",
+        "-DSPDLOG_FMT_EXTERNAL",
+    });
     const gtest_root = requireEnv(b, "GTEST_SOURCE_DIR");
     const openssl_include_dir = requireEnv(b, "OPENSSL_INCLUDE_DIR");
+    const spdlog_include_dir = requireEnv(b, "SPDLOG_INCLUDE_DIR");
+    const fmt_include_dir = requireEnv(b, "FMT_INCLUDE_DIR");
     const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");
 
     const exe = b.addExecutable(.{
@@ -110,8 +132,10 @@ pub fn build(b: *std.Build) void {
         "coquic",
         target,
         optimize,
-        cpp_flags,
+        spdlog_cpp_flags,
         openssl_include_dir,
+        spdlog_include_dir,
+        fmt_include_dir,
     );
     exe.addCSourceFiles(.{
         .root = b.path("."),
@@ -120,6 +144,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.linkLibrary(project_lib);
     linkOpenSSL(exe);
+    linkSpdlog(exe);
     exe.linkLibCpp();
     b.installArtifact(exe);
 
@@ -141,6 +166,7 @@ pub fn build(b: *std.Build) void {
         gtest_root,
     );
     linkOpenSSL(smoke);
+    linkSpdlog(smoke);
     const smoke_run = b.addRunArtifact(smoke);
     const test_step = b.step("test", "Run the GoogleTest suite");
     test_step.dependOn(&smoke_run.step);
@@ -150,8 +176,10 @@ pub fn build(b: *std.Build) void {
         "coquic-coverage",
         target,
         optimize,
-        coverage_cpp_flags,
+        coverage_spdlog_cpp_flags,
         openssl_include_dir,
+        spdlog_include_dir,
+        fmt_include_dir,
     );
     const coverage_test = addTestBinary(
         b,
@@ -163,6 +191,7 @@ pub fn build(b: *std.Build) void {
         gtest_root,
     );
     linkOpenSSL(coverage_test);
+    linkSpdlog(coverage_test);
     coverage_test.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     coverage_test.forceUndefinedSymbol("__llvm_profile_runtime");
     const coverage_cmd = b.addSystemCommand(&.{ "bash" });

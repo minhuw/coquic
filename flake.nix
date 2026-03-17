@@ -19,10 +19,30 @@
         inherit system;
       };
       lib = pkgs.lib;
+      llvmPkgs = pkgs.llvmPackages_20;
+      fmt = (pkgs.fmt.override {
+        stdenv = llvmPkgs.libcxxStdenv;
+      }).overrideAttrs
+        (old: {
+          cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+            (lib.cmakeBool "FMT_TEST" false)
+          ];
+          doCheck = false;
+        });
+      spdlog = (pkgs.spdlog.override {
+        stdenv = llvmPkgs.libcxxStdenv;
+        inherit fmt;
+      }).overrideAttrs
+        (old: {
+          cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+            (lib.cmakeBool "SPDLOG_BUILD_TESTS" false)
+          ];
+          doCheck = false;
+        });
       pkgConfigPath = lib.makeSearchPath "lib/pkgconfig" [
         pkgs.openssl.dev
-        pkgs.spdlog.dev
-        pkgs.fmt.dev
+        spdlog.dev
+        fmt.dev
       ];
       pre-commit-check = git-hooks.lib.${system}.run {
         src = ./.;
@@ -52,7 +72,7 @@
             clang-tools
             gtest
             lldb
-            llvmPackages_20.llvm
+            llvmPkgs.llvm
             openssl
             spdlog
             pkg-config
@@ -66,12 +86,12 @@
             export GTEST_SOURCE_DIR="${pkgs.gtest.src}"
             export GTEST_LIB_DIR="${pkgs.gtest}/lib"
             export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
-            export SPDLOG_INCLUDE_DIR="${pkgs.spdlog.dev}/include"
-            export FMT_INCLUDE_DIR="${pkgs.fmt.dev}/include"
+            export SPDLOG_INCLUDE_DIR="${spdlog.dev}/include"
+            export FMT_INCLUDE_DIR="${fmt.dev}/include"
             export PKG_CONFIG_PATH="${pkgConfigPath}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-            export LLVM_COV="${pkgs.llvmPackages_20.llvm}/bin/llvm-cov"
-            export LLVM_PROFDATA="${pkgs.llvmPackages_20.llvm}/bin/llvm-profdata"
-            export LLVM_PROFILE_RT="${pkgs.llvmPackages_20.compiler-rt}/lib/linux/libclang_rt.profile-x86_64.a"
+            export LLVM_COV="${llvmPkgs.llvm}/bin/llvm-cov"
+            export LLVM_PROFDATA="${llvmPkgs.llvm}/bin/llvm-profdata"
+            export LLVM_PROFILE_RT="${llvmPkgs.compiler-rt}/lib/linux/libclang_rt.profile-x86_64.a"
             echo "coquic dev shell ready. Run: zig build"
           '';
       };

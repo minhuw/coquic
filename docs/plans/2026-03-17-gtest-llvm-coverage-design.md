@@ -22,7 +22,8 @@ existing Nix + Zig developer workflow.
 ### Test Framework
 
 - Use GoogleTest from Nix instead of a header-only test library.
-- Link tests against `gtest_main`.
+- Build GoogleTest from the Nix-provided source tree so it uses the same Zig C++
+  toolchain and standard library ABI as the project sources.
 - Replace the current smoke test with a real GoogleTest binary in `tests/`.
 
 ### Build Structure
@@ -35,9 +36,9 @@ existing Nix + Zig developer workflow.
 ### Nix Environment
 
 - Add `gtest` and LLVM tools to `flake.nix`.
-- Export the required include, library, and coverage tool paths from the Nix
-  dev shell so `build.zig` can consume them deterministically in local
-  development and CI.
+- Export the required GoogleTest source path, coverage tool paths, and LLVM
+  profile runtime archive path from the Nix dev shell so `build.zig` can
+  consume them deterministically in local development and CI.
 - Keep pre-commit, lint, and formatting behavior unchanged.
 
 ### Coverage

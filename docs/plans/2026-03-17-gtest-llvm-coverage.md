@@ -27,10 +27,10 @@ Update `flake.nix` to:
 - add `gtest`
 - add `llvmPackages_20.llvm`
 - export:
-  - `GTEST_INCLUDE_DIR`
-  - `GTEST_LIB_DIR`
+  - `GTEST_SOURCE_DIR`
   - `LLVM_COV`
   - `LLVM_PROFDATA`
+  - `LLVM_PROFILE_RT`
 
 Update `.gitignore` to add:
 
@@ -40,7 +40,7 @@ coverage/
 
 **Step 3: Verify the shell exposes the expected paths**
 
-Run: `nix develop -c bash -lc 'printf "%s\n%s\n%s\n%s\n" "$GTEST_INCLUDE_DIR" "$GTEST_LIB_DIR" "$LLVM_COV" "$LLVM_PROFDATA"'`
+Run: `nix develop -c bash -lc 'printf "%s\n%s\n%s\n%s\n" "$GTEST_SOURCE_DIR" "$LLVM_COV" "$LLVM_PROFDATA" "$LLVM_PROFILE_RT"'`
 Expected: PASS and print non-empty paths.
 
 **Step 4: Commit**
@@ -84,8 +84,8 @@ std::string_view project_name();
 }
 ```
 
-Update `build.zig` so the `test` step builds a GoogleTest runner linked against
-`gtest_main`, but do not add `src/coquic.cpp` yet.
+Update `build.zig` so the `test` step builds a GoogleTest runner from the
+Nix-provided GoogleTest source tree, but do not add `src/coquic.cpp` yet.
 
 **Step 2: Run the test step and verify it fails for the missing implementation**
 

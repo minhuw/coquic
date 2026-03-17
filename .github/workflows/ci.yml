@@ -33,4 +33,13 @@ jobs:
         run: nix develop -c zig build
 
       - name: Test
-        run: nix develop -c zig build test
+        run: nix develop -c zig build coverage
+
+      - name: Upload Coverage Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-coverage
+          path: |
+            coverage/html
+            coverage/lcov.info

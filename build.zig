@@ -1,19 +1,108 @@
 const std = @import("std");
 
+fn requireEnv(b: *std.Build, name: []const u8) []const u8 {
+    return b.graph.env_map.get(name) orelse std.debug.panic(
+        "missing required environment variable {s}; run inside `nix develop`",
+        .{name},
+    );
+}
+
+fn withExtraFlags(
+    b: *std.Build,
+    base: []const []const u8,
+    extra: []const []const u8,
+) []const []const u8 {
+    var flags = std.ArrayList([]const u8).init(b.allocator);
+    flags.appendSlice(base) catch @panic("failed to append base flags");
+    flags.appendSlice(extra) catch @panic("failed to append extra flags");
+    return flags.toOwnedSlice() catch @panic("failed to allocate flags");
+}
+
+fn addProjectLibrary(
+    b: *std.Build,
+    name: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    cpp_flags: []const []const u8,
+) *std.Build.Step.Compile {
+    const lib = b.addStaticLibrary(.{
+        .name = name,
+        .target = target,
+        .optimize = optimize,
+    });
+    lib.addIncludePath(b.path("."));
+    lib.addCSourceFiles(.{
+        .root = b.path("."),
+        .files = &.{"src/coquic.cpp"},
+        .flags = cpp_flags,
+    });
+    lib.linkLibCpp();
+    return lib;
+}
+
+fn addTestBinary(
+    b: *std.Build,
+    name: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    cpp_flags: []const []const u8,
+    project_lib: *std.Build.Step.Compile,
+    gtest_root: []const u8,
+) *std.Build.Step.Compile {
+    const gtest_include_dir = b.pathJoin(&.{ gtest_root, "googletest", "include" });
+    const gtest_src_dir = b.pathJoin(&.{ gtest_root, "googletest" });
+
+    const test_exe = b.addExecutable(.{
+        .name = name,
+        .target = target,
+        .optimize = optimize,
+    });
+    test_exe.addIncludePath(b.path("."));
+    test_exe.addIncludePath(.{ .cwd_relative = gtest_include_dir });
+    test_exe.addIncludePath(.{ .cwd_relative = gtest_src_dir });
+    test_exe.addCSourceFiles(.{
+        .root = b.path("."),
+        .files = &.{"tests/smoke.cpp"},
+        .flags = cpp_flags,
+    });
+    test_exe.addCSourceFiles(.{
+        .root = .{ .cwd_relative = gtest_root },
+        .files = &.{
+            "googletest/src/gtest-all.cc",
+            "googletest/src/gtest_main.cc",
+        },
+        .flags = cpp_flags,
+    });
+    test_exe.linkLibrary(project_lib);
+    test_exe.linkSystemLibrary("pthread");
+    test_exe.linkLibCpp();
+    return test_exe;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const cpp_flags = &.{"-std=c++20"};
+    const coverage_cpp_flags = withExtraFlags(b, cpp_flags, &.{
+        "-fprofile-instr-generate",
+        "-fcoverage-mapping",
+    });
+    const gtest_root = requireEnv(b, "GTEST_SOURCE_DIR");
+    const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");
 
     const exe = b.addExecutable(.{
         .name = "coquic",
         .target = target,
         .optimize = optimize,
     });
+    exe.addIncludePath(b.path("."));
+    const project_lib = addProjectLibrary(b, "coquic", target, optimize, cpp_flags);
     exe.addCSourceFiles(.{
         .root = b.path("."),
         .files = &.{"src/main.cpp"},
-        .flags = &.{"-std=c++20"},
+        .flags = cpp_flags,
     });
+    exe.linkLibrary(project_lib);
     exe.linkLibCpp();
     b.installArtifact(exe);
 
@@ -25,19 +114,43 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the coquic executable");
     run_step.dependOn(&run_exe.step);
 
-    const smoke = b.addExecutable(.{
-        .name = "coquic-smoke",
-        .target = target,
-        .optimize = optimize,
-    });
-    smoke.addCSourceFiles(.{
-        .root = b.path("."),
-        .files = &.{"tests/smoke.cpp"},
-        .flags = &.{"-std=c++20"},
-    });
-    smoke.linkLibCpp();
-
+    const smoke = addTestBinary(
+        b,
+        "coquic-tests",
+        target,
+        optimize,
+        cpp_flags,
+        project_lib,
+        gtest_root,
+    );
     const smoke_run = b.addRunArtifact(smoke);
-    const test_step = b.step("test", "Run the smoke test executable");
+    const test_step = b.step("test", "Run the GoogleTest suite");
     test_step.dependOn(&smoke_run.step);
+
+    const coverage_lib = addProjectLibrary(
+        b,
+        "coquic-coverage",
+        target,
+        optimize,
+        coverage_cpp_flags,
+    );
+    const coverage_test = addTestBinary(
+        b,
+        "coquic-coverage-tests",
+        target,
+        optimize,
+        coverage_cpp_flags,
+        coverage_lib,
+        gtest_root,
+    );
+    coverage_test.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
+    coverage_test.forceUndefinedSymbol("__llvm_profile_runtime");
+    const coverage_cmd = b.addSystemCommand(&.{ "bash" });
+    coverage_cmd.addFileArg(b.path("scripts/run-coverage.sh"));
+    coverage_cmd.addArtifactArg(coverage_test);
+    const coverage_step = b.step(
+        "coverage",
+        "Run the test suite and export LLVM coverage reports",
+    );
+    coverage_step.dependOn(&coverage_cmd.step);
 }

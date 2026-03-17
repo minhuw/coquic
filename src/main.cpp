@@ -1,3 +1,5 @@
+#include "src/coquic.h"
+
 int main() {
-    return 0;
+    return coquic::project_name().empty();
 }

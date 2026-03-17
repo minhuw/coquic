@@ -17,7 +17,13 @@ pre-commit run clang-format --all-files --show-diff-on-failure
 pre-commit run coquic-clang-tidy --all-files --show-diff-on-failure
 zig build
 zig build test
+zig build coverage
 ```
+
+The C++ test suite uses GoogleTest. `zig build coverage` writes:
+
+- `coverage/html/index.html`
+- `coverage/lcov.info`
 
 ## CI
 
@@ -26,4 +32,4 @@ GitHub Actions runs the same four checks through `nix develop`:
 - format check
 - lint
 - build
-- test
+- test and coverage artifact export

@@ -1,3 +1,1 @@
-from coquic_rag.cli.main import main
-
-__all__ = ["main"]
+"""CLI entrypoints for coquic_rag."""

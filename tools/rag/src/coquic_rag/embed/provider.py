@@ -14,12 +14,16 @@ if TYPE_CHECKING:
 DEFAULT_EMBEDDING_MODEL = "mixedbread-ai/mxbai-embed-large-v1"
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _DEFAULT_KEYWORDS = (
+    "ack",
     "transport",
     "parameter",
     "payload",
     "limit",
     "appendix",
     "version",
+    "negotiation",
+    "token",
+    "tls",
     "frame",
     "error",
 )

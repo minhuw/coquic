@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+import anyio
+
+from coquic_rag.cli.main import main as cli_main
+from coquic_rag.config import ProjectPaths
+from coquic_rag.embed.provider import FakeEmbedder
+from coquic_rag.mcp_server.server import create_mcp_server
+from coquic_rag.query.service import QueryService
+
+
+def _copy_query_fixtures(source_dir: Path) -> None:
+    source_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("rfc9000.txt", "rfc9369.txt"):
+        shutil.copyfile(Path("docs/rfc") / filename, source_dir / filename)
+
+
+def _build_server(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _copy_query_fixtures(source_dir)
+
+    exit_code = cli_main(
+        [
+            "build-index",
+            "--source",
+            str(source_dir),
+            "--state-dir",
+            str(state_dir),
+            "--embedder",
+            "fake",
+        ]
+    )
+    assert exit_code == 0
+
+    service = QueryService(
+        paths=ProjectPaths(
+            repo_root=tmp_path,
+            rfc_source=source_dir,
+            state_dir=state_dir,
+            model_cache_dir=state_dir / "cache" / "models",
+        ),
+        embedder=FakeEmbedder(),
+    )
+    return create_mcp_server(service=service)
+
+
+def test_mcp_server_exposes_query_tools(tmp_path: Path) -> None:
+    server = _build_server(tmp_path)
+
+    tools = anyio.run(server.list_tools)
+    tool_names = {tool.name for tool in tools}
+    assert tool_names == {
+        "search_sections",
+        "get_section",
+        "trace_term",
+        "related_sections",
+        "lookup_term",
+    }
+
+    _, get_section_result = anyio.run(
+        server.call_tool,
+        "get_section",
+        {"rfc": 9000, "section_id": "18.2"},
+    )
+    assert get_section_result["citation"] == "RFC 9000 Section 18.2"
+
+    _, trace_term_result = anyio.run(
+        server.call_tool,
+        "trace_term",
+        {"term": "max_udp_payload_size"},
+    )
+    assert trace_term_result["definitions"][0]["citation"] == "RFC 9000 Section 18.2"
+
+    _, related_sections_result = anyio.run(
+        server.call_tool,
+        "related_sections",
+        {"rfc": 9369, "section_id": "5"},
+    )
+    assert any(
+        section["section_id"] in {"4", "4.1"}
+        for section in related_sections_result["sections"]
+    )
+
+    _, search_sections_result = anyio.run(
+        server.call_tool,
+        "search_sections",
+        {"query": "ACK frame behavior", "top_k": 3},
+    )
+    assert search_sections_result["results"][0]["rfc"] == 9000
+
+    _, lookup_term_result = anyio.run(
+        server.call_tool,
+        "lookup_term",
+        {"term_type": "transport_parameter", "name": "max_udp_payload_size"},
+    )
+    assert lookup_term_result["term_class"] == "transport_parameter"
+
+
+def test_mcp_server_exposes_section_resource_template(tmp_path: Path) -> None:
+    server = _build_server(tmp_path)
+
+    resource_templates = anyio.run(server.list_resource_templates)
+    assert any(
+        template.uriTemplate == "quic://rfc/{rfc}/section/{section_id}"
+        for template in resource_templates
+    )
+
+    contents = anyio.run(
+        server.read_resource,
+        "quic://rfc/9000/section/18.2",
+    )
+    assert "Transport Parameter Definitions" in contents[0].content

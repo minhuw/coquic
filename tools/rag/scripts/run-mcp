@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+uv run --project tools/rag python -m coquic_rag.mcp_server.server "$@"

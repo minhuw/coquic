@@ -48,6 +48,7 @@
             gtest
             lldb
             llvmPackages_20.llvm
+            openssl
             pkg-config
           ])
           ++ pre-commit-check.enabledPackages;

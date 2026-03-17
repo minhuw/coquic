@@ -63,6 +63,17 @@ def _extract_terms(section: RfcSection) -> Iterable[tuple[str, str]]:
             yield term
 
 
+def _term_mention_pattern(term_name: str) -> re.Pattern[str]:
+    tokens = [re.escape(token) for token in term_name.split("_")]
+    pattern = r"\b" + r"[_\s]+".join(tokens) + r"\b"
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _section_mentions_term(section: RfcSection, term_name: str) -> bool:
+    haystack = f"{section.title}\n{section.text}"
+    return bool(_term_mention_pattern(term_name).search(haystack))
+
+
 def build_graph_artifacts(
     document: RfcDocument,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
@@ -81,6 +92,25 @@ def build_graph_artifacts(
     )
 
     term_node_ids: set[str] = set()
+    known_terms: dict[tuple[str, str], set[str]] = {}
+
+    # First pass: collect deterministic term definitions per section.
+    for section in document.sections:
+        section_id = _section_node_id(document.rfc, section.section_id)
+        for term_class, term_name in _extract_terms(section):
+            term_key = (term_class, term_name)
+            if term_key not in known_terms:
+                known_terms[term_key] = set()
+            is_definition = (
+                (term_class == "transport_parameter" and section.section_id == "18.2")
+                or (term_class == "frame_name" and section.section_id.startswith("19."))
+                or (
+                    term_class == "transport_error_code"
+                    and section.section_id.startswith("20.")
+                )
+            )
+            if is_definition:
+                known_terms[term_key].add(section_id)
 
     for section in document.sections:
         section_id = _section_node_id(document.rfc, section.section_id)
@@ -121,7 +151,9 @@ def build_graph_artifacts(
                     }
                 )
 
-        for term_class, term_name in _extract_terms(section):
+        for term_class, term_name in known_terms:
+            if not _section_mentions_term(section, term_name):
+                continue
             term_id = f"term:{term_class}:{term_name}"
             if term_id not in term_node_ids:
                 term_node_ids.add(term_id)
@@ -138,19 +170,11 @@ def build_graph_artifacts(
                 {
                     "edge_type": "mentions",
                     "source": section_id,
-                    "target": term_id,
-                }
-            )
-
-            is_definition = (
-                (term_class == "transport_parameter" and section.section_id == "18.2")
-                or (term_class == "frame_name" and section.section_id.startswith("19."))
-                or (
-                    term_class == "transport_error_code"
-                    and section.section_id.startswith("20.")
+                        "target": term_id,
+                    }
                 )
-            )
-            if is_definition:
+
+            if section_id in known_terms[(term_class, term_name)]:
                 graph_edges.append(
                     {
                         "edge_type": "defines",

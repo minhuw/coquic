@@ -58,6 +58,15 @@ def test_build_graph_artifacts_from_rfc9000() -> None:
     ]
     assert frame_defines_edges
 
+    frame_mentions_edges = [
+        edge
+        for edge in graph_edges
+        if edge["edge_type"] == "mentions"
+        and edge["source"] == "rfc9000#13.4.2.1"
+        and edge["target"] == frame_term_id
+    ]
+    assert frame_mentions_edges
+
     frame_encoding_error_id = "term:transport_error_code:frame_encoding_error"
     crypto_error_id = "term:transport_error_code:crypto_error"
     error_node_ids = {
@@ -76,6 +85,15 @@ def test_build_graph_artifacts_from_rfc9000() -> None:
         and edge["target"] in {frame_encoding_error_id, crypto_error_id}
     ]
     assert len(error_defines_edges) == 2
+
+    transport_param_mentions = [
+        edge
+        for edge in graph_edges
+        if edge["edge_type"] == "mentions"
+        and edge["source"] == "rfc9000#7.4.1"
+        and edge["target"] == term_id
+    ]
+    assert transport_param_mentions
 
     section_record_ids = {record["node_id"] for record in section_records}
     assert "rfc9000#18.2" in section_record_ids

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 
@@ -17,6 +18,7 @@ class ProjectPaths:
     rfc_source: Path
     state_dir: Path
     model_cache_dir: Path
+    qdrant_url: str | None = None
 
     @property
     def artifacts_dir(self) -> Path:
@@ -34,4 +36,5 @@ class ProjectPaths:
             rfc_source=repo_root / "docs" / "rfc",
             state_dir=repo_root / ".rag",
             model_cache_dir=repo_root / ".rag" / "cache" / "models",
+            qdrant_url=os.getenv("COQUIC_QDRANT_URL"),
         )

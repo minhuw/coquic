@@ -6,11 +6,14 @@ from pathlib import Path
 import anyio
 import pytest
 
+import coquic_rag.mcp_server.server as mcp_server_module
+import coquic_rag.query.service as query_service_module
 from coquic_rag.cli.main import main as cli_main
 from coquic_rag.config import ProjectPaths
 from coquic_rag.embed.provider import FakeEmbedder
 from coquic_rag.mcp_server.server import create_mcp_server, main as mcp_main
-from coquic_rag.query.service import IndexNotBuiltError, QueryService
+from coquic_rag.query.service import IndexNotBuiltError, IndexStatus, QueryService
+from coquic_rag.store.qdrant_store import QdrantSectionStore
 
 
 def _copy_query_fixtures(source_dir: Path) -> None:
@@ -24,6 +27,21 @@ def _build_server(tmp_path: Path):
     state_dir = tmp_path / ".rag"
     _copy_query_fixtures(source_dir)
 
+    _build_index(source_dir, state_dir)
+
+    service = QueryService(
+        paths=ProjectPaths(
+            repo_root=tmp_path,
+            rfc_source=source_dir,
+            state_dir=state_dir,
+            model_cache_dir=state_dir / "cache" / "models",
+        ),
+        embedder=FakeEmbedder(),
+    )
+    return create_mcp_server(service=service)
+
+
+def _build_index(source_dir: Path, state_dir: Path) -> None:
     exit_code = cli_main(
         [
             "build-index",
@@ -36,17 +54,6 @@ def _build_server(tmp_path: Path):
         ]
     )
     assert exit_code == 0
-
-    service = QueryService(
-        paths=ProjectPaths(
-            repo_root=tmp_path,
-            rfc_source=source_dir,
-            state_dir=state_dir,
-            model_cache_dir=state_dir / "cache" / "models",
-        ),
-        embedder=FakeEmbedder(),
-    )
-    return create_mcp_server(service=service)
 
 
 def test_mcp_server_exposes_query_tools(tmp_path: Path) -> None:
@@ -152,3 +159,134 @@ def test_mcp_main_returns_nonzero_when_index_is_incomplete(
 
     error_output = capsys.readouterr().err
     assert "QUIC index is not ready" in error_output
+
+
+def test_mcp_main_returns_nonzero_with_clear_remote_backend_error(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _copy_query_fixtures(source_dir)
+    paths = ProjectPaths(
+        repo_root=tmp_path,
+        rfc_source=source_dir,
+        state_dir=state_dir,
+        model_cache_dir=state_dir / "cache" / "models",
+    )
+    remote_url = "http://127.0.0.1:6333"
+    monkeypatch.setenv("COQUIC_QDRANT_URL", remote_url)
+    _build_index(source_dir, state_dir)
+
+    def _raise_connection_error(_self: QdrantSectionStore) -> int | None:
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(QdrantSectionStore, "section_count", _raise_connection_error)
+
+    assert mcp_main(paths=paths) == 1
+
+    error_output = capsys.readouterr().err
+    assert remote_url in error_output
+    assert "nix run .#qdrant-dev -- start" in error_output
+
+
+def test_mcp_main_remote_unreachable_probes_status_once(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    paths = ProjectPaths(
+        repo_root=tmp_path,
+        rfc_source=tmp_path / "source",
+        state_dir=tmp_path / ".rag",
+        model_cache_dir=tmp_path / ".rag" / "cache" / "models",
+    )
+    remote_url = "http://127.0.0.1:6333"
+    monkeypatch.setenv("COQUIC_QDRANT_URL", remote_url)
+
+    probe_count = 0
+
+    def _fake_status(_paths: ProjectPaths, *, collection_name: str) -> IndexStatus:
+        del collection_name
+        nonlocal probe_count
+        probe_count += 1
+        return IndexStatus(
+            source_ok=True,
+            artifacts_ok=True,
+            qdrant_ok=False,
+            qdrant_status="unreachable",
+            qdrant_backend="remote",
+            section_count=10,
+            indexed_count=None,
+        )
+
+    monkeypatch.setattr(query_service_module, "get_index_status", _fake_status)
+    monkeypatch.setattr(mcp_server_module, "get_index_status", _fake_status)
+
+    assert mcp_main(paths=paths) == 1
+
+    error_output = capsys.readouterr().err
+    assert remote_url in error_output
+    assert probe_count == 1
+
+
+def test_mcp_main_preserves_incomplete_index_message_when_remote_unreachable_with_missing_artifacts(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _copy_query_fixtures(source_dir)
+    paths = ProjectPaths(
+        repo_root=tmp_path,
+        rfc_source=source_dir,
+        state_dir=state_dir,
+        model_cache_dir=state_dir / "cache" / "models",
+    )
+    monkeypatch.setenv("COQUIC_QDRANT_URL", "http://127.0.0.1:6333")
+
+    def _raise_connection_error(_self: QdrantSectionStore) -> int | None:
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(QdrantSectionStore, "section_count", _raise_connection_error)
+
+    assert mcp_main(paths=paths) == 1
+
+    error_output = capsys.readouterr().err
+    assert "QUIC index is not ready" in error_output
+    assert "artifacts: missing" in error_output
+    assert "nix run .#qdrant-dev -- start" not in error_output
+
+
+def test_mcp_main_returns_nonzero_with_clear_local_lock_error(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _copy_query_fixtures(source_dir)
+    paths = ProjectPaths(
+        repo_root=tmp_path,
+        rfc_source=source_dir,
+        state_dir=state_dir,
+        model_cache_dir=state_dir / "cache" / "models",
+    )
+    monkeypatch.delenv("COQUIC_QDRANT_URL", raising=False)
+
+    def _raise_local_lock_error(_self: QdrantSectionStore) -> int | None:
+        raise RuntimeError(
+            f"Storage folder {state_dir / 'qdrant'} is already accessed by another "
+            "instance of Qdrant client. If you require concurrent access, use Qdrant "
+            "server instead."
+        )
+
+    monkeypatch.setattr(QdrantSectionStore, "section_count", _raise_local_lock_error)
+
+    assert mcp_main(paths=paths) == 1
+
+    error_output = capsys.readouterr().err
+    assert "shared server workflow" in error_output
+    assert "nix run .#qdrant-dev -- start" in error_output

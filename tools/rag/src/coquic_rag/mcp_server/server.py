@@ -1,11 +1,61 @@
 from __future__ import annotations
 
+import os
 import sys
 
 from mcp.server.fastmcp import FastMCP
 
 from coquic_rag.config import ProjectPaths
-from coquic_rag.query.service import IndexNotBuiltError, QueryService, require_index_ready
+from coquic_rag.query.service import (
+    IndexStatus,
+    IndexNotBuiltError,
+    QueryService,
+    get_index_status,
+)
+
+_QDRANT_DEV_START_COMMAND = "nix run .#qdrant-dev -- start"
+_LOCAL_QDRANT_LOCK_MARKER = "is already accessed by another instance of Qdrant client"
+
+
+def _configured_qdrant_url(paths: ProjectPaths) -> str | None:
+    return paths.qdrant_url or os.getenv("COQUIC_QDRANT_URL")
+
+
+def _is_remote_qdrant_only_blocker(
+    status: IndexStatus,
+) -> bool:
+    return (
+        status.source_ok
+        and status.artifacts_ok
+        and status.qdrant_backend == "remote"
+        and status.qdrant_status == "unreachable"
+    )
+
+
+def _remote_backend_error_message(qdrant_url: str) -> str:
+    return "\n".join(
+        [
+            "Unable to start the QUIC MCP server: remote Qdrant backend is unreachable.",
+            f"configured COQUIC_QDRANT_URL: {qdrant_url}",
+            "Start the shared server workflow and retry:",
+            f"  {_QDRANT_DEV_START_COMMAND}",
+        ]
+    )
+
+
+def _is_local_qdrant_lock_error(error: RuntimeError) -> bool:
+    return _LOCAL_QDRANT_LOCK_MARKER in str(error)
+
+
+def _local_qdrant_lock_error_message(error: RuntimeError) -> str:
+    return "\n".join(
+        [
+            "Unable to start the QUIC MCP server: local Qdrant state is locked.",
+            f"details: {error}",
+            "Use the shared server workflow instead:",
+            f"  {_QDRANT_DEV_START_COMMAND}",
+        ]
+    )
 
 
 def create_mcp_server(
@@ -17,7 +67,12 @@ def create_mcp_server(
     query_service = service
     if query_service is None:
         resolved_paths = paths or ProjectPaths.default()
-        require_index_ready(resolved_paths, collection_name=collection_name)
+        status = get_index_status(resolved_paths, collection_name=collection_name)
+        if not status.ready:
+            qdrant_url = _configured_qdrant_url(resolved_paths)
+            if qdrant_url and _is_remote_qdrant_only_blocker(status):
+                raise IndexNotBuiltError(_remote_backend_error_message(qdrant_url))
+            raise IndexNotBuiltError(status.failure_message(resolved_paths))
         query_service = QueryService(
             paths=resolved_paths,
             collection_name=collection_name,
@@ -90,11 +145,17 @@ def main(
     paths: ProjectPaths | None = None,
     collection_name: str = "quic_sections",
 ) -> int:
+    resolved_paths = paths or ProjectPaths.default()
     try:
-        create_mcp_server(paths=paths, collection_name=collection_name).run()
+        create_mcp_server(paths=resolved_paths, collection_name=collection_name).run()
     except IndexNotBuiltError as error:
         print(error, file=sys.stderr)
         return 1
+    except RuntimeError as error:
+        if _is_local_qdrant_lock_error(error):
+            print(_local_qdrant_lock_error_message(error), file=sys.stderr)
+            return 1
+        raise
     return 0
 
 

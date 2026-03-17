@@ -43,6 +43,15 @@ def test_extract_section_citations_from_body_text() -> None:
     assert "21.11" in targets
 
 
+def test_extract_appendix_citation_from_rfc9000_fixture() -> None:
+    doc = parse_rfc_document(Path("docs/rfc/rfc9000.txt"))
+
+    section_1342 = doc.section_by_id("13.4.2")
+    assert section_1342 is not None
+
+    assert SectionCitation(target_start="A.4", target_end=None) in section_1342.citations
+
+
 def test_extracts_range_section_citations(tmp_path: Path) -> None:
     tmp_doc = tmp_path / "rfc9999-test.txt"
     tmp_doc.write_text(

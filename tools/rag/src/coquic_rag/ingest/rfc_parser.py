@@ -12,7 +12,8 @@ _SECTION_HEADING_RE = re.compile(
     re.MULTILINE,
 )
 _CITATION_RE = re.compile(
-    r"\bSection\s+(\d+(?:\.\d+)*)(?:\s*(?:-|to)\s*(\d+(?:\.\d+)*))?"
+    r"\b(?:Section\s+(?P<section>\d+(?:\.\d+)*)|Appendix\s+(?P<appendix>[A-Z](?:\.\d+)*))"
+    r"(?:\s*(?:-|to)\s*(?P<range_end>\d+(?:\.\d+)*|[A-Z](?:\.\d+)*))?"
 )
 
 
@@ -33,10 +34,11 @@ def _extract_title(text: str) -> str:
 def _extract_citations(section_text: str) -> tuple[SectionCitation, ...]:
     citations = []
     for match in _CITATION_RE.finditer(section_text):
+        target_start = match.group("section") or match.group("appendix")
         citations.append(
             SectionCitation(
-                target_start=match.group(1),
-                target_end=match.group(2),
+                target_start=target_start,
+                target_end=match.group("range_end"),
             )
         )
     return tuple(citations)

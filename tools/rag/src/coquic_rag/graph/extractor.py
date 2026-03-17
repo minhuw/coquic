@@ -11,7 +11,9 @@ _TRANSPORT_PARAMETER_RE = re.compile(
 )
 _FRAME_NAME_RE = re.compile(r"\b([A-Z][A-Z0-9_ ]+)\s+FRAME\b")
 _FRAME_SECTION_TITLE_RE = re.compile(r"^\s*([A-Z][A-Z0-9_ ]+)\s+Frames?\s*$")
-_TRANSPORT_ERROR_RE = re.compile(r"\b([A-Z][A-Z0-9_]+)\s+\(0x[0-9a-fA-F]+\):")
+_TRANSPORT_ERROR_RE = re.compile(
+    r"\b([A-Z][A-Z0-9_]+)\s+\(0x[0-9a-fA-F]+(?:-0x[0-9a-fA-F]+)?\):"
+)
 
 
 def _normalize_term(raw_name: str) -> str:
@@ -55,11 +57,10 @@ def _extract_terms(section: RfcSection) -> Iterable[tuple[str, str]]:
 
     for match in _TRANSPORT_ERROR_RE.finditer(section.text):
         term_name = _normalize_term(match.group(1))
-        if "frame" not in term_name:
-            term = ("transport_error_code", term_name)
-            if term not in seen_terms:
-                seen_terms.add(term)
-                yield term
+        term = ("transport_error_code", term_name)
+        if term not in seen_terms:
+            seen_terms.add(term)
+            yield term
 
 
 def build_graph_artifacts(

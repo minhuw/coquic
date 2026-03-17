@@ -19,6 +19,11 @@
         inherit system;
       };
       lib = pkgs.lib;
+      pkgConfigPath = lib.makeSearchPath "lib/pkgconfig" [
+        pkgs.openssl.dev
+        pkgs.spdlog.dev
+        pkgs.fmt.dev
+      ];
       pre-commit-check = git-hooks.lib.${system}.run {
         src = ./.;
         hooks = {
@@ -49,6 +54,7 @@
             lldb
             llvmPackages_20.llvm
             openssl
+            spdlog
             pkg-config
           ])
           ++ pre-commit-check.enabledPackages;
@@ -60,6 +66,9 @@
             export GTEST_SOURCE_DIR="${pkgs.gtest.src}"
             export GTEST_LIB_DIR="${pkgs.gtest}/lib"
             export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
+            export SPDLOG_INCLUDE_DIR="${pkgs.spdlog.dev}/include"
+            export FMT_INCLUDE_DIR="${pkgs.fmt.dev}/include"
+            export PKG_CONFIG_PATH="${pkgConfigPath}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
             export LLVM_COV="${pkgs.llvmPackages_20.llvm}/bin/llvm-cov"
             export LLVM_PROFDATA="${pkgs.llvmPackages_20.llvm}/bin/llvm-profdata"
             export LLVM_PROFILE_RT="${pkgs.llvmPackages_20.compiler-rt}/lib/linux/libclang_rt.profile-x86_64.a"

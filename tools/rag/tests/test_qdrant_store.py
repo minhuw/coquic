@@ -1,9 +1,38 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from coquic_rag.embed.provider import FakeEmbedder
 from coquic_rag.store.qdrant_store import QdrantSectionStore
+
+
+def test_qdrant_store_prefers_configured_url_over_local_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _FakeQdrantClient:
+        def __init__(self, **kwargs: Any) -> None:
+            calls.append(kwargs)
+
+        def collection_exists(self, _collection_name: str) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "coquic_rag.store.qdrant_store.QdrantClient",
+        _FakeQdrantClient,
+    )
+
+    store = QdrantSectionStore(
+        state_dir=tmp_path / "qdrant",
+        qdrant_url="http://127.0.0.1:6333",
+        collection_name="quic_sections",
+    )
+
+    assert not store.collection_exists()
+    assert calls == [{"url": "http://127.0.0.1:6333"}]
 
 
 def test_qdrant_store_upserts_sections_and_filters_search_results(

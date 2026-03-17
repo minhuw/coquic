@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ class IndexStatus:
     artifacts_ok: bool
     qdrant_ok: bool
     qdrant_status: str
+    qdrant_backend: str
     section_count: int | None
     indexed_count: int | None
 
@@ -40,6 +42,7 @@ class IndexStatus:
         lines = [
             f"source_docs: {'ok' if self.source_ok else 'missing'}",
             f"artifacts: {'ok' if self.artifacts_ok else 'missing'}",
+            f"qdrant_backend: {self.qdrant_backend}",
             f"qdrant: {self.qdrant_status}",
         ]
         if self.section_count is not None and self.indexed_count is not None:
@@ -77,12 +80,18 @@ def _required_artifact_paths(paths: ProjectPaths) -> tuple[Path, Path, Path]:
     )
 
 
+def _configured_qdrant_url(paths: ProjectPaths) -> str | None:
+    return paths.qdrant_url or os.getenv("COQUIC_QDRANT_URL")
+
+
 def get_index_status(
     paths: ProjectPaths | None = None,
     *,
     collection_name: str = "quic_sections",
 ) -> IndexStatus:
     resolved_paths = paths or ProjectPaths.default()
+    qdrant_url = _configured_qdrant_url(resolved_paths)
+    qdrant_backend = "remote" if qdrant_url else "local"
     source_ok = resolved_paths.rfc_source.is_dir() and bool(
         sorted(path for path in resolved_paths.rfc_source.glob("*.txt") if path.is_file())
     )
@@ -95,9 +104,23 @@ def get_index_status(
 
     store = QdrantSectionStore(
         state_dir=resolved_paths.qdrant_dir,
+        qdrant_url=qdrant_url,
         collection_name=collection_name,
     )
-    indexed_count = store.section_count()
+    try:
+        indexed_count = store.section_count()
+    except Exception:
+        if qdrant_backend != "remote":
+            raise
+        return IndexStatus(
+            source_ok=source_ok,
+            artifacts_ok=artifacts_ok,
+            qdrant_ok=False,
+            qdrant_status="unreachable",
+            qdrant_backend=qdrant_backend,
+            section_count=section_count,
+            indexed_count=None,
+        )
 
     if indexed_count is None:
         qdrant_status = "missing"
@@ -114,6 +137,7 @@ def get_index_status(
         artifacts_ok=artifacts_ok,
         qdrant_ok=qdrant_ok,
         qdrant_status=qdrant_status,
+        qdrant_backend=qdrant_backend,
         section_count=section_count,
         indexed_count=indexed_count,
     )
@@ -140,9 +164,11 @@ class QueryService:
         collection_name: str = "quic_sections",
     ) -> None:
         self._paths = paths or ProjectPaths.default()
+        qdrant_url = _configured_qdrant_url(self._paths)
         self._embedder = embedder or SentenceTransformerEmbedder(paths=self._paths)
         self._store = QdrantSectionStore(
             state_dir=self._paths.qdrant_dir,
+            qdrant_url=qdrant_url,
             collection_name=collection_name,
         )
         self._loaded = False

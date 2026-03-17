@@ -110,5 +110,63 @@ def test_doctor_reports_ready_after_build_index(tmp_path: Path, capsys) -> None:
     assert "ready: yes" in output
 
 
+def test_doctor_reports_remote_backend_when_qdrant_url_is_configured(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _copy_fixture_rfc(source_dir)
+    monkeypatch.setenv("COQUIC_QDRANT_URL", "http://127.0.0.1:6333")
+    monkeypatch.setattr(QdrantSectionStore, "section_count", lambda self: None)
+
+    doctor_exit_code = main(
+        [
+            "doctor",
+            "--source",
+            str(source_dir),
+            "--state-dir",
+            str(state_dir),
+        ]
+    )
+
+    assert doctor_exit_code == 1
+    output = capsys.readouterr().out
+    assert "qdrant_backend: remote" in output
+
+
+def test_doctor_reports_unreachable_remote_backend_without_crashing(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _copy_fixture_rfc(source_dir)
+    monkeypatch.setenv("COQUIC_QDRANT_URL", "http://127.0.0.1:6333")
+
+    def _raise_connection_error(_self: QdrantSectionStore) -> int | None:
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(QdrantSectionStore, "section_count", _raise_connection_error)
+
+    doctor_exit_code = main(
+        [
+            "doctor",
+            "--source",
+            str(source_dir),
+            "--state-dir",
+            str(state_dir),
+        ]
+    )
+
+    assert doctor_exit_code == 1
+    output = capsys.readouterr().out
+    assert "qdrant_backend: remote" in output
+    assert "qdrant: unreachable" in output
+    assert "ready: no" in output
+
+
 def test_default_embedding_model_uses_small_cpu_friendly_model() -> None:
     assert DEFAULT_EMBEDDING_MODEL == "sentence-transformers/all-MiniLM-L6-v2"

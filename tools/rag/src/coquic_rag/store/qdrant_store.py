@@ -55,9 +55,11 @@ class QdrantSectionStore:
     def __init__(
         self,
         state_dir: Path,
+        qdrant_url: str | None = None,
         collection_name: str = "quic_sections",
     ) -> None:
         self._state_dir = Path(state_dir)
+        self._qdrant_url = qdrant_url
         self._collection_name = collection_name
         self._client: QdrantClient | None = None
 
@@ -171,6 +173,9 @@ class QdrantSectionStore:
 
     def _client_or_create(self) -> QdrantClient:
         if self._client is None:
-            self._state_dir.mkdir(parents=True, exist_ok=True)
-            self._client = QdrantClient(path=str(self._state_dir))
+            if self._qdrant_url:
+                self._client = QdrantClient(url=self._qdrant_url)
+            else:
+                self._state_dir.mkdir(parents=True, exist_ok=True)
+                self._client = QdrantClient(path=str(self._state_dir))
         return self._client

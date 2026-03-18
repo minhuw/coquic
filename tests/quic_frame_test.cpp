@@ -1,6 +1,9 @@
 #include <array>
 #include <cstddef>
+#include <cstdint>
+#include <span>
 #include <variant>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -15,14 +18,45 @@ using coquic::quic::ApplicationConnectionCloseFrame;
 using coquic::quic::CodecErrorCode;
 using coquic::quic::ConnectionCloseReason;
 using coquic::quic::CryptoFrame;
+using coquic::quic::DataBlockedFrame;
 using coquic::quic::Frame;
 using coquic::quic::HandshakeDoneFrame;
+using coquic::quic::MaxDataFrame;
+using coquic::quic::MaxStreamDataFrame;
+using coquic::quic::MaxStreamsFrame;
 using coquic::quic::NewConnectionIdFrame;
+using coquic::quic::NewTokenFrame;
 using coquic::quic::PaddingFrame;
 using coquic::quic::PathChallengeFrame;
+using coquic::quic::PathResponseFrame;
 using coquic::quic::PingFrame;
+using coquic::quic::ResetStreamFrame;
+using coquic::quic::RetireConnectionIdFrame;
+using coquic::quic::StopSendingFrame;
+using coquic::quic::StreamDataBlockedFrame;
 using coquic::quic::StreamFrame;
+using coquic::quic::StreamLimitType;
+using coquic::quic::StreamsBlockedFrame;
 using coquic::quic::TransportConnectionCloseFrame;
+
+constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
+constexpr std::uint64_t kInvalidQuicVarInt = kMaxQuicVarInt + 1;
+
+template <std::size_t N> std::span<const std::byte> as_span(const std::array<std::byte, N> &bytes) {
+    return std::span<const std::byte>(bytes.data(), bytes.size());
+}
+
+void expect_decode_error(std::span<const std::byte> bytes, CodecErrorCode code) {
+    const auto decoded = coquic::quic::deserialize_frame(bytes);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, code);
+}
+
+void expect_serialize_error(const Frame &frame, CodecErrorCode code) {
+    const auto encoded = coquic::quic::serialize_frame(frame);
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, code);
+}
 
 TEST(QuicFrameTest, SerializesAndDeserializesPing) {
     Frame frame = PingFrame{};
@@ -258,6 +292,670 @@ TEST(QuicFrameTest, RejectsNonShortestFrameTypeEncoding) {
     auto decoded = coquic::quic::deserialize_frame(bytes);
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, CodecErrorCode::non_shortest_frame_type_encoding);
+}
+
+TEST(QuicFrameTest, RoundTripsResetAndStopSendingFrames) {
+    {
+        Frame frame = ResetStreamFrame{
+            .stream_id = 7,
+            .application_protocol_error_code = 11,
+            .final_size = 13,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *reset_stream = std::get_if<ResetStreamFrame>(&decoded.value().frame);
+        ASSERT_NE(reset_stream, nullptr);
+        EXPECT_EQ(reset_stream->stream_id, 7u);
+        EXPECT_EQ(reset_stream->application_protocol_error_code, 11u);
+        EXPECT_EQ(reset_stream->final_size, 13u);
+    }
+
+    {
+        Frame frame = StopSendingFrame{
+            .stream_id = 5,
+            .application_protocol_error_code = 17,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *stop_sending = std::get_if<StopSendingFrame>(&decoded.value().frame);
+        ASSERT_NE(stop_sending, nullptr);
+        EXPECT_EQ(stop_sending->stream_id, 5u);
+        EXPECT_EQ(stop_sending->application_protocol_error_code, 17u);
+    }
+}
+
+TEST(QuicFrameTest, RoundTripsTokenAndFlowControlFrames) {
+    {
+        Frame frame = NewTokenFrame{
+            .token = {std::byte{0xa1}, std::byte{0xa2}},
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *new_token = std::get_if<NewTokenFrame>(&decoded.value().frame);
+        ASSERT_NE(new_token, nullptr);
+        EXPECT_EQ(new_token->token, (std::vector<std::byte>{std::byte{0xa1}, std::byte{0xa2}}));
+    }
+
+    {
+        Frame frame = MaxDataFrame{
+            .maximum_data = 123,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *max_data = std::get_if<MaxDataFrame>(&decoded.value().frame);
+        ASSERT_NE(max_data, nullptr);
+        EXPECT_EQ(max_data->maximum_data, 123u);
+    }
+
+    {
+        Frame frame = MaxStreamDataFrame{
+            .stream_id = 3,
+            .maximum_stream_data = 321,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *max_stream_data = std::get_if<MaxStreamDataFrame>(&decoded.value().frame);
+        ASSERT_NE(max_stream_data, nullptr);
+        EXPECT_EQ(max_stream_data->stream_id, 3u);
+        EXPECT_EQ(max_stream_data->maximum_stream_data, 321u);
+    }
+
+    {
+        Frame frame = MaxStreamsFrame{
+            .stream_type = StreamLimitType::bidirectional,
+            .maximum_streams = 9,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *max_streams = std::get_if<MaxStreamsFrame>(&decoded.value().frame);
+        ASSERT_NE(max_streams, nullptr);
+        EXPECT_EQ(max_streams->stream_type, StreamLimitType::bidirectional);
+        EXPECT_EQ(max_streams->maximum_streams, 9u);
+    }
+
+    {
+        Frame frame = MaxStreamsFrame{
+            .stream_type = StreamLimitType::unidirectional,
+            .maximum_streams = 10,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *max_streams = std::get_if<MaxStreamsFrame>(&decoded.value().frame);
+        ASSERT_NE(max_streams, nullptr);
+        EXPECT_EQ(max_streams->stream_type, StreamLimitType::unidirectional);
+        EXPECT_EQ(max_streams->maximum_streams, 10u);
+    }
+
+    {
+        Frame frame = DataBlockedFrame{
+            .maximum_data = 777,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *data_blocked = std::get_if<DataBlockedFrame>(&decoded.value().frame);
+        ASSERT_NE(data_blocked, nullptr);
+        EXPECT_EQ(data_blocked->maximum_data, 777u);
+    }
+
+    {
+        Frame frame = StreamDataBlockedFrame{
+            .stream_id = 8,
+            .maximum_stream_data = 999,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *stream_data_blocked =
+            std::get_if<StreamDataBlockedFrame>(&decoded.value().frame);
+        ASSERT_NE(stream_data_blocked, nullptr);
+        EXPECT_EQ(stream_data_blocked->stream_id, 8u);
+        EXPECT_EQ(stream_data_blocked->maximum_stream_data, 999u);
+    }
+
+    {
+        Frame frame = StreamsBlockedFrame{
+            .stream_type = StreamLimitType::bidirectional,
+            .maximum_streams = 12,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *streams_blocked = std::get_if<StreamsBlockedFrame>(&decoded.value().frame);
+        ASSERT_NE(streams_blocked, nullptr);
+        EXPECT_EQ(streams_blocked->stream_type, StreamLimitType::bidirectional);
+        EXPECT_EQ(streams_blocked->maximum_streams, 12u);
+    }
+
+    {
+        Frame frame = StreamsBlockedFrame{
+            .stream_type = StreamLimitType::unidirectional,
+            .maximum_streams = 13,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *streams_blocked = std::get_if<StreamsBlockedFrame>(&decoded.value().frame);
+        ASSERT_NE(streams_blocked, nullptr);
+        EXPECT_EQ(streams_blocked->stream_type, StreamLimitType::unidirectional);
+        EXPECT_EQ(streams_blocked->maximum_streams, 13u);
+    }
+}
+
+TEST(QuicFrameTest, RoundTripsRetireConnectionIdAndPathResponseFrames) {
+    {
+        Frame frame = RetireConnectionIdFrame{
+            .sequence_number = 6,
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *retire = std::get_if<RetireConnectionIdFrame>(&decoded.value().frame);
+        ASSERT_NE(retire, nullptr);
+        EXPECT_EQ(retire->sequence_number, 6u);
+    }
+
+    {
+        Frame frame = PathResponseFrame{
+            .data = {std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13},
+                     std::byte{0x14}, std::byte{0x15}, std::byte{0x16}, std::byte{0x17}},
+        };
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+
+        const auto *path_response = std::get_if<PathResponseFrame>(&decoded.value().frame);
+        ASSERT_NE(path_response, nullptr);
+        EXPECT_EQ(path_response->data[7], std::byte{0x17});
+    }
+}
+
+TEST(QuicFrameTest, DeserializesStreamFrameWithoutLengthUsingRemainingBytes) {
+    const std::array<std::byte, 6> bytes{
+        std::byte{0x0d}, std::byte{0x05}, std::byte{0x03},
+        std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc},
+    };
+
+    const auto decoded = coquic::quic::deserialize_frame(bytes);
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *stream = std::get_if<StreamFrame>(&decoded.value().frame);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_TRUE(stream->fin);
+    EXPECT_TRUE(stream->has_offset);
+    EXPECT_FALSE(stream->has_length);
+    ASSERT_TRUE(stream->offset.has_value());
+    EXPECT_EQ(stream->offset.value_or(0), 3u);
+    EXPECT_EQ(stream->stream_data,
+              (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}}));
+}
+
+TEST(QuicFrameTest, RejectsMalformedAckFrames) {
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x02}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x02}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 3>{std::byte{0x02}, std::byte{0x00}, std::byte{0x00}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 4>{std::byte{0x02}, std::byte{0x00},
+                                                         std::byte{0x00}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 5>{std::byte{0x02}, std::byte{0x01}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x02}}),
+        CodecErrorCode::invalid_varint);
+    expect_decode_error(
+        as_span(std::array<std::byte, 5>{std::byte{0x02}, std::byte{0x02}, std::byte{0x00},
+                                         std::byte{0x01}, std::byte{0x00}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 6>{std::byte{0x02}, std::byte{0x02}, std::byte{0x00},
+                                         std::byte{0x01}, std::byte{0x00}, std::byte{0x00}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 7>{
+                            std::byte{0x02}, std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
+                            std::byte{0x00}, std::byte{0x00}, std::byte{0x00}}),
+                        CodecErrorCode::invalid_varint);
+    expect_decode_error(as_span(std::array<std::byte, 7>{
+                            std::byte{0x02}, std::byte{0x03}, std::byte{0x00}, std::byte{0x01},
+                            std::byte{0x00}, std::byte{0x00}, std::byte{0x02}}),
+                        CodecErrorCode::invalid_varint);
+    expect_decode_error(
+        as_span(std::array<std::byte, 5>{std::byte{0x03}, std::byte{0x00}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x00}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 6>{std::byte{0x03}, std::byte{0x00}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x00}, std::byte{0x00}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 7>{
+                            std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+                            std::byte{0x00}, std::byte{0x00}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+}
+
+TEST(QuicFrameTest, RejectsInvalidAckFrameSerializationInputs) {
+    expect_serialize_error(
+        AckFrame{
+            .largest_acknowledged = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        AckFrame{
+            .largest_acknowledged = 1,
+            .ack_delay = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        AckFrame{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        AckFrame{
+            .largest_acknowledged = 1,
+            .first_ack_range = 2,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        AckFrame{
+            .largest_acknowledged = 1,
+            .first_ack_range = 0,
+            .additional_ranges =
+                {
+                    AckRange{
+                        .gap = 0,
+                        .range_length = 0,
+                    },
+                },
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        AckFrame{
+            .largest_acknowledged = 3,
+            .first_ack_range = 0,
+            .additional_ranges =
+                {
+                    AckRange{
+                        .gap = 0,
+                        .range_length = 2,
+                    },
+                },
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        AckFrame{
+            .largest_acknowledged = 1,
+            .ecn_counts =
+                AckEcnCounts{
+                    .ect0 = kInvalidQuicVarInt,
+                },
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        AckFrame{
+            .largest_acknowledged = 1,
+            .ecn_counts =
+                AckEcnCounts{
+                    .ect0 = 0,
+                    .ect1 = kInvalidQuicVarInt,
+                },
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        AckFrame{
+            .largest_acknowledged = 1,
+            .ecn_counts =
+                AckEcnCounts{
+                    .ect0 = 0,
+                    .ect1 = 0,
+                    .ecn_ce = kInvalidQuicVarInt,
+                },
+        },
+        CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicFrameTest, RejectsMalformedResetAndStopSendingFrames) {
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x04}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x04}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 3>{std::byte{0x04}, std::byte{0x00}, std::byte{0x00}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x05}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x05}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+}
+
+TEST(QuicFrameTest, RejectsMalformedCryptoTokenAndStreamFrames) {
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x06}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 3>{std::byte{0x06}, std::byte{0x00}, std::byte{0x01}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 11>{
+                            std::byte{0x06},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0x01},
+                            std::byte{0xaa},
+                        }),
+                        CodecErrorCode::invalid_varint);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x07}, std::byte{0x00}}),
+                        CodecErrorCode::invalid_varint);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x07}, std::byte{0x40}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x08}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x0c}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 3>{std::byte{0x0a}, std::byte{0x00}, std::byte{0x01}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 12>{
+                            std::byte{0x0e},
+                            std::byte{0x00},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0xff},
+                            std::byte{0x01},
+                            std::byte{0xaa},
+                        }),
+                        CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicFrameTest, RejectsMalformedFlowControlConnectionIdAndCloseFrames) {
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x10}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x11}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x11}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 3>{std::byte{0x12}, std::byte{0xc0}, std::byte{0x00}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 9>{std::byte{0x12}, std::byte{0xd0}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x00}, std::byte{0x01}}),
+        CodecErrorCode::invalid_varint);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x14}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x15}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x15}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 9>{std::byte{0x16}, std::byte{0xd0}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x00}, std::byte{0x01}}),
+        CodecErrorCode::invalid_varint);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x18}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x18}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 3>{std::byte{0x18}, std::byte{0x00}, std::byte{0x00}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 4>{std::byte{0x18}, std::byte{0x00},
+                                                         std::byte{0x00}, std::byte{0x00}}),
+                        CodecErrorCode::invalid_varint);
+    expect_decode_error(as_span(std::array<std::byte, 4>{std::byte{0x18}, std::byte{0x00},
+                                                         std::byte{0x00}, std::byte{0x15}}),
+                        CodecErrorCode::invalid_varint);
+    expect_decode_error(as_span(std::array<std::byte, 4>{std::byte{0x18}, std::byte{0x01},
+                                                         std::byte{0x02}, std::byte{0x01}}),
+                        CodecErrorCode::invalid_varint);
+    expect_decode_error(
+        as_span(std::array<std::byte, 5>{std::byte{0x18}, std::byte{0x01}, std::byte{0x00},
+                                         std::byte{0x02}, std::byte{0xaa}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 7>{
+                            std::byte{0x18}, std::byte{0x01}, std::byte{0x00}, std::byte{0x02},
+                            std::byte{0xaa}, std::byte{0xbb}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x19}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 8>{
+                            std::byte{0x1a}, std::byte{0x00}, std::byte{0x01}, std::byte{0x02},
+                            std::byte{0x03}, std::byte{0x04}, std::byte{0x05}, std::byte{0x06}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 8>{
+                            std::byte{0x1b}, std::byte{0x00}, std::byte{0x01}, std::byte{0x02},
+                            std::byte{0x03}, std::byte{0x04}, std::byte{0x05}, std::byte{0x06}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x1c}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x1c}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 3>{std::byte{0x1c}, std::byte{0x00}, std::byte{0x00}}),
+        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x1d}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x1d}, std::byte{0x00}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 0>{}), CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x16}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x40}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x1f}}),
+                        CodecErrorCode::unknown_frame_type);
+}
+
+TEST(QuicFrameTest, RejectsInvalidSerializationInputsAcrossFrameFamilies) {
+    expect_serialize_error(
+        PaddingFrame{
+            .length = 0,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        CryptoFrame{
+            .offset = kMaxQuicVarInt,
+            .crypto_data = {std::byte{0x01}},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        NewTokenFrame{
+            .token = {},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        StreamFrame{
+            .stream_id = kInvalidQuicVarInt,
+            .stream_data = {std::byte{0x01}},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        StreamFrame{
+            .has_offset = true,
+            .offset = kMaxQuicVarInt,
+            .stream_data = {std::byte{0x01}},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        MaxStreamDataFrame{
+            .stream_id = kInvalidQuicVarInt,
+            .maximum_stream_data = 1,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        MaxStreamDataFrame{
+            .stream_id = 1,
+            .maximum_stream_data = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        MaxDataFrame{
+            .maximum_data = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        MaxStreamsFrame{
+            .maximum_streams = (1ull << 60) + 1,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        DataBlockedFrame{
+            .maximum_data = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        StreamDataBlockedFrame{
+            .stream_id = kInvalidQuicVarInt,
+            .maximum_stream_data = 1,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        StreamDataBlockedFrame{
+            .stream_id = 1,
+            .maximum_stream_data = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        StreamsBlockedFrame{
+            .maximum_streams = (1ull << 60) + 1,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        NewConnectionIdFrame{
+            .sequence_number = 0,
+            .retire_prior_to = 1,
+            .connection_id = {std::byte{0xaa}},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        NewConnectionIdFrame{
+            .sequence_number = kInvalidQuicVarInt,
+            .retire_prior_to = 0,
+            .connection_id = {std::byte{0xaa}},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        ResetStreamFrame{
+            .stream_id = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        ResetStreamFrame{
+            .stream_id = 0,
+            .application_protocol_error_code = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        ResetStreamFrame{
+            .stream_id = 0,
+            .application_protocol_error_code = 0,
+            .final_size = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        StopSendingFrame{
+            .stream_id = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        StopSendingFrame{
+            .stream_id = 0,
+            .application_protocol_error_code = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        RetireConnectionIdFrame{
+            .sequence_number = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        TransportConnectionCloseFrame{
+            .error_code = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        TransportConnectionCloseFrame{
+            .error_code = 1,
+            .frame_type = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        ApplicationConnectionCloseFrame{
+            .error_code = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint);
 }
 
 } // namespace

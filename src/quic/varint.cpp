@@ -1,6 +1,7 @@
 #include "src/quic/varint.h"
 
 #include <array>
+#include <cassert>
 
 #include "src/quic/buffer.h"
 
@@ -11,18 +12,18 @@ namespace {
 constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
 
 std::byte prefix_mask(std::size_t length) {
-    switch (length) {
-    case 1:
-        return std::byte{0x00};
-    case 2:
-        return std::byte{0x40};
-    case 4:
-        return std::byte{0x80};
-    case 8:
-        return std::byte{0xc0};
-    default:
+    if (length == 1) {
         return std::byte{0x00};
     }
+    if (length == 2) {
+        return std::byte{0x40};
+    }
+    if (length == 4) {
+        return std::byte{0x80};
+    }
+
+    assert(length == 8 && "unsupported QUIC varint length");
+    return std::byte{0xc0};
 }
 
 } // namespace

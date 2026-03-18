@@ -33,10 +33,6 @@ CodecResult<std::vector<Packet>> deserialize_datagram(std::span<const std::byte>
             return CodecResult<std::vector<Packet>>::failure(decoded.error().code,
                                                              offset + decoded.error().offset);
         }
-        if (decoded.value().bytes_consumed == 0) {
-            return CodecResult<std::vector<Packet>>::failure(CodecErrorCode::packet_length_mismatch,
-                                                             offset);
-        }
 
         packets.push_back(decoded.value().packet);
         offset += decoded.value().bytes_consumed;

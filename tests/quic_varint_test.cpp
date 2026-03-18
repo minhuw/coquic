@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "src/quic/buffer.h"
 #include "src/quic/varint.h"
 
 TEST(QuicVarIntTest, RoundTripsBoundaryValues) {
@@ -33,4 +34,30 @@ TEST(QuicVarIntTest, RejectsTruncatedEncoding) {
     auto decoded = coquic::quic::decode_varint_bytes(bytes);
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicVarIntTest, BufferReaderRejectsTruncatedExactReads) {
+    const std::array<std::byte, 1> bytes{std::byte{0x01}};
+    coquic::quic::BufferReader reader(bytes);
+
+    const auto result = reader.read_exact(2);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, coquic::quic::CodecErrorCode::truncated_input);
+    EXPECT_EQ(result.error().offset, 0u);
+}
+
+TEST(QuicVarIntTest, EncodeVarintRejectsValuesAboveMaximum) {
+    const auto encoded = coquic::quic::encode_varint(4611686018427387904ull);
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicVarIntTest, DecodeVarintRejectsEmptyReader) {
+    const std::array<std::byte, 0> bytes{};
+    coquic::quic::BufferReader reader(bytes);
+
+    const auto decoded = coquic::quic::decode_varint(reader);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+    EXPECT_EQ(decoded.error().offset, 0u);
 }

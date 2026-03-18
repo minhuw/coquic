@@ -177,6 +177,22 @@ def test_mcp_main_returns_nonzero_with_clear_remote_backend_error(
     )
     remote_url = "http://127.0.0.1:6333"
     monkeypatch.setenv("COQUIC_QDRANT_URL", remote_url)
+
+    monkeypatch.setattr(QdrantSectionStore, "reset_collection", lambda self: None)
+
+    def _fake_upsert_sections(
+        _self: QdrantSectionStore,
+        section_records,
+        _embedder,
+        *,
+        batch_size: int = 32,
+        progress=None,
+    ) -> None:
+        del batch_size
+        if progress is not None:
+            progress(len(section_records), len(section_records))
+
+    monkeypatch.setattr(QdrantSectionStore, "upsert_sections", _fake_upsert_sections)
     _build_index(source_dir, state_dir)
 
     def _raise_connection_error(_self: QdrantSectionStore) -> int | None:

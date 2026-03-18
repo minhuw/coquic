@@ -19,6 +19,9 @@ from qdrant_client.models import (
 from coquic_rag.embed.provider import EmbeddingProvider
 
 
+REMOTE_QDRANT_TIMEOUT_SECONDS = 30
+
+
 def _section_kind(section_id: str) -> str:
     return "appendix" if section_id[:1].isalpha() else "numbered"
 
@@ -174,7 +177,10 @@ class QdrantSectionStore:
     def _client_or_create(self) -> QdrantClient:
         if self._client is None:
             if self._qdrant_url:
-                self._client = QdrantClient(url=self._qdrant_url)
+                self._client = QdrantClient(
+                    url=self._qdrant_url,
+                    timeout=REMOTE_QDRANT_TIMEOUT_SECONDS,
+                )
             else:
                 self._state_dir.mkdir(parents=True, exist_ok=True)
                 self._client = QdrantClient(path=str(self._state_dir))

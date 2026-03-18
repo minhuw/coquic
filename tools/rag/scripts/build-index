@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export COQUIC_QDRANT_URL="${COQUIC_QDRANT_URL:-http://127.0.0.1:6333}"
+
 uv run --project tools/rag python -m coquic_rag.cli.main build-index "$@"

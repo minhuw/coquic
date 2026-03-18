@@ -6,6 +6,7 @@ Current scope:
 - index RFC text from `docs/rfc`
 - store generated local state under `.rag`
 - expose query tooling through a local FastMCP server
+- share one localhost-only Qdrant dev backend across multiple Codex sessions
 
 Setup:
 
@@ -24,15 +25,46 @@ uv run --project tools/rag python -m coquic_rag.cli.main doctor --source docs/rf
 The default embedding model is `sentence-transformers/all-MiniLM-L6-v2`, stored under `.rag/cache/models`.
 `build-index` now shows parse and embedding progress, and the MCP server exits early with a clear error if `.rag` is incomplete.
 
+Shared Qdrant dev backend:
+
+```bash
+nix run .#qdrant-dev -- start
+nix run .#qdrant-dev -- status
+```
+
+The dev daemon listens on `127.0.0.1:6333` only, so it is reachable from the
+local machine but not exposed on the network. One daemon can serve multiple
+Codex sessions at the same time.
+
+The repo-root wrappers default `COQUIC_QDRANT_URL` to
+`http://127.0.0.1:6333`, while still honoring a manual override when you set
+that environment variable yourself:
+
+```bash
+tools/rag/scripts/build-index --source docs/rfc --state-dir .rag
+tools/rag/scripts/run-mcp
+```
+
 Start the MCP server for Codex:
 
 ```bash
 uv run --project tools/rag python -m coquic_rag.mcp_server.server
 ```
 
-Repo-root convenience wrappers are also available:
+Recommended Codex MCP config:
+
+```toml
+[mcp_servers.quic-rag]
+command = "bash"
+args = ["-lc", "cd /home/minhu/projects/coquic && tools/rag/scripts/run-mcp"]
+startup_timeout_sec = 30
+
+[mcp_servers.quic-rag.env]
+UV_CACHE_DIR = "/tmp/uv-cache"
+```
+
+When you are done with the shared backend:
 
 ```bash
-tools/rag/scripts/build-index --source docs/rfc --state-dir .rag
-tools/rag/scripts/run-mcp
+nix run .#qdrant-dev -- stop
 ```

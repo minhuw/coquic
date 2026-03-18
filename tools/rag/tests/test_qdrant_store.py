@@ -32,7 +32,36 @@ def test_qdrant_store_prefers_configured_url_over_local_path(
     )
 
     assert not store.collection_exists()
-    assert calls == [{"url": "http://127.0.0.1:6333"}]
+    assert calls[0]["url"] == "http://127.0.0.1:6333"
+    assert "path" not in calls[0]
+
+
+def test_qdrant_store_sets_longer_timeout_for_remote_backend(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _FakeQdrantClient:
+        def __init__(self, **kwargs: Any) -> None:
+            calls.append(kwargs)
+
+        def collection_exists(self, _collection_name: str) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "coquic_rag.store.qdrant_store.QdrantClient",
+        _FakeQdrantClient,
+    )
+
+    store = QdrantSectionStore(
+        state_dir=tmp_path / "qdrant",
+        qdrant_url="http://127.0.0.1:6333",
+        collection_name="quic_sections",
+    )
+
+    assert not store.collection_exists()
+    assert calls == [{"url": "http://127.0.0.1:6333", "timeout": 30}]
 
 
 def test_qdrant_store_upserts_sections_and_filters_search_results(

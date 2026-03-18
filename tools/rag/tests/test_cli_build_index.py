@@ -73,6 +73,56 @@ def test_build_index_reports_progress_stages(tmp_path: Path, capsys) -> None:
     assert "100%" in output
 
 
+def test_build_index_uses_remote_qdrant_url_from_env(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _copy_fixture_rfc(source_dir)
+    captured: dict[str, object] = {}
+
+    class FakeStore:
+        def __init__(
+            self,
+            state_dir: Path,
+            qdrant_url: str | None = None,
+            collection_name: str = "quic_sections",
+        ) -> None:
+            captured["state_dir"] = state_dir
+            captured["qdrant_url"] = qdrant_url
+            captured["collection_name"] = collection_name
+
+        def reset_collection(self) -> None:
+            return None
+
+        def upsert_sections(self, *_args, progress=None, **_kwargs) -> None:
+            if progress is not None:
+                progress(1, 1)
+
+    monkeypatch.setenv("COQUIC_QDRANT_URL", "http://127.0.0.1:6333")
+    monkeypatch.setattr("coquic_rag.cli.main.QdrantSectionStore", FakeStore)
+
+    exit_code = main(
+        [
+            "build-index",
+            "--source",
+            str(source_dir),
+            "--state-dir",
+            str(state_dir),
+            "--embedder",
+            "fake",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured == {
+        "state_dir": state_dir / "qdrant",
+        "qdrant_url": "http://127.0.0.1:6333",
+        "collection_name": "quic_sections",
+    }
+
+
 def test_doctor_reports_ready_after_build_index(tmp_path: Path, capsys) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"

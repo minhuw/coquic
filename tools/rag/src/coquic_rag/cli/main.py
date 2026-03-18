@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -54,6 +55,7 @@ def _runtime_paths(source: Path, state_dir: Path) -> ProjectPaths:
         rfc_source=source,
         state_dir=state_dir,
         model_cache_dir=state_dir / "cache" / "models",
+        qdrant_url=os.getenv("COQUIC_QDRANT_URL"),
     )
 
 
@@ -96,6 +98,7 @@ def _build_index(args: argparse.Namespace) -> int:
 
     store = QdrantSectionStore(
         state_dir=paths.qdrant_dir,
+        qdrant_url=paths.qdrant_url,
         collection_name=args.collection_name,
     )
     store.reset_collection()

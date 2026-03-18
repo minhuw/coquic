@@ -40,10 +40,16 @@ class QuicConnection {
     void start_server_if_needed(const ConnectionId &client_initial_destination_connection_id);
     CodecResult<ConnectionId>
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
+    CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
     CodecResult<bool> process_inbound_packet(const ProtectedPacket &packet);
     CodecResult<bool> process_inbound_crypto(EncryptionLevel level, std::span<const Frame> frames);
     void install_available_secrets();
     void collect_pending_tls_bytes();
+    CodecResult<bool> sync_tls_state();
+    CodecResult<bool> validate_peer_transport_parameters_if_ready();
+    void update_handshake_status();
+    std::optional<TransportParametersValidationContext>
+    peer_transport_parameters_validation_context() const;
     ConnectionId outbound_destination_connection_id() const;
     ConnectionId client_initial_destination_connection_id() const;
     std::vector<std::byte> flush_outbound_datagram();
@@ -58,6 +64,8 @@ class QuicConnection {
     TransportParameters local_transport_parameters_;
     std::optional<ConnectionId> peer_source_connection_id_;
     std::optional<ConnectionId> client_initial_destination_connection_id_;
+    std::optional<TransportParameters> peer_transport_parameters_;
+    bool peer_transport_parameters_validated_ = false;
 };
 
 } // namespace coquic::quic

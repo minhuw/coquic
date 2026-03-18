@@ -80,37 +80,48 @@ std::vector<std::byte> QuicConnection::receive(std::span<const std::byte> bytes)
         start_server_if_needed(initial_destination_connection_id.value());
     }
 
-    const auto packets = deserialize_protected_datagram(
-        bytes,
-        DeserializeProtectionContext{
-            .peer_role = opposite_role(config_.role),
-            .client_initial_destination_connection_id = client_initial_destination_connection_id(),
-            .handshake_secret = handshake_space_.read_secret,
-            .one_rtt_secret = application_space_.read_secret,
-            .largest_authenticated_initial_packet_number =
-                initial_space_.largest_authenticated_packet_number,
-            .largest_authenticated_handshake_packet_number =
-                handshake_space_.largest_authenticated_packet_number,
-            .largest_authenticated_application_packet_number =
-                application_space_.largest_authenticated_packet_number,
-            .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
-        });
-    if (!packets.has_value()) {
-        status_ = HandshakeStatus::failed;
-        return {};
-    }
-
-    for (const auto &packet : packets.value()) {
-        if (!process_inbound_packet(packet).has_value()) {
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const auto packet_length = peek_next_packet_length(bytes.subspan(offset));
+        if (!packet_length.has_value()) {
             status_ = HandshakeStatus::failed;
             return {};
         }
+
+        const auto packets = deserialize_protected_datagram(
+            bytes.subspan(offset, packet_length.value()),
+            DeserializeProtectionContext{
+                .peer_role = opposite_role(config_.role),
+                .client_initial_destination_connection_id =
+                    client_initial_destination_connection_id(),
+                .handshake_secret = handshake_space_.read_secret,
+                .one_rtt_secret = application_space_.read_secret,
+                .largest_authenticated_initial_packet_number =
+                    initial_space_.largest_authenticated_packet_number,
+                .largest_authenticated_handshake_packet_number =
+                    handshake_space_.largest_authenticated_packet_number,
+                .largest_authenticated_application_packet_number =
+                    application_space_.largest_authenticated_packet_number,
+                .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
+            });
+        if (!packets.has_value()) {
+            status_ = HandshakeStatus::failed;
+            return {};
+        }
+
+        for (const auto &packet : packets.value()) {
+            if (!process_inbound_packet(packet).has_value()) {
+                status_ = HandshakeStatus::failed;
+                return {};
+            }
+        }
+
+        offset += packet_length.value();
     }
 
-    if (tls_.has_value()) {
-        tls_->poll();
-        install_available_secrets();
-        collect_pending_tls_bytes();
+    if (!sync_tls_state().has_value()) {
+        status_ = HandshakeStatus::failed;
+        return {};
     }
 
     return flush_outbound_datagram();
@@ -152,8 +163,9 @@ void QuicConnection::start_client_if_needed() {
         return;
     }
 
-    install_available_secrets();
-    collect_pending_tls_bytes();
+    if (!sync_tls_state().has_value()) {
+        status_ = HandshakeStatus::failed;
+    }
 }
 
 void QuicConnection::start_server_if_needed(
@@ -186,8 +198,9 @@ void QuicConnection::start_server_if_needed(
         .identity = config_.identity,
         .local_transport_parameters = serialized_transport_parameters.value(),
     });
-    install_available_secrets();
-    collect_pending_tls_bytes();
+    if (!sync_tls_state().has_value()) {
+        status_ = HandshakeStatus::failed;
+    }
 }
 
 CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connection_id(
@@ -238,6 +251,97 @@ CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connec
 
     return CodecResult<ConnectionId>::success(ConnectionId(
         destination_connection_id.value().begin(), destination_connection_id.value().end()));
+}
+
+CodecResult<std::size_t>
+QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const {
+    BufferReader reader(bytes);
+    const auto first_byte = reader.read_byte();
+    if (!first_byte.has_value()) {
+        return CodecResult<std::size_t>::failure(first_byte.error().code,
+                                                 first_byte.error().offset);
+    }
+
+    const auto header_byte = std::to_integer<std::uint8_t>(first_byte.value());
+    if ((header_byte & 0x80u) == 0) {
+        return CodecResult<std::size_t>::success(bytes.size());
+    }
+    if ((header_byte & 0x40u) == 0) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_fixed_bit, 0);
+    }
+
+    const auto version = reader.read_exact(4);
+    if (!version.has_value()) {
+        return CodecResult<std::size_t>::failure(version.error().code, version.error().offset);
+    }
+    if (read_u32_be(version.value()) != kQuicVersion1) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::unsupported_packet_type, 0);
+    }
+
+    const auto destination_connection_id_length = reader.read_byte();
+    if (!destination_connection_id_length.has_value()) {
+        return CodecResult<std::size_t>::failure(destination_connection_id_length.error().code,
+                                                 destination_connection_id_length.error().offset);
+    }
+    const auto destination_connection_id_length_value =
+        std::to_integer<std::uint8_t>(destination_connection_id_length.value());
+    if (destination_connection_id_length_value > 20) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, reader.offset());
+    }
+    const auto destination_connection_id =
+        reader.read_exact(destination_connection_id_length_value);
+    if (!destination_connection_id.has_value()) {
+        return CodecResult<std::size_t>::failure(destination_connection_id.error().code,
+                                                 destination_connection_id.error().offset);
+    }
+
+    const auto source_connection_id_length = reader.read_byte();
+    if (!source_connection_id_length.has_value()) {
+        return CodecResult<std::size_t>::failure(source_connection_id_length.error().code,
+                                                 source_connection_id_length.error().offset);
+    }
+    const auto source_connection_id_length_value =
+        std::to_integer<std::uint8_t>(source_connection_id_length.value());
+    if (source_connection_id_length_value > 20) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, reader.offset());
+    }
+    const auto source_connection_id = reader.read_exact(source_connection_id_length_value);
+    if (!source_connection_id.has_value()) {
+        return CodecResult<std::size_t>::failure(source_connection_id.error().code,
+                                                 source_connection_id.error().offset);
+    }
+
+    const auto packet_type = static_cast<std::uint8_t>((header_byte >> 4) & 0x03u);
+    if (packet_type == 0x00u) {
+        const auto token_length = decode_varint(reader);
+        if (!token_length.has_value()) {
+            return CodecResult<std::size_t>::failure(token_length.error().code,
+                                                     token_length.error().offset);
+        }
+        if (token_length.value().value > static_cast<std::uint64_t>(reader.remaining())) {
+            return CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch,
+                                                     reader.offset());
+        }
+        const auto token = reader.read_exact(static_cast<std::size_t>(token_length.value().value));
+        if (!token.has_value()) {
+            return CodecResult<std::size_t>::failure(token.error().code, token.error().offset);
+        }
+    } else if (packet_type != 0x02u) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::unsupported_packet_type, 0);
+    }
+
+    const auto payload_length = decode_varint(reader);
+    if (!payload_length.has_value()) {
+        return CodecResult<std::size_t>::failure(payload_length.error().code,
+                                                 payload_length.error().offset);
+    }
+    if (payload_length.value().value > static_cast<std::uint64_t>(reader.remaining())) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch,
+                                                 reader.offset());
+    }
+
+    return CodecResult<std::size_t>::success(
+        reader.offset() + static_cast<std::size_t>(payload_length.value().value));
 }
 
 CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &packet) {
@@ -324,6 +428,93 @@ void QuicConnection::collect_pending_tls_bytes() {
     initial_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::initial));
     handshake_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::handshake));
     application_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::application));
+}
+
+CodecResult<bool> QuicConnection::sync_tls_state() {
+    install_available_secrets();
+    collect_pending_tls_bytes();
+
+    const auto validated = validate_peer_transport_parameters_if_ready();
+    if (!validated.has_value()) {
+        return validated;
+    }
+
+    update_handshake_status();
+    return CodecResult<bool>::success(true);
+}
+
+CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() {
+    if (peer_transport_parameters_validated_ || !tls_.has_value()) {
+        return CodecResult<bool>::success(true);
+    }
+
+    const auto &peer_transport_parameters_bytes = tls_->peer_transport_parameters();
+    if (!peer_transport_parameters_bytes.has_value()) {
+        return CodecResult<bool>::success(true);
+    }
+
+    if (!peer_transport_parameters_.has_value()) {
+        const auto parameters =
+            deserialize_transport_parameters(peer_transport_parameters_bytes.value());
+        if (!parameters.has_value()) {
+            return CodecResult<bool>::failure(parameters.error().code, parameters.error().offset);
+        }
+
+        peer_transport_parameters_ = parameters.value();
+    }
+
+    const auto validation_context = peer_transport_parameters_validation_context();
+    if (!validation_context.has_value()) {
+        return CodecResult<bool>::success(true);
+    }
+
+    const auto validation = validate_peer_transport_parameters(opposite_role(config_.role),
+                                                               peer_transport_parameters_.value(),
+                                                               validation_context.value());
+    if (!validation.has_value()) {
+        return CodecResult<bool>::failure(validation.error().code, validation.error().offset);
+    }
+
+    peer_transport_parameters_validated_ = true;
+    return CodecResult<bool>::success(true);
+}
+
+void QuicConnection::update_handshake_status() {
+    if (status_ == HandshakeStatus::failed || !started_) {
+        return;
+    }
+    if (!tls_.has_value()) {
+        return;
+    }
+
+    if (tls_->handshake_complete() && peer_transport_parameters_validated_ &&
+        application_space_.read_secret.has_value() && application_space_.write_secret.has_value()) {
+        status_ = HandshakeStatus::connected;
+    } else {
+        status_ = HandshakeStatus::in_progress;
+    }
+}
+
+std::optional<TransportParametersValidationContext>
+QuicConnection::peer_transport_parameters_validation_context() const {
+    if (!peer_source_connection_id_.has_value()) {
+        return std::nullopt;
+    }
+
+    if (config_.role == EndpointRole::client) {
+        return TransportParametersValidationContext{
+            .expected_initial_source_connection_id = peer_source_connection_id_.value(),
+            .expected_original_destination_connection_id =
+                client_initial_destination_connection_id(),
+            .expected_retry_source_connection_id = std::nullopt,
+        };
+    }
+
+    return TransportParametersValidationContext{
+        .expected_initial_source_connection_id = peer_source_connection_id_.value(),
+        .expected_original_destination_connection_id = std::nullopt,
+        .expected_retry_source_connection_id = std::nullopt,
+    };
 }
 
 ConnectionId QuicConnection::outbound_destination_connection_id() const {

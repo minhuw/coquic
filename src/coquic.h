@@ -2,6 +2,8 @@
 
 #include <string_view>
 
+#include "src/quic/plaintext_codec.h"
+
 namespace coquic {
 
 std::string_view project_name();

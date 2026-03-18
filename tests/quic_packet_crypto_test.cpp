@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -13,9 +14,14 @@ namespace {
 std::vector<std::byte> hex_bytes(const char *hex) {
     std::vector<std::byte> bytes;
     const std::string_view text{hex};
+    if ((text.size() % 2) != 0) {
+        ADD_FAILURE() << "hex string must contain an even number of characters: " << text;
+        return bytes;
+    }
+
     bytes.reserve(text.size() / 2);
 
-    const auto hex_value = [](char ch) -> std::uint8_t {
+    const auto hex_value = [](char ch) -> std::optional<std::uint8_t> {
         if (ch >= '0' && ch <= '9') {
             return static_cast<std::uint8_t>(ch - '0');
         }
@@ -25,13 +31,17 @@ std::vector<std::byte> hex_bytes(const char *hex) {
         if (ch >= 'A' && ch <= 'F') {
             return static_cast<std::uint8_t>(10 + (ch - 'A'));
         }
-        return 0;
+        return std::nullopt;
     };
 
     for (std::size_t index = 0; index < text.size(); index += 2) {
         const auto high = hex_value(text[index]);
         const auto low = hex_value(text[index + 1]);
-        bytes.push_back(static_cast<std::byte>((high << 4) | low));
+        if (!high.has_value() || !low.has_value()) {
+            ADD_FAILURE() << "hex string contains a non-hex character: " << text;
+            return {};
+        }
+        bytes.push_back(static_cast<std::byte>((high.value() << 4) | low.value()));
     }
 
     return bytes;
@@ -68,6 +78,40 @@ TEST(QuicPacketCryptoTest, DerivesServerInitialKeysFromRfc9001AppendixA1) {
     EXPECT_EQ(to_hex(keys.value().key), "cf3a5331653c364c88f0f379b6067e37");
     EXPECT_EQ(to_hex(keys.value().iv), "0ac1493ca1905853b0bba03e");
     EXPECT_EQ(to_hex(keys.value().hp_key), "c206b8d9b9f0f37644430b490eeaa314");
+}
+
+TEST(QuicPacketCryptoTest, DerivesServerInitialKeysForClientReceiveFromRfc9001AppendixA1) {
+    const auto keys = coquic::quic::derive_initial_packet_keys(
+        coquic::quic::EndpointRole::client, false, hex_bytes("8394c8f03e515708"));
+    ASSERT_TRUE(keys.has_value());
+    EXPECT_EQ(to_hex(keys.value().key), "cf3a5331653c364c88f0f379b6067e37");
+    EXPECT_EQ(to_hex(keys.value().iv), "0ac1493ca1905853b0bba03e");
+    EXPECT_EQ(to_hex(keys.value().hp_key), "c206b8d9b9f0f37644430b490eeaa314");
+}
+
+TEST(QuicPacketCryptoTest, DerivesClientInitialKeysForServerReceiveFromRfc9001AppendixA1) {
+    const auto keys = coquic::quic::derive_initial_packet_keys(
+        coquic::quic::EndpointRole::server, false, hex_bytes("8394c8f03e515708"));
+    ASSERT_TRUE(keys.has_value());
+    EXPECT_EQ(to_hex(keys.value().key), "1f369613dd76d5467730efcbe3b1a22d");
+    EXPECT_EQ(to_hex(keys.value().iv), "fa044b2f42a3fd3b46fb255c");
+    EXPECT_EQ(to_hex(keys.value().hp_key), "9f50449e04a0e810283a1e9933adedd2");
+}
+
+TEST(QuicPacketCryptoTest, DerivesInitialKeysForEmptyDestinationConnectionId) {
+    const auto client_keys =
+        coquic::quic::derive_initial_packet_keys(coquic::quic::EndpointRole::client, true, {});
+    ASSERT_TRUE(client_keys.has_value());
+    EXPECT_EQ(to_hex(client_keys.value().key), "77946e94d6f58bf7e8140b50b1ad28d2");
+    EXPECT_EQ(to_hex(client_keys.value().iv), "1533d930a17b66f492940f71");
+    EXPECT_EQ(to_hex(client_keys.value().hp_key), "f5d64bf060bebe4e086d31f48efe3610");
+
+    const auto server_keys =
+        coquic::quic::derive_initial_packet_keys(coquic::quic::EndpointRole::server, true, {});
+    ASSERT_TRUE(server_keys.has_value());
+    EXPECT_EQ(to_hex(server_keys.value().key), "1e737190106f6dcfd3e5f005c1567466");
+    EXPECT_EQ(to_hex(server_keys.value().iv), "c78324064e7b5bafb8ed27d7");
+    EXPECT_EQ(to_hex(server_keys.value().hp_key), "b175abd708d3c7b157293412365e8007");
 }
 
 TEST(QuicPacketCryptoTest, ExpandsChaChaTrafficSecretFromRfc9001AppendixA5) {

@@ -3,7 +3,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -43,11 +45,21 @@ CodecResult<PacketProtectionKeys> packet_key_failure(CodecErrorCode code) {
     return CodecResult<PacketProtectionKeys>::failure(code, 0);
 }
 
-const unsigned char *as_unsigned_chars(std::span<const std::byte> bytes) {
+const unsigned char *openssl_data(std::span<const std::byte> bytes) {
+    static constexpr unsigned char empty = 0;
+    if (bytes.empty()) {
+        return &empty;
+    }
+
     return reinterpret_cast<const unsigned char *>(bytes.data());
 }
 
-unsigned char *as_unsigned_chars(std::vector<std::byte> &bytes) {
+unsigned char *openssl_data(std::span<std::byte> bytes) {
+    static unsigned char empty = 0;
+    if (bytes.empty()) {
+        return &empty;
+    }
+
     return reinterpret_cast<unsigned char *>(bytes.data());
 }
 
@@ -98,11 +110,12 @@ CodecResult<std::vector<std::byte>> hkdf_extract(const EVP_MD *digest,
     if (EVP_PKEY_derive_init(context.get()) <= 0 ||
         EVP_PKEY_CTX_set_hkdf_mode(context.get(), EVP_PKEY_HKDEF_MODE_EXTRACT_ONLY) <= 0 ||
         EVP_PKEY_CTX_set_hkdf_md(context.get(), digest) <= 0 ||
-        EVP_PKEY_CTX_set1_hkdf_salt(context.get(), as_unsigned_chars(salt),
+        EVP_PKEY_CTX_set1_hkdf_salt(context.get(), openssl_data(salt),
                                     static_cast<int>(salt.size())) <= 0 ||
-        EVP_PKEY_CTX_set1_hkdf_key(context.get(), as_unsigned_chars(input_key_material),
+        EVP_PKEY_CTX_set1_hkdf_key(context.get(), openssl_data(input_key_material),
                                    static_cast<int>(input_key_material.size())) <= 0 ||
-        EVP_PKEY_derive(context.get(), as_unsigned_chars(pseudorandom_key), &output_length) <= 0) {
+        EVP_PKEY_derive(context.get(), openssl_data(std::span{pseudorandom_key}), &output_length) <=
+            0) {
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
     }
 
@@ -125,11 +138,11 @@ CodecResult<std::vector<std::byte>> hkdf_expand(const EVP_MD *digest,
     if (EVP_PKEY_derive_init(context.get()) <= 0 ||
         EVP_PKEY_CTX_set_hkdf_mode(context.get(), EVP_PKEY_HKDEF_MODE_EXPAND_ONLY) <= 0 ||
         EVP_PKEY_CTX_set_hkdf_md(context.get(), digest) <= 0 ||
-        EVP_PKEY_CTX_set1_hkdf_key(context.get(), as_unsigned_chars(secret),
+        EVP_PKEY_CTX_set1_hkdf_key(context.get(), openssl_data(secret),
                                    static_cast<int>(secret.size())) <= 0 ||
-        EVP_PKEY_CTX_add1_hkdf_info(context.get(), as_unsigned_chars(info),
+        EVP_PKEY_CTX_add1_hkdf_info(context.get(), openssl_data(info),
                                     static_cast<int>(info.size())) <= 0 ||
-        EVP_PKEY_derive(context.get(), as_unsigned_chars(output), &derived_length) <= 0) {
+        EVP_PKEY_derive(context.get(), openssl_data(std::span{output}), &derived_length) <= 0) {
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
     }
 
@@ -141,13 +154,20 @@ CodecResult<std::vector<std::byte>> hkdf_expand_label(const EVP_MD *digest,
                                                       std::span<const std::byte> secret,
                                                       std::string_view label,
                                                       std::size_t output_length) {
+    if (output_length > std::numeric_limits<std::uint16_t>::max()) {
+        return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
+    }
+
+    const auto full_label_length = tls13_label_prefix.size() + label.size();
+    if (full_label_length > std::numeric_limits<std::uint8_t>::max()) {
+        return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
+    }
+
     std::vector<std::byte> info;
-    info.reserve(2 + 1 + tls13_label_prefix.size() + label.size() + 1);
+    info.reserve(2 + 1 + full_label_length + 1);
 
     info.push_back(static_cast<std::byte>((output_length >> 8) & 0xff));
     info.push_back(static_cast<std::byte>(output_length & 0xff));
-
-    const auto full_label_length = tls13_label_prefix.size() + label.size();
     info.push_back(static_cast<std::byte>(full_label_length));
 
     for (const auto ch : tls13_label_prefix) {

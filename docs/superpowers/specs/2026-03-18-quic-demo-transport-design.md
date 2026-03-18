@@ -107,6 +107,9 @@ Add the smallest viable post-handshake transport slice that:
 - The wrapper frames each message as:
   - 4-byte big-endian payload length
   - payload bytes
+- The maximum framed message payload for this slice is 64 KiB.
+- A malformed length prefix or an oversized framed message is treated as a
+  terminal wrapper-level framing error for that channel instance.
 - The wrapper reassembles partial bytes until a full framed message is
   available.
 - `QuicCore` only deals with raw application stream bytes.
@@ -121,17 +124,29 @@ Add the smallest viable post-handshake transport slice that:
     application receive buffer
 - Application receive buffering is byte-oriented; message framing is left to the
   wrapper.
+- The sender uses contiguous stream offsets only.
+- The receiver assumes in-order contiguous delivery for stream `0` in this
+  slice.
+- Gaps, overlapping offsets, or `FIN` usage on the demo stream are treated as
+  hard errors rather than partially supported transport behavior.
 - `QuicConnection` should continue to allow handshake and application output to
   share a flush step so `receive({})` can emit any queued post-handshake
   traffic.
+- Packetization is deterministic:
+  - emit at most one `STREAM` frame per application flush
+  - fill that frame with as many queued bytes as fit in the current packet
+  - keep any remainder queued for later flush calls
 
 ### Packet Handling
 
 - In application space, the engine only needs to handle:
   - `STREAM` frames for stream `0`
   - `PADDING`
+- Inbound `ACK` frames in application space are parsed and ignored.
+- The engine does not generate application-space `ACK` frames in this slice.
 - In this slice, unrelated application-space frame types are ignored and do not
   terminate the connection.
+- `STREAM` frames on stream IDs other than `0` are hard errors.
 - Malformed supported frames still remain hard errors.
 - Packet generation may produce:
   - a handshake datagram

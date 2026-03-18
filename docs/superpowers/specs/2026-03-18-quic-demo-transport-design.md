@@ -65,6 +65,7 @@ Add the smallest viable post-handshake transport slice that:
   - `std::vector<std::byte> on_datagram(std::vector<std::byte> bytes)`
   - `std::vector<std::vector<std::byte>> take_messages()`
   - `bool is_ready() const`
+  - `bool has_failed() const`
 - `on_datagram(...)` is the single network pump:
   - feed one inbound UDP payload image
   - let the wrapper drain any received application bytes from `QuicCore`
@@ -78,6 +79,10 @@ Add the smallest viable post-handshake transport slice that:
     empty datagram is returned when they want to fully flush queued output
   - tests and the demo loop must follow this rule instead of assuming one call
     drains all pending work
+- `std::vector<std::byte>{}` always means “no outbound datagram to send”.
+- `send_message(...)` before `is_ready()` buffers locally and sends once the
+  handshake completes.
+- The wrapper uses no exceptions in this slice.
 
 ### Transport Scope
 
@@ -110,6 +115,11 @@ Add the smallest viable post-handshake transport slice that:
 - The maximum framed message payload for this slice is 64 KiB.
 - A malformed length prefix or an oversized framed message is treated as a
   terminal wrapper-level framing error for that channel instance.
+- After wrapper failure:
+  - `has_failed()` returns true
+  - `on_datagram(...)` returns `{}`
+  - `take_messages()` returns an empty list
+  - `send_message(...)` becomes a no-op
 - The wrapper reassembles partial bytes until a full framed message is
   available.
 - `QuicCore` only deals with raw application stream bytes.
@@ -134,8 +144,17 @@ Add the smallest viable post-handshake transport slice that:
   traffic.
 - Packetization is deterministic:
   - emit at most one `STREAM` frame per application flush
-  - fill that frame with as many queued bytes as fit in the current packet
+  - fill that frame with as many queued bytes as fit in the current
+    1200-byte datagram budget
   - keep any remainder queued for later flush calls
+- `QuicCore` exposes `bool has_failed() const` in addition to
+  `is_handshake_complete() const`.
+- `QuicCore` uses no exceptions in this slice.
+- After `QuicCore` failure:
+  - `has_failed()` returns true
+  - `receive(...)` returns `{}`
+  - `take_received_application_data()` returns an empty byte vector
+  - `queue_application_data(...)` becomes a no-op
 
 ### Packet Handling
 

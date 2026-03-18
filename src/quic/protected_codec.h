@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "src/quic/packet.h"
+#include "src/quic/varint.h"
 
 namespace coquic::quic {
 

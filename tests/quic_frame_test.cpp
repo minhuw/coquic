@@ -101,16 +101,20 @@ TEST(QuicFrameTest, DeserializesSingleBytePaddingRun) {
     EXPECT_EQ(decoded.value().bytes_consumed, 1u);
 }
 
-TEST(QuicFrameTest, StopsPaddingRunBeforeNextFrame) {
-    const std::array<std::byte, 2> bytes{std::byte{0x00}, std::byte{0x01}};
+TEST(QuicFrameTest, StopsPaddingRunBeforeNextFrameType) {
+    std::array<std::byte, 3> bytes{
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x01},
+    };
 
-    const auto decoded = coquic::quic::deserialize_frame(bytes);
+    auto decoded = coquic::quic::deserialize_frame(bytes);
     ASSERT_TRUE(decoded.has_value());
 
     const auto *padding = std::get_if<PaddingFrame>(&decoded.value().frame);
     ASSERT_NE(padding, nullptr);
-    EXPECT_EQ(padding->length, 1u);
-    EXPECT_EQ(decoded.value().bytes_consumed, 1u);
+    EXPECT_EQ(padding->length, 2u);
+    EXPECT_EQ(decoded.value().bytes_consumed, 2u);
 }
 
 TEST(QuicFrameTest, RoundTripsAckWithoutEcn) {
@@ -216,6 +220,28 @@ TEST(QuicFrameTest, RoundTripsStreamFrameWithFlags) {
     const auto offset = *stream->offset;
     EXPECT_EQ(offset, 11u);
     EXPECT_EQ(stream->stream_data.size(), 2u);
+}
+
+TEST(QuicFrameTest, RoundTripsStreamFrameWithoutOffsetOrLength) {
+    Frame frame = StreamFrame{
+        .stream_id = 7,
+        .stream_data = {std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}},
+    };
+
+    auto encoded = coquic::quic::serialize_frame(frame);
+    ASSERT_TRUE(encoded.has_value());
+
+    auto decoded = coquic::quic::deserialize_frame(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *stream = std::get_if<StreamFrame>(&decoded.value().frame);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_FALSE(stream->fin);
+    EXPECT_FALSE(stream->has_offset);
+    EXPECT_FALSE(stream->has_length);
+    EXPECT_FALSE(stream->offset.has_value());
+    EXPECT_EQ(stream->stream_data,
+              (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}}));
 }
 
 TEST(QuicFrameTest, RoundTripsTransportConnectionClose) {

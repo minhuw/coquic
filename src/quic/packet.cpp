@@ -1,5 +1,6 @@
 #include "src/quic/packet.h"
 
+#include <type_traits>
 #include "src/quic/buffer.h"
 
 namespace coquic::quic {
@@ -103,6 +104,7 @@ CodecResult<std::uint32_t> read_packet_number(BufferReader &reader,
 
 void append_connection_id(BufferWriter &writer, const ConnectionId &connection_id,
                           bool enforce_v1_limit) {
+    (void)enforce_v1_limit;
     writer.write_byte(static_cast<std::byte>(connection_id.size()));
     writer.write_bytes(connection_id);
 }
@@ -132,24 +134,19 @@ bool frame_allowed_in_packet_type(const Frame &frame, ProtectedPacketType packet
         return true;
     }
 
-    if (packet_type == ProtectedPacketType::initial ||
-        packet_type == ProtectedPacketType::handshake) {
-        return std::holds_alternative<PaddingFrame>(frame) ||
-               std::holds_alternative<PingFrame>(frame) ||
-               std::holds_alternative<AckFrame>(frame) ||
-               std::holds_alternative<CryptoFrame>(frame) ||
-               std::holds_alternative<TransportConnectionCloseFrame>(frame);
+    const auto frame_index = frame.index();
+    const auto packet_type_allows_handshake_space_frames =
+        packet_type == ProtectedPacketType::initial ||
+        packet_type == ProtectedPacketType::handshake;
+    if (packet_type_allows_handshake_space_frames) {
+        return (frame_index == 0) | (frame_index == 1) | (frame_index == 2) | (frame_index == 5) |
+               (frame_index == 18);
     }
 
-    if (std::holds_alternative<AckFrame>(frame) || std::holds_alternative<CryptoFrame>(frame) ||
-        std::holds_alternative<HandshakeDoneFrame>(frame) ||
-        std::holds_alternative<NewTokenFrame>(frame) ||
-        std::holds_alternative<PathResponseFrame>(frame) ||
-        std::holds_alternative<RetireConnectionIdFrame>(frame)) {
-        return false;
-    }
-
-    return true;
+    const auto forbidden_in_zero_rtt = (frame_index == 2) | (frame_index == 5) |
+                                       (frame_index == 20) | (frame_index == 6) |
+                                       (frame_index == 17) | (frame_index == 15);
+    return !forbidden_in_zero_rtt;
 }
 
 CodecResult<std::vector<std::byte>> serialize_frame_sequence(const std::vector<Frame> &frames,
@@ -306,8 +303,10 @@ CodecResult<DecodedLongHeaderFields> decode_long_header_fields(BufferReader &rea
         return CodecResult<DecodedLongHeaderFields>::failure(payload_length.error().code,
                                                              payload_length.error().offset);
     }
-    if (payload_length.value() < packet_number_length ||
-        payload_length.value() > static_cast<std::uint64_t>(reader.remaining())) {
+    const auto invalid_payload_length =
+        (payload_length.value() < packet_number_length) |
+        (payload_length.value() > static_cast<std::uint64_t>(reader.remaining()));
+    if (invalid_payload_length) {
         return CodecResult<DecodedLongHeaderFields>::failure(CodecErrorCode::packet_length_mismatch,
                                                              reader.offset());
     }
@@ -473,7 +472,6 @@ CodecResult<PacketDecodeResult> decode_short_header_packet(std::span<const std::
     }
 
     const auto payload = reader.read_exact(reader.remaining()).value();
-
     auto frames =
         deserialize_frame_sequence(payload, ProtectedPacketType::one_rtt, reader.offset());
     if (!frames.has_value()) {
@@ -507,8 +505,10 @@ CodecResult<std::vector<std::byte>> serialize_long_header_fields(
         return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::unsupported_packet_type,
                                                             0);
     }
-    if (version == kQuicV1 &&
-        (destination_connection_id.size() > 20 || source_connection_id.size() > 20)) {
+    const auto invalid_v1_connection_id =
+        (version == kQuicV1) &
+        ((destination_connection_id.size() > 20) | (source_connection_id.size() > 20));
+    if (invalid_v1_connection_id) {
         return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
     }
     if (!valid_truncated_packet_number(PacketNumberEncoding{
@@ -566,9 +566,11 @@ CodecResult<std::vector<std::byte>> serialize_long_header_packet(const PacketTyp
 
 CodecResult<std::vector<std::byte>> serialize_packet(const Packet &packet) {
     if (const auto *version_negotiation = std::get_if<VersionNegotiationPacket>(&packet)) {
-        if (version_negotiation->destination_connection_id.size() > 255 ||
-            version_negotiation->source_connection_id.size() > 255 ||
-            version_negotiation->supported_versions.empty()) {
+        const auto invalid_version_negotiation =
+            (version_negotiation->destination_connection_id.size() > 255) |
+            (version_negotiation->source_connection_id.size() > 255) |
+            version_negotiation->supported_versions.empty();
+        if (invalid_version_negotiation) {
             return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
         }
 
@@ -584,9 +586,10 @@ CodecResult<std::vector<std::byte>> serialize_packet(const Packet &packet) {
     }
 
     if (const auto *retry = std::get_if<RetryPacket>(&packet)) {
-        if (retry->version == kVersionNegotiationVersion ||
-            retry->destination_connection_id.size() > 20 ||
-            retry->source_connection_id.size() > 20) {
+        const auto invalid_retry_packet = (retry->version == kVersionNegotiationVersion) |
+                                          (retry->destination_connection_id.size() > 20) |
+                                          (retry->source_connection_id.size() > 20);
+        if (invalid_retry_packet) {
             return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
         }
 
@@ -671,7 +674,8 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
     }
 
     const auto type = static_cast<std::uint8_t>((first_byte >> 4) & 0x03u);
-    if (type != 0x03u && (first_byte & 0x0cu) != 0) {
+    const auto invalid_reserved_bits = (type != 0x03u) & ((first_byte & 0x0cu) != 0);
+    if (invalid_reserved_bits) {
         return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_reserved_bits, 0);
     }
 

@@ -368,6 +368,22 @@ TEST(QuicPacketTest, RejectsLongHeaderConnectionIdOverLimit) {
     EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
 }
 
+TEST(QuicPacketTest, RejectsPacketNumberLengthsAboveFourBytes) {
+    expect_packet_serialize_error(
+        HandshakePacket{
+            .version = 1,
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = {std::byte{0xbb}},
+            .packet_number_length = 5,
+            .truncated_packet_number = 1,
+            .frames = {CryptoFrame{
+                .offset = 0,
+                .crypto_data = {std::byte{0x01}},
+            }},
+        },
+        CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicPacketTest, RoundTripsZeroRttPacketWithAllowedFrames) {
     ZeroRttPacket packet{
         .version = 1,
@@ -391,6 +407,52 @@ TEST(QuicPacketTest, RoundTripsZeroRttPacketWithAllowedFrames) {
     ASSERT_NE(zero_rtt, nullptr);
     EXPECT_EQ(zero_rtt->packet_number_length, 4u);
     EXPECT_EQ(zero_rtt->truncated_packet_number, 0x12345678u);
+}
+
+TEST(QuicPacketTest, AllowsNonTerminalStreamFramesWhenTheyCarryExplicitLengths) {
+    OneRttPacket packet{
+        .destination_connection_id = {std::byte{0xaa}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 7,
+        .frames =
+            {
+                StreamFrame{
+                    .has_length = true,
+                    .stream_id = 0,
+                    .stream_data = {std::byte{0x01}},
+                },
+                PingFrame{},
+            },
+    };
+
+    const auto encoded = coquic::quic::serialize_packet(packet);
+    ASSERT_TRUE(encoded.has_value());
+}
+
+TEST(QuicPacketTest, AllowsTerminalStreamFramesWithoutLength) {
+    OneRttPacket packet{
+        .destination_connection_id = {std::byte{0xaa}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 7,
+        .frames =
+            {
+                StreamFrame{
+                    .has_length = false,
+                    .stream_id = 0,
+                    .stream_data = {std::byte{0x01}},
+                },
+            },
+    };
+
+    const auto encoded = coquic::quic::serialize_packet(packet);
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_packet(
+        encoded.value(), coquic::quic::DeserializeOptions{
+                             .one_rtt_destination_connection_id_length = 1,
+                         });
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_TRUE(std::holds_alternative<OneRttPacket>(decoded.value().packet));
 }
 
 TEST(QuicPacketTest, RejectsInvalidPacketSerializationInputs) {
@@ -632,6 +694,14 @@ TEST(QuicPacketTest, RejectsMalformedZeroRttAndHandshakePackets) {
     ASSERT_TRUE(handshake.has_value());
     handshake.value()[9] = std::byte{0x03};
     expect_packet_decode_error(handshake.value(), {}, CodecErrorCode::packet_length_mismatch);
+    expect_packet_decode_error(
+        as_span(std::array<std::byte, 5>{std::byte{0xd0}, std::byte{0x00}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x01}}),
+        {}, CodecErrorCode::truncated_input);
+    expect_packet_decode_error(
+        as_span(std::array<std::byte, 5>{std::byte{0xe0}, std::byte{0x00}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x01}}),
+        {}, CodecErrorCode::truncated_input);
 }
 
 TEST(QuicPacketTest, RejectsForbiddenFramesAndFrameDecodeErrorsInLongHeaders) {

@@ -29,6 +29,16 @@ std::optional<CodecError> append_varint(BufferWriter &writer, std::uint64_t valu
     return std::nullopt;
 }
 
+void append_varint_unchecked(BufferWriter &writer, std::uint64_t value) {
+    writer.write_bytes(encode_varint(value).value());
+}
+
+std::optional<CodecError> append_exact_length_bytes(BufferWriter &writer,
+                                                    const std::vector<std::byte> &bytes) {
+    append_varint_unchecked(writer, bytes.size());
+    writer.write_bytes(bytes);
+    return std::nullopt;
+}
 CodecResult<std::uint64_t> read_varint(BufferReader &reader) {
     const auto decoded = decode_varint(reader);
     if (!decoded.has_value()) {
@@ -195,7 +205,7 @@ CodecResult<std::vector<std::byte>> serialize_ack_frame(const AckFrame &frame) {
     if (const auto error = append_varint(writer, frame.ack_delay)) {
         return failure_result(error->code, error->offset);
     }
-    writer.write_bytes(encode_varint(frame.additional_ranges.size()).value());
+    append_varint_unchecked(writer, frame.additional_ranges.size());
     if (const auto error = append_varint(writer, frame.first_ack_range)) {
         return failure_result(error->code, error->offset);
     }
@@ -214,8 +224,8 @@ CodecResult<std::vector<std::byte>> serialize_ack_frame(const AckFrame &frame) {
             return failure_result(CodecErrorCode::invalid_varint, 0);
         }
 
-        writer.write_bytes(encode_varint(range.gap).value());
-        writer.write_bytes(encode_varint(range.range_length).value());
+        append_varint_unchecked(writer, range.gap);
+        append_varint_unchecked(writer, range.range_length);
 
         previous_smallest = largest - range.range_length;
     }
@@ -329,8 +339,7 @@ CodecResult<NewTokenFrame> decode_new_token_frame(BufferReader &reader) {
     });
 }
 
-CodecResult<StreamFrame> decode_stream_frame(BufferReader &reader, std::uint64_t frame_type,
-                                             std::span<const std::byte> remaining_bytes) {
+CodecResult<StreamFrame> decode_stream_frame(BufferReader &reader, std::uint64_t frame_type) {
     StreamFrame frame{};
     frame.fin = (frame_type & 0x01u) != 0;
     frame.has_length = (frame_type & 0x02u) != 0;
@@ -596,9 +605,8 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         }
 
         writer.write_byte(std::byte{0x06});
-        writer.write_bytes(encode_varint(crypto->offset).value());
-        writer.write_bytes(encode_varint(crypto->crypto_data.size()).value());
-        writer.write_bytes(crypto->crypto_data);
+        append_varint_unchecked(writer, crypto->offset);
+        append_exact_length_bytes(writer, crypto->crypto_data);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
@@ -608,8 +616,7 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         }
 
         writer.write_byte(std::byte{0x07});
-        writer.write_bytes(encode_varint(new_token->token.size()).value());
-        writer.write_bytes(new_token->token);
+        append_exact_length_bytes(writer, new_token->token);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
@@ -635,10 +642,10 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
             return failure_result(error->code, error->offset);
         }
         if (stream->has_offset) {
-            writer.write_bytes(encode_varint(offset).value());
+            append_varint_unchecked(writer, offset);
         }
         if (stream->has_length) {
-            writer.write_bytes(encode_varint(stream->stream_data.size()).value());
+            append_varint_unchecked(writer, stream->stream_data.size());
         }
         writer.write_bytes(stream->stream_data);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
@@ -666,7 +673,7 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         writer.write_byte(max_streams->stream_type == StreamLimitType::bidirectional
                               ? std::byte{0x12}
                               : std::byte{0x13});
-        writer.write_bytes(encode_varint(max_streams->maximum_streams).value());
+        append_varint_unchecked(writer, max_streams->maximum_streams);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
@@ -693,14 +700,16 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         writer.write_byte(streams_blocked->stream_type == StreamLimitType::bidirectional
                               ? std::byte{0x16}
                               : std::byte{0x17});
-        writer.write_bytes(encode_varint(streams_blocked->maximum_streams).value());
+        append_varint_unchecked(writer, streams_blocked->maximum_streams);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
     if (const auto *new_connection_id = std::get_if<NewConnectionIdFrame>(&frame)) {
-        if (new_connection_id->connection_id.empty() ||
-            new_connection_id->connection_id.size() > 20 ||
-            new_connection_id->retire_prior_to > new_connection_id->sequence_number) {
+        const auto invalid_new_connection_id =
+            new_connection_id->connection_id.empty() |
+            (new_connection_id->connection_id.size() > 20) |
+            (new_connection_id->retire_prior_to > new_connection_id->sequence_number);
+        if (invalid_new_connection_id) {
             return failure_result(CodecErrorCode::invalid_varint, 0);
         }
 
@@ -708,7 +717,7 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         if (const auto error = append_varint(writer, new_connection_id->sequence_number)) {
             return failure_result(error->code, error->offset);
         }
-        writer.write_bytes(encode_varint(new_connection_id->retire_prior_to).value());
+        append_varint_unchecked(writer, new_connection_id->retire_prior_to);
         writer.write_byte(static_cast<std::byte>(new_connection_id->connection_id.size()));
         writer.write_bytes(new_connection_id->connection_id);
         writer.write_bytes(new_connection_id->stateless_reset_token);
@@ -740,8 +749,7 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         if (const auto error = append_varint(writer, transport_close->frame_type)) {
             return failure_result(error->code, error->offset);
         }
-        writer.write_bytes(encode_varint(transport_close->reason.bytes.size()).value());
-        writer.write_bytes(transport_close->reason.bytes);
+        append_exact_length_bytes(writer, transport_close->reason.bytes);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
@@ -750,8 +758,7 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         if (const auto error = append_varint(writer, application_close->error_code)) {
             return failure_result(error->code, error->offset);
         }
-        writer.write_bytes(encode_varint(application_close->reason.bytes.size()).value());
-        writer.write_bytes(application_close->reason.bytes);
+        append_exact_length_bytes(writer, application_close->reason.bytes);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
@@ -787,6 +794,17 @@ CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> byte
     const auto frame_type = frame_type_result.value().value;
     if (frame_type <= 0x1eu && frame_type_result.value().bytes_consumed != 1) {
         return decode_failure(CodecErrorCode::non_shortest_frame_type_encoding, 0);
+    }
+
+    if (frame_type >= 0x08 && frame_type <= 0x0f) {
+        const auto frame = decode_stream_frame(reader, frame_type);
+        if (!frame.has_value()) {
+            return decode_failure(frame.error().code, frame.error().offset);
+        }
+        return CodecResult<FrameDecodeResult>::success(FrameDecodeResult{
+            .frame = frame.value(),
+            .bytes_consumed = reader.offset(),
+        });
     }
 
     switch (frame_type) {
@@ -838,23 +856,6 @@ CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> byte
     }
     case 0x07: {
         const auto frame = decode_new_token_frame(reader);
-        if (!frame.has_value()) {
-            return decode_failure(frame.error().code, frame.error().offset);
-        }
-        return CodecResult<FrameDecodeResult>::success(FrameDecodeResult{
-            .frame = frame.value(),
-            .bytes_consumed = reader.offset(),
-        });
-    }
-    case 0x08:
-    case 0x09:
-    case 0x0a:
-    case 0x0b:
-    case 0x0c:
-    case 0x0d:
-    case 0x0e:
-    case 0x0f: {
-        const auto frame = decode_stream_frame(reader, frame_type, bytes.subspan(reader.offset()));
         if (!frame.has_value()) {
             return decode_failure(frame.error().code, frame.error().offset);
         }

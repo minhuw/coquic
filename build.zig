@@ -44,7 +44,10 @@ fn addProjectLibrary(
             "src/quic/buffer.cpp",
             "src/quic/frame.cpp",
             "src/quic/packet.cpp",
+            "src/quic/packet_crypto.cpp",
+            "src/quic/packet_number.cpp",
             "src/quic/plaintext_codec.cpp",
+            "src/quic/protected_codec.cpp",
             "src/quic/varint.cpp",
         },
         .flags = project_cpp_flags,
@@ -73,6 +76,7 @@ fn addTestBinary(
     cpp_flags: []const []const u8,
     project_lib: *std.Build.Step.Compile,
     gtest_root: []const u8,
+    test_files: []const []const u8,
 ) *std.Build.Step.Compile {
     const gtest_include_dir = b.pathJoin(&.{ gtest_root, "googletest", "include" });
     const gtest_src_dir = b.pathJoin(&.{ gtest_root, "googletest" });
@@ -87,13 +91,7 @@ fn addTestBinary(
     test_exe.addIncludePath(.{ .cwd_relative = gtest_src_dir });
     test_exe.addCSourceFiles(.{
         .root = b.path("."),
-        .files = &.{
-            "tests/smoke.cpp",
-            "tests/quic_frame_test.cpp",
-            "tests/quic_packet_test.cpp",
-            "tests/quic_plaintext_codec_test.cpp",
-            "tests/quic_varint_test.cpp",
-        },
+        .files = test_files,
         .flags = cpp_flags,
     });
     test_exe.addCSourceFiles(.{
@@ -133,6 +131,16 @@ pub fn build(b: *std.Build) void {
     const spdlog_include_dir = requireEnv(b, "SPDLOG_INCLUDE_DIR");
     const fmt_include_dir = requireEnv(b, "FMT_INCLUDE_DIR");
     const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");
+    const default_test_files = &.{
+        "tests/smoke.cpp",
+        "tests/quic_frame_test.cpp",
+        "tests/quic_packet_test.cpp",
+        "tests/quic_packet_number_test.cpp",
+        "tests/quic_packet_crypto_test.cpp",
+        "tests/quic_plaintext_codec_test.cpp",
+        "tests/quic_protected_codec_test.cpp",
+        "tests/quic_varint_test.cpp",
+    };
 
     const exe = b.addExecutable(.{
         .name = "coquic",
@@ -177,6 +185,7 @@ pub fn build(b: *std.Build) void {
         cpp_flags,
         project_lib,
         gtest_root,
+        default_test_files,
     );
     linkOpenSSL(smoke);
     linkSpdlog(smoke);
@@ -205,6 +214,7 @@ pub fn build(b: *std.Build) void {
         coverage_cpp_flags,
         coverage_lib,
         gtest_root,
+        default_test_files,
     );
     linkOpenSSL(coverage_test);
     linkSpdlog(coverage_test);

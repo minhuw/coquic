@@ -11,7 +11,7 @@ namespace {
 constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
 
 std::byte prefix_mask(std::size_t length) {
-    return static_cast<std::byte>(std::countr_zero(length) << 6);
+    return static_cast<std::byte>(std::countr_zero(static_cast<unsigned int>(length)) << 6);
 }
 
 } // namespace

@@ -76,6 +76,8 @@ fn addProjectLibrary(
     files.appendSlice(&.{
         "src/coquic.cpp",
         "src/quic/buffer.cpp",
+        "src/quic/connection.cpp",
+        "src/quic/core.cpp",
         "src/quic/crypto_stream.cpp",
         "src/quic/frame.cpp",
         "src/quic/packet.cpp",
@@ -176,6 +178,7 @@ pub fn build(b: *std.Build) void {
     const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");
     const default_test_files = &.{
         "tests/smoke.cpp",
+        "tests/quic_core_test.cpp",
         "tests/quic_frame_test.cpp",
         "tests/quic_crypto_stream_test.cpp",
         "tests/quic_packet_test.cpp",

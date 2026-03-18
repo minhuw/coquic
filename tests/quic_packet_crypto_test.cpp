@@ -138,6 +138,15 @@ TEST(QuicPacketCryptoTest, BuildsAesHeaderProtectionMaskFromRfc9001AppendixA2) {
     EXPECT_EQ(to_hex(mask.value()), "437b9aec36");
 }
 
+TEST(QuicPacketCryptoTest, BuildsHeaderProtectionMaskFromFirstSixteenSampleBytes) {
+    const auto mask = coquic::quic::make_header_protection_mask(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+        hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9bfeedface"));
+    ASSERT_TRUE(mask.has_value());
+    EXPECT_EQ(to_hex(mask.value()), "437b9aec36");
+}
+
 TEST(QuicPacketCryptoTest, BuildsChaChaHeaderProtectionMaskFromRfc9001AppendixA5) {
     const auto mask = coquic::quic::make_header_protection_mask(
         coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
@@ -166,6 +175,39 @@ TEST(QuicPacketCryptoTest, SealsAndOpensPayloadWithAssociatedData) {
         nonce.value(), hex_bytes("4200bff4"), ciphertext.value());
     ASSERT_TRUE(plaintext.has_value());
     EXPECT_EQ(to_hex(plaintext.value()), "01");
+}
+
+TEST(QuicPacketCryptoTest, SealsAndOpensAes128PayloadWithAssociatedData) {
+    const auto ciphertext = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e0f"), hex_bytes("101112131415161718191a1b"),
+        hex_bytes("a0a1a2a3a4"), hex_bytes("112233445566778899"));
+    ASSERT_TRUE(ciphertext.has_value());
+    EXPECT_EQ(ciphertext.value().size(), 25U);
+
+    const auto plaintext = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e0f"), hex_bytes("101112131415161718191a1b"),
+        hex_bytes("a0a1a2a3a4"), ciphertext.value());
+    ASSERT_TRUE(plaintext.has_value());
+    EXPECT_EQ(to_hex(plaintext.value()), "112233445566778899");
+}
+
+TEST(QuicPacketCryptoTest, SealsAndOpensAes256PayloadWithAssociatedData) {
+    const auto ciphertext = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_aes_256_gcm_sha384,
+        hex_bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+        hex_bytes("202122232425262728292a2b"), hex_bytes("b0b1b2b3b4b5"),
+        hex_bytes("aabbccddeeff0011223344"));
+    ASSERT_TRUE(ciphertext.has_value());
+    EXPECT_EQ(ciphertext.value().size(), 27U);
+
+    const auto plaintext = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_aes_256_gcm_sha384,
+        hex_bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+        hex_bytes("202122232425262728292a2b"), hex_bytes("b0b1b2b3b4b5"), ciphertext.value());
+    ASSERT_TRUE(plaintext.has_value());
+    EXPECT_EQ(to_hex(plaintext.value()), "aabbccddeeff0011223344");
 }
 
 TEST(QuicPacketCryptoTest, RejectsPayloadWhenAuthenticationFails) {

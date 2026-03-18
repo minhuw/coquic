@@ -320,6 +320,7 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *cipher,
 
     const auto ciphertext_without_tag = ciphertext.first(ciphertext.size() - aead_tag_length);
     const auto tag = ciphertext.last(aead_tag_length);
+    std::vector<std::byte> mutable_tag(tag.begin(), tag.end());
 
     std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> context(EVP_CIPHER_CTX_new(),
                                                                             &EVP_CIPHER_CTX_free);
@@ -350,8 +351,9 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *cipher,
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
     }
 
-    if (EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_AEAD_SET_TAG, static_cast<int>(tag.size()),
-                            const_cast<unsigned char *>(openssl_data(tag))) <= 0) {
+    if (EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_AEAD_SET_TAG,
+                            static_cast<int>(mutable_tag.size()),
+                            openssl_data(std::span{mutable_tag})) <= 0) {
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
     }
 
@@ -467,9 +469,7 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
     if (sample.size() < header_protection_sample_length) {
         return crypto_failure(CodecErrorCode::header_protection_sample_too_short);
     }
-    if (sample.size() != header_protection_sample_length) {
-        return crypto_failure(CodecErrorCode::header_protection_failed);
-    }
+    const auto sample_prefix = sample.first(header_protection_sample_length);
 
     std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> context(EVP_CIPHER_CTX_new(),
                                                                             &EVP_CIPHER_CTX_free);
@@ -482,14 +482,27 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
         std::vector<std::byte> mask(header_protection_mask_length);
         int produced_length = 0;
         if (EVP_EncryptInit_ex(context.get(), EVP_chacha20(), nullptr, openssl_data(hp_key),
-                               openssl_data(sample)) <= 0 ||
+                               openssl_data(sample_prefix)) <= 0 ||
             EVP_EncryptUpdate(context.get(), openssl_data(std::span{mask}), &produced_length,
                               openssl_data(std::span<const std::byte>{zeros}),
                               static_cast<int>(zeros.size())) <= 0) {
             return crypto_failure(CodecErrorCode::header_protection_failed);
         }
 
-        mask.resize(static_cast<std::size_t>(produced_length));
+        int final_length = 0;
+        if (EVP_EncryptFinal_ex(
+                context.get(),
+                openssl_data(std::span{mask}.subspan(static_cast<std::size_t>(produced_length))),
+                &final_length) <= 0) {
+            return crypto_failure(CodecErrorCode::header_protection_failed);
+        }
+
+        const auto mask_length =
+            static_cast<std::size_t>(produced_length) + static_cast<std::size_t>(final_length);
+        if (mask_length != header_protection_mask_length) {
+            return crypto_failure(CodecErrorCode::header_protection_failed);
+        }
+        mask.resize(mask_length);
         return CodecResult<std::vector<std::byte>>::success(std::move(mask));
     }
 
@@ -503,7 +516,8 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
     if (EVP_EncryptInit_ex(context.get(), cipher, nullptr, openssl_data(hp_key), nullptr) <= 0 ||
         EVP_CIPHER_CTX_set_padding(context.get(), 0) <= 0 ||
         EVP_EncryptUpdate(context.get(), openssl_data(std::span{block}), &produced_length,
-                          openssl_data(sample), static_cast<int>(sample.size())) <= 0) {
+                          openssl_data(sample_prefix),
+                          static_cast<int>(sample_prefix.size())) <= 0) {
         return crypto_failure(CodecErrorCode::header_protection_failed);
     }
 
@@ -515,8 +529,12 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
         return crypto_failure(CodecErrorCode::header_protection_failed);
     }
 
-    block.resize(static_cast<std::size_t>(produced_length) +
-                 static_cast<std::size_t>(final_length));
+    const auto block_length =
+        static_cast<std::size_t>(produced_length) + static_cast<std::size_t>(final_length);
+    if (block_length != header_protection_sample_length) {
+        return crypto_failure(CodecErrorCode::header_protection_failed);
+    }
+    block.resize(block_length);
     block.resize(header_protection_mask_length);
     return CodecResult<std::vector<std::byte>>::success(std::move(block));
 }

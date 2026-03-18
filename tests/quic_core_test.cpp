@@ -31,4 +31,15 @@ TEST(QuicCoreTest, ServerDoesNotEmitUntilItReceivesBytes) {
     EXPECT_FALSE(server.is_handshake_complete());
 }
 
+TEST(QuicCoreTest, ServerProcessesClientInitialAndEmitsHandshakeFlight) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    const auto client_initial = client.receive({});
+    const auto server_flight = server.receive(client_initial);
+
+    EXPECT_FALSE(server_flight.empty());
+    EXPECT_FALSE(server.is_handshake_complete());
+}
+
 } // namespace

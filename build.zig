@@ -42,6 +42,7 @@ fn addProjectLibrary(
         .files = &.{
             "src/coquic.cpp",
             "src/quic/buffer.cpp",
+            "src/quic/frame.cpp",
             "src/quic/varint.cpp",
         },
         .flags = project_cpp_flags,
@@ -86,6 +87,7 @@ fn addTestBinary(
         .root = b.path("."),
         .files = &.{
             "tests/smoke.cpp",
+            "tests/quic_frame_test.cpp",
             "tests/quic_varint_test.cpp",
         },
         .flags = cpp_flags,

@@ -47,6 +47,7 @@ fn addProjectLibrary(
             "src/quic/packet_crypto.cpp",
             "src/quic/packet_number.cpp",
             "src/quic/plaintext_codec.cpp",
+            "src/quic/protected_codec.cpp",
             "src/quic/varint.cpp",
         },
         .flags = project_cpp_flags,
@@ -137,10 +138,8 @@ pub fn build(b: *std.Build) void {
         "tests/quic_packet_number_test.cpp",
         "tests/quic_packet_crypto_test.cpp",
         "tests/quic_plaintext_codec_test.cpp",
-        "tests/quic_varint_test.cpp",
-    };
-    const protected_codec_test_files = &.{
         "tests/quic_protected_codec_test.cpp",
+        "tests/quic_varint_test.cpp",
     };
 
     const exe = b.addExecutable(.{
@@ -196,29 +195,6 @@ pub fn build(b: *std.Build) void {
     }
     const test_step = b.step("test", "Run the GoogleTest suite");
     test_step.dependOn(&smoke_run.step);
-
-    // Keep the protected codec test isolated until its referenced symbols exist.
-    const protected_codec_test = addTestBinary(
-        b,
-        "coquic-protected-codec-tests",
-        target,
-        optimize,
-        cpp_flags,
-        project_lib,
-        gtest_root,
-        protected_codec_test_files,
-    );
-    linkOpenSSL(protected_codec_test);
-    linkSpdlog(protected_codec_test);
-    const protected_codec_test_run = b.addRunArtifact(protected_codec_test);
-    if (b.args) |args| {
-        protected_codec_test_run.addArgs(args);
-    }
-    const protected_codec_test_step = b.step(
-        "test-protected-codec",
-        "Run the protected codec GoogleTest suite",
-    );
-    protected_codec_test_step.dependOn(&protected_codec_test_run.step);
 
     const coverage_lib = addProjectLibrary(
         b,

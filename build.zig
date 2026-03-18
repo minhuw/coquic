@@ -195,6 +195,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the GoogleTest suite");
     test_step.dependOn(&smoke_run.step);
 
+    // Keep the protected codec test isolated until its referenced symbols exist.
     const protected_codec_test = addTestBinary(
         b,
         "coquic-protected-codec-tests",

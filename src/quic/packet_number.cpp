@@ -32,6 +32,10 @@ CodecResult<std::uint32_t> truncate_packet_number(std::uint64_t packet_number,
     if (!valid_packet_number_length(packet_number_length)) {
         return CodecResult<std::uint32_t>::failure(CodecErrorCode::invalid_varint, 0);
     }
+    if (packet_number > kMaxPacketNumber) {
+        return CodecResult<std::uint32_t>::failure(CodecErrorCode::packet_number_recovery_failed,
+                                                   0);
+    }
 
     return CodecResult<std::uint32_t>::success(
         static_cast<std::uint32_t>(packet_number & packet_number_mask(packet_number_length)));
@@ -47,7 +51,7 @@ recover_packet_number(std::optional<std::uint64_t> largest_authenticated_packet_
         return CodecResult<std::uint64_t>::failure(CodecErrorCode::invalid_varint, 0);
     }
     if (largest_authenticated_packet_number.has_value() &&
-        largest_authenticated_packet_number.value() > kMaxPacketNumber) {
+        largest_authenticated_packet_number.value() >= kMaxPacketNumber) {
         return CodecResult<std::uint64_t>::failure(CodecErrorCode::packet_number_recovery_failed,
                                                    0);
     }

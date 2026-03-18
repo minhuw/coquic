@@ -14,6 +14,7 @@ namespace {
 using coquic::quic::AckFrame;
 using coquic::quic::CodecErrorCode;
 using coquic::quic::CryptoFrame;
+using coquic::quic::HandshakeDoneFrame;
 using coquic::quic::HandshakePacket;
 using coquic::quic::InitialPacket;
 using coquic::quic::NewTokenFrame;
@@ -21,7 +22,9 @@ using coquic::quic::OneRttPacket;
 using coquic::quic::Packet;
 using coquic::quic::PaddingFrame;
 using coquic::quic::PathChallengeFrame;
+using coquic::quic::PathResponseFrame;
 using coquic::quic::PingFrame;
+using coquic::quic::RetireConnectionIdFrame;
 using coquic::quic::RetryPacket;
 using coquic::quic::StreamFrame;
 using coquic::quic::TransportConnectionCloseFrame;
@@ -134,6 +137,69 @@ TEST(QuicPacketTest, RejectsAckFrameInZeroRttPacket) {
     EXPECT_EQ(encoded.error().code, CodecErrorCode::frame_not_allowed_in_packet_type);
 }
 
+TEST(QuicPacketTest, RejectsOtherForbiddenFramesInZeroRttPacket) {
+    expect_packet_serialize_error(
+        ZeroRttPacket{
+            .version = 1,
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = {std::byte{0xbb}},
+            .packet_number_length = 1,
+            .truncated_packet_number = 1,
+            .frames = {CryptoFrame{
+                .offset = 0,
+                .crypto_data = {std::byte{0x01}},
+            }},
+        },
+        CodecErrorCode::frame_not_allowed_in_packet_type);
+    expect_packet_serialize_error(
+        ZeroRttPacket{
+            .version = 1,
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = {std::byte{0xbb}},
+            .packet_number_length = 1,
+            .truncated_packet_number = 2,
+            .frames = {HandshakeDoneFrame{}},
+        },
+        CodecErrorCode::frame_not_allowed_in_packet_type);
+    expect_packet_serialize_error(
+        ZeroRttPacket{
+            .version = 1,
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = {std::byte{0xbb}},
+            .packet_number_length = 1,
+            .truncated_packet_number = 3,
+            .frames = {NewTokenFrame{
+                .token = {std::byte{0x01}},
+            }},
+        },
+        CodecErrorCode::frame_not_allowed_in_packet_type);
+    expect_packet_serialize_error(
+        ZeroRttPacket{
+            .version = 1,
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = {std::byte{0xbb}},
+            .packet_number_length = 1,
+            .truncated_packet_number = 4,
+            .frames = {PathResponseFrame{
+                .data = {std::byte{0x00}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                         std::byte{0x04}, std::byte{0x05}, std::byte{0x06}, std::byte{0x07}},
+            }},
+        },
+        CodecErrorCode::frame_not_allowed_in_packet_type);
+    expect_packet_serialize_error(
+        ZeroRttPacket{
+            .version = 1,
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = {std::byte{0xbb}},
+            .packet_number_length = 1,
+            .truncated_packet_number = 5,
+            .frames = {RetireConnectionIdFrame{
+                .sequence_number = 1,
+            }},
+        },
+        CodecErrorCode::frame_not_allowed_in_packet_type);
+}
+
 TEST(QuicPacketTest, AllowsHandshakeSafeFrameSubsetInHandshakePackets) {
     HandshakePacket packet{
         .version = 1,
@@ -159,6 +225,92 @@ TEST(QuicPacketTest, AllowsHandshakeSafeFrameSubsetInHandshakePackets) {
     auto decoded = coquic::quic::deserialize_packet(encoded.value(), {});
     ASSERT_TRUE(decoded.has_value());
     EXPECT_TRUE(std::holds_alternative<HandshakePacket>(decoded.value().packet));
+}
+
+TEST(QuicPacketTest, AllowsPaddingInInitialPacketsAndStreamFramesWithoutLengthAtPacketEnd) {
+    const auto initial_encoded = coquic::quic::serialize_packet(InitialPacket{
+        .version = 1,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .token = {},
+        .packet_number_length = 1,
+        .truncated_packet_number = 9,
+        .frames = {PaddingFrame{
+            .length = 2,
+        }},
+    });
+    ASSERT_TRUE(initial_encoded.has_value());
+
+    const auto initial_decoded = coquic::quic::deserialize_packet(initial_encoded.value(), {});
+    ASSERT_TRUE(initial_decoded.has_value());
+    EXPECT_TRUE(std::holds_alternative<InitialPacket>(initial_decoded.value().packet));
+
+    const auto one_rtt_encoded = coquic::quic::serialize_packet(OneRttPacket{
+        .destination_connection_id = {std::byte{0xaa}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 7,
+        .frames = {StreamFrame{
+            .stream_id = 0,
+            .stream_data = {std::byte{0x10}, std::byte{0x11}},
+        }},
+    });
+    ASSERT_TRUE(one_rtt_encoded.has_value());
+
+    const auto one_rtt_decoded = coquic::quic::deserialize_packet(
+        one_rtt_encoded.value(), coquic::quic::DeserializeOptions{
+                                     .one_rtt_destination_connection_id_length = 1,
+                                 });
+    ASSERT_TRUE(one_rtt_decoded.has_value());
+    const auto *one_rtt = std::get_if<OneRttPacket>(&one_rtt_decoded.value().packet);
+    ASSERT_NE(one_rtt, nullptr);
+    ASSERT_EQ(one_rtt->frames.size(), 1u);
+    const auto *stream = std::get_if<StreamFrame>(&one_rtt->frames.front());
+    ASSERT_NE(stream, nullptr);
+    EXPECT_FALSE(stream->has_length);
+    EXPECT_EQ(stream->stream_data, (std::vector<std::byte>{std::byte{0x10}, std::byte{0x11}}));
+}
+
+TEST(QuicPacketTest, AllowsLengthEncodedStreamFrameAtPacketEndAndNonV1LongConnectionIds) {
+    const auto one_rtt_encoded = coquic::quic::serialize_packet(OneRttPacket{
+        .destination_connection_id = {std::byte{0xaa}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 8,
+        .frames = {StreamFrame{
+            .has_length = true,
+            .stream_id = 1,
+            .stream_data = {std::byte{0x20}, std::byte{0x21}},
+        }},
+    });
+    ASSERT_TRUE(one_rtt_encoded.has_value());
+
+    const auto one_rtt_decoded = coquic::quic::deserialize_packet(
+        one_rtt_encoded.value(), coquic::quic::DeserializeOptions{
+                                     .one_rtt_destination_connection_id_length = 1,
+                                 });
+    ASSERT_TRUE(one_rtt_decoded.has_value());
+    EXPECT_TRUE(std::holds_alternative<OneRttPacket>(one_rtt_decoded.value().packet));
+
+    const auto initial_encoded = coquic::quic::serialize_packet(InitialPacket{
+        .version = 2,
+        .destination_connection_id = std::vector<std::byte>(21, std::byte{0xaa}),
+        .source_connection_id = std::vector<std::byte>(21, std::byte{0xbb}),
+        .token = {},
+        .packet_number_length = 1,
+        .truncated_packet_number = 1,
+        .frames = {CryptoFrame{
+            .offset = 0,
+            .crypto_data = {std::byte{0x01}},
+        }},
+    });
+    ASSERT_TRUE(initial_encoded.has_value());
+
+    const auto initial_decoded = coquic::quic::deserialize_packet(initial_encoded.value(), {});
+    ASSERT_TRUE(initial_decoded.has_value());
+    const auto *initial = std::get_if<InitialPacket>(&initial_decoded.value().packet);
+    ASSERT_NE(initial, nullptr);
+    EXPECT_EQ(initial->version, 2u);
+    EXPECT_EQ(initial->destination_connection_id.size(), 21u);
+    EXPECT_EQ(initial->source_connection_id.size(), 21u);
 }
 
 TEST(QuicPacketTest, ParsesOneRttPacketWithContextLength) {
@@ -250,10 +402,38 @@ TEST(QuicPacketTest, RejectsInvalidPacketSerializationInputs) {
         },
         CodecErrorCode::invalid_varint);
     expect_packet_serialize_error(
+        VersionNegotiationPacket{
+            .destination_connection_id = std::vector<std::byte>(256, std::byte{0xaa}),
+            .source_connection_id = {std::byte{0xbb}},
+            .supported_versions = {1u},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_packet_serialize_error(
+        VersionNegotiationPacket{
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = std::vector<std::byte>(256, std::byte{0xbb}),
+            .supported_versions = {1u},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_packet_serialize_error(
         RetryPacket{
             .version = 0,
             .destination_connection_id = {std::byte{0xaa}},
             .source_connection_id = {std::byte{0xbb}},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_packet_serialize_error(
+        RetryPacket{
+            .version = 1,
+            .destination_connection_id = std::vector<std::byte>(21, std::byte{0xaa}),
+            .source_connection_id = {std::byte{0xbb}},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_packet_serialize_error(
+        RetryPacket{
+            .version = 1,
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = std::vector<std::byte>(21, std::byte{0xbb}),
         },
         CodecErrorCode::invalid_varint);
     expect_packet_serialize_error(
@@ -269,6 +449,19 @@ TEST(QuicPacketTest, RejectsInvalidPacketSerializationInputs) {
             }},
         },
         CodecErrorCode::unsupported_packet_type);
+    expect_packet_serialize_error(
+        InitialPacket{
+            .version = 1,
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = {std::byte{0xbb}},
+            .packet_number_length = 5,
+            .truncated_packet_number = 1,
+            .frames = {CryptoFrame{
+                .offset = 0,
+                .crypto_data = {std::byte{0x01}},
+            }},
+        },
+        CodecErrorCode::invalid_varint);
     expect_packet_serialize_error(
         InitialPacket{
             .version = 1,
@@ -413,6 +606,32 @@ TEST(QuicPacketTest, RejectsMalformedInitialPackets) {
             std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
             std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01}, std::byte{0x00}}),
         {}, CodecErrorCode::empty_packet_payload);
+}
+
+TEST(QuicPacketTest, RejectsMalformedZeroRttAndHandshakePackets) {
+    auto zero_rtt = coquic::quic::serialize_packet(ZeroRttPacket{
+        .version = 1,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 1,
+        .frames = {PingFrame{}},
+    });
+    ASSERT_TRUE(zero_rtt.has_value());
+    zero_rtt.value()[9] = std::byte{0x03};
+    expect_packet_decode_error(zero_rtt.value(), {}, CodecErrorCode::packet_length_mismatch);
+
+    auto handshake = coquic::quic::serialize_packet(HandshakePacket{
+        .version = 1,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 1,
+        .frames = {PingFrame{}},
+    });
+    ASSERT_TRUE(handshake.has_value());
+    handshake.value()[9] = std::byte{0x03};
+    expect_packet_decode_error(handshake.value(), {}, CodecErrorCode::packet_length_mismatch);
 }
 
 TEST(QuicPacketTest, RejectsForbiddenFramesAndFrameDecodeErrorsInLongHeaders) {

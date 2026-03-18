@@ -89,6 +89,30 @@ TEST(QuicFrameTest, CoalescesPaddingRuns) {
     EXPECT_EQ(reencoded.value(), std::vector<std::byte>(bytes.begin(), bytes.end()));
 }
 
+TEST(QuicFrameTest, DeserializesSingleBytePaddingRun) {
+    const std::array<std::byte, 1> bytes{std::byte{0x00}};
+
+    const auto decoded = coquic::quic::deserialize_frame(bytes);
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *padding = std::get_if<PaddingFrame>(&decoded.value().frame);
+    ASSERT_NE(padding, nullptr);
+    EXPECT_EQ(padding->length, 1u);
+    EXPECT_EQ(decoded.value().bytes_consumed, 1u);
+}
+
+TEST(QuicFrameTest, StopsPaddingRunBeforeNextFrame) {
+    const std::array<std::byte, 2> bytes{std::byte{0x00}, std::byte{0x01}};
+
+    const auto decoded = coquic::quic::deserialize_frame(bytes);
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *padding = std::get_if<PaddingFrame>(&decoded.value().frame);
+    ASSERT_NE(padding, nullptr);
+    EXPECT_EQ(padding->length, 1u);
+    EXPECT_EQ(decoded.value().bytes_consumed, 1u);
+}
+
 TEST(QuicFrameTest, RoundTripsAckWithoutEcn) {
     Frame frame = AckFrame{
         .largest_acknowledged = 42,
@@ -548,6 +572,106 @@ TEST(QuicFrameTest, DeserializesStreamFrameWithoutLengthUsingRemainingBytes) {
               (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}}));
 }
 
+TEST(QuicFrameTest, RoundTripsStreamFramesAcrossFlagVariants) {
+    struct StreamVariantCase {
+        std::byte expected_type;
+        StreamFrame frame;
+    };
+
+    const std::array<StreamVariantCase, 7> cases{{
+        {
+            .expected_type = std::byte{0x08},
+            .frame =
+                StreamFrame{
+                    .stream_id = 1,
+                    .stream_data = {std::byte{0xaa}, std::byte{0xbb}},
+                },
+        },
+        {
+            .expected_type = std::byte{0x09},
+            .frame =
+                StreamFrame{
+                    .fin = true,
+                    .stream_id = 2,
+                    .stream_data = {std::byte{0xaa}},
+                },
+        },
+        {
+            .expected_type = std::byte{0x0a},
+            .frame =
+                StreamFrame{
+                    .has_length = true,
+                    .stream_id = 3,
+                    .stream_data = {std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}},
+                },
+        },
+        {
+            .expected_type = std::byte{0x0b},
+            .frame =
+                StreamFrame{
+                    .fin = true,
+                    .has_length = true,
+                    .stream_id = 4,
+                    .stream_data = {std::byte{0xaa}, std::byte{0xbb}},
+                },
+        },
+        {
+            .expected_type = std::byte{0x0c},
+            .frame =
+                StreamFrame{
+                    .has_offset = true,
+                    .stream_id = 5,
+                    .offset = 7,
+                    .stream_data = {std::byte{0xaa}, std::byte{0xbb}},
+                },
+        },
+        {
+            .expected_type = std::byte{0x0d},
+            .frame =
+                StreamFrame{
+                    .fin = true,
+                    .has_offset = true,
+                    .stream_id = 6,
+                    .offset = 8,
+                    .stream_data = {std::byte{0xaa}},
+                },
+        },
+        {
+            .expected_type = std::byte{0x0e},
+            .frame =
+                StreamFrame{
+                    .has_offset = true,
+                    .has_length = true,
+                    .stream_id = 7,
+                    .offset = 9,
+                    .stream_data = {std::byte{0xaa}, std::byte{0xbb}},
+                },
+        },
+    }};
+
+    for (const auto &test_case : cases) {
+        const Frame frame = test_case.frame;
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+        ASSERT_FALSE(encoded.value().empty());
+        EXPECT_EQ(encoded.value().front(), test_case.expected_type);
+
+        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        ASSERT_TRUE(decoded.has_value());
+        EXPECT_EQ(decoded.value().bytes_consumed, encoded.value().size());
+
+        const auto *stream = std::get_if<StreamFrame>(&decoded.value().frame);
+        ASSERT_NE(stream, nullptr);
+        EXPECT_EQ(stream->fin, test_case.frame.fin);
+        EXPECT_EQ(stream->has_offset, test_case.frame.has_offset);
+        EXPECT_EQ(stream->has_length, test_case.frame.has_length);
+        EXPECT_EQ(stream->stream_id, test_case.frame.stream_id);
+        EXPECT_EQ(stream->offset, test_case.frame.offset);
+        EXPECT_EQ(stream->stream_data, test_case.frame.stream_data);
+    }
+}
+
 TEST(QuicFrameTest, RejectsMalformedAckFrames) {
     expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x02}}),
                         CodecErrorCode::truncated_input);
@@ -890,6 +1014,16 @@ TEST(QuicFrameTest, RejectsInvalidSerializationInputsAcrossFrameFamilies) {
     expect_serialize_error(
         StreamsBlockedFrame{
             .maximum_streams = (1ull << 60) + 1,
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        NewConnectionIdFrame{
+            .connection_id = {},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_serialize_error(
+        NewConnectionIdFrame{
+            .connection_id = std::vector<std::byte>(21, std::byte{0xaa}),
         },
         CodecErrorCode::invalid_varint);
     expect_serialize_error(

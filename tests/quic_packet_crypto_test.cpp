@@ -129,4 +129,61 @@ TEST(QuicPacketCryptoTest, ExpandsChaChaTrafficSecretFromRfc9001AppendixA5) {
               "25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4");
 }
 
+TEST(QuicPacketCryptoTest, BuildsAesHeaderProtectionMaskFromRfc9001AppendixA2) {
+    const auto mask =
+        coquic::quic::make_header_protection_mask(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                                  hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+                                                  hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"));
+    ASSERT_TRUE(mask.has_value());
+    EXPECT_EQ(to_hex(mask.value()), "437b9aec36");
+}
+
+TEST(QuicPacketCryptoTest, BuildsChaChaHeaderProtectionMaskFromRfc9001AppendixA5) {
+    const auto mask = coquic::quic::make_header_protection_mask(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4"),
+        hex_bytes("5e5cd55c41f69080575d7999c25a5bfb"));
+    ASSERT_TRUE(mask.has_value());
+    EXPECT_EQ(to_hex(mask.value()), "aefefe7d03");
+}
+
+TEST(QuicPacketCryptoTest, SealsAndOpensPayloadWithAssociatedData) {
+    const auto nonce = coquic::quic::make_packet_protection_nonce(
+        hex_bytes("e0459b3474bdd0e44a41c144"), 654360564ULL);
+    ASSERT_TRUE(nonce.has_value());
+    EXPECT_EQ(to_hex(nonce.value()), "e0459b3474bdd0e46d417eb0");
+
+    const auto ciphertext = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), hex_bytes("01"));
+    ASSERT_TRUE(ciphertext.has_value());
+    EXPECT_EQ(to_hex(ciphertext.value()), "655e5cd55c41f69080575d7999c25a5bfb");
+
+    const auto plaintext = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), ciphertext.value());
+    ASSERT_TRUE(plaintext.has_value());
+    EXPECT_EQ(to_hex(plaintext.value()), "01");
+}
+
+TEST(QuicPacketCryptoTest, RejectsPayloadWhenAuthenticationFails) {
+    const auto plaintext = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        hex_bytes("e0459b3474bdd0e46d417eb0"), hex_bytes("4200bff5"),
+        hex_bytes("655e5cd55c41f69080575d7999c25a5bfb"));
+    ASSERT_FALSE(plaintext.has_value());
+    EXPECT_EQ(plaintext.error().code, coquic::quic::CodecErrorCode::packet_decryption_failed);
+}
+
+TEST(QuicPacketCryptoTest, RejectsShortHeaderProtectionSample) {
+    const auto mask = coquic::quic::make_header_protection_mask(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("9f50449e04a0e810283a1e9933adedd2"), hex_bytes("d1b1c98dd7689fb8"));
+    ASSERT_FALSE(mask.has_value());
+    EXPECT_EQ(mask.error().code, coquic::quic::CodecErrorCode::header_protection_sample_too_short);
+}
+
 } // namespace

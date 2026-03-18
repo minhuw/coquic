@@ -71,6 +71,13 @@ Add the smallest viable post-handshake transport slice that:
   - return at most one outbound UDP payload image
 - `on_datagram({})` acts as a poll/flush step when the local side has queued
   handshake or application data to send.
+- The drain contract is explicit:
+  - one `QuicCore` or `QuicDemoChannel` call returns at most one outbound
+    datagram
+  - callers must repeatedly call `on_datagram({})` or `receive({})` until an
+    empty datagram is returned when they want to fully flush queued output
+  - tests and the demo loop must follow this rule instead of assuming one call
+    drains all pending work
 
 ### Transport Scope
 
@@ -123,8 +130,9 @@ Add the smallest viable post-handshake transport slice that:
 - In application space, the engine only needs to handle:
   - `STREAM` frames for stream `0`
   - `PADDING`
-- The engine should reject or ignore unrelated application-space frames rather
-  than pretending to support more transport than it does.
+- In this slice, unrelated application-space frame types are ignored and do not
+  terminate the connection.
+- Malformed supported frames still remain hard errors.
 - Packet generation may produce:
   - a handshake datagram
   - an application-data datagram
@@ -137,6 +145,13 @@ Add the smallest viable post-handshake transport slice that:
 - Support two basic roles:
   - demo server: handshake with one client, read one message, send one reply
   - demo client: handshake with server, send one message, print the reply
+- The demo uses two real processes over localhost UDP sockets.
+- The initial concrete shape is:
+  - server binds `127.0.0.1:4444` by default
+  - client sends from an OS-assigned ephemeral UDP port
+  - both sides use a simple blocking receive/send loop
+  - both sides flush pending outbound QUIC work by repeatedly calling the local
+    wrapper until it returns an empty datagram
 - The demo is a proof-of-shape, not a durable CLI contract.
 
 ## Testing

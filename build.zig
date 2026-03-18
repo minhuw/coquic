@@ -139,6 +139,7 @@ pub fn build(b: *std.Build) void {
         "tests/quic_packet_crypto_test.cpp",
         "tests/quic_plaintext_codec_test.cpp",
         "tests/quic_protected_codec_test.cpp",
+        "tests/quic_tls_adapter_test.cpp",
         "tests/quic_varint_test.cpp",
     };
 

@@ -39,7 +39,7 @@ TEST(QuicProtectedCodecTest, DeclaresInitialRoundTripApi) {
     };
 
     const auto encoded = coquic::quic::serialize_protected_datagram(packets, serialize_context);
-    EXPECT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded.has_value());
 
     const coquic::quic::DeserializeProtectionContext deserialize_context{
         .peer_role = coquic::quic::EndpointRole::client,
@@ -56,9 +56,8 @@ TEST(QuicProtectedCodecTest, DeclaresInitialRoundTripApi) {
             },
     };
 
-    const std::vector<std::byte> encoded_bytes{};
     const auto decoded =
-        coquic::quic::deserialize_protected_datagram(encoded_bytes, deserialize_context);
+        coquic::quic::deserialize_protected_datagram(encoded.value(), deserialize_context);
     EXPECT_TRUE(decoded.has_value());
 }
 

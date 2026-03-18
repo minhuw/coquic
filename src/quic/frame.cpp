@@ -1,6 +1,5 @@
 #include "src/quic/frame.h"
 
-#include <cassert>
 #include <limits>
 
 #include "src/quic/buffer.h"
@@ -30,16 +29,6 @@ std::optional<CodecError> append_varint(BufferWriter &writer, std::uint64_t valu
     return std::nullopt;
 }
 
-std::optional<CodecError> append_exact_length_bytes(BufferWriter &writer,
-                                                    const std::vector<std::byte> &bytes) {
-    const auto length_result = encode_varint(bytes.size());
-    assert(length_result.has_value());
-
-    writer.write_bytes(length_result.value());
-    writer.write_bytes(bytes);
-    return std::nullopt;
-}
-
 CodecResult<std::uint64_t> read_varint(BufferReader &reader) {
     const auto decoded = decode_varint(reader);
     if (!decoded.has_value()) {
@@ -61,12 +50,11 @@ CodecResult<std::vector<std::byte>> read_length_prefixed_bytes(BufferReader &rea
                                                             reader.offset());
     }
 
-    const auto data = reader.read_exact(static_cast<std::size_t>(length.value()));
-    assert(data.has_value());
+    const auto data = reader.read_exact(static_cast<std::size_t>(length.value())).value();
 
     return CodecResult<std::vector<std::byte>>::success(std::vector<std::byte>{
-        data.value().begin(),
-        data.value().end(),
+        data.begin(),
+        data.end(),
     });
 }
 
@@ -207,8 +195,7 @@ CodecResult<std::vector<std::byte>> serialize_ack_frame(const AckFrame &frame) {
     if (const auto error = append_varint(writer, frame.ack_delay)) {
         return failure_result(error->code, error->offset);
     }
-    const auto ack_range_count_error = append_varint(writer, frame.additional_ranges.size());
-    assert(!ack_range_count_error.has_value());
+    writer.write_bytes(encode_varint(frame.additional_ranges.size()).value());
     if (const auto error = append_varint(writer, frame.first_ack_range)) {
         return failure_result(error->code, error->offset);
     }
@@ -227,10 +214,8 @@ CodecResult<std::vector<std::byte>> serialize_ack_frame(const AckFrame &frame) {
             return failure_result(CodecErrorCode::invalid_varint, 0);
         }
 
-        const auto gap_error = append_varint(writer, range.gap);
-        assert(!gap_error.has_value());
-        const auto range_length_error = append_varint(writer, range.range_length);
-        assert(!range_length_error.has_value());
+        writer.write_bytes(encode_varint(range.gap).value());
+        writer.write_bytes(encode_varint(range.range_length).value());
 
         previous_smallest = largest - range.range_length;
     }
@@ -375,9 +360,8 @@ CodecResult<StreamFrame> decode_stream_frame(BufferReader &reader, std::uint64_t
         }
         frame.stream_data = stream_data.value();
     } else {
-        const auto bytes = reader.read_exact(reader.remaining());
-        assert(bytes.has_value());
-        frame.stream_data.assign(bytes.value().begin(), bytes.value().end());
+        const auto bytes = reader.read_exact(reader.remaining()).value();
+        frame.stream_data.assign(bytes.begin(), bytes.end());
     }
 
     if (offset_value > kMaxVarInt - frame.stream_data.size()) {
@@ -612,10 +596,9 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         }
 
         writer.write_byte(std::byte{0x06});
-        const auto offset_error = append_varint(writer, crypto->offset);
-        assert(!offset_error.has_value());
-        const auto crypto_data_error = append_exact_length_bytes(writer, crypto->crypto_data);
-        assert(!crypto_data_error.has_value());
+        writer.write_bytes(encode_varint(crypto->offset).value());
+        writer.write_bytes(encode_varint(crypto->crypto_data.size()).value());
+        writer.write_bytes(crypto->crypto_data);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
@@ -625,8 +608,8 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         }
 
         writer.write_byte(std::byte{0x07});
-        const auto new_token_error = append_exact_length_bytes(writer, new_token->token);
-        assert(!new_token_error.has_value());
+        writer.write_bytes(encode_varint(new_token->token.size()).value());
+        writer.write_bytes(new_token->token);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
@@ -652,12 +635,10 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
             return failure_result(error->code, error->offset);
         }
         if (stream->has_offset) {
-            const auto offset_error = append_varint(writer, offset);
-            assert(!offset_error.has_value());
+            writer.write_bytes(encode_varint(offset).value());
         }
         if (stream->has_length) {
-            const auto stream_length_error = append_varint(writer, stream->stream_data.size());
-            assert(!stream_length_error.has_value());
+            writer.write_bytes(encode_varint(stream->stream_data.size()).value());
         }
         writer.write_bytes(stream->stream_data);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
@@ -685,8 +666,7 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         writer.write_byte(max_streams->stream_type == StreamLimitType::bidirectional
                               ? std::byte{0x12}
                               : std::byte{0x13});
-        const auto max_streams_error = append_varint(writer, max_streams->maximum_streams);
-        assert(!max_streams_error.has_value());
+        writer.write_bytes(encode_varint(max_streams->maximum_streams).value());
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
@@ -713,8 +693,7 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         writer.write_byte(streams_blocked->stream_type == StreamLimitType::bidirectional
                               ? std::byte{0x16}
                               : std::byte{0x17});
-        const auto streams_blocked_error = append_varint(writer, streams_blocked->maximum_streams);
-        assert(!streams_blocked_error.has_value());
+        writer.write_bytes(encode_varint(streams_blocked->maximum_streams).value());
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
@@ -729,9 +708,7 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         if (const auto error = append_varint(writer, new_connection_id->sequence_number)) {
             return failure_result(error->code, error->offset);
         }
-        const auto retire_prior_to_error =
-            append_varint(writer, new_connection_id->retire_prior_to);
-        assert(!retire_prior_to_error.has_value());
+        writer.write_bytes(encode_varint(new_connection_id->retire_prior_to).value());
         writer.write_byte(static_cast<std::byte>(new_connection_id->connection_id.size()));
         writer.write_bytes(new_connection_id->connection_id);
         writer.write_bytes(new_connection_id->stateless_reset_token);
@@ -763,8 +740,8 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         if (const auto error = append_varint(writer, transport_close->frame_type)) {
             return failure_result(error->code, error->offset);
         }
-        const auto reason_error = append_exact_length_bytes(writer, transport_close->reason.bytes);
-        assert(!reason_error.has_value());
+        writer.write_bytes(encode_varint(transport_close->reason.bytes.size()).value());
+        writer.write_bytes(transport_close->reason.bytes);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 
@@ -773,9 +750,8 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
         if (const auto error = append_varint(writer, application_close->error_code)) {
             return failure_result(error->code, error->offset);
         }
-        const auto reason_error =
-            append_exact_length_bytes(writer, application_close->reason.bytes);
-        assert(!reason_error.has_value());
+        writer.write_bytes(encode_varint(application_close->reason.bytes.size()).value());
+        writer.write_bytes(application_close->reason.bytes);
         return CodecResult<std::vector<std::byte>>::success(writer.bytes());
     }
 

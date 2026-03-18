@@ -26,8 +26,8 @@ def _section_kind(section_id: str) -> str:
     return "appendix" if section_id[:1].isalpha() else "numbered"
 
 
-def _point_id(node_id: str) -> uuid.UUID:
-    return uuid.uuid5(uuid.NAMESPACE_URL, node_id)
+def _point_id(node_id: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, node_id))
 
 
 def _embed_input(section_record: dict[str, object]) -> str:

@@ -9,7 +9,7 @@ description = "Local QUIC RFC knowledge base tooling for coquic"
 requires-python = ">=3.11"
 dependencies = [
   "mcp",
-  "qdrant-client",
+  "qdrant-client>=1.13,<1.15",
   "sentence-transformers",
   "torch",
 ]

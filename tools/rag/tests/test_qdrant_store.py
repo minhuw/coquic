@@ -5,6 +5,7 @@ from typing import Any
 
 from coquic_rag.embed.provider import FakeEmbedder
 from coquic_rag.store.qdrant_store import QdrantSectionStore
+from coquic_rag.store.qdrant_store import _point_id
 
 
 def test_qdrant_store_prefers_configured_url_over_local_path(
@@ -62,6 +63,10 @@ def test_qdrant_store_sets_longer_timeout_for_remote_backend(
 
     assert not store.collection_exists()
     assert calls == [{"url": "http://127.0.0.1:6333", "timeout": 30}]
+
+
+def test_point_id_is_stringified_for_qdrant_client_compatibility() -> None:
+    assert isinstance(_point_id("rfc9000#1"), str)
 
 
 def test_qdrant_store_upserts_sections_and_filters_search_results(

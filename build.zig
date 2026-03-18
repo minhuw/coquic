@@ -39,7 +39,11 @@ fn addProjectLibrary(
     lib.addIncludePath(.{ .cwd_relative = fmt_include_dir });
     lib.addCSourceFiles(.{
         .root = b.path("."),
-        .files = &.{"src/coquic.cpp"},
+        .files = &.{
+            "src/coquic.cpp",
+            "src/quic/buffer.cpp",
+            "src/quic/varint.cpp",
+        },
         .flags = project_cpp_flags,
     });
     lib.linkLibCpp();
@@ -80,7 +84,10 @@ fn addTestBinary(
     test_exe.addIncludePath(.{ .cwd_relative = gtest_src_dir });
     test_exe.addCSourceFiles(.{
         .root = b.path("."),
-        .files = &.{"tests/smoke.cpp"},
+        .files = &.{
+            "tests/smoke.cpp",
+            "tests/quic_varint_test.cpp",
+        },
         .flags = cpp_flags,
     });
     test_exe.addCSourceFiles(.{
@@ -168,6 +175,9 @@ pub fn build(b: *std.Build) void {
     linkOpenSSL(smoke);
     linkSpdlog(smoke);
     const smoke_run = b.addRunArtifact(smoke);
+    if (b.args) |args| {
+        smoke_run.addArgs(args);
+    }
     const test_step = b.step("test", "Run the GoogleTest suite");
     test_step.dependOn(&smoke_run.step);
 

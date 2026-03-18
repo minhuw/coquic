@@ -56,6 +56,12 @@ constexpr std::string_view kRfc9001ClientInitialPacketHex =
 
 constexpr std::size_t kRfc9001ClientInitialPayloadLength = 1162;
 
+struct HandshakeCipherSuiteCase {
+    const char *name;
+    coquic::quic::CipherSuite cipher_suite;
+    std::size_t secret_size;
+};
+
 std::vector<std::byte> hex_bytes(std::string_view hex) {
     std::vector<std::byte> bytes;
     if ((hex.size() % 2) != 0) {
@@ -170,6 +176,58 @@ coquic::quic::ProtectedInitialPacket make_minimal_initial_packet() {
     };
 }
 
+std::vector<std::byte> make_secret(std::size_t size) {
+    std::vector<std::byte> secret(size);
+    for (std::size_t i = 0; i < size; ++i) {
+        secret[i] = static_cast<std::byte>(i);
+    }
+    return secret;
+}
+
+coquic::quic::ProtectedHandshakePacket make_minimal_handshake_packet() {
+    return coquic::quic::ProtectedHandshakePacket{
+        .version = 1,
+        .destination_connection_id = {std::byte{0xaa}, std::byte{0xbb}},
+        .source_connection_id = {std::byte{0xcc}},
+        .packet_number_length = 2,
+        .packet_number = 0x1234,
+        .frames =
+            {
+                coquic::quic::CryptoFrame{
+                    .offset = 0,
+                    .crypto_data = {std::byte{0x01}, std::byte{0x02}, std::byte{0x03}},
+                },
+            },
+    };
+}
+
+coquic::quic::SerializeProtectionContext
+make_handshake_serialize_context(coquic::quic::CipherSuite cipher_suite, std::size_t secret_size) {
+    return coquic::quic::SerializeProtectionContext{
+        .local_role = coquic::quic::EndpointRole::client,
+        .handshake_secret =
+            coquic::quic::TrafficSecret{
+                .cipher_suite = cipher_suite,
+                .secret = make_secret(secret_size),
+            },
+    };
+}
+
+coquic::quic::DeserializeProtectionContext
+make_handshake_deserialize_context(coquic::quic::CipherSuite cipher_suite,
+                                   std::size_t secret_size) {
+    return coquic::quic::DeserializeProtectionContext{
+        .peer_role = coquic::quic::EndpointRole::client,
+        .handshake_secret =
+            coquic::quic::TrafficSecret{
+                .cipher_suite = cipher_suite,
+                .secret = make_secret(secret_size),
+            },
+    };
+}
+
+class QuicProtectedCodecHandshakeTest : public testing::TestWithParam<HandshakeCipherSuiteCase> {};
+
 TEST(QuicProtectedCodecTest, SerializesClientInitialFromRfc9001AppendixA2) {
     const auto packet = make_rfc9001_client_initial_packet();
     const std::vector<coquic::quic::ProtectedPacket> packets{packet};
@@ -196,5 +254,85 @@ TEST(QuicProtectedCodecTest, RejectsInitialWithoutClientInitialDestinationConnec
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
 }
+
+TEST_P(QuicProtectedCodecHandshakeTest, RoundTripsHandshakePacketForCipherSuite) {
+    const auto params = GetParam();
+    const auto expected_packet = make_minimal_handshake_packet();
+    const std::vector<coquic::quic::ProtectedPacket> packets{expected_packet};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_handshake_serialize_context(params.cipher_suite, params.secret_size));
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        make_handshake_deserialize_context(params.cipher_suite, params.secret_size));
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+    const auto *handshake =
+        std::get_if<coquic::quic::ProtectedHandshakePacket>(&decoded.value().front());
+    ASSERT_NE(handshake, nullptr);
+    EXPECT_EQ(handshake->packet_number, 0x1234ULL);
+    EXPECT_EQ(handshake->destination_connection_id, expected_packet.destination_connection_id);
+    EXPECT_EQ(handshake->source_connection_id, expected_packet.source_connection_id);
+    ASSERT_EQ(handshake->frames.size(), 1u);
+    const auto *crypto = std::get_if<coquic::quic::CryptoFrame>(&handshake->frames.front());
+    ASSERT_NE(crypto, nullptr);
+    EXPECT_EQ(crypto->offset, 0ULL);
+    EXPECT_EQ(crypto->crypto_data,
+              std::vector<std::byte>({std::byte{0x01}, std::byte{0x02}, std::byte{0x03}}));
+}
+
+TEST(QuicProtectedCodecTest, RejectsHandshakePacketWithoutHandshakeSecret) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_handshake_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, coquic::quic::SerializeProtectionContext{
+                     .local_role = coquic::quic::EndpointRole::client,
+                 });
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
+}
+
+TEST(QuicProtectedCodecTest, RejectsHandshakePacketWhenSecretDoesNotMatch) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_handshake_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    auto wrong_secret = make_secret(32);
+    wrong_secret.back() ^= std::byte{0xff};
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        coquic::quic::DeserializeProtectionContext{
+            .peer_role = coquic::quic::EndpointRole::client,
+            .handshake_secret =
+                coquic::quic::TrafficSecret{
+                    .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                    .secret = std::move(wrong_secret),
+                },
+        });
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_decryption_failed);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllCipherSuites, QuicProtectedCodecHandshakeTest,
+    testing::Values(
+        HandshakeCipherSuiteCase{
+            .name = "Aes128GcmSha256",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .secret_size = 32,
+        },
+        HandshakeCipherSuiteCase{
+            .name = "Aes256GcmSha384",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_256_gcm_sha384,
+            .secret_size = 48,
+        },
+        HandshakeCipherSuiteCase{
+            .name = "ChaCha20Poly1305Sha256",
+            .cipher_suite = coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+            .secret_size = 32,
+        }),
+    [](const testing::TestParamInfo<HandshakeCipherSuiteCase> &info) { return info.param.name; });
 
 } // namespace

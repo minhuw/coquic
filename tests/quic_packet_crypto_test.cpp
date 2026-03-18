@@ -1,13 +1,16 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "src/quic/packet_crypto.h"
+#include "src/quic/packet_crypto_test_hooks.h"
 
 namespace {
 
@@ -60,6 +63,121 @@ std::string to_hex(const std::vector<std::byte> &bytes) {
     }
 
     return text;
+}
+
+std::vector<std::byte> make_secret(std::size_t size) {
+    std::vector<std::byte> secret(size);
+    for (std::size_t index = 0; index < size; ++index) {
+        secret[index] = static_cast<std::byte>(index);
+    }
+    return secret;
+}
+
+coquic::quic::CipherSuite invalid_cipher_suite() {
+    const auto raw = static_cast<std::underlying_type_t<coquic::quic::CipherSuite>>(0xff);
+    coquic::quic::CipherSuite cipher_suite{};
+    std::memcpy(&cipher_suite, &raw, sizeof(cipher_suite));
+    return cipher_suite;
+}
+
+struct PacketCryptoFaultCase {
+    const char *name;
+    coquic::quic::test::PacketCryptoFaultPoint fault_point;
+    std::size_t occurrence;
+    coquic::quic::CodecErrorCode error_code;
+};
+
+struct PacketCryptoHeaderProtectionFaultCase {
+    const char *name;
+    coquic::quic::CipherSuite cipher_suite;
+    std::vector<std::byte> hp_key;
+    std::vector<std::byte> sample;
+    coquic::quic::test::PacketCryptoFaultPoint fault_point;
+};
+
+class QuicPacketCryptoInitialKeyFaultTest : public testing::TestWithParam<PacketCryptoFaultCase> {};
+
+class QuicPacketCryptoTrafficSecretFaultTest
+    : public testing::TestWithParam<PacketCryptoFaultCase> {};
+
+class QuicPacketCryptoSealFaultTest : public testing::TestWithParam<PacketCryptoFaultCase> {};
+
+class QuicPacketCryptoOpenFaultTest : public testing::TestWithParam<PacketCryptoFaultCase> {};
+
+class QuicPacketCryptoHeaderProtectionFaultTest
+    : public testing::TestWithParam<PacketCryptoHeaderProtectionFaultCase> {};
+
+TEST_P(QuicPacketCryptoInitialKeyFaultTest, RejectsInitialKeyDerivationWhenFaultInjected) {
+    const auto params = GetParam();
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(params.fault_point,
+                                                                       params.occurrence);
+
+    const auto keys = coquic::quic::derive_initial_packet_keys(coquic::quic::EndpointRole::client,
+                                                               true, hex_bytes("8394c8f03e515708"));
+    ASSERT_FALSE(keys.has_value());
+    EXPECT_EQ(keys.error().code, params.error_code);
+}
+
+TEST_P(QuicPacketCryptoTrafficSecretFaultTest, RejectsTrafficSecretExpansionWhenFaultInjected) {
+    const auto params = GetParam();
+    const coquic::quic::TrafficSecret secret{
+        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        .secret = make_secret(32),
+    };
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(params.fault_point,
+                                                                       params.occurrence);
+
+    const auto keys = coquic::quic::expand_traffic_secret(secret);
+    ASSERT_FALSE(keys.has_value());
+    EXPECT_EQ(keys.error().code, params.error_code);
+}
+
+TEST_P(QuicPacketCryptoSealFaultTest, RejectsSealingWhenFaultInjected) {
+    const auto params = GetParam();
+    const auto nonce = coquic::quic::make_packet_protection_nonce(
+        hex_bytes("e0459b3474bdd0e44a41c144"), 654360564ULL);
+    ASSERT_TRUE(nonce.has_value());
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(params.fault_point,
+                                                                       params.occurrence);
+
+    const auto ciphertext = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), hex_bytes("01"));
+    ASSERT_FALSE(ciphertext.has_value());
+    EXPECT_EQ(ciphertext.error().code, params.error_code);
+}
+
+TEST_P(QuicPacketCryptoOpenFaultTest, RejectsOpeningWhenFaultInjected) {
+    const auto params = GetParam();
+    const auto nonce = coquic::quic::make_packet_protection_nonce(
+        hex_bytes("e0459b3474bdd0e44a41c144"), 654360564ULL);
+    ASSERT_TRUE(nonce.has_value());
+
+    const auto ciphertext = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), hex_bytes("01"));
+    ASSERT_TRUE(ciphertext.has_value());
+
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(params.fault_point,
+                                                                       params.occurrence);
+    const auto plaintext = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), ciphertext.value());
+    ASSERT_FALSE(plaintext.has_value());
+    EXPECT_EQ(plaintext.error().code, params.error_code);
+}
+
+TEST_P(QuicPacketCryptoHeaderProtectionFaultTest, RejectsHeaderProtectionWhenFaultInjected) {
+    const auto params = GetParam();
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(params.fault_point);
+
+    const auto mask = coquic::quic::make_header_protection_mask(params.cipher_suite, params.hp_key,
+                                                                params.sample);
+    ASSERT_FALSE(mask.has_value());
+    EXPECT_EQ(mask.error().code, coquic::quic::CodecErrorCode::header_protection_failed);
 }
 
 TEST(QuicPacketCryptoTest, DerivesClientInitialKeysFromRfc9001AppendixA1) {
@@ -177,6 +295,28 @@ TEST(QuicPacketCryptoTest, SealsAndOpensPayloadWithAssociatedData) {
     EXPECT_EQ(to_hex(plaintext.value()), "01");
 }
 
+TEST(QuicPacketCryptoTest, SealsAndOpensPayloadWithoutAssociatedData) {
+    const auto ciphertext = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e0f"), hex_bytes("101112131415161718191a1b"), {},
+        hex_bytes("11223344"));
+    ASSERT_TRUE(ciphertext.has_value());
+
+    const auto plaintext =
+        coquic::quic::open_payload(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                   hex_bytes("000102030405060708090a0b0c0d0e0f"),
+                                   hex_bytes("101112131415161718191a1b"), {}, ciphertext.value());
+    ASSERT_TRUE(plaintext.has_value());
+    EXPECT_EQ(to_hex(plaintext.value()), "11223344");
+}
+
+TEST(QuicPacketCryptoTest, XorsPacketNumberIntoShortIvTail) {
+    const auto nonce =
+        coquic::quic::make_packet_protection_nonce(hex_bytes("00112233"), 0x4455667788ULL);
+    ASSERT_TRUE(nonce.has_value());
+    EXPECT_EQ(to_hex(nonce.value()), "557755bb");
+}
+
 TEST(QuicPacketCryptoTest, SealsAndOpensAes128PayloadWithAssociatedData) {
     const auto ciphertext = coquic::quic::seal_payload(
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
@@ -258,5 +398,300 @@ TEST(QuicPacketCryptoTest, RejectsShortHeaderProtectionSample) {
     ASSERT_FALSE(mask.has_value());
     EXPECT_EQ(mask.error().code, coquic::quic::CodecErrorCode::header_protection_sample_too_short);
 }
+
+TEST(QuicPacketCryptoTest, RejectsUnsupportedCipherSuites) {
+    const coquic::quic::TrafficSecret invalid_secret{
+        .cipher_suite = invalid_cipher_suite(),
+        .secret = {std::byte{0x00}},
+    };
+
+    const auto expanded = coquic::quic::expand_traffic_secret(invalid_secret);
+    ASSERT_FALSE(expanded.has_value());
+    EXPECT_EQ(expanded.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
+
+    const auto sealed = coquic::quic::seal_payload(invalid_cipher_suite(), {}, {}, {}, {});
+    ASSERT_FALSE(sealed.has_value());
+    EXPECT_EQ(sealed.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
+
+    const auto opened = coquic::quic::open_payload(invalid_cipher_suite(), {}, {}, {}, {});
+    ASSERT_FALSE(opened.has_value());
+    EXPECT_EQ(opened.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
+
+    const auto mask = coquic::quic::make_header_protection_mask(invalid_cipher_suite(), {}, {});
+    ASSERT_FALSE(mask.has_value());
+    EXPECT_EQ(mask.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
+}
+
+TEST(QuicPacketCryptoTest, RejectsPayloadProtectionWhenKeyMaterialSizesDoNotMatchCipherSuite) {
+    const auto sealed_with_short_key = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e"), hex_bytes("101112131415161718191a1b"),
+        hex_bytes("a0"), hex_bytes("01"));
+    ASSERT_FALSE(sealed_with_short_key.has_value());
+    EXPECT_EQ(sealed_with_short_key.error().code,
+              coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+
+    const auto sealed_with_short_nonce = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e0f"), hex_bytes("101112131415161718191a"),
+        hex_bytes("a0"), hex_bytes("01"));
+    ASSERT_FALSE(sealed_with_short_nonce.has_value());
+    EXPECT_EQ(sealed_with_short_nonce.error().code,
+              coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+
+    const auto opened_with_short_key = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e"), hex_bytes("101112131415161718191a1b"),
+        hex_bytes("a0"), hex_bytes("00112233445566778899aabbccddeeff"));
+    ASSERT_FALSE(opened_with_short_key.has_value());
+    EXPECT_EQ(opened_with_short_key.error().code,
+              coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+
+    const auto opened_with_short_nonce = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e0f"), hex_bytes("101112131415161718191a"),
+        hex_bytes("a0"), hex_bytes("00112233445566778899aabbccddeeff"));
+    ASSERT_FALSE(opened_with_short_nonce.has_value());
+    EXPECT_EQ(opened_with_short_nonce.error().code,
+              coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicPacketCryptoTest, RejectsCiphertextsShorterThanAuthenticationTag) {
+    const auto plaintext = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e0f"), hex_bytes("101112131415161718191a1b"),
+        hex_bytes("a0"), hex_bytes("00112233445566778899aabbccddee"));
+    ASSERT_FALSE(plaintext.has_value());
+    EXPECT_EQ(plaintext.error().code, coquic::quic::CodecErrorCode::packet_decryption_failed);
+}
+
+TEST(QuicPacketCryptoTest, RejectsSealPayloadWhenLengthGuardFaultIsInjected) {
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector{
+        coquic::quic::test::PacketCryptoFaultPoint::seal_length_guard};
+
+    const auto ciphertext = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e0f"), hex_bytes("101112131415161718191a1b"),
+        hex_bytes("a0a1a2a3a4"), hex_bytes("112233445566778899"));
+    ASSERT_FALSE(ciphertext.has_value());
+    EXPECT_EQ(ciphertext.error().code,
+              coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicPacketCryptoTest, RejectsOpenPayloadWhenLengthGuardFaultIsInjected) {
+    const auto ciphertext = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e0f"), hex_bytes("101112131415161718191a1b"),
+        hex_bytes("a0a1a2a3a4"), hex_bytes("112233445566778899"));
+    ASSERT_TRUE(ciphertext.has_value());
+
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector{
+        coquic::quic::test::PacketCryptoFaultPoint::open_length_guard};
+
+    const auto plaintext = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("000102030405060708090a0b0c0d0e0f"), hex_bytes("101112131415161718191a1b"),
+        hex_bytes("a0a1a2a3a4"), ciphertext.value());
+    ASSERT_FALSE(plaintext.has_value());
+    EXPECT_EQ(plaintext.error().code,
+              coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicPacketCryptoTest, RejectsHeaderProtectionWhenKeyLengthDoesNotMatchCipherSuite) {
+    const auto mask = coquic::quic::make_header_protection_mask(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        hex_bytes("9f50449e04a0e810283a1e9933aded"), hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"));
+    ASSERT_FALSE(mask.has_value());
+    EXPECT_EQ(mask.error().code, coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    FaultInjection, QuicPacketCryptoInitialKeyFaultTest,
+    testing::Values(
+        PacketCryptoFaultCase{
+            .name = "HkdfExtractContextNew",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::hkdf_extract_context_new,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "HkdfExtractSetup",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::hkdf_extract_setup,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "HkdfExpandContextNew",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_context_new,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "HkdfExpandSetup",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        }),
+    [](const testing::TestParamInfo<PacketCryptoFaultCase> &info) { return info.param.name; });
+
+INSTANTIATE_TEST_SUITE_P(
+    FaultInjection, QuicPacketCryptoTrafficSecretFaultTest,
+    testing::Values(
+        PacketCryptoFaultCase{
+            .name = "ExpandKey",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "ExpandIv",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
+            .occurrence = 2,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "ExpandHp",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
+            .occurrence = 3,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        }),
+    [](const testing::TestParamInfo<PacketCryptoFaultCase> &info) { return info.param.name; });
+
+INSTANTIATE_TEST_SUITE_P(
+    FaultInjection, QuicPacketCryptoSealFaultTest,
+    testing::Values(
+        PacketCryptoFaultCase{
+            .name = "ContextNew",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::seal_context_new,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "Init",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::seal_init,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "AadUpdate",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::seal_aad_update,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "PayloadUpdate",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "Final",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::seal_final,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "GetTag",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::seal_get_tag,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        }),
+    [](const testing::TestParamInfo<PacketCryptoFaultCase> &info) { return info.param.name; });
+
+INSTANTIATE_TEST_SUITE_P(
+    FaultInjection, QuicPacketCryptoOpenFaultTest,
+    testing::Values(
+        PacketCryptoFaultCase{
+            .name = "ContextNew",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::open_context_new,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "Init",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::open_init,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "AadUpdate",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::open_aad_update,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "PayloadUpdate",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::open_payload_update,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
+            .name = "SetTag",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::open_set_tag,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        }),
+    [](const testing::TestParamInfo<PacketCryptoFaultCase> &info) { return info.param.name; });
+
+INSTANTIATE_TEST_SUITE_P(
+    FaultInjection, QuicPacketCryptoHeaderProtectionFaultTest,
+    testing::Values(
+        PacketCryptoHeaderProtectionFaultCase{
+            .name = "ContextNew",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+            .fault_point =
+                coquic::quic::test::PacketCryptoFaultPoint::header_protection_context_new,
+        },
+        PacketCryptoHeaderProtectionFaultCase{
+            .name = "AesInit",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::header_protection_aes_init,
+        },
+        PacketCryptoHeaderProtectionFaultCase{
+            .name = "AesFinal",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::header_protection_aes_final,
+        },
+        PacketCryptoHeaderProtectionFaultCase{
+            .name = "AesBadLength",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+            .fault_point =
+                coquic::quic::test::PacketCryptoFaultPoint::header_protection_aes_bad_length,
+        },
+        PacketCryptoHeaderProtectionFaultCase{
+            .name = "ChaChaInit",
+            .cipher_suite = coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+            .hp_key = hex_bytes("25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4"),
+            .sample = hex_bytes("5e5cd55c41f69080575d7999c25a5bfb"),
+            .fault_point =
+                coquic::quic::test::PacketCryptoFaultPoint::header_protection_chacha_init,
+        },
+        PacketCryptoHeaderProtectionFaultCase{
+            .name = "ChaChaFinal",
+            .cipher_suite = coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+            .hp_key = hex_bytes("25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4"),
+            .sample = hex_bytes("5e5cd55c41f69080575d7999c25a5bfb"),
+            .fault_point =
+                coquic::quic::test::PacketCryptoFaultPoint::header_protection_chacha_final,
+        },
+        PacketCryptoHeaderProtectionFaultCase{
+            .name = "ChaChaBadLength",
+            .cipher_suite = coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+            .hp_key = hex_bytes("25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4"),
+            .sample = hex_bytes("5e5cd55c41f69080575d7999c25a5bfb"),
+            .fault_point =
+                coquic::quic::test::PacketCryptoFaultPoint::header_protection_chacha_bad_length,
+        }),
+    [](const testing::TestParamInfo<PacketCryptoHeaderProtectionFaultCase> &info) {
+        return info.param.name;
+    });
 
 } // namespace

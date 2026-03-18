@@ -1,14 +1,18 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "src/coquic.h"
+#include "src/quic/packet_crypto_test_hooks.h"
+#include "src/quic/protected_codec_test_hooks.h"
 
 namespace {
 
@@ -195,6 +199,13 @@ std::vector<std::byte> make_secret(std::size_t size) {
     return secret;
 }
 
+coquic::quic::CipherSuite invalid_cipher_suite() {
+    const auto raw = static_cast<std::underlying_type_t<coquic::quic::CipherSuite>>(0xff);
+    coquic::quic::CipherSuite cipher_suite{};
+    std::memcpy(&cipher_suite, &raw, sizeof(cipher_suite));
+    return cipher_suite;
+}
+
 coquic::quic::ProtectedHandshakePacket make_minimal_handshake_packet() {
     return coquic::quic::ProtectedHandshakePacket{
         .version = 1,
@@ -320,6 +331,29 @@ make_initial_and_handshake_deserialize_context(coquic::quic::CipherSuite cipher_
     };
 }
 
+void expect_protected_serialize_fault(const coquic::quic::ProtectedPacket &packet,
+                                      const coquic::quic::SerializeProtectionContext &context,
+                                      coquic::quic::test::PacketCryptoFaultPoint fault_point,
+                                      coquic::quic::CodecErrorCode expected_error) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(fault_point);
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(packets, context);
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, expected_error);
+}
+
+void expect_protected_deserialize_fault(const std::vector<std::byte> &bytes,
+                                        const coquic::quic::DeserializeProtectionContext &context,
+                                        coquic::quic::test::PacketCryptoFaultPoint fault_point,
+                                        coquic::quic::CodecErrorCode expected_error) {
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(fault_point);
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(bytes, context);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, expected_error);
+}
+
 TEST(QuicProtectedCodecTest, SerializesClientInitialFromRfc9001AppendixA2) {
     const auto packet = make_rfc9001_client_initial_packet();
     const std::vector<coquic::quic::ProtectedPacket> packets{packet};
@@ -345,6 +379,121 @@ TEST(QuicProtectedCodecTest, RejectsInitialWithoutClientInitialDestinationConnec
     const auto encoded = coquic::quic::serialize_protected_datagram(packets, {});
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
+}
+
+TEST(QuicProtectedCodecTest, RejectsInitialPacketWithUnsupportedVersion) {
+    auto packet = make_minimal_initial_packet();
+    packet.version = 2;
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
+}
+
+TEST(QuicProtectedCodecTest, RejectsInitialPacketWithInvalidPacketNumberLength) {
+    auto packet = make_minimal_initial_packet();
+    packet.packet_number_length = 5;
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicProtectedCodecTest, RejectsInitialPacketWithEmptyPayload) {
+    auto packet = make_minimal_initial_packet();
+    packet.frames.clear();
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::empty_packet_payload);
+}
+
+TEST(QuicProtectedCodecTest, RejectsInitialPacketWithFrameForbiddenInInitialSpace) {
+    auto packet = make_minimal_initial_packet();
+    packet.frames = {
+        coquic::quic::NewTokenFrame{
+            .token = {std::byte{0x01}},
+        },
+    };
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::frame_not_allowed_in_packet_type);
+}
+
+TEST(QuicProtectedCodecTest, RejectsInitialPacketWithoutReceiveInitialContext) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(), coquic::quic::DeserializeProtectionContext{
+                             .peer_role = coquic::quic::EndpointRole::client,
+                         });
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
+}
+
+TEST(QuicProtectedCodecTest, RejectsInitialPacketWhenPacketNumberRecoveryContextOverflows) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    auto context = make_rfc9001_client_initial_deserialize_context();
+    context.largest_authenticated_initial_packet_number = (1ULL << 62) - 1;
+    const auto decoded = coquic::quic::deserialize_protected_datagram(encoded.value(), context);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_number_recovery_failed);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesInitialSealFaultsFromPacketCrypto) {
+    expect_protected_serialize_fault(
+        coquic::quic::ProtectedPacket{make_rfc9001_client_initial_packet()},
+        make_rfc9001_client_initial_serialize_context(),
+        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new,
+        coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesInitialHeaderProtectionFaultsFromPacketCrypto) {
+    expect_protected_serialize_fault(
+        coquic::quic::ProtectedPacket{make_rfc9001_client_initial_packet()},
+        make_rfc9001_client_initial_serialize_context(),
+        coquic::quic::test::PacketCryptoFaultPoint::header_protection_context_new,
+        coquic::quic::CodecErrorCode::header_protection_failed);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesInitialDeserializeHeaderProtectionFaultsFromPacketCrypto) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    expect_protected_deserialize_fault(
+        encoded.value(), make_rfc9001_client_initial_deserialize_context(),
+        coquic::quic::test::PacketCryptoFaultPoint::header_protection_context_new,
+        coquic::quic::CodecErrorCode::header_protection_failed);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesInitialDeserializePayloadFaultsFromPacketCrypto) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    expect_protected_deserialize_fault(
+        encoded.value(), make_rfc9001_client_initial_deserialize_context(),
+        coquic::quic::test::PacketCryptoFaultPoint::open_set_tag,
+        coquic::quic::CodecErrorCode::invalid_packet_protection_state);
 }
 
 TEST_P(QuicProtectedCodecHandshakeTest, RoundTripsHandshakePacketForCipherSuite) {
@@ -384,6 +533,57 @@ TEST(QuicProtectedCodecTest, RejectsHandshakePacketWithoutHandshakeSecret) {
     EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
 }
 
+TEST(QuicProtectedCodecTest, RejectsHandshakePacketWithEmptyPayload) {
+    auto packet = make_minimal_handshake_packet();
+    packet.frames.clear();
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::empty_packet_payload);
+}
+
+TEST(QuicProtectedCodecTest, RejectsHandshakePacketWithUnsupportedVersion) {
+    auto packet = make_minimal_handshake_packet();
+    packet.version = 2;
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
+}
+
+TEST(QuicProtectedCodecTest, RejectsHandshakePacketWithInvalidPacketNumberLength) {
+    auto packet = make_minimal_handshake_packet();
+    packet.packet_number_length = 5;
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicProtectedCodecTest, RejectsHandshakePacketWhenCipherSuiteIsUnsupported) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_handshake_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, coquic::quic::SerializeProtectionContext{
+                     .local_role = coquic::quic::EndpointRole::client,
+                     .handshake_secret =
+                         coquic::quic::TrafficSecret{
+                             .cipher_suite = invalid_cipher_suite(),
+                             .secret = make_secret(32),
+                         },
+                 });
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
+}
+
 TEST(QuicProtectedCodecTest, RejectsHandshakePacketWhenSecretDoesNotMatch) {
     const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_handshake_packet()};
     const auto encoded = coquic::quic::serialize_protected_datagram(
@@ -405,6 +605,100 @@ TEST(QuicProtectedCodecTest, RejectsHandshakePacketWhenSecretDoesNotMatch) {
         });
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_decryption_failed);
+}
+
+TEST(QuicProtectedCodecTest, RejectsHandshakePacketWithoutReceiveHandshakeSecret) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_handshake_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(), coquic::quic::DeserializeProtectionContext{
+                             .peer_role = coquic::quic::EndpointRole::client,
+                         });
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
+}
+
+TEST(QuicProtectedCodecTest, RejectsHandshakePacketWhenReceiveCipherSuiteIsUnsupported) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_handshake_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(), coquic::quic::DeserializeProtectionContext{
+                             .peer_role = coquic::quic::EndpointRole::client,
+                             .handshake_secret =
+                                 coquic::quic::TrafficSecret{
+                                     .cipher_suite = invalid_cipher_suite(),
+                                     .secret = make_secret(32),
+                                 },
+                         });
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
+}
+
+TEST(QuicProtectedCodecTest, RejectsHandshakePacketWhenPacketNumberRecoveryContextOverflows) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_handshake_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    auto context =
+        make_handshake_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+    context.largest_authenticated_handshake_packet_number = (1ULL << 62) - 1;
+    const auto decoded = coquic::quic::deserialize_protected_datagram(encoded.value(), context);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_number_recovery_failed);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesHandshakeSealFaultsFromPacketCrypto) {
+    expect_protected_serialize_fault(
+        coquic::quic::ProtectedPacket{make_minimal_handshake_packet()},
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32),
+        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new,
+        coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesHandshakeHeaderProtectionFaultsFromPacketCrypto) {
+    expect_protected_serialize_fault(
+        coquic::quic::ProtectedPacket{make_minimal_handshake_packet()},
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32),
+        coquic::quic::test::PacketCryptoFaultPoint::header_protection_context_new,
+        coquic::quic::CodecErrorCode::header_protection_failed);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesHandshakeDeserializeHeaderProtectionFaultsFromPacketCrypto) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_handshake_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    expect_protected_deserialize_fault(
+        encoded.value(),
+        make_handshake_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32),
+        coquic::quic::test::PacketCryptoFaultPoint::header_protection_context_new,
+        coquic::quic::CodecErrorCode::header_protection_failed);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesHandshakeDeserializePayloadFaultsFromPacketCrypto) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_handshake_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    expect_protected_deserialize_fault(
+        encoded.value(),
+        make_handshake_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32),
+        coquic::quic::test::PacketCryptoFaultPoint::open_set_tag,
+        coquic::quic::CodecErrorCode::invalid_packet_protection_state);
 }
 
 TEST_P(QuicProtectedCodecOneRttTest, RoundTripsOneRttPacketForCipherSuite) {
@@ -446,6 +740,16 @@ TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenKeyPhaseDoesNotMatchContext)
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::invalid_packet_protection_state);
 }
 
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithoutOneRttSecret) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, coquic::quic::SerializeProtectionContext{
+                     .local_role = coquic::quic::EndpointRole::client,
+                 });
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
+}
+
 TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenSerializeKeyPhaseDoesNotMatchContext) {
     const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet(true)};
     const auto encoded = coquic::quic::serialize_protected_datagram(
@@ -467,6 +771,184 @@ TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithoutDestinationConnectionIdLe
                              coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32, false, 0));
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::malformed_short_header_context);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithInvalidPacketNumberLength) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.packet_number_length = 5;
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithUnsupportedCipherSuite) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, coquic::quic::SerializeProtectionContext{
+                     .local_role = coquic::quic::EndpointRole::client,
+                     .one_rtt_secret =
+                         coquic::quic::TrafficSecret{
+                             .cipher_suite = invalid_cipher_suite(),
+                             .secret = make_secret(32),
+                         },
+                 });
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithNonTerminalStreamFrameWithoutLength) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{
+        coquic::quic::ProtectedOneRttPacket{
+            .spin_bit = false,
+            .key_phase = false,
+            .destination_connection_id =
+                {
+                    std::byte{0xde},
+                    std::byte{0xad},
+                    std::byte{0xbe},
+                    std::byte{0xef},
+                },
+            .packet_number_length = kOneRttPacketNumberLength,
+            .packet_number = kOneRttPacketNumber,
+            .frames =
+                {
+                    coquic::quic::StreamFrame{
+                        .fin = false,
+                        .has_offset = false,
+                        .has_length = false,
+                        .stream_id = 0,
+                        .offset = std::nullopt,
+                        .stream_data = {std::byte{0x01}},
+                    },
+                    coquic::quic::PingFrame{},
+                },
+        },
+    };
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithoutReceiveOneRttSecret) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        coquic::quic::DeserializeProtectionContext{
+            .peer_role = coquic::quic::EndpointRole::client,
+            .one_rtt_destination_connection_id_length = kOneRttDestinationConnectionIdLength,
+        });
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenReceiveCipherSuiteIsUnsupported) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        coquic::quic::DeserializeProtectionContext{
+            .peer_role = coquic::quic::EndpointRole::client,
+            .one_rtt_secret =
+                coquic::quic::TrafficSecret{
+                    .cipher_suite = invalid_cipher_suite(),
+                    .secret = make_secret(32),
+                },
+            .largest_authenticated_application_packet_number =
+                kOneRttLargestAuthenticatedPacketNumber,
+            .one_rtt_destination_connection_id_length = kOneRttDestinationConnectionIdLength,
+        });
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenDestinationConnectionIdLengthExceedsBytes) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    auto context =
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+    context.one_rtt_destination_connection_id_length = encoded.value().size();
+    const auto decoded = coquic::quic::deserialize_protected_datagram(encoded.value(), context);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::malformed_short_header_context);
+    EXPECT_EQ(decoded.error().offset, 1u);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenPacketNumberRecoveryContextOverflows) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    auto context =
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+    context.largest_authenticated_application_packet_number = (1ULL << 62) - 1;
+    const auto decoded = coquic::quic::deserialize_protected_datagram(encoded.value(), context);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_number_recovery_failed);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesOneRttSealFaultsFromPacketCrypto) {
+    expect_protected_serialize_fault(
+        coquic::quic::ProtectedPacket{make_minimal_one_rtt_packet()},
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32),
+        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new,
+        coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesOneRttHeaderProtectionFaultsFromPacketCrypto) {
+    expect_protected_serialize_fault(
+        coquic::quic::ProtectedPacket{make_minimal_one_rtt_packet()},
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32),
+        coquic::quic::test::PacketCryptoFaultPoint::header_protection_context_new,
+        coquic::quic::CodecErrorCode::header_protection_failed);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesOneRttDeserializeHeaderProtectionFaultsFromPacketCrypto) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    expect_protected_deserialize_fault(
+        encoded.value(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32),
+        coquic::quic::test::PacketCryptoFaultPoint::header_protection_context_new,
+        coquic::quic::CodecErrorCode::header_protection_failed);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesOneRttDeserializePayloadFaultsFromPacketCrypto) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    expect_protected_deserialize_fault(
+        encoded.value(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32),
+        coquic::quic::test::PacketCryptoFaultPoint::open_set_tag,
+        coquic::quic::CodecErrorCode::invalid_packet_protection_state);
 }
 
 TEST(QuicProtectedCodecTest, RoundTripsCoalescedInitialAndHandshakeDatagram) {
@@ -521,12 +1003,195 @@ TEST(QuicProtectedCodecTest, ReportsOffsetOfSecondPacketFailureInDatagram) {
     EXPECT_EQ(decoded.error().offset, initial.value().size());
 }
 
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithoutDestinationConnectionIdLength) {
+    const std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithTruncatedDestinationConnectionId) {
+    const std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x01}, std::byte{0x01},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithoutSourceConnectionIdLength) {
+    const std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x01}, std::byte{0x01}, std::byte{0xaa},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithTruncatedSourceConnectionId) {
+    const std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithTruncatedTokenLengthVarint) {
+    const std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithTruncatedPayloadLengthVarint) {
+    const std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
 TEST(QuicProtectedCodecTest, RejectsUnsupportedProtectedPacketTypes) {
     const std::vector<std::byte> bytes{std::byte{0xd0}};
     const auto decoded = coquic::quic::deserialize_protected_datagram(bytes, {});
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
     EXPECT_EQ(decoded.error().offset, 0u);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithoutFixedBit) {
+    const std::vector<std::byte> bytes{std::byte{0x80}};
+    const auto decoded = coquic::quic::deserialize_protected_datagram(bytes, {});
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::invalid_fixed_bit);
+    EXPECT_EQ(decoded.error().offset, 0u);
+}
+
+TEST(QuicProtectedCodecTest, RejectsTruncatedLongHeaderVersionField) {
+    const std::vector<std::byte> bytes{
+        std::byte{0xc0},
+        std::byte{0x00},
+        std::byte{0x00},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithUnsupportedVersion) {
+    const std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x02},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithTooLongDestinationConnectionId) {
+    const std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x01}, std::byte{0x15},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithTooLongSourceConnectionId) {
+    std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x01}, std::byte{0x01}, std::byte{0xaa}, std::byte{0x15},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithTokenLengthLongerThanRemainingBytes) {
+    std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
+        std::byte{0x01}, std::byte{0xaa}, std::byte{0x00}, std::byte{0x40}, std::byte{0x01},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
+}
+
+TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithPayloadLengthLongerThanRemainingBytes) {
+    std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x02},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
+}
+
+TEST(QuicProtectedCodecTest, RejectsTruncatedHandshakeLongHeaderAfterVersion) {
+    const std::vector<std::byte> bytes{
+        std::byte{0xe0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
+    };
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        bytes,
+        make_handshake_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicProtectedCodecTest, RejectsInitialPacketsTooShortToRemoveHeaderProtection) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_GT(encoded.value().size(), 17u);
+
+    auto truncated = encoded.value();
+    truncated[16] = std::byte{0x01};
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        truncated, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code,
+              coquic::quic::CodecErrorCode::header_protection_sample_too_short);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketsTooShortToRemoveHeaderProtection) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_GT(encoded.value().size(), 8u);
+
+    const std::vector<std::byte> truncated(encoded.value().begin(), encoded.value().begin() + 8);
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        truncated,
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code,
+              coquic::quic::CodecErrorCode::header_protection_sample_too_short);
 }
 
 TEST(QuicProtectedCodecTest, RejectsPacketsTooShortForHeaderProtectionSample) {
@@ -555,6 +1220,97 @@ TEST(QuicProtectedCodecTest, RejectsPacketsTooShortForHeaderProtectionSample) {
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code,
               coquic::quic::CodecErrorCode::header_protection_sample_too_short);
+}
+
+TEST(QuicProtectedCodecTest, RejectsInitialPacketWhenHeaderProtectionRevealsTooLongPacketNumber) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+        coquic::quic::test::ProtectedCodecFaultPoint::remove_long_header_packet_length_mismatch};
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(), make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenHeaderProtectionRevealsTooLongPacketNumber) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+        coquic::quic::test::ProtectedCodecFaultPoint::remove_short_header_packet_length_mismatch};
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesInitialPlaintextDecodeFaultFromProtectedCodecSeam) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+        coquic::quic::test::ProtectedCodecFaultPoint::deserialize_plaintext_packet};
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(), make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesHandshakePlaintextDecodeFaultFromProtectedCodecSeam) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_handshake_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+        coquic::quic::test::ProtectedCodecFaultPoint::deserialize_plaintext_packet};
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        make_handshake_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicProtectedCodecTest, PropagatesOneRttPlaintextDecodeFaultFromProtectedCodecSeam) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+        coquic::quic::test::ProtectedCodecFaultPoint::deserialize_plaintext_packet};
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicProtectedCodecTest, IgnoresProtectedCodecFaultUntilConfiguredOccurrence) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+        coquic::quic::test::ProtectedCodecFaultPoint::deserialize_plaintext_packet, 2};
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(), make_rfc9001_client_initial_deserialize_context());
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+    EXPECT_NE(std::get_if<coquic::quic::ProtectedInitialPacket>(&decoded.value()[0]), nullptr);
 }
 
 INSTANTIATE_TEST_SUITE_P(

@@ -55,4 +55,28 @@ TEST(QuicPacketNumberTest, TruncatesPacketNumberToRequestedLength) {
     EXPECT_EQ(truncated.value(), 0x5678U);
 }
 
+TEST(QuicPacketNumberTest, RecoversPacketNumberByAdvancingToNextWindow) {
+    const auto recovered = coquic::quic::recover_packet_number(0x01efULL, 0x10U, 1);
+    ASSERT_TRUE(recovered.has_value());
+    EXPECT_EQ(recovered.value(), 0x0210ULL);
+}
+
+TEST(QuicPacketNumberTest, RecoversPacketNumberByRewindingToPreviousWindow) {
+    const auto recovered = coquic::quic::recover_packet_number(0x0105ULL, 0xf0U, 1);
+    ASSERT_TRUE(recovered.has_value());
+    EXPECT_EQ(recovered.value(), 0x00f0ULL);
+}
+
+TEST(QuicPacketNumberTest, KeepsCandidateAtPacketNumberSpaceBoundaryWithoutAdvancingWindow) {
+    const auto recovered = coquic::quic::recover_packet_number((1ULL << 62) - 129, 0x00U, 1);
+    ASSERT_TRUE(recovered.has_value());
+    EXPECT_EQ(recovered.value(), (1ULL << 62) - 256);
+}
+
+TEST(QuicPacketNumberTest, KeepsCandidateInFirstWindowWithoutRewinding) {
+    const auto recovered = coquic::quic::recover_packet_number(4ULL, 0xf0U, 1);
+    ASSERT_TRUE(recovered.has_value());
+    EXPECT_EQ(recovered.value(), 0x00f0ULL);
+}
+
 } // namespace

@@ -62,6 +62,17 @@ struct HandshakeCipherSuiteCase {
     std::size_t secret_size;
 };
 
+struct OneRttCipherSuiteCase {
+    const char *name;
+    coquic::quic::CipherSuite cipher_suite;
+    std::size_t secret_size;
+};
+
+constexpr std::uint64_t kOneRttLargestAuthenticatedPacketNumber = 0xa82f30eaULL;
+constexpr std::uint64_t kOneRttPacketNumber = 0xa82f9b32ULL;
+constexpr std::uint8_t kOneRttPacketNumberLength = 2;
+constexpr std::size_t kOneRttDestinationConnectionIdLength = 4;
+
 std::vector<std::byte> hex_bytes(std::string_view hex) {
     std::vector<std::byte> bytes;
     if ((hex.size() % 2) != 0) {
@@ -228,6 +239,59 @@ make_handshake_deserialize_context(coquic::quic::CipherSuite cipher_suite,
 
 class QuicProtectedCodecHandshakeTest : public testing::TestWithParam<HandshakeCipherSuiteCase> {};
 
+coquic::quic::ProtectedOneRttPacket make_minimal_one_rtt_packet(bool key_phase = false) {
+    return coquic::quic::ProtectedOneRttPacket{
+        .spin_bit = true,
+        .key_phase = key_phase,
+        .destination_connection_id =
+            {
+                std::byte{0xde},
+                std::byte{0xad},
+                std::byte{0xbe},
+                std::byte{0xef},
+            },
+        .packet_number_length = kOneRttPacketNumberLength,
+        .packet_number = kOneRttPacketNumber,
+        .frames =
+            {
+                coquic::quic::PingFrame{},
+                coquic::quic::PingFrame{},
+            },
+    };
+}
+
+coquic::quic::SerializeProtectionContext
+make_one_rtt_serialize_context(coquic::quic::CipherSuite cipher_suite, std::size_t secret_size,
+                               bool key_phase = false) {
+    return coquic::quic::SerializeProtectionContext{
+        .local_role = coquic::quic::EndpointRole::client,
+        .one_rtt_secret =
+            coquic::quic::TrafficSecret{
+                .cipher_suite = cipher_suite,
+                .secret = make_secret(secret_size),
+            },
+        .one_rtt_key_phase = key_phase,
+    };
+}
+
+coquic::quic::DeserializeProtectionContext make_one_rtt_deserialize_context(
+    coquic::quic::CipherSuite cipher_suite, std::size_t secret_size, bool key_phase = false,
+    std::size_t destination_connection_id_length = kOneRttDestinationConnectionIdLength) {
+    return coquic::quic::DeserializeProtectionContext{
+        .peer_role = coquic::quic::EndpointRole::client,
+        .one_rtt_secret =
+            coquic::quic::TrafficSecret{
+                .cipher_suite = cipher_suite,
+                .secret = make_secret(secret_size),
+            },
+        .one_rtt_key_phase = key_phase,
+        .largest_authenticated_application_packet_number = kOneRttLargestAuthenticatedPacketNumber,
+        .one_rtt_destination_connection_id_length = destination_connection_id_length,
+    };
+}
+
+class QuicProtectedCodecOneRttTest : public testing::TestWithParam<OneRttCipherSuiteCase> {};
+
 TEST(QuicProtectedCodecTest, SerializesClientInitialFromRfc9001AppendixA2) {
     const auto packet = make_rfc9001_client_initial_packet();
     const std::vector<coquic::quic::ProtectedPacket> packets{packet};
@@ -315,6 +379,68 @@ TEST(QuicProtectedCodecTest, RejectsHandshakePacketWhenSecretDoesNotMatch) {
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_decryption_failed);
 }
 
+TEST_P(QuicProtectedCodecOneRttTest, RoundTripsOneRttPacketForCipherSuite) {
+    const auto params = GetParam();
+    const auto expected_packet = make_minimal_one_rtt_packet();
+    const std::vector<coquic::quic::ProtectedPacket> packets{expected_packet};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_one_rtt_serialize_context(params.cipher_suite, params.secret_size));
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(), make_one_rtt_deserialize_context(params.cipher_suite, params.secret_size));
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+    const auto *one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded.value().front());
+    ASSERT_NE(one_rtt, nullptr);
+    EXPECT_TRUE(one_rtt->spin_bit);
+    EXPECT_FALSE(one_rtt->key_phase);
+    EXPECT_EQ(one_rtt->destination_connection_id, expected_packet.destination_connection_id);
+    EXPECT_EQ(one_rtt->packet_number_length, kOneRttPacketNumberLength);
+    EXPECT_EQ(one_rtt->packet_number, kOneRttPacketNumber);
+    ASSERT_EQ(one_rtt->frames.size(), 2u);
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::PingFrame>(one_rtt->frames[0]));
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::PingFrame>(one_rtt->frames[1]));
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenKeyPhaseDoesNotMatchContext) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet(false)};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(), make_one_rtt_deserialize_context(
+                             coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32, true));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenSerializeKeyPhaseDoesNotMatchContext) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet(true)};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                                32, false));
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithoutDestinationConnectionIdLength) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(), make_one_rtt_deserialize_context(
+                             coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32, false, 0));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::malformed_short_header_context);
+}
+
 INSTANTIATE_TEST_SUITE_P(
     AllCipherSuites, QuicProtectedCodecHandshakeTest,
     testing::Values(
@@ -334,5 +460,25 @@ INSTANTIATE_TEST_SUITE_P(
             .secret_size = 32,
         }),
     [](const testing::TestParamInfo<HandshakeCipherSuiteCase> &info) { return info.param.name; });
+
+INSTANTIATE_TEST_SUITE_P(
+    AllCipherSuites, QuicProtectedCodecOneRttTest,
+    testing::Values(
+        OneRttCipherSuiteCase{
+            .name = "Aes128GcmSha256",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .secret_size = 32,
+        },
+        OneRttCipherSuiteCase{
+            .name = "Aes256GcmSha384",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_256_gcm_sha384,
+            .secret_size = 48,
+        },
+        OneRttCipherSuiteCase{
+            .name = "ChaCha20Poly1305Sha256",
+            .cipher_suite = coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+            .secret_size = 32,
+        }),
+    [](const testing::TestParamInfo<OneRttCipherSuiteCase> &info) { return info.param.name; });
 
 } // namespace

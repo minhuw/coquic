@@ -92,6 +92,7 @@ fn addTestBinary(
             "tests/quic_frame_test.cpp",
             "tests/quic_packet_test.cpp",
             "tests/quic_plaintext_codec_test.cpp",
+            "tests/quic_protected_codec_test.cpp",
             "tests/quic_varint_test.cpp",
         },
         .flags = cpp_flags,

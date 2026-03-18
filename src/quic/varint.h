@@ -21,6 +21,13 @@ enum class CodecErrorCode : std::uint8_t {
     packet_length_mismatch,
     frame_not_allowed_in_packet_type,
     malformed_short_header_context,
+    missing_crypto_context,
+    unsupported_cipher_suite,
+    packet_number_recovery_failed,
+    header_protection_sample_too_short,
+    header_protection_failed,
+    packet_decryption_failed,
+    invalid_packet_protection_state,
 };
 
 struct CodecError {

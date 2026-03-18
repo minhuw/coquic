@@ -20,6 +20,8 @@
       };
       lib = pkgs.lib;
       llvmPkgs = pkgs.llvmPackages_20;
+      quictls = pkgs.quictls;
+      boringssl = pkgs.boringssl;
       fmt = (pkgs.fmt.override {
         stdenv = llvmPkgs.libcxxStdenv;
       }).overrideAttrs
@@ -40,7 +42,6 @@
           doCheck = false;
         });
       pkgConfigPath = lib.makeSearchPath "lib/pkgconfig" [
-        pkgs.openssl.dev
         spdlog.dev
         fmt.dev
       ];
@@ -99,7 +100,8 @@
             gtest
             lldb
             llvmPkgs.llvm
-            openssl
+            quictls
+            boringssl
             spdlog
             pkg-config
             python3
@@ -113,7 +115,12 @@
             export GTEST_INCLUDE_DIR="${pkgs.gtest.dev}/include"
             export GTEST_SOURCE_DIR="${pkgs.gtest.src}"
             export GTEST_LIB_DIR="${pkgs.gtest}/lib"
-            export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
+            export COQUIC_TLS_BACKEND="quictls"
+            export QUICTLS_INCLUDE_DIR="${quictls.dev}/include"
+            export QUICTLS_LIB_DIR="${quictls.out}/lib"
+            export BORINGSSL_INCLUDE_DIR="${boringssl.dev}/include"
+            export BORINGSSL_LIB_DIR="${boringssl.out}/lib"
+            export OPENSSL_INCLUDE_DIR="${quictls.dev}/include"
             export SPDLOG_INCLUDE_DIR="${spdlog.dev}/include"
             export FMT_INCLUDE_DIR="${fmt.dev}/include"
             export PKG_CONFIG_PATH="${pkgConfigPath}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"

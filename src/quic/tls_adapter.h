@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -39,6 +40,12 @@ struct TlsAdapterConfig {
 class TlsAdapter {
   public:
     explicit TlsAdapter(TlsAdapterConfig config);
+    ~TlsAdapter();
+
+    TlsAdapter(const TlsAdapter &) = delete;
+    TlsAdapter &operator=(const TlsAdapter &) = delete;
+    TlsAdapter(TlsAdapter &&) noexcept;
+    TlsAdapter &operator=(TlsAdapter &&) noexcept;
 
     CodecResult<bool> start();
     CodecResult<bool> provide(EncryptionLevel level, std::span<const std::byte> bytes);
@@ -47,6 +54,10 @@ class TlsAdapter {
     std::vector<AvailableTrafficSecret> take_available_secrets();
     const std::optional<std::vector<std::byte>> &peer_transport_parameters() const;
     bool handshake_complete() const;
+
+  private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace coquic::quic

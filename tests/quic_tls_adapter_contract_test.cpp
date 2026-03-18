@@ -1,3 +1,5 @@
+#include <algorithm>
+
 #include <gtest/gtest.h>
 
 #include "src/quic/tls_adapter.h"
@@ -36,11 +38,14 @@ TlsAdapterConfig make_server_config() {
     };
 }
 
-TEST(QuicTlsAdapterTest, ClientAndServerExchangeHandshakeBytesAndSecrets) {
+TEST(QuicTlsAdapterContractTest, ClientAndServerExchangeHandshakeBytesAndSecrets) {
     TlsAdapter client(make_client_config());
     TlsAdapter server(make_server_config());
 
     ASSERT_TRUE(client.start().has_value());
+    const auto initial_client_flight = client.take_pending(EncryptionLevel::initial);
+    ASSERT_FALSE(initial_client_flight.empty());
+    ASSERT_TRUE(server.provide(EncryptionLevel::initial, initial_client_flight).has_value());
 
     for (int i = 0; i < 32 && !(client.handshake_complete() && server.handshake_complete()); ++i) {
         const auto client_initial = client.take_pending(EncryptionLevel::initial);
@@ -71,8 +76,16 @@ TEST(QuicTlsAdapterTest, ClientAndServerExchangeHandshakeBytesAndSecrets) {
     EXPECT_TRUE(server.handshake_complete());
     EXPECT_TRUE(client.peer_transport_parameters().has_value());
     EXPECT_TRUE(server.peer_transport_parameters().has_value());
-    EXPECT_FALSE(client.take_available_secrets().empty());
-    EXPECT_FALSE(server.take_available_secrets().empty());
+
+    const auto client_secrets = client.take_available_secrets();
+    const auto server_secrets = server.take_available_secrets();
+
+    EXPECT_TRUE(std::any_of(client_secrets.begin(), client_secrets.end(), [](const auto &secret) {
+        return secret.level == EncryptionLevel::handshake;
+    }));
+    EXPECT_TRUE(std::any_of(server_secrets.begin(), server_secrets.end(), [](const auto &secret) {
+        return secret.level == EncryptionLevel::handshake;
+    }));
 }
 
 } // namespace

@@ -171,6 +171,8 @@ struct DeserializeProtectionContext {
   caller provides both the full packet number and the desired encoded length.
 - Deserialization requires largest-authenticated packet number context per
   packet number space because QUIC packet number recovery depends on it.
+- A `nullopt` largest-authenticated packet number means no packet has been
+  successfully authenticated yet in that packet number space.
 
 ### Public API Shape
 
@@ -270,9 +272,10 @@ CodecResult<std::vector<ProtectedPacket>> deserialize_protected_datagram(
   - Initial space
   - Handshake space
   - application-data space
-- Missing packet number context for a packet type is a codec error.
-- This slice will not guess or invent a recovery base when the caller omits the
-  required packet number state.
+- A `nullopt` largest-authenticated packet number means the codec should
+  recover against an expected packet number of 0 for that packet number space.
+- This slice will not guess or invent a recovery base beyond the explicit
+  `nullopt` bootstrap case for an empty packet number space.
 
 ### Header Protection Handling
 
@@ -310,6 +313,8 @@ CodecResult<std::vector<ProtectedPacket>> deserialize_protected_datagram(
   - Initial secret derivation from the RFC 9001 v1 salt and client Initial DCID
   - HKDF expansion for `quic key`, `quic iv`, and `quic hp`
   - packet number reconstruction against RFC 9000 Appendix A.3 examples
+  - packet number reconstruction for the first authenticated packet in a packet
+    number space
   - AES-based header protection masking and unmasking
   - ChaCha20-based header protection masking and unmasking
   - protected `Initial` round trips

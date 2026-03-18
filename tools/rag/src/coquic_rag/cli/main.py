@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -13,7 +14,7 @@ from coquic_rag.embed.provider import (
 )
 from coquic_rag.graph.extractor import build_graph_artifacts
 from coquic_rag.ingest.rfc_parser import parse_rfc_document
-from coquic_rag.query.service import get_index_status
+from coquic_rag.query.service import IndexNotBuiltError, QueryService, get_index_status
 from coquic_rag.store.artifacts import (
     write_graph_edges,
     write_graph_nodes,
@@ -124,23 +125,125 @@ def _doctor(args: argparse.Namespace) -> int:
     return 0 if status.ready else 1
 
 
+def _query_service(args: argparse.Namespace) -> QueryService:
+    paths = _runtime_paths(Path(args.source), Path(args.state_dir))
+    return QueryService(
+        paths=paths,
+        embedder=_build_embedder(args.embedder, paths, args.model_name),
+        collection_name=args.collection_name,
+    )
+
+
+def _write_json(payload: object) -> None:
+    json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+    print()
+
+
+def _search_sections(args: argparse.Namespace) -> int:
+    _write_json(
+        {
+            "results": _query_service(args).search_sections(
+                args.query,
+                rfc=args.rfc,
+                category=args.category,
+                top_k=args.top_k,
+            )
+        }
+    )
+    return 0
+
+
+def _get_section(args: argparse.Namespace) -> int:
+    _write_json(_query_service(args).get_section(args.rfc, args.section_id))
+    return 0
+
+
+def _trace_term(args: argparse.Namespace) -> int:
+    _write_json(_query_service(args).trace_term(args.term, rfc=args.rfc))
+    return 0
+
+
+def _related_sections(args: argparse.Namespace) -> int:
+    _write_json(
+        {
+            "sections": _query_service(args).related_sections(
+                args.rfc,
+                args.section_id,
+                edge_types=tuple(args.edge_type) if args.edge_type else ("cites", "mentions", "defines"),
+                top_k=args.top_k,
+            )
+        }
+    )
+    return 0
+
+
+def _lookup_term(args: argparse.Namespace) -> int:
+    _write_json(_query_service(args).lookup_term(args.term_type, args.name))
+    return 0
+
+
+def _add_runtime_args(
+    parser: argparse.ArgumentParser,
+    *,
+    include_embedder: bool = False,
+) -> None:
+    parser.add_argument("--source", default="docs/rfc")
+    parser.add_argument("--state-dir", default=".rag")
+    parser.add_argument("--collection-name", default="quic_sections")
+    if include_embedder:
+        parser.add_argument(
+            "--embedder",
+            choices=("sentence-transformer", "fake"),
+            default="sentence-transformer",
+        )
+        parser.add_argument("--model-name", default=DEFAULT_EMBEDDING_MODEL)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="coquic-rag")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     build_parser = subparsers.add_parser("build-index")
-    build_parser.add_argument("--source", default="docs/rfc")
-    build_parser.add_argument("--state-dir", default=".rag")
-    build_parser.add_argument("--embedder", choices=("sentence-transformer", "fake"), default="sentence-transformer")
-    build_parser.add_argument("--model-name", default=DEFAULT_EMBEDDING_MODEL)
-    build_parser.add_argument("--collection-name", default="quic_sections")
+    _add_runtime_args(build_parser, include_embedder=True)
     build_parser.set_defaults(handler=_build_index)
 
     doctor_parser = subparsers.add_parser("doctor")
-    doctor_parser.add_argument("--source", default="docs/rfc")
-    doctor_parser.add_argument("--state-dir", default=".rag")
-    doctor_parser.add_argument("--collection-name", default="quic_sections")
+    _add_runtime_args(doctor_parser)
     doctor_parser.set_defaults(handler=_doctor)
+
+    search_sections_parser = subparsers.add_parser("search-sections")
+    _add_runtime_args(search_sections_parser, include_embedder=True)
+    search_sections_parser.add_argument("query")
+    search_sections_parser.add_argument("--rfc", type=int)
+    search_sections_parser.add_argument("--category")
+    search_sections_parser.add_argument("--top-k", type=int, default=5)
+    search_sections_parser.set_defaults(handler=_search_sections)
+
+    get_section_parser = subparsers.add_parser("get-section")
+    _add_runtime_args(get_section_parser, include_embedder=True)
+    get_section_parser.add_argument("--rfc", type=int, required=True)
+    get_section_parser.add_argument("--section-id", required=True)
+    get_section_parser.set_defaults(handler=_get_section)
+
+    trace_term_parser = subparsers.add_parser("trace-term")
+    _add_runtime_args(trace_term_parser, include_embedder=True)
+    trace_term_parser.add_argument("term")
+    trace_term_parser.add_argument("--rfc", type=int)
+    trace_term_parser.set_defaults(handler=_trace_term)
+
+    related_sections_parser = subparsers.add_parser("related-sections")
+    _add_runtime_args(related_sections_parser, include_embedder=True)
+    related_sections_parser.add_argument("--rfc", type=int, required=True)
+    related_sections_parser.add_argument("--section-id", required=True)
+    related_sections_parser.add_argument("--edge-type", action="append")
+    related_sections_parser.add_argument("--top-k", type=int, default=5)
+    related_sections_parser.set_defaults(handler=_related_sections)
+
+    lookup_term_parser = subparsers.add_parser("lookup-term")
+    _add_runtime_args(lookup_term_parser, include_embedder=True)
+    lookup_term_parser.add_argument("--term-type", required=True)
+    lookup_term_parser.add_argument("--name", required=True)
+    lookup_term_parser.set_defaults(handler=_lookup_term)
 
     return parser
 
@@ -148,7 +251,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    return args.handler(args)
+    try:
+        return args.handler(args)
+    except IndexNotBuiltError as error:
+        print(error, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

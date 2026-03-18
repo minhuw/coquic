@@ -5,7 +5,7 @@ This directory contains the local Python tooling for the QUIC RFC knowledge base
 Current scope:
 - index RFC text from `docs/rfc`
 - store generated local state under `.rag`
-- expose query tooling through a local FastMCP server
+- expose query tooling through a repo-local Codex skill and CLI
 - share one localhost-only Qdrant dev backend across multiple Codex sessions
 
 Setup:
@@ -23,7 +23,7 @@ uv run --project tools/rag python -m coquic_rag.cli.main doctor --source docs/rf
 ```
 
 The default embedding model is `sentence-transformers/all-MiniLM-L6-v2`, stored under `.rag/cache/models`.
-`build-index` now shows parse and embedding progress, and the MCP server exits early with a clear error if `.rag` is incomplete.
+`build-index` now shows parse and embedding progress, and query commands exit early with a clear error if `.rag` is incomplete.
 
 Shared Qdrant dev backend:
 
@@ -42,26 +42,23 @@ that environment variable yourself:
 
 ```bash
 tools/rag/scripts/build-index --source docs/rfc --state-dir .rag
-tools/rag/scripts/run-mcp
+tools/rag/scripts/query-rag doctor --source docs/rfc --state-dir .rag
 ```
 
-Start the MCP server for Codex:
+Common query commands:
 
 ```bash
-uv run --project tools/rag python -m coquic_rag.mcp_server.server
+tools/rag/scripts/query-rag search-sections "ACK frame behavior" --top-k 5
+tools/rag/scripts/query-rag get-section --rfc 9000 --section-id 18.2
+tools/rag/scripts/query-rag trace-term max_udp_payload_size
+tools/rag/scripts/query-rag lookup-term --term-type transport_parameter --name max_udp_payload_size
+tools/rag/scripts/query-rag related-sections --rfc 9369 --section-id 5
 ```
 
-Recommended Codex MCP config:
-
-```toml
-[mcp_servers.quic-rag]
-command = "bash"
-args = ["-lc", "cd /home/minhu/projects/coquic && tools/rag/scripts/run-mcp"]
-startup_timeout_sec = 30
-
-[mcp_servers.quic-rag.env]
-UV_CACHE_DIR = "/tmp/uv-cache"
-```
+Codex integration is repo-local through `.agents/skills/quic-rag`. Codex can
+discover repo skills automatically when launched from this repository or a
+subdirectory inside it. If the new skill does not appear in an existing Codex
+session, restart Codex.
 
 When you are done with the shared backend:
 

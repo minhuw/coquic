@@ -165,7 +165,7 @@ class QueryService:
     ) -> None:
         self._paths = paths or ProjectPaths.default()
         qdrant_url = _configured_qdrant_url(self._paths)
-        self._embedder = embedder or SentenceTransformerEmbedder(paths=self._paths)
+        self._embedder = embedder
         self._store = QdrantSectionStore(
             state_dir=self._paths.qdrant_dir,
             qdrant_url=qdrant_url,
@@ -264,7 +264,7 @@ class QueryService:
         query_text = f"{source['title']}\n\n{source['text']}"
         hits = self._store.search_sections(
             query_text,
-            self._embedder,
+            self._embedder_or_create(),
             limit=top_k + 1,
             payload_filters={"rfc": rfc},
         )
@@ -294,7 +294,7 @@ class QueryService:
 
         hits = self._store.search_sections(
             query,
-            self._embedder,
+            self._embedder_or_create(),
             limit=top_k,
             payload_filters=payload_filters or None,
         )
@@ -417,3 +417,8 @@ class QueryService:
             self._edges_from[str(edge["source"])].append(edge)
             self._edges_to[str(edge["target"])].append(edge)
         self._loaded = True
+
+    def _embedder_or_create(self) -> EmbeddingProvider:
+        if self._embedder is None:
+            self._embedder = SentenceTransformerEmbedder(paths=self._paths)
+        return self._embedder

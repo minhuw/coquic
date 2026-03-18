@@ -22,13 +22,19 @@
 
 - Prefer `docs/rfc/` as the source of truth for QUIC specification questions.
 - The local RAG project lives under `tools/rag/`.
+- The repo-local Codex skill for QUIC questions lives under
+  `.agents/skills/quic-rag/`.
 - Generated RAG state lives under `.rag/` and must not be committed.
 - Build or rebuild the RAG index with:
   - `tools/rag/scripts/build-index --source docs/rfc --state-dir .rag`
 - Check index readiness with:
-  - `uv run --project tools/rag python -m coquic_rag.cli.main doctor --source docs/rfc --state-dir .rag`
-- Start the local MCP server with:
-  - `tools/rag/scripts/run-mcp`
+  - `tools/rag/scripts/query-rag doctor --source docs/rfc --state-dir .rag`
+- Query the local RFC knowledge base with:
+  - `tools/rag/scripts/query-rag search-sections "ACK frame behavior" --top-k 5`
+  - `tools/rag/scripts/query-rag get-section --rfc 9000 --section-id 18.2`
+  - `tools/rag/scripts/query-rag trace-term max_udp_payload_size`
+- For QUIC protocol questions, use the repo-local `quic-rag` skill and the
+  query wrapper above instead of the old MCP flow.
 - If you change `tools/rag/`, run:
   - `uv run --project tools/rag pytest tools/rag/tests`
 

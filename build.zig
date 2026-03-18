@@ -76,12 +76,14 @@ fn addProjectLibrary(
     files.appendSlice(&.{
         "src/coquic.cpp",
         "src/quic/buffer.cpp",
+        "src/quic/crypto_stream.cpp",
         "src/quic/frame.cpp",
         "src/quic/packet.cpp",
         "src/quic/packet_crypto.cpp",
         "src/quic/packet_number.cpp",
         "src/quic/plaintext_codec.cpp",
         "src/quic/protected_codec.cpp",
+        "src/quic/transport_parameters.cpp",
         "src/quic/varint.cpp",
     }) catch @panic("oom");
     appendTlsAdapterSource(&files, tls_backend);
@@ -175,12 +177,14 @@ pub fn build(b: *std.Build) void {
     const default_test_files = &.{
         "tests/smoke.cpp",
         "tests/quic_frame_test.cpp",
+        "tests/quic_crypto_stream_test.cpp",
         "tests/quic_packet_test.cpp",
         "tests/quic_packet_number_test.cpp",
         "tests/quic_packet_crypto_test.cpp",
         "tests/quic_plaintext_codec_test.cpp",
         "tests/quic_protected_codec_test.cpp",
         "tests/quic_tls_adapter_contract_test.cpp",
+        "tests/quic_transport_parameters_test.cpp",
         "tests/quic_varint_test.cpp",
     };
 

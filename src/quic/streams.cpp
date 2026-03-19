@@ -39,8 +39,9 @@ StreamIdInfo classify_stream_id(std::uint64_t stream_id, EndpointRole local_role
     };
 }
 
-bool is_implicit_stream_open_allowed(std::uint64_t stream_id, EndpointRole local_role,
-                                     PeerStreamOpenLimits limits) {
+bool is_peer_implicit_stream_open_allowed_by_limits(std::uint64_t stream_id,
+                                                    EndpointRole local_role,
+                                                    PeerStreamOpenLimits limits) {
     const auto id_info = classify_stream_id(stream_id, local_role);
     if (id_info.initiator != StreamInitiator::peer) {
         return false;
@@ -96,7 +97,7 @@ StreamStateResult<bool> StreamState::validate_receive_range(std::uint64_t offset
         if (!final_size_result.has_value()) {
             return final_size_result;
         }
-        receive_closed = true;
+        peer_send_closed = true;
     }
 
     return StreamStateResult<bool>::success(true);

@@ -95,8 +95,9 @@ struct PeerStreamOpenLimits {
     std::uint64_t unidirectional = 0;
 };
 
-bool is_implicit_stream_open_allowed(std::uint64_t stream_id, EndpointRole local_role,
-                                     PeerStreamOpenLimits limits);
+bool is_peer_implicit_stream_open_allowed_by_limits(std::uint64_t stream_id,
+                                                    EndpointRole local_role,
+                                                    PeerStreamOpenLimits limits);
 
 struct StreamState {
     std::uint64_t stream_id = 0;
@@ -105,7 +106,12 @@ struct StreamState {
     ReliableReceiveBuffer receive_buffer;
     bool send_closed = false;
     bool receive_closed = false;
+    bool peer_send_closed = false;
     std::optional<std::uint64_t> peer_final_size;
+    std::uint64_t send_flow_control_limit = 0;
+    std::uint64_t send_flow_control_committed = 0;
+    std::uint64_t receive_flow_control_limit = 0;
+    std::uint64_t receive_flow_control_consumed = 0;
     std::uint64_t highest_received_offset = 0;
 
     StreamStateResult<bool> validate_local_send(bool fin);

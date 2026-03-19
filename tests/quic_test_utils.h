@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -116,6 +117,21 @@ inline std::string string_from_bytes(std::span<const std::byte> bytes) {
         text.push_back(static_cast<char>(std::to_integer<unsigned char>(byte)));
     }
     return text;
+}
+
+inline StreamFrame make_inbound_application_stream_frame(std::string_view text,
+                                                         std::uint64_t offset = 0,
+                                                         std::uint64_t stream_id = 0,
+                                                         bool fin = false, bool has_offset = true,
+                                                         bool has_length = true) {
+    return StreamFrame{
+        .fin = fin,
+        .has_offset = has_offset,
+        .has_length = has_length,
+        .stream_id = stream_id,
+        .offset = has_offset ? std::optional<std::uint64_t>(offset) : std::nullopt,
+        .stream_data = bytes_from_string(text),
+    };
 }
 
 struct QuicConnectionTestPeer {

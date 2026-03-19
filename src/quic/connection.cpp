@@ -434,34 +434,6 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
             continue;
         }
 
-        const auto *crypto_frame = std::get_if<CryptoFrame>(&frame);
-        if (crypto_frame != nullptr) {
-            const auto contiguous_bytes = application_space_.receive_crypto.push(
-                crypto_frame->offset, crypto_frame->crypto_data);
-            if (!contiguous_bytes.has_value()) {
-                return CodecResult<bool>::failure(contiguous_bytes.error().code,
-                                                  contiguous_bytes.error().offset);
-            }
-            if (contiguous_bytes.value().empty()) {
-                continue;
-            }
-
-            if (!tls_.has_value()) {
-                return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state,
-                                                  0);
-            }
-
-            const auto provided =
-                tls_->provide(EncryptionLevel::application, contiguous_bytes.value());
-            if (!provided.has_value()) {
-                return provided;
-            }
-
-            install_available_secrets();
-            collect_pending_tls_bytes();
-            continue;
-        }
-
         const auto *stream_frame = std::get_if<StreamFrame>(&frame);
         if (stream_frame == nullptr) {
             continue;

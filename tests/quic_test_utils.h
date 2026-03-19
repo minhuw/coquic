@@ -115,7 +115,11 @@ inline QuicCoreResult relay_send_datagrams_to_peer(const QuicCoreResult &result,
         combined.effects.insert(combined.effects.end(),
                                 std::make_move_iterator(step.effects.begin()),
                                 std::make_move_iterator(step.effects.end()));
-        combined.next_wakeup = step.next_wakeup;
+        if (step.next_wakeup.has_value() &&
+            (!combined.next_wakeup.has_value() ||
+             step.next_wakeup.value() < combined.next_wakeup.value())) {
+            combined.next_wakeup = step.next_wakeup;
+        }
     }
 
     return combined;

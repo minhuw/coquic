@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include "src/coquic.h"
 #include "src/quic/protected_codec.h"
 #include "tests/quic_test_utils.h"
 
@@ -97,6 +96,17 @@ TEST(QuicCoreTest, FailureEventIsEdgeTriggeredAndLaterCallsAreInert) {
               std::vector{coquic::quic::QuicCoreStateChange::failed});
     EXPECT_TRUE(after.effects.empty());
     EXPECT_EQ(after.next_wakeup, std::nullopt);
+}
+
+TEST(QuicCoreTest, FailureSuppressesStaleHandshakeReadyInSameResult) {
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+    server.connection_->queue_state_change(coquic::quic::QuicCoreStateChange::handshake_ready);
+
+    const auto failed = server.advance(coquic::quic::QuicCoreInboundDatagram{{std::byte{0x01}}},
+                                       coquic::quic::test::test_time());
+    const auto state_changes = coquic::quic::test::state_changes_from(failed);
+
+    EXPECT_EQ(state_changes, std::vector{coquic::quic::QuicCoreStateChange::failed});
 }
 
 TEST(QuicCoreTest, InboundApplicationStreamRequiresOffsetAndLengthFlags) {

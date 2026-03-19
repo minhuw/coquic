@@ -596,6 +596,7 @@ void QuicConnection::mark_failed() {
     status_ = HandshakeStatus::failed;
     pending_application_send_.clear();
     pending_application_receive_.clear();
+    pending_state_changes_.clear();
     queue_state_change(QuicCoreStateChange::failed);
 }
 

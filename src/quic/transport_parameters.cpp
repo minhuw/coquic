@@ -25,45 +25,27 @@ constexpr std::uint64_t retry_source_connection_id_parameter_id = 0x10;
 constexpr std::uint64_t minimum_max_udp_payload_size = 1200;
 constexpr std::uint64_t minimum_active_connection_id_limit = 2;
 
-CodecResult<std::vector<std::byte>> append_parameter_header(std::vector<std::byte> &output,
-                                                            std::uint64_t id, std::size_t length) {
-    auto encoded_id = coquic::quic::encode_varint(id);
-    if (!encoded_id.has_value()) {
-        return CodecResult<std::vector<std::byte>>::failure(encoded_id.error().code,
-                                                            encoded_id.error().offset);
-    }
+void append_parameter_header(std::vector<std::byte> &output, std::uint64_t id, std::size_t length) {
+    const auto encoded_id = coquic::quic::encode_varint(id).value();
+    const auto encoded_length = coquic::quic::encode_varint(length).value();
 
-    auto encoded_length = coquic::quic::encode_varint(length);
-    if (!encoded_length.has_value()) {
-        return CodecResult<std::vector<std::byte>>::failure(encoded_length.error().code,
-                                                            encoded_length.error().offset);
-    }
-
-    output.insert(output.end(), encoded_id.value().begin(), encoded_id.value().end());
-    output.insert(output.end(), encoded_length.value().begin(), encoded_length.value().end());
-    return CodecResult<std::vector<std::byte>>::success({});
+    output.insert(output.end(), encoded_id.begin(), encoded_id.end());
+    output.insert(output.end(), encoded_length.begin(), encoded_length.end());
 }
 
-CodecResult<std::vector<std::byte>> append_raw_parameter(std::vector<std::byte> &output,
-                                                         std::uint64_t parameter_id,
-                                                         std::span<const std::byte> value_bytes) {
-    auto header = append_parameter_header(output, parameter_id, value_bytes.size());
-    if (!header.has_value()) {
-        return header;
-    }
-
+void append_raw_parameter(std::vector<std::byte> &output, std::uint64_t parameter_id,
+                          std::span<const std::byte> value_bytes) {
+    append_parameter_header(output, parameter_id, value_bytes.size());
     output.insert(output.end(), value_bytes.begin(), value_bytes.end());
-    return CodecResult<std::vector<std::byte>>::success({});
 }
 
-CodecResult<std::vector<std::byte>>
-append_connection_id_parameter(std::vector<std::byte> &output, std::uint64_t id,
-                               const std::optional<ConnectionId> &connection_id) {
+void append_connection_id_parameter(std::vector<std::byte> &output, std::uint64_t id,
+                                    const std::optional<ConnectionId> &connection_id) {
     if (!connection_id.has_value()) {
-        return CodecResult<std::vector<std::byte>>::success({});
+        return;
     }
 
-    return append_raw_parameter(output, id, *connection_id);
+    append_raw_parameter(output, id, *connection_id);
 }
 
 CodecResult<std::uint64_t> decode_integer_parameter(std::span<const std::byte> bytes) {
@@ -91,12 +73,8 @@ CodecResult<std::vector<std::byte>>
 serialize_transport_parameters(const TransportParameters &parameters) {
     std::vector<std::byte> output;
 
-    auto original_destination_connection_id =
-        append_connection_id_parameter(output, original_destination_connection_id_parameter_id,
-                                       parameters.original_destination_connection_id);
-    if (!original_destination_connection_id.has_value()) {
-        return original_destination_connection_id;
-    }
+    append_connection_id_parameter(output, original_destination_connection_id_parameter_id,
+                                   parameters.original_destination_connection_id);
 
     auto encoded_max_udp_payload_size = encode_varint(parameters.max_udp_payload_size);
     if (!encoded_max_udp_payload_size.has_value()) {
@@ -104,11 +82,8 @@ serialize_transport_parameters(const TransportParameters &parameters) {
             encoded_max_udp_payload_size.error().code, encoded_max_udp_payload_size.error().offset);
     }
 
-    auto max_udp_payload_size = append_raw_parameter(output, max_udp_payload_size_parameter_id,
-                                                     encoded_max_udp_payload_size.value());
-    if (!max_udp_payload_size.has_value()) {
-        return max_udp_payload_size;
-    }
+    append_raw_parameter(output, max_udp_payload_size_parameter_id,
+                         encoded_max_udp_payload_size.value());
 
     auto encoded_active_connection_id_limit = encode_varint(parameters.active_connection_id_limit);
     if (!encoded_active_connection_id_limit.has_value()) {
@@ -117,24 +92,14 @@ serialize_transport_parameters(const TransportParameters &parameters) {
             encoded_active_connection_id_limit.error().offset);
     }
 
-    auto active_connection_id_limit =
-        append_raw_parameter(output, active_connection_id_limit_parameter_id,
-                             encoded_active_connection_id_limit.value());
-    if (!active_connection_id_limit.has_value()) {
-        return active_connection_id_limit;
-    }
+    append_raw_parameter(output, active_connection_id_limit_parameter_id,
+                         encoded_active_connection_id_limit.value());
 
-    auto initial_source_connection_id = append_connection_id_parameter(
-        output, initial_source_connection_id_parameter_id, parameters.initial_source_connection_id);
-    if (!initial_source_connection_id.has_value()) {
-        return initial_source_connection_id;
-    }
+    append_connection_id_parameter(output, initial_source_connection_id_parameter_id,
+                                   parameters.initial_source_connection_id);
 
-    auto retry_source_connection_id = append_connection_id_parameter(
-        output, retry_source_connection_id_parameter_id, parameters.retry_source_connection_id);
-    if (!retry_source_connection_id.has_value()) {
-        return retry_source_connection_id;
-    }
+    append_connection_id_parameter(output, retry_source_connection_id_parameter_id,
+                                   parameters.retry_source_connection_id);
 
     return CodecResult<std::vector<std::byte>>::success(std::move(output));
 }

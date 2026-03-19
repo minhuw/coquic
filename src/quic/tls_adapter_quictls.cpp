@@ -1,4 +1,5 @@
 #include "src/quic/tls_adapter.h"
+#include "src/quic/tls_adapter_quictls_test_hooks.h"
 
 #include <array>
 #include <cstddef>
@@ -27,13 +28,54 @@ using coquic::quic::EndpointRole;
 using coquic::quic::TlsAdapter;
 using coquic::quic::TlsAdapterConfig;
 using coquic::quic::TrafficSecret;
+using coquic::quic::test::TlsAdapterFaultPoint;
 using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
 using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
 using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
 
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 constexpr std::uint16_t tls_aes_128_gcm_sha256_id = 0x1301;
 constexpr std::uint16_t tls_aes_256_gcm_sha384_id = 0x1302;
 constexpr std::uint16_t tls_chacha20_poly1305_sha256_id = 0x1303;
+
+struct TlsAdapterFaultState {
+    std::optional<TlsAdapterFaultPoint> fault_point;
+    std::size_t occurrence = 0;
+};
+
+TlsAdapterFaultState &tls_adapter_fault_state() {
+    static thread_local TlsAdapterFaultState state;
+    return state;
+}
+
+void set_tls_adapter_fault_state(std::optional<TlsAdapterFaultPoint> fault_point,
+                                 std::size_t occurrence) {
+    tls_adapter_fault_state() = TlsAdapterFaultState{
+        .fault_point = fault_point,
+        .occurrence = occurrence,
+    };
+}
+
+COQUIC_NO_PROFILE bool consume_tls_adapter_fault(TlsAdapterFaultPoint fault_point) {
+    auto &state = tls_adapter_fault_state();
+    if (!state.fault_point.has_value() || state.fault_point.value() != fault_point) {
+        return false;
+    }
+
+    if (state.occurrence > 1) {
+        --state.occurrence;
+        return false;
+    }
+
+    state.fault_point.reset();
+    state.occurrence = 0;
+    return true;
+}
 
 CodecResult<bool> tls_failure() {
     return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
@@ -60,48 +102,62 @@ const uint8_t *as_tls_bytes(std::span<const std::byte> bytes) {
     return reinterpret_cast<const uint8_t *>(bytes.data());
 }
 
-std::optional<EncryptionLevel> to_encryption_level(OSSL_ENCRYPTION_LEVEL level) {
-    switch (level) {
+std::optional<EncryptionLevel> to_encryption_level_value(int level_value) {
+    switch (level_value) {
     case ssl_encryption_initial:
         return EncryptionLevel::initial;
     case ssl_encryption_handshake:
         return EncryptionLevel::handshake;
     case ssl_encryption_application:
         return EncryptionLevel::application;
-    case ssl_encryption_early_data:
+    default:
         return std::nullopt;
     }
+}
 
-    return std::nullopt;
+std::optional<EncryptionLevel> to_encryption_level(OSSL_ENCRYPTION_LEVEL level) {
+    return to_encryption_level_value(static_cast<int>(level));
+}
+
+OSSL_ENCRYPTION_LEVEL to_ossl_encryption_level_value(std::uint8_t level_value) {
+    switch (level_value) {
+    case static_cast<std::uint8_t>(EncryptionLevel::initial):
+        return ssl_encryption_initial;
+    case static_cast<std::uint8_t>(EncryptionLevel::handshake):
+        return ssl_encryption_handshake;
+    case static_cast<std::uint8_t>(EncryptionLevel::application):
+        return ssl_encryption_application;
+    default:
+        return ssl_encryption_initial;
+    }
 }
 
 OSSL_ENCRYPTION_LEVEL to_ossl_encryption_level(EncryptionLevel level) {
-    switch (level) {
-    case EncryptionLevel::initial:
-        return ssl_encryption_initial;
-    case EncryptionLevel::handshake:
-        return ssl_encryption_handshake;
-    case EncryptionLevel::application:
-        return ssl_encryption_application;
-    }
-
-    return ssl_encryption_initial;
+    return to_ossl_encryption_level_value(static_cast<std::uint8_t>(level));
 }
 
 const SSL_METHOD *tls_method_for_role(EndpointRole role) {
     return role == EndpointRole::client ? TLS_client_method() : TLS_server_method();
 }
 
-CodecResult<CipherSuite> cipher_suite_for_ssl(const SSL *ssl) {
-    const SSL_CIPHER *cipher = SSL_get_pending_cipher(ssl);
-    if (cipher == nullptr) {
-        cipher = SSL_get_current_cipher(ssl);
+COQUIC_NO_PROFILE SSL_CTX *new_ssl_ctx(EndpointRole role) {
+    if (consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_ctx_new)) {
+        return nullptr;
     }
-    if (cipher == nullptr) {
+
+    return SSL_CTX_new(tls_method_for_role(role));
+}
+
+CodecResult<CipherSuite>
+cipher_suite_for_protocol_ids(std::optional<std::uint16_t> pending_protocol_id,
+                              std::optional<std::uint16_t> current_protocol_id) {
+    const auto protocol_id =
+        pending_protocol_id.has_value() ? pending_protocol_id : current_protocol_id;
+    if (!protocol_id.has_value()) {
         return CodecResult<CipherSuite>::failure(CodecErrorCode::unsupported_cipher_suite, 0);
     }
 
-    switch (SSL_CIPHER_get_protocol_id(cipher)) {
+    switch (protocol_id.value()) {
     case tls_aes_128_gcm_sha256_id:
         return CodecResult<CipherSuite>::success(CipherSuite::tls_aes_128_gcm_sha256);
     case tls_aes_256_gcm_sha384_id:
@@ -113,12 +169,103 @@ CodecResult<CipherSuite> cipher_suite_for_ssl(const SSL *ssl) {
     }
 }
 
+COQUIC_NO_PROFILE CodecResult<CipherSuite> cipher_suite_for_ssl(const SSL *ssl) {
+    std::optional<std::uint16_t> pending_protocol_id;
+    if (const SSL_CIPHER *cipher = SSL_get_pending_cipher(ssl); cipher != nullptr) {
+        pending_protocol_id = SSL_CIPHER_get_protocol_id(cipher);
+    }
+
+    std::optional<std::uint16_t> current_protocol_id;
+    if (const SSL_CIPHER *cipher = SSL_get_current_cipher(ssl); cipher != nullptr) {
+        current_protocol_id = SSL_CIPHER_get_protocol_id(cipher);
+    }
+
+    return cipher_suite_for_protocol_ids(pending_protocol_id, current_protocol_id);
+}
+
+COQUIC_NO_PROFILE bool provide_quic_data_failed(SSL *ssl, EncryptionLevel level,
+                                                std::span<const std::byte> bytes) {
+    return consume_tls_adapter_fault(TlsAdapterFaultPoint::provide_quic_data) ||
+           SSL_provide_quic_data(ssl, to_ossl_encryption_level(level), as_tls_bytes(bytes),
+                                 bytes.size()) != 1;
+}
+
+COQUIC_NO_PROFILE bool post_handshake_failed(SSL *ssl) {
+    return consume_tls_adapter_fault(TlsAdapterFaultPoint::provide_post_handshake) ||
+           SSL_process_quic_post_handshake(ssl) != 1;
+}
+
+COQUIC_NO_PROFILE bool configure_ctx_failed(SSL_CTX *ctx, const SSL_QUIC_METHOD *quic_method) {
+    return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_ctx_config) ||
+           SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION) != 1 ||
+           SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION) != 1 ||
+           SSL_CTX_set_quic_method(ctx, quic_method) != 1;
+}
+
+COQUIC_NO_PROFILE bool verify_paths_failed(SSL_CTX *ctx) {
+    return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_verify_paths) ||
+           SSL_CTX_set_default_verify_paths(ctx) != 1;
+}
+
+COQUIC_NO_PROFILE bool verify_paths_init_failed(bool verify_peer, SSL_CTX *ctx) {
+    return verify_peer && verify_paths_failed(ctx);
+}
+
+COQUIC_NO_PROFILE SSL *new_ssl(SSL_CTX *ctx) {
+    if (consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_ssl_new)) {
+        return nullptr;
+    }
+
+    return SSL_new(ctx);
+}
+
+COQUIC_NO_PROFILE bool ssl_quic_method_failed(SSL *ssl, const SSL_QUIC_METHOD *quic_method) {
+    return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_ssl_set_quic_method) ||
+           SSL_set_quic_method(ssl, quic_method) != 1;
+}
+
+COQUIC_NO_PROFILE bool server_name_failed(SSL *ssl, const TlsAdapterConfig &config) {
+    return !config.server_name.empty() && config.role == EndpointRole::client &&
+           (consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_server_name) ||
+            SSL_set_tlsext_host_name(ssl, config.server_name.c_str()) != 1);
+}
+
+COQUIC_NO_PROFILE bool transport_params_failed(SSL *ssl,
+                                               std::span<const std::byte> transport_params) {
+    return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_transport_params) ||
+           SSL_set_quic_transport_params(ssl, as_tls_bytes(transport_params),
+                                         transport_params.size()) != 1;
+}
+
+COQUIC_NO_PROFILE bool install_identity_failed(SSL_CTX *ctx, X509 *certificate,
+                                               EVP_PKEY *private_key) {
+    return consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_use_certificate) ||
+           SSL_CTX_use_certificate(ctx, certificate) != 1 ||
+           SSL_CTX_use_PrivateKey(ctx, private_key) != 1 || SSL_CTX_check_private_key(ctx) != 1;
+}
+
+bool should_retry_handshake(bool handshake_fault, int error) {
+    return !handshake_fault && (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE);
+}
+
+bool handshake_progressed(bool pending_changed, bool secrets_changed,
+                          bool peer_transport_parameters_changed) {
+    return pending_changed || secrets_changed || peer_transport_parameters_changed;
+}
+
+COQUIC_NO_PROFILE bool should_process_post_handshake(EncryptionLevel level,
+                                                     bool handshake_complete) {
+    return level == EncryptionLevel::application && handshake_complete;
+}
+
 } // namespace
 
 namespace coquic::quic {
 
 class TlsAdapter::Impl {
   public:
+    friend class coquic::quic::test::TlsAdapterTestPeer;
+
     explicit Impl(TlsAdapterConfig config)
         : config_(std::move(config)), ctx_(nullptr, &SSL_CTX_free), ssl_(nullptr, &SSL_free) {
         initialize();
@@ -137,16 +284,15 @@ class TlsAdapter::Impl {
         }
 
         ERR_clear_error();
-        if (SSL_provide_quic_data(ssl_.get(), to_ossl_encryption_level(level), as_tls_bytes(bytes),
-                                  bytes.size()) != 1) {
+        if (provide_quic_data_failed(ssl_.get(), level, bytes)) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return tls_failure();
         }
 
-        if (level == EncryptionLevel::application && SSL_is_init_finished(ssl_.get()) == 1) {
+        if (should_process_post_handshake(level, SSL_is_init_finished(ssl_.get()) == 1)) {
             ERR_clear_error();
-            if (SSL_process_quic_post_handshake(ssl_.get()) != 1) {
+            if (post_handshake_failed(ssl_.get())) {
                 sticky_error_ = CodecError{
                     .code = CodecErrorCode::invalid_packet_protection_state,
                     .offset = 0,
@@ -186,7 +332,11 @@ class TlsAdapter::Impl {
     }
 
     bool handshake_complete() const {
-        return ssl_ != nullptr && SSL_is_init_finished(ssl_.get()) == 1;
+        if (ssl_ == nullptr) {
+            return false;
+        }
+
+        return SSL_is_init_finished(ssl_.get()) == 1;
     }
 
     static int set_encryption_secrets(SSL *ssl, OSSL_ENCRYPTION_LEVEL level,
@@ -231,16 +381,14 @@ class TlsAdapter::Impl {
   private:
     void initialize() {
         ERR_clear_error();
-        ctx_.reset(SSL_CTX_new(tls_method_for_role(config_.role)));
+        ctx_.reset(new_ssl_ctx(config_.role));
         if (ctx_ == nullptr) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;
         }
 
-        if (SSL_CTX_set_min_proto_version(ctx_.get(), TLS1_3_VERSION) != 1 ||
-            SSL_CTX_set_max_proto_version(ctx_.get(), TLS1_3_VERSION) != 1 ||
-            SSL_CTX_set_quic_method(ctx_.get(), &kQuicMethod) != 1) {
+        if (configure_ctx_failed(ctx_.get(), &kQuicMethod)) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;
@@ -248,7 +396,7 @@ class TlsAdapter::Impl {
 
         SSL_CTX_set_verify(ctx_.get(), config_.verify_peer ? SSL_VERIFY_PEER : SSL_VERIFY_NONE,
                            nullptr);
-        if (config_.verify_peer && SSL_CTX_set_default_verify_paths(ctx_.get()) != 1) {
+        if (verify_paths_init_failed(config_.verify_peer, ctx_.get())) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;
@@ -260,7 +408,7 @@ class TlsAdapter::Impl {
             return;
         }
 
-        ssl_.reset(SSL_new(ctx_.get()));
+        ssl_.reset(new_ssl(ctx_.get()));
         if (ssl_ == nullptr) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
@@ -268,22 +416,19 @@ class TlsAdapter::Impl {
         }
 
         SSL_set_app_data(ssl_.get(), this);
-        if (SSL_set_quic_method(ssl_.get(), &kQuicMethod) != 1) {
+        if (ssl_quic_method_failed(ssl_.get(), &kQuicMethod)) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;
         }
 
-        if (!config_.server_name.empty() && config_.role == EndpointRole::client &&
-            SSL_set_tlsext_host_name(ssl_.get(), config_.server_name.c_str()) != 1) {
+        if (server_name_failed(ssl_.get(), config_)) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;
         }
 
-        if (SSL_set_quic_transport_params(ssl_.get(),
-                                          as_tls_bytes(config_.local_transport_parameters),
-                                          config_.local_transport_parameters.size()) != 1) {
+        if (transport_params_failed(ssl_.get(), config_.local_transport_parameters)) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;
@@ -304,9 +449,12 @@ class TlsAdapter::Impl {
             return false;
         }
 
-        BioPtr cert_bio(BIO_new_mem_buf(config_.identity->certificate_pem.data(),
-                                        static_cast<int>(config_.identity->certificate_pem.size())),
-                        &BIO_free);
+        BioPtr cert_bio(
+            consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_cert_bio)
+                ? nullptr
+                : BIO_new_mem_buf(config_.identity->certificate_pem.data(),
+                                  static_cast<int>(config_.identity->certificate_pem.size())),
+            &BIO_free);
         if (cert_bio == nullptr) {
             return false;
         }
@@ -317,9 +465,12 @@ class TlsAdapter::Impl {
             return false;
         }
 
-        BioPtr key_bio(BIO_new_mem_buf(config_.identity->private_key_pem.data(),
-                                       static_cast<int>(config_.identity->private_key_pem.size())),
-                       &BIO_free);
+        BioPtr key_bio(
+            consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_key_bio)
+                ? nullptr
+                : BIO_new_mem_buf(config_.identity->private_key_pem.data(),
+                                  static_cast<int>(config_.identity->private_key_pem.size())),
+            &BIO_free);
         if (key_bio == nullptr) {
             return false;
         }
@@ -330,9 +481,7 @@ class TlsAdapter::Impl {
             return false;
         }
 
-        return SSL_CTX_use_certificate(ctx_.get(), certificate.get()) == 1 &&
-               SSL_CTX_use_PrivateKey(ctx_.get(), private_key.get()) == 1 &&
-               SSL_CTX_check_private_key(ctx_.get()) == 1;
+        return !install_identity_failed(ctx_.get(), certificate.get(), private_key.get());
     }
 
     CodecResult<bool> drive_handshake() {
@@ -356,12 +505,16 @@ class TlsAdapter::Impl {
                 return CodecResult<bool>::success(true);
             }
 
+            const bool handshake_fault =
+                consume_tls_adapter_fault(TlsAdapterFaultPoint::drive_handshake);
             const int error = SSL_get_error(ssl_.get(), result);
-            if (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE) {
-                const bool progressed =
-                    total_pending_bytes() != pending_before ||
-                    available_secrets_.size() != secrets_before ||
+            if (should_retry_handshake(handshake_fault, error)) {
+                const bool pending_changed = total_pending_bytes() != pending_before;
+                const bool secrets_changed = available_secrets_.size() != secrets_before;
+                const bool peer_transport_parameters_changed =
                     peer_transport_parameters_.has_value() != had_peer_transport_parameters;
+                const bool progressed = handshake_progressed(pending_changed, secrets_changed,
+                                                             peer_transport_parameters_changed);
                 if (!progressed) {
                     return CodecResult<bool>::success(true);
                 }
@@ -381,7 +534,11 @@ class TlsAdapter::Impl {
             return 1;
         }
 
-        const auto cipher_suite = cipher_suite_for_ssl(ssl);
+        const auto cipher_suite =
+            consume_tls_adapter_fault(
+                TlsAdapterFaultPoint::set_encryption_secrets_unsupported_cipher)
+                ? CodecResult<CipherSuite>::failure(CodecErrorCode::unsupported_cipher_suite, 0)
+                : cipher_suite_for_ssl(ssl);
         if (!cipher_suite.has_value()) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::unsupported_cipher_suite, .offset = 0};
@@ -517,5 +674,181 @@ const std::optional<std::vector<std::byte>> &TlsAdapter::peer_transport_paramete
 bool TlsAdapter::handshake_complete() const {
     return impl_->handshake_complete();
 }
+
+namespace test {
+
+ScopedTlsAdapterFaultInjector::ScopedTlsAdapterFaultInjector(TlsAdapterFaultPoint fault_point,
+                                                             std::size_t occurrence)
+    : previous_fault_point_(tls_adapter_fault_state().fault_point),
+      previous_occurrence_(tls_adapter_fault_state().occurrence) {
+    set_tls_adapter_fault_state(fault_point, occurrence);
+}
+
+ScopedTlsAdapterFaultInjector::~ScopedTlsAdapterFaultInjector() {
+    set_tls_adapter_fault_state(previous_fault_point_, previous_occurrence_);
+}
+
+const uint8_t *TlsAdapterTestPeer::as_tls_bytes(std::span<const std::byte> bytes) {
+    return ::as_tls_bytes(bytes);
+}
+
+std::optional<EncryptionLevel>
+TlsAdapterTestPeer::to_encryption_level(OSSL_ENCRYPTION_LEVEL level) {
+    return ::to_encryption_level(level);
+}
+
+std::optional<EncryptionLevel> TlsAdapterTestPeer::to_encryption_level_value(int level_value) {
+    return ::to_encryption_level_value(level_value);
+}
+
+OSSL_ENCRYPTION_LEVEL TlsAdapterTestPeer::to_ossl_encryption_level(EncryptionLevel level) {
+    return ::to_ossl_encryption_level(level);
+}
+
+OSSL_ENCRYPTION_LEVEL TlsAdapterTestPeer::to_ossl_encryption_level_value(std::uint8_t level_value) {
+    return ::to_ossl_encryption_level_value(level_value);
+}
+
+CodecResult<CipherSuite> TlsAdapterTestPeer::cipher_suite_for_protocol_ids(
+    std::optional<std::uint16_t> pending_protocol_id,
+    std::optional<std::uint16_t> current_protocol_id) {
+    return ::cipher_suite_for_protocol_ids(pending_protocol_id, current_protocol_id);
+}
+
+CodecResult<CipherSuite> TlsAdapterTestPeer::cipher_suite_for_ssl(TlsAdapter &adapter) {
+    return ::cipher_suite_for_ssl(adapter.impl_->ssl_.get());
+}
+
+CodecResult<bool> TlsAdapterTestPeer::drive_handshake(TlsAdapter &adapter) {
+    return adapter.impl_->drive_handshake();
+}
+
+void TlsAdapterTestPeer::reset_ssl(TlsAdapter &adapter) {
+    adapter.impl_->ssl_.reset();
+}
+
+void TlsAdapterTestPeer::set_sticky_error(TlsAdapter &adapter, CodecErrorCode code) {
+    adapter.impl_->sticky_error_ = CodecError{
+        .code = code,
+        .offset = 0,
+    };
+}
+
+void TlsAdapterTestPeer::clear_sticky_error(TlsAdapter &adapter) {
+    adapter.impl_->sticky_error_.reset();
+}
+
+bool TlsAdapterTestPeer::has_sticky_error(const TlsAdapter &adapter) {
+    return adapter.impl_->sticky_error_.has_value();
+}
+
+std::optional<CodecErrorCode> TlsAdapterTestPeer::sticky_error_code(const TlsAdapter &adapter) {
+    const auto &sticky_error = adapter.impl_->sticky_error_;
+    if (!sticky_error.has_value()) {
+        return std::nullopt;
+    }
+
+    return sticky_error.value().code;
+}
+
+bool TlsAdapterTestPeer::should_retry_handshake(bool handshake_fault, int error) {
+    return ::should_retry_handshake(handshake_fault, error);
+}
+
+bool TlsAdapterTestPeer::handshake_progressed(bool pending_changed, bool secrets_changed,
+                                              bool peer_transport_parameters_changed) {
+    return ::handshake_progressed(pending_changed, secrets_changed,
+                                  peer_transport_parameters_changed);
+}
+
+int TlsAdapterTestPeer::call_on_set_encryption_secrets(TlsAdapter &adapter,
+                                                       OSSL_ENCRYPTION_LEVEL level,
+                                                       const uint8_t *read_secret,
+                                                       const uint8_t *write_secret,
+                                                       size_t secret_len) {
+    return adapter.impl_->on_set_encryption_secrets(adapter.impl_->ssl_.get(), level, read_secret,
+                                                    write_secret, secret_len);
+}
+
+int TlsAdapterTestPeer::call_on_add_handshake_data(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
+                                                   const uint8_t *data, size_t len) {
+    return adapter.impl_->on_add_handshake_data(level, data, len);
+}
+
+int TlsAdapterTestPeer::call_on_flush_flight(TlsAdapter &adapter) {
+    return adapter.impl_->on_flush_flight();
+}
+
+int TlsAdapterTestPeer::call_on_send_alert(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
+                                           uint8_t alert) {
+    return adapter.impl_->on_send_alert(level, alert);
+}
+
+int TlsAdapterTestPeer::call_static_send_alert(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
+                                               uint8_t alert) {
+    auto *ssl = adapter.impl_->ssl_.get();
+    if (ssl == nullptr) {
+        return 0;
+    }
+
+    return TlsAdapter::Impl::send_alert(ssl, level, alert);
+}
+
+template <typename Callback>
+COQUIC_NO_PROFILE int call_with_null_app_data(SSL *ssl, Callback callback) {
+    if (ssl == nullptr) {
+        return 0;
+    }
+
+    void *previous = SSL_get_app_data(ssl);
+    SSL_set_app_data(ssl, nullptr);
+    const int result = callback(ssl);
+    SSL_set_app_data(ssl, previous);
+    return result;
+}
+
+int TlsAdapterTestPeer::call_static_set_encryption_secrets_with_null_app_data(
+    TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level, const uint8_t *read_secret,
+    const uint8_t *write_secret, size_t secret_len) {
+    return call_with_null_app_data(adapter.impl_->ssl_.get(), [&](SSL *ssl) {
+        return TlsAdapter::Impl::set_encryption_secrets(ssl, level, read_secret, write_secret,
+                                                        secret_len);
+    });
+}
+
+int TlsAdapterTestPeer::call_static_add_handshake_data_with_null_app_data(
+    TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level, const uint8_t *data, size_t len) {
+    return call_with_null_app_data(adapter.impl_->ssl_.get(), [&](SSL *ssl) {
+        return TlsAdapter::Impl::add_handshake_data(ssl, level, data, len);
+    });
+}
+
+int TlsAdapterTestPeer::call_static_flush_flight_with_null_app_data(TlsAdapter &adapter) {
+    return call_with_null_app_data(adapter.impl_->ssl_.get(),
+                                   [&](SSL *ssl) { return TlsAdapter::Impl::flush_flight(ssl); });
+}
+
+int TlsAdapterTestPeer::call_static_send_alert_with_null_app_data(TlsAdapter &adapter,
+                                                                  OSSL_ENCRYPTION_LEVEL level,
+                                                                  uint8_t alert) {
+    return call_with_null_app_data(adapter.impl_->ssl_.get(), [&](SSL *ssl) {
+        return TlsAdapter::Impl::send_alert(ssl, level, alert);
+    });
+}
+
+void TlsAdapterTestPeer::capture_peer_transport_parameters(TlsAdapter &adapter) {
+    adapter.impl_->capture_peer_transport_parameters();
+}
+
+void TlsAdapterTestPeer::set_peer_transport_parameters(TlsAdapter &adapter,
+                                                       std::vector<std::byte> bytes) {
+    adapter.impl_->peer_transport_parameters_ = std::move(bytes);
+}
+
+void TlsAdapterTestPeer::clear_peer_transport_parameters(TlsAdapter &adapter) {
+    adapter.impl_->peer_transport_parameters_.reset();
+}
+
+} // namespace test
 
 } // namespace coquic::quic

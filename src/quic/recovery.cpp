@@ -158,6 +158,9 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
             packet.packet_number > result.largest_newly_acked_packet->packet_number) {
             result.largest_newly_acked_packet = packet;
         }
+        if (packet.packet_number == ack.largest_acknowledged) {
+            result.largest_acknowledged_was_newly_acked = true;
+        }
         if (packet.ack_eliciting) {
             result.has_newly_acked_ack_eliciting = true;
         }

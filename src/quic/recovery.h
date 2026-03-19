@@ -59,6 +59,7 @@ struct AckProcessingResult {
     std::vector<SentPacketRecord> acked_packets;
     std::vector<SentPacketRecord> lost_packets;
     std::optional<SentPacketRecord> largest_newly_acked_packet;
+    bool largest_acknowledged_was_newly_acked = false;
     bool has_newly_acked_ack_eliciting = false;
 };
 

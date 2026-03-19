@@ -746,13 +746,14 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         mark_lost_packet(packet_space, packet);
     }
 
-    if (ack_result.largest_newly_acked_packet.has_value() &&
+    if (ack_result.largest_acknowledged_was_newly_acked &&
+        ack_result.largest_newly_acked_packet.has_value() &&
         ack_result.has_newly_acked_ack_eliciting) {
         update_rtt(packet_space.recovery.rtt_state(), now, *ack_result.largest_newly_acked_packet,
                    decode_ack_delay(ack, ack_delay_exponent),
                    std::chrono::milliseconds(max_ack_delay_ms));
     }
-    if (ack_result.has_newly_acked_ack_eliciting && !suppress_pto_reset) {
+    if (!ack_result.acked_packets.empty() && !suppress_pto_reset) {
         pto_count_ = 0;
     }
 

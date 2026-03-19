@@ -224,6 +224,47 @@ TEST(QuicCoreTest, AckProcessingUsesLargestNewlyAcknowledgedPacketForRttSample) 
               std::chrono::milliseconds(60));
 }
 
+TEST(QuicCoreTest, StaleLargestAcknowledgedPacketDoesNotGenerateRttSample) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 1,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                 });
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 2,
+                                     .sent_time = coquic::quic::test::test_time(10),
+                                     .ack_eliciting = false,
+                                     .in_flight = false,
+                                 });
+
+    const auto first = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 2,
+            .first_ack_range = 0,
+        },
+        coquic::quic::test::test_time(20), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+        /*suppress_pto_reset=*/false);
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(connection.application_space_.recovery.rtt_state().latest_rtt, std::nullopt);
+
+    const auto second = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 2,
+            .first_ack_range = 1,
+        },
+        coquic::quic::test::test_time(70), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+        /*suppress_pto_reset=*/false);
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(connection.application_space_.recovery.rtt_state().latest_rtt, std::nullopt);
+}
+
 TEST(QuicCoreTest, PtoBackoffIsConnectionWideAcrossPacketSpaces) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
 
@@ -247,6 +288,31 @@ TEST(QuicCoreTest, PtoBackoffIsConnectionWideAcrossPacketSpaces) {
     connection.on_timeout(coquic::quic::test::test_time(999));
 
     EXPECT_EQ(connection.pto_deadline(), std::optional{coquic::quic::test::test_time(1998)});
+}
+
+TEST(QuicCoreTest, NewlyAcknowledgedNonAckElicitingPacketsResetPtoBackoff) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.pto_count_ = 3;
+
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 7,
+                                     .sent_time = coquic::quic::test::test_time(10),
+                                     .ack_eliciting = false,
+                                     .in_flight = false,
+                                 });
+
+    const auto processed = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 7,
+            .first_ack_range = 0,
+        },
+        coquic::quic::test::test_time(40), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+        /*suppress_pto_reset=*/false);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_EQ(connection.pto_count_, 0u);
 }
 
 TEST(QuicCoreTest, ReceivingAckElicitingPacketsSchedulesAckResponse) {

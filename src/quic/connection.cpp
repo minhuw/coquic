@@ -853,8 +853,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
         std::size_t low = 1;
         std::size_t high = kMaximumDatagramSize;
         std::size_t best_length = 0;
-        bool best_ack_only = application_space_.received_packets.has_ack_to_send() &&
-                             !pending_application_send_.has_pending_data();
+        bool found_fitting_candidate = false;
+        bool best_ack_only = false;
 
         while (low <= high) {
             const auto candidate_length = low + (high - low) / 2;
@@ -899,6 +899,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
             }
 
             if (candidate_datagram.value().size() <= kMaximumDatagramSize) {
+                found_fitting_candidate = true;
                 best_length = candidate_length;
                 best_ack_only = candidate_ranges.empty();
                 low = candidate_length + 1;
@@ -907,7 +908,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
             }
         }
 
-        if (best_length > 0 || best_ack_only) {
+        if (found_fitting_candidate && (best_length > 0 || best_ack_only)) {
             std::vector<Frame> frames;
             if (const auto ack_frame =
                     application_space_.received_packets.build_ack_frame(0, QuicCoreTimePoint{})) {

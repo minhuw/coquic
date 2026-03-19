@@ -180,6 +180,55 @@ TEST(QuicCoreTest, ReorderedApplicationPacketsAreDeliveredOnceContiguous) {
               "pingpong");
 }
 
+TEST(QuicCoreTest, InboundApplicationAckRetiresOwnedSendRanges) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto send = client.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("retire-me"),
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(client.connection_->application_space_.sent_packets.empty());
+    EXPECT_TRUE(client.connection_->pending_application_send_.has_outstanding_data());
+
+    const auto server_step = coquic::quic::test::relay_send_datagrams_to_peer(
+        send, server, coquic::quic::test::test_time(2));
+    const auto client_step = coquic::quic::test::relay_send_datagrams_to_peer(
+        server_step, client, coquic::quic::test::test_time(3));
+
+    EXPECT_FALSE(client.has_failed());
+    EXPECT_TRUE(coquic::quic::test::received_application_data_from(client_step).empty());
+    EXPECT_TRUE(client.connection_->application_space_.sent_packets.empty());
+    EXPECT_FALSE(client.connection_->pending_application_send_.has_pending_data());
+    EXPECT_FALSE(client.connection_->pending_application_send_.has_outstanding_data());
+}
+
+TEST(QuicCoreTest, LargeAckOnlyHistoryDoesNotEmitOversizedDatagram) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    for (std::uint64_t packet_number = 0; packet_number < 4096; ++packet_number) {
+        client.connection_->application_space_.received_packets.record_received(
+            packet_number * 3, true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+    }
+
+    const auto datagram = client.connection_->drain_outbound_datagram();
+
+    EXPECT_FALSE(client.connection_->has_failed());
+    EXPECT_TRUE(datagram.empty() || datagram.size() <= 1200u);
+}
+
 TEST(QuicCoreTest, FailureEventIsEdgeTriggeredAndLaterCallsAreInert) {
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 

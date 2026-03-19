@@ -6,6 +6,21 @@
 
 namespace {
 
+template <typename Core>
+concept has_receive = requires(Core &core) { core.receive(std::vector<std::byte>{}); };
+
+template <typename Core>
+concept has_queue_application_data =
+    requires(Core &core) { core.queue_application_data(std::vector<std::byte>{}); };
+
+template <typename Core>
+concept has_take_received_application_data =
+    requires(Core &core) { core.take_received_application_data(); };
+
+static_assert(!has_receive<coquic::quic::QuicCore>);
+static_assert(!has_queue_application_data<coquic::quic::QuicCore>);
+static_assert(!has_take_received_application_data<coquic::quic::QuicCore>);
+
 TEST(QuicCoreTest, ClientStartProducesSendEffect) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     const auto config = coquic::quic::test::make_client_core_config();

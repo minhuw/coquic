@@ -79,13 +79,6 @@ class QuicCore {
     QuicCore &operator=(QuicCore &&) noexcept;
 
     QuicCoreResult advance(QuicCoreInput input, QuicCoreTimePoint now);
-
-    [[deprecated("Use advance(...)")]]
-    std::vector<std::byte> receive(std::vector<std::byte> bytes);
-    [[deprecated("Use advance(...)")]]
-    void queue_application_data(std::vector<std::byte> bytes);
-    [[deprecated("Use advance(...)")]]
-    std::vector<std::byte> take_received_application_data();
     bool is_handshake_complete() const;
     bool has_failed() const;
 

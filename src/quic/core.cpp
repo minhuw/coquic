@@ -59,23 +59,6 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     return result;
 }
 
-std::vector<std::byte> QuicCore::receive(std::vector<std::byte> bytes) {
-    if (bytes.empty()) {
-        connection_->start();
-    } else {
-        connection_->process_inbound_datagram(bytes);
-    }
-    return connection_->drain_outbound_datagram();
-}
-
-void QuicCore::queue_application_data(std::vector<std::byte> bytes) {
-    connection_->queue_application_data(bytes);
-}
-
-std::vector<std::byte> QuicCore::take_received_application_data() {
-    return connection_->take_received_application_data();
-}
-
 bool QuicCore::is_handshake_complete() const {
     return connection_->is_handshake_complete();
 }

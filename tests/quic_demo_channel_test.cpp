@@ -72,26 +72,42 @@ TEST(QuicDemoChannelTest, InboundOversizedLengthPrefixTriggersTerminalFailure) {
     coquic::quic::QuicCore attacker(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicDemoChannel victim(coquic::quic::test::make_server_core_config());
 
-    auto to_victim = attacker.receive({});
+    auto to_victim =
+        coquic::quic::test::send_datagrams_from(
+            attacker.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time()))
+            .front();
     auto to_attacker = std::vector<std::byte>{};
 
     for (int i = 0; i < 32 && !(attacker.is_handshake_complete() && victim.is_ready()); ++i) {
         if (!to_victim.empty()) {
             to_attacker = victim.on_datagram(to_victim);
         }
-        to_victim = attacker.receive(to_attacker);
+
+        const auto attacker_result =
+            to_attacker.empty()
+                ? attacker.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time())
+                : attacker.advance(coquic::quic::QuicCoreInboundDatagram{to_attacker},
+                                   coquic::quic::test::test_time());
+        auto datagrams = coquic::quic::test::send_datagrams_from(attacker_result);
+        to_victim = datagrams.empty() ? std::vector<std::byte>{} : std::move(datagrams.front());
     }
 
     ASSERT_TRUE(attacker.is_handshake_complete());
     ASSERT_TRUE(victim.is_ready());
 
-    attacker.queue_application_data({
-        std::byte{0x00},
-        std::byte{0x01},
-        std::byte{0x00},
-        std::byte{0x01},
-    });
-    const auto attack_datagram = attacker.receive({});
+    auto attack_datagrams = coquic::quic::test::send_datagrams_from(attacker.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes =
+                {
+                    std::byte{0x00},
+                    std::byte{0x01},
+                    std::byte{0x00},
+                    std::byte{0x01},
+                },
+        },
+        coquic::quic::test::test_time(1)));
+    ASSERT_FALSE(attack_datagrams.empty());
+    const auto attack_datagram = std::move(attack_datagrams.front());
     ASSERT_FALSE(attack_datagram.empty());
 
     EXPECT_TRUE(victim.on_datagram(attack_datagram).empty());

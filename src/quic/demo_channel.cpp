@@ -61,7 +61,8 @@ QuicDemoChannel::QuicDemoChannel(QuicCoreConfig config) : core_(std::move(config
 }
 
 void QuicDemoChannel::send_message(std::vector<std::byte> bytes) {
-    if (failed_) {
+    if (has_failed()) {
+        failed_ = true;
         return;
     }
     if (bytes.size() > kMessageMaxBytes) {
@@ -79,7 +80,8 @@ void QuicDemoChannel::send_message(std::vector<std::byte> bytes) {
 }
 
 std::vector<std::byte> QuicDemoChannel::on_datagram(std::vector<std::byte> bytes) {
-    if (failed_) {
+    if (has_failed()) {
+        failed_ = true;
         return {};
     }
 
@@ -121,7 +123,8 @@ std::vector<std::byte> QuicDemoChannel::on_datagram(std::vector<std::byte> bytes
 }
 
 std::vector<std::vector<std::byte>> QuicDemoChannel::take_messages() {
-    if (failed_) {
+    if (has_failed()) {
+        failed_ = true;
         complete_messages_.clear();
         return {};
     }
@@ -132,7 +135,7 @@ std::vector<std::vector<std::byte>> QuicDemoChannel::take_messages() {
 }
 
 bool QuicDemoChannel::is_ready() const {
-    return !failed_ && core_.is_handshake_complete();
+    return !has_failed() && core_.is_handshake_complete();
 }
 
 bool QuicDemoChannel::has_failed() const {

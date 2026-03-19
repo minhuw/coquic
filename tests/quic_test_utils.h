@@ -125,6 +125,139 @@ inline QuicCoreResult relay_send_datagrams_to_peer(const QuicCoreResult &result,
     return combined;
 }
 
+inline std::vector<std::vector<std::byte>>
+send_datagrams_from(const QuicDemoChannelResult &result) {
+    std::vector<std::vector<std::byte>> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *send = std::get_if<QuicCoreSendDatagram>(&effect)) {
+            out.push_back(send->bytes);
+        }
+    }
+
+    return out;
+}
+
+inline std::vector<QuicDemoChannelStateChange>
+state_changes_from(const QuicDemoChannelResult &result) {
+    std::vector<QuicDemoChannelStateChange> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *event = std::get_if<QuicDemoChannelStateEvent>(&effect)) {
+            out.push_back(event->change);
+        }
+    }
+
+    return out;
+}
+
+inline std::size_t count_state_change(std::span<const QuicDemoChannelStateChange> changes,
+                                      QuicDemoChannelStateChange change) {
+    std::size_t count = 0;
+    for (const auto value : changes) {
+        if (value == change) {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+inline std::vector<std::vector<std::byte>>
+received_messages_from(const QuicDemoChannelResult &result) {
+    std::vector<std::vector<std::byte>> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *received = std::get_if<QuicDemoChannelReceiveMessage>(&effect)) {
+            out.push_back(received->bytes);
+        }
+    }
+
+    return out;
+}
+
+inline QuicDemoChannelResult relay_send_datagrams_to_peer(const QuicDemoChannelResult &result,
+                                                          QuicDemoChannel &peer,
+                                                          QuicCoreTimePoint now) {
+    QuicDemoChannelResult combined;
+    for (auto datagram : send_datagrams_from(result)) {
+        auto step = peer.advance(QuicCoreInboundDatagram{std::move(datagram)}, now);
+        combined.effects.insert(combined.effects.end(),
+                                std::make_move_iterator(step.effects.begin()),
+                                std::make_move_iterator(step.effects.end()));
+        if (step.next_wakeup.has_value() &&
+            (!combined.next_wakeup.has_value() ||
+             step.next_wakeup.value() < combined.next_wakeup.value())) {
+            combined.next_wakeup = step.next_wakeup;
+        }
+    }
+
+    return combined;
+}
+
+inline QuicCoreResult relay_send_datagrams_to_peer(const QuicDemoChannelResult &result,
+                                                   QuicCore &peer, QuicCoreTimePoint now) {
+    QuicCoreResult combined;
+    for (auto datagram : send_datagrams_from(result)) {
+        auto step = peer.advance(QuicCoreInboundDatagram{std::move(datagram)}, now);
+        combined.effects.insert(combined.effects.end(),
+                                std::make_move_iterator(step.effects.begin()),
+                                std::make_move_iterator(step.effects.end()));
+        if (step.next_wakeup.has_value() &&
+            (!combined.next_wakeup.has_value() ||
+             step.next_wakeup.value() < combined.next_wakeup.value())) {
+            combined.next_wakeup = step.next_wakeup;
+        }
+    }
+
+    return combined;
+}
+
+inline QuicDemoChannelResult relay_send_datagrams_to_peer(const QuicCoreResult &result,
+                                                          QuicDemoChannel &peer,
+                                                          QuicCoreTimePoint now) {
+    QuicDemoChannelResult combined;
+    for (auto datagram : send_datagrams_from(result)) {
+        auto step = peer.advance(QuicCoreInboundDatagram{std::move(datagram)}, now);
+        combined.effects.insert(combined.effects.end(),
+                                std::make_move_iterator(step.effects.begin()),
+                                std::make_move_iterator(step.effects.end()));
+        if (step.next_wakeup.has_value() &&
+            (!combined.next_wakeup.has_value() ||
+             step.next_wakeup.value() < combined.next_wakeup.value())) {
+            combined.next_wakeup = step.next_wakeup;
+        }
+    }
+
+    return combined;
+}
+
+inline void
+drive_demo_channel_handshake(QuicDemoChannel &client, QuicDemoChannel &server,
+                             QuicCoreTimePoint now,
+                             std::vector<QuicDemoChannelStateChange> *client_events = nullptr,
+                             std::vector<QuicDemoChannelStateChange> *server_events = nullptr) {
+    const auto append_state_changes = [](const QuicDemoChannelResult &result,
+                                         std::vector<QuicDemoChannelStateChange> *events) {
+        if (events == nullptr) {
+            return;
+        }
+
+        auto changes = state_changes_from(result);
+        events->insert(events->end(), changes.begin(), changes.end());
+    };
+
+    auto to_server = client.advance(QuicCoreStart{}, now);
+    append_state_changes(to_server, client_events);
+
+    for (int i = 0; i < 16 && !(client.is_ready() && server.is_ready()); ++i) {
+        const auto to_client = relay_send_datagrams_to_peer(to_server, server, now);
+        append_state_changes(to_client, server_events);
+        if (client.is_ready() && server.is_ready()) {
+            break;
+        }
+        to_server = relay_send_datagrams_to_peer(to_client, client, now);
+        append_state_changes(to_server, client_events);
+    }
+}
+
 inline void drive_quic_handshake(QuicCore &client, QuicCore &server, QuicCoreTimePoint now,
                                  std::vector<QuicCoreStateChange> *client_events = nullptr,
                                  std::vector<QuicCoreStateChange> *server_events = nullptr) {
@@ -149,24 +282,6 @@ inline void drive_quic_handshake(QuicCore &client, QuicCore &server, QuicCoreTim
         }
         to_server = relay_send_datagrams_to_peer(to_client, client, now);
         append_state_changes(to_server, client_events);
-    }
-}
-
-inline void flush_demo_channels(QuicDemoChannel &left, QuicDemoChannel &right) {
-    auto to_left = std::vector<std::byte>{};
-    auto to_right = std::vector<std::byte>{};
-    bool saw_empty_round = false;
-    for (int i = 0; i < 64; ++i) {
-        to_right = left.on_datagram(to_left);
-        to_left = right.on_datagram(to_right);
-        if (to_left.empty() && to_right.empty()) {
-            if (saw_empty_round) {
-                break;
-            }
-            saw_empty_round = true;
-        } else {
-            saw_empty_round = false;
-        }
     }
 }
 

@@ -9,7 +9,9 @@
 #include <utility>
 #include <vector>
 
+#define private public
 #include "src/quic/connection.h"
+#undef private
 
 namespace coquic::quic::test {
 

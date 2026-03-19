@@ -11,9 +11,6 @@
 #include "src/quic/transport_parameters.h"
 
 namespace coquic::quic {
-namespace test {
-struct QuicConnectionTestPeer;
-}
 
 enum class HandshakeStatus : std::uint8_t {
     idle,
@@ -42,8 +39,6 @@ class QuicConnection {
     bool has_failed() const;
 
   private:
-    friend struct test::QuicConnectionTestPeer;
-
     void start_client_if_needed();
     void start_server_if_needed(const ConnectionId &client_initial_destination_connection_id);
     CodecResult<ConnectionId>

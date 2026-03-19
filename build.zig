@@ -87,6 +87,7 @@ fn addProjectLibrary(
         "src/quic/plaintext_codec.cpp",
         "src/quic/recovery.cpp",
         "src/quic/protected_codec.cpp",
+        "src/quic/streams.cpp",
         "src/quic/transport_parameters.cpp",
         "src/quic/varint.cpp",
     }) catch @panic("oom");
@@ -189,6 +190,7 @@ pub fn build(b: *std.Build) void {
         "tests/quic_packet_crypto_test.cpp",
         "tests/quic_plaintext_codec_test.cpp",
         "tests/quic_recovery_test.cpp",
+        "tests/quic_streams_test.cpp",
         "tests/quic_protected_codec_test.cpp",
         "tests/quic_tls_adapter_contract_test.cpp",
         "tests/quic_transport_parameters_test.cpp",

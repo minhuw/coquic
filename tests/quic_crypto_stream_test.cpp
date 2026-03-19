@@ -4,7 +4,9 @@
 
 #include <gtest/gtest.h>
 
+#define private public
 #include "src/quic/crypto_stream.h"
+#undef private
 
 namespace {
 
@@ -81,6 +83,17 @@ TEST(QuicCryptoStreamTest, SendBufferRetainsBytesUntilAcknowledged) {
     EXPECT_TRUE(buffer.has_pending_data());
 }
 
+TEST(QuicCryptoStreamTest, TakeRangesWithZeroBudgetPreservesPendingBytes) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("ab"));
+
+    const auto ranges = buffer.take_ranges(0);
+
+    EXPECT_TRUE(ranges.empty());
+    EXPECT_TRUE(buffer.has_pending_data());
+    EXPECT_FALSE(buffer.has_outstanding_data());
+}
+
 TEST(QuicCryptoStreamTest, LostRangesBecomeSendableBeforeNewRanges) {
     ReliableSendBuffer buffer;
     const auto bytes = bytes_from_string("abcdef");
@@ -117,6 +130,82 @@ TEST(QuicCryptoStreamTest, PartialAcksRetireOnlyAcknowledgedSubrange) {
     ASSERT_EQ(unsent.size(), 1u);
     EXPECT_EQ(unsent[0].offset, 4u);
     EXPECT_EQ(unsent[0].bytes, bytes_from_string("ef"));
+}
+
+TEST(QuicCryptoStreamTest, ZeroLengthAcknowledgeLeavesOutstandingBytesUnchanged) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("ab"));
+    ASSERT_EQ(buffer.take_ranges(2).size(), 1u);
+
+    buffer.acknowledge(0, 0);
+
+    EXPECT_TRUE(buffer.has_outstanding_data());
+    EXPECT_TRUE(buffer.take_ranges(2).empty());
+}
+
+TEST(QuicCryptoStreamTest, ZeroLengthLostMarkLeavesSentBytesUnchanged) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("ab"));
+    ASSERT_EQ(buffer.take_ranges(2).size(), 1u);
+
+    buffer.mark_lost(0, 0);
+
+    EXPECT_TRUE(buffer.has_outstanding_data());
+    EXPECT_TRUE(buffer.take_ranges(2).empty());
+}
+
+TEST(QuicCryptoStreamTest, MarkLostOnlyRetiresSentSegmentsInsideRange) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcd"));
+    ASSERT_EQ(buffer.take_ranges(2).size(), 1u);
+
+    buffer.mark_lost(0, 4);
+
+    const auto retransmit = buffer.take_ranges(4);
+    ASSERT_EQ(retransmit.size(), 2u);
+    EXPECT_EQ(retransmit[0].offset, 0u);
+    EXPECT_EQ(retransmit[0].bytes, bytes_from_string("ab"));
+    EXPECT_EQ(retransmit[1].offset, 2u);
+    EXPECT_EQ(retransmit[1].bytes, bytes_from_string("cd"));
+}
+
+TEST(QuicCryptoStreamTest, AcknowledgeClampsOverflowingRangeEndToUint64Max) {
+    ReliableSendBuffer buffer;
+    buffer.segments_.emplace(std::numeric_limits<std::uint64_t>::max() - 2,
+                             ReliableSendBuffer::Segment{
+                                 .state = ReliableSendBuffer::SegmentState::sent,
+                                 .bytes = bytes_from_string("abcd"),
+                             });
+
+    buffer.acknowledge(std::numeric_limits<std::uint64_t>::max() - 2, 8);
+
+    EXPECT_TRUE(buffer.segments_.empty());
+}
+
+TEST(QuicCryptoStreamTest, UnsentSegmentsAreNotOutstandingYet) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("ab"));
+
+    EXPECT_FALSE(buffer.has_outstanding_data());
+}
+
+TEST(QuicCryptoStreamTest, LostSegmentsRemainOutstanding) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("ab"));
+    ASSERT_EQ(buffer.take_ranges(2).size(), 1u);
+    buffer.mark_lost(0, 2);
+
+    EXPECT_TRUE(buffer.has_outstanding_data());
+}
+
+TEST(QuicCryptoStreamTest, LostOnlySegmentsRemainOutstandingAfterRemovingUnsentTail) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("ab"));
+    ASSERT_EQ(buffer.take_ranges(1).size(), 1u);
+    buffer.acknowledge(1, 1);
+    buffer.mark_lost(0, 1);
+
+    EXPECT_TRUE(buffer.has_outstanding_data());
 }
 
 TEST(QuicCryptoStreamTest, ReceiveBufferReleasesReorderedApplicationBytesContiguously) {

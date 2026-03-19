@@ -29,9 +29,8 @@ bool ack_frame_acks_packet(const AckFrame &ack, std::uint64_t packet_number) {
         return false;
     }
 
-    auto range_largest = ack.largest_acknowledged;
     auto range_smallest = ack.largest_acknowledged - ack.first_ack_range;
-    if (packet_number >= range_smallest && packet_number <= range_largest) {
+    if (packet_number >= range_smallest) {
         return true;
     }
 
@@ -41,7 +40,7 @@ bool ack_frame_acks_packet(const AckFrame &ack, std::uint64_t packet_number) {
             return false;
         }
 
-        range_largest = previous_smallest - range.gap - 2;
+        const auto range_largest = previous_smallest - range.gap - 2;
         if (range_largest < range.range_length) {
             return false;
         }
@@ -84,7 +83,10 @@ bool ReceivedPacketHistory::has_ack_to_send() const {
 
 std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack_delay_exponent,
                                                                QuicCoreTimePoint now) const {
-    if (!ack_pending_ || packets_.empty()) {
+    if (packets_.empty()) {
+        return std::nullopt;
+    }
+    if (!ack_pending_) {
         return std::nullopt;
     }
 
@@ -109,8 +111,7 @@ std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack
     };
 
     const auto largest_acknowledged_it = packets_.find(ack.largest_acknowledged);
-    if (largest_acknowledged_it != packets_.end() &&
-        now >= largest_acknowledged_it->second.received_time) {
+    if (now >= largest_acknowledged_it->second.received_time) {
         const auto ack_delay = std::chrono::duration_cast<std::chrono::microseconds>(
             now - largest_acknowledged_it->second.received_time);
         ack.ack_delay = encode_ack_delay(ack_delay, ack_delay_exponent);
@@ -154,10 +155,7 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
 
         acked_packet_numbers.push_back(packet_number);
         result.acked_packets.push_back(packet);
-        if (!result.largest_newly_acked_packet.has_value() ||
-            packet.packet_number > result.largest_newly_acked_packet->packet_number) {
-            result.largest_newly_acked_packet = packet;
-        }
+        result.largest_newly_acked_packet = packet;
         if (packet.packet_number == ack.largest_acknowledged) {
             result.largest_acknowledged_was_newly_acked = true;
         }
@@ -252,7 +250,7 @@ void update_rtt(RecoveryRttState &rtt, QuicCoreTimePoint ack_receive_time,
 
     const auto bounded_ack_delay = std::min(ack_delay, max_ack_delay);
     auto adjusted_rtt = latest_sample;
-    if (rtt.min_rtt.has_value() && latest_sample >= *rtt.min_rtt + bounded_ack_delay) {
+    if (latest_sample >= *rtt.min_rtt + bounded_ack_delay) {
         adjusted_rtt = latest_sample - bounded_ack_delay;
     }
 

@@ -1,4 +1,5 @@
 #include <cstddef>
+#include <cstdint>
 #include <initializer_list>
 #include <optional>
 #include <vector>
@@ -168,6 +169,34 @@ TEST(QuicTransportParametersTest,
     EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
 }
 
+TEST(QuicTransportParametersTest, RejectsAckDelayExponentAboveVarintLimitDuringSerialization) {
+    const TransportParameters parameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .ack_delay_exponent = (std::uint64_t{1} << 62),
+        .initial_source_connection_id = ConnectionId{std::byte{0x01}},
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsMaxAckDelayAboveVarintLimitDuringSerialization) {
+    const TransportParameters parameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_source_connection_id = ConnectionId{std::byte{0x01}},
+        .max_ack_delay = (std::uint64_t{1} << 62),
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicTransportParametersTest, IgnoresUnknownParameterIdsDuringParse) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
         0x20,
@@ -230,6 +259,30 @@ TEST(QuicTransportParametersTest, RejectsInvalidMaxUdpPayloadSizeEncoding) {
 TEST(QuicTransportParametersTest, RejectsInvalidActiveConnectionIdLimitEncoding) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
         0x0e,
+        0x02,
+        0x01,
+        0x00,
+    }));
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsInvalidAckDelayExponentEncoding) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x0a,
+        0x02,
+        0x01,
+        0x00,
+    }));
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsInvalidMaxAckDelayEncoding) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x0b,
         0x02,
         0x01,
         0x00,

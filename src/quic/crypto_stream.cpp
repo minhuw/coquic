@@ -211,7 +211,7 @@ std::vector<CryptoFrame> CryptoSendBuffer::take_frames(std::size_t max_frame_pay
         return frames;
     }
 
-    while (reliable_.has_pending_data()) {
+    while (true) {
         const auto ranges = reliable_.take_ranges(max_frame_payload_size);
         if (ranges.empty()) {
             break;

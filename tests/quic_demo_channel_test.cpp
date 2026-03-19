@@ -104,7 +104,7 @@ TEST(QuicDemoChannelTest, ClientStartProducesSendDatagramEffect) {
     ASSERT_EQ(datagrams.size(), 1u);
     EXPECT_GE(datagrams.front().size(), 1200u);
     EXPECT_TRUE(coquic::quic::test::state_changes_from(result).empty());
-    EXPECT_EQ(result.next_wakeup, std::nullopt);
+    EXPECT_TRUE(result.next_wakeup.has_value());
     EXPECT_FALSE(client.is_ready());
     EXPECT_FALSE(client.has_failed());
 }

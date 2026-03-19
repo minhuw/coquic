@@ -297,7 +297,9 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
 
     return earliest_of({packet_space_pto_deadline(initial_space_, std::chrono::milliseconds(0)),
                         packet_space_pto_deadline(handshake_space_, std::chrono::milliseconds(0)),
-                        packet_space_pto_deadline(application_space_, application_max_ack_delay)});
+                        handshake_confirmed_ ? packet_space_pto_deadline(application_space_,
+                                                                         application_max_ack_delay)
+                                             : std::nullopt});
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::ack_deadline() const {
@@ -374,7 +376,9 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
 
     consider_packet_space(initial_space_, std::chrono::milliseconds(0));
     consider_packet_space(handshake_space_, std::chrono::milliseconds(0));
-    consider_packet_space(application_space_, application_max_ack_delay);
+    if (handshake_confirmed_) {
+        consider_packet_space(application_space_, application_max_ack_delay);
+    }
 
     if (selected_packet_space == nullptr) {
         return;
@@ -753,6 +757,9 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
                    decode_ack_delay(ack, ack_delay_exponent),
                    std::chrono::milliseconds(max_ack_delay_ms));
     }
+    if (&packet_space == &application_space_ && !ack_result.acked_packets.empty()) {
+        handshake_confirmed_ = true;
+    }
     if (!ack_result.acked_packets.empty() && !suppress_pto_reset) {
         pto_count_ = 0;
     }
@@ -953,6 +960,9 @@ void QuicConnection::update_handshake_status() {
         if (status_ != HandshakeStatus::connected) {
             status_ = HandshakeStatus::connected;
             queue_state_change(QuicCoreStateChange::handshake_ready);
+        }
+        if (config_.role == EndpointRole::server) {
+            handshake_confirmed_ = true;
         }
     } else {
         status_ = HandshakeStatus::in_progress;

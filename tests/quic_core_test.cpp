@@ -133,31 +133,80 @@ TEST(QuicCoreTest, ApplicationDataIsRetransmittedAfterLoss) {
     ASSERT_TRUE(client.is_handshake_complete());
     ASSERT_TRUE(server.is_handshake_complete());
 
+    const auto confirm = client.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("confirm"),
+        },
+        coquic::quic::test::test_time(1));
+    const auto confirm_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
+        confirm, server, coquic::quic::test::test_time(2));
+    const auto confirm_acked = coquic::quic::test::relay_send_datagrams_to_peer(
+        confirm_delivered, client, coquic::quic::test::test_time(3));
+    EXPECT_TRUE(coquic::quic::test::received_application_data_from(confirm_acked).empty());
+
     const auto sent = client.advance(
         coquic::quic::QuicCoreQueueApplicationData{
             .bytes = coquic::quic::test::bytes_from_string("probe"),
         },
-        coquic::quic::test::test_time(1));
+        coquic::quic::test::test_time(4));
     EXPECT_TRUE(sent.next_wakeup.has_value());
 
     const auto dropped = coquic::quic::test::relay_send_datagrams_to_peer_except(
-        sent, std::array<std::size_t, 1>{0}, server, coquic::quic::test::test_time(2));
+        sent, std::array<std::size_t, 1>{0}, server, coquic::quic::test::test_time(5));
     EXPECT_TRUE(dropped.effects.empty());
 
     const auto retry = coquic::quic::test::drive_earliest_next_wakeup(client, {sent.next_wakeup});
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(retry).empty());
 
     const auto delivered = coquic::quic::test::relay_nth_send_datagram_to_peer(
-        retry, 0, server, coquic::quic::test::test_time(3));
+        retry, 0, server, coquic::quic::test::test_time(6));
     EXPECT_EQ(coquic::quic::test::string_from_bytes(
                   coquic::quic::test::received_application_data_from(delivered)),
               "probe");
 
     const auto acked = coquic::quic::test::relay_send_datagrams_to_peer(
-        delivered, client, coquic::quic::test::test_time(4));
+        delivered, client, coquic::quic::test::test_time(7));
     EXPECT_FALSE(client.has_failed());
     EXPECT_FALSE(server.has_failed());
     EXPECT_TRUE(coquic::quic::test::received_application_data_from(acked).empty());
+}
+
+TEST(QuicCoreTest, ApplicationPtoWaitsForClientHandshakeConfirmation) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto server_send = server.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("server-probe"),
+        },
+        coquic::quic::test::test_time(1));
+    EXPECT_TRUE(server_send.next_wakeup.has_value());
+
+    const auto client_before_confirmation = client.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("client-probe"),
+        },
+        coquic::quic::test::test_time(2));
+    EXPECT_EQ(client_before_confirmation.next_wakeup, std::nullopt);
+
+    const auto server_after_client_probe = coquic::quic::test::relay_send_datagrams_to_peer(
+        client_before_confirmation, server, coquic::quic::test::test_time(3));
+    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(server_after_client_probe).empty());
+
+    const auto client_after_ack = coquic::quic::test::relay_send_datagrams_to_peer(
+        server_after_client_probe, client, coquic::quic::test::test_time(4));
+    EXPECT_TRUE(coquic::quic::test::received_application_data_from(client_after_ack).empty());
+
+    const auto client_after_confirmation = client.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("client-after-ack"),
+        },
+        coquic::quic::test::test_time(5));
+    EXPECT_TRUE(client_after_confirmation.next_wakeup.has_value());
 }
 
 TEST(QuicCoreTest, AckProcessingClearsOutstandingDataAndRemovesWakeup) {
@@ -168,19 +217,30 @@ TEST(QuicCoreTest, AckProcessingClearsOutstandingDataAndRemovesWakeup) {
     ASSERT_TRUE(client.is_handshake_complete());
     ASSERT_TRUE(server.is_handshake_complete());
 
+    const auto confirm = client.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("confirm"),
+        },
+        coquic::quic::test::test_time(1));
+    const auto confirm_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
+        confirm, server, coquic::quic::test::test_time(2));
+    const auto confirm_acked = coquic::quic::test::relay_send_datagrams_to_peer(
+        confirm_delivered, client, coquic::quic::test::test_time(3));
+    EXPECT_TRUE(coquic::quic::test::received_application_data_from(confirm_acked).empty());
+
     const auto sent = client.advance(
         coquic::quic::QuicCoreQueueApplicationData{
             .bytes = coquic::quic::test::bytes_from_string("ack-clear"),
         },
-        coquic::quic::test::test_time(1));
+        coquic::quic::test::test_time(4));
     EXPECT_TRUE(sent.next_wakeup.has_value());
     ASSERT_FALSE(client.connection_->application_space_.sent_packets.empty());
     EXPECT_TRUE(client.connection_->pending_application_send_.has_outstanding_data());
 
     const auto server_step = coquic::quic::test::relay_send_datagrams_to_peer(
-        sent, server, coquic::quic::test::test_time(2));
+        sent, server, coquic::quic::test::test_time(5));
     const auto client_step = coquic::quic::test::relay_send_datagrams_to_peer(
-        server_step, client, coquic::quic::test::test_time(3));
+        server_step, client, coquic::quic::test::test_time(6));
 
     EXPECT_FALSE(client.has_failed());
     EXPECT_TRUE(coquic::quic::test::received_application_data_from(client_step).empty());

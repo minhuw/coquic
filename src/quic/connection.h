@@ -105,6 +105,7 @@ class QuicConnection {
     std::vector<std::byte> pending_application_receive_;
     std::vector<QuicCoreStateChange> pending_state_changes_;
     std::uint32_t pto_count_ = 0;
+    bool handshake_confirmed_ = false;
     bool handshake_ready_emitted_ = false;
     bool failed_emitted_ = false;
 };

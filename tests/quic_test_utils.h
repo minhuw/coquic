@@ -261,6 +261,27 @@ inline QuicDemoChannelResult relay_send_datagrams_to_peer(const QuicDemoChannelR
     return combined;
 }
 
+inline QuicDemoChannelResult
+relay_send_datagrams_to_peer_except(const QuicDemoChannelResult &result,
+                                    std::span<const std::size_t> dropped, QuicDemoChannel &peer,
+                                    QuicCoreTimePoint now) {
+    const auto datagrams = send_datagrams_from(result);
+    QuicDemoChannelResult combined;
+    for (std::size_t index = 0; index < datagrams.size(); ++index) {
+        if (std::find(dropped.begin(), dropped.end(), index) != dropped.end()) {
+            continue;
+        }
+
+        auto step = peer.advance(QuicCoreInboundDatagram{datagrams[index]}, now);
+        combined.effects.insert(combined.effects.end(),
+                                std::make_move_iterator(step.effects.begin()),
+                                std::make_move_iterator(step.effects.end()));
+        combined.next_wakeup = step.next_wakeup;
+    }
+
+    return combined;
+}
+
 inline QuicCoreResult relay_send_datagrams_to_peer(const QuicDemoChannelResult &result,
                                                    QuicCore &peer, QuicCoreTimePoint now) {
     QuicCoreResult combined;
@@ -290,6 +311,17 @@ inline QuicDemoChannelResult relay_send_datagrams_to_peer(const QuicCoreResult &
     return combined;
 }
 
+inline QuicDemoChannelResult
+drive_earliest_next_wakeup(QuicDemoChannel &channel,
+                           std::initializer_list<std::optional<QuicCoreTimePoint>> wakeups) {
+    const auto earliest = earliest_next_wakeup(wakeups);
+    if (!earliest.has_value()) {
+        return {};
+    }
+
+    return channel.advance(QuicCoreTimerExpired{}, *earliest);
+}
+
 inline void
 drive_demo_channel_handshake(QuicDemoChannel &client, QuicDemoChannel &server,
                              QuicCoreTimePoint now,
@@ -307,15 +339,42 @@ drive_demo_channel_handshake(QuicDemoChannel &client, QuicDemoChannel &server,
 
     auto to_server = client.advance(QuicCoreStart{}, now);
     append_state_changes(to_server, client_events);
+    auto to_client = QuicDemoChannelResult{};
+    auto step_now = now;
 
-    for (int i = 0; i < 16 && !(client.is_ready() && server.is_ready()); ++i) {
-        const auto to_client = relay_send_datagrams_to_peer(to_server, server, now);
-        append_state_changes(to_client, server_events);
-        if (client.is_ready() && server.is_ready()) {
+    for (int i = 0; i < 32; ++i) {
+        if (!send_datagrams_from(to_server).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            to_client = relay_send_datagrams_to_peer(to_server, server, step_now);
+            append_state_changes(to_client, server_events);
+            to_server.effects.clear();
+            continue;
+        }
+
+        if (!send_datagrams_from(to_client).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            to_server = relay_send_datagrams_to_peer(to_client, client, step_now);
+            append_state_changes(to_server, client_events);
+            to_client.effects.clear();
+            continue;
+        }
+
+        const auto next = earliest_next_wakeup({to_server.next_wakeup, to_client.next_wakeup});
+        if (!next.has_value()) {
             break;
         }
-        to_server = relay_send_datagrams_to_peer(to_client, client, now);
-        append_state_changes(to_server, client_events);
+
+        if (to_server.next_wakeup.has_value() && *to_server.next_wakeup == *next) {
+            to_server = client.advance(QuicCoreTimerExpired{}, *next);
+            append_state_changes(to_server, client_events);
+            continue;
+        }
+
+        if (to_client.next_wakeup.has_value() && *to_client.next_wakeup == *next) {
+            to_client = server.advance(QuicCoreTimerExpired{}, *next);
+            append_state_changes(to_client, server_events);
+            continue;
+        }
     }
 }
 

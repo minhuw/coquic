@@ -46,22 +46,25 @@ TEST(QuicCoreTest, TwoPeersCompleteHandshake) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 
-    auto to_server = client.receive({});
-    auto to_client = std::vector<std::byte>{};
-
-    for (int i = 0; i < 16 && !(client.is_handshake_complete() && server.is_handshake_complete());
-         ++i) {
-        if (!to_server.empty()) {
-            to_client = server.receive(to_server);
-        }
-        if (client.is_handshake_complete() && server.is_handshake_complete()) {
-            break;
-        }
-        to_server = client.receive(to_client);
-    }
+    coquic::quic::test::drive_quic_handshake(client, server);
 
     EXPECT_TRUE(client.is_handshake_complete());
     EXPECT_TRUE(server.is_handshake_complete());
+}
+
+TEST(QuicCoreTest, TwoPeersExchangeApplicationDataAfterHandshake) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server);
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    client.queue_application_data(coquic::quic::test::bytes_from_string("ping"));
+    coquic::quic::test::flush_pending_datagrams(client, server);
+
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(server.take_received_application_data()),
+              "ping");
 }
 
 } // namespace

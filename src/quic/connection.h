@@ -33,7 +33,10 @@ class QuicConnection {
     explicit QuicConnection(QuicCoreConfig config);
 
     std::vector<std::byte> receive(std::span<const std::byte> bytes);
+    void queue_application_data(std::span<const std::byte> bytes);
+    std::vector<std::byte> take_received_application_data();
     bool is_handshake_complete() const;
+    bool has_failed() const;
 
   private:
     void start_client_if_needed();
@@ -43,6 +46,7 @@ class QuicConnection {
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
     CodecResult<bool> process_inbound_packet(const ProtectedPacket &packet);
     CodecResult<bool> process_inbound_crypto(EncryptionLevel level, std::span<const Frame> frames);
+    CodecResult<bool> process_inbound_application(std::span<const Frame> frames);
     void install_available_secrets();
     void collect_pending_tls_bytes();
     CodecResult<bool> sync_tls_state();
@@ -66,6 +70,10 @@ class QuicConnection {
     std::optional<ConnectionId> client_initial_destination_connection_id_;
     std::optional<TransportParameters> peer_transport_parameters_;
     bool peer_transport_parameters_validated_ = false;
+    std::vector<std::byte> pending_application_send_;
+    std::vector<std::byte> pending_application_receive_;
+    std::uint64_t next_application_stream_offset_ = 0;
+    std::uint64_t expected_application_stream_offset_ = 0;
 };
 
 } // namespace coquic::quic

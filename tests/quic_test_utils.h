@@ -3,7 +3,9 @@
 #include <cstddef>
 #include <fstream>
 #include <iterator>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/quic/core.h"
@@ -46,6 +48,52 @@ inline QuicCoreConfig make_server_core_config() {
                 .private_key_pem = read_text_file("tests/fixtures/quic-server-key.pem"),
             },
     };
+}
+
+inline void flush_pending_datagrams(QuicCore &left, QuicCore &right) {
+    auto to_right = left.receive({});
+    auto to_left = std::vector<std::byte>{};
+    while (!to_right.empty()) {
+        to_left = right.receive(to_right);
+        if (to_left.empty()) {
+            break;
+        }
+        to_right = left.receive(to_left);
+    }
+}
+
+inline void drive_quic_handshake(QuicCore &client, QuicCore &server) {
+    auto to_server = client.receive({});
+    auto to_client = std::vector<std::byte>{};
+
+    for (int i = 0; i < 16 && !(client.is_handshake_complete() && server.is_handshake_complete());
+         ++i) {
+        if (!to_server.empty()) {
+            to_client = server.receive(to_server);
+        }
+        if (client.is_handshake_complete() && server.is_handshake_complete()) {
+            break;
+        }
+        to_server = client.receive(to_client);
+    }
+}
+
+inline std::vector<std::byte> bytes_from_string(std::string_view text) {
+    std::vector<std::byte> bytes;
+    bytes.reserve(text.size());
+    for (const auto character : text) {
+        bytes.push_back(static_cast<std::byte>(character));
+    }
+    return bytes;
+}
+
+inline std::string string_from_bytes(std::span<const std::byte> bytes) {
+    std::string text;
+    text.reserve(bytes.size());
+    for (const auto byte : bytes) {
+        text.push_back(static_cast<char>(std::to_integer<unsigned char>(byte)));
+    }
+    return text;
 }
 
 } // namespace coquic::quic::test

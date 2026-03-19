@@ -33,7 +33,10 @@ class QuicCore {
     QuicCore &operator=(QuicCore &&) noexcept;
 
     std::vector<std::byte> receive(std::vector<std::byte> bytes);
+    void queue_application_data(std::vector<std::byte> bytes);
+    std::vector<std::byte> take_received_application_data();
     bool is_handshake_complete() const;
+    bool has_failed() const;
 
   private:
     std::unique_ptr<QuicConnection> connection_;

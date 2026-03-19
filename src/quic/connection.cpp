@@ -14,8 +14,10 @@ namespace coquic::quic {
 namespace {
 
 constexpr std::size_t kMinimumInitialDatagramSize = 1200;
+constexpr std::size_t kMaximumDatagramSize = 1200;
 constexpr std::uint32_t kQuicVersion1 = 1;
 constexpr std::uint8_t kDefaultInitialPacketNumberLength = 2;
+constexpr std::uint64_t kApplicationStreamId = 0;
 
 EndpointRole opposite_role(EndpointRole role) {
     return role == EndpointRole::client ? EndpointRole::server : EndpointRole::client;
@@ -127,8 +129,30 @@ std::vector<std::byte> QuicConnection::receive(std::span<const std::byte> bytes)
     return flush_outbound_datagram();
 }
 
+void QuicConnection::queue_application_data(std::span<const std::byte> bytes) {
+    if (status_ == HandshakeStatus::failed || bytes.empty()) {
+        return;
+    }
+
+    pending_application_send_.insert(pending_application_send_.end(), bytes.begin(), bytes.end());
+}
+
+std::vector<std::byte> QuicConnection::take_received_application_data() {
+    if (status_ == HandshakeStatus::failed) {
+        return {};
+    }
+
+    auto bytes = std::move(pending_application_receive_);
+    pending_application_receive_.clear();
+    return bytes;
+}
+
 bool QuicConnection::is_handshake_complete() const {
     return status_ == HandshakeStatus::connected;
+}
+
+bool QuicConnection::has_failed() const {
+    return status_ == HandshakeStatus::failed;
 }
 
 void QuicConnection::start_client_if_needed() {
@@ -357,7 +381,7 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
     }
     if (const auto *application = std::get_if<ProtectedOneRttPacket>(&packet)) {
         application_space_.largest_authenticated_packet_number = application->packet_number;
-        return process_inbound_crypto(EncryptionLevel::application, application->frames);
+        return process_inbound_application(application->frames);
     }
 
     return CodecResult<bool>::success(true);
@@ -399,6 +423,68 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
 
         install_available_secrets();
         collect_pending_tls_bytes();
+    }
+
+    return CodecResult<bool>::success(true);
+}
+
+CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Frame> frames) {
+    for (const auto &frame : frames) {
+        if (is_padding_frame(frame) || std::holds_alternative<AckFrame>(frame)) {
+            continue;
+        }
+
+        const auto *crypto_frame = std::get_if<CryptoFrame>(&frame);
+        if (crypto_frame != nullptr) {
+            const auto contiguous_bytes = application_space_.receive_crypto.push(
+                crypto_frame->offset, crypto_frame->crypto_data);
+            if (!contiguous_bytes.has_value()) {
+                return CodecResult<bool>::failure(contiguous_bytes.error().code,
+                                                  contiguous_bytes.error().offset);
+            }
+            if (contiguous_bytes.value().empty()) {
+                continue;
+            }
+
+            if (!tls_.has_value()) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state,
+                                                  0);
+            }
+
+            const auto provided =
+                tls_->provide(EncryptionLevel::application, contiguous_bytes.value());
+            if (!provided.has_value()) {
+                return provided;
+            }
+
+            install_available_secrets();
+            collect_pending_tls_bytes();
+            continue;
+        }
+
+        const auto *stream_frame = std::get_if<StreamFrame>(&frame);
+        if (stream_frame == nullptr) {
+            continue;
+        }
+
+        if (stream_frame->stream_id != kApplicationStreamId || stream_frame->fin) {
+            return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+        }
+
+        const auto stream_offset = stream_frame->offset.value_or(0);
+        if (stream_offset != expected_application_stream_offset_) {
+            return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+        }
+
+        if (stream_frame->stream_data.size() >
+            (std::numeric_limits<std::uint64_t>::max() - expected_application_stream_offset_)) {
+            return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+        }
+
+        expected_application_stream_offset_ += stream_frame->stream_data.size();
+        pending_application_receive_.insert(pending_application_receive_.end(),
+                                            stream_frame->stream_data.begin(),
+                                            stream_frame->stream_data.end());
     }
 
     return CodecResult<bool>::success(true);
@@ -579,6 +665,79 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
             .packet_number = handshake_space_.next_send_packet_number++,
             .frames = std::move(frames),
         });
+    }
+
+    if (status_ == HandshakeStatus::connected && application_space_.write_secret.has_value() &&
+        !pending_application_send_.empty()) {
+        std::size_t low = 1;
+        std::size_t high = pending_application_send_.size();
+        std::size_t best_length = 0;
+
+        while (low <= high) {
+            const auto candidate_length = low + (high - low) / 2;
+            std::vector<std::byte> candidate_bytes(
+                pending_application_send_.begin(),
+                pending_application_send_.begin() + static_cast<std::ptrdiff_t>(candidate_length));
+
+            auto candidate_packets = packets;
+            candidate_packets.emplace_back(ProtectedOneRttPacket{
+                .destination_connection_id = destination_connection_id,
+                .packet_number_length = kDefaultInitialPacketNumberLength,
+                .packet_number = application_space_.next_send_packet_number,
+                .frames = {StreamFrame{
+                    .fin = false,
+                    .has_offset = true,
+                    .has_length = true,
+                    .stream_id = kApplicationStreamId,
+                    .offset = next_application_stream_offset_,
+                    .stream_data = std::move(candidate_bytes),
+                }},
+            });
+
+            const auto candidate_datagram = serialize_protected_datagram(
+                candidate_packets, SerializeProtectionContext{
+                                       .local_role = config_.role,
+                                       .client_initial_destination_connection_id =
+                                           client_initial_destination_connection_id(),
+                                       .handshake_secret = handshake_space_.write_secret,
+                                       .one_rtt_secret = application_space_.write_secret,
+                                   });
+            if (!candidate_datagram.has_value()) {
+                status_ = HandshakeStatus::failed;
+                return {};
+            }
+
+            if (candidate_datagram.value().size() <= kMaximumDatagramSize) {
+                best_length = candidate_length;
+                low = candidate_length + 1;
+            } else {
+                high = candidate_length - 1;
+            }
+        }
+
+        if (best_length > 0) {
+            std::vector<std::byte> stream_bytes(pending_application_send_.begin(),
+                                                pending_application_send_.begin() +
+                                                    static_cast<std::ptrdiff_t>(best_length));
+            packets.emplace_back(ProtectedOneRttPacket{
+                .destination_connection_id = destination_connection_id,
+                .packet_number_length = kDefaultInitialPacketNumberLength,
+                .packet_number = application_space_.next_send_packet_number++,
+                .frames = {StreamFrame{
+                    .fin = false,
+                    .has_offset = true,
+                    .has_length = true,
+                    .stream_id = kApplicationStreamId,
+                    .offset = next_application_stream_offset_,
+                    .stream_data = std::move(stream_bytes),
+                }},
+            });
+
+            next_application_stream_offset_ += best_length;
+            pending_application_send_.erase(pending_application_send_.begin(),
+                                            pending_application_send_.begin() +
+                                                static_cast<std::ptrdiff_t>(best_length));
+        }
     }
 
     if (packets.empty()) {

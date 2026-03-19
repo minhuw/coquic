@@ -120,6 +120,9 @@ TEST(QuicTransportParametersTest, RoundTripsFlowControlAndStreamCountParameters)
     const auto decoded = coquic::quic::deserialize_transport_parameters(encoded.value());
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(decoded.value().initial_max_data, 4096u);
+    EXPECT_EQ(decoded.value().initial_max_stream_data_bidi_local, 1024u);
+    EXPECT_EQ(decoded.value().initial_max_stream_data_bidi_remote, 2048u);
+    EXPECT_EQ(decoded.value().initial_max_stream_data_uni, 512u);
     EXPECT_EQ(decoded.value().initial_max_streams_bidi, 9u);
     EXPECT_EQ(decoded.value().initial_max_streams_uni, 5u);
 }
@@ -139,6 +142,8 @@ TEST(QuicTransportParametersTest, MissingFlowControlParametersDefaultToZero) {
     }));
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(decoded.value().initial_max_data, 0u);
+    EXPECT_EQ(decoded.value().initial_max_stream_data_bidi_local, 0u);
+    EXPECT_EQ(decoded.value().initial_max_stream_data_bidi_remote, 0u);
     EXPECT_EQ(decoded.value().initial_max_streams_bidi, 0u);
     EXPECT_EQ(decoded.value().initial_max_stream_data_uni, 0u);
 }

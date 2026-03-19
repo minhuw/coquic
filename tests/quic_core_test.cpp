@@ -1,3 +1,5 @@
+#include <array>
+
 #include <gtest/gtest.h>
 
 #include "src/quic/protected_codec.h"
@@ -82,6 +84,100 @@ TEST(QuicCoreTest, TwoPeersExchangeApplicationDataThroughEffects) {
     EXPECT_EQ(coquic::quic::test::string_from_bytes(
                   coquic::quic::test::received_application_data_from(received)),
               "ping");
+}
+
+TEST(QuicCoreTest, ReceivingAckElicitingPacketsSchedulesAckResponse) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto send = client.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("ack-me"),
+        },
+        coquic::quic::test::test_time(1));
+    const auto received = coquic::quic::test::relay_send_datagrams_to_peer(
+        send, server, coquic::quic::test::test_time(1));
+    const auto response_datagrams = coquic::quic::test::send_datagrams_from(received);
+
+    ASSERT_FALSE(response_datagrams.empty());
+
+    bool saw_ack = false;
+    for (const auto &datagram : response_datagrams) {
+        const auto decoded = coquic::quic::deserialize_protected_datagram(
+            datagram,
+            coquic::quic::DeserializeProtectionContext{
+                .peer_role = coquic::quic::EndpointRole::server,
+                .client_initial_destination_connection_id =
+                    client.connection_->client_initial_destination_connection_id(),
+                .handshake_secret = client.connection_->handshake_space_.read_secret,
+                .one_rtt_secret = client.connection_->application_space_.read_secret,
+                .largest_authenticated_initial_packet_number =
+                    client.connection_->initial_space_.largest_authenticated_packet_number,
+                .largest_authenticated_handshake_packet_number =
+                    client.connection_->handshake_space_.largest_authenticated_packet_number,
+                .largest_authenticated_application_packet_number =
+                    client.connection_->application_space_.largest_authenticated_packet_number,
+                .one_rtt_destination_connection_id_length =
+                    client.connection_->config_.source_connection_id.size(),
+            });
+        ASSERT_TRUE(decoded.has_value());
+
+        for (const auto &packet : decoded.value()) {
+            const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+            if (one_rtt == nullptr) {
+                continue;
+            }
+
+            for (const auto &frame : one_rtt->frames) {
+                if (std::holds_alternative<coquic::quic::AckFrame>(frame)) {
+                    saw_ack = true;
+                }
+            }
+        }
+    }
+
+    EXPECT_TRUE(saw_ack);
+}
+
+TEST(QuicCoreTest, ReorderedApplicationPacketsAreDeliveredOnceContiguous) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto first_send = client.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("ping"),
+        },
+        coquic::quic::test::test_time(1));
+    const auto second_send = client.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("pong"),
+        },
+        coquic::quic::test::test_time(2));
+
+    auto datagrams = coquic::quic::test::send_datagrams_from(first_send);
+    const auto second_datagrams = coquic::quic::test::send_datagrams_from(second_send);
+    datagrams.insert(datagrams.end(), second_datagrams.begin(), second_datagrams.end());
+    ASSERT_EQ(datagrams.size(), 2u);
+
+    const auto reordered = coquic::quic::test::relay_datagrams_to_peer(
+        datagrams, std::array<std::size_t, 1>{1}, server, coquic::quic::test::test_time(3));
+    EXPECT_FALSE(server.has_failed());
+    EXPECT_TRUE(coquic::quic::test::received_application_data_from(reordered).empty());
+
+    const auto contiguous = coquic::quic::test::relay_datagrams_to_peer(
+        datagrams, std::array<std::size_t, 1>{0}, server, coquic::quic::test::test_time(4));
+    EXPECT_FALSE(server.has_failed());
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(
+                  coquic::quic::test::received_application_data_from(contiguous)),
+              "pingpong");
 }
 
 TEST(QuicCoreTest, FailureEventIsEdgeTriggeredAndLaterCallsAreInert) {

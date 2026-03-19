@@ -1,12 +1,14 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <vector>
 
 #include "src/quic/core.h"
 #include "src/quic/crypto_stream.h"
+#include "src/quic/recovery.h"
 #include "src/quic/tls_adapter.h"
 #include "src/quic/transport_parameters.h"
 
@@ -24,8 +26,10 @@ struct PacketSpaceState {
     std::optional<std::uint64_t> largest_authenticated_packet_number;
     std::optional<TrafficSecret> read_secret;
     std::optional<TrafficSecret> write_secret;
-    CryptoSendBuffer send_crypto;
-    CryptoReceiveBuffer receive_crypto;
+    ReliableSendBuffer send_crypto;
+    ReliableReceiveBuffer receive_crypto;
+    ReceivedPacketHistory received_packets;
+    std::map<std::uint64_t, SentPacketRecord> sent_packets;
 };
 
 class QuicConnection {
@@ -76,13 +80,12 @@ class QuicConnection {
     std::optional<ConnectionId> client_initial_destination_connection_id_;
     std::optional<TransportParameters> peer_transport_parameters_;
     bool peer_transport_parameters_validated_ = false;
-    std::vector<std::byte> pending_application_send_;
+    ReliableSendBuffer pending_application_send_;
+    ReliableReceiveBuffer pending_application_receive_buffer_;
     std::vector<std::byte> pending_application_receive_;
     std::vector<QuicCoreStateChange> pending_state_changes_;
     bool handshake_ready_emitted_ = false;
     bool failed_emitted_ = false;
-    std::uint64_t next_application_stream_offset_ = 0;
-    std::uint64_t expected_application_stream_offset_ = 0;
 };
 
 } // namespace coquic::quic

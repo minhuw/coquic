@@ -121,6 +121,21 @@ inline QuicCoreResult relay_send_datagrams_to_peer(const QuicCoreResult &result,
     return combined;
 }
 
+inline QuicCoreResult relay_datagrams_to_peer(std::span<const std::vector<std::byte>> datagrams,
+                                              std::span<const std::size_t> delivery_order,
+                                              QuicCore &peer, QuicCoreTimePoint now) {
+    QuicCoreResult combined;
+    for (const auto index : delivery_order) {
+        auto step = peer.advance(QuicCoreInboundDatagram{datagrams[index]}, now);
+        combined.effects.insert(combined.effects.end(),
+                                std::make_move_iterator(step.effects.begin()),
+                                std::make_move_iterator(step.effects.end()));
+        combined.next_wakeup = step.next_wakeup;
+    }
+
+    return combined;
+}
+
 inline std::vector<std::vector<std::byte>>
 send_datagrams_from(const QuicDemoChannelResult &result) {
     std::vector<std::vector<std::byte>> out;

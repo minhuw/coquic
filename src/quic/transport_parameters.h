@@ -14,6 +14,8 @@ struct TransportParameters {
     std::optional<ConnectionId> original_destination_connection_id;
     std::uint64_t max_udp_payload_size = 65527;
     std::uint64_t active_connection_id_limit = 2;
+    std::uint64_t ack_delay_exponent = 3;
+    std::uint64_t max_ack_delay = 25;
     std::optional<ConnectionId> initial_source_connection_id;
     std::optional<ConnectionId> retry_source_connection_id;
 };

@@ -209,7 +209,7 @@ TEST(QuicCoreTest, InboundApplicationAckRetiresOwnedSendRanges) {
     EXPECT_FALSE(client.connection_->pending_application_send_.has_outstanding_data());
 }
 
-TEST(QuicCoreTest, LargeAckOnlyHistoryDoesNotEmitOversizedDatagram) {
+TEST(QuicCoreTest, LargeAckOnlyHistoryEmitsTrimmedAckDatagram) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 
@@ -226,7 +226,43 @@ TEST(QuicCoreTest, LargeAckOnlyHistoryDoesNotEmitOversizedDatagram) {
     const auto datagram = client.connection_->drain_outbound_datagram();
 
     EXPECT_FALSE(client.connection_->has_failed());
-    EXPECT_TRUE(datagram.empty() || datagram.size() <= 1200u);
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_LE(datagram.size(), 1200u);
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        datagram,
+        coquic::quic::DeserializeProtectionContext{
+            .peer_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id =
+                client.connection_->client_initial_destination_connection_id(),
+            .handshake_secret = client.connection_->handshake_space_.write_secret,
+            .one_rtt_secret = client.connection_->application_space_.write_secret,
+            .largest_authenticated_initial_packet_number =
+                server.connection_->initial_space_.largest_authenticated_packet_number,
+            .largest_authenticated_handshake_packet_number =
+                server.connection_->handshake_space_.largest_authenticated_packet_number,
+            .largest_authenticated_application_packet_number =
+                server.connection_->application_space_.largest_authenticated_packet_number,
+            .one_rtt_destination_connection_id_length =
+                server.connection_->config_.source_connection_id.size(),
+        });
+    ASSERT_TRUE(decoded.has_value());
+
+    bool saw_ack = false;
+    for (const auto &packet : decoded.value()) {
+        const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+        if (one_rtt == nullptr) {
+            continue;
+        }
+
+        for (const auto &frame : one_rtt->frames) {
+            if (std::holds_alternative<coquic::quic::AckFrame>(frame)) {
+                saw_ack = true;
+            }
+        }
+    }
+
+    EXPECT_TRUE(saw_ack);
 }
 
 TEST(QuicCoreTest, FailureEventIsEdgeTriggeredAndLaterCallsAreInert) {

@@ -855,53 +855,104 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
         std::size_t best_length = 0;
         bool found_fitting_candidate = false;
         bool best_ack_only = false;
+        std::optional<AckFrame> best_ack_frame;
 
         while (low <= high) {
             const auto candidate_length = low + (high - low) / 2;
             auto candidate_send_buffer = pending_application_send_;
             const auto candidate_ranges = candidate_send_buffer.take_ranges(candidate_length);
+            const auto candidate_ack_frame =
+                application_space_.received_packets.build_ack_frame(0, QuicCoreTimePoint{});
+            const auto serialize_candidate_datagram = [&](const std::optional<AckFrame> &ack_frame)
+                -> CodecResult<std::vector<std::byte>> {
+                std::vector<Frame> candidate_frames;
+                if (ack_frame.has_value()) {
+                    candidate_frames.emplace_back(*ack_frame);
+                }
+                for (const auto &range : candidate_ranges) {
+                    candidate_frames.emplace_back(StreamFrame{
+                        .fin = false,
+                        .has_offset = true,
+                        .has_length = true,
+                        .stream_id = kApplicationStreamId,
+                        .offset = range.offset,
+                        .stream_data = range.bytes,
+                    });
+                }
 
-            std::vector<Frame> candidate_frames;
-            if (const auto ack_frame =
-                    application_space_.received_packets.build_ack_frame(0, QuicCoreTimePoint{})) {
-                candidate_frames.emplace_back(*ack_frame);
-            }
-            for (const auto &range : candidate_ranges) {
-                candidate_frames.emplace_back(StreamFrame{
-                    .fin = false,
-                    .has_offset = true,
-                    .has_length = true,
-                    .stream_id = kApplicationStreamId,
-                    .offset = range.offset,
-                    .stream_data = range.bytes,
+                auto candidate_packets = packets;
+                candidate_packets.emplace_back(ProtectedOneRttPacket{
+                    .destination_connection_id = destination_connection_id,
+                    .packet_number_length = kDefaultInitialPacketNumberLength,
+                    .packet_number = application_space_.next_send_packet_number,
+                    .frames = std::move(candidate_frames),
                 });
-            }
 
-            auto candidate_packets = packets;
-            candidate_packets.emplace_back(ProtectedOneRttPacket{
-                .destination_connection_id = destination_connection_id,
-                .packet_number_length = kDefaultInitialPacketNumberLength,
-                .packet_number = application_space_.next_send_packet_number,
-                .frames = std::move(candidate_frames),
-            });
+                const auto candidate_datagram = serialize_protected_datagram(
+                    candidate_packets, SerializeProtectionContext{
+                                           .local_role = config_.role,
+                                           .client_initial_destination_connection_id =
+                                               client_initial_destination_connection_id(),
+                                           .handshake_secret = handshake_space_.write_secret,
+                                           .one_rtt_secret = application_space_.write_secret,
+                                       });
+                return candidate_datagram;
+            };
 
-            const auto candidate_datagram = serialize_protected_datagram(
-                candidate_packets, SerializeProtectionContext{
-                                       .local_role = config_.role,
-                                       .client_initial_destination_connection_id =
-                                           client_initial_destination_connection_id(),
-                                       .handshake_secret = handshake_space_.write_secret,
-                                       .one_rtt_secret = application_space_.write_secret,
-                                   });
+            auto fitting_ack_frame = candidate_ack_frame;
+            auto candidate_datagram = serialize_candidate_datagram(fitting_ack_frame);
             if (!candidate_datagram.has_value()) {
                 mark_failed();
                 return {};
             }
 
-            if (candidate_datagram.value().size() <= kMaximumDatagramSize) {
+            if (candidate_datagram.value().size() > kMaximumDatagramSize &&
+                candidate_ack_frame.has_value() &&
+                !candidate_ack_frame->additional_ranges.empty()) {
+                std::size_t retained_ranges_low = 0;
+                std::size_t retained_ranges_high = candidate_ack_frame->additional_ranges.size();
+                std::optional<AckFrame> best_trimmed_ack_frame;
+
+                while (retained_ranges_low <= retained_ranges_high) {
+                    const auto retained_ranges =
+                        retained_ranges_low + (retained_ranges_high - retained_ranges_low) / 2;
+                    auto trimmed_ack_frame = candidate_ack_frame;
+                    trimmed_ack_frame->additional_ranges.resize(retained_ranges);
+
+                    candidate_datagram = serialize_candidate_datagram(trimmed_ack_frame);
+                    if (!candidate_datagram.has_value()) {
+                        mark_failed();
+                        return {};
+                    }
+
+                    if (candidate_datagram.value().size() <= kMaximumDatagramSize) {
+                        best_trimmed_ack_frame = std::move(trimmed_ack_frame);
+                        retained_ranges_low = retained_ranges + 1;
+                        continue;
+                    }
+
+                    if (retained_ranges == 0) {
+                        break;
+                    }
+                    retained_ranges_high = retained_ranges - 1;
+                }
+
+                fitting_ack_frame = std::move(best_trimmed_ack_frame);
+                if (fitting_ack_frame.has_value()) {
+                    candidate_datagram = serialize_candidate_datagram(fitting_ack_frame);
+                    if (!candidate_datagram.has_value()) {
+                        mark_failed();
+                        return {};
+                    }
+                }
+            }
+
+            if (candidate_datagram.value().size() <= kMaximumDatagramSize &&
+                (!candidate_ack_frame.has_value() || fitting_ack_frame.has_value())) {
                 found_fitting_candidate = true;
                 best_length = candidate_length;
                 best_ack_only = candidate_ranges.empty();
+                best_ack_frame = std::move(fitting_ack_frame);
                 low = candidate_length + 1;
             } else {
                 high = candidate_length - 1;
@@ -910,9 +961,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
 
         if (found_fitting_candidate && (best_length > 0 || best_ack_only)) {
             std::vector<Frame> frames;
-            if (const auto ack_frame =
-                    application_space_.received_packets.build_ack_frame(0, QuicCoreTimePoint{})) {
-                frames.emplace_back(*ack_frame);
+            if (best_ack_frame.has_value()) {
+                frames.emplace_back(*best_ack_frame);
             }
             const auto stream_ranges = pending_application_send_.take_ranges(best_length);
             for (const auto &range : stream_ranges) {

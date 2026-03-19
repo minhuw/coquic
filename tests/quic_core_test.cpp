@@ -89,6 +89,23 @@ static_assert(!has_receive<coquic::quic::QuicCore>);
 static_assert(!has_queue_application_data<coquic::quic::QuicCore>);
 static_assert(!has_take_received_application_data<coquic::quic::QuicCore>);
 
+void expect_local_error(const coquic::quic::QuicCoreResult &result,
+                        coquic::quic::QuicCoreLocalErrorCode code, std::uint64_t stream_id) {
+    const auto local_error = result.local_error;
+    ASSERT_TRUE(local_error.has_value());
+    if (!local_error.has_value()) {
+        return;
+    }
+
+    EXPECT_EQ(local_error->code, code);
+    ASSERT_TRUE(local_error->stream_id.has_value());
+    if (!local_error->stream_id.has_value()) {
+        return;
+    }
+
+    EXPECT_EQ(*local_error->stream_id, stream_id);
+}
+
 TEST(QuicCoreTest, ClientStartProducesSendEffect) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     const auto config = coquic::quic::test::make_client_core_config();
@@ -157,7 +174,54 @@ TEST(QuicCoreTest, TwoPeersExchangeStreamZeroDataThroughEffects) {
     EXPECT_FALSE(stream_events[0].fin);
 }
 
-TEST(QuicCoreTest, InvalidLocalStreamCommandReportsLocalErrorWithoutFailingConnection) {
+TEST(QuicCoreTest, NonZeroStreamSendReportsUnsupportedOperationWithoutFailingConnection) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+
+    const auto result = client.advance(
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 4,
+            .bytes = coquic::quic::test::bytes_from_string("ping"),
+            .fin = false,
+        },
+        coquic::quic::test::test_time());
+
+    expect_local_error(result, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation, 4);
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(result).empty());
+    EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicCoreTest, StreamFinReportsUnsupportedOperationWithoutFailingConnection) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+
+    const auto result = client.advance(
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
+            .bytes = coquic::quic::test::bytes_from_string("ping"),
+            .fin = true,
+        },
+        coquic::quic::test::test_time());
+
+    expect_local_error(result, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation, 0);
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(result).empty());
+    EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicCoreTest, ResetStreamReportsUnsupportedOperationWithoutFailingConnection) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+
+    const auto result = client.advance(
+        coquic::quic::QuicCoreResetStream{
+            .stream_id = 0,
+            .application_error_code = 7,
+        },
+        coquic::quic::test::test_time());
+
+    expect_local_error(result, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation, 0);
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(result).empty());
+    EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicCoreTest, StopSendingReportsUnsupportedOperationWithoutFailingConnection) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
 
     const auto result = client.advance(
@@ -167,7 +231,8 @@ TEST(QuicCoreTest, InvalidLocalStreamCommandReportsLocalErrorWithoutFailingConne
         },
         coquic::quic::test::test_time());
 
-    ASSERT_TRUE(result.local_error.has_value());
+    expect_local_error(result, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation, 0);
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(result).empty());
     EXPECT_FALSE(client.has_failed());
 }
 

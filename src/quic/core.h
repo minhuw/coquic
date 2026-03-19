@@ -32,6 +32,7 @@ enum class QuicCoreStateChange : std::uint8_t {
 };
 
 enum class QuicCoreLocalErrorCode : std::uint8_t {
+    unsupported_operation,
     invalid_stream_id,
     invalid_stream_direction,
     send_side_closed,

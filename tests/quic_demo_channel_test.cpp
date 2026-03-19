@@ -422,6 +422,65 @@ TEST(QuicDemoChannelTest, FailedCoreStateMakesChannelReportFailure) {
     EXPECT_TRUE(channel.has_failed());
 }
 
+TEST(QuicDemoChannelTest, LocalErrorFromCoreFailsChannel) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+
+    const auto result = channel.process_core_result(coquic::quic::QuicCoreResult{
+        .local_error =
+            coquic::quic::QuicCoreLocalError{
+                .code = coquic::quic::QuicCoreLocalErrorCode::unsupported_operation,
+                .stream_id = 0,
+            },
+    });
+
+    EXPECT_TRUE(channel.has_failed());
+    EXPECT_EQ(coquic::quic::test::state_changes_from(result),
+              (std::vector<coquic::quic::QuicDemoChannelStateChange>{
+                  coquic::quic::QuicDemoChannelStateChange::failed,
+              }));
+}
+
+TEST(QuicDemoChannelTest, PeerResetStreamEffectFailsChannel) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+
+    const auto result = channel.process_core_result(coquic::quic::QuicCoreResult{
+        .effects =
+            {
+                coquic::quic::QuicCorePeerResetStream{
+                    .stream_id = 0,
+                    .application_error_code = 9,
+                    .final_size = 0,
+                },
+            },
+    });
+
+    EXPECT_TRUE(channel.has_failed());
+    EXPECT_EQ(coquic::quic::test::state_changes_from(result),
+              (std::vector<coquic::quic::QuicDemoChannelStateChange>{
+                  coquic::quic::QuicDemoChannelStateChange::failed,
+              }));
+}
+
+TEST(QuicDemoChannelTest, PeerStopSendingEffectFailsChannel) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+
+    const auto result = channel.process_core_result(coquic::quic::QuicCoreResult{
+        .effects =
+            {
+                coquic::quic::QuicCorePeerStopSending{
+                    .stream_id = 0,
+                    .application_error_code = 11,
+                },
+            },
+    });
+
+    EXPECT_TRUE(channel.has_failed());
+    EXPECT_EQ(coquic::quic::test::state_changes_from(result),
+              (std::vector<coquic::quic::QuicDemoChannelStateChange>{
+                  coquic::quic::QuicDemoChannelStateChange::failed,
+              }));
+}
+
 TEST(QuicDemoChannelTest, PartialFramedReceiveWaitsForRemainingBytes) {
     coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_server_core_config());
     coquic::quic::QuicDemoChannelResult partial_result;
@@ -458,6 +517,48 @@ TEST(QuicDemoChannelTest, PartialFramedReceiveWaitsForRemainingBytes) {
     const auto messages = coquic::quic::test::received_messages_from(completed_result);
     ASSERT_EQ(messages.size(), 1u);
     EXPECT_EQ(coquic::quic::test::string_from_bytes(messages.front()), "hello");
+}
+
+TEST(QuicDemoChannelTest, NonDemoStreamReceiveFailsChannel) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_server_core_config());
+
+    const auto result = channel.process_core_result(coquic::quic::QuicCoreResult{
+        .effects =
+            {
+                coquic::quic::QuicCoreReceiveStreamData{
+                    .stream_id = 4,
+                    .bytes = coquic::quic::test::bytes_from_string("hello"),
+                    .fin = false,
+                },
+            },
+    });
+
+    EXPECT_TRUE(channel.has_failed());
+    EXPECT_EQ(coquic::quic::test::state_changes_from(result),
+              (std::vector<coquic::quic::QuicDemoChannelStateChange>{
+                  coquic::quic::QuicDemoChannelStateChange::failed,
+              }));
+}
+
+TEST(QuicDemoChannelTest, StreamFinCompatibilityViolationFailsChannel) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_server_core_config());
+
+    const auto result = channel.process_core_result(coquic::quic::QuicCoreResult{
+        .effects =
+            {
+                coquic::quic::QuicCoreReceiveStreamData{
+                    .stream_id = 0,
+                    .bytes = {},
+                    .fin = true,
+                },
+            },
+    });
+
+    EXPECT_TRUE(channel.has_failed());
+    EXPECT_EQ(coquic::quic::test::state_changes_from(result),
+              (std::vector<coquic::quic::QuicDemoChannelStateChange>{
+                  coquic::quic::QuicDemoChannelStateChange::failed,
+              }));
 }
 
 TEST(QuicDemoChannelTest, FailChannelEmitsFailureOnlyOnce) {

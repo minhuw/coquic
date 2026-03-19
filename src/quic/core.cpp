@@ -16,9 +16,9 @@ template <typename... Ts> struct overloaded : Ts... {
 
 template <typename... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 
-QuicCoreLocalError invalid_stream_id_error(std::uint64_t stream_id) {
+QuicCoreLocalError unsupported_operation_error(std::uint64_t stream_id) {
     return QuicCoreLocalError{
-        .code = QuicCoreLocalErrorCode::invalid_stream_id,
+        .code = QuicCoreLocalErrorCode::unsupported_operation,
         .stream_id = stream_id,
     };
 }
@@ -44,37 +44,28 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                    },
                    [&](const QuicCoreSendStreamData &in) {
                        if (in.stream_id != kCompatibleStreamId) {
-                           result.local_error = invalid_stream_id_error(in.stream_id);
+                           result.local_error = unsupported_operation_error(in.stream_id);
                            return;
                        }
                        if (in.fin) {
-                           result.local_error = QuicCoreLocalError{
-                               .code = QuicCoreLocalErrorCode::final_size_conflict,
-                               .stream_id = in.stream_id,
-                           };
+                           result.local_error = unsupported_operation_error(in.stream_id);
                            return;
                        }
                        connection_->queue_application_data(in.bytes);
                    },
                    [&](const QuicCoreResetStream &in) {
                        if (in.stream_id != kCompatibleStreamId) {
-                           result.local_error = invalid_stream_id_error(in.stream_id);
+                           result.local_error = unsupported_operation_error(in.stream_id);
                            return;
                        }
-                       result.local_error = QuicCoreLocalError{
-                           .code = QuicCoreLocalErrorCode::send_side_closed,
-                           .stream_id = in.stream_id,
-                       };
+                       result.local_error = unsupported_operation_error(in.stream_id);
                    },
                    [&](const QuicCoreStopSending &in) {
                        if (in.stream_id != kCompatibleStreamId) {
-                           result.local_error = invalid_stream_id_error(in.stream_id);
+                           result.local_error = unsupported_operation_error(in.stream_id);
                            return;
                        }
-                       result.local_error = QuicCoreLocalError{
-                           .code = QuicCoreLocalErrorCode::receive_side_closed,
-                           .stream_id = in.stream_id,
-                       };
+                       result.local_error = unsupported_operation_error(in.stream_id);
                    },
                    [&](const QuicCoreTimerExpired &) { connection_->on_timeout(now); },
                },

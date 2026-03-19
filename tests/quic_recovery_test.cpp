@@ -49,6 +49,26 @@ TEST(QuicRecoveryTest, AckHistoryBuildsSingleContiguousAckRange) {
     EXPECT_EQ(ack_frame.first_ack_range, 1u);
 }
 
+TEST(QuicRecoveryTest, AckHistoryMeasuresAckDelayFromLargestAcknowledgedPacket) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/0, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(5));
+    history.record_received(/*packet_number=*/2, /*ack_eliciting=*/false,
+                            coquic::quic::test::test_time(20));
+
+    const auto ack =
+        history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(28));
+    ASSERT_TRUE(ack.has_value());
+    if (!ack.has_value()) {
+        GTEST_FAIL() << "expected ACK frame";
+        return;
+    }
+
+    const auto &ack_frame = *ack;
+    EXPECT_EQ(ack_frame.largest_acknowledged, 2u);
+    EXPECT_EQ(ack_frame.ack_delay, 1000u);
+}
+
 TEST(QuicRecoveryTest, PacketThresholdLossMarksOlderPacketLost) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
@@ -99,6 +119,8 @@ TEST(QuicRecoveryTest, TimeThresholdLossUsesRttWindow) {
     rtt.smoothed_rtt = std::chrono::milliseconds(10);
     rtt.rttvar = std::chrono::milliseconds(5);
 
+    EXPECT_FALSE(coquic::quic::is_time_threshold_lost(rtt, coquic::quic::test::test_time(0),
+                                                      coquic::quic::test::test_time(11)));
     EXPECT_TRUE(coquic::quic::is_time_threshold_lost(rtt, coquic::quic::test::test_time(0),
                                                      coquic::quic::test::test_time(12)));
 }

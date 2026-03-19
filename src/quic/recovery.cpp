@@ -59,7 +59,8 @@ bool ack_frame_acks_packet(const AckFrame &ack, std::uint64_t packet_number) {
 std::chrono::milliseconds latest_loss_delay(const RecoveryRttState &rtt) {
     const auto base_rtt =
         rtt.latest_rtt.has_value() ? std::max(*rtt.latest_rtt, rtt.smoothed_rtt) : kInitialRtt;
-    return std::max(kGranularity, std::chrono::milliseconds(base_rtt.count() * 9 / 8));
+    const auto rounded_up_loss_delay = std::chrono::milliseconds((base_rtt.count() * 9 + 7) / 8);
+    return std::max(kGranularity, rounded_up_loss_delay);
 }
 
 } // namespace
@@ -107,10 +108,11 @@ std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack
         .first_ack_range = ranges.front().second - ranges.front().first,
     };
 
-    if (latest_ack_eliciting_received_time_.has_value() &&
-        now >= *latest_ack_eliciting_received_time_) {
+    const auto largest_acknowledged_it = packets_.find(ack.largest_acknowledged);
+    if (largest_acknowledged_it != packets_.end() &&
+        now >= largest_acknowledged_it->second.received_time) {
         const auto ack_delay = std::chrono::duration_cast<std::chrono::microseconds>(
-            now - *latest_ack_eliciting_received_time_);
+            now - largest_acknowledged_it->second.received_time);
         ack.ack_delay = encode_ack_delay(ack_delay, ack_delay_exponent);
     }
 

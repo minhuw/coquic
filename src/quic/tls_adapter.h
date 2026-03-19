@@ -10,6 +10,10 @@
 
 #include "src/quic/protected_codec.h"
 
+namespace coquic::quic::test {
+class TlsAdapterTestPeer;
+}
+
 namespace coquic::quic {
 
 enum class EncryptionLevel : std::uint8_t {
@@ -56,6 +60,7 @@ class TlsAdapter {
     bool handshake_complete() const;
 
   private:
+    friend class test::TlsAdapterTestPeer;
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

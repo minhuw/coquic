@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -35,16 +36,8 @@ std::uint32_t read_u32_be(std::span<const std::byte> bytes) {
 PacketSpaceState &packet_space_for_level(EncryptionLevel level, PacketSpaceState &initial_space,
                                          PacketSpaceState &handshake_space,
                                          PacketSpaceState &application_space) {
-    switch (level) {
-    case EncryptionLevel::initial:
-        return initial_space;
-    case EncryptionLevel::handshake:
-        return handshake_space;
-    case EncryptionLevel::application:
-        return application_space;
-    }
-
-    return application_space;
+    PacketSpaceState *const spaces[] = {&initial_space, &handshake_space, &application_space};
+    return *spaces[static_cast<std::size_t>(level)];
 }
 
 bool is_padding_frame(const Frame &frame) {
@@ -169,27 +162,21 @@ void QuicConnection::start_client_if_needed() {
     };
 
     const auto serialized_transport_parameters =
-        serialize_transport_parameters(local_transport_parameters_);
-    if (!serialized_transport_parameters.has_value()) {
-        status_ = HandshakeStatus::failed;
-        return;
-    }
+        serialize_transport_parameters(local_transport_parameters_).value();
 
     tls_.emplace(TlsAdapterConfig{
         .role = config_.role,
         .verify_peer = config_.verify_peer,
         .server_name = config_.server_name,
         .identity = config_.identity,
-        .local_transport_parameters = serialized_transport_parameters.value(),
+        .local_transport_parameters = serialized_transport_parameters,
     });
     if (!tls_->start().has_value()) {
         status_ = HandshakeStatus::failed;
         return;
     }
 
-    if (!sync_tls_state().has_value()) {
-        status_ = HandshakeStatus::failed;
-    }
+    sync_tls_state();
 }
 
 void QuicConnection::start_server_if_needed(
@@ -209,22 +196,16 @@ void QuicConnection::start_server_if_needed(
     };
 
     const auto serialized_transport_parameters =
-        serialize_transport_parameters(local_transport_parameters_);
-    if (!serialized_transport_parameters.has_value()) {
-        status_ = HandshakeStatus::failed;
-        return;
-    }
+        serialize_transport_parameters(local_transport_parameters_).value();
 
     tls_.emplace(TlsAdapterConfig{
         .role = config_.role,
         .verify_peer = config_.verify_peer,
         .server_name = config_.server_name,
         .identity = config_.identity,
-        .local_transport_parameters = serialized_transport_parameters.value(),
+        .local_transport_parameters = serialized_transport_parameters,
     });
-    if (!sync_tls_state().has_value()) {
-        status_ = HandshakeStatus::failed;
-    }
+    sync_tls_state();
 }
 
 CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connection_id(
@@ -346,10 +327,8 @@ QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const 
             return CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch,
                                                      reader.offset());
         }
-        const auto token = reader.read_exact(static_cast<std::size_t>(token_length.value().value));
-        if (!token.has_value()) {
-            return CodecResult<std::size_t>::failure(token.error().code, token.error().offset);
-        }
+        static_cast<void>(
+            reader.read_exact(static_cast<std::size_t>(token_length.value().value)).value());
     } else if (packet_type != 0x02u) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::unsupported_packet_type, 0);
     }
@@ -379,12 +358,10 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
         handshake_space_.largest_authenticated_packet_number = handshake->packet_number;
         return process_inbound_crypto(EncryptionLevel::handshake, handshake->frames);
     }
-    if (const auto *application = std::get_if<ProtectedOneRttPacket>(&packet)) {
-        application_space_.largest_authenticated_packet_number = application->packet_number;
-        return process_inbound_application(application->frames);
-    }
 
-    return CodecResult<bool>::success(true);
+    const auto &application = std::get<ProtectedOneRttPacket>(packet);
+    application_space_.largest_authenticated_packet_number = application.packet_number;
+    return process_inbound_application(application.frames);
 }
 
 CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,

@@ -1,17 +1,29 @@
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "src/quic/tls_adapter.h"
+#include "src/quic/tls_adapter_quictls_test_hooks.h"
 #include "tests/quic_test_utils.h"
 
 namespace {
 
+using coquic::quic::CipherSuite;
+using coquic::quic::CodecErrorCode;
 using coquic::quic::EncryptionLevel;
 using coquic::quic::EndpointRole;
 using coquic::quic::TlsAdapter;
 using coquic::quic::TlsAdapterConfig;
 using coquic::quic::TlsIdentity;
+using coquic::quic::test::ScopedTlsAdapterFaultInjector;
+using coquic::quic::test::TlsAdapterFaultPoint;
+using coquic::quic::test::TlsAdapterTestPeer;
 
 TlsAdapterConfig make_client_config() {
     return TlsAdapterConfig{
@@ -38,10 +50,7 @@ TlsAdapterConfig make_server_config() {
     };
 }
 
-TEST(QuicTlsAdapterContractTest, ClientAndServerExchangeHandshakeBytesAndSecrets) {
-    TlsAdapter client(make_client_config());
-    TlsAdapter server(make_server_config());
-
+void drive_tls_handshake(TlsAdapter &client, TlsAdapter &server) {
     ASSERT_TRUE(client.start().has_value());
     const auto initial_client_flight = client.take_pending(EncryptionLevel::initial);
     ASSERT_FALSE(initial_client_flight.empty());
@@ -71,6 +80,13 @@ TEST(QuicTlsAdapterContractTest, ClientAndServerExchangeHandshakeBytesAndSecrets
         client.poll();
         server.poll();
     }
+}
+
+TEST(QuicTlsAdapterContractTest, ClientAndServerExchangeHandshakeBytesAndSecrets) {
+    TlsAdapter client(make_client_config());
+    TlsAdapter server(make_server_config());
+
+    drive_tls_handshake(client, server);
 
     EXPECT_TRUE(client.handshake_complete());
     EXPECT_TRUE(server.handshake_complete());
@@ -86,6 +102,344 @@ TEST(QuicTlsAdapterContractTest, ClientAndServerExchangeHandshakeBytesAndSecrets
     EXPECT_TRUE(std::any_of(server_secrets.begin(), server_secrets.end(), [](const auto &secret) {
         return secret.level == EncryptionLevel::handshake;
     }));
+}
+
+TEST(QuicTlsAdapterContractTest, AsTlsBytesReturnsStablePointers) {
+    const auto empty_bytes = std::span<const std::byte>{};
+    EXPECT_NE(TlsAdapterTestPeer::as_tls_bytes(empty_bytes), nullptr);
+
+    const auto non_empty_bytes = coquic::quic::test::sample_transport_parameters();
+    EXPECT_EQ(TlsAdapterTestPeer::as_tls_bytes(non_empty_bytes),
+              reinterpret_cast<const uint8_t *>(non_empty_bytes.data()));
+}
+
+TEST(QuicTlsAdapterContractTest, MapsOsslEncryptionLevelsToInternalLevels) {
+    EXPECT_EQ(TlsAdapterTestPeer::to_encryption_level(ssl_encryption_initial),
+              EncryptionLevel::initial);
+    EXPECT_EQ(TlsAdapterTestPeer::to_encryption_level(ssl_encryption_handshake),
+              EncryptionLevel::handshake);
+    EXPECT_EQ(TlsAdapterTestPeer::to_encryption_level(ssl_encryption_application),
+              EncryptionLevel::application);
+    EXPECT_EQ(TlsAdapterTestPeer::to_encryption_level(ssl_encryption_early_data), std::nullopt);
+    EXPECT_EQ(TlsAdapterTestPeer::to_encryption_level_value(0xff), std::nullopt);
+}
+
+TEST(QuicTlsAdapterContractTest, MapsInternalEncryptionLevelsToOsslLevels) {
+    EXPECT_EQ(TlsAdapterTestPeer::to_ossl_encryption_level(EncryptionLevel::initial),
+              ssl_encryption_initial);
+    EXPECT_EQ(TlsAdapterTestPeer::to_ossl_encryption_level(EncryptionLevel::handshake),
+              ssl_encryption_handshake);
+    EXPECT_EQ(TlsAdapterTestPeer::to_ossl_encryption_level(EncryptionLevel::application),
+              ssl_encryption_application);
+    EXPECT_EQ(TlsAdapterTestPeer::to_ossl_encryption_level_value(0xff), ssl_encryption_initial);
+}
+
+TEST(QuicTlsAdapterContractTest, MapsCipherSuitesFromProtocolIdsAndStartsIncomplete) {
+    EXPECT_FALSE(
+        TlsAdapterTestPeer::cipher_suite_for_protocol_ids(std::nullopt, std::nullopt).has_value());
+    EXPECT_EQ(TlsAdapterTestPeer::cipher_suite_for_protocol_ids(
+                  std::nullopt, std::optional<std::uint16_t>(0x1301))
+                  .value(),
+              CipherSuite::tls_aes_128_gcm_sha256);
+    EXPECT_EQ(TlsAdapterTestPeer::cipher_suite_for_protocol_ids(
+                  std::optional<std::uint16_t>(0x1302), std::nullopt)
+                  .value(),
+              CipherSuite::tls_aes_256_gcm_sha384);
+    EXPECT_EQ(TlsAdapterTestPeer::cipher_suite_for_protocol_ids(
+                  std::nullopt, std::optional<std::uint16_t>(0x1303))
+                  .value(),
+              CipherSuite::tls_chacha20_poly1305_sha256);
+    EXPECT_FALSE(TlsAdapterTestPeer::cipher_suite_for_protocol_ids(
+                     std::optional<std::uint16_t>(0x9999), std::nullopt)
+                     .has_value());
+
+    TlsAdapter client(make_client_config());
+    EXPECT_FALSE(client.handshake_complete());
+}
+
+TEST(QuicTlsAdapterContractTest, InitializationFaultsProduceStickyErrors) {
+    const auto expect_init_failure = [](TlsAdapterFaultPoint fault_point, TlsAdapterConfig config) {
+        const ScopedTlsAdapterFaultInjector injector(fault_point);
+        TlsAdapter adapter(std::move(config));
+        EXPECT_FALSE(adapter.start().has_value());
+        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+                  CodecErrorCode::invalid_packet_protection_state);
+    };
+
+    expect_init_failure(TlsAdapterFaultPoint::initialize_ctx_new, make_client_config());
+    expect_init_failure(TlsAdapterFaultPoint::initialize_ctx_config, make_client_config());
+    auto verify_paths_config = make_client_config();
+    verify_paths_config.verify_peer = true;
+    expect_init_failure(TlsAdapterFaultPoint::initialize_verify_paths,
+                        std::move(verify_paths_config));
+    expect_init_failure(TlsAdapterFaultPoint::initialize_ssl_new, make_client_config());
+    expect_init_failure(TlsAdapterFaultPoint::initialize_ssl_set_quic_method, make_client_config());
+    expect_init_failure(TlsAdapterFaultPoint::initialize_server_name, make_client_config());
+    expect_init_failure(TlsAdapterFaultPoint::initialize_transport_params, make_client_config());
+}
+
+TEST(QuicTlsAdapterContractTest, FaultInjectorHonorsConfiguredOccurrence) {
+    const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::initialize_ctx_new, 2);
+
+    TlsAdapter first(make_client_config());
+    EXPECT_TRUE(first.start().has_value());
+
+    TlsAdapter second(make_client_config());
+    EXPECT_FALSE(second.start().has_value());
+}
+
+TEST(QuicTlsAdapterContractTest, ServerIdentityFailuresProduceStickyErrors) {
+    auto missing_identity = make_server_config();
+    missing_identity.identity.reset();
+    TlsAdapter missing_identity_adapter(std::move(missing_identity));
+    EXPECT_FALSE(missing_identity_adapter.start().has_value());
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(missing_identity_adapter),
+              CodecErrorCode::invalid_packet_protection_state);
+
+    {
+        const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::load_identity_cert_bio);
+        TlsAdapter adapter(make_server_config());
+        EXPECT_FALSE(adapter.start().has_value());
+        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+                  CodecErrorCode::invalid_packet_protection_state);
+    }
+
+    auto invalid_certificate = make_server_config();
+    const auto valid_identity = invalid_certificate.identity.value_or(TlsIdentity{});
+    invalid_certificate.identity = TlsIdentity{
+        .certificate_pem = "invalid certificate",
+        .private_key_pem = valid_identity.private_key_pem,
+    };
+    TlsAdapter invalid_certificate_adapter(std::move(invalid_certificate));
+    EXPECT_FALSE(invalid_certificate_adapter.start().has_value());
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(invalid_certificate_adapter),
+              CodecErrorCode::invalid_packet_protection_state);
+
+    {
+        const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::load_identity_key_bio);
+        TlsAdapter adapter(make_server_config());
+        EXPECT_FALSE(adapter.start().has_value());
+        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+                  CodecErrorCode::invalid_packet_protection_state);
+    }
+
+    auto invalid_private_key = make_server_config();
+    const auto valid_private_key_identity = invalid_private_key.identity.value_or(TlsIdentity{});
+    invalid_private_key.identity = TlsIdentity{
+        .certificate_pem = valid_private_key_identity.certificate_pem,
+        .private_key_pem = "invalid private key",
+    };
+    TlsAdapter invalid_private_key_adapter(std::move(invalid_private_key));
+    EXPECT_FALSE(invalid_private_key_adapter.start().has_value());
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(invalid_private_key_adapter),
+              CodecErrorCode::invalid_packet_protection_state);
+
+    {
+        const ScopedTlsAdapterFaultInjector injector(
+            TlsAdapterFaultPoint::load_identity_use_certificate);
+        TlsAdapter adapter(make_server_config());
+        EXPECT_FALSE(adapter.start().has_value());
+        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+                  CodecErrorCode::invalid_packet_protection_state);
+    }
+}
+
+TEST(QuicTlsAdapterContractTest, ProvideAndPollRejectStickyOrMissingSslState) {
+    TlsAdapter sticky_adapter(make_client_config());
+    EXPECT_FALSE(TlsAdapterTestPeer::has_sticky_error(sticky_adapter));
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(sticky_adapter), std::nullopt);
+    TlsAdapterTestPeer::set_sticky_error(sticky_adapter,
+                                         CodecErrorCode::invalid_packet_protection_state);
+    EXPECT_TRUE(TlsAdapterTestPeer::has_sticky_error(sticky_adapter));
+    EXPECT_FALSE(sticky_adapter.provide(EncryptionLevel::initial, {}).has_value());
+    sticky_adapter.poll();
+    EXPECT_FALSE(TlsAdapterTestPeer::drive_handshake(sticky_adapter).has_value());
+    TlsAdapterTestPeer::clear_sticky_error(sticky_adapter);
+    EXPECT_FALSE(TlsAdapterTestPeer::has_sticky_error(sticky_adapter));
+
+    TlsAdapter missing_ssl_adapter(make_client_config());
+    TlsAdapterTestPeer::reset_ssl(missing_ssl_adapter);
+    EXPECT_FALSE(missing_ssl_adapter.handshake_complete());
+    EXPECT_FALSE(missing_ssl_adapter.provide(EncryptionLevel::initial, {}).has_value());
+    EXPECT_FALSE(TlsAdapterTestPeer::drive_handshake(missing_ssl_adapter).has_value());
+}
+
+TEST(QuicTlsAdapterContractTest, HandshakeHelpersClassifyRetryAndProgressStates) {
+    EXPECT_TRUE(TlsAdapterTestPeer::should_retry_handshake(false, SSL_ERROR_WANT_READ));
+    EXPECT_TRUE(TlsAdapterTestPeer::should_retry_handshake(false, SSL_ERROR_WANT_WRITE));
+    EXPECT_FALSE(TlsAdapterTestPeer::should_retry_handshake(true, SSL_ERROR_WANT_READ));
+    EXPECT_FALSE(TlsAdapterTestPeer::should_retry_handshake(false, SSL_ERROR_SSL));
+
+    EXPECT_FALSE(TlsAdapterTestPeer::handshake_progressed(false, false, false));
+    EXPECT_TRUE(TlsAdapterTestPeer::handshake_progressed(true, false, false));
+    EXPECT_TRUE(TlsAdapterTestPeer::handshake_progressed(false, true, false));
+    EXPECT_TRUE(TlsAdapterTestPeer::handshake_progressed(false, false, true));
+}
+
+TEST(QuicTlsAdapterContractTest,
+     ProvideCoversInjectedQuicDataFailureAndApplicationPostHandshakePaths) {
+    {
+        const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::provide_quic_data);
+        TlsAdapter adapter(make_client_config());
+        EXPECT_FALSE(adapter.provide(EncryptionLevel::initial, {}).has_value());
+        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+                  CodecErrorCode::invalid_packet_protection_state);
+    }
+
+    {
+        TlsAdapter client(make_client_config());
+        TlsAdapter server(make_server_config());
+        drive_tls_handshake(client, server);
+        TlsAdapterTestPeer::clear_peer_transport_parameters(client);
+        EXPECT_TRUE(client.provide(EncryptionLevel::application, {}).has_value());
+        EXPECT_TRUE(client.peer_transport_parameters().has_value());
+        EXPECT_TRUE(TlsAdapterTestPeer::cipher_suite_for_ssl(client).has_value());
+    }
+
+    {
+        TlsAdapter client(make_client_config());
+        TlsAdapter server(make_server_config());
+        drive_tls_handshake(client, server);
+        const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::provide_post_handshake);
+        EXPECT_FALSE(client.provide(EncryptionLevel::application, {}).has_value());
+        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(client),
+                  CodecErrorCode::invalid_packet_protection_state);
+    }
+}
+
+TEST(QuicTlsAdapterContractTest,
+     StaticCallbacksReturnZeroWhenAppDataMissingAndSendAlertWhenPresent) {
+    TlsAdapter adapter(make_client_config());
+    const std::array<uint8_t, 32> secret{};
+    const std::array<uint8_t, 3> data{1, 2, 3};
+
+    EXPECT_EQ(TlsAdapterTestPeer::call_static_set_encryption_secrets_with_null_app_data(
+                  adapter, ssl_encryption_initial, secret.data(), secret.data(), secret.size()),
+              0);
+    EXPECT_EQ(TlsAdapterTestPeer::call_static_add_handshake_data_with_null_app_data(
+                  adapter, ssl_encryption_initial, data.data(), data.size()),
+              0);
+    EXPECT_EQ(TlsAdapterTestPeer::call_static_flush_flight_with_null_app_data(adapter), 0);
+    EXPECT_EQ(TlsAdapterTestPeer::call_static_send_alert_with_null_app_data(
+                  adapter, ssl_encryption_initial, 1),
+              0);
+
+    EXPECT_EQ(TlsAdapterTestPeer::call_static_send_alert(adapter, ssl_encryption_initial, 1), 0);
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+              CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTlsAdapterContractTest, NullSslAndDirectSendAlertTestHooksRemainSafe) {
+    TlsAdapter adapter(make_client_config());
+    EXPECT_EQ(TlsAdapterTestPeer::call_on_send_alert(adapter, ssl_encryption_initial, 1), 0);
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+              CodecErrorCode::invalid_packet_protection_state);
+
+    TlsAdapter missing_ssl_adapter(make_client_config());
+    TlsAdapterTestPeer::reset_ssl(missing_ssl_adapter);
+    const std::array<uint8_t, 32> secret{};
+    EXPECT_EQ(
+        TlsAdapterTestPeer::call_static_send_alert(missing_ssl_adapter, ssl_encryption_initial, 1),
+        0);
+    EXPECT_EQ(TlsAdapterTestPeer::call_static_set_encryption_secrets_with_null_app_data(
+                  missing_ssl_adapter, ssl_encryption_initial, secret.data(), secret.data(),
+                  secret.size()),
+              0);
+}
+
+TEST(QuicTlsAdapterContractTest, CallbacksCaptureSecretsAndHandshakeData) {
+    TlsAdapter client(make_client_config());
+    TlsAdapter server(make_server_config());
+    drive_tls_handshake(client, server);
+    static_cast<void>(client.take_available_secrets());
+
+    const std::array<uint8_t, 32> read_secret{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                                              1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+    const std::array<uint8_t, 32> write_secret{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+                                               2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+    const std::array<uint8_t, 4> data{9, 8, 7, 6};
+
+    EXPECT_EQ(TlsAdapterTestPeer::call_on_set_encryption_secrets(
+                  client, ssl_encryption_early_data, read_secret.data(), write_secret.data(),
+                  read_secret.size()),
+              1);
+    EXPECT_TRUE(client.take_available_secrets().empty());
+
+    EXPECT_EQ(TlsAdapterTestPeer::call_on_set_encryption_secrets(client, ssl_encryption_application,
+                                                                 read_secret.data(), nullptr,
+                                                                 read_secret.size()),
+              1);
+    const auto inbound_secrets = client.take_available_secrets();
+    ASSERT_EQ(inbound_secrets.size(), 1u);
+    EXPECT_EQ(inbound_secrets[0].sender, EndpointRole::server);
+    EXPECT_EQ(inbound_secrets[0].level, EncryptionLevel::application);
+
+    EXPECT_EQ(TlsAdapterTestPeer::call_on_set_encryption_secrets(client, ssl_encryption_application,
+                                                                 nullptr, write_secret.data(),
+                                                                 write_secret.size()),
+              1);
+    const auto outbound_secrets = client.take_available_secrets();
+    ASSERT_EQ(outbound_secrets.size(), 1u);
+    EXPECT_EQ(outbound_secrets[0].sender, EndpointRole::client);
+    EXPECT_EQ(outbound_secrets[0].level, EncryptionLevel::application);
+
+    EXPECT_EQ(TlsAdapterTestPeer::call_on_add_handshake_data(client, ssl_encryption_handshake,
+                                                             data.data(), data.size()),
+              1);
+    EXPECT_EQ(client.take_pending(EncryptionLevel::handshake).size(), data.size());
+    EXPECT_EQ(TlsAdapterTestPeer::call_on_flush_flight(client), 1);
+
+    {
+        TlsAdapter early_data_adapter(make_client_config());
+        EXPECT_EQ(TlsAdapterTestPeer::call_on_add_handshake_data(
+                      early_data_adapter, ssl_encryption_early_data, data.data(), data.size()),
+                  0);
+        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(early_data_adapter),
+                  CodecErrorCode::invalid_packet_protection_state);
+    }
+
+    {
+        TlsAdapter unsupported_cipher_adapter(make_client_config());
+        const ScopedTlsAdapterFaultInjector injector(
+            TlsAdapterFaultPoint::set_encryption_secrets_unsupported_cipher);
+        EXPECT_EQ(TlsAdapterTestPeer::call_on_set_encryption_secrets(
+                      unsupported_cipher_adapter, ssl_encryption_application, read_secret.data(),
+                      nullptr, read_secret.size()),
+                  0);
+        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(unsupported_cipher_adapter),
+                  CodecErrorCode::unsupported_cipher_suite);
+    }
+}
+
+TEST(QuicTlsAdapterContractTest,
+     CapturePeerTransportParametersReturnsWhenSslMissingOrAlreadyCaptured) {
+    TlsAdapter missing_ssl_adapter(make_client_config());
+    TlsAdapterTestPeer::reset_ssl(missing_ssl_adapter);
+    TlsAdapterTestPeer::capture_peer_transport_parameters(missing_ssl_adapter);
+    EXPECT_FALSE(missing_ssl_adapter.peer_transport_parameters().has_value());
+
+    TlsAdapter cached_adapter(make_client_config());
+    TlsAdapterTestPeer::set_peer_transport_parameters(cached_adapter, {std::byte{0x42}});
+    TlsAdapterTestPeer::capture_peer_transport_parameters(cached_adapter);
+    EXPECT_EQ(cached_adapter.peer_transport_parameters(),
+              std::optional<std::vector<std::byte>>{{std::byte{0x42}}});
+}
+
+TEST(QuicTlsAdapterContractTest, DriveHandshakeFaultAndMoveAssignmentRemainUsable) {
+    {
+        TlsAdapter adapter(make_client_config());
+        const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::drive_handshake);
+        EXPECT_FALSE(TlsAdapterTestPeer::drive_handshake(adapter).has_value());
+        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+                  CodecErrorCode::invalid_packet_protection_state);
+    }
+
+    TlsAdapter source(make_client_config());
+    TlsAdapter destination(make_client_config());
+    destination = std::move(source);
+
+    EXPECT_FALSE(destination.handshake_complete());
+    EXPECT_TRUE(destination.start().has_value());
 }
 
 } // namespace

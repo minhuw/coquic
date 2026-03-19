@@ -145,6 +145,7 @@ TEST(QuicTransportParametersTest, MissingFlowControlParametersDefaultToZero) {
     EXPECT_EQ(decoded.value().initial_max_stream_data_bidi_local, 0u);
     EXPECT_EQ(decoded.value().initial_max_stream_data_bidi_remote, 0u);
     EXPECT_EQ(decoded.value().initial_max_streams_bidi, 0u);
+    EXPECT_EQ(decoded.value().initial_max_streams_uni, 0u);
     EXPECT_EQ(decoded.value().initial_max_stream_data_uni, 0u);
 }
 

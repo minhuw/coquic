@@ -152,6 +152,9 @@ TEST(QuicCoreTest, TwoPeersEmitHandshakeReadyExactlyOnce) {
 TEST(QuicCoreTest, HandshakeExportsConfiguredTransportParametersToPeer) {
     auto client_config = coquic::quic::test::make_client_core_config();
     client_config.transport.initial_max_data = 7777;
+    client_config.transport.initial_max_stream_data_bidi_local = 1234;
+    client_config.transport.initial_max_stream_data_bidi_remote = 2345;
+    client_config.transport.initial_max_stream_data_uni = 3456;
     client_config.transport.initial_max_streams_bidi = 11;
     client_config.transport.initial_max_streams_uni = 13;
 
@@ -165,6 +168,11 @@ TEST(QuicCoreTest, HandshakeExportsConfiguredTransportParametersToPeer) {
         return;
     }
     EXPECT_EQ(peer_transport_parameters.value().initial_max_data, 7777u);
+    EXPECT_EQ(peer_transport_parameters.value().initial_max_stream_data_bidi_local, 1234u);
+    EXPECT_EQ(peer_transport_parameters.value().initial_max_stream_data_bidi_remote, 2345u);
+    EXPECT_EQ(peer_transport_parameters.value().initial_max_stream_data_uni, 3456u);
+    EXPECT_EQ(peer_transport_parameters.value().initial_max_streams_bidi, 11u);
+    EXPECT_EQ(peer_transport_parameters.value().initial_max_streams_uni, 13u);
 }
 
 TEST(QuicCoreTest, TwoPeersExchangeStreamZeroDataThroughEffects) {
@@ -1988,6 +1996,42 @@ TEST(QuicCoreTest, ConnectionStartupHelpersCoverReentryAndTlsFailure) {
     const auto initial_dcid = second_server.client_initial_destination_connection_id_;
     second_server.start_server_if_needed({std::byte{0x03}});
     EXPECT_EQ(second_server.client_initial_destination_connection_id_, initial_dcid);
+}
+
+TEST(QuicCoreTest, ConnectionStartupRejectsInvalidLocalTransportParameters) {
+    auto bad_client_config = coquic::quic::test::make_client_core_config();
+    bad_client_config.transport.ack_delay_exponent = 21;
+    coquic::quic::QuicConnection bad_client(std::move(bad_client_config));
+    bad_client.start_client_if_needed();
+    EXPECT_TRUE(bad_client.started_);
+    EXPECT_TRUE(bad_client.has_failed());
+    EXPECT_FALSE(bad_client.tls_.has_value());
+
+    auto bad_server_config = coquic::quic::test::make_server_core_config();
+    bad_server_config.transport.max_ack_delay = (1u << 14);
+    coquic::quic::QuicConnection bad_server(std::move(bad_server_config));
+    bad_server.start_server_if_needed({std::byte{0x01}});
+    EXPECT_TRUE(bad_server.started_);
+    EXPECT_TRUE(bad_server.has_failed());
+    EXPECT_FALSE(bad_server.tls_.has_value());
+}
+
+TEST(QuicCoreTest, ConnectionStartupRejectsUnserializableLocalTransportParameters) {
+    auto bad_client_config = coquic::quic::test::make_client_core_config();
+    bad_client_config.transport.initial_max_data = (std::uint64_t{1} << 62);
+    coquic::quic::QuicConnection bad_client(std::move(bad_client_config));
+    bad_client.start_client_if_needed();
+    EXPECT_TRUE(bad_client.started_);
+    EXPECT_TRUE(bad_client.has_failed());
+    EXPECT_FALSE(bad_client.tls_.has_value());
+
+    auto bad_server_config = coquic::quic::test::make_server_core_config();
+    bad_server_config.transport.initial_max_stream_data_uni = (std::uint64_t{1} << 62);
+    coquic::quic::QuicConnection bad_server(std::move(bad_server_config));
+    bad_server.start_server_if_needed({std::byte{0x01}});
+    EXPECT_TRUE(bad_server.started_);
+    EXPECT_TRUE(bad_server.has_failed());
+    EXPECT_FALSE(bad_server.tls_.has_value());
 }
 
 TEST(QuicCoreTest, ProcessInboundDatagramFailsForDecodeAndPacketProcessingErrors) {

@@ -96,6 +96,19 @@ std::chrono::milliseconds decode_ack_delay(const AckFrame &ack, std::uint64_t ac
         std::chrono::microseconds(bounded_ack_delay << ack_delay_exponent));
 }
 
+CodecResult<std::vector<std::byte>> serialize_locally_validated_transport_parameters(
+    EndpointRole local_role, const TransportParameters &parameters,
+    const TransportParametersValidationContext &validation_context) {
+    const auto validation =
+        validate_peer_transport_parameters(local_role, parameters, validation_context);
+    if (!validation.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(validation.error().code,
+                                                            validation.error().offset);
+    }
+
+    return serialize_transport_parameters(parameters);
+}
+
 } // namespace
 
 QuicConnection::QuicConnection(QuicCoreConfig config) : config_(std::move(config)) {
@@ -441,15 +454,24 @@ void QuicConnection::start_client_if_needed() {
         .initial_source_connection_id = config_.source_connection_id,
     };
 
-    const auto serialized_transport_parameters =
-        serialize_transport_parameters(local_transport_parameters_).value();
+    const auto serialized_transport_parameters = serialize_locally_validated_transport_parameters(
+        config_.role, local_transport_parameters_,
+        TransportParametersValidationContext{
+            .expected_initial_source_connection_id = config_.source_connection_id,
+            .expected_original_destination_connection_id = std::nullopt,
+            .expected_retry_source_connection_id = std::nullopt,
+        });
+    if (!serialized_transport_parameters.has_value()) {
+        mark_failed();
+        return;
+    }
 
     tls_.emplace(TlsAdapterConfig{
         .role = config_.role,
         .verify_peer = config_.verify_peer,
         .server_name = config_.server_name,
         .identity = config_.identity,
-        .local_transport_parameters = serialized_transport_parameters,
+        .local_transport_parameters = serialized_transport_parameters.value(),
     });
     if (!tls_->start().has_value()) {
         mark_failed();
@@ -484,15 +506,25 @@ void QuicConnection::start_server_if_needed(
         .initial_source_connection_id = config_.source_connection_id,
     };
 
-    const auto serialized_transport_parameters =
-        serialize_transport_parameters(local_transport_parameters_).value();
+    const auto serialized_transport_parameters = serialize_locally_validated_transport_parameters(
+        config_.role, local_transport_parameters_,
+        TransportParametersValidationContext{
+            .expected_initial_source_connection_id = config_.source_connection_id,
+            .expected_original_destination_connection_id =
+                client_initial_destination_connection_id_,
+            .expected_retry_source_connection_id = std::nullopt,
+        });
+    if (!serialized_transport_parameters.has_value()) {
+        mark_failed();
+        return;
+    }
 
     tls_.emplace(TlsAdapterConfig{
         .role = config_.role,
         .verify_peer = config_.verify_peer,
         .server_name = config_.server_name,
         .identity = config_.identity,
-        .local_transport_parameters = serialized_transport_parameters,
+        .local_transport_parameters = serialized_transport_parameters.value(),
     });
     static_cast<void>(sync_tls_state().value());
 }

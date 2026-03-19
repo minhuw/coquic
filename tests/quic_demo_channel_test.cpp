@@ -213,6 +213,21 @@ TEST(QuicDemoChannelTest, QueueBeforeHandshakePreservesCurrentWakeup) {
     EXPECT_EQ(result.next_wakeup, coquic::quic::test::test_time(123));
 }
 
+TEST(QuicDemoChannelTest, LaterInternalStepWakeupReplacesEarlierWakeup) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+
+    coquic::quic::QuicDemoChannelResult first_step{
+        .next_wakeup = coquic::quic::test::test_time(10),
+    };
+    coquic::quic::QuicDemoChannelResult second_step{
+        .next_wakeup = std::nullopt,
+    };
+
+    channel.merge_result(first_step, std::move(second_step));
+
+    EXPECT_EQ(first_step.next_wakeup, std::nullopt);
+}
+
 TEST(QuicDemoChannelTest, InboundOversizedLengthPrefixFailsOnceAndLaterCallsAreInert) {
     coquic::quic::QuicCore attacker(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicDemoChannel victim(coquic::quic::test::make_server_core_config());

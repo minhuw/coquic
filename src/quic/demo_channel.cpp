@@ -148,11 +148,7 @@ void QuicDemoChannel::merge_result(QuicDemoChannelResult &destination,
     destination.effects.insert(destination.effects.end(),
                                std::make_move_iterator(source.effects.begin()),
                                std::make_move_iterator(source.effects.end()));
-    if (source.next_wakeup.has_value() &&
-        (!destination.next_wakeup.has_value() ||
-         source.next_wakeup.value() < destination.next_wakeup.value())) {
-        destination.next_wakeup = source.next_wakeup;
-    }
+    destination.next_wakeup = source.next_wakeup;
     next_wakeup_ = destination.next_wakeup;
 }
 

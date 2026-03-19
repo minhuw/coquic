@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -140,6 +141,20 @@ TEST(QuicDemoChannelTest, QueuedMessageFlushesWhenClientTransitionsToReady) {
 
     ASSERT_TRUE(saw_ready);
     EXPECT_FALSE(coquic::quic::test::send_datagrams_from(ready_step).empty());
+    const auto ready_position = std::find_if(
+        ready_step.effects.begin(), ready_step.effects.end(),
+        [](const coquic::quic::QuicDemoChannelEffect &effect) {
+            const auto *state_event = std::get_if<coquic::quic::QuicDemoChannelStateEvent>(&effect);
+            return state_event != nullptr &&
+                   state_event->change == coquic::quic::QuicDemoChannelStateChange::ready;
+        });
+    ASSERT_NE(ready_position, ready_step.effects.end());
+    EXPECT_EQ(std::find_if(ready_position, ready_step.effects.end(),
+                           [](const coquic::quic::QuicDemoChannelEffect &effect) {
+                               return std::holds_alternative<coquic::quic::QuicCoreSendDatagram>(
+                                   effect);
+                           }),
+              ready_step.effects.end());
 
     const auto server_after_ready = coquic::quic::test::relay_send_datagrams_to_peer(
         ready_step, server, coquic::quic::test::test_time(1));

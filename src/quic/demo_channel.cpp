@@ -1,5 +1,6 @@
 #include "src/quic/demo_channel.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <utility>
@@ -73,24 +74,37 @@ QuicDemoChannelResult QuicDemoChannel::advance(QuicDemoChannelInput input, QuicC
         };
     }
 
+    const auto flush_after_ready = [&](bool was_ready, QuicDemoChannelResult &result) {
+        if (has_failed() || was_ready || !core_.is_handshake_complete() ||
+            pending_send_bytes_.empty()) {
+            return;
+        }
+
+        auto flushed = flush_buffered_messages(now);
+        auto ready_position = std::find_if(
+            result.effects.begin(), result.effects.end(), [](const QuicDemoChannelEffect &effect) {
+                const auto *state_event = std::get_if<QuicDemoChannelStateEvent>(&effect);
+                return state_event != nullptr &&
+                       state_event->change == QuicDemoChannelStateChange::ready;
+            });
+        result.effects.insert(ready_position, std::make_move_iterator(flushed.effects.begin()),
+                              std::make_move_iterator(flushed.effects.end()));
+        result.next_wakeup = flushed.next_wakeup;
+        next_wakeup_ = result.next_wakeup;
+    };
+
     return std::visit(overloaded{
                           [&](QuicCoreStart start) {
                               const bool was_ready = core_.is_handshake_complete();
                               auto result = process_core_result(core_.advance(start, now));
-                              if (!has_failed() && !was_ready && core_.is_handshake_complete() &&
-                                  !pending_send_bytes_.empty()) {
-                                  merge_result(result, flush_buffered_messages(now));
-                              }
+                              flush_after_ready(was_ready, result);
                               return result;
                           },
                           [&](QuicCoreInboundDatagram inbound) {
                               const bool was_ready = core_.is_handshake_complete();
                               auto result =
                                   process_core_result(core_.advance(std::move(inbound), now));
-                              if (!has_failed() && !was_ready && core_.is_handshake_complete() &&
-                                  !pending_send_bytes_.empty()) {
-                                  merge_result(result, flush_buffered_messages(now));
-                              }
+                              flush_after_ready(was_ready, result);
                               return result;
                           },
                           [&](QuicDemoChannelQueueMessage queued) {
@@ -99,10 +113,7 @@ QuicDemoChannelResult QuicDemoChannel::advance(QuicDemoChannelInput input, QuicC
                           [&](QuicCoreTimerExpired expired) {
                               const bool was_ready = core_.is_handshake_complete();
                               auto result = process_core_result(core_.advance(expired, now));
-                              if (!has_failed() && !was_ready && core_.is_handshake_complete() &&
-                                  !pending_send_bytes_.empty()) {
-                                  merge_result(result, flush_buffered_messages(now));
-                              }
+                              flush_after_ready(was_ready, result);
                               return result;
                           },
                       },

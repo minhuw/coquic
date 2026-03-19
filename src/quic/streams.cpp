@@ -39,6 +39,11 @@ StreamIdInfo classify_stream_id(std::uint64_t stream_id, EndpointRole local_role
     };
 }
 
+bool is_local_implicit_stream_open_allowed(std::uint64_t stream_id, EndpointRole local_role) {
+    const auto id_info = classify_stream_id(stream_id, local_role);
+    return id_info.initiator == StreamInitiator::local && id_info.local_can_send;
+}
+
 bool is_peer_implicit_stream_open_allowed_by_limits(std::uint64_t stream_id,
                                                     EndpointRole local_role,
                                                     PeerStreamOpenLimits limits) {
@@ -116,6 +121,60 @@ StreamStateResult<bool> StreamState::note_peer_final_size(std::uint64_t final_si
 
     peer_final_size = final_size;
     return StreamStateResult<bool>::success(true);
+}
+
+bool StreamState::has_pending_send() const {
+    return send_buffer.has_pending_data() || send_fin_state == StreamSendFinState::pending;
+}
+
+bool StreamState::has_outstanding_send() const {
+    return send_buffer.has_outstanding_data() || send_fin_state == StreamSendFinState::sent;
+}
+
+std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(std::size_t max_bytes) {
+    std::vector<StreamFrameSendFragment> fragments;
+    for (auto &range : send_buffer.take_ranges(max_bytes)) {
+        const auto range_end = saturating_add(range.offset, range.bytes.size());
+        const auto fin = send_fin_state == StreamSendFinState::pending &&
+                         send_final_size.has_value() && range_end == *send_final_size;
+        fragments.push_back(StreamFrameSendFragment{
+            .stream_id = stream_id,
+            .offset = range.offset,
+            .bytes = std::move(range.bytes),
+            .fin = fin,
+        });
+        if (fin) {
+            send_fin_state = StreamSendFinState::sent;
+        }
+    }
+
+    if (fragments.empty() && send_fin_state == StreamSendFinState::pending &&
+        send_final_size.has_value() && !send_buffer.has_pending_data() &&
+        !send_buffer.has_outstanding_data()) {
+        fragments.push_back(StreamFrameSendFragment{
+            .stream_id = stream_id,
+            .offset = *send_final_size,
+            .bytes = {},
+            .fin = true,
+        });
+        send_fin_state = StreamSendFinState::sent;
+    }
+
+    return fragments;
+}
+
+void StreamState::acknowledge_send_fragment(const StreamFrameSendFragment &fragment) {
+    send_buffer.acknowledge(fragment.offset, fragment.bytes.size());
+    if (fragment.fin) {
+        send_fin_state = StreamSendFinState::acknowledged;
+    }
+}
+
+void StreamState::mark_send_fragment_lost(const StreamFrameSendFragment &fragment) {
+    send_buffer.mark_lost(fragment.offset, fragment.bytes.size());
+    if (fragment.fin) {
+        send_fin_state = StreamSendFinState::pending;
+    }
 }
 
 StreamState make_implicit_stream_state(std::uint64_t stream_id, EndpointRole local_role) {

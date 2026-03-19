@@ -9,6 +9,7 @@
 #include "src/quic/core.h"
 #include "src/quic/crypto_stream.h"
 #include "src/quic/frame.h"
+#include "src/quic/streams.h"
 
 namespace coquic::quic {
 
@@ -24,8 +25,9 @@ struct SentPacketRecord {
     bool in_flight = false;
     bool declared_lost = false;
     std::vector<ByteRange> crypto_ranges;
-    std::vector<ByteRange> stream_ranges;
+    std::vector<StreamFrameSendFragment> stream_fragments;
     bool has_ping = false;
+    std::size_t bytes_in_flight = 0;
 };
 
 struct RecoveryRttState {

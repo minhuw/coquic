@@ -3,12 +3,11 @@
 #include <utility>
 
 #include "src/quic/connection.h"
+#include "src/quic/streams.h"
 
 namespace coquic::quic {
 
 namespace {
-
-constexpr std::uint64_t kCompatibleStreamId = 0;
 
 template <typename... Ts> struct overloaded : Ts... {
     using Ts::operator()...;
@@ -20,6 +19,32 @@ QuicCoreLocalError unsupported_operation_error(std::uint64_t stream_id) {
     return QuicCoreLocalError{
         .code = QuicCoreLocalErrorCode::unsupported_operation,
         .stream_id = stream_id,
+    };
+}
+
+QuicCoreLocalError stream_state_error_to_local_error(const StreamStateError &error) {
+    auto code = QuicCoreLocalErrorCode::invalid_stream_id;
+    switch (error.code) {
+    case StreamStateErrorCode::invalid_stream_id:
+        code = QuicCoreLocalErrorCode::invalid_stream_id;
+        break;
+    case StreamStateErrorCode::invalid_stream_direction:
+        code = QuicCoreLocalErrorCode::invalid_stream_direction;
+        break;
+    case StreamStateErrorCode::send_side_closed:
+        code = QuicCoreLocalErrorCode::send_side_closed;
+        break;
+    case StreamStateErrorCode::receive_side_closed:
+        code = QuicCoreLocalErrorCode::receive_side_closed;
+        break;
+    case StreamStateErrorCode::final_size_conflict:
+        code = QuicCoreLocalErrorCode::final_size_conflict;
+        break;
+    }
+
+    return QuicCoreLocalError{
+        .code = code,
+        .stream_id = error.stream_id,
     };
 }
 
@@ -43,28 +68,16 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                        connection_->process_inbound_datagram(in.bytes, now);
                    },
                    [&](const QuicCoreSendStreamData &in) {
-                       if (in.stream_id != kCompatibleStreamId) {
-                           result.local_error = unsupported_operation_error(in.stream_id);
-                           return;
+                       const auto queued =
+                           connection_->queue_stream_send(in.stream_id, in.bytes, in.fin);
+                       if (!queued.has_value()) {
+                           result.local_error = stream_state_error_to_local_error(queued.error());
                        }
-                       if (in.fin) {
-                           result.local_error = unsupported_operation_error(in.stream_id);
-                           return;
-                       }
-                       connection_->queue_application_data(in.bytes);
                    },
                    [&](const QuicCoreResetStream &in) {
-                       if (in.stream_id != kCompatibleStreamId) {
-                           result.local_error = unsupported_operation_error(in.stream_id);
-                           return;
-                       }
                        result.local_error = unsupported_operation_error(in.stream_id);
                    },
                    [&](const QuicCoreStopSending &in) {
-                       if (in.stream_id != kCompatibleStreamId) {
-                           result.local_error = unsupported_operation_error(in.stream_id);
-                           return;
-                       }
                        result.local_error = unsupported_operation_error(in.stream_id);
                    },
                    [&](const QuicCoreTimerExpired &) { connection_->on_timeout(now); },
@@ -78,12 +91,8 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         }
         result.effects.emplace_back(QuicCoreSendDatagram{std::move(datagram)});
     }
-    if (auto bytes = connection_->take_received_application_data(); !bytes.empty()) {
-        result.effects.emplace_back(QuicCoreReceiveStreamData{
-            .stream_id = kCompatibleStreamId,
-            .bytes = std::move(bytes),
-            .fin = false,
-        });
+    while (const auto received = connection_->take_received_stream_data()) {
+        result.effects.emplace_back(*received);
     }
     while (const auto event = connection_->take_state_change()) {
         result.effects.emplace_back(QuicCoreStateEvent{*event});

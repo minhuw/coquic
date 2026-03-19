@@ -41,10 +41,11 @@ class QuicConnection {
 
     void start();
     void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now);
-    void queue_application_data(std::span<const std::byte> bytes);
+    StreamStateResult<bool> queue_stream_send(std::uint64_t stream_id,
+                                              std::span<const std::byte> bytes, bool fin);
     std::vector<std::byte> drain_outbound_datagram(QuicCoreTimePoint now);
     void on_timeout(QuicCoreTimePoint now);
-    std::vector<std::byte> take_received_application_data();
+    std::optional<QuicCoreReceiveStreamData> take_received_stream_data();
     std::optional<QuicCoreStateChange> take_state_change();
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     bool is_handshake_complete() const;
@@ -82,6 +83,10 @@ class QuicConnection {
     void update_handshake_status();
     std::optional<TransportParametersValidationContext>
     peer_transport_parameters_validation_context() const;
+    StreamStateResult<StreamState *> get_or_open_local_stream(std::uint64_t stream_id);
+    CodecResult<StreamState *> get_or_open_receive_stream(std::uint64_t stream_id);
+    PeerStreamOpenLimits peer_stream_open_limits() const;
+    bool has_pending_application_send() const;
     ConnectionId outbound_destination_connection_id() const;
     ConnectionId client_initial_destination_connection_id() const;
     std::vector<std::byte> flush_outbound_datagram(QuicCoreTimePoint now);
@@ -100,9 +105,8 @@ class QuicConnection {
     std::optional<ConnectionId> client_initial_destination_connection_id_;
     std::optional<TransportParameters> peer_transport_parameters_;
     bool peer_transport_parameters_validated_ = false;
-    ReliableSendBuffer pending_application_send_;
-    ReliableReceiveBuffer pending_application_receive_buffer_;
-    std::vector<std::byte> pending_application_receive_;
+    std::map<std::uint64_t, StreamState> streams_;
+    std::vector<QuicCoreReceiveStreamData> pending_stream_receive_effects_;
     std::vector<QuicCoreStateChange> pending_state_changes_;
     std::uint32_t pto_count_ = 0;
     bool handshake_confirmed_ = false;

@@ -122,6 +122,32 @@ received_stream_data_from(const QuicCoreResult &result) {
     return out;
 }
 
+struct StreamPayload {
+    std::uint64_t stream_id = 0;
+    std::string text;
+    bool fin = false;
+
+    bool operator==(const StreamPayload &) const = default;
+};
+
+inline std::vector<StreamPayload> stream_payloads_from(const QuicCoreResult &result) {
+    std::vector<StreamPayload> payloads;
+    for (const auto &received : received_stream_data_from(result)) {
+        std::string text;
+        text.reserve(received.bytes.size());
+        for (const auto byte : received.bytes) {
+            text.push_back(static_cast<char>(std::to_integer<unsigned char>(byte)));
+        }
+        payloads.push_back(StreamPayload{
+            .stream_id = received.stream_id,
+            .text = std::move(text),
+            .fin = received.fin,
+        });
+    }
+
+    return payloads;
+}
+
 inline std::vector<QuicCorePeerResetStream> peer_resets_from(const QuicCoreResult &result) {
     std::vector<QuicCorePeerResetStream> out;
     for (const auto &effect : result.effects) {

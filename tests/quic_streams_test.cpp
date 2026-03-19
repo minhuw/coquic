@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
+#include <string_view>
+#include <vector>
 
 #include "src/quic/streams.h"
 
@@ -14,6 +17,15 @@ using coquic::quic::StreamDirection;
 using coquic::quic::StreamInitiator;
 using coquic::quic::StreamState;
 using coquic::quic::StreamStateErrorCode;
+
+std::vector<std::byte> bytes_from_string(std::string_view text) {
+    std::vector<std::byte> bytes;
+    bytes.reserve(text.size());
+    for (const auto character : text) {
+        bytes.push_back(static_cast<std::byte>(character));
+    }
+    return bytes;
+}
 
 void expect_stream_id_info(std::uint64_t stream_id, EndpointRole local_role,
                            StreamInitiator initiator, StreamDirection direction,
@@ -102,12 +114,57 @@ TEST(QuicStreamsTest, PeerImplicitOpenLimitCheckIgnoresLocalBidiStreams) {
         /*stream_id=*/0, EndpointRole::client, {.bidirectional = 8, .unidirectional = 8}));
 }
 
+TEST(QuicStreamsTest, LocalImplicitOpenAllowsOnlyLocallyInitiatedSendStreams) {
+    EXPECT_TRUE(
+        coquic::quic::is_local_implicit_stream_open_allowed(/*stream_id=*/0, EndpointRole::client));
+    EXPECT_TRUE(
+        coquic::quic::is_local_implicit_stream_open_allowed(/*stream_id=*/4, EndpointRole::client));
+    EXPECT_TRUE(
+        coquic::quic::is_local_implicit_stream_open_allowed(/*stream_id=*/2, EndpointRole::client));
+    EXPECT_FALSE(
+        coquic::quic::is_local_implicit_stream_open_allowed(/*stream_id=*/1, EndpointRole::client));
+    EXPECT_FALSE(
+        coquic::quic::is_local_implicit_stream_open_allowed(/*stream_id=*/3, EndpointRole::client));
+}
+
 TEST(QuicStreamsTest, StreamStateCarriesFlowControlBookkeepingGroundwork) {
     const auto state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
     EXPECT_EQ(state.send_flow_control_limit, 0u);
     EXPECT_EQ(state.send_flow_control_committed, 0u);
     EXPECT_EQ(state.receive_flow_control_limit, 0u);
     EXPECT_EQ(state.receive_flow_control_consumed, 0u);
+}
+
+TEST(QuicStreamsTest, TakeSendFragmentsCarriesFinOnFinalFragment) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    state.send_buffer.append(bytes_from_string("hello"));
+    state.send_flow_control_committed = 5;
+    ASSERT_TRUE(state.validate_local_send(/*fin=*/true).has_value());
+    state.send_final_size = 5;
+    state.send_fin_state = coquic::quic::StreamSendFinState::pending;
+
+    const auto fragments = state.take_send_fragments(/*max_bytes=*/16);
+
+    ASSERT_EQ(fragments.size(), 1u);
+    EXPECT_EQ(fragments[0].stream_id, 0u);
+    EXPECT_EQ(fragments[0].offset, 0u);
+    EXPECT_EQ(fragments[0].bytes, bytes_from_string("hello"));
+    EXPECT_TRUE(fragments[0].fin);
+}
+
+TEST(QuicStreamsTest, TakeSendFragmentsSupportsFinOnlySend) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    ASSERT_TRUE(state.validate_local_send(/*fin=*/true).has_value());
+    state.send_final_size = 0;
+    state.send_fin_state = coquic::quic::StreamSendFinState::pending;
+
+    const auto fragments = state.take_send_fragments(/*max_bytes=*/16);
+
+    ASSERT_EQ(fragments.size(), 1u);
+    EXPECT_EQ(fragments[0].stream_id, 0u);
+    EXPECT_EQ(fragments[0].offset, 0u);
+    EXPECT_TRUE(fragments[0].bytes.empty());
+    EXPECT_TRUE(fragments[0].fin);
 }
 
 } // namespace

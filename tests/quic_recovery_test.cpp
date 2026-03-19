@@ -159,9 +159,11 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
             .offset = 11,
             .bytes = {std::byte{0xaa}, std::byte{0xbb}},
         }},
-        .stream_ranges = {ByteRange{
+        .stream_fragments = {coquic::quic::StreamFrameSendFragment{
+            .stream_id = 0,
             .offset = 21,
             .bytes = {std::byte{0xcc}},
+            .fin = false,
         }},
         .has_ping = true,
     });
@@ -174,9 +176,11 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
             .offset = 31,
             .bytes = {std::byte{0xdd}},
         }},
-        .stream_ranges = {ByteRange{
+        .stream_fragments = {coquic::quic::StreamFrameSendFragment{
+            .stream_id = 4,
             .offset = 41,
             .bytes = {std::byte{0xee}, std::byte{0xff}},
+            .fin = true,
         }},
     });
 
@@ -191,15 +195,19 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
     const auto &acked_packet = result.acked_packets.front();
     EXPECT_EQ(acked_packet.crypto_ranges.size(), 1u);
     EXPECT_EQ(acked_packet.crypto_ranges[0].offset, 31u);
-    EXPECT_EQ(acked_packet.stream_ranges.size(), 1u);
-    EXPECT_EQ(acked_packet.stream_ranges[0].offset, 41u);
+    EXPECT_EQ(acked_packet.stream_fragments.size(), 1u);
+    EXPECT_EQ(acked_packet.stream_fragments[0].stream_id, 4u);
+    EXPECT_EQ(acked_packet.stream_fragments[0].offset, 41u);
+    EXPECT_TRUE(acked_packet.stream_fragments[0].fin);
     EXPECT_FALSE(acked_packet.has_ping);
 
     const auto &lost_packet = result.lost_packets.front();
     EXPECT_EQ(lost_packet.crypto_ranges.size(), 1u);
     EXPECT_EQ(lost_packet.crypto_ranges[0].offset, 11u);
-    EXPECT_EQ(lost_packet.stream_ranges.size(), 1u);
-    EXPECT_EQ(lost_packet.stream_ranges[0].offset, 21u);
+    EXPECT_EQ(lost_packet.stream_fragments.size(), 1u);
+    EXPECT_EQ(lost_packet.stream_fragments[0].stream_id, 0u);
+    EXPECT_EQ(lost_packet.stream_fragments[0].offset, 21u);
+    EXPECT_FALSE(lost_packet.stream_fragments[0].fin);
     EXPECT_TRUE(lost_packet.has_ping);
 }
 

@@ -30,6 +30,7 @@ struct StreamIdInfo {
 };
 
 enum class StreamStateErrorCode : std::uint8_t {
+    invalid_stream_id,
     invalid_stream_direction,
     send_side_closed,
     receive_side_closed,
@@ -37,7 +38,7 @@ enum class StreamStateErrorCode : std::uint8_t {
 };
 
 struct StreamStateError {
-    StreamStateErrorCode code = StreamStateErrorCode::invalid_stream_direction;
+    StreamStateErrorCode code = StreamStateErrorCode::invalid_stream_id;
     std::uint64_t stream_id = 0;
 };
 
@@ -89,6 +90,7 @@ struct StreamFrameSendFragment {
 };
 
 StreamIdInfo classify_stream_id(std::uint64_t stream_id, EndpointRole local_role);
+bool is_local_implicit_stream_open_allowed(std::uint64_t stream_id, EndpointRole local_role);
 
 struct PeerStreamOpenLimits {
     std::uint64_t bidirectional = 0;
@@ -99,6 +101,13 @@ bool is_peer_implicit_stream_open_allowed_by_limits(std::uint64_t stream_id,
                                                     EndpointRole local_role,
                                                     PeerStreamOpenLimits limits);
 
+enum class StreamSendFinState : std::uint8_t {
+    none,
+    pending,
+    sent,
+    acknowledged,
+};
+
 struct StreamState {
     std::uint64_t stream_id = 0;
     StreamIdInfo id_info;
@@ -107,7 +116,10 @@ struct StreamState {
     bool send_closed = false;
     bool receive_closed = false;
     bool peer_send_closed = false;
+    bool peer_fin_delivered = false;
     std::optional<std::uint64_t> peer_final_size;
+    std::optional<std::uint64_t> send_final_size;
+    StreamSendFinState send_fin_state = StreamSendFinState::none;
     std::uint64_t send_flow_control_limit = 0;
     std::uint64_t send_flow_control_committed = 0;
     std::uint64_t receive_flow_control_limit = 0;
@@ -118,6 +130,11 @@ struct StreamState {
     StreamStateResult<bool> validate_receive_range(std::uint64_t offset, std::size_t length,
                                                    bool fin);
     StreamStateResult<bool> note_peer_final_size(std::uint64_t final_size);
+    bool has_pending_send() const;
+    bool has_outstanding_send() const;
+    std::vector<StreamFrameSendFragment> take_send_fragments(std::size_t max_bytes);
+    void acknowledge_send_fragment(const StreamFrameSendFragment &fragment);
+    void mark_send_fragment_lost(const StreamFrameSendFragment &fragment);
 };
 
 StreamState make_implicit_stream_state(std::uint64_t stream_id, EndpointRole local_role);

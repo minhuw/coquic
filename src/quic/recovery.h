@@ -33,7 +33,6 @@ struct RecoveryRttState {
     std::optional<std::chrono::milliseconds> min_rtt;
     std::chrono::milliseconds smoothed_rtt{333};
     std::chrono::milliseconds rttvar{166};
-    std::uint32_t pto_count = 0;
 };
 
 class ReceivedPacketHistory {
@@ -59,7 +58,8 @@ class ReceivedPacketHistory {
 struct AckProcessingResult {
     std::vector<SentPacketRecord> acked_packets;
     std::vector<SentPacketRecord> lost_packets;
-    std::optional<SentPacketRecord> largest_newly_acked_ack_eliciting;
+    std::optional<SentPacketRecord> largest_newly_acked_packet;
+    bool has_newly_acked_ack_eliciting = false;
 };
 
 class PacketSpaceRecovery {
@@ -82,10 +82,11 @@ QuicCoreTimePoint compute_time_threshold_deadline(const RecoveryRttState &rtt,
                                                   QuicCoreTimePoint sent_time);
 bool is_time_threshold_lost(const RecoveryRttState &rtt, QuicCoreTimePoint sent_time,
                             QuicCoreTimePoint now);
-QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt, std::uint64_t max_ack_delay_ms,
-                                       QuicCoreTimePoint now);
+QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt,
+                                       std::chrono::milliseconds max_ack_delay,
+                                       QuicCoreTimePoint now, std::uint32_t pto_count);
 void update_rtt(RecoveryRttState &rtt, QuicCoreTimePoint ack_receive_time,
-                const SentPacketRecord &largest_acked_ack_eliciting_packet,
+                const SentPacketRecord &largest_newly_acked_packet,
                 std::chrono::milliseconds ack_delay, std::chrono::milliseconds max_ack_delay);
 
 } // namespace coquic::quic

@@ -154,10 +154,12 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
 
         acked_packet_numbers.push_back(packet_number);
         result.acked_packets.push_back(packet);
-        if (packet.ack_eliciting &&
-            (!result.largest_newly_acked_ack_eliciting.has_value() ||
-             packet.packet_number > result.largest_newly_acked_ack_eliciting->packet_number)) {
-            result.largest_newly_acked_ack_eliciting = packet;
+        if (!result.largest_newly_acked_packet.has_value() ||
+            packet.packet_number > result.largest_newly_acked_packet->packet_number) {
+            result.largest_newly_acked_packet = packet;
+        }
+        if (packet.ack_eliciting) {
+            result.has_newly_acked_ack_eliciting = true;
         }
     }
 
@@ -214,15 +216,15 @@ bool is_time_threshold_lost(const RecoveryRttState &rtt, QuicCoreTimePoint sent_
     return now >= compute_time_threshold_deadline(rtt, sent_time);
 }
 
-QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt, std::uint64_t max_ack_delay_ms,
-                                       QuicCoreTimePoint now) {
+QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt,
+                                       std::chrono::milliseconds max_ack_delay,
+                                       QuicCoreTimePoint now, std::uint32_t pto_count) {
     std::chrono::milliseconds timeout = kInitialRtt * 3;
     if (rtt.latest_rtt.has_value()) {
-        timeout = rtt.smoothed_rtt + std::max(rtt.rttvar * 4, kGranularity) +
-                  std::chrono::milliseconds(max_ack_delay_ms);
+        timeout = rtt.smoothed_rtt + std::max(rtt.rttvar * 4, kGranularity) + max_ack_delay;
     }
 
-    for (std::uint32_t count = 0; count < rtt.pto_count; ++count) {
+    for (std::uint32_t count = 0; count < pto_count; ++count) {
         timeout *= 2;
     }
 
@@ -230,11 +232,10 @@ QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt, std::uint64_
 }
 
 void update_rtt(RecoveryRttState &rtt, QuicCoreTimePoint ack_receive_time,
-                const SentPacketRecord &largest_acked_ack_eliciting_packet,
+                const SentPacketRecord &largest_newly_acked_packet,
                 std::chrono::milliseconds ack_delay, std::chrono::milliseconds max_ack_delay) {
-    const auto latest_sample = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::max(ack_receive_time - largest_acked_ack_eliciting_packet.sent_time,
-                 QuicCoreClock::duration::zero()));
+    const auto latest_sample = std::chrono::duration_cast<std::chrono::milliseconds>(std::max(
+        ack_receive_time - largest_newly_acked_packet.sent_time, QuicCoreClock::duration::zero()));
     const auto first_sample = !rtt.latest_rtt.has_value();
 
     rtt.latest_rtt = latest_sample;

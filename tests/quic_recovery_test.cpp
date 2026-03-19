@@ -192,10 +192,30 @@ TEST(QuicRecoveryTest, PacketThresholdLossKeepsRunningLargestAcknowledgedState) 
     EXPECT_EQ(*stale_largest_acked, 6u);
 }
 
+TEST(QuicRecoveryTest,
+     AckProcessingTracksLargestNewlyAcknowledgedPacketSeparatelyFromAckElicitingStatus) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/false,
+                                             coquic::quic::test::test_time(10)));
+
+    const auto result = recovery.on_ack_received(
+        make_ack_frame(/*largest=*/2, /*first_ack_range=*/1), coquic::quic::test::test_time(70));
+
+    ASSERT_TRUE(result.largest_newly_acked_packet.has_value());
+    if (!result.largest_newly_acked_packet.has_value()) {
+        GTEST_FAIL() << "expected largest newly acknowledged packet";
+        return;
+    }
+    EXPECT_EQ(result.largest_newly_acked_packet.value().packet_number, 2u);
+    EXPECT_TRUE(result.has_newly_acked_ack_eliciting);
+}
+
 TEST(QuicRecoveryTest, PtoDeadlineUsesInitialRttBeforeSamples) {
     RecoveryRttState rtt;
-    const auto deadline = coquic::quic::compute_pto_deadline(rtt, /*max_ack_delay_ms=*/25,
-                                                             coquic::quic::test::test_time(0));
+    const auto deadline = coquic::quic::compute_pto_deadline(
+        rtt, std::chrono::milliseconds(25), coquic::quic::test::test_time(0), /*pto_count=*/0);
     EXPECT_EQ(deadline, coquic::quic::test::test_time(999));
 }
 

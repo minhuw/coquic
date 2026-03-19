@@ -80,15 +80,21 @@ QuicDemoChannelResult QuicDemoChannel::advance(QuicDemoChannelInput input, QuicC
             return;
         }
 
+        const auto is_ready_event = [](const QuicDemoChannelEffect &effect) {
+            const auto *state_event = std::get_if<QuicDemoChannelStateEvent>(&effect);
+            return state_event != nullptr &&
+                   state_event->change == QuicDemoChannelStateChange::ready;
+        };
         auto flushed = flush_buffered_messages(now);
-        auto ready_position = std::find_if(
-            result.effects.begin(), result.effects.end(), [](const QuicDemoChannelEffect &effect) {
-                const auto *state_event = std::get_if<QuicDemoChannelStateEvent>(&effect);
-                return state_event != nullptr &&
-                       state_event->change == QuicDemoChannelStateChange::ready;
-            });
+        auto ready_position =
+            std::find_if(result.effects.begin(), result.effects.end(), is_ready_event);
         result.effects.insert(ready_position, std::make_move_iterator(flushed.effects.begin()),
                               std::make_move_iterator(flushed.effects.end()));
+        if (has_failed()) {
+            result.effects.erase(
+                std::remove_if(result.effects.begin(), result.effects.end(), is_ready_event),
+                result.effects.end());
+        }
         result.next_wakeup = flushed.next_wakeup;
         next_wakeup_ = result.next_wakeup;
     };

@@ -19,6 +19,7 @@
 #undef private
 
 #include "src/coquic.h"
+#include "src/quic/packet_crypto_test_hooks.h"
 #include "tests/quic_test_utils.h"
 
 namespace {
@@ -161,6 +162,46 @@ TEST(QuicDemoChannelTest, QueuedMessageFlushesWhenClientTransitionsToReady) {
     const auto messages = coquic::quic::test::received_messages_from(server_after_ready);
     ASSERT_EQ(messages.size(), 1u);
     EXPECT_EQ(coquic::quic::test::string_from_bytes(messages.front()), "hello");
+}
+
+TEST(QuicDemoChannelTest, FailedFlushAfterReadySuppressesStaleReadyStateEvent) {
+    coquic::quic::QuicDemoChannel client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicDemoChannel server(coquic::quic::test::make_server_core_config());
+
+    const auto queued = client.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = std::vector<std::byte>(static_cast<std::size_t>(64) * 1024U, std::byte{0x68}),
+        },
+        coquic::quic::test::test_time());
+    EXPECT_TRUE(queued.effects.empty());
+
+    auto to_server = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    coquic::quic::QuicDemoChannelResult failed_step;
+    bool saw_failed = false;
+
+    for (int i = 0; i < 32 && !saw_failed; ++i) {
+        const auto to_client = coquic::quic::test::relay_send_datagrams_to_peer(
+            to_server, server, coquic::quic::test::test_time(i + 1));
+        const coquic::quic::test::ScopedPacketCryptoFaultInjector injector{
+            coquic::quic::test::PacketCryptoFaultPoint::seal_length_guard, 8};
+        auto candidate = coquic::quic::test::relay_send_datagrams_to_peer(
+            to_client, client, coquic::quic::test::test_time(i + 1));
+        const auto changes = coquic::quic::test::state_changes_from(candidate);
+        if (coquic::quic::test::count_state_change(
+                changes, coquic::quic::QuicDemoChannelStateChange::failed) == 1u) {
+            failed_step = std::move(candidate);
+            saw_failed = true;
+            break;
+        }
+
+        to_server = std::move(candidate);
+    }
+
+    ASSERT_TRUE(saw_failed);
+    EXPECT_EQ(coquic::quic::test::state_changes_from(failed_step),
+              (std::vector<coquic::quic::QuicDemoChannelStateChange>{
+                  coquic::quic::QuicDemoChannelStateChange::failed,
+              }));
 }
 
 TEST(QuicDemoChannelTest, ReceivedMessagesAreDeliveredThroughEffects) {

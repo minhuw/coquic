@@ -62,6 +62,7 @@ class QuicDemoChannel {
     bool failed_ = false;
     bool ready_emitted_ = false;
     bool failed_emitted_ = false;
+    std::optional<QuicCoreTimePoint> next_wakeup_ = std::nullopt;
 };
 
 } // namespace coquic::quic

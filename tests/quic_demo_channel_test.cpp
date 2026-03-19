@@ -13,6 +13,10 @@
 #include <utility>
 #include <vector>
 
+#define private public
+#include "src/quic/demo_channel.h"
+#undef private
+
 #include "src/coquic.h"
 #include "tests/quic_test_utils.h"
 
@@ -193,6 +197,20 @@ TEST(QuicDemoChannelTest, OversizedQueuedMessageFailsOnceAndLaterCallsAreInert) 
     EXPECT_TRUE(after_timer.effects.empty());
     EXPECT_EQ(after_start.next_wakeup, std::nullopt);
     EXPECT_EQ(after_timer.next_wakeup, std::nullopt);
+}
+
+TEST(QuicDemoChannelTest, QueueBeforeHandshakePreservesCurrentWakeup) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+    channel.next_wakeup_ = coquic::quic::test::test_time(123);
+
+    const auto result = channel.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = coquic::quic::test::bytes_from_string("hello"),
+        },
+        coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(result.effects.empty());
+    EXPECT_EQ(result.next_wakeup, coquic::quic::test::test_time(123));
 }
 
 TEST(QuicDemoChannelTest, InboundOversizedLengthPrefixFailsOnceAndLaterCallsAreInert) {

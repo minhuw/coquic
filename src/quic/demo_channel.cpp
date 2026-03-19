@@ -68,7 +68,9 @@ QuicDemoChannel::QuicDemoChannel(QuicCoreConfig config) : core_(std::move(config
 
 QuicDemoChannelResult QuicDemoChannel::advance(QuicDemoChannelInput input, QuicCoreTimePoint now) {
     if (has_failed()) {
-        return {};
+        return QuicDemoChannelResult{
+            .next_wakeup = std::nullopt,
+        };
     }
 
     return std::visit(overloaded{
@@ -116,8 +118,9 @@ bool QuicDemoChannel::has_failed() const {
 }
 
 QuicDemoChannelResult QuicDemoChannel::process_core_result(QuicCoreResult result) {
+    next_wakeup_ = result.next_wakeup;
     QuicDemoChannelResult translated{
-        .next_wakeup = result.next_wakeup,
+        .next_wakeup = next_wakeup_,
     };
 
     for (auto &effect : result.effects) {
@@ -150,12 +153,14 @@ void QuicDemoChannel::merge_result(QuicDemoChannelResult &destination,
          source.next_wakeup.value() < destination.next_wakeup.value())) {
         destination.next_wakeup = source.next_wakeup;
     }
+    next_wakeup_ = destination.next_wakeup;
 }
 
 QuicDemoChannelResult QuicDemoChannel::fail_channel() {
     pending_send_bytes_.clear();
     pending_receive_bytes_.clear();
     failed_ = true;
+    next_wakeup_ = std::nullopt;
 
     QuicDemoChannelResult result{
         .next_wakeup = std::nullopt,
@@ -179,7 +184,9 @@ QuicDemoChannelResult QuicDemoChannel::queue_message(std::vector<std::byte> byte
     auto framed = frame_message_bytes(std::move(bytes));
     if (!core_.is_handshake_complete()) {
         pending_send_bytes_.insert(pending_send_bytes_.end(), framed.begin(), framed.end());
-        return {};
+        return QuicDemoChannelResult{
+            .next_wakeup = next_wakeup_,
+        };
     }
 
     return process_core_result(core_.advance(

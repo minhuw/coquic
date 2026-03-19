@@ -33,7 +33,7 @@ TEST(QuicCoreTest, ClientStartProducesSendEffect) {
     ASSERT_GE(datagrams.front().size(), 1200u);
     EXPECT_FALSE(client.is_handshake_complete());
     EXPECT_TRUE(coquic::quic::test::state_changes_from(result).empty());
-    EXPECT_EQ(result.next_wakeup, std::nullopt);
+    EXPECT_TRUE(result.next_wakeup.has_value());
 
     const auto decoded = coquic::quic::deserialize_protected_datagram(
         datagrams.front(),
@@ -84,6 +84,110 @@ TEST(QuicCoreTest, TwoPeersExchangeApplicationDataThroughEffects) {
     EXPECT_EQ(coquic::quic::test::string_from_bytes(
                   coquic::quic::test::received_application_data_from(received)),
               "ping");
+}
+
+TEST(QuicCoreTest, HandshakeRecoversWhenInitialFlightIsDropped) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    const auto dropped =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    EXPECT_TRUE(dropped.next_wakeup.has_value());
+
+    const auto dropped_by_network = coquic::quic::test::relay_send_datagrams_to_peer_except(
+        dropped, std::array<std::size_t, 1>{0}, server, coquic::quic::test::test_time(1));
+    EXPECT_TRUE(dropped_by_network.effects.empty());
+
+    const auto retry =
+        coquic::quic::test::drive_earliest_next_wakeup(client, {dropped.next_wakeup});
+    EXPECT_FALSE(coquic::quic::test::send_datagrams_from(retry).empty());
+
+    auto to_client = coquic::quic::test::relay_send_datagrams_to_peer(
+        retry, server, coquic::quic::test::test_time(2));
+    auto to_server = coquic::quic::test::relay_send_datagrams_to_peer(
+        to_client, client, coquic::quic::test::test_time(3));
+
+    for (int i = 0; i < 16 && !(client.is_handshake_complete() && server.is_handshake_complete());
+         ++i) {
+        to_client = coquic::quic::test::relay_send_datagrams_to_peer(
+            to_server, server, coquic::quic::test::test_time(4 + i * 2));
+        if (client.is_handshake_complete() && server.is_handshake_complete()) {
+            break;
+        }
+
+        to_server = coquic::quic::test::relay_send_datagrams_to_peer(
+            to_client, client, coquic::quic::test::test_time(5 + i * 2));
+    }
+
+    EXPECT_FALSE(client.has_failed());
+    EXPECT_FALSE(server.has_failed());
+    EXPECT_TRUE(client.is_handshake_complete());
+    EXPECT_TRUE(server.is_handshake_complete());
+}
+
+TEST(QuicCoreTest, ApplicationDataIsRetransmittedAfterLoss) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto sent = client.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("probe"),
+        },
+        coquic::quic::test::test_time(1));
+    EXPECT_TRUE(sent.next_wakeup.has_value());
+
+    const auto dropped = coquic::quic::test::relay_send_datagrams_to_peer_except(
+        sent, std::array<std::size_t, 1>{0}, server, coquic::quic::test::test_time(2));
+    EXPECT_TRUE(dropped.effects.empty());
+
+    const auto retry = coquic::quic::test::drive_earliest_next_wakeup(client, {sent.next_wakeup});
+    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(retry).empty());
+
+    const auto delivered = coquic::quic::test::relay_nth_send_datagram_to_peer(
+        retry, 0, server, coquic::quic::test::test_time(3));
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(
+                  coquic::quic::test::received_application_data_from(delivered)),
+              "probe");
+
+    const auto acked = coquic::quic::test::relay_send_datagrams_to_peer(
+        delivered, client, coquic::quic::test::test_time(4));
+    EXPECT_FALSE(client.has_failed());
+    EXPECT_FALSE(server.has_failed());
+    EXPECT_TRUE(coquic::quic::test::received_application_data_from(acked).empty());
+}
+
+TEST(QuicCoreTest, AckProcessingClearsOutstandingDataAndRemovesWakeup) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto sent = client.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes = coquic::quic::test::bytes_from_string("ack-clear"),
+        },
+        coquic::quic::test::test_time(1));
+    EXPECT_TRUE(sent.next_wakeup.has_value());
+    ASSERT_FALSE(client.connection_->application_space_.sent_packets.empty());
+    EXPECT_TRUE(client.connection_->pending_application_send_.has_outstanding_data());
+
+    const auto server_step = coquic::quic::test::relay_send_datagrams_to_peer(
+        sent, server, coquic::quic::test::test_time(2));
+    const auto client_step = coquic::quic::test::relay_send_datagrams_to_peer(
+        server_step, client, coquic::quic::test::test_time(3));
+
+    EXPECT_FALSE(client.has_failed());
+    EXPECT_TRUE(coquic::quic::test::received_application_data_from(client_step).empty());
+    EXPECT_TRUE(client.connection_->application_space_.sent_packets.empty());
+    EXPECT_FALSE(client.connection_->pending_application_send_.has_pending_data());
+    EXPECT_FALSE(client.connection_->pending_application_send_.has_outstanding_data());
+    EXPECT_EQ(client_step.next_wakeup, std::nullopt);
 }
 
 TEST(QuicCoreTest, ReceivingAckElicitingPacketsSchedulesAckResponse) {
@@ -223,7 +327,8 @@ TEST(QuicCoreTest, LargeAckOnlyHistoryEmitsTrimmedAckDatagram) {
             coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
     }
 
-    const auto datagram = client.connection_->drain_outbound_datagram();
+    const auto datagram =
+        client.connection_->drain_outbound_datagram(coquic::quic::test::test_time(5000));
 
     EXPECT_FALSE(client.connection_->has_failed());
     ASSERT_FALSE(datagram.empty());

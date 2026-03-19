@@ -1,9 +1,12 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <optional>
 #include <span>
@@ -119,6 +122,65 @@ inline QuicCoreResult relay_send_datagrams_to_peer(const QuicCoreResult &result,
     }
 
     return combined;
+}
+
+inline QuicCoreResult relay_datagrams_to_peer(std::span<const std::vector<std::byte>> datagrams,
+                                              std::span<const std::size_t> delivery_order,
+                                              QuicCore &peer, QuicCoreTimePoint now);
+
+inline QuicCoreResult relay_send_datagrams_to_peer_except(const QuicCoreResult &result,
+                                                          std::span<const std::size_t> dropped,
+                                                          QuicCore &peer, QuicCoreTimePoint now) {
+    const auto datagrams = send_datagrams_from(result);
+    std::vector<std::size_t> delivery_order;
+    delivery_order.reserve(datagrams.size());
+    for (std::size_t index = 0; index < datagrams.size(); ++index) {
+        if (std::find(dropped.begin(), dropped.end(), index) != dropped.end()) {
+            continue;
+        }
+
+        delivery_order.push_back(index);
+    }
+
+    return relay_datagrams_to_peer(datagrams, delivery_order, peer, now);
+}
+
+inline QuicCoreResult relay_nth_send_datagram_to_peer(const QuicCoreResult &result,
+                                                      std::size_t index, QuicCore &peer,
+                                                      QuicCoreTimePoint now) {
+    const auto datagrams = send_datagrams_from(result);
+    if (index >= datagrams.size()) {
+        return {};
+    }
+
+    return relay_datagrams_to_peer(datagrams, std::array<std::size_t, 1>{index}, peer, now);
+}
+
+inline std::optional<QuicCoreTimePoint>
+earliest_next_wakeup(std::initializer_list<std::optional<QuicCoreTimePoint>> wakeups) {
+    std::optional<QuicCoreTimePoint> earliest;
+    for (const auto &wakeup : wakeups) {
+        if (!wakeup.has_value()) {
+            continue;
+        }
+
+        if (!earliest.has_value() || *wakeup < *earliest) {
+            earliest = wakeup;
+        }
+    }
+
+    return earliest;
+}
+
+inline QuicCoreResult
+drive_earliest_next_wakeup(QuicCore &core,
+                           std::initializer_list<std::optional<QuicCoreTimePoint>> wakeups) {
+    const auto earliest = earliest_next_wakeup(wakeups);
+    if (!earliest.has_value()) {
+        return {};
+    }
+
+    return core.advance(QuicCoreTimerExpired{}, *earliest);
 }
 
 inline QuicCoreResult relay_datagrams_to_peer(std::span<const std::vector<std::byte>> datagrams,
@@ -271,16 +333,46 @@ inline void drive_quic_handshake(QuicCore &client, QuicCore &server, QuicCoreTim
 
     auto to_server = client.advance(QuicCoreStart{}, now);
     append_state_changes(to_server, client_events);
+    auto to_client = QuicCoreResult{};
+    auto step_now = now;
 
-    for (int i = 0; i < 16 && !(client.is_handshake_complete() && server.is_handshake_complete());
-         ++i) {
-        const auto to_client = relay_send_datagrams_to_peer(to_server, server, now);
-        append_state_changes(to_client, server_events);
-        if (client.is_handshake_complete() && server.is_handshake_complete()) {
+    for (int i = 0; i < 32; ++i) {
+        if (!send_datagrams_from(to_server).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            to_client = relay_send_datagrams_to_peer(to_server, server, step_now);
+            append_state_changes(to_client, server_events);
+            to_server.effects.clear();
+            continue;
+        }
+
+        if (!send_datagrams_from(to_client).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            to_server = relay_send_datagrams_to_peer(to_client, client, step_now);
+            append_state_changes(to_server, client_events);
+            to_client.effects.clear();
+            continue;
+        }
+
+        const auto next = earliest_next_wakeup({to_server.next_wakeup, to_client.next_wakeup});
+        if (!next.has_value()) {
             break;
         }
-        to_server = relay_send_datagrams_to_peer(to_client, client, now);
-        append_state_changes(to_server, client_events);
+
+        if (to_server.next_wakeup.has_value() && *to_server.next_wakeup == *next) {
+            to_server = client.advance(QuicCoreTimerExpired{}, *next);
+            append_state_changes(to_server, client_events);
+            continue;
+        }
+
+        if (to_client.next_wakeup.has_value() && *to_client.next_wakeup == *next) {
+            to_client = server.advance(QuicCoreTimerExpired{}, *next);
+            append_state_changes(to_client, server_events);
+            continue;
+        }
+    }
+
+    if (!(client.is_handshake_complete() && server.is_handshake_complete())) {
+        return;
     }
 }
 
@@ -324,12 +416,14 @@ struct QuicConnectionTestPeer {
 
     static bool inject_inbound_one_rtt_frames(QuicConnection &connection, std::vector<Frame> frames,
                                               std::uint64_t packet_number = 0) {
-        const auto processed = connection.process_inbound_packet(ProtectedOneRttPacket{
-            .destination_connection_id = {},
-            .packet_number_length = 2,
-            .packet_number = packet_number,
-            .frames = std::move(frames),
-        });
+        const auto processed = connection.process_inbound_packet(
+            ProtectedOneRttPacket{
+                .destination_connection_id = {},
+                .packet_number_length = 2,
+                .packet_number = packet_number,
+                .frames = std::move(frames),
+            },
+            test_time());
         if (!processed.has_value()) {
             connection.status_ = HandshakeStatus::failed;
             return false;

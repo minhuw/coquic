@@ -30,6 +30,9 @@ struct PacketSpaceState {
     ReliableReceiveBuffer receive_crypto;
     ReceivedPacketHistory received_packets;
     std::map<std::uint64_t, SentPacketRecord> sent_packets;
+    PacketSpaceRecovery recovery;
+    std::optional<SentPacketRecord> pending_probe_packet;
+    std::optional<QuicCoreTimePoint> pending_ack_deadline;
 };
 
 class QuicConnection {
@@ -37,9 +40,10 @@ class QuicConnection {
     explicit QuicConnection(QuicCoreConfig config);
 
     void start();
-    void process_inbound_datagram(std::span<const std::byte> bytes);
+    void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now);
     void queue_application_data(std::span<const std::byte> bytes);
-    std::vector<std::byte> drain_outbound_datagram();
+    std::vector<std::byte> drain_outbound_datagram(QuicCoreTimePoint now);
+    void on_timeout(QuicCoreTimePoint now);
     std::vector<std::byte> take_received_application_data();
     std::optional<QuicCoreStateChange> take_state_change();
     std::optional<QuicCoreTimePoint> next_wakeup() const;
@@ -52,9 +56,25 @@ class QuicConnection {
     CodecResult<ConnectionId>
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
-    CodecResult<bool> process_inbound_packet(const ProtectedPacket &packet);
-    CodecResult<bool> process_inbound_crypto(EncryptionLevel level, std::span<const Frame> frames);
-    CodecResult<bool> process_inbound_application(std::span<const Frame> frames);
+    CodecResult<bool> process_inbound_packet(const ProtectedPacket &packet, QuicCoreTimePoint now);
+    CodecResult<bool> process_inbound_crypto(EncryptionLevel level, std::span<const Frame> frames,
+                                             QuicCoreTimePoint now);
+    CodecResult<bool> process_inbound_application(std::span<const Frame> frames,
+                                                  QuicCoreTimePoint now);
+    CodecResult<bool> process_inbound_ack(PacketSpaceState &packet_space, const AckFrame &ack,
+                                          QuicCoreTimePoint now, std::uint64_t ack_delay_exponent,
+                                          std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);
+    void track_sent_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet);
+    void retire_acked_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet);
+    void mark_lost_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet);
+    void rebuild_recovery(PacketSpaceState &packet_space);
+    std::optional<QuicCoreTimePoint> loss_deadline() const;
+    std::optional<QuicCoreTimePoint> pto_deadline() const;
+    std::optional<QuicCoreTimePoint> ack_deadline() const;
+    void detect_lost_packets(QuicCoreTimePoint now);
+    void detect_lost_packets(PacketSpaceState &packet_space, QuicCoreTimePoint now);
+    void arm_pto_probe(QuicCoreTimePoint now);
+    std::optional<SentPacketRecord> select_pto_probe(const PacketSpaceState &packet_space) const;
     void install_available_secrets();
     void collect_pending_tls_bytes();
     CodecResult<bool> sync_tls_state();
@@ -64,7 +84,7 @@ class QuicConnection {
     peer_transport_parameters_validation_context() const;
     ConnectionId outbound_destination_connection_id() const;
     ConnectionId client_initial_destination_connection_id() const;
-    std::vector<std::byte> flush_outbound_datagram();
+    std::vector<std::byte> flush_outbound_datagram(QuicCoreTimePoint now);
     void mark_failed();
     void queue_state_change(QuicCoreStateChange change);
 

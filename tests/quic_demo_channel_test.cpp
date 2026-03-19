@@ -372,7 +372,8 @@ TEST(QuicDemoChannelTest, InvalidInboundFramePayloadFailsChannel) {
         channel.process_core_result(coquic::quic::QuicCoreResult{
             .effects =
                 {
-                    coquic::quic::QuicCoreReceiveApplicationData{
+                    coquic::quic::QuicCoreReceiveStreamData{
+                        .stream_id = 0,
                         .bytes =
                             {
                                 std::byte{0x00},
@@ -426,7 +427,8 @@ TEST(QuicDemoChannelTest, PartialFramedReceiveWaitsForRemainingBytes) {
     coquic::quic::QuicDemoChannelResult partial_result;
 
     EXPECT_TRUE(channel.translate_receive_application_data(
-        coquic::quic::QuicCoreReceiveApplicationData{
+        coquic::quic::QuicCoreReceiveStreamData{
+            .stream_id = 0,
             .bytes =
                 {
                     std::byte{0x00},
@@ -442,7 +444,8 @@ TEST(QuicDemoChannelTest, PartialFramedReceiveWaitsForRemainingBytes) {
 
     coquic::quic::QuicDemoChannelResult completed_result;
     EXPECT_TRUE(channel.translate_receive_application_data(
-        coquic::quic::QuicCoreReceiveApplicationData{
+        coquic::quic::QuicCoreReceiveStreamData{
+            .stream_id = 0,
             .bytes =
                 {
                     std::byte{'l'},
@@ -504,7 +507,8 @@ TEST(QuicDemoChannelTest, InboundOversizedLengthPrefixFailsOnceAndLaterCallsAreI
     ASSERT_TRUE(victim.is_ready());
 
     const auto attack = attacker.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes =
                 {
                     std::byte{0x00},

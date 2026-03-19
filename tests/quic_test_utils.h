@@ -102,8 +102,31 @@ inline std::size_t count_state_change(std::span<const QuicCoreStateChange> chang
 inline std::vector<std::byte> received_application_data_from(const QuicCoreResult &result) {
     std::vector<std::byte> out;
     for (const auto &effect : result.effects) {
-        if (const auto *received = std::get_if<QuicCoreReceiveApplicationData>(&effect)) {
+        if (const auto *received = std::get_if<QuicCoreReceiveStreamData>(&effect)) {
             out.insert(out.end(), received->bytes.begin(), received->bytes.end());
+        }
+    }
+
+    return out;
+}
+
+inline std::vector<QuicCoreReceiveStreamData>
+received_stream_data_from(const QuicCoreResult &result) {
+    std::vector<QuicCoreReceiveStreamData> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *received = std::get_if<QuicCoreReceiveStreamData>(&effect)) {
+            out.push_back(*received);
+        }
+    }
+
+    return out;
+}
+
+inline std::vector<QuicCorePeerResetStream> peer_resets_from(const QuicCoreResult &result) {
+    std::vector<QuicCorePeerResetStream> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *reset = std::get_if<QuicCorePeerResetStream>(&effect)) {
+            out.push_back(*reset);
         }
     }
 

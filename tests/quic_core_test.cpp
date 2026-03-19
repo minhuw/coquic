@@ -132,7 +132,7 @@ TEST(QuicCoreTest, TwoPeersEmitHandshakeReadyExactlyOnce) {
               1u);
 }
 
-TEST(QuicCoreTest, TwoPeersExchangeApplicationDataThroughEffects) {
+TEST(QuicCoreTest, TwoPeersExchangeStreamZeroDataThroughEffects) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 
@@ -141,16 +141,34 @@ TEST(QuicCoreTest, TwoPeersExchangeApplicationDataThroughEffects) {
     ASSERT_TRUE(server.is_handshake_complete());
 
     const auto send = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("ping"),
+            .fin = false,
         },
         coquic::quic::test::test_time(1));
     const auto received = coquic::quic::test::relay_send_datagrams_to_peer(
         send, server, coquic::quic::test::test_time(1));
 
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(
-                  coquic::quic::test::received_application_data_from(received)),
-              "ping");
+    const auto stream_events = coquic::quic::test::received_stream_data_from(received);
+    ASSERT_EQ(stream_events.size(), 1u);
+    EXPECT_EQ(stream_events[0].stream_id, 0u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(stream_events[0].bytes), "ping");
+    EXPECT_FALSE(stream_events[0].fin);
+}
+
+TEST(QuicCoreTest, InvalidLocalStreamCommandReportsLocalErrorWithoutFailingConnection) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+
+    const auto result = client.advance(
+        coquic::quic::QuicCoreStopSending{
+            .stream_id = 0,
+            .application_error_code = 7,
+        },
+        coquic::quic::test::test_time());
+
+    ASSERT_TRUE(result.local_error.has_value());
+    EXPECT_FALSE(client.has_failed());
 }
 
 TEST(QuicCoreTest, MoveConstructionPreservesStartBehavior) {
@@ -222,7 +240,8 @@ TEST(QuicCoreTest, ApplicationDataIsRetransmittedAfterLoss) {
     ASSERT_TRUE(server.is_handshake_complete());
 
     const auto confirm = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("confirm"),
         },
         coquic::quic::test::test_time(1));
@@ -233,7 +252,8 @@ TEST(QuicCoreTest, ApplicationDataIsRetransmittedAfterLoss) {
     EXPECT_TRUE(coquic::quic::test::received_application_data_from(confirm_acked).empty());
 
     const auto sent = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("probe"),
         },
         coquic::quic::test::test_time(4));
@@ -268,14 +288,16 @@ TEST(QuicCoreTest, ApplicationPtoWaitsForClientHandshakeConfirmation) {
     ASSERT_TRUE(server.is_handshake_complete());
 
     const auto server_send = server.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("server-probe"),
         },
         coquic::quic::test::test_time(1));
     EXPECT_TRUE(server_send.next_wakeup.has_value());
 
     const auto client_before_confirmation = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("client-probe"),
         },
         coquic::quic::test::test_time(2));
@@ -290,7 +312,8 @@ TEST(QuicCoreTest, ApplicationPtoWaitsForClientHandshakeConfirmation) {
     EXPECT_TRUE(coquic::quic::test::received_application_data_from(client_after_ack).empty());
 
     const auto client_after_confirmation = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("client-after-ack"),
         },
         coquic::quic::test::test_time(5));
@@ -306,7 +329,8 @@ TEST(QuicCoreTest, AckProcessingClearsOutstandingDataAndRemovesWakeup) {
     ASSERT_TRUE(server.is_handshake_complete());
 
     const auto confirm = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("confirm"),
         },
         coquic::quic::test::test_time(1));
@@ -317,7 +341,8 @@ TEST(QuicCoreTest, AckProcessingClearsOutstandingDataAndRemovesWakeup) {
     EXPECT_TRUE(coquic::quic::test::received_application_data_from(confirm_acked).empty());
 
     const auto sent = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("ack-clear"),
         },
         coquic::quic::test::test_time(4));
@@ -387,8 +412,8 @@ TEST(QuicCoreTest, AckProcessingClampsAckDelayWhenExponentIsTooLarge) {
         connection.application_space_,
         coquic::quic::AckFrame{
             .largest_acknowledged = 1,
-            .first_ack_range = 0,
             .ack_delay = 1,
+            .first_ack_range = 0,
         },
         coquic::quic::test::test_time(40), std::numeric_limits<std::uint64_t>::digits,
         /*max_ack_delay_ms=*/25, /*suppress_pto_reset=*/false);
@@ -939,7 +964,8 @@ TEST(QuicCoreTest, ReceivingAckElicitingPacketsSchedulesAckResponse) {
     ASSERT_TRUE(server.is_handshake_complete());
 
     const auto send = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("ack-me"),
         },
         coquic::quic::test::test_time(1));
@@ -996,12 +1022,14 @@ TEST(QuicCoreTest, ReorderedApplicationPacketsAreDeliveredOnceContiguous) {
     ASSERT_TRUE(server.is_handshake_complete());
 
     const auto first_send = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("ping"),
         },
         coquic::quic::test::test_time(1));
     const auto second_send = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("pong"),
         },
         coquic::quic::test::test_time(2));
@@ -1033,7 +1061,8 @@ TEST(QuicCoreTest, InboundApplicationAckRetiresOwnedSendRanges) {
     ASSERT_TRUE(server.is_handshake_complete());
 
     const auto send = client.advance(
-        coquic::quic::QuicCoreQueueApplicationData{
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("retire-me"),
         },
         coquic::quic::test::test_time(1));

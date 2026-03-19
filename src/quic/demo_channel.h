@@ -53,7 +53,7 @@ class QuicDemoChannel {
     QuicDemoChannelResult queue_message(std::vector<std::byte> bytes, QuicCoreTimePoint now);
     QuicDemoChannelResult flush_buffered_messages(QuicCoreTimePoint now);
     bool translate_state_event(const QuicCoreStateEvent &event, QuicDemoChannelResult &result);
-    bool translate_receive_application_data(const QuicCoreReceiveApplicationData &received,
+    bool translate_receive_application_data(const QuicCoreReceiveStreamData &received,
                                             QuicDemoChannelResult &result);
 
     QuicCore core_;

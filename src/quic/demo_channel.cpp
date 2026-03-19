@@ -9,6 +9,7 @@ namespace coquic::quic {
 namespace {
 
 constexpr std::size_t kMessageMaxBytes = static_cast<std::size_t>(64) * 1024U;
+constexpr std::uint64_t kDemoStreamId = 0;
 
 template <typename... Ts> struct overloaded : Ts... {
     using Ts::operator()...;
@@ -140,16 +141,24 @@ QuicDemoChannelResult QuicDemoChannel::process_core_result(QuicCoreResult result
         .next_wakeup = next_wakeup_,
     };
 
+    if (result.local_error.has_value()) {
+        return fail_channel();
+    }
+
     for (auto &effect : result.effects) {
         if (auto *send = std::get_if<QuicCoreSendDatagram>(&effect)) {
             translated.effects.emplace_back(QuicCoreSendDatagram{std::move(send->bytes)});
             continue;
         }
-        if (auto *received = std::get_if<QuicCoreReceiveApplicationData>(&effect)) {
+        if (auto *received = std::get_if<QuicCoreReceiveStreamData>(&effect)) {
             if (!translate_receive_application_data(*received, translated)) {
                 return fail_channel();
             }
             continue;
+        }
+        if (std::holds_alternative<QuicCorePeerResetStream>(effect) ||
+            std::holds_alternative<QuicCorePeerStopSending>(effect)) {
+            return fail_channel();
         }
         translate_state_event(std::get<QuicCoreStateEvent>(effect), translated);
     }
@@ -200,8 +209,10 @@ QuicDemoChannelResult QuicDemoChannel::queue_message(std::vector<std::byte> byte
     }
 
     return process_core_result(core_.advance(
-        QuicCoreQueueApplicationData{
+        QuicCoreSendStreamData{
+            .stream_id = kDemoStreamId,
             .bytes = std::move(framed),
+            .fin = false,
         },
         now));
 }
@@ -214,8 +225,10 @@ QuicDemoChannelResult QuicDemoChannel::flush_buffered_messages(QuicCoreTimePoint
     auto bytes = std::move(pending_send_bytes_);
     pending_send_bytes_.clear();
     return process_core_result(core_.advance(
-        QuicCoreQueueApplicationData{
+        QuicCoreSendStreamData{
+            .stream_id = kDemoStreamId,
             .bytes = std::move(bytes),
+            .fin = false,
         },
         now));
 }
@@ -241,8 +254,12 @@ bool QuicDemoChannel::translate_state_event(const QuicCoreStateEvent &event,
     return true;
 }
 
-bool QuicDemoChannel::translate_receive_application_data(
-    const QuicCoreReceiveApplicationData &received, QuicDemoChannelResult &result) {
+bool QuicDemoChannel::translate_receive_application_data(const QuicCoreReceiveStreamData &received,
+                                                         QuicDemoChannelResult &result) {
+    if (received.stream_id != kDemoStreamId || received.fin) {
+        return false;
+    }
+
     pending_receive_bytes_.insert(pending_receive_bytes_.end(), received.bytes.begin(),
                                   received.bytes.end());
 

@@ -94,6 +94,31 @@ TEST(QuicCryptoStreamTest, LostRangesBecomeSendableBeforeNewRanges) {
     EXPECT_EQ(retry[0].offset, first[0].offset);
 }
 
+TEST(QuicCryptoStreamTest, PartialAcksRetireOnlyAcknowledgedSubrange) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+
+    const auto sent = buffer.take_ranges(4);
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].offset, 0u);
+    EXPECT_EQ(sent[0].bytes, bytes_from_string("abcd"));
+
+    buffer.acknowledge(1, 2);
+    buffer.mark_lost(0, 4);
+
+    const auto retransmit = buffer.take_ranges(2);
+    ASSERT_EQ(retransmit.size(), 2u);
+    EXPECT_EQ(retransmit[0].offset, 0u);
+    EXPECT_EQ(retransmit[0].bytes, bytes_from_string("a"));
+    EXPECT_EQ(retransmit[1].offset, 3u);
+    EXPECT_EQ(retransmit[1].bytes, bytes_from_string("d"));
+
+    const auto unsent = buffer.take_ranges(2);
+    ASSERT_EQ(unsent.size(), 1u);
+    EXPECT_EQ(unsent[0].offset, 4u);
+    EXPECT_EQ(unsent[0].bytes, bytes_from_string("ef"));
+}
+
 TEST(QuicCryptoStreamTest, ReceiveBufferReleasesReorderedApplicationBytesContiguously) {
     ReliableReceiveBuffer buffer;
     ASSERT_TRUE(buffer.push(4, bytes_from_string("ef")).has_value());

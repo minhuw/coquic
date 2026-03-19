@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -35,13 +36,11 @@ std::uint32_t read_u32_be(std::span<const std::byte> bytes) {
 PacketSpaceState &packet_space_for_level(EncryptionLevel level, PacketSpaceState &initial_space,
                                          PacketSpaceState &handshake_space,
                                          PacketSpaceState &application_space) {
-    switch (level) {
-    case EncryptionLevel::initial:
+    if (level == EncryptionLevel::initial) {
         return initial_space;
-    case EncryptionLevel::handshake:
+    }
+    if (level == EncryptionLevel::handshake) {
         return handshake_space;
-    case EncryptionLevel::application:
-        return application_space;
     }
 
     return application_space;
@@ -83,9 +82,6 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes) 
         }
 
         start_server_if_needed(initial_destination_connection_id.value());
-        if (status_ == HandshakeStatus::failed) {
-            return;
-        }
     }
 
     std::size_t offset = 0;
@@ -194,27 +190,21 @@ void QuicConnection::start_client_if_needed() {
     };
 
     const auto serialized_transport_parameters =
-        serialize_transport_parameters(local_transport_parameters_);
-    if (!serialized_transport_parameters.has_value()) {
-        mark_failed();
-        return;
-    }
+        serialize_transport_parameters(local_transport_parameters_).value();
 
     tls_.emplace(TlsAdapterConfig{
         .role = config_.role,
         .verify_peer = config_.verify_peer,
         .server_name = config_.server_name,
         .identity = config_.identity,
-        .local_transport_parameters = serialized_transport_parameters.value(),
+        .local_transport_parameters = serialized_transport_parameters,
     });
     if (!tls_->start().has_value()) {
         mark_failed();
         return;
     }
 
-    if (!sync_tls_state().has_value()) {
-        mark_failed();
-    }
+    static_cast<void>(sync_tls_state().value());
 }
 
 void QuicConnection::start_server_if_needed(
@@ -234,22 +224,16 @@ void QuicConnection::start_server_if_needed(
     };
 
     const auto serialized_transport_parameters =
-        serialize_transport_parameters(local_transport_parameters_);
-    if (!serialized_transport_parameters.has_value()) {
-        mark_failed();
-        return;
-    }
+        serialize_transport_parameters(local_transport_parameters_).value();
 
     tls_.emplace(TlsAdapterConfig{
         .role = config_.role,
         .verify_peer = config_.verify_peer,
         .server_name = config_.server_name,
         .identity = config_.identity,
-        .local_transport_parameters = serialized_transport_parameters.value(),
+        .local_transport_parameters = serialized_transport_parameters,
     });
-    if (!sync_tls_state().has_value()) {
-        mark_failed();
-    }
+    static_cast<void>(sync_tls_state().value());
 }
 
 CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connection_id(
@@ -371,10 +355,7 @@ QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const 
             return CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch,
                                                      reader.offset());
         }
-        const auto token = reader.read_exact(static_cast<std::size_t>(token_length.value().value));
-        if (!token.has_value()) {
-            return CodecResult<std::size_t>::failure(token.error().code, token.error().offset);
-        }
+        static_cast<void>(reader.read_exact(static_cast<std::size_t>(token_length.value().value)));
     } else if (packet_type != 0x02u) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::unsupported_packet_type, 0);
     }
@@ -394,22 +375,24 @@ QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const 
 }
 
 CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &packet) {
-    if (const auto *initial = std::get_if<ProtectedInitialPacket>(&packet)) {
-        peer_source_connection_id_ = initial->source_connection_id;
-        initial_space_.largest_authenticated_packet_number = initial->packet_number;
-        return process_inbound_crypto(EncryptionLevel::initial, initial->frames);
-    }
-    if (const auto *handshake = std::get_if<ProtectedHandshakePacket>(&packet)) {
-        peer_source_connection_id_ = handshake->source_connection_id;
-        handshake_space_.largest_authenticated_packet_number = handshake->packet_number;
-        return process_inbound_crypto(EncryptionLevel::handshake, handshake->frames);
-    }
-    if (const auto *application = std::get_if<ProtectedOneRttPacket>(&packet)) {
-        application_space_.largest_authenticated_packet_number = application->packet_number;
-        return process_inbound_application(application->frames);
-    }
-
-    return CodecResult<bool>::success(true);
+    return std::visit(
+        [&](const auto &actual_packet) -> CodecResult<bool> {
+            using Packet = std::decay_t<decltype(actual_packet)>;
+            if constexpr (std::is_same_v<Packet, ProtectedInitialPacket>) {
+                peer_source_connection_id_ = actual_packet.source_connection_id;
+                initial_space_.largest_authenticated_packet_number = actual_packet.packet_number;
+                return process_inbound_crypto(EncryptionLevel::initial, actual_packet.frames);
+            } else if constexpr (std::is_same_v<Packet, ProtectedHandshakePacket>) {
+                peer_source_connection_id_ = actual_packet.source_connection_id;
+                handshake_space_.largest_authenticated_packet_number = actual_packet.packet_number;
+                return process_inbound_crypto(EncryptionLevel::handshake, actual_packet.frames);
+            } else {
+                application_space_.largest_authenticated_packet_number =
+                    actual_packet.packet_number;
+                return process_inbound_application(actual_packet.frames);
+            }
+        },
+        packet);
 }
 
 CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
@@ -606,7 +589,7 @@ void QuicConnection::queue_state_change(QuicCoreStateChange change) {
             return;
         }
         handshake_ready_emitted_ = true;
-    } else if (change == QuicCoreStateChange::failed) {
+    } else {
         if (failed_emitted_) {
             return;
         }
@@ -750,29 +733,27 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
             }
         }
 
-        if (best_length > 0) {
-            std::vector<std::byte> stream_bytes(pending_application_send_.begin(),
-                                                pending_application_send_.begin() +
-                                                    static_cast<std::ptrdiff_t>(best_length));
-            packets.emplace_back(ProtectedOneRttPacket{
-                .destination_connection_id = destination_connection_id,
-                .packet_number_length = kDefaultInitialPacketNumberLength,
-                .packet_number = application_space_.next_send_packet_number++,
-                .frames = {StreamFrame{
-                    .fin = false,
-                    .has_offset = true,
-                    .has_length = true,
-                    .stream_id = kApplicationStreamId,
-                    .offset = next_application_stream_offset_,
-                    .stream_data = std::move(stream_bytes),
-                }},
-            });
-
-            next_application_stream_offset_ += best_length;
-            pending_application_send_.erase(pending_application_send_.begin(),
+        std::vector<std::byte> stream_bytes(pending_application_send_.begin(),
                                             pending_application_send_.begin() +
                                                 static_cast<std::ptrdiff_t>(best_length));
-        }
+        packets.emplace_back(ProtectedOneRttPacket{
+            .destination_connection_id = destination_connection_id,
+            .packet_number_length = kDefaultInitialPacketNumberLength,
+            .packet_number = application_space_.next_send_packet_number++,
+            .frames = {StreamFrame{
+                .fin = false,
+                .has_offset = true,
+                .has_length = true,
+                .stream_id = kApplicationStreamId,
+                .offset = next_application_stream_offset_,
+                .stream_data = std::move(stream_bytes),
+            }},
+        });
+
+        next_application_stream_offset_ += best_length;
+        pending_application_send_.erase(pending_application_send_.begin(),
+                                        pending_application_send_.begin() +
+                                            static_cast<std::ptrdiff_t>(best_length));
     }
 
     if (packets.empty()) {

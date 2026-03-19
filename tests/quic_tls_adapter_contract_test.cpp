@@ -442,4 +442,12 @@ TEST(QuicTlsAdapterContractTest, DriveHandshakeFaultAndMoveAssignmentRemainUsabl
     EXPECT_TRUE(destination.start().has_value());
 }
 
+TEST(QuicTlsAdapterContractTest, MoveConstructionRetainsUsableAdapter) {
+    TlsAdapter source(make_client_config());
+    TlsAdapter moved(std::move(source));
+
+    EXPECT_FALSE(moved.handshake_complete());
+    EXPECT_TRUE(moved.start().has_value());
+}
+
 } // namespace

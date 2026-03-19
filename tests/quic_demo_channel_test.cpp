@@ -281,6 +281,135 @@ TEST(QuicDemoChannelTest, LaterInternalStepWakeupReplacesEarlierWakeup) {
     EXPECT_EQ(first_step.next_wakeup, std::nullopt);
 }
 
+TEST(QuicDemoChannelTest, TimerExpiredInputUsesTimerVisitorPath) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+
+    const auto result =
+        channel.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(5));
+
+    EXPECT_TRUE(result.effects.empty());
+    EXPECT_EQ(result.next_wakeup, std::nullopt);
+}
+
+TEST(QuicDemoChannelTest, InvalidInboundFramePayloadFailsChannel) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::QuicDemoChannelResult result =
+        channel.process_core_result(coquic::quic::QuicCoreResult{
+            .effects =
+                {
+                    coquic::quic::QuicCoreReceiveApplicationData{
+                        .bytes =
+                            {
+                                std::byte{0x00},
+                                std::byte{0x01},
+                                std::byte{0x00},
+                                std::byte{0x01},
+                            },
+                    },
+                },
+        });
+
+    EXPECT_TRUE(channel.has_failed());
+    EXPECT_EQ(coquic::quic::test::state_changes_from(result),
+              (std::vector<coquic::quic::QuicDemoChannelStateChange>{
+                  coquic::quic::QuicDemoChannelStateChange::failed,
+              }));
+}
+
+TEST(QuicDemoChannelTest, FlushBufferedMessagesReturnsEmptyWhenNothingIsQueued) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+
+    const auto result = channel.flush_buffered_messages(coquic::quic::test::test_time());
+
+    EXPECT_TRUE(result.effects.empty());
+    EXPECT_EQ(result.next_wakeup, std::nullopt);
+}
+
+TEST(QuicDemoChannelTest, DuplicateReadyStateEventIsIgnoredAfterEmission) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+    channel.ready_emitted_ = true;
+
+    coquic::quic::QuicDemoChannelResult result;
+    EXPECT_TRUE(channel.translate_state_event(
+        coquic::quic::QuicCoreStateEvent{
+            .change = coquic::quic::QuicCoreStateChange::handshake_ready,
+        },
+        result));
+
+    EXPECT_TRUE(result.effects.empty());
+}
+
+TEST(QuicDemoChannelTest, FailedCoreStateMakesChannelReportFailure) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+    channel.core_.connection_->status_ = coquic::quic::HandshakeStatus::failed;
+
+    EXPECT_TRUE(channel.has_failed());
+}
+
+TEST(QuicDemoChannelTest, PartialFramedReceiveWaitsForRemainingBytes) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_server_core_config());
+    coquic::quic::QuicDemoChannelResult partial_result;
+
+    EXPECT_TRUE(channel.translate_receive_application_data(
+        coquic::quic::QuicCoreReceiveApplicationData{
+            .bytes =
+                {
+                    std::byte{0x00},
+                    std::byte{0x00},
+                    std::byte{0x00},
+                    std::byte{0x05},
+                    std::byte{'h'},
+                    std::byte{'e'},
+                },
+        },
+        partial_result));
+    EXPECT_TRUE(coquic::quic::test::received_messages_from(partial_result).empty());
+
+    coquic::quic::QuicDemoChannelResult completed_result;
+    EXPECT_TRUE(channel.translate_receive_application_data(
+        coquic::quic::QuicCoreReceiveApplicationData{
+            .bytes =
+                {
+                    std::byte{'l'},
+                    std::byte{'l'},
+                    std::byte{'o'},
+                },
+        },
+        completed_result));
+
+    const auto messages = coquic::quic::test::received_messages_from(completed_result);
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(messages.front()), "hello");
+}
+
+TEST(QuicDemoChannelTest, FailChannelEmitsFailureOnlyOnce) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+
+    const auto first = channel.fail_channel();
+    const auto second = channel.fail_channel();
+
+    EXPECT_EQ(coquic::quic::test::state_changes_from(first),
+              (std::vector<coquic::quic::QuicDemoChannelStateChange>{
+                  coquic::quic::QuicDemoChannelStateChange::failed,
+              }));
+    EXPECT_TRUE(second.effects.empty());
+}
+
+TEST(QuicDemoChannelTest, ReadyEventsAreIgnoredAfterChannelFailure) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+    static_cast<void>(channel.fail_channel());
+
+    coquic::quic::QuicDemoChannelResult result;
+    EXPECT_TRUE(channel.translate_state_event(
+        coquic::quic::QuicCoreStateEvent{
+            .change = coquic::quic::QuicCoreStateChange::handshake_ready,
+        },
+        result));
+
+    EXPECT_TRUE(result.effects.empty());
+}
+
 TEST(QuicDemoChannelTest, InboundOversizedLengthPrefixFailsOnceAndLaterCallsAreInert) {
     coquic::quic::QuicCore attacker(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicDemoChannel victim(coquic::quic::test::make_server_core_config());

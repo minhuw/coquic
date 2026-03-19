@@ -151,10 +151,7 @@ QuicDemoChannelResult QuicDemoChannel::process_core_result(QuicCoreResult result
             }
             continue;
         }
-        const auto *state_event = std::get_if<QuicCoreStateEvent>(&effect);
-        if (state_event != nullptr && !translate_state_event(*state_event, translated)) {
-            return fail_channel();
-        }
+        translate_state_event(std::get<QuicCoreStateEvent>(effect), translated);
     }
 
     return translated;
@@ -236,7 +233,7 @@ bool QuicDemoChannel::translate_state_event(const QuicCoreStateEvent &event,
         return true;
     }
 
-    if (event.change == QuicCoreStateChange::failed) {
+    else {
         auto failed_result = fail_channel();
         merge_result(result, std::move(failed_result));
     }

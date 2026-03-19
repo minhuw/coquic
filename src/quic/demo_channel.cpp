@@ -1,5 +1,6 @@
 #include "src/quic/demo_channel.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <utility>
@@ -8,6 +9,12 @@ namespace coquic::quic {
 namespace {
 
 constexpr std::size_t kMessageMaxBytes = static_cast<std::size_t>(64) * 1024U;
+
+template <typename... Ts> struct overloaded : Ts... {
+    using Ts::operator()...;
+};
+
+template <typename... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 
 std::vector<std::byte> frame_message_bytes(std::vector<std::byte> bytes) {
     const auto size = static_cast<std::uint32_t>(bytes.size());
@@ -60,78 +67,63 @@ bool decode_complete_messages(std::vector<std::byte> &buffer,
 QuicDemoChannel::QuicDemoChannel(QuicCoreConfig config) : core_(std::move(config)) {
 }
 
-void QuicDemoChannel::send_message(std::vector<std::byte> bytes) {
+QuicDemoChannelResult QuicDemoChannel::advance(QuicDemoChannelInput input, QuicCoreTimePoint now) {
     if (has_failed()) {
-        failed_ = true;
-        return;
-    }
-    if (bytes.size() > kMessageMaxBytes) {
-        failed_ = true;
-        return;
+        return QuicDemoChannelResult{
+            .next_wakeup = std::nullopt,
+        };
     }
 
-    auto framed = frame_message_bytes(std::move(bytes));
-    if (core_.is_handshake_complete()) {
-        core_.queue_application_data(std::move(framed));
-        return;
-    }
-
-    pending_send_bytes_.insert(pending_send_bytes_.end(), framed.begin(), framed.end());
-}
-
-std::vector<std::byte> QuicDemoChannel::on_datagram(std::vector<std::byte> bytes) {
-    if (has_failed()) {
-        failed_ = true;
-        return {};
-    }
-
-    const bool was_ready = core_.is_handshake_complete();
-    if (was_ready && !pending_send_bytes_.empty()) {
-        core_.queue_application_data(std::move(pending_send_bytes_));
-        pending_send_bytes_.clear();
-    }
-
-    auto outbound = core_.receive(std::move(bytes));
-    if (core_.has_failed()) {
-        failed_ = true;
-        return {};
-    }
-
-    if (!was_ready && core_.is_handshake_complete() && !pending_send_bytes_.empty()) {
-        core_.queue_application_data(std::move(pending_send_bytes_));
-        pending_send_bytes_.clear();
-        if (outbound.empty()) {
-            outbound = core_.receive({});
-            if (core_.has_failed()) {
-                failed_ = true;
-                return {};
-            }
+    const auto flush_after_ready = [&](bool was_ready, QuicDemoChannelResult &result) {
+        if (has_failed() || was_ready || !core_.is_handshake_complete() ||
+            pending_send_bytes_.empty()) {
+            return;
         }
-    }
 
-    auto raw_inbound = core_.take_received_application_data();
-    pending_receive_bytes_.insert(pending_receive_bytes_.end(), raw_inbound.begin(),
-                                  raw_inbound.end());
-    if (!decode_complete_messages(pending_receive_bytes_, complete_messages_)) {
-        failed_ = true;
-        complete_messages_.clear();
-        pending_receive_bytes_.clear();
-        return {};
-    }
+        const auto is_ready_event = [](const QuicDemoChannelEffect &effect) {
+            const auto *state_event = std::get_if<QuicDemoChannelStateEvent>(&effect);
+            return state_event != nullptr &&
+                   state_event->change == QuicDemoChannelStateChange::ready;
+        };
+        auto flushed = flush_buffered_messages(now);
+        auto ready_position =
+            std::find_if(result.effects.begin(), result.effects.end(), is_ready_event);
+        result.effects.insert(ready_position, std::make_move_iterator(flushed.effects.begin()),
+                              std::make_move_iterator(flushed.effects.end()));
+        if (has_failed()) {
+            result.effects.erase(
+                std::remove_if(result.effects.begin(), result.effects.end(), is_ready_event),
+                result.effects.end());
+        }
+        result.next_wakeup = flushed.next_wakeup;
+        next_wakeup_ = result.next_wakeup;
+    };
 
-    return outbound;
-}
-
-std::vector<std::vector<std::byte>> QuicDemoChannel::take_messages() {
-    if (has_failed()) {
-        failed_ = true;
-        complete_messages_.clear();
-        return {};
-    }
-
-    auto messages = std::move(complete_messages_);
-    complete_messages_.clear();
-    return messages;
+    return std::visit(overloaded{
+                          [&](QuicCoreStart start) {
+                              const bool was_ready = core_.is_handshake_complete();
+                              auto result = process_core_result(core_.advance(start, now));
+                              flush_after_ready(was_ready, result);
+                              return result;
+                          },
+                          [&](QuicCoreInboundDatagram inbound) {
+                              const bool was_ready = core_.is_handshake_complete();
+                              auto result =
+                                  process_core_result(core_.advance(std::move(inbound), now));
+                              flush_after_ready(was_ready, result);
+                              return result;
+                          },
+                          [&](QuicDemoChannelQueueMessage queued) {
+                              return queue_message(std::move(queued.bytes), now);
+                          },
+                          [&](QuicCoreTimerExpired expired) {
+                              const bool was_ready = core_.is_handshake_complete();
+                              auto result = process_core_result(core_.advance(expired, now));
+                              flush_after_ready(was_ready, result);
+                              return result;
+                          },
+                      },
+                      std::move(input));
 }
 
 bool QuicDemoChannel::is_ready() const {
@@ -140,6 +132,135 @@ bool QuicDemoChannel::is_ready() const {
 
 bool QuicDemoChannel::has_failed() const {
     return failed_ || core_.has_failed();
+}
+
+QuicDemoChannelResult QuicDemoChannel::process_core_result(QuicCoreResult result) {
+    next_wakeup_ = result.next_wakeup;
+    QuicDemoChannelResult translated{
+        .next_wakeup = next_wakeup_,
+    };
+
+    for (auto &effect : result.effects) {
+        if (auto *send = std::get_if<QuicCoreSendDatagram>(&effect)) {
+            translated.effects.emplace_back(QuicCoreSendDatagram{std::move(send->bytes)});
+            continue;
+        }
+        if (auto *received = std::get_if<QuicCoreReceiveApplicationData>(&effect)) {
+            if (!translate_receive_application_data(*received, translated)) {
+                return fail_channel();
+            }
+            continue;
+        }
+        const auto *state_event = std::get_if<QuicCoreStateEvent>(&effect);
+        if (state_event != nullptr && !translate_state_event(*state_event, translated)) {
+            return fail_channel();
+        }
+    }
+
+    return translated;
+}
+
+void QuicDemoChannel::merge_result(QuicDemoChannelResult &destination,
+                                   QuicDemoChannelResult source) {
+    destination.effects.insert(destination.effects.end(),
+                               std::make_move_iterator(source.effects.begin()),
+                               std::make_move_iterator(source.effects.end()));
+    destination.next_wakeup = source.next_wakeup;
+    next_wakeup_ = destination.next_wakeup;
+}
+
+QuicDemoChannelResult QuicDemoChannel::fail_channel() {
+    pending_send_bytes_.clear();
+    pending_receive_bytes_.clear();
+    failed_ = true;
+    next_wakeup_ = std::nullopt;
+
+    QuicDemoChannelResult result{
+        .next_wakeup = std::nullopt,
+    };
+    if (!failed_emitted_) {
+        failed_emitted_ = true;
+        result.effects.emplace_back(QuicDemoChannelStateEvent{
+            .change = QuicDemoChannelStateChange::failed,
+        });
+    }
+
+    return result;
+}
+
+QuicDemoChannelResult QuicDemoChannel::queue_message(std::vector<std::byte> bytes,
+                                                     QuicCoreTimePoint now) {
+    if (bytes.size() > kMessageMaxBytes) {
+        return fail_channel();
+    }
+
+    auto framed = frame_message_bytes(std::move(bytes));
+    if (!core_.is_handshake_complete()) {
+        pending_send_bytes_.insert(pending_send_bytes_.end(), framed.begin(), framed.end());
+        return QuicDemoChannelResult{
+            .next_wakeup = next_wakeup_,
+        };
+    }
+
+    return process_core_result(core_.advance(
+        QuicCoreQueueApplicationData{
+            .bytes = std::move(framed),
+        },
+        now));
+}
+
+QuicDemoChannelResult QuicDemoChannel::flush_buffered_messages(QuicCoreTimePoint now) {
+    if (pending_send_bytes_.empty()) {
+        return {};
+    }
+
+    auto bytes = std::move(pending_send_bytes_);
+    pending_send_bytes_.clear();
+    return process_core_result(core_.advance(
+        QuicCoreQueueApplicationData{
+            .bytes = std::move(bytes),
+        },
+        now));
+}
+
+bool QuicDemoChannel::translate_state_event(const QuicCoreStateEvent &event,
+                                            QuicDemoChannelResult &result) {
+    if (event.change == QuicCoreStateChange::handshake_ready) {
+        if (ready_emitted_ || has_failed()) {
+            return true;
+        }
+        ready_emitted_ = true;
+        result.effects.emplace_back(QuicDemoChannelStateEvent{
+            .change = QuicDemoChannelStateChange::ready,
+        });
+        return true;
+    }
+
+    if (event.change == QuicCoreStateChange::failed) {
+        auto failed_result = fail_channel();
+        merge_result(result, std::move(failed_result));
+    }
+
+    return true;
+}
+
+bool QuicDemoChannel::translate_receive_application_data(
+    const QuicCoreReceiveApplicationData &received, QuicDemoChannelResult &result) {
+    pending_receive_bytes_.insert(pending_receive_bytes_.end(), received.bytes.begin(),
+                                  received.bytes.end());
+
+    auto messages = std::vector<std::vector<std::byte>>{};
+    if (!decode_complete_messages(pending_receive_bytes_, messages)) {
+        return false;
+    }
+
+    for (auto &message : messages) {
+        result.effects.emplace_back(QuicDemoChannelReceiveMessage{
+            .bytes = std::move(message),
+        });
+    }
+
+    return true;
 }
 
 } // namespace coquic::quic

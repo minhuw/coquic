@@ -1,363 +1,424 @@
-#include <cstring>
-#include <type_traits>
-
 #include <gtest/gtest.h>
+
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <array>
+#include <algorithm>
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <utility>
+#include <vector>
 
 #define private public
 #include "src/quic/demo_channel.h"
 #undef private
 
 #include "src/coquic.h"
-#include "src/quic/protected_codec.h"
+#include "src/quic/packet_crypto_test_hooks.h"
 #include "tests/quic_test_utils.h"
 
 namespace {
 
-using coquic::quic::AckFrame;
-using coquic::quic::CipherSuite;
-using coquic::quic::ConnectionId;
-using coquic::quic::EndpointRole;
-using coquic::quic::Frame;
-using coquic::quic::ProtectedOneRttPacket;
-using coquic::quic::ProtectedPacket;
-using coquic::quic::SerializeProtectionContext;
-using coquic::quic::TlsAdapter;
-using coquic::quic::TlsAdapterConfig;
-using coquic::quic::TlsIdentity;
-using coquic::quic::TrafficSecret;
+template <typename Channel>
+concept has_send_message =
+    requires(Channel &channel) { channel.send_message(std::vector<std::byte>{}); };
 
-std::vector<std::byte> framed_message(std::string_view text) {
-    std::vector<std::byte> framed{
-        std::byte{0x00},
-        std::byte{0x00},
-        std::byte{0x00},
-        static_cast<std::byte>(text.size()),
-    };
-    for (const auto character : text) {
-        framed.push_back(static_cast<std::byte>(character));
+template <typename Channel>
+concept has_on_datagram =
+    requires(Channel &channel) { channel.on_datagram(std::vector<std::byte>{}); };
+
+template <typename Channel>
+concept has_take_messages = requires(Channel &channel) { channel.take_messages(); };
+
+static_assert(!has_send_message<coquic::quic::QuicDemoChannel>);
+static_assert(!has_on_datagram<coquic::quic::QuicDemoChannel>);
+static_assert(!has_take_messages<coquic::quic::QuicDemoChannel>);
+
+class ScopedFd {
+  public:
+    explicit ScopedFd(int fd) : fd_(fd) {
     }
 
-    return framed;
-}
-
-EndpointRole opposite_role(EndpointRole role) {
-    return role == EndpointRole::client ? EndpointRole::server : EndpointRole::client;
-}
-
-CipherSuite invalid_cipher_suite() {
-    const auto raw = static_cast<std::underlying_type_t<CipherSuite>>(0xff);
-    CipherSuite cipher_suite{};
-    std::memcpy(&cipher_suite, &raw, sizeof(cipher_suite));
-    return cipher_suite;
-}
-
-TrafficSecret make_traffic_secret(CipherSuite cipher_suite = CipherSuite::tls_aes_128_gcm_sha256) {
-    const std::size_t secret_size = cipher_suite == CipherSuite::tls_aes_256_gcm_sha384 ? 48u : 32u;
-    return TrafficSecret{
-        .cipher_suite = cipher_suite,
-        .secret = std::vector<std::byte>(secret_size, std::byte{0x11}),
-    };
-}
-
-TlsAdapterConfig make_client_tls_config(std::vector<std::byte> local_transport_parameters =
-                                            coquic::quic::test::sample_transport_parameters()) {
-    return TlsAdapterConfig{
-        .role = EndpointRole::client,
-        .verify_peer = false,
-        .server_name = "localhost",
-        .local_transport_parameters = std::move(local_transport_parameters),
-    };
-}
-
-TlsAdapterConfig make_server_tls_config(std::vector<std::byte> local_transport_parameters =
-                                            coquic::quic::test::sample_transport_parameters()) {
-    return TlsAdapterConfig{
-        .role = EndpointRole::server,
-        .verify_peer = false,
-        .server_name = "localhost",
-        .identity =
-            TlsIdentity{
-                .certificate_pem =
-                    coquic::quic::test::read_text_file("tests/fixtures/quic-server-cert.pem"),
-                .private_key_pem =
-                    coquic::quic::test::read_text_file("tests/fixtures/quic-server-key.pem"),
-            },
-        .local_transport_parameters = std::move(local_transport_parameters),
-    };
-}
-
-void drive_tls_handshake(TlsAdapter &client, TlsAdapter &server) {
-    ASSERT_TRUE(client.start().has_value());
-    auto to_server = client.take_pending(coquic::quic::EncryptionLevel::initial);
-    ASSERT_FALSE(to_server.empty());
-    ASSERT_TRUE(server.provide(coquic::quic::EncryptionLevel::initial, to_server).has_value());
-
-    for (int i = 0; i < 32 && !(client.handshake_complete() && server.handshake_complete()); ++i) {
-        const auto client_initial = client.take_pending(coquic::quic::EncryptionLevel::initial);
-        if (!client_initial.empty()) {
-            ASSERT_TRUE(
-                server.provide(coquic::quic::EncryptionLevel::initial, client_initial).has_value());
+    ~ScopedFd() {
+        if (fd_ >= 0) {
+            ::close(fd_);
         }
-
-        const auto server_initial = server.take_pending(coquic::quic::EncryptionLevel::initial);
-        if (!server_initial.empty()) {
-            ASSERT_TRUE(
-                client.provide(coquic::quic::EncryptionLevel::initial, server_initial).has_value());
-        }
-
-        const auto server_handshake = server.take_pending(coquic::quic::EncryptionLevel::handshake);
-        if (!server_handshake.empty()) {
-            ASSERT_TRUE(client.provide(coquic::quic::EncryptionLevel::handshake, server_handshake)
-                            .has_value());
-        }
-
-        const auto client_handshake = client.take_pending(coquic::quic::EncryptionLevel::handshake);
-        if (!client_handshake.empty()) {
-            ASSERT_TRUE(server.provide(coquic::quic::EncryptionLevel::handshake, client_handshake)
-                            .has_value());
-        }
-
-        client.poll();
-        server.poll();
     }
 
-    ASSERT_TRUE(client.handshake_complete());
-    ASSERT_TRUE(server.handshake_complete());
-}
+    ScopedFd(const ScopedFd &) = delete;
+    ScopedFd &operator=(const ScopedFd &) = delete;
 
-std::vector<std::byte> make_one_rtt_datagram(coquic::quic::QuicConnection &connection,
-                                             std::vector<Frame> frames,
-                                             const TrafficSecret &secret) {
-    const auto serialized = coquic::quic::serialize_protected_datagram(
-        std::vector<ProtectedPacket>{ProtectedOneRttPacket{
-            .destination_connection_id = connection.config_.source_connection_id,
-            .packet_number_length = 2,
-            .packet_number = 0,
-            .frames = std::move(frames),
-        }},
-        SerializeProtectionContext{
-            .local_role = opposite_role(connection.config_.role),
-            .client_initial_destination_connection_id =
-                connection.client_initial_destination_connection_id(),
-            .one_rtt_secret = secret,
-        });
-    EXPECT_TRUE(serialized.has_value());
-    if (!serialized.has_value()) {
-        return {};
+    int get() const {
+        return fd_;
     }
 
-    return serialized.value();
+  private:
+    int fd_ = -1;
+};
+
+bool set_nonblocking(int fd) {
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return false;
+    }
+    return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
-TEST(QuicDemoChannelTest, BufferedMessageFlushesAfterHandshake) {
+bool bind_loopback(int fd, sockaddr_in &bound) {
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(0);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+        return false;
+    }
+
+    socklen_t length = sizeof(bound);
+    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&bound), &length) != 0) {
+        return false;
+    }
+
+    return true;
+}
+
+void merge_result(coquic::quic::QuicDemoChannelResult &combined,
+                  coquic::quic::QuicDemoChannelResult step) {
+    combined.effects.insert(combined.effects.end(), std::make_move_iterator(step.effects.begin()),
+                            std::make_move_iterator(step.effects.end()));
+    combined.next_wakeup = step.next_wakeup;
+}
+
+TEST(QuicDemoChannelTest, ClientStartProducesSendDatagramEffect) {
+    coquic::quic::QuicDemoChannel client(coquic::quic::test::make_client_core_config());
+
+    const auto result =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto datagrams = coquic::quic::test::send_datagrams_from(result);
+
+    ASSERT_EQ(datagrams.size(), 1u);
+    EXPECT_GE(datagrams.front().size(), 1200u);
+    EXPECT_TRUE(coquic::quic::test::state_changes_from(result).empty());
+    EXPECT_EQ(result.next_wakeup, std::nullopt);
+    EXPECT_FALSE(client.is_ready());
+    EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicDemoChannelTest, QueuedMessageFlushesWhenClientTransitionsToReady) {
     coquic::quic::QuicDemoChannel client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicDemoChannel server(coquic::quic::test::make_server_core_config());
 
-    client.send_message(coquic::quic::test::bytes_from_string("hello"));
-    auto to_server = client.on_datagram({});
-    auto to_client = std::vector<std::byte>{};
+    const auto queued = client.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = coquic::quic::test::bytes_from_string("hello"),
+        },
+        coquic::quic::test::test_time());
+    EXPECT_TRUE(queued.effects.empty());
 
-    for (int i = 0; i < 32 && !(client.is_ready() && server.is_ready()); ++i) {
-        if (!to_server.empty()) {
-            to_client = server.on_datagram(to_server);
+    auto to_server = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    coquic::quic::QuicDemoChannelResult ready_step;
+    bool saw_ready = false;
+
+    for (int i = 0; i < 32 && !saw_ready; ++i) {
+        const auto to_client = coquic::quic::test::relay_send_datagrams_to_peer(
+            to_server, server, coquic::quic::test::test_time());
+        auto candidate = coquic::quic::test::relay_send_datagrams_to_peer(
+            to_client, client, coquic::quic::test::test_time());
+        const auto changes = coquic::quic::test::state_changes_from(candidate);
+        if (coquic::quic::test::count_state_change(
+                changes, coquic::quic::QuicDemoChannelStateChange::ready) == 1u) {
+            saw_ready = true;
+            ready_step = std::move(candidate);
+            break;
         }
-        to_server = client.on_datagram(to_client);
+
+        to_server = std::move(candidate);
     }
 
+    ASSERT_TRUE(saw_ready);
+    EXPECT_FALSE(coquic::quic::test::send_datagrams_from(ready_step).empty());
+    const auto ready_position = std::find_if(
+        ready_step.effects.begin(), ready_step.effects.end(),
+        [](const coquic::quic::QuicDemoChannelEffect &effect) {
+            const auto *state_event = std::get_if<coquic::quic::QuicDemoChannelStateEvent>(&effect);
+            return state_event != nullptr &&
+                   state_event->change == coquic::quic::QuicDemoChannelStateChange::ready;
+        });
+    ASSERT_NE(ready_position, ready_step.effects.end());
+    EXPECT_EQ(std::find_if(ready_position, ready_step.effects.end(),
+                           [](const coquic::quic::QuicDemoChannelEffect &effect) {
+                               return std::holds_alternative<coquic::quic::QuicCoreSendDatagram>(
+                                   effect);
+                           }),
+              ready_step.effects.end());
+
+    const auto server_after_ready = coquic::quic::test::relay_send_datagrams_to_peer(
+        ready_step, server, coquic::quic::test::test_time(1));
+    const auto messages = coquic::quic::test::received_messages_from(server_after_ready);
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(messages.front()), "hello");
+}
+
+TEST(QuicDemoChannelTest, FailedFlushAfterReadySuppressesStaleReadyStateEvent) {
+    coquic::quic::QuicDemoChannel client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicDemoChannel server(coquic::quic::test::make_server_core_config());
+
+    const auto queued = client.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = std::vector<std::byte>(static_cast<std::size_t>(64) * 1024U, std::byte{0x68}),
+        },
+        coquic::quic::test::test_time());
+    EXPECT_TRUE(queued.effects.empty());
+
+    auto to_server = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    coquic::quic::QuicDemoChannelResult failed_step;
+    bool saw_failed = false;
+
+    for (int i = 0; i < 32 && !saw_failed; ++i) {
+        const auto to_client = coquic::quic::test::relay_send_datagrams_to_peer(
+            to_server, server, coquic::quic::test::test_time(i + 1));
+        const coquic::quic::test::ScopedPacketCryptoFaultInjector injector{
+            coquic::quic::test::PacketCryptoFaultPoint::seal_length_guard, 8};
+        auto candidate = coquic::quic::test::relay_send_datagrams_to_peer(
+            to_client, client, coquic::quic::test::test_time(i + 1));
+        const auto changes = coquic::quic::test::state_changes_from(candidate);
+        if (coquic::quic::test::count_state_change(
+                changes, coquic::quic::QuicDemoChannelStateChange::failed) == 1u) {
+            failed_step = std::move(candidate);
+            saw_failed = true;
+            break;
+        }
+
+        to_server = std::move(candidate);
+    }
+
+    ASSERT_TRUE(saw_failed);
+    EXPECT_EQ(coquic::quic::test::state_changes_from(failed_step),
+              (std::vector<coquic::quic::QuicDemoChannelStateChange>{
+                  coquic::quic::QuicDemoChannelStateChange::failed,
+              }));
+}
+
+TEST(QuicDemoChannelTest, ReceivedMessagesAreDeliveredThroughEffects) {
+    coquic::quic::QuicDemoChannel client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicDemoChannel server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_demo_channel_handshake(client, server,
+                                                     coquic::quic::test::test_time());
     ASSERT_TRUE(client.is_ready());
     ASSERT_TRUE(server.is_ready());
-    ASSERT_FALSE(client.has_failed());
-    ASSERT_FALSE(server.has_failed());
 
-    if (!to_server.empty()) {
-        to_client = server.on_datagram(to_server);
-        to_server = client.on_datagram(to_client);
-    }
-
-    coquic::quic::test::flush_demo_channels(client, server);
-    const auto messages = server.take_messages();
+    const auto send = client.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = coquic::quic::test::bytes_from_string("ping"),
+        },
+        coquic::quic::test::test_time(1));
+    const auto received = coquic::quic::test::relay_send_datagrams_to_peer(
+        send, server, coquic::quic::test::test_time(1));
+    const auto messages = coquic::quic::test::received_messages_from(received);
 
     ASSERT_EQ(messages.size(), 1u);
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(messages[0]), "hello");
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(messages.front()), "ping");
 }
 
-TEST(QuicDemoChannelTest, RejectsOversizedFramedMessage) {
+TEST(QuicDemoChannelTest, OversizedQueuedMessageFailsOnceAndLaterCallsAreInert) {
     coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
 
-    channel.send_message(std::vector<std::byte>(65537, std::byte{0x61}));
-
+    const auto failed = channel.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = std::vector<std::byte>(65537, std::byte{0x61}),
+        },
+        coquic::quic::test::test_time());
+    const auto failed_changes = coquic::quic::test::state_changes_from(failed);
+    EXPECT_EQ(failed_changes, (std::vector<coquic::quic::QuicDemoChannelStateChange>{
+                                  coquic::quic::QuicDemoChannelStateChange::failed,
+                              }));
+    EXPECT_EQ(failed.next_wakeup, std::nullopt);
     EXPECT_TRUE(channel.has_failed());
-    EXPECT_TRUE(channel.on_datagram({}).empty());
-    EXPECT_TRUE(channel.take_messages().empty());
-}
-
-TEST(QuicDemoChannelTest, CoreFailureStateRemainsTerminalForWrapperOperations) {
-    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_server_core_config());
-
-    EXPECT_TRUE(channel.on_datagram({std::byte{0x01}}).empty());
-    ASSERT_TRUE(channel.has_failed());
-    ASSERT_TRUE(channel.core_.has_failed());
-
-    channel.failed_ = false;
-    ASSERT_FALSE(channel.failed_);
-    ASSERT_TRUE(channel.core_.has_failed());
-
-    channel.send_message(coquic::quic::test::bytes_from_string("ignored"));
-    EXPECT_TRUE(channel.pending_send_bytes_.empty());
-    EXPECT_TRUE(channel.on_datagram({}).empty());
     EXPECT_FALSE(channel.is_ready());
+
+    const auto after_start =
+        channel.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time(1));
+    const auto after_timer =
+        channel.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(2));
+    EXPECT_TRUE(after_start.effects.empty());
+    EXPECT_TRUE(after_timer.effects.empty());
+    EXPECT_EQ(after_start.next_wakeup, std::nullopt);
+    EXPECT_EQ(after_timer.next_wakeup, std::nullopt);
 }
 
-TEST(QuicDemoChannelTest, InboundOversizedLengthPrefixTriggersTerminalFailure) {
+TEST(QuicDemoChannelTest, QueueBeforeHandshakePreservesCurrentWakeup) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+    channel.next_wakeup_ = coquic::quic::test::test_time(123);
+
+    const auto result = channel.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = coquic::quic::test::bytes_from_string("hello"),
+        },
+        coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(result.effects.empty());
+    EXPECT_EQ(result.next_wakeup, coquic::quic::test::test_time(123));
+}
+
+TEST(QuicDemoChannelTest, LaterInternalStepWakeupReplacesEarlierWakeup) {
+    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
+
+    coquic::quic::QuicDemoChannelResult first_step{
+        .next_wakeup = coquic::quic::test::test_time(10),
+    };
+    coquic::quic::QuicDemoChannelResult second_step{
+        .next_wakeup = std::nullopt,
+    };
+
+    channel.merge_result(first_step, std::move(second_step));
+
+    EXPECT_EQ(first_step.next_wakeup, std::nullopt);
+}
+
+TEST(QuicDemoChannelTest, InboundOversizedLengthPrefixFailsOnceAndLaterCallsAreInert) {
     coquic::quic::QuicCore attacker(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicDemoChannel victim(coquic::quic::test::make_server_core_config());
 
-    auto to_victim = attacker.receive({});
-    auto to_attacker = std::vector<std::byte>{};
-
+    auto to_victim =
+        attacker.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     for (int i = 0; i < 32 && !(attacker.is_handshake_complete() && victim.is_ready()); ++i) {
-        if (!to_victim.empty()) {
-            to_attacker = victim.on_datagram(to_victim);
+        const auto to_attacker = coquic::quic::test::relay_send_datagrams_to_peer(
+            to_victim, victim, coquic::quic::test::test_time());
+        if (attacker.is_handshake_complete() && victim.is_ready()) {
+            break;
         }
-        to_victim = attacker.receive(to_attacker);
+        to_victim = coquic::quic::test::relay_send_datagrams_to_peer(
+            to_attacker, attacker, coquic::quic::test::test_time());
     }
 
     ASSERT_TRUE(attacker.is_handshake_complete());
     ASSERT_TRUE(victim.is_ready());
 
-    attacker.queue_application_data({
-        std::byte{0x00},
-        std::byte{0x01},
-        std::byte{0x00},
-        std::byte{0x01},
-    });
-    const auto attack_datagram = attacker.receive({});
-    ASSERT_FALSE(attack_datagram.empty());
-
-    EXPECT_TRUE(victim.on_datagram(attack_datagram).empty());
+    const auto attack = attacker.advance(
+        coquic::quic::QuicCoreQueueApplicationData{
+            .bytes =
+                {
+                    std::byte{0x00},
+                    std::byte{0x01},
+                    std::byte{0x00},
+                    std::byte{0x01},
+                },
+        },
+        coquic::quic::test::test_time(1));
+    const auto failed = coquic::quic::test::relay_send_datagrams_to_peer(
+        attack, victim, coquic::quic::test::test_time(1));
+    const auto failed_changes = coquic::quic::test::state_changes_from(failed);
+    EXPECT_EQ(coquic::quic::test::count_state_change(
+                  failed_changes, coquic::quic::QuicDemoChannelStateChange::failed),
+              1u);
     EXPECT_TRUE(victim.has_failed());
     EXPECT_FALSE(victim.is_ready());
-    EXPECT_TRUE(victim.take_messages().empty());
+    EXPECT_EQ(failed.next_wakeup, std::nullopt);
 
-    victim.send_message(coquic::quic::test::bytes_from_string("ignored"));
-    EXPECT_TRUE(victim.on_datagram({}).empty());
-    EXPECT_TRUE(victim.take_messages().empty());
+    const auto after =
+        victim.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(2));
+    EXPECT_TRUE(after.effects.empty());
+    EXPECT_EQ(after.next_wakeup, std::nullopt);
 }
 
-TEST(QuicDemoChannelTest, ReadyChannelQueuesMessageDirectlyToCore) {
-    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
-    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
-        *channel.core_.connection_, coquic::quic::HandshakeStatus::connected);
+TEST(QuicDemoChannelTest, SocketBackedPollApiSmokeTestDeliversMessage) {
+    const int client_socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(client_socket_fd, 0) << std::strerror(errno);
+    const int server_socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(server_socket_fd, 0) << std::strerror(errno);
+    ScopedFd client_socket(client_socket_fd);
+    ScopedFd server_socket(server_socket_fd);
 
-    channel.send_message(coquic::quic::test::bytes_from_string("hi"));
+    ASSERT_TRUE(set_nonblocking(client_socket.get())) << std::strerror(errno);
+    ASSERT_TRUE(set_nonblocking(server_socket.get())) << std::strerror(errno);
 
-    EXPECT_TRUE(channel.pending_send_bytes_.empty());
-    EXPECT_EQ(channel.core_.connection_->pending_application_send_, framed_message("hi"));
-}
+    sockaddr_in client_address{};
+    sockaddr_in server_address{};
+    ASSERT_TRUE(bind_loopback(client_socket.get(), client_address)) << std::strerror(errno);
+    ASSERT_TRUE(bind_loopback(server_socket.get(), server_address)) << std::strerror(errno);
 
-TEST(QuicDemoChannelTest, ReadyChannelFlushesBufferedBytesIntoCore) {
-    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
-    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
-        *channel.core_.connection_, coquic::quic::HandshakeStatus::connected);
-    channel.pending_send_bytes_ = framed_message("queued");
-
-    EXPECT_FALSE(channel.on_datagram({}).empty());
-    EXPECT_TRUE(channel.pending_send_bytes_.empty());
-    EXPECT_EQ(channel.core_.connection_->pending_application_send_, framed_message("queued"));
-}
-
-TEST(QuicDemoChannelTest, PartialFramedMessageWaitsForCompletion) {
-    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_server_core_config());
-    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
-        *channel.core_.connection_, coquic::quic::HandshakeStatus::connected);
-    channel.core_.connection_->pending_application_receive_ =
-        coquic::quic::test::bytes_from_string(std::string("\0\0\0\5he", 6));
-
-    EXPECT_TRUE(channel.on_datagram({}).empty());
-    EXPECT_TRUE(channel.take_messages().empty());
-    EXPECT_EQ(channel.pending_receive_bytes_,
-              coquic::quic::test::bytes_from_string(std::string("\0\0\0\5he", 6)));
-
-    channel.core_.connection_->pending_application_receive_ =
-        coquic::quic::test::bytes_from_string("llo");
-
-    EXPECT_TRUE(channel.on_datagram({}).empty());
-
-    const auto messages = channel.take_messages();
-    ASSERT_EQ(messages.size(), 1u);
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(messages[0]), "hello");
-}
-
-TEST(QuicDemoChannelTest, ServerFlushesBufferedMessageWhenHandshakeCompletes) {
     coquic::quic::QuicDemoChannel client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicDemoChannel server(coquic::quic::test::make_server_core_config());
 
-    server.send_message(coquic::quic::test::bytes_from_string("reply"));
+    const auto buffered = client.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = coquic::quic::test::bytes_from_string("hello"),
+        },
+        coquic::quic::test::test_time());
+    EXPECT_TRUE(buffered.effects.empty());
 
-    auto to_server = client.on_datagram({});
-    auto to_client = std::vector<std::byte>{};
-    bool saw_server_ready_transition = false;
-    bool saw_immediate_server_reply = false;
+    auto client_result =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    coquic::quic::QuicDemoChannelResult server_result;
+    bool saw_hello = false;
 
-    for (int i = 0; i < 32 && !(client.is_ready() && server.is_ready()); ++i) {
-        if (!to_server.empty()) {
-            const bool server_was_ready = server.is_ready();
-            const auto server_outbound = server.on_datagram(to_server);
-            if (!server_was_ready && server.is_ready()) {
-                saw_server_ready_transition = true;
-                if (!server_outbound.empty()) {
-                    saw_immediate_server_reply = true;
+    for (int i = 0; i < 256 && !saw_hello; ++i) {
+        for (const auto &datagram : coquic::quic::test::send_datagrams_from(client_result)) {
+            const auto sent = ::sendto(client_socket.get(), datagram.data(), datagram.size(), 0,
+                                       reinterpret_cast<const sockaddr *>(&server_address),
+                                       sizeof(server_address));
+            ASSERT_EQ(sent, static_cast<ssize_t>(datagram.size())) << std::strerror(errno);
+        }
+        for (const auto &datagram : coquic::quic::test::send_datagrams_from(server_result)) {
+            const auto sent = ::sendto(server_socket.get(), datagram.data(), datagram.size(), 0,
+                                       reinterpret_cast<const sockaddr *>(&client_address),
+                                       sizeof(client_address));
+            ASSERT_EQ(sent, static_cast<ssize_t>(datagram.size())) << std::strerror(errno);
+        }
+
+        client_result = {};
+        while (true) {
+            std::array<std::byte, 65535> inbound{};
+            const auto bytes_read = ::recvfrom(client_socket.get(), inbound.data(), inbound.size(),
+                                               0, nullptr, nullptr);
+            if (bytes_read < 0) {
+                ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK) << std::strerror(errno);
+                break;
+            }
+
+            auto step = client.advance(
+                coquic::quic::QuicCoreInboundDatagram{
+                    .bytes = std::vector<std::byte>(
+                        inbound.begin(), inbound.begin() + static_cast<std::ptrdiff_t>(bytes_read)),
+                },
+                coquic::quic::test::test_time(i + 1));
+            merge_result(client_result, std::move(step));
+        }
+
+        server_result = {};
+        while (true) {
+            std::array<std::byte, 65535> inbound{};
+            const auto bytes_read = ::recvfrom(server_socket.get(), inbound.data(), inbound.size(),
+                                               0, nullptr, nullptr);
+            if (bytes_read < 0) {
+                ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK) << std::strerror(errno);
+                break;
+            }
+
+            auto step = server.advance(
+                coquic::quic::QuicCoreInboundDatagram{
+                    .bytes = std::vector<std::byte>(
+                        inbound.begin(), inbound.begin() + static_cast<std::ptrdiff_t>(bytes_read)),
+                },
+                coquic::quic::test::test_time(i + 1));
+            for (const auto &message : coquic::quic::test::received_messages_from(step)) {
+                if (coquic::quic::test::string_from_bytes(message) == "hello") {
+                    saw_hello = true;
                 }
             }
-            to_client = server_outbound;
+            merge_result(server_result, std::move(step));
         }
-        to_server = client.on_datagram(to_client);
     }
 
-    ASSERT_TRUE(client.is_ready());
-    ASSERT_TRUE(server.is_ready());
-    EXPECT_TRUE(saw_server_ready_transition);
-    EXPECT_TRUE(saw_immediate_server_reply);
-
-    coquic::quic::test::flush_demo_channels(client, server);
-    const auto messages = client.take_messages();
-
-    ASSERT_EQ(messages.size(), 1u);
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(messages[0]), "reply");
-}
-
-TEST(QuicDemoChannelTest, RetryFlushFailureAfterHandshakeCompletionMarksChannelFailed) {
-    coquic::quic::QuicDemoChannel channel(coquic::quic::test::make_client_core_config());
-    channel.pending_send_bytes_ = framed_message("queued");
-
-    auto &connection = *channel.core_.connection_;
-    connection.started_ = true;
-    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
-    connection.peer_transport_parameters_validated_ = true;
-    connection.peer_source_connection_id_ = ConnectionId{std::byte{0x53}, std::byte{0x01}};
-    connection.application_space_.read_secret = make_traffic_secret();
-    connection.application_space_.write_secret = make_traffic_secret(invalid_cipher_suite());
-
-    TlsAdapter client_adapter(make_client_tls_config());
-    TlsAdapter server_adapter(make_server_tls_config());
-    drive_tls_handshake(client_adapter, server_adapter);
-    static_cast<void>(client_adapter.take_available_secrets());
-    static_cast<void>(client_adapter.take_pending(coquic::quic::EncryptionLevel::initial));
-    static_cast<void>(client_adapter.take_pending(coquic::quic::EncryptionLevel::handshake));
-    static_cast<void>(client_adapter.take_pending(coquic::quic::EncryptionLevel::application));
-    connection.tls_ = std::move(client_adapter);
-
-    const auto datagram = make_one_rtt_datagram(connection,
-                                                {AckFrame{
-                                                    .largest_acknowledged = 0,
-                                                    .ack_delay = 0,
-                                                    .first_ack_range = 0,
-                                                }},
-                                                connection.application_space_.read_secret.value());
-
-    EXPECT_TRUE(channel.on_datagram(datagram).empty());
-    EXPECT_TRUE(channel.has_failed());
-    EXPECT_TRUE(channel.take_messages().empty());
+    EXPECT_TRUE(saw_hello);
+    EXPECT_FALSE(client.has_failed());
+    EXPECT_FALSE(server.has_failed());
 }
 
 } // namespace

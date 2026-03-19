@@ -1,6 +1,7 @@
 #include "src/coquic.h"
 
 #include <arpa/inet.h>
+#include <chrono>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -9,10 +10,10 @@
 #include <iostream>
 #include <iterator>
 #include <optional>
+#include <poll.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -30,10 +31,12 @@ struct DemoCliConfig {
 
 constexpr std::size_t kMaxDatagramBytes = 65535;
 constexpr int kReceiveTimeoutSeconds = 10;
-constexpr int kFlushIterationLimit = 1024;
 constexpr const char *kUsageLine = "usage: coquic [demo-server|demo-client <message>]";
 constexpr const char *kServerCertPath = "tests/fixtures/quic-server-cert.pem";
 constexpr const char *kServerKeyPath = "tests/fixtures/quic-server-key.pem";
+
+using DemoChannel = coquic::quic::QuicDemoChannel;
+using DemoTimePoint = coquic::quic::QuicCoreTimePoint;
 
 class ScopedFd {
   public:
@@ -124,39 +127,138 @@ int open_udp_socket() {
     return ::socket(AF_INET, SOCK_DGRAM, 0);
 }
 
-bool set_receive_timeout(int fd) {
-    const timeval timeout{
-        .tv_sec = kReceiveTimeoutSeconds,
-        .tv_usec = 0,
-    };
-    return ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0;
-}
-
 bool send_datagram(int fd, const std::vector<std::byte> &datagram, const sockaddr_storage &peer,
                    socklen_t peer_len) {
     return ::sendto(fd, datagram.data(), datagram.size(), 0,
                     reinterpret_cast<const sockaddr *>(&peer), peer_len) >= 0;
 }
 
-bool flush_queued_output(int fd, coquic::quic::QuicDemoChannel &channel,
-                         const sockaddr_storage &peer, socklen_t peer_len) {
-    for (int i = 0; i < kFlushIterationLimit; ++i) {
-        auto queued = channel.on_datagram({});
-        if (channel.has_failed()) {
-            std::cerr << "demo failed: channel entered failure state during flush\n";
-            return false;
+DemoTimePoint now() {
+    return coquic::quic::QuicCoreClock::now();
+}
+
+struct DemoEffectBatch {
+    bool saw_terminal_failure = false;
+    std::vector<std::vector<std::byte>> received_messages;
+};
+
+bool dispatch_effect_batch(int fd, const std::vector<coquic::quic::QuicDemoChannelEffect> &effects,
+                           const sockaddr_storage *peer, socklen_t peer_len,
+                           std::string_view missing_peer_message, DemoEffectBatch &batch) {
+    for (const auto &effect : effects) {
+        if (const auto *send = std::get_if<coquic::quic::QuicCoreSendDatagram>(&effect)) {
+            if (peer == nullptr) {
+                std::cerr << missing_peer_message << '\n';
+                return false;
+            }
+            if (!send_datagram(fd, send->bytes, *peer, peer_len)) {
+                std::cerr << "demo failed: sendto error: " << std::strerror(errno) << '\n';
+                return false;
+            }
+            continue;
         }
-        if (queued.empty()) {
-            return true;
+
+        if (const auto *received =
+                std::get_if<coquic::quic::QuicDemoChannelReceiveMessage>(&effect)) {
+            batch.received_messages.push_back(received->bytes);
+            continue;
         }
-        if (!send_datagram(fd, queued, peer, peer_len)) {
-            std::cerr << "demo failed: sendto error during flush: " << std::strerror(errno) << '\n';
-            return false;
+
+        const auto *state_event = std::get_if<coquic::quic::QuicDemoChannelStateEvent>(&effect);
+        if (state_event != nullptr &&
+            state_event->change == coquic::quic::QuicDemoChannelStateChange::failed) {
+            batch.saw_terminal_failure = true;
         }
     }
 
-    std::cerr << "demo failed: channel flush exceeded " << kFlushIterationLimit << " iterations\n";
-    return false;
+    return true;
+}
+
+struct DemoWaitStep {
+    coquic::quic::QuicDemoChannelInput input;
+    DemoTimePoint input_time;
+    sockaddr_storage source{};
+    socklen_t source_len = 0;
+    bool has_source = false;
+};
+
+std::optional<DemoWaitStep>
+wait_for_socket_or_deadline(int fd, const std::optional<DemoTimePoint> &next_wakeup) {
+    int timeout_ms = kReceiveTimeoutSeconds * 1000;
+    if (next_wakeup.has_value()) {
+        const auto current = now();
+        if (*next_wakeup <= current) {
+            return DemoWaitStep{
+                .input = coquic::quic::QuicCoreTimerExpired{},
+                .input_time = current,
+            };
+        }
+
+        const auto remaining = *next_wakeup - current;
+        timeout_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          remaining + std::chrono::milliseconds(1))
+                                          .count());
+        if (timeout_ms < 1) {
+            timeout_ms = 1;
+        }
+    }
+
+    pollfd descriptor{};
+    descriptor.fd = fd;
+    descriptor.events = POLLIN;
+
+    int poll_result = 0;
+    do {
+        poll_result = ::poll(&descriptor, 1, timeout_ms);
+    } while (poll_result < 0 && errno == EINTR);
+
+    if (poll_result < 0) {
+        std::cerr << "demo failed: poll error: " << std::strerror(errno) << '\n';
+        return std::nullopt;
+    }
+
+    if (poll_result == 0) {
+        if (!next_wakeup.has_value()) {
+            std::cerr << "demo failed: timed out waiting for inbound datagram\n";
+            return std::nullopt;
+        }
+        return DemoWaitStep{
+            .input = coquic::quic::QuicCoreTimerExpired{},
+            .input_time = now(),
+        };
+    }
+
+    if ((descriptor.revents & POLLIN) == 0) {
+        std::cerr << "demo failed: socket became unreadable\n";
+        return std::nullopt;
+    }
+
+    std::vector<std::byte> inbound(kMaxDatagramBytes);
+    sockaddr_storage source{};
+    socklen_t source_len = sizeof(source);
+
+    ssize_t bytes_read = 0;
+    do {
+        bytes_read = ::recvfrom(fd, inbound.data(), inbound.size(), 0,
+                                reinterpret_cast<sockaddr *>(&source), &source_len);
+    } while (bytes_read < 0 && errno == EINTR);
+
+    if (bytes_read < 0) {
+        std::cerr << "demo failed: recvfrom error: " << std::strerror(errno) << '\n';
+        return std::nullopt;
+    }
+
+    inbound.resize(static_cast<std::size_t>(bytes_read));
+    return DemoWaitStep{
+        .input =
+            coquic::quic::QuicCoreInboundDatagram{
+                .bytes = std::move(inbound),
+            },
+        .input_time = now(),
+        .source = source,
+        .source_len = source_len,
+        .has_source = true,
+    };
 }
 
 coquic::quic::QuicCoreConfig make_client_config() {
@@ -202,11 +304,6 @@ int run_demo_server(const DemoCliConfig &config) {
         return 1;
     }
     ScopedFd socket_guard(socket_fd);
-    if (!set_receive_timeout(socket_fd)) {
-        std::cerr << "demo-server failed: unable to set receive timeout: " << std::strerror(errno)
-                  << '\n';
-        return 1;
-    }
 
     sockaddr_in bind_address{};
     if (!make_ipv4_address(config.host, config.port, bind_address)) {
@@ -224,64 +321,86 @@ int run_demo_server(const DemoCliConfig &config) {
     if (!server_config.has_value()) {
         return 1;
     }
-    coquic::quic::QuicDemoChannel channel(std::move(*server_config));
+    DemoChannel channel(std::move(*server_config));
     sockaddr_storage peer{};
     socklen_t peer_len = 0;
     bool have_peer = false;
+    std::optional<DemoTimePoint> next_wakeup = std::nullopt;
+
+    auto start_result = channel.advance(coquic::quic::QuicCoreStart{}, now());
+    DemoEffectBatch start_batch;
+    if (!dispatch_effect_batch(socket_fd, start_result.effects, nullptr, 0,
+                               "demo-server failed: cannot send datagram before peer is known",
+                               start_batch)) {
+        return 1;
+    }
+    if (start_batch.saw_terminal_failure || channel.has_failed()) {
+        std::cerr << "demo-server failed: channel entered failure state\n";
+        return 1;
+    }
+    next_wakeup = start_result.next_wakeup;
 
     for (;;) {
-        std::vector<std::byte> inbound(kMaxDatagramBytes);
-        sockaddr_storage source{};
-        socklen_t source_len = sizeof(source);
-        const auto bytes_read = ::recvfrom(socket_fd, inbound.data(), inbound.size(), 0,
-                                           reinterpret_cast<sockaddr *>(&source), &source_len);
-        if (bytes_read < 0) {
-            std::cerr << "demo-server failed: recvfrom error: " << std::strerror(errno) << '\n';
+        auto step = wait_for_socket_or_deadline(socket_fd, next_wakeup);
+        if (!step.has_value()) {
             return 1;
         }
-        inbound.resize(static_cast<std::size_t>(bytes_read));
+        if (!have_peer && step->has_source) {
+            peer = step->source;
+            peer_len = step->source_len;
+            have_peer = true;
+        }
+        auto step_result = channel.advance(std::move(step->input), step->input_time);
 
-        auto outbound = channel.on_datagram(std::move(inbound));
-        if (channel.has_failed()) {
+        DemoEffectBatch step_batch;
+        if (!dispatch_effect_batch(
+                socket_fd, step_result.effects, have_peer ? &peer : nullptr, peer_len,
+                "demo-server failed: cannot send datagram before peer is known", step_batch)) {
+            return 1;
+        }
+        if (step_batch.saw_terminal_failure || channel.has_failed()) {
             std::cerr << "demo-server failed: channel entered failure state\n";
             return 1;
         }
+        next_wakeup = step_result.next_wakeup;
 
-        if (!have_peer) {
-            peer = source;
-            peer_len = source_len;
-            have_peer = true;
-        }
-
-        if (!outbound.empty() && !send_datagram(socket_fd, outbound, peer, peer_len)) {
-            std::cerr << "demo-server failed: sendto error\n";
-            return 1;
-        }
-        if (!flush_queued_output(socket_fd, channel, peer, peer_len)) {
-            std::cerr << "demo-server failed: channel flush error\n";
-            return 1;
-        }
-
-        auto messages = channel.take_messages();
-        if (messages.empty()) {
+        if (step_batch.received_messages.empty()) {
             continue;
         }
 
-        const std::string received = string_from_bytes(messages.front());
-        std::cout << "received: " << received << '\n';
+        for (std::size_t message_index = 0; message_index < step_batch.received_messages.size();
+             ++message_index) {
+            const std::string received =
+                string_from_bytes(step_batch.received_messages[message_index]);
+            std::cout << "received: " << received << '\n';
 
-        const std::string reply = "echo: " + received;
-        channel.send_message(bytes_from_string(reply));
-        if (channel.has_failed()) {
-            std::cerr << "demo-server failed: unable to queue reply\n";
-            return 1;
-        }
-        if (!flush_queued_output(socket_fd, channel, peer, peer_len)) {
-            std::cerr << "demo-server failed: channel flush error\n";
-            return 1;
+            const std::string reply = "echo: " + received;
+            auto queued = channel.advance(
+                coquic::quic::QuicDemoChannelQueueMessage{
+                    .bytes = bytes_from_string(reply),
+                },
+                now());
+            DemoEffectBatch queued_batch;
+            if (!dispatch_effect_batch(
+                    socket_fd, queued.effects, have_peer ? &peer : nullptr, peer_len,
+                    "demo-server failed: cannot send datagram before peer is known",
+                    queued_batch)) {
+                return 1;
+            }
+            if (queued_batch.saw_terminal_failure || channel.has_failed()) {
+                std::cerr << "demo-server failed: channel entered failure state\n";
+                return 1;
+            }
+            if (!queued_batch.received_messages.empty()) {
+                for (auto &queued_message : queued_batch.received_messages) {
+                    step_batch.received_messages.push_back(std::move(queued_message));
+                }
+            }
+            next_wakeup = queued.next_wakeup;
+
+            std::cout << "sent: " << reply << '\n';
         }
 
-        std::cout << "sent: " << reply << '\n';
         return 0;
     }
 }
@@ -294,11 +413,6 @@ int run_demo_client(const DemoCliConfig &config) {
         return 1;
     }
     ScopedFd socket_guard(socket_fd);
-    if (!set_receive_timeout(socket_fd)) {
-        std::cerr << "demo-client failed: unable to set receive timeout: " << std::strerror(errno)
-                  << '\n';
-        return 1;
-    }
 
     sockaddr_storage peer{};
     socklen_t peer_len = 0;
@@ -311,48 +425,69 @@ int run_demo_client(const DemoCliConfig &config) {
     std::memcpy(&peer, &server_address, sizeof(server_address));
     peer_len = sizeof(server_address);
 
-    coquic::quic::QuicDemoChannel channel(make_client_config());
-    channel.send_message(bytes_from_string(config.message));
-    if (channel.has_failed()) {
-        std::cerr << "demo-client failed: unable to queue message\n";
+    DemoChannel channel(make_client_config());
+    std::optional<DemoTimePoint> next_wakeup = std::nullopt;
+
+    auto start_result = channel.advance(coquic::quic::QuicCoreStart{}, now());
+    DemoEffectBatch start_batch;
+    if (!dispatch_effect_batch(socket_fd, start_result.effects, &peer, peer_len,
+                               "demo-client failed: missing peer for datagram send", start_batch)) {
         return 1;
     }
-    if (!flush_queued_output(socket_fd, channel, peer, peer_len)) {
-        std::cerr << "demo-client failed: channel flush error\n";
+    if (start_batch.saw_terminal_failure || channel.has_failed()) {
+        std::cerr << "demo-client failed: channel entered failure state\n";
         return 1;
+    }
+    next_wakeup = start_result.next_wakeup;
+
+    auto queued = channel.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = bytes_from_string(config.message),
+        },
+        now());
+    DemoEffectBatch queued_batch;
+    if (!dispatch_effect_batch(socket_fd, queued.effects, &peer, peer_len,
+                               "demo-client failed: missing peer for datagram send",
+                               queued_batch)) {
+        return 1;
+    }
+    if (queued_batch.saw_terminal_failure || channel.has_failed()) {
+        std::cerr << "demo-client failed: channel entered failure state\n";
+        return 1;
+    }
+    next_wakeup = queued.next_wakeup;
+
+    if (!queued_batch.received_messages.empty()) {
+        for (const auto &message : queued_batch.received_messages) {
+            std::cout << string_from_bytes(message) << '\n';
+        }
+        return 0;
     }
 
     for (;;) {
-        std::vector<std::byte> inbound(kMaxDatagramBytes);
-        sockaddr_storage source{};
-        socklen_t source_len = sizeof(source);
-        const auto bytes_read = ::recvfrom(socket_fd, inbound.data(), inbound.size(), 0,
-                                           reinterpret_cast<sockaddr *>(&source), &source_len);
-        if (bytes_read < 0) {
-            std::cerr << "demo-client failed: recvfrom error: " << std::strerror(errno) << '\n';
+        auto step = wait_for_socket_or_deadline(socket_fd, next_wakeup);
+        if (!step.has_value()) {
             return 1;
         }
-        inbound.resize(static_cast<std::size_t>(bytes_read));
-
-        auto outbound = channel.on_datagram(std::move(inbound));
-        if (channel.has_failed()) {
+        auto step_result = channel.advance(std::move(step->input), step->input_time);
+        DemoEffectBatch step_batch;
+        if (!dispatch_effect_batch(socket_fd, step_result.effects, &peer, peer_len,
+                                   "demo-client failed: missing peer for datagram send",
+                                   step_batch)) {
+            return 1;
+        }
+        if (step_batch.saw_terminal_failure || channel.has_failed()) {
             std::cerr << "demo-client failed: channel entered failure state\n";
             return 1;
         }
-        if (!outbound.empty() && !send_datagram(socket_fd, outbound, peer, peer_len)) {
-            std::cerr << "demo-client failed: sendto error\n";
-            return 1;
-        }
-        if (!flush_queued_output(socket_fd, channel, peer, peer_len)) {
-            std::cerr << "demo-client failed: channel flush error\n";
-            return 1;
-        }
+        next_wakeup = step_result.next_wakeup;
 
-        auto messages = channel.take_messages();
-        if (messages.empty()) {
+        if (step_batch.received_messages.empty()) {
             continue;
         }
-        std::cout << string_from_bytes(messages.front()) << '\n';
+        for (const auto &message : step_batch.received_messages) {
+            std::cout << string_from_bytes(message) << '\n';
+        }
         return 0;
     }
 }

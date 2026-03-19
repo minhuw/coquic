@@ -32,9 +32,13 @@ class QuicConnection {
   public:
     explicit QuicConnection(QuicCoreConfig config);
 
-    std::vector<std::byte> receive(std::span<const std::byte> bytes);
+    void start();
+    void process_inbound_datagram(std::span<const std::byte> bytes);
     void queue_application_data(std::span<const std::byte> bytes);
+    std::vector<std::byte> drain_outbound_datagram();
     std::vector<std::byte> take_received_application_data();
+    std::optional<QuicCoreStateChange> take_state_change();
+    std::optional<QuicCoreTimePoint> next_wakeup() const;
     bool is_handshake_complete() const;
     bool has_failed() const;
 
@@ -57,6 +61,8 @@ class QuicConnection {
     ConnectionId outbound_destination_connection_id() const;
     ConnectionId client_initial_destination_connection_id() const;
     std::vector<std::byte> flush_outbound_datagram();
+    void mark_failed();
+    void queue_state_change(QuicCoreStateChange change);
 
     QuicCoreConfig config_;
     HandshakeStatus status_ = HandshakeStatus::idle;
@@ -72,6 +78,9 @@ class QuicConnection {
     bool peer_transport_parameters_validated_ = false;
     std::vector<std::byte> pending_application_send_;
     std::vector<std::byte> pending_application_receive_;
+    std::vector<QuicCoreStateChange> pending_state_changes_;
+    bool handshake_ready_emitted_ = false;
+    bool failed_emitted_ = false;
     std::uint64_t next_application_stream_offset_ = 0;
     std::uint64_t expected_application_stream_offset_ = 0;
 };

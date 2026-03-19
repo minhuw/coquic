@@ -6,6 +6,16 @@
 
 namespace coquic::quic {
 
+namespace {
+
+template <typename... Ts> struct overloaded : Ts... {
+    using Ts::operator()...;
+};
+
+template <typename... Ts> overloaded(Ts...) -> overloaded<Ts...>;
+
+} // namespace
+
 QuicCore::QuicCore(QuicCoreConfig config)
     : connection_(std::make_unique<QuicConnection>(std::move(config))) {
 }
@@ -16,16 +26,37 @@ QuicCore::QuicCore(QuicCore &&) noexcept = default;
 
 QuicCore &QuicCore::operator=(QuicCore &&) noexcept = default;
 
-std::vector<std::byte> QuicCore::receive(std::vector<std::byte> bytes) {
-    return connection_->receive(bytes);
-}
+QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
+    (void)now;
 
-void QuicCore::queue_application_data(std::vector<std::byte> bytes) {
-    connection_->queue_application_data(bytes);
-}
+    std::visit(overloaded{
+                   [&](const QuicCoreStart &) { connection_->start(); },
+                   [&](const QuicCoreInboundDatagram &in) {
+                       connection_->process_inbound_datagram(in.bytes);
+                   },
+                   [&](const QuicCoreQueueApplicationData &in) {
+                       connection_->queue_application_data(in.bytes);
+                   },
+                   [&](const QuicCoreTimerExpired &) {},
+               },
+               input);
 
-std::vector<std::byte> QuicCore::take_received_application_data() {
-    return connection_->take_received_application_data();
+    QuicCoreResult result;
+    while (true) {
+        auto datagram = connection_->drain_outbound_datagram();
+        if (datagram.empty()) {
+            break;
+        }
+        result.effects.emplace_back(QuicCoreSendDatagram{std::move(datagram)});
+    }
+    if (auto bytes = connection_->take_received_application_data(); !bytes.empty()) {
+        result.effects.emplace_back(QuicCoreReceiveApplicationData{std::move(bytes)});
+    }
+    while (const auto event = connection_->take_state_change()) {
+        result.effects.emplace_back(QuicCoreStateEvent{*event});
+    }
+    result.next_wakeup = connection_->next_wakeup();
+    return result;
 }
 
 bool QuicCore::is_handshake_complete() const {

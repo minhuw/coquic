@@ -149,6 +149,24 @@ TEST(QuicCoreTest, TwoPeersEmitHandshakeReadyExactlyOnce) {
               1u);
 }
 
+TEST(QuicCoreTest, HandshakeExportsConfiguredTransportParametersToPeer) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.transport.initial_max_data = 7777;
+    client_config.transport.initial_max_streams_bidi = 11;
+    client_config.transport.initial_max_streams_uni = 13;
+
+    coquic::quic::QuicCore client(std::move(client_config));
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+
+    const auto &peer_transport_parameters = server.connection_->peer_transport_parameters_;
+    ASSERT_TRUE(peer_transport_parameters.has_value());
+    if (!peer_transport_parameters.has_value()) {
+        return;
+    }
+    EXPECT_EQ(peer_transport_parameters.value().initial_max_data, 7777u);
+}
+
 TEST(QuicCoreTest, TwoPeersExchangeStreamZeroDataThroughEffects) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());

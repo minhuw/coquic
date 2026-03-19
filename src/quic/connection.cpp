@@ -427,8 +427,17 @@ void QuicConnection::start_client_if_needed() {
     started_ = true;
     status_ = HandshakeStatus::in_progress;
     local_transport_parameters_ = TransportParameters{
-        .max_udp_payload_size = kMinimumInitialDatagramSize,
+        .max_udp_payload_size = config_.transport.max_udp_payload_size,
         .active_connection_id_limit = 2,
+        .ack_delay_exponent = config_.transport.ack_delay_exponent,
+        .max_ack_delay = config_.transport.max_ack_delay,
+        .initial_max_data = config_.transport.initial_max_data,
+        .initial_max_stream_data_bidi_local = config_.transport.initial_max_stream_data_bidi_local,
+        .initial_max_stream_data_bidi_remote =
+            config_.transport.initial_max_stream_data_bidi_remote,
+        .initial_max_stream_data_uni = config_.transport.initial_max_stream_data_uni,
+        .initial_max_streams_bidi = config_.transport.initial_max_streams_bidi,
+        .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
     };
 
@@ -461,8 +470,17 @@ void QuicConnection::start_server_if_needed(
     client_initial_destination_connection_id_ = client_initial_destination_connection_id;
     local_transport_parameters_ = TransportParameters{
         .original_destination_connection_id = client_initial_destination_connection_id_,
-        .max_udp_payload_size = kMinimumInitialDatagramSize,
+        .max_udp_payload_size = config_.transport.max_udp_payload_size,
         .active_connection_id_limit = 2,
+        .ack_delay_exponent = config_.transport.ack_delay_exponent,
+        .max_ack_delay = config_.transport.max_ack_delay,
+        .initial_max_data = config_.transport.initial_max_data,
+        .initial_max_stream_data_bidi_local = config_.transport.initial_max_stream_data_bidi_local,
+        .initial_max_stream_data_bidi_remote =
+            config_.transport.initial_max_stream_data_bidi_remote,
+        .initial_max_stream_data_uni = config_.transport.initial_max_stream_data_uni,
+        .initial_max_streams_bidi = config_.transport.initial_max_streams_bidi,
+        .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
     };
 

@@ -19,11 +19,17 @@ using coquic::quic::TransportParametersValidationOk;
 
 constexpr std::uint64_t original_destination_connection_id_parameter_id = 0x00;
 constexpr std::uint64_t max_udp_payload_size_parameter_id = 0x03;
+constexpr std::uint64_t initial_max_data_parameter_id = 0x04;
+constexpr std::uint64_t initial_max_stream_data_bidi_local_parameter_id = 0x05;
+constexpr std::uint64_t initial_max_stream_data_bidi_remote_parameter_id = 0x06;
+constexpr std::uint64_t initial_max_stream_data_uni_parameter_id = 0x07;
+constexpr std::uint64_t initial_max_streams_bidi_parameter_id = 0x08;
+constexpr std::uint64_t initial_max_streams_uni_parameter_id = 0x09;
+constexpr std::uint64_t ack_delay_exponent_parameter_id = 0x0a;
+constexpr std::uint64_t max_ack_delay_parameter_id = 0x0b;
 constexpr std::uint64_t active_connection_id_limit_parameter_id = 0x0e;
 constexpr std::uint64_t initial_source_connection_id_parameter_id = 0x0f;
 constexpr std::uint64_t retry_source_connection_id_parameter_id = 0x10;
-constexpr std::uint64_t ack_delay_exponent_parameter_id = 0x0a;
-constexpr std::uint64_t max_ack_delay_parameter_id = 0x0b;
 constexpr std::uint64_t minimum_max_udp_payload_size = 1200;
 constexpr std::uint64_t minimum_active_connection_id_limit = 2;
 constexpr std::uint64_t maximum_ack_delay_exponent = 20;
@@ -116,6 +122,67 @@ serialize_transport_parameters(const TransportParameters &parameters) {
 
     append_raw_parameter(output, max_ack_delay_parameter_id, encoded_max_ack_delay.value());
 
+    auto encoded_initial_max_data = encode_varint(parameters.initial_max_data);
+    if (!encoded_initial_max_data.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(
+            encoded_initial_max_data.error().code, encoded_initial_max_data.error().offset);
+    }
+
+    append_raw_parameter(output, initial_max_data_parameter_id, encoded_initial_max_data.value());
+
+    auto encoded_initial_max_stream_data_bidi_local =
+        encode_varint(parameters.initial_max_stream_data_bidi_local);
+    if (!encoded_initial_max_stream_data_bidi_local.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(
+            encoded_initial_max_stream_data_bidi_local.error().code,
+            encoded_initial_max_stream_data_bidi_local.error().offset);
+    }
+
+    append_raw_parameter(output, initial_max_stream_data_bidi_local_parameter_id,
+                         encoded_initial_max_stream_data_bidi_local.value());
+
+    auto encoded_initial_max_stream_data_bidi_remote =
+        encode_varint(parameters.initial_max_stream_data_bidi_remote);
+    if (!encoded_initial_max_stream_data_bidi_remote.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(
+            encoded_initial_max_stream_data_bidi_remote.error().code,
+            encoded_initial_max_stream_data_bidi_remote.error().offset);
+    }
+
+    append_raw_parameter(output, initial_max_stream_data_bidi_remote_parameter_id,
+                         encoded_initial_max_stream_data_bidi_remote.value());
+
+    auto encoded_initial_max_stream_data_uni =
+        encode_varint(parameters.initial_max_stream_data_uni);
+    if (!encoded_initial_max_stream_data_uni.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(
+            encoded_initial_max_stream_data_uni.error().code,
+            encoded_initial_max_stream_data_uni.error().offset);
+    }
+
+    append_raw_parameter(output, initial_max_stream_data_uni_parameter_id,
+                         encoded_initial_max_stream_data_uni.value());
+
+    auto encoded_initial_max_streams_bidi = encode_varint(parameters.initial_max_streams_bidi);
+    if (!encoded_initial_max_streams_bidi.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(
+            encoded_initial_max_streams_bidi.error().code,
+            encoded_initial_max_streams_bidi.error().offset);
+    }
+
+    append_raw_parameter(output, initial_max_streams_bidi_parameter_id,
+                         encoded_initial_max_streams_bidi.value());
+
+    auto encoded_initial_max_streams_uni = encode_varint(parameters.initial_max_streams_uni);
+    if (!encoded_initial_max_streams_uni.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(
+            encoded_initial_max_streams_uni.error().code,
+            encoded_initial_max_streams_uni.error().offset);
+    }
+
+    append_raw_parameter(output, initial_max_streams_uni_parameter_id,
+                         encoded_initial_max_streams_uni.value());
+
     append_connection_id_parameter(output, initial_source_connection_id_parameter_id,
                                    parameters.initial_source_connection_id);
 
@@ -170,6 +237,54 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
                 return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
             }
             parameters.active_connection_id_limit = decoded.value();
+            break;
+        }
+        case initial_max_data_parameter_id: {
+            const auto decoded = decode_integer_parameter(value);
+            if (!decoded.has_value()) {
+                return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
+            }
+            parameters.initial_max_data = decoded.value();
+            break;
+        }
+        case initial_max_stream_data_bidi_local_parameter_id: {
+            const auto decoded = decode_integer_parameter(value);
+            if (!decoded.has_value()) {
+                return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
+            }
+            parameters.initial_max_stream_data_bidi_local = decoded.value();
+            break;
+        }
+        case initial_max_stream_data_bidi_remote_parameter_id: {
+            const auto decoded = decode_integer_parameter(value);
+            if (!decoded.has_value()) {
+                return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
+            }
+            parameters.initial_max_stream_data_bidi_remote = decoded.value();
+            break;
+        }
+        case initial_max_stream_data_uni_parameter_id: {
+            const auto decoded = decode_integer_parameter(value);
+            if (!decoded.has_value()) {
+                return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
+            }
+            parameters.initial_max_stream_data_uni = decoded.value();
+            break;
+        }
+        case initial_max_streams_bidi_parameter_id: {
+            const auto decoded = decode_integer_parameter(value);
+            if (!decoded.has_value()) {
+                return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
+            }
+            parameters.initial_max_streams_bidi = decoded.value();
+            break;
+        }
+        case initial_max_streams_uni_parameter_id: {
+            const auto decoded = decode_integer_parameter(value);
+            if (!decoded.has_value()) {
+                return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
+            }
+            parameters.initial_max_streams_uni = decoded.value();
             break;
         }
         case initial_source_connection_id_parameter_id:

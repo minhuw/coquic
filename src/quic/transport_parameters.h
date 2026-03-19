@@ -16,6 +16,12 @@ struct TransportParameters {
     std::uint64_t active_connection_id_limit = 2;
     std::uint64_t ack_delay_exponent = 3;
     std::uint64_t max_ack_delay = 25;
+    std::uint64_t initial_max_data = 0;
+    std::uint64_t initial_max_stream_data_bidi_local = 0;
+    std::uint64_t initial_max_stream_data_bidi_remote = 0;
+    std::uint64_t initial_max_stream_data_uni = 0;
+    std::uint64_t initial_max_streams_bidi = 0;
+    std::uint64_t initial_max_streams_uni = 0;
     std::optional<ConnectionId> initial_source_connection_id;
     std::optional<ConnectionId> retry_source_connection_id;
 };

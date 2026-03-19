@@ -14,6 +14,18 @@
 
 namespace coquic::quic {
 
+struct QuicTransportConfig {
+    std::uint64_t max_udp_payload_size = 65527;
+    std::uint64_t ack_delay_exponent = 3;
+    std::uint64_t max_ack_delay = 25;
+    std::uint64_t initial_max_data = 1 << 20;
+    std::uint64_t initial_max_stream_data_bidi_local = 256 << 10;
+    std::uint64_t initial_max_stream_data_bidi_remote = 256 << 10;
+    std::uint64_t initial_max_stream_data_uni = 256 << 10;
+    std::uint64_t initial_max_streams_bidi = 16;
+    std::uint64_t initial_max_streams_uni = 16;
+};
+
 struct QuicCoreConfig {
     EndpointRole role = EndpointRole::client;
     ConnectionId source_connection_id;
@@ -21,6 +33,7 @@ struct QuicCoreConfig {
     bool verify_peer = false;
     std::string server_name = "localhost";
     std::optional<TlsIdentity> identity;
+    QuicTransportConfig transport;
 };
 
 using QuicCoreClock = std::chrono::steady_clock;

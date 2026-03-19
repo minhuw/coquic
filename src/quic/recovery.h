@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <map>
 #include <optional>
-#include <set>
 #include <vector>
 
 #include "src/quic/core.h"
@@ -58,8 +57,8 @@ class ReceivedPacketHistory {
 };
 
 struct AckProcessingResult {
-    std::set<std::uint64_t> acked_packet_numbers;
-    std::set<std::uint64_t> lost_packet_numbers;
+    std::vector<SentPacketRecord> acked_packets;
+    std::vector<SentPacketRecord> lost_packets;
     std::optional<SentPacketRecord> largest_newly_acked_ack_eliciting;
 };
 
@@ -67,12 +66,14 @@ class PacketSpaceRecovery {
   public:
     void on_packet_sent(SentPacketRecord packet);
     AckProcessingResult on_ack_received(const AckFrame &ack, QuicCoreTimePoint now);
+    std::optional<std::uint64_t> largest_acked_packet_number() const;
 
     RecoveryRttState &rtt_state();
     const RecoveryRttState &rtt_state() const;
 
   private:
     std::map<std::uint64_t, SentPacketRecord> sent_packets_;
+    std::optional<std::uint64_t> largest_acked_packet_number_;
     RecoveryRttState rtt_state_;
 };
 

@@ -140,6 +140,11 @@ void PacketSpaceRecovery::on_packet_sent(SentPacketRecord packet) {
 AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
                                                          QuicCoreTimePoint now) {
     AckProcessingResult result;
+    largest_acked_packet_number_ =
+        largest_acked_packet_number_.has_value()
+            ? std::max(*largest_acked_packet_number_, ack.largest_acknowledged)
+            : ack.largest_acknowledged;
+    const auto effective_largest_acked = *largest_acked_packet_number_;
     std::vector<std::uint64_t> acked_packet_numbers;
 
     for (const auto &[packet_number, packet] : sent_packets_) {
@@ -148,7 +153,7 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
         }
 
         acked_packet_numbers.push_back(packet_number);
-        result.acked_packet_numbers.insert(packet_number);
+        result.acked_packets.push_back(packet);
         if (packet.ack_eliciting &&
             (!result.largest_newly_acked_ack_eliciting.has_value() ||
              packet.packet_number > result.largest_newly_acked_ack_eliciting->packet_number)) {
@@ -163,17 +168,17 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
     std::vector<std::uint64_t> lost_packet_numbers;
     for (const auto &[packet_number, packet] : sent_packets_) {
         if (packet.declared_lost || !packet.in_flight ||
-            packet.packet_number >= ack.largest_acknowledged) {
+            packet.packet_number >= effective_largest_acked) {
             continue;
         }
 
-        if (!is_packet_threshold_lost(packet.packet_number, ack.largest_acknowledged) &&
+        if (!is_packet_threshold_lost(packet.packet_number, effective_largest_acked) &&
             !is_time_threshold_lost(rtt_state_, packet.sent_time, now)) {
             continue;
         }
 
         lost_packet_numbers.push_back(packet_number);
-        result.lost_packet_numbers.insert(packet_number);
+        result.lost_packets.push_back(packet);
     }
 
     for (const auto packet_number : lost_packet_numbers) {
@@ -181,6 +186,10 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
     }
 
     return result;
+}
+
+std::optional<std::uint64_t> PacketSpaceRecovery::largest_acked_packet_number() const {
+    return largest_acked_packet_number_;
 }
 
 RecoveryRttState &PacketSpaceRecovery::rtt_state() {

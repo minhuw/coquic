@@ -1,6 +1,7 @@
 #include "src/coquic.h"
 
 #include <arpa/inet.h>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -11,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -27,7 +29,11 @@ struct DemoCliConfig {
 };
 
 constexpr std::size_t kMaxDatagramBytes = 65535;
+constexpr int kReceiveTimeoutSeconds = 10;
+constexpr int kFlushIterationLimit = 1024;
 constexpr const char *kUsageLine = "usage: coquic [demo-server|demo-client <message>]";
+constexpr const char *kServerCertPath = "tests/fixtures/quic-server-cert.pem";
+constexpr const char *kServerKeyPath = "tests/fixtures/quic-server-key.pem";
 
 class ScopedFd {
   public:
@@ -56,6 +62,16 @@ class ScopedFd {
 std::string read_text_file(const char *path) {
     std::ifstream input(path);
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+std::optional<std::string> read_required_text_file(const char *path) {
+    std::string content = read_text_file(path);
+    if (!content.empty()) {
+        return content;
+    }
+    std::cerr << "demo-server failed: unable to load required TLS fixture '" << path
+              << "' (file missing or empty). Run from the repo root.\n";
+    return std::nullopt;
 }
 
 std::vector<std::byte> bytes_from_string(std::string_view text) {
@@ -108,6 +124,14 @@ int open_udp_socket() {
     return ::socket(AF_INET, SOCK_DGRAM, 0);
 }
 
+bool set_receive_timeout(int fd) {
+    const timeval timeout{
+        .tv_sec = kReceiveTimeoutSeconds,
+        .tv_usec = 0,
+    };
+    return ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0;
+}
+
 bool send_datagram(int fd, const std::vector<std::byte> &datagram, const sockaddr_storage &peer,
                    socklen_t peer_len) {
     return ::sendto(fd, datagram.data(), datagram.size(), 0,
@@ -116,18 +140,23 @@ bool send_datagram(int fd, const std::vector<std::byte> &datagram, const sockadd
 
 bool flush_queued_output(int fd, coquic::quic::QuicDemoChannel &channel,
                          const sockaddr_storage &peer, socklen_t peer_len) {
-    for (;;) {
+    for (int i = 0; i < kFlushIterationLimit; ++i) {
         auto queued = channel.on_datagram({});
         if (channel.has_failed()) {
+            std::cerr << "demo failed: channel entered failure state during flush\n";
             return false;
         }
         if (queued.empty()) {
             return true;
         }
         if (!send_datagram(fd, queued, peer, peer_len)) {
+            std::cerr << "demo failed: sendto error during flush: " << std::strerror(errno) << '\n';
             return false;
         }
     }
+
+    std::cerr << "demo failed: channel flush exceeded " << kFlushIterationLimit << " iterations\n";
+    return false;
 }
 
 coquic::quic::QuicCoreConfig make_client_config() {
@@ -142,16 +171,25 @@ coquic::quic::QuicCoreConfig make_client_config() {
     };
 }
 
-coquic::quic::QuicCoreConfig make_server_config() {
-    return {
+std::optional<coquic::quic::QuicCoreConfig> make_server_config() {
+    const auto cert = read_required_text_file(kServerCertPath);
+    if (!cert.has_value()) {
+        return std::nullopt;
+    }
+    const auto key = read_required_text_file(kServerKeyPath);
+    if (!key.has_value()) {
+        return std::nullopt;
+    }
+
+    return coquic::quic::QuicCoreConfig{
         .role = coquic::quic::EndpointRole::server,
         .source_connection_id = {std::byte{0x53}, std::byte{0x01}},
         .verify_peer = false,
         .server_name = "localhost",
         .identity =
             coquic::quic::TlsIdentity{
-                .certificate_pem = read_text_file("tests/fixtures/quic-server-cert.pem"),
-                .private_key_pem = read_text_file("tests/fixtures/quic-server-key.pem"),
+                .certificate_pem = *cert,
+                .private_key_pem = *key,
             },
     };
 }
@@ -159,10 +197,16 @@ coquic::quic::QuicCoreConfig make_server_config() {
 int run_demo_server(const DemoCliConfig &config) {
     const int socket_fd = open_udp_socket();
     if (socket_fd < 0) {
-        std::cerr << "demo-server failed: unable to create UDP socket\n";
+        std::cerr << "demo-server failed: unable to create UDP socket: " << std::strerror(errno)
+                  << '\n';
         return 1;
     }
     ScopedFd socket_guard(socket_fd);
+    if (!set_receive_timeout(socket_fd)) {
+        std::cerr << "demo-server failed: unable to set receive timeout: " << std::strerror(errno)
+                  << '\n';
+        return 1;
+    }
 
     sockaddr_in bind_address{};
     if (!make_ipv4_address(config.host, config.port, bind_address)) {
@@ -171,11 +215,16 @@ int run_demo_server(const DemoCliConfig &config) {
     }
     if (::bind(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address),
                sizeof(bind_address)) != 0) {
-        std::cerr << "demo-server failed: unable to bind UDP socket\n";
+        std::cerr << "demo-server failed: unable to bind UDP socket: " << std::strerror(errno)
+                  << '\n';
         return 1;
     }
 
-    coquic::quic::QuicDemoChannel channel(make_server_config());
+    auto server_config = make_server_config();
+    if (!server_config.has_value()) {
+        return 1;
+    }
+    coquic::quic::QuicDemoChannel channel(std::move(*server_config));
     sockaddr_storage peer{};
     socklen_t peer_len = 0;
     bool have_peer = false;
@@ -187,7 +236,7 @@ int run_demo_server(const DemoCliConfig &config) {
         const auto bytes_read = ::recvfrom(socket_fd, inbound.data(), inbound.size(), 0,
                                            reinterpret_cast<sockaddr *>(&source), &source_len);
         if (bytes_read < 0) {
-            std::cerr << "demo-server failed: recvfrom error\n";
+            std::cerr << "demo-server failed: recvfrom error: " << std::strerror(errno) << '\n';
             return 1;
         }
         inbound.resize(static_cast<std::size_t>(bytes_read));
@@ -240,10 +289,16 @@ int run_demo_server(const DemoCliConfig &config) {
 int run_demo_client(const DemoCliConfig &config) {
     const int socket_fd = open_udp_socket();
     if (socket_fd < 0) {
-        std::cerr << "demo-client failed: unable to create UDP socket\n";
+        std::cerr << "demo-client failed: unable to create UDP socket: " << std::strerror(errno)
+                  << '\n';
         return 1;
     }
     ScopedFd socket_guard(socket_fd);
+    if (!set_receive_timeout(socket_fd)) {
+        std::cerr << "demo-client failed: unable to set receive timeout: " << std::strerror(errno)
+                  << '\n';
+        return 1;
+    }
 
     sockaddr_storage peer{};
     socklen_t peer_len = 0;
@@ -274,7 +329,7 @@ int run_demo_client(const DemoCliConfig &config) {
         const auto bytes_read = ::recvfrom(socket_fd, inbound.data(), inbound.size(), 0,
                                            reinterpret_cast<sockaddr *>(&source), &source_len);
         if (bytes_read < 0) {
-            std::cerr << "demo-client failed: recvfrom error\n";
+            std::cerr << "demo-client failed: recvfrom error: " << std::strerror(errno) << '\n';
             return 1;
         }
         inbound.resize(static_cast<std::size_t>(bytes_read));

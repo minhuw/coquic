@@ -259,6 +259,42 @@ TEST(QuicCoreTest, StreamReceiveEffectCarriesFin) {
               (coquic::quic::test::StreamPayload{0, "hello", true}));
 }
 
+TEST(QuicCoreTest, StreamReceiveEffectCarriesFinWhenQueuedAfterOutstandingData) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto sent = client.advance(
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
+            .bytes = coquic::quic::test::bytes_from_string("hello"),
+            .fin = false,
+        },
+        coquic::quic::test::test_time(1));
+    const auto first_received = coquic::quic::test::relay_send_datagrams_to_peer(
+        sent, server, coquic::quic::test::test_time(2));
+    ASSERT_EQ(coquic::quic::test::stream_payloads_from(first_received).size(), 1u);
+    EXPECT_EQ(coquic::quic::test::stream_payloads_from(first_received)[0],
+              (coquic::quic::test::StreamPayload{0, "hello", false}));
+
+    const auto fin_only = client.advance(
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
+            .bytes = {},
+            .fin = true,
+        },
+        coquic::quic::test::test_time(3));
+    const auto fin_received = coquic::quic::test::relay_send_datagrams_to_peer(
+        fin_only, server, coquic::quic::test::test_time(4));
+
+    ASSERT_EQ(coquic::quic::test::stream_payloads_from(fin_received).size(), 1u);
+    EXPECT_EQ(coquic::quic::test::stream_payloads_from(fin_received)[0],
+              (coquic::quic::test::StreamPayload{0, "", true}));
+}
+
 TEST(QuicCoreTest, ResetStreamReportsUnsupportedOperationWithoutFailingConnection) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
 

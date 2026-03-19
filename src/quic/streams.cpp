@@ -149,8 +149,7 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(std::size_
     }
 
     if (fragments.empty() && send_fin_state == StreamSendFinState::pending &&
-        send_final_size.has_value() && !send_buffer.has_pending_data() &&
-        !send_buffer.has_outstanding_data()) {
+        send_final_size.has_value() && !send_buffer.has_pending_data()) {
         fragments.push_back(StreamFrameSendFragment{
             .stream_id = stream_id,
             .offset = *send_final_size,

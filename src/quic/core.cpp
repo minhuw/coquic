@@ -27,23 +27,21 @@ QuicCore::QuicCore(QuicCore &&) noexcept = default;
 QuicCore &QuicCore::operator=(QuicCore &&) noexcept = default;
 
 QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
-    (void)now;
-
     std::visit(overloaded{
                    [&](const QuicCoreStart &) { connection_->start(); },
                    [&](const QuicCoreInboundDatagram &in) {
-                       connection_->process_inbound_datagram(in.bytes);
+                       connection_->process_inbound_datagram(in.bytes, now);
                    },
                    [&](const QuicCoreQueueApplicationData &in) {
                        connection_->queue_application_data(in.bytes);
                    },
-                   [&](const QuicCoreTimerExpired &) {},
+                   [&](const QuicCoreTimerExpired &) { connection_->on_timeout(now); },
                },
                input);
 
     QuicCoreResult result;
     while (true) {
-        auto datagram = connection_->drain_outbound_datagram();
+        auto datagram = connection_->drain_outbound_datagram(now);
         if (datagram.empty()) {
             break;
         }

@@ -22,8 +22,12 @@ constexpr std::uint64_t max_udp_payload_size_parameter_id = 0x03;
 constexpr std::uint64_t active_connection_id_limit_parameter_id = 0x0e;
 constexpr std::uint64_t initial_source_connection_id_parameter_id = 0x0f;
 constexpr std::uint64_t retry_source_connection_id_parameter_id = 0x10;
+constexpr std::uint64_t ack_delay_exponent_parameter_id = 0x0a;
+constexpr std::uint64_t max_ack_delay_parameter_id = 0x0b;
 constexpr std::uint64_t minimum_max_udp_payload_size = 1200;
 constexpr std::uint64_t minimum_active_connection_id_limit = 2;
+constexpr std::uint64_t maximum_ack_delay_exponent = 20;
+constexpr std::uint64_t maximum_max_ack_delay = (std::uint64_t{1} << 14);
 
 void append_parameter_header(std::vector<std::byte> &output, std::uint64_t id, std::size_t length) {
     const auto encoded_id = coquic::quic::encode_varint(id).value();
@@ -95,6 +99,23 @@ serialize_transport_parameters(const TransportParameters &parameters) {
     append_raw_parameter(output, active_connection_id_limit_parameter_id,
                          encoded_active_connection_id_limit.value());
 
+    auto encoded_ack_delay_exponent = encode_varint(parameters.ack_delay_exponent);
+    if (!encoded_ack_delay_exponent.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(
+            encoded_ack_delay_exponent.error().code, encoded_ack_delay_exponent.error().offset);
+    }
+
+    append_raw_parameter(output, ack_delay_exponent_parameter_id,
+                         encoded_ack_delay_exponent.value());
+
+    auto encoded_max_ack_delay = encode_varint(parameters.max_ack_delay);
+    if (!encoded_max_ack_delay.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(encoded_max_ack_delay.error().code,
+                                                            encoded_max_ack_delay.error().offset);
+    }
+
+    append_raw_parameter(output, max_ack_delay_parameter_id, encoded_max_ack_delay.value());
+
     append_connection_id_parameter(output, initial_source_connection_id_parameter_id,
                                    parameters.initial_source_connection_id);
 
@@ -157,6 +178,22 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
         case retry_source_connection_id_parameter_id:
             parameters.retry_source_connection_id = ConnectionId(value.begin(), value.end());
             break;
+        case ack_delay_exponent_parameter_id: {
+            const auto decoded = decode_integer_parameter(value);
+            if (!decoded.has_value()) {
+                return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
+            }
+            parameters.ack_delay_exponent = decoded.value();
+            break;
+        }
+        case max_ack_delay_parameter_id: {
+            const auto decoded = decode_integer_parameter(value);
+            if (!decoded.has_value()) {
+                return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
+            }
+            parameters.max_ack_delay = decoded.value();
+            break;
+        }
         default:
             break;
         }
@@ -179,6 +216,12 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
         return validation_failure();
     }
     if (parameters.active_connection_id_limit < minimum_active_connection_id_limit) {
+        return validation_failure();
+    }
+    if (parameters.ack_delay_exponent > maximum_ack_delay_exponent) {
+        return validation_failure();
+    }
+    if (parameters.max_ack_delay >= maximum_max_ack_delay) {
         return validation_failure();
     }
 

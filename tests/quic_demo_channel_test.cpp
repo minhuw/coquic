@@ -104,7 +104,7 @@ TEST(QuicDemoChannelTest, ClientStartProducesSendDatagramEffect) {
     ASSERT_EQ(datagrams.size(), 1u);
     EXPECT_GE(datagrams.front().size(), 1200u);
     EXPECT_TRUE(coquic::quic::test::state_changes_from(result).empty());
-    EXPECT_EQ(result.next_wakeup, std::nullopt);
+    EXPECT_TRUE(result.next_wakeup.has_value());
     EXPECT_FALSE(client.is_ready());
     EXPECT_FALSE(client.has_failed());
 }
@@ -224,6 +224,80 @@ TEST(QuicDemoChannelTest, ReceivedMessagesAreDeliveredThroughEffects) {
 
     ASSERT_EQ(messages.size(), 1u);
     EXPECT_EQ(coquic::quic::test::string_from_bytes(messages.front()), "ping");
+}
+
+TEST(QuicDemoChannelTest, QueuedMessageIsDeliveredAfterSingleDatagramLoss) {
+    coquic::quic::QuicDemoChannel client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicDemoChannel server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_demo_channel_handshake(client, server,
+                                                     coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_ready());
+    ASSERT_TRUE(server.is_ready());
+
+    const auto expected = coquic::quic::test::bytes_from_string("ping");
+    const auto send = server.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = expected,
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_EQ(coquic::quic::test::send_datagrams_from(send).size(), 1u);
+    EXPECT_TRUE(send.next_wakeup.has_value());
+
+    const auto dropped = coquic::quic::test::relay_send_datagrams_to_peer_except(
+        send, std::array<std::size_t, 1>{0}, client, coquic::quic::test::test_time(2));
+    EXPECT_TRUE(coquic::quic::test::received_messages_from(dropped).empty());
+
+    const auto retry = coquic::quic::test::drive_earliest_next_wakeup(server, {send.next_wakeup});
+    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(retry).empty());
+
+    const auto delivered = coquic::quic::test::relay_send_datagrams_to_peer(
+        retry, client, coquic::quic::test::test_time(3));
+    const auto messages = coquic::quic::test::received_messages_from(delivered);
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_EQ(messages.front(), expected);
+
+    const auto acked = coquic::quic::test::relay_send_datagrams_to_peer(
+        delivered, server, coquic::quic::test::test_time(4));
+    EXPECT_TRUE(coquic::quic::test::received_messages_from(acked).empty());
+    EXPECT_FALSE(client.has_failed());
+    EXPECT_FALSE(server.has_failed());
+}
+
+TEST(QuicDemoChannelTest, ReorderedTransportDatagramsDoNotDuplicateMessageDelivery) {
+    coquic::quic::QuicDemoChannel client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicDemoChannel server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_demo_channel_handshake(client, server,
+                                                     coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_ready());
+    ASSERT_TRUE(server.is_ready());
+
+    const auto expected = std::vector<std::byte>(4096, std::byte{0x61});
+    const auto send = server.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = expected,
+        },
+        coquic::quic::test::test_time(1));
+    const auto datagrams = coquic::quic::test::send_datagrams_from(send);
+    ASSERT_GE(datagrams.size(), 2u);
+
+    coquic::quic::QuicDemoChannelResult reordered;
+    for (std::size_t index = datagrams.size(); index-- > 0;) {
+        auto step = client.advance(coquic::quic::QuicCoreInboundDatagram{datagrams[index]},
+                                   coquic::quic::test::test_time(2));
+        merge_result(reordered, std::move(step));
+    }
+
+    const auto messages = coquic::quic::test::received_messages_from(reordered);
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_EQ(messages.front(), expected);
+
+    const auto acked = coquic::quic::test::relay_send_datagrams_to_peer(
+        reordered, server, coquic::quic::test::test_time(3));
+    EXPECT_TRUE(coquic::quic::test::received_messages_from(acked).empty());
+    EXPECT_FALSE(client.has_failed());
+    EXPECT_FALSE(server.has_failed());
 }
 
 TEST(QuicDemoChannelTest, OversizedQueuedMessageFailsOnceAndLaterCallsAreInert) {

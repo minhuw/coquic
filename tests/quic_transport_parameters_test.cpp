@@ -80,6 +80,67 @@ TEST(QuicTransportParametersTest, RoundTripsRetrySourceConnectionId) {
     EXPECT_EQ(decoded.value().retry_source_connection_id, parameters.retry_source_connection_id);
 }
 
+TEST(QuicTransportParametersTest, RoundTripsAckDelayExponentAndMaxAckDelay) {
+    const TransportParameters parameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_source_connection_id = ConnectionId{std::byte{0xc1}},
+        .ack_delay_exponent = 5,
+        .max_ack_delay = 42,
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_transport_parameters(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().ack_delay_exponent, 5u);
+    EXPECT_EQ(decoded.value().max_ack_delay, 42u);
+}
+
+TEST(QuicTransportParametersTest, MissingAckTimingParametersUseRfcDefaults) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x03,
+        0x02,
+        0x44,
+        0xb0,
+        0x0e,
+        0x01,
+        0x02,
+        0x0f,
+        0x01,
+        0x11,
+    }));
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().ack_delay_exponent, 3u);
+    EXPECT_EQ(decoded.value().max_ack_delay, 25u);
+}
+
+TEST(QuicTransportParametersTest, RejectsInvalidAckTimingValues) {
+    const auto bad_exponent = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::client,
+        TransportParameters{
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .ack_delay_exponent = 21,
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}}));
+    ASSERT_FALSE(bad_exponent.has_value());
+
+    const auto bad_max_ack_delay = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::client,
+        TransportParameters{
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .max_ack_delay = (1u << 14),
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}}));
+    ASSERT_FALSE(bad_max_ack_delay.has_value());
+}
+
 TEST(QuicTransportParametersTest, RejectsMaxUdpPayloadSizeAboveVarintLimitDuringSerialization) {
     const TransportParameters parameters{
         .max_udp_payload_size = (std::uint64_t{1} << 62),

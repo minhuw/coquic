@@ -79,6 +79,7 @@ fn addProjectLibrary(
         "src/quic/connection.cpp",
         "src/quic/core.cpp",
         "src/quic/crypto_stream.cpp",
+        "src/quic/demo_channel.cpp",
         "src/quic/frame.cpp",
         "src/quic/packet.cpp",
         "src/quic/packet_crypto.cpp",
@@ -179,6 +180,7 @@ pub fn build(b: *std.Build) void {
     const default_test_files = &.{
         "tests/smoke.cpp",
         "tests/quic_core_test.cpp",
+        "tests/quic_demo_channel_test.cpp",
         "tests/quic_frame_test.cpp",
         "tests/quic_crypto_stream_test.cpp",
         "tests/quic_packet_test.cpp",

@@ -12,6 +12,7 @@
 #define private public
 #include "src/quic/connection.h"
 #undef private
+#include "src/quic/demo_channel.h"
 
 namespace coquic::quic::test {
 
@@ -78,6 +79,24 @@ inline void drive_quic_handshake(QuicCore &client, QuicCore &server) {
             break;
         }
         to_server = client.receive(to_client);
+    }
+}
+
+inline void flush_demo_channels(QuicDemoChannel &left, QuicDemoChannel &right) {
+    auto to_left = std::vector<std::byte>{};
+    auto to_right = std::vector<std::byte>{};
+    bool saw_empty_round = false;
+    for (int i = 0; i < 64; ++i) {
+        to_right = left.on_datagram(to_left);
+        to_left = right.on_datagram(to_right);
+        if (to_left.empty() && to_right.empty()) {
+            if (saw_empty_round) {
+                break;
+            }
+            saw_empty_round = true;
+        } else {
+            saw_empty_round = false;
+        }
     }
 }
 

@@ -67,4 +67,62 @@ TEST(QuicCoreTest, TwoPeersExchangeApplicationDataAfterHandshake) {
               "ping");
 }
 
+TEST(QuicCoreTest, InboundApplicationStreamRequiresOffsetAndLengthFlags) {
+    coquic::quic::QuicConnection missing_offset_connection(
+        coquic::quic::test::make_server_core_config());
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        missing_offset_connection, coquic::quic::HandshakeStatus::connected);
+    const auto missing_offset_ok =
+        coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+            missing_offset_connection,
+            {coquic::quic::StreamFrame{
+                .fin = false,
+                .has_offset = false,
+                .has_length = true,
+                .stream_id = 0,
+                .offset = std::nullopt,
+                .stream_data = coquic::quic::test::bytes_from_string("a"),
+            }});
+    EXPECT_FALSE(missing_offset_ok);
+    EXPECT_TRUE(missing_offset_connection.has_failed());
+
+    coquic::quic::QuicConnection missing_length_connection(
+        coquic::quic::test::make_server_core_config());
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        missing_length_connection, coquic::quic::HandshakeStatus::connected);
+    const auto missing_length_ok =
+        coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+            missing_length_connection,
+            {coquic::quic::StreamFrame{
+                .fin = false,
+                .has_offset = true,
+                .has_length = false,
+                .stream_id = 0,
+                .offset = 0,
+                .stream_data = coquic::quic::test::bytes_from_string("b"),
+            }});
+    EXPECT_FALSE(missing_length_ok);
+    EXPECT_TRUE(missing_length_connection.has_failed());
+}
+
+TEST(QuicCoreTest, InboundApplicationStreamFailsBeforeHandshakeConnected) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        connection, coquic::quic::HandshakeStatus::in_progress);
+
+    const auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::StreamFrame{
+                        .fin = false,
+                        .has_offset = true,
+                        .has_length = true,
+                        .stream_id = 0,
+                        .offset = 0,
+                        .stream_data = coquic::quic::test::bytes_from_string("ping"),
+                    }});
+
+    EXPECT_FALSE(injected);
+    EXPECT_TRUE(connection.has_failed());
+    EXPECT_TRUE(connection.take_received_application_data().empty());
+}
+
 } // namespace

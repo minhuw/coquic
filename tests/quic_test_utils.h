@@ -6,9 +6,10 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
-#include "src/quic/core.h"
+#include "src/quic/connection.h"
 
 namespace coquic::quic::test {
 
@@ -95,5 +96,27 @@ inline std::string string_from_bytes(std::span<const std::byte> bytes) {
     }
     return text;
 }
+
+struct QuicConnectionTestPeer {
+    static void set_handshake_status(QuicConnection &connection, HandshakeStatus status) {
+        connection.status_ = status;
+    }
+
+    static bool inject_inbound_one_rtt_frames(QuicConnection &connection, std::vector<Frame> frames,
+                                              std::uint64_t packet_number = 0) {
+        const auto processed = connection.process_inbound_packet(ProtectedOneRttPacket{
+            .destination_connection_id = {},
+            .packet_number_length = 2,
+            .packet_number = packet_number,
+            .frames = std::move(frames),
+        });
+        if (!processed.has_value()) {
+            connection.status_ = HandshakeStatus::failed;
+            return false;
+        }
+
+        return true;
+    }
+};
 
 } // namespace coquic::quic::test

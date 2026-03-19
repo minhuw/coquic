@@ -467,11 +467,18 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
             continue;
         }
 
+        if (status_ != HandshakeStatus::connected) {
+            return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+        }
+        if (!stream_frame->has_offset || !stream_frame->offset.has_value() ||
+            !stream_frame->has_length) {
+            return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+        }
         if (stream_frame->stream_id != kApplicationStreamId || stream_frame->fin) {
             return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
         }
 
-        const auto stream_offset = stream_frame->offset.value_or(0);
+        const auto stream_offset = stream_frame->offset.value();
         if (stream_offset != expected_application_stream_offset_) {
             return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
         }

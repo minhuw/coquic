@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <optional>
@@ -8,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #define private public
@@ -55,31 +58,93 @@ inline QuicCoreConfig make_server_core_config() {
     };
 }
 
-inline void flush_pending_datagrams(QuicCore &left, QuicCore &right) {
-    auto to_right = left.receive({});
-    auto to_left = std::vector<std::byte>{};
-    while (!to_right.empty()) {
-        to_left = right.receive(to_right);
-        if (to_left.empty()) {
-            break;
-        }
-        to_right = left.receive(to_left);
-    }
+inline QuicCoreTimePoint test_time(std::int64_t ms = 0) {
+    return QuicCoreTimePoint{} + std::chrono::milliseconds(ms);
 }
 
-inline void drive_quic_handshake(QuicCore &client, QuicCore &server) {
-    auto to_server = client.receive({});
-    auto to_client = std::vector<std::byte>{};
+inline std::vector<std::vector<std::byte>> send_datagrams_from(const QuicCoreResult &result) {
+    std::vector<std::vector<std::byte>> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *send = std::get_if<QuicCoreSendDatagram>(&effect)) {
+            out.push_back(send->bytes);
+        }
+    }
+
+    return out;
+}
+
+inline std::vector<QuicCoreStateChange> state_changes_from(const QuicCoreResult &result) {
+    std::vector<QuicCoreStateChange> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *event = std::get_if<QuicCoreStateEvent>(&effect)) {
+            out.push_back(event->change);
+        }
+    }
+
+    return out;
+}
+
+inline std::size_t count_state_change(std::span<const QuicCoreStateChange> changes,
+                                      QuicCoreStateChange change) {
+    std::size_t count = 0;
+    for (const auto value : changes) {
+        if (value == change) {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+inline std::vector<std::byte> received_application_data_from(const QuicCoreResult &result) {
+    std::vector<std::byte> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *received = std::get_if<QuicCoreReceiveApplicationData>(&effect)) {
+            out.insert(out.end(), received->bytes.begin(), received->bytes.end());
+        }
+    }
+
+    return out;
+}
+
+inline QuicCoreResult relay_send_datagrams_to_peer(const QuicCoreResult &result, QuicCore &peer,
+                                                   QuicCoreTimePoint now) {
+    QuicCoreResult combined;
+    for (auto datagram : send_datagrams_from(result)) {
+        auto step = peer.advance(QuicCoreInboundDatagram{std::move(datagram)}, now);
+        combined.effects.insert(combined.effects.end(),
+                                std::make_move_iterator(step.effects.begin()),
+                                std::make_move_iterator(step.effects.end()));
+        combined.next_wakeup = step.next_wakeup;
+    }
+
+    return combined;
+}
+
+inline void drive_quic_handshake(QuicCore &client, QuicCore &server, QuicCoreTimePoint now,
+                                 std::vector<QuicCoreStateChange> *client_events = nullptr,
+                                 std::vector<QuicCoreStateChange> *server_events = nullptr) {
+    const auto append_state_changes = [](const QuicCoreResult &result,
+                                         std::vector<QuicCoreStateChange> *events) {
+        if (events == nullptr) {
+            return;
+        }
+        auto changes = state_changes_from(result);
+        events->insert(events->end(), changes.begin(), changes.end());
+    };
+
+    auto to_server = client.advance(QuicCoreStart{}, now);
+    append_state_changes(to_server, client_events);
 
     for (int i = 0; i < 16 && !(client.is_handshake_complete() && server.is_handshake_complete());
          ++i) {
-        if (!to_server.empty()) {
-            to_client = server.receive(to_server);
-        }
+        const auto to_client = relay_send_datagrams_to_peer(to_server, server, now);
+        append_state_changes(to_client, server_events);
         if (client.is_handshake_complete() && server.is_handshake_complete()) {
             break;
         }
-        to_server = client.receive(to_client);
+        to_server = relay_send_datagrams_to_peer(to_client, client, now);
+        append_state_changes(to_server, client_events);
     }
 }
 

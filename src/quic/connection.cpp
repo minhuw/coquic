@@ -56,38 +56,44 @@ bool is_padding_frame(const Frame &frame) {
 QuicConnection::QuicConnection(QuicCoreConfig config) : config_(std::move(config)) {
 }
 
-std::vector<std::byte> QuicConnection::receive(std::span<const std::byte> bytes) {
+void QuicConnection::start() {
     if (status_ == HandshakeStatus::failed) {
-        return {};
+        return;
     }
 
-    if (bytes.empty()) {
-        start_client_if_needed();
-        return flush_outbound_datagram();
+    start_client_if_needed();
+}
+
+void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes) {
+    if (status_ == HandshakeStatus::failed || bytes.empty()) {
+        return;
     }
 
     if (!started_) {
         if (config_.role != EndpointRole::server) {
-            status_ = HandshakeStatus::failed;
-            return {};
+            mark_failed();
+            return;
         }
 
         const auto initial_destination_connection_id =
             peek_client_initial_destination_connection_id(bytes);
         if (!initial_destination_connection_id.has_value()) {
-            status_ = HandshakeStatus::failed;
-            return {};
+            mark_failed();
+            return;
         }
 
         start_server_if_needed(initial_destination_connection_id.value());
+        if (status_ == HandshakeStatus::failed) {
+            return;
+        }
     }
 
     std::size_t offset = 0;
     while (offset < bytes.size()) {
         const auto packet_length = peek_next_packet_length(bytes.subspan(offset));
         if (!packet_length.has_value()) {
-            status_ = HandshakeStatus::failed;
-            return {};
+            mark_failed();
+            return;
         }
 
         const auto packets = deserialize_protected_datagram(
@@ -107,14 +113,14 @@ std::vector<std::byte> QuicConnection::receive(std::span<const std::byte> bytes)
                 .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
             });
         if (!packets.has_value()) {
-            status_ = HandshakeStatus::failed;
-            return {};
+            mark_failed();
+            return;
         }
 
         for (const auto &packet : packets.value()) {
             if (!process_inbound_packet(packet).has_value()) {
-                status_ = HandshakeStatus::failed;
-                return {};
+                mark_failed();
+                return;
             }
         }
 
@@ -122,11 +128,8 @@ std::vector<std::byte> QuicConnection::receive(std::span<const std::byte> bytes)
     }
 
     if (!sync_tls_state().has_value()) {
-        status_ = HandshakeStatus::failed;
-        return {};
+        mark_failed();
     }
-
-    return flush_outbound_datagram();
 }
 
 void QuicConnection::queue_application_data(std::span<const std::byte> bytes) {
@@ -137,6 +140,14 @@ void QuicConnection::queue_application_data(std::span<const std::byte> bytes) {
     pending_application_send_.insert(pending_application_send_.end(), bytes.begin(), bytes.end());
 }
 
+std::vector<std::byte> QuicConnection::drain_outbound_datagram() {
+    if (status_ == HandshakeStatus::failed) {
+        return {};
+    }
+
+    return flush_outbound_datagram();
+}
+
 std::vector<std::byte> QuicConnection::take_received_application_data() {
     if (status_ == HandshakeStatus::failed) {
         return {};
@@ -145,6 +156,20 @@ std::vector<std::byte> QuicConnection::take_received_application_data() {
     auto bytes = std::move(pending_application_receive_);
     pending_application_receive_.clear();
     return bytes;
+}
+
+std::optional<QuicCoreStateChange> QuicConnection::take_state_change() {
+    if (pending_state_changes_.empty()) {
+        return std::nullopt;
+    }
+
+    const auto next = pending_state_changes_.front();
+    pending_state_changes_.erase(pending_state_changes_.begin());
+    return next;
+}
+
+std::optional<QuicCoreTimePoint> QuicConnection::next_wakeup() const {
+    return std::nullopt;
 }
 
 bool QuicConnection::is_handshake_complete() const {
@@ -171,7 +196,7 @@ void QuicConnection::start_client_if_needed() {
     const auto serialized_transport_parameters =
         serialize_transport_parameters(local_transport_parameters_);
     if (!serialized_transport_parameters.has_value()) {
-        status_ = HandshakeStatus::failed;
+        mark_failed();
         return;
     }
 
@@ -183,12 +208,12 @@ void QuicConnection::start_client_if_needed() {
         .local_transport_parameters = serialized_transport_parameters.value(),
     });
     if (!tls_->start().has_value()) {
-        status_ = HandshakeStatus::failed;
+        mark_failed();
         return;
     }
 
     if (!sync_tls_state().has_value()) {
-        status_ = HandshakeStatus::failed;
+        mark_failed();
     }
 }
 
@@ -211,7 +236,7 @@ void QuicConnection::start_server_if_needed(
     const auto serialized_transport_parameters =
         serialize_transport_parameters(local_transport_parameters_);
     if (!serialized_transport_parameters.has_value()) {
-        status_ = HandshakeStatus::failed;
+        mark_failed();
         return;
     }
 
@@ -223,7 +248,7 @@ void QuicConnection::start_server_if_needed(
         .local_transport_parameters = serialized_transport_parameters.value(),
     });
     if (!sync_tls_state().has_value()) {
-        status_ = HandshakeStatus::failed;
+        mark_failed();
     }
 }
 
@@ -554,10 +579,40 @@ void QuicConnection::update_handshake_status() {
 
     if (tls_->handshake_complete() && peer_transport_parameters_validated_ &&
         application_space_.read_secret.has_value() && application_space_.write_secret.has_value()) {
-        status_ = HandshakeStatus::connected;
+        if (status_ != HandshakeStatus::connected) {
+            status_ = HandshakeStatus::connected;
+            queue_state_change(QuicCoreStateChange::handshake_ready);
+        }
     } else {
         status_ = HandshakeStatus::in_progress;
     }
+}
+
+void QuicConnection::mark_failed() {
+    if (status_ == HandshakeStatus::failed) {
+        return;
+    }
+
+    status_ = HandshakeStatus::failed;
+    pending_application_send_.clear();
+    pending_application_receive_.clear();
+    queue_state_change(QuicCoreStateChange::failed);
+}
+
+void QuicConnection::queue_state_change(QuicCoreStateChange change) {
+    if (change == QuicCoreStateChange::handshake_ready) {
+        if (handshake_ready_emitted_) {
+            return;
+        }
+        handshake_ready_emitted_ = true;
+    } else if (change == QuicCoreStateChange::failed) {
+        if (failed_emitted_) {
+            return;
+        }
+        failed_emitted_ = true;
+    }
+
+    pending_state_changes_.push_back(change);
 }
 
 std::optional<TransportParametersValidationContext>
@@ -626,7 +681,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
         handshake_space_.send_crypto.take_frames(std::numeric_limits<std::size_t>::max());
     if (!handshake_crypto_frames.empty()) {
         if (!handshake_space_.write_secret.has_value()) {
-            status_ = HandshakeStatus::failed;
+            mark_failed();
             return {};
         }
 
@@ -682,7 +737,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
                                        .one_rtt_secret = application_space_.write_secret,
                                    });
             if (!candidate_datagram.has_value()) {
-                status_ = HandshakeStatus::failed;
+                mark_failed();
                 return {};
             }
 
@@ -732,7 +787,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
                                                   .one_rtt_secret = application_space_.write_secret,
                                               });
     if (!datagram.has_value()) {
-        status_ = HandshakeStatus::failed;
+        mark_failed();
         return {};
     }
 
@@ -755,7 +810,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram() {
                              .one_rtt_secret = application_space_.write_secret,
                          });
             if (!datagram.has_value()) {
-                status_ = HandshakeStatus::failed;
+                mark_failed();
                 return {};
             }
             break;

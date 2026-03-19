@@ -184,22 +184,23 @@ bool has_send_effect(const std::vector<coquic::quic::QuicDemoChannelEffect> &eff
 }
 
 struct DemoWaitStep {
-    coquic::quic::QuicDemoChannelResult result;
+    coquic::quic::QuicDemoChannelInput input;
+    DemoTimePoint input_time;
     sockaddr_storage source{};
     socklen_t source_len = 0;
     bool has_source = false;
 };
 
 std::optional<DemoWaitStep>
-wait_for_socket_or_deadline(int fd, DemoChannel &channel,
-                            const std::optional<DemoTimePoint> &next_wakeup) {
+wait_for_socket_or_deadline(int fd, const std::optional<DemoTimePoint> &next_wakeup) {
     int timeout_ms = kReceiveTimeoutSeconds * 1000;
     if (next_wakeup.has_value()) {
         const auto current = now();
         if (*next_wakeup <= current) {
-            DemoWaitStep step;
-            step.result = channel.advance(coquic::quic::QuicCoreTimerExpired{}, current);
-            return step;
+            return DemoWaitStep{
+                .input = coquic::quic::QuicCoreTimerExpired{},
+                .input_time = current,
+            };
         }
 
         const auto remaining = *next_wakeup - current;
@@ -230,9 +231,10 @@ wait_for_socket_or_deadline(int fd, DemoChannel &channel,
             std::cerr << "demo failed: timed out waiting for inbound datagram\n";
             return std::nullopt;
         }
-        DemoWaitStep step;
-        step.result = channel.advance(coquic::quic::QuicCoreTimerExpired{}, now());
-        return step;
+        return DemoWaitStep{
+            .input = coquic::quic::QuicCoreTimerExpired{},
+            .input_time = now(),
+        };
     }
 
     if ((descriptor.revents & POLLIN) == 0) {
@@ -256,16 +258,16 @@ wait_for_socket_or_deadline(int fd, DemoChannel &channel,
     }
 
     inbound.resize(static_cast<std::size_t>(bytes_read));
-    DemoWaitStep step;
-    step.result = channel.advance(
-        coquic::quic::QuicCoreInboundDatagram{
-            .bytes = std::move(inbound),
-        },
-        now());
-    step.source = source;
-    step.source_len = source_len;
-    step.has_source = true;
-    return step;
+    return DemoWaitStep{
+        .input =
+            coquic::quic::QuicCoreInboundDatagram{
+                .bytes = std::move(inbound),
+            },
+        .input_time = now(),
+        .source = source,
+        .source_len = source_len,
+        .has_source = true,
+    };
 }
 
 coquic::quic::QuicCoreConfig make_client_config() {
@@ -346,7 +348,7 @@ int run_demo_server(const DemoCliConfig &config) {
     next_wakeup = start_result.next_wakeup;
 
     for (;;) {
-        auto step = wait_for_socket_or_deadline(socket_fd, channel, next_wakeup);
+        auto step = wait_for_socket_or_deadline(socket_fd, next_wakeup);
         if (!step.has_value()) {
             return 1;
         }
@@ -355,21 +357,22 @@ int run_demo_server(const DemoCliConfig &config) {
             peer_len = step->source_len;
             have_peer = true;
         }
+        auto step_result = channel.advance(std::move(step->input), step->input_time);
 
-        if (saw_terminal_failure(step->result.effects) || channel.has_failed()) {
+        if (saw_terminal_failure(step_result.effects) || channel.has_failed()) {
             std::cerr << "demo-server failed: channel entered failure state\n";
             return 1;
         }
-        if (!have_peer && has_send_effect(step->result.effects)) {
+        if (!have_peer && has_send_effect(step_result.effects)) {
             std::cerr << "demo-server failed: cannot send datagram before peer is known\n";
             return 1;
         }
-        if (have_peer && !send_effect_datagrams(socket_fd, step->result.effects, peer, peer_len)) {
+        if (have_peer && !send_effect_datagrams(socket_fd, step_result.effects, peer, peer_len)) {
             return 1;
         }
-        next_wakeup = step->result.next_wakeup;
+        next_wakeup = step_result.next_wakeup;
 
-        auto received_message = take_received_message(step->result.effects);
+        auto received_message = take_received_message(step_result.effects);
         if (!received_message.has_value()) {
             continue;
         }
@@ -450,20 +453,21 @@ int run_demo_client(const DemoCliConfig &config) {
     }
 
     for (;;) {
-        auto step = wait_for_socket_or_deadline(socket_fd, channel, next_wakeup);
+        auto step = wait_for_socket_or_deadline(socket_fd, next_wakeup);
         if (!step.has_value()) {
             return 1;
         }
-        if (saw_terminal_failure(step->result.effects) || channel.has_failed()) {
+        auto step_result = channel.advance(std::move(step->input), step->input_time);
+        if (saw_terminal_failure(step_result.effects) || channel.has_failed()) {
             std::cerr << "demo-client failed: channel entered failure state\n";
             return 1;
         }
-        if (!send_effect_datagrams(socket_fd, step->result.effects, peer, peer_len)) {
+        if (!send_effect_datagrams(socket_fd, step_result.effects, peer, peer_len)) {
             return 1;
         }
-        next_wakeup = step->result.next_wakeup;
+        next_wakeup = step_result.next_wakeup;
 
-        const auto received_message = take_received_message(step->result.effects);
+        const auto received_message = take_received_message(step_result.effects);
         if (!received_message.has_value()) {
             continue;
         }

@@ -11,6 +11,50 @@
 
 namespace coquic::quic {
 
+struct ByteRange {
+    std::uint64_t offset = 0;
+    std::vector<std::byte> bytes;
+};
+
+class ReliableSendBuffer {
+  public:
+    void append(std::span<const std::byte> bytes);
+    std::vector<ByteRange> take_ranges(std::size_t max_bytes);
+    void acknowledge(std::uint64_t offset, std::size_t length);
+    void mark_lost(std::uint64_t offset, std::size_t length);
+    bool has_pending_data() const;
+    bool has_outstanding_data() const;
+
+  private:
+    enum class SegmentState : std::uint8_t {
+        unsent,
+        sent,
+        lost,
+    };
+
+    struct Segment {
+        SegmentState state = SegmentState::unsent;
+        std::vector<std::byte> bytes;
+    };
+
+    std::vector<ByteRange> take_ranges_by_state(SegmentState state, std::size_t &remaining_bytes);
+    void split_at(std::uint64_t offset);
+    void merge_adjacent_segments();
+
+    std::map<std::uint64_t, Segment> segments_;
+    std::uint64_t next_append_offset_ = 0;
+};
+
+class ReliableReceiveBuffer {
+  public:
+    CodecResult<std::vector<std::byte>> push(std::uint64_t offset,
+                                             std::span<const std::byte> bytes);
+
+  private:
+    std::uint64_t next_contiguous_offset_ = 0;
+    std::map<std::uint64_t, std::byte> buffered_bytes_;
+};
+
 class CryptoSendBuffer {
   public:
     void append(std::span<const std::byte> bytes);
@@ -18,8 +62,7 @@ class CryptoSendBuffer {
     bool empty() const;
 
   private:
-    std::vector<std::byte> pending_;
-    std::uint64_t next_offset_ = 0;
+    ReliableSendBuffer reliable_;
 };
 
 class CryptoReceiveBuffer {
@@ -28,8 +71,7 @@ class CryptoReceiveBuffer {
                                              std::span<const std::byte> bytes);
 
   private:
-    std::uint64_t next_contiguous_offset_ = 0;
-    std::map<std::uint64_t, std::byte> buffered_bytes_;
+    ReliableReceiveBuffer reliable_;
 };
 
 } // namespace coquic::quic

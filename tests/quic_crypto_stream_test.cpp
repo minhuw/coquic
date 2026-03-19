@@ -1,4 +1,5 @@
 #include <limits>
+#include <string_view>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -9,6 +10,17 @@ namespace {
 
 using coquic::quic::CryptoReceiveBuffer;
 using coquic::quic::CryptoSendBuffer;
+using coquic::quic::ReliableReceiveBuffer;
+using coquic::quic::ReliableSendBuffer;
+
+std::vector<std::byte> bytes_from_string(std::string_view text) {
+    std::vector<std::byte> bytes;
+    bytes.reserve(text.size());
+    for (const char ch : text) {
+        bytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(ch)));
+    }
+    return bytes;
+}
 
 TEST(QuicCryptoStreamTest, SendBufferProducesIncreasingOffsets) {
     CryptoSendBuffer buffer;
@@ -53,6 +65,44 @@ TEST(QuicCryptoStreamTest, EmptyReflectsPendingSendState) {
 
     ASSERT_EQ(buffer.take_frames(16).size(), 1u);
     EXPECT_TRUE(buffer.empty());
+}
+
+TEST(QuicCryptoStreamTest, SendBufferRetainsBytesUntilAcknowledged) {
+    ReliableSendBuffer buffer;
+    buffer.append(std::vector<std::byte>{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}});
+
+    const auto first = buffer.take_ranges(2);
+    ASSERT_EQ(first.size(), 1u);
+    EXPECT_EQ(first[0].offset, 0u);
+    EXPECT_EQ(first[0].bytes.size(), 2u);
+    EXPECT_TRUE(buffer.has_outstanding_data());
+
+    buffer.acknowledge(0, 2);
+    EXPECT_TRUE(buffer.has_pending_data());
+}
+
+TEST(QuicCryptoStreamTest, LostRangesBecomeSendableBeforeNewRanges) {
+    ReliableSendBuffer buffer;
+    const auto bytes = bytes_from_string("abcdef");
+    buffer.append(bytes);
+    const auto first = buffer.take_ranges(2);
+    ASSERT_EQ(first.size(), 1u);
+    buffer.mark_lost(first[0].offset, first[0].bytes.size());
+
+    const auto retry = buffer.take_ranges(2);
+    ASSERT_EQ(retry.size(), 1u);
+    EXPECT_EQ(retry[0].offset, first[0].offset);
+}
+
+TEST(QuicCryptoStreamTest, ReceiveBufferReleasesReorderedApplicationBytesContiguously) {
+    ReliableReceiveBuffer buffer;
+    ASSERT_TRUE(buffer.push(4, bytes_from_string("ef")).has_value());
+    const auto first_release = buffer.push(0, bytes_from_string("abcd"));
+    ASSERT_TRUE(first_release.has_value());
+    EXPECT_EQ(first_release.value(), bytes_from_string("abcdef"));
+    const auto released = buffer.push(6, bytes_from_string("gh"));
+    ASSERT_TRUE(released.has_value());
+    EXPECT_EQ(released.value(), bytes_from_string("gh"));
 }
 
 TEST(QuicCryptoStreamTest, ReceiveBufferReleasesOnlyContiguousBytes) {

@@ -1,0 +1,168 @@
+#include "src/quic/http09.h"
+
+#include <algorithm>
+#include <array>
+#include <string_view>
+#include <utility>
+
+namespace coquic::quic {
+
+namespace {
+
+constexpr CodecErrorCode kHttp09ParseError = CodecErrorCode::invalid_varint;
+
+CodecResult<QuicHttp09Request> parse_absolute_https_request(std::string_view token) {
+    constexpr std::string_view scheme = "https://";
+    if (!token.starts_with(scheme)) {
+        return CodecResult<QuicHttp09Request>::failure(kHttp09ParseError, 0);
+    }
+
+    const std::string_view remainder = token.substr(scheme.size());
+    if (remainder.empty()) {
+        return CodecResult<QuicHttp09Request>::failure(kHttp09ParseError, 0);
+    }
+
+    const std::size_t slash = remainder.find('/');
+    const std::string_view authority =
+        slash == std::string_view::npos ? remainder : remainder.substr(0, slash);
+    if (authority.empty()) {
+        return CodecResult<QuicHttp09Request>::failure(kHttp09ParseError, 0);
+    }
+
+    std::string_view request_target =
+        slash == std::string_view::npos ? std::string_view{"/"} : remainder.substr(slash);
+    if (request_target.empty() || request_target.front() != '/') {
+        return CodecResult<QuicHttp09Request>::failure(kHttp09ParseError, 0);
+    }
+
+    const std::string_view relative = request_target.substr(1);
+    return CodecResult<QuicHttp09Request>::success(QuicHttp09Request{
+        .url = std::string(token),
+        .authority = std::string(authority),
+        .request_target = std::string(request_target),
+        .relative_output_path = std::filesystem::path(relative),
+    });
+}
+
+bool path_has_prefix(const std::filesystem::path &path, const std::filesystem::path &prefix) {
+    auto path_it = path.begin();
+    auto prefix_it = prefix.begin();
+    for (; prefix_it != prefix.end(); ++prefix_it, ++path_it) {
+        if (path_it == path.end() || *path_it != *prefix_it) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+} // namespace
+
+CodecResult<std::vector<QuicHttp09Request>>
+parse_http09_requests_env(std::string_view requests_env) {
+    std::vector<QuicHttp09Request> requests;
+    std::string authority;
+
+    std::size_t offset = 0;
+    while (offset < requests_env.size()) {
+        while (offset < requests_env.size() && requests_env[offset] == ' ') {
+            ++offset;
+        }
+        if (offset >= requests_env.size()) {
+            break;
+        }
+
+        std::size_t end = offset;
+        while (end < requests_env.size() && requests_env[end] != ' ') {
+            ++end;
+        }
+
+        const auto parsed = parse_absolute_https_request(requests_env.substr(offset, end - offset));
+        if (!parsed.has_value()) {
+            return CodecResult<std::vector<QuicHttp09Request>>::failure(kHttp09ParseError, offset);
+        }
+
+        if (authority.empty()) {
+            authority = parsed.value().authority;
+        } else if (authority != parsed.value().authority) {
+            return CodecResult<std::vector<QuicHttp09Request>>::failure(kHttp09ParseError, offset);
+        }
+
+        requests.push_back(parsed.value());
+        offset = end;
+    }
+
+    if (requests.empty()) {
+        return CodecResult<std::vector<QuicHttp09Request>>::failure(kHttp09ParseError, 0);
+    }
+
+    return CodecResult<std::vector<QuicHttp09Request>>::success(std::move(requests));
+}
+
+CodecResult<std::string> parse_http09_request_target(std::span<const std::byte> bytes) {
+    std::string request_line;
+    request_line.reserve(bytes.size());
+    for (const auto byte : bytes) {
+        request_line.push_back(static_cast<char>(std::to_integer<unsigned char>(byte)));
+    }
+
+    constexpr std::string_view method = "GET ";
+    constexpr std::string_view line_end = "\r\n";
+    if (!request_line.starts_with(method) || !request_line.ends_with(line_end)) {
+        return CodecResult<std::string>::failure(kHttp09ParseError, 0);
+    }
+
+    const std::size_t target_begin = method.size();
+    const std::size_t target_end = request_line.size() - line_end.size();
+    if (target_end <= target_begin) {
+        return CodecResult<std::string>::failure(kHttp09ParseError, 0);
+    }
+
+    std::string target = request_line.substr(target_begin, target_end - target_begin);
+    if (target.empty() || target.front() != '/' || target.find(' ') != std::string::npos) {
+        return CodecResult<std::string>::failure(kHttp09ParseError, 0);
+    }
+
+    return CodecResult<std::string>::success(std::move(target));
+}
+
+CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::filesystem::path &root,
+                                                                  std::string_view request_target) {
+    if (request_target.empty() || request_target.front() != '/') {
+        return CodecResult<std::filesystem::path>::failure(kHttp09ParseError, 0);
+    }
+    if (request_target.find('?') != std::string_view::npos ||
+        request_target.find('#') != std::string_view::npos) {
+        return CodecResult<std::filesystem::path>::failure(kHttp09ParseError, 0);
+    }
+
+    const std::filesystem::path normalized_root = root.lexically_normal();
+    const std::filesystem::path relative =
+        std::filesystem::path(request_target.substr(1)).lexically_normal();
+    if (relative.is_absolute()) {
+        return CodecResult<std::filesystem::path>::failure(kHttp09ParseError, 0);
+    }
+
+    if (std::any_of(relative.begin(), relative.end(),
+                    [](const std::filesystem::path &part) { return part == ".."; })) {
+        return CodecResult<std::filesystem::path>::failure(kHttp09ParseError, 0);
+    }
+
+    const std::filesystem::path candidate = (normalized_root / relative).lexically_normal();
+    if (!path_has_prefix(candidate, normalized_root)) {
+        return CodecResult<std::filesystem::path>::failure(kHttp09ParseError, 0);
+    }
+
+    return CodecResult<std::filesystem::path>::success(candidate);
+}
+
+QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase) {
+    auto config = QuicTransportConfig{};
+    if (testcase == QuicHttp09Testcase::transfer) {
+        config.initial_max_data = 64ull * 1024ull;
+        config.initial_max_stream_data_bidi_local = 16ull * 1024ull;
+    }
+    return config;
+}
+
+} // namespace coquic::quic

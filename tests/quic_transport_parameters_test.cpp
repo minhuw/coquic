@@ -247,6 +247,41 @@ TEST(QuicTransportParametersTest, RejectsMaxAckDelayAboveVarintLimitDuringSerial
     EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
 }
 
+TEST(QuicTransportParametersTest,
+     RejectsFlowControlAndStreamCountValuesAboveVarintLimitDuringSerialization) {
+    const auto make_parameters = [] {
+        return TransportParameters{
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0x01}},
+        };
+    };
+
+    auto bidi_local = make_parameters();
+    bidi_local.initial_max_stream_data_bidi_local = (std::uint64_t{1} << 62);
+    const auto encoded_bidi_local = coquic::quic::serialize_transport_parameters(bidi_local);
+    ASSERT_FALSE(encoded_bidi_local.has_value());
+    EXPECT_EQ(encoded_bidi_local.error().code, CodecErrorCode::invalid_varint);
+
+    auto bidi_remote = make_parameters();
+    bidi_remote.initial_max_stream_data_bidi_remote = (std::uint64_t{1} << 62);
+    const auto encoded_bidi_remote = coquic::quic::serialize_transport_parameters(bidi_remote);
+    ASSERT_FALSE(encoded_bidi_remote.has_value());
+    EXPECT_EQ(encoded_bidi_remote.error().code, CodecErrorCode::invalid_varint);
+
+    auto streams_bidi = make_parameters();
+    streams_bidi.initial_max_streams_bidi = (std::uint64_t{1} << 62);
+    const auto encoded_streams_bidi = coquic::quic::serialize_transport_parameters(streams_bidi);
+    ASSERT_FALSE(encoded_streams_bidi.has_value());
+    EXPECT_EQ(encoded_streams_bidi.error().code, CodecErrorCode::invalid_varint);
+
+    auto streams_uni = make_parameters();
+    streams_uni.initial_max_streams_uni = (std::uint64_t{1} << 62);
+    const auto encoded_streams_uni = coquic::quic::serialize_transport_parameters(streams_uni);
+    ASSERT_FALSE(encoded_streams_uni.has_value());
+    EXPECT_EQ(encoded_streams_uni.error().code, CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicTransportParametersTest, IgnoresUnknownParameterIdsDuringParse) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
         0x20,
@@ -340,6 +375,20 @@ TEST(QuicTransportParametersTest, RejectsInvalidMaxAckDelayEncoding) {
 
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsInvalidFlowControlAndStreamCountEncodings) {
+    for (const auto parameter_id : {0x04u, 0x05u, 0x06u, 0x07u, 0x08u, 0x09u}) {
+        const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+            parameter_id,
+            0x02,
+            0x01,
+            0x00,
+        }));
+
+        ASSERT_FALSE(decoded.has_value());
+        EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+    }
 }
 
 TEST(QuicTransportParametersTest, RejectsTruncatedIntegerParameterEncoding) {

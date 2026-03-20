@@ -317,6 +317,240 @@ TEST(QuicStreamsTest, ResetAndStopSendingRemainIdempotentAfterAcknowledgement) {
     EXPECT_TRUE(stop_state.validate_local_stop_sending(/*application_error_code=*/10).has_value());
 }
 
+TEST(QuicStreamsTest, LocalResetRejectsReceiveOnlyStreamsAndAcknowledgedFin) {
+    StreamState receive_only = make_implicit_stream_state(/*stream_id=*/3, EndpointRole::client);
+    const auto invalid_direction = receive_only.validate_local_reset(/*application_error_code=*/7);
+    ASSERT_FALSE(invalid_direction.has_value());
+    EXPECT_EQ(invalid_direction.error().code, StreamStateErrorCode::invalid_stream_direction);
+
+    StreamState closed_send_side =
+        make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    closed_send_side.send_fin_state = StreamSendFinState::acknowledged;
+    const auto send_closed = closed_send_side.validate_local_reset(/*application_error_code=*/8);
+    ASSERT_FALSE(send_closed.has_value());
+    EXPECT_EQ(send_closed.error().code, StreamStateErrorCode::send_side_closed);
+}
+
+TEST(QuicStreamsTest, ControlFramesIgnoreMissingAndMismatchedState) {
+    StreamState max_stream_data = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    max_stream_data.flow_control.max_stream_data_state = StreamControlFrameState::sent;
+    max_stream_data.acknowledge_max_stream_data_frame(coquic::quic::MaxStreamDataFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 20,
+    });
+    EXPECT_EQ(max_stream_data.flow_control.max_stream_data_state, StreamControlFrameState::sent);
+    max_stream_data.mark_max_stream_data_frame_lost(coquic::quic::MaxStreamDataFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 20,
+    });
+    EXPECT_EQ(max_stream_data.flow_control.max_stream_data_state, StreamControlFrameState::sent);
+    max_stream_data.flow_control.max_stream_data_state = StreamControlFrameState::pending;
+    EXPECT_FALSE(max_stream_data.take_max_stream_data_frame().has_value());
+    max_stream_data.flow_control.pending_max_stream_data_frame = coquic::quic::MaxStreamDataFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 20,
+    };
+    max_stream_data.flow_control.max_stream_data_state = StreamControlFrameState::sent;
+    max_stream_data.acknowledge_max_stream_data_frame(coquic::quic::MaxStreamDataFrame{
+        .stream_id = 4,
+        .maximum_stream_data = 21,
+    });
+    EXPECT_EQ(max_stream_data.flow_control.max_stream_data_state, StreamControlFrameState::sent);
+    max_stream_data.mark_max_stream_data_frame_lost(coquic::quic::MaxStreamDataFrame{
+        .stream_id = 4,
+        .maximum_stream_data = 21,
+    });
+    EXPECT_EQ(max_stream_data.flow_control.max_stream_data_state, StreamControlFrameState::sent);
+    max_stream_data.flow_control.max_stream_data_state = StreamControlFrameState::acknowledged;
+    max_stream_data.mark_max_stream_data_frame_lost(coquic::quic::MaxStreamDataFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 20,
+    });
+    EXPECT_EQ(max_stream_data.flow_control.max_stream_data_state,
+              StreamControlFrameState::acknowledged);
+
+    StreamState stream_data_blocked =
+        make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    stream_data_blocked.flow_control.stream_data_blocked_state = StreamControlFrameState::sent;
+    stream_data_blocked.acknowledge_stream_data_blocked_frame(coquic::quic::StreamDataBlockedFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 30,
+    });
+    EXPECT_EQ(stream_data_blocked.flow_control.stream_data_blocked_state,
+              StreamControlFrameState::sent);
+    stream_data_blocked.mark_stream_data_blocked_frame_lost(coquic::quic::StreamDataBlockedFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 30,
+    });
+    EXPECT_EQ(stream_data_blocked.flow_control.stream_data_blocked_state,
+              StreamControlFrameState::sent);
+    stream_data_blocked.flow_control.stream_data_blocked_state = StreamControlFrameState::pending;
+    EXPECT_FALSE(stream_data_blocked.take_stream_data_blocked_frame().has_value());
+    stream_data_blocked.flow_control.pending_stream_data_blocked_frame =
+        coquic::quic::StreamDataBlockedFrame{
+            .stream_id = 0,
+            .maximum_stream_data = 30,
+        };
+    stream_data_blocked.flow_control.stream_data_blocked_state = StreamControlFrameState::sent;
+    stream_data_blocked.acknowledge_stream_data_blocked_frame(coquic::quic::StreamDataBlockedFrame{
+        .stream_id = 4,
+        .maximum_stream_data = 31,
+    });
+    EXPECT_EQ(stream_data_blocked.flow_control.stream_data_blocked_state,
+              StreamControlFrameState::sent);
+    stream_data_blocked.mark_stream_data_blocked_frame_lost(coquic::quic::StreamDataBlockedFrame{
+        .stream_id = 4,
+        .maximum_stream_data = 31,
+    });
+    EXPECT_EQ(stream_data_blocked.flow_control.stream_data_blocked_state,
+              StreamControlFrameState::sent);
+    stream_data_blocked.flow_control.stream_data_blocked_state =
+        StreamControlFrameState::acknowledged;
+    stream_data_blocked.mark_stream_data_blocked_frame_lost(coquic::quic::StreamDataBlockedFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 30,
+    });
+    EXPECT_EQ(stream_data_blocked.flow_control.stream_data_blocked_state,
+              StreamControlFrameState::acknowledged);
+
+    StreamState reset = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    reset.reset_state = StreamControlFrameState::sent;
+    reset.acknowledge_reset_frame(coquic::quic::ResetStreamFrame{
+        .stream_id = 0,
+        .application_protocol_error_code = 7,
+        .final_size = 5,
+    });
+    EXPECT_EQ(reset.reset_state, StreamControlFrameState::sent);
+    reset.mark_reset_frame_lost(coquic::quic::ResetStreamFrame{
+        .stream_id = 0,
+        .application_protocol_error_code = 7,
+        .final_size = 5,
+    });
+    EXPECT_EQ(reset.reset_state, StreamControlFrameState::sent);
+    reset.reset_state = StreamControlFrameState::pending;
+    EXPECT_FALSE(reset.take_reset_frame().has_value());
+    reset.pending_reset_frame = coquic::quic::ResetStreamFrame{
+        .stream_id = 0,
+        .application_protocol_error_code = 7,
+        .final_size = 5,
+    };
+    reset.reset_state = StreamControlFrameState::sent;
+    reset.acknowledge_reset_frame(coquic::quic::ResetStreamFrame{
+        .stream_id = 4,
+        .application_protocol_error_code = 8,
+        .final_size = 6,
+    });
+    EXPECT_EQ(reset.reset_state, StreamControlFrameState::sent);
+    reset.mark_reset_frame_lost(coquic::quic::ResetStreamFrame{
+        .stream_id = 4,
+        .application_protocol_error_code = 8,
+        .final_size = 6,
+    });
+    EXPECT_EQ(reset.reset_state, StreamControlFrameState::sent);
+    reset.reset_state = StreamControlFrameState::acknowledged;
+    reset.mark_reset_frame_lost(coquic::quic::ResetStreamFrame{
+        .stream_id = 0,
+        .application_protocol_error_code = 7,
+        .final_size = 5,
+    });
+    EXPECT_EQ(reset.reset_state, StreamControlFrameState::acknowledged);
+
+    StreamState stop = make_implicit_stream_state(/*stream_id=*/3, EndpointRole::client);
+    stop.stop_sending_state = StreamControlFrameState::sent;
+    stop.acknowledge_stop_sending_frame(coquic::quic::StopSendingFrame{
+        .stream_id = 3,
+        .application_protocol_error_code = 9,
+    });
+    EXPECT_EQ(stop.stop_sending_state, StreamControlFrameState::sent);
+    stop.mark_stop_sending_frame_lost(coquic::quic::StopSendingFrame{
+        .stream_id = 3,
+        .application_protocol_error_code = 9,
+    });
+    EXPECT_EQ(stop.stop_sending_state, StreamControlFrameState::sent);
+    stop.stop_sending_state = StreamControlFrameState::pending;
+    EXPECT_FALSE(stop.take_stop_sending_frame().has_value());
+    stop.pending_stop_sending_frame = coquic::quic::StopSendingFrame{
+        .stream_id = 3,
+        .application_protocol_error_code = 9,
+    };
+    stop.stop_sending_state = StreamControlFrameState::sent;
+    stop.acknowledge_stop_sending_frame(coquic::quic::StopSendingFrame{
+        .stream_id = 7,
+        .application_protocol_error_code = 10,
+    });
+    EXPECT_EQ(stop.stop_sending_state, StreamControlFrameState::sent);
+    stop.mark_stop_sending_frame_lost(coquic::quic::StopSendingFrame{
+        .stream_id = 7,
+        .application_protocol_error_code = 10,
+    });
+    EXPECT_EQ(stop.stop_sending_state, StreamControlFrameState::sent);
+    stop.stop_sending_state = StreamControlFrameState::acknowledged;
+    stop.mark_stop_sending_frame_lost(coquic::quic::StopSendingFrame{
+        .stream_id = 3,
+        .application_protocol_error_code = 9,
+    });
+    EXPECT_EQ(stop.stop_sending_state, StreamControlFrameState::acknowledged);
+}
+
+TEST(QuicStreamsTest, PendingSendRecognizesLostAndFreshStreamBytes) {
+    StreamState lost = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    lost.flow_control.peer_max_stream_data = 3;
+    lost.send_buffer.append(bytes_from_string("abc"));
+    lost.send_flow_control_committed = 3;
+
+    const auto lost_fragments = lost.take_send_fragments(/*max_bytes=*/3);
+    ASSERT_EQ(lost_fragments.size(), 1u);
+    lost.mark_send_fragment_lost(lost_fragments[0]);
+    EXPECT_TRUE(lost.has_pending_send());
+
+    StreamState unsent = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    unsent.flow_control.peer_max_stream_data = 3;
+    unsent.send_buffer.append(bytes_from_string("xyz"));
+    unsent.send_flow_control_committed = 3;
+    EXPECT_TRUE(unsent.has_pending_send());
+}
+
+TEST(QuicStreamsTest, PendingSendAndPeerStopCoverBlockedFinAndControlStates) {
+    StreamState peer_stop = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    peer_stop.send_fin_state = StreamSendFinState::acknowledged;
+    ASSERT_TRUE(peer_stop.note_peer_stop_sending(/*application_error_code=*/5).has_value());
+    EXPECT_FALSE(peer_stop.pending_reset_frame.has_value());
+
+    StreamState stop_pending = make_implicit_stream_state(/*stream_id=*/3, EndpointRole::client);
+    stop_pending.stop_sending_state = StreamControlFrameState::pending;
+    EXPECT_TRUE(stop_pending.has_pending_send());
+
+    StreamState fin_blocked_by_credit =
+        make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    fin_blocked_by_credit.send_fin_state = StreamSendFinState::pending;
+    fin_blocked_by_credit.send_final_size = 1;
+    fin_blocked_by_credit.flow_control.peer_max_stream_data = 0;
+    EXPECT_FALSE(fin_blocked_by_credit.has_pending_send());
+    EXPECT_TRUE(fin_blocked_by_credit.take_send_fragments(/*max_bytes=*/0).empty());
+
+    StreamState fin_blocked_by_pending_data =
+        make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    fin_blocked_by_pending_data.send_fin_state = StreamSendFinState::pending;
+    fin_blocked_by_pending_data.send_final_size = 1;
+    fin_blocked_by_pending_data.flow_control.peer_max_stream_data = 1;
+    fin_blocked_by_pending_data.send_buffer.append(bytes_from_string("x"));
+    fin_blocked_by_pending_data.send_flow_control_committed = 1;
+    EXPECT_TRUE(fin_blocked_by_pending_data.has_pending_send());
+    const auto pending_data_fragments =
+        fin_blocked_by_pending_data.take_send_fragments(/*max_bytes=*/0);
+    EXPECT_TRUE(pending_data_fragments.empty());
+
+    StreamState pending_without_final_size =
+        make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    pending_without_final_size.send_fin_state = StreamSendFinState::pending;
+    pending_without_final_size.flow_control.peer_max_stream_data = 1;
+    pending_without_final_size.send_buffer.append(bytes_from_string("x"));
+    pending_without_final_size.send_flow_control_committed = 1;
+    const auto fragments = pending_without_final_size.take_send_fragments(/*max_bytes=*/1);
+    ASSERT_EQ(fragments.size(), 1u);
+    EXPECT_FALSE(fragments[0].fin);
+}
+
 TEST(QuicStreamsTest, MaxStreamDataFramesTransitionThroughPendingSentLostAndAckedStates) {
     StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
     state.flow_control.advertised_max_stream_data = 10;
@@ -380,6 +614,33 @@ TEST(QuicStreamsTest, StreamDataBlockedFramesDeduplicateAndClearWhenPeerCreditCa
     EXPECT_EQ(state.flow_control.stream_data_blocked_state, StreamControlFrameState::none);
 }
 
+TEST(QuicStreamsTest, QueueStreamDataBlockedReplacesUntrackedOrStaleCandidates) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    state.flow_control.peer_max_stream_data = 4;
+    state.send_flow_control_limit = 4;
+    state.send_flow_control_committed = 10;
+
+    state.flow_control.pending_stream_data_blocked_frame = coquic::quic::StreamDataBlockedFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 3,
+    };
+    state.flow_control.stream_data_blocked_state = StreamControlFrameState::none;
+    state.queue_stream_data_blocked();
+    ASSERT_TRUE(state.flow_control.pending_stream_data_blocked_frame.has_value());
+    EXPECT_EQ(state.flow_control.pending_stream_data_blocked_frame->maximum_stream_data, 4u);
+    EXPECT_EQ(state.flow_control.stream_data_blocked_state, StreamControlFrameState::pending);
+
+    state.flow_control.pending_stream_data_blocked_frame = coquic::quic::StreamDataBlockedFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 4,
+    };
+    state.flow_control.stream_data_blocked_state = StreamControlFrameState::none;
+    state.queue_stream_data_blocked();
+    ASSERT_TRUE(state.flow_control.pending_stream_data_blocked_frame.has_value());
+    EXPECT_EQ(state.flow_control.pending_stream_data_blocked_frame->maximum_stream_data, 4u);
+    EXPECT_EQ(state.flow_control.stream_data_blocked_state, StreamControlFrameState::pending);
+}
+
 TEST(QuicStreamsTest, LocalStopQueuesControlFrameAndRejectsSendOnlyStreams) {
     StreamState receive_only = make_implicit_stream_state(/*stream_id=*/3, EndpointRole::client);
     ASSERT_TRUE(receive_only.validate_local_stop_sending(/*application_error_code=*/7).has_value());
@@ -415,6 +676,25 @@ TEST(QuicStreamsTest, FinFragmentsDrivePendingOutstandingAndAcknowledgedState) {
     state.acknowledge_send_fragment(fragments[0]);
     EXPECT_EQ(state.send_fin_state, StreamSendFinState::acknowledged);
     EXPECT_FALSE(state.has_outstanding_send());
+}
+
+TEST(QuicStreamsTest, ReceiveValidationRejectsSendOnlyStreamsAndResetSuppressesAckEffects) {
+    StreamState send_only = make_implicit_stream_state(/*stream_id=*/2, EndpointRole::client);
+    const auto invalid_direction =
+        send_only.validate_receive_range(/*offset=*/0, /*length=*/1, /*fin=*/false);
+    ASSERT_FALSE(invalid_direction.has_value());
+    EXPECT_EQ(invalid_direction.error().code, StreamStateErrorCode::invalid_stream_direction);
+
+    StreamState reset_pending = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    reset_pending.send_fin_state = StreamSendFinState::pending;
+    reset_pending.reset_state = StreamControlFrameState::pending;
+    reset_pending.acknowledge_send_fragment(coquic::quic::StreamFrameSendFragment{
+        .stream_id = 0,
+        .offset = 0,
+        .bytes = {},
+        .fin = true,
+    });
+    EXPECT_EQ(reset_pending.send_fin_state, StreamSendFinState::pending);
 }
 
 TEST(QuicStreamsTest, PeerResetRecordsFinalSizeAndRejectsSendOnlyStreams) {
@@ -461,6 +741,29 @@ TEST(QuicStreamsTest, PeerStopQueuesAutomaticResetForActiveSendSide) {
     const auto invalid = receive_only.note_peer_stop_sending(/*application_error_code=*/13);
     ASSERT_FALSE(invalid.has_value());
     EXPECT_EQ(invalid.error().code, StreamStateErrorCode::invalid_stream_direction);
+}
+
+TEST(QuicStreamsTest, StopSendingAndFinPathsShortCircuitWhenStateAlreadyClosed) {
+    StreamState stop = make_implicit_stream_state(/*stream_id=*/3, EndpointRole::client);
+    stop.peer_reset_received = true;
+    ASSERT_TRUE(stop.validate_local_stop_sending(/*application_error_code=*/7).has_value());
+    EXPECT_FALSE(stop.pending_stop_sending_frame.has_value());
+
+    StreamState peer_stop = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    peer_stop.reset_state = StreamControlFrameState::sent;
+    ASSERT_TRUE(peer_stop.note_peer_stop_sending(/*application_error_code=*/8).has_value());
+    EXPECT_EQ(peer_stop.reset_state, StreamControlFrameState::sent);
+    EXPECT_FALSE(peer_stop.pending_reset_frame.has_value());
+
+    StreamState fin_pending = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    fin_pending.send_fin_state = StreamSendFinState::pending;
+    EXPECT_FALSE(fin_pending.has_pending_send());
+    fin_pending.send_final_size = 0;
+    fin_pending.send_buffer.append(bytes_from_string("x"));
+    fin_pending.send_flow_control_committed = 1;
+    const auto fragments = fin_pending.take_send_fragments(/*max_bytes=*/0);
+    EXPECT_TRUE(fragments.empty());
+    EXPECT_EQ(fin_pending.send_fin_state, StreamSendFinState::pending);
 }
 
 } // namespace

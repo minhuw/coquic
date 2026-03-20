@@ -45,7 +45,7 @@ void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRec
             continue;
         }
 
-        if (recovery_start_time_.has_value() && packet.sent_time > *recovery_start_time_) {
+        if (recovery_start_time_.has_value()) {
             recovery_start_time_ = std::nullopt;
         }
 

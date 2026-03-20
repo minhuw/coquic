@@ -109,4 +109,17 @@ TEST(QuicCongestionTest, LossEventDoesNotReduceWindowTwiceWithinRecoveryEpoch) {
     EXPECT_EQ(controller.congestion_window(), first_reduction);
 }
 
+TEST(QuicCongestionTest, LaterLossEventStartsANewRecoveryEpoch) {
+    NewRenoCongestionController controller(/*max_datagram_size=*/1200);
+    controller.on_packet_sent(/*bytes_sent=*/12000, /*ack_eliciting=*/true);
+    controller.on_loss_event(coquic::quic::test::test_time(5));
+    const auto first_reduction = controller.congestion_window();
+
+    controller.on_packet_sent(/*bytes_sent=*/first_reduction, /*ack_eliciting=*/true);
+    controller.on_loss_event(coquic::quic::test::test_time(6));
+
+    EXPECT_LT(controller.congestion_window(), first_reduction);
+    EXPECT_EQ(controller.congestion_window(), 3000u);
+}
+
 } // namespace

@@ -1,5 +1,6 @@
 #include "src/quic/core.h"
 
+#include <array>
 #include <utility>
 
 #include "src/quic/connection.h"
@@ -15,28 +16,20 @@ template <typename... Ts> struct overloaded : Ts... {
 
 template <typename... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 
-QuicCoreLocalError stream_state_error_to_local_error(const StreamStateError &error) {
-    auto code = QuicCoreLocalErrorCode::invalid_stream_id;
-    switch (error.code) {
-    case StreamStateErrorCode::invalid_stream_id:
-        code = QuicCoreLocalErrorCode::invalid_stream_id;
-        break;
-    case StreamStateErrorCode::invalid_stream_direction:
-        code = QuicCoreLocalErrorCode::invalid_stream_direction;
-        break;
-    case StreamStateErrorCode::send_side_closed:
-        code = QuicCoreLocalErrorCode::send_side_closed;
-        break;
-    case StreamStateErrorCode::receive_side_closed:
-        code = QuicCoreLocalErrorCode::receive_side_closed;
-        break;
-    case StreamStateErrorCode::final_size_conflict:
-        code = QuicCoreLocalErrorCode::final_size_conflict;
-        break;
-    }
+constexpr auto kStreamStateErrorMap = std::to_array<QuicCoreLocalErrorCode>({
+    QuicCoreLocalErrorCode::invalid_stream_id,
+    QuicCoreLocalErrorCode::invalid_stream_direction,
+    QuicCoreLocalErrorCode::send_side_closed,
+    QuicCoreLocalErrorCode::receive_side_closed,
+    QuicCoreLocalErrorCode::final_size_conflict,
+});
 
+static_assert(kStreamStateErrorMap.size() ==
+              static_cast<std::size_t>(StreamStateErrorCode::final_size_conflict) + 1);
+
+QuicCoreLocalError stream_state_error_to_local_error(const StreamStateError &error) {
     return QuicCoreLocalError{
-        .code = code,
+        .code = kStreamStateErrorMap[static_cast<std::size_t>(error.code)],
         .stream_id = error.stream_id,
     };
 }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <tuple>
 
 namespace coquic::quic {
 namespace {
@@ -18,27 +19,43 @@ std::uint64_t saturating_add(std::uint64_t lhs, std::size_t rhs) {
 
 bool reset_frame_matches(const std::optional<ResetStreamFrame> &candidate,
                          const ResetStreamFrame &frame) {
-    return candidate.has_value() && candidate->stream_id == frame.stream_id &&
-           candidate->application_protocol_error_code == frame.application_protocol_error_code &&
-           candidate->final_size == frame.final_size;
+    if (!candidate.has_value()) {
+        return false;
+    }
+
+    return std::tie(candidate->stream_id, candidate->application_protocol_error_code,
+                    candidate->final_size) ==
+           std::tie(frame.stream_id, frame.application_protocol_error_code, frame.final_size);
 }
 
 bool stop_sending_frame_matches(const std::optional<StopSendingFrame> &candidate,
                                 const StopSendingFrame &frame) {
-    return candidate.has_value() && candidate->stream_id == frame.stream_id &&
-           candidate->application_protocol_error_code == frame.application_protocol_error_code;
+    if (!candidate.has_value()) {
+        return false;
+    }
+
+    return std::tie(candidate->stream_id, candidate->application_protocol_error_code) ==
+           std::tie(frame.stream_id, frame.application_protocol_error_code);
 }
 
 bool max_stream_data_frame_matches(const std::optional<MaxStreamDataFrame> &candidate,
                                    const MaxStreamDataFrame &frame) {
-    return candidate.has_value() && candidate->stream_id == frame.stream_id &&
-           candidate->maximum_stream_data == frame.maximum_stream_data;
+    if (!candidate.has_value()) {
+        return false;
+    }
+
+    return std::tie(candidate->stream_id, candidate->maximum_stream_data) ==
+           std::tie(frame.stream_id, frame.maximum_stream_data);
 }
 
 bool stream_data_blocked_frame_matches(const std::optional<StreamDataBlockedFrame> &candidate,
                                        const StreamDataBlockedFrame &frame) {
-    return candidate.has_value() && candidate->stream_id == frame.stream_id &&
-           candidate->maximum_stream_data == frame.maximum_stream_data;
+    if (!candidate.has_value()) {
+        return false;
+    }
+
+    return std::tie(candidate->stream_id, candidate->maximum_stream_data) ==
+           std::tie(frame.stream_id, frame.maximum_stream_data);
 }
 
 } // namespace
@@ -66,7 +83,7 @@ StreamIdInfo classify_stream_id(std::uint64_t stream_id, EndpointRole local_role
 
 bool is_local_implicit_stream_open_allowed(std::uint64_t stream_id, EndpointRole local_role) {
     const auto id_info = classify_stream_id(stream_id, local_role);
-    return id_info.initiator == StreamInitiator::local && id_info.local_can_send;
+    return id_info.initiator == StreamInitiator::local;
 }
 
 bool is_peer_implicit_stream_open_allowed_by_limits(std::uint64_t stream_id,
@@ -270,10 +287,19 @@ bool StreamState::has_pending_send() const {
         return false;
     }
 
-    const auto fin_sendable =
-        send_fin_state == StreamSendFinState::pending && send_final_size.has_value() &&
-        *send_final_size <= flow_control.peer_max_stream_data && !send_buffer.has_pending_data();
-    return send_buffer.has_lost_data() || sendable_bytes() != 0 || fin_sendable;
+    bool fin_sendable = false;
+    if (send_fin_state == StreamSendFinState::pending && send_final_size.has_value()) {
+        fin_sendable = *send_final_size <= flow_control.peer_max_stream_data &&
+                       !send_buffer.has_pending_data();
+    }
+    if (send_buffer.has_lost_data()) {
+        return true;
+    }
+    if (sendable_bytes() != 0) {
+        return true;
+    }
+
+    return fin_sendable;
 }
 
 bool StreamState::has_outstanding_send() const {
@@ -361,11 +387,15 @@ void StreamState::queue_stream_data_blocked() {
     if (!should_send_stream_data_blocked()) {
         return;
     }
-    if (flow_control.pending_stream_data_blocked_frame.has_value() &&
-        flow_control.pending_stream_data_blocked_frame->maximum_stream_data ==
-            flow_control.peer_max_stream_data &&
-        flow_control.stream_data_blocked_state != StreamControlFrameState::none) {
-        return;
+    if (flow_control.pending_stream_data_blocked_frame.has_value()) {
+        const auto same_maximum =
+            flow_control.pending_stream_data_blocked_frame->maximum_stream_data ==
+            flow_control.peer_max_stream_data;
+        const auto already_tracked =
+            flow_control.stream_data_blocked_state != StreamControlFrameState::none;
+        if (same_maximum && already_tracked) {
+            return;
+        }
     }
 
     flow_control.pending_stream_data_blocked_frame = StreamDataBlockedFrame{
@@ -432,8 +462,10 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
     auto remaining_bytes = budget.packet_bytes;
     const auto append_fragment = [&](ByteRange range) {
         const auto range_end = saturating_add(range.offset, range.bytes.size());
-        const auto fin = send_fin_state == StreamSendFinState::pending &&
-                         send_final_size.has_value() && range_end == *send_final_size;
+        bool fin = false;
+        if (send_fin_state == StreamSendFinState::pending && send_final_size.has_value()) {
+            fin = range_end == *send_final_size;
+        }
         fragments.push_back(StreamFrameSendFragment{
             .stream_id = stream_id,
             .offset = range.offset,
@@ -461,9 +493,12 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
         append_fragment(std::move(range));
     }
 
-    if (fragments.empty() && send_fin_state == StreamSendFinState::pending &&
-        send_final_size.has_value() && !send_buffer.has_pending_data() &&
-        *send_final_size <= flow_control.peer_max_stream_data) {
+    bool fin_only_sendable = false;
+    if (send_fin_state == StreamSendFinState::pending && send_final_size.has_value()) {
+        fin_only_sendable = !send_buffer.has_pending_data() &&
+                            *send_final_size <= flow_control.peer_max_stream_data;
+    }
+    if (fragments.empty() && fin_only_sendable) {
         fragments.push_back(StreamFrameSendFragment{
             .stream_id = stream_id,
             .offset = *send_final_size,

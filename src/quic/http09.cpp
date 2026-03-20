@@ -1,7 +1,6 @@
 #include "src/quic/http09.h"
 
 #include <algorithm>
-#include <array>
 #include <string_view>
 #include <utility>
 
@@ -61,6 +60,17 @@ bool path_has_prefix(const std::filesystem::path &path, const std::filesystem::p
     return true;
 }
 
+bool has_raw_dot_segment(const std::filesystem::path &path) {
+    return std::any_of(path.begin(), path.end(), [](const std::filesystem::path &part) {
+        return part == "." || part == "..";
+    });
+}
+
+bool is_invalid_http09_target_char(char ch) {
+    const auto value = static_cast<unsigned char>(ch);
+    return value <= 0x20u || value == 0x7fu;
+}
+
 } // namespace
 
 CodecResult<std::vector<QuicHttp09Request>>
@@ -114,7 +124,7 @@ CodecResult<std::string> parse_http09_request_target(std::span<const std::byte> 
     constexpr std::string_view method = "GET ";
     const std::size_t line_end = request_bytes.find('\n');
     if (line_end == std::string::npos) {
-        return CodecResult<std::string>::failure(kHttp09ParseError, 0);
+        return CodecResult<std::string>::failure(CodecErrorCode::truncated_input, bytes.size());
     }
 
     std::string_view request_line(request_bytes.data(), line_end);
@@ -131,7 +141,9 @@ CodecResult<std::string> parse_http09_request_target(std::span<const std::byte> 
         return CodecResult<std::string>::failure(kHttp09ParseError, 0);
     }
 
-    if (target.front() != '/' || target.find(' ') != std::string::npos) {
+    if (target.front() != '/' || std::any_of(target.begin(), target.end(), [](char ch) {
+            return is_invalid_http09_target_char(ch);
+        })) {
         return CodecResult<std::string>::failure(kHttp09ParseError, 0);
     }
 
@@ -149,16 +161,16 @@ CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::fil
     }
 
     const std::filesystem::path normalized_root = root.lexically_normal();
-    const std::filesystem::path relative =
-        std::filesystem::path(request_target.substr(1)).lexically_normal();
-    if (relative.is_absolute()) {
+    const std::filesystem::path raw_relative(request_target.substr(1));
+    if (raw_relative.is_absolute()) {
         return CodecResult<std::filesystem::path>::failure(kHttp09ParseError, 0);
     }
 
-    if (std::any_of(relative.begin(), relative.end(),
-                    [](const std::filesystem::path &part) { return part == ".."; })) {
+    if (has_raw_dot_segment(raw_relative)) {
         return CodecResult<std::filesystem::path>::failure(kHttp09ParseError, 0);
     }
+
+    const std::filesystem::path relative = raw_relative.lexically_normal();
 
     // This is a lexical containment check; it does not resolve symlinks.
     const std::filesystem::path candidate = (normalized_root / relative).lexically_normal();

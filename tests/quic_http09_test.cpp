@@ -36,6 +36,8 @@ TEST(QuicHttp09Test, RejectsMixedAuthoritiesInSingleClientRun) {
 TEST(QuicHttp09Test, RejectsUnsafeRequestTargetsDuringRequestEnvParse) {
     EXPECT_FALSE(
         coquic::quic::parse_http09_requests_env("https://example.test/../secret").has_value());
+    EXPECT_FALSE(
+        coquic::quic::parse_http09_requests_env("https://example.test/a/../b").has_value());
     EXPECT_FALSE(coquic::quic::parse_http09_requests_env("https://example.test/a?b").has_value());
     EXPECT_FALSE(coquic::quic::parse_http09_requests_env("https://example.test/a#b").has_value());
 }
@@ -57,6 +59,8 @@ TEST(QuicHttp09Test, ResolvesRequestTargetUnderRootWithoutDiscardingRoot) {
 TEST(QuicHttp09Test, RejectsTraversalQueriesAndFragmentsWhenResolvingPath) {
     EXPECT_FALSE(
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/../secret").has_value());
+    EXPECT_FALSE(
+        coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a/../b").has_value());
     EXPECT_FALSE(
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a?b").has_value());
     EXPECT_FALSE(
@@ -80,6 +84,19 @@ TEST(QuicHttp09Test, ParsesOnlyFirstRequestLineWhenBufferHasTrailingBytes) {
         coquic::quic::parse_http09_request_target(bytes_from_ascii("GET /c\r\nEXTRA"));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(parsed.value(), "/c");
+}
+
+TEST(QuicHttp09Test, ReportsTruncatedInputForPartialRequestLine) {
+    const auto parsed = coquic::quic::parse_http09_request_target(bytes_from_ascii("GET /partial"));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicHttp09Test, RejectsTabCharacterInRequestTarget) {
+    const auto parsed =
+        coquic::quic::parse_http09_request_target(bytes_from_ascii("GET /\tbad\r\n"));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
 }
 
 } // namespace

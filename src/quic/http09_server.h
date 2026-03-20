@@ -27,7 +27,6 @@ class QuicHttp09ServerEndpoint {
   private:
     struct PendingRequest {
         std::vector<std::byte> request_bytes;
-        bool parsed = false;
     };
 
     QuicHttp09EndpointUpdate make_failure_update() const;

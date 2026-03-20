@@ -5,13 +5,17 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
 #include <optional>
+#include <sstream>
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -19,7 +23,6 @@
 #define private public
 #include "src/quic/connection.h"
 #undef private
-#include "src/quic/demo_channel.h"
 
 namespace coquic::quic::test {
 
@@ -258,185 +261,56 @@ inline QuicCoreResult relay_datagrams_to_peer(std::span<const std::vector<std::b
     return combined;
 }
 
-inline std::vector<std::vector<std::byte>>
-send_datagrams_from(const QuicDemoChannelResult &result) {
-    std::vector<std::vector<std::byte>> out;
-    for (const auto &effect : result.effects) {
-        if (const auto *send = std::get_if<QuicCoreSendDatagram>(&effect)) {
-            out.push_back(send->bytes);
-        }
-    }
-
-    return out;
-}
-
-inline std::vector<QuicDemoChannelStateChange>
-state_changes_from(const QuicDemoChannelResult &result) {
-    std::vector<QuicDemoChannelStateChange> out;
-    for (const auto &effect : result.effects) {
-        if (const auto *event = std::get_if<QuicDemoChannelStateEvent>(&effect)) {
-            out.push_back(event->change);
-        }
-    }
-
-    return out;
-}
-
-inline std::size_t count_state_change(std::span<const QuicDemoChannelStateChange> changes,
-                                      QuicDemoChannelStateChange change) {
-    std::size_t count = 0;
-    for (const auto value : changes) {
-        if (value == change) {
-            ++count;
-        }
-    }
-
-    return count;
-}
-
-inline std::vector<std::vector<std::byte>>
-received_messages_from(const QuicDemoChannelResult &result) {
-    std::vector<std::vector<std::byte>> out;
-    for (const auto &effect : result.effects) {
-        if (const auto *received = std::get_if<QuicDemoChannelReceiveMessage>(&effect)) {
-            out.push_back(received->bytes);
-        }
-    }
-
-    return out;
-}
-
-inline QuicDemoChannelResult relay_send_datagrams_to_peer(const QuicDemoChannelResult &result,
-                                                          QuicDemoChannel &peer,
-                                                          QuicCoreTimePoint now) {
-    QuicDemoChannelResult combined;
-    for (auto datagram : send_datagrams_from(result)) {
-        auto step = peer.advance(QuicCoreInboundDatagram{std::move(datagram)}, now);
-        combined.effects.insert(combined.effects.end(),
-                                std::make_move_iterator(step.effects.begin()),
-                                std::make_move_iterator(step.effects.end()));
-        combined.next_wakeup = step.next_wakeup;
-    }
-
-    return combined;
-}
-
-inline QuicDemoChannelResult
-relay_send_datagrams_to_peer_except(const QuicDemoChannelResult &result,
-                                    std::span<const std::size_t> dropped, QuicDemoChannel &peer,
-                                    QuicCoreTimePoint now) {
-    const auto datagrams = send_datagrams_from(result);
-    QuicDemoChannelResult combined;
-    for (std::size_t index = 0; index < datagrams.size(); ++index) {
-        if (std::find(dropped.begin(), dropped.end(), index) != dropped.end()) {
-            continue;
-        }
-
-        auto step = peer.advance(QuicCoreInboundDatagram{datagrams[index]}, now);
-        combined.effects.insert(combined.effects.end(),
-                                std::make_move_iterator(step.effects.begin()),
-                                std::make_move_iterator(step.effects.end()));
-        combined.next_wakeup = step.next_wakeup;
-    }
-
-    return combined;
-}
-
-inline QuicCoreResult relay_send_datagrams_to_peer(const QuicDemoChannelResult &result,
-                                                   QuicCore &peer, QuicCoreTimePoint now) {
+inline QuicCoreResult advance_core_with_inputs(QuicCore &core,
+                                               std::span<const QuicCoreInput> inputs,
+                                               QuicCoreTimePoint now) {
     QuicCoreResult combined;
-    for (auto datagram : send_datagrams_from(result)) {
-        auto step = peer.advance(QuicCoreInboundDatagram{std::move(datagram)}, now);
+    for (const auto &input : inputs) {
+        auto step = core.advance(input, now);
         combined.effects.insert(combined.effects.end(),
                                 std::make_move_iterator(step.effects.begin()),
                                 std::make_move_iterator(step.effects.end()));
         combined.next_wakeup = step.next_wakeup;
-    }
-
-    return combined;
-}
-
-inline QuicDemoChannelResult relay_send_datagrams_to_peer(const QuicCoreResult &result,
-                                                          QuicDemoChannel &peer,
-                                                          QuicCoreTimePoint now) {
-    QuicDemoChannelResult combined;
-    for (auto datagram : send_datagrams_from(result)) {
-        auto step = peer.advance(QuicCoreInboundDatagram{std::move(datagram)}, now);
-        combined.effects.insert(combined.effects.end(),
-                                std::make_move_iterator(step.effects.begin()),
-                                std::make_move_iterator(step.effects.end()));
-        combined.next_wakeup = step.next_wakeup;
-    }
-
-    return combined;
-}
-
-inline QuicDemoChannelResult
-drive_earliest_next_wakeup(QuicDemoChannel &channel,
-                           std::initializer_list<std::optional<QuicCoreTimePoint>> wakeups) {
-    const auto earliest = earliest_next_wakeup(wakeups);
-    if (!earliest.has_value()) {
-        return {};
-    }
-
-    return channel.advance(QuicCoreTimerExpired{}, *earliest);
-}
-
-inline void
-drive_demo_channel_handshake(QuicDemoChannel &client, QuicDemoChannel &server,
-                             QuicCoreTimePoint now,
-                             std::vector<QuicDemoChannelStateChange> *client_events = nullptr,
-                             std::vector<QuicDemoChannelStateChange> *server_events = nullptr) {
-    const auto append_state_changes = [](const QuicDemoChannelResult &result,
-                                         std::vector<QuicDemoChannelStateChange> *events) {
-        if (events == nullptr) {
-            return;
-        }
-
-        auto changes = state_changes_from(result);
-        events->insert(events->end(), changes.begin(), changes.end());
-    };
-
-    auto to_server = client.advance(QuicCoreStart{}, now);
-    append_state_changes(to_server, client_events);
-    auto to_client = QuicDemoChannelResult{};
-    auto step_now = now;
-
-    for (int i = 0; i < 32; ++i) {
-        if (!send_datagrams_from(to_server).empty()) {
-            step_now += std::chrono::milliseconds(1);
-            to_client = relay_send_datagrams_to_peer(to_server, server, step_now);
-            append_state_changes(to_client, server_events);
-            to_server.effects.clear();
-            continue;
-        }
-
-        if (!send_datagrams_from(to_client).empty()) {
-            step_now += std::chrono::milliseconds(1);
-            to_server = relay_send_datagrams_to_peer(to_client, client, step_now);
-            append_state_changes(to_server, client_events);
-            to_client.effects.clear();
-            continue;
-        }
-
-        const auto next = earliest_next_wakeup({to_server.next_wakeup, to_client.next_wakeup});
-        if (!next.has_value()) {
+        if (step.local_error.has_value()) {
+            combined.local_error = step.local_error;
             break;
         }
-
-        if (to_server.next_wakeup.has_value() && *to_server.next_wakeup == *next) {
-            to_server = client.advance(QuicCoreTimerExpired{}, *next);
-            append_state_changes(to_server, client_events);
-            continue;
-        }
-
-        if (to_client.next_wakeup.has_value() && *to_client.next_wakeup == *next) {
-            to_client = server.advance(QuicCoreTimerExpired{}, *next);
-            append_state_changes(to_client, server_events);
-            continue;
-        }
     }
+
+    return combined;
 }
+
+class ScopedTempDir {
+  public:
+    ScopedTempDir() {
+        std::ostringstream suffix;
+        suffix << "coquic-http09-" << std::rand();
+        path_ = std::filesystem::temp_directory_path() / suffix.str();
+        std::filesystem::create_directories(path_);
+    }
+
+    ~ScopedTempDir() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+
+    ScopedTempDir(const ScopedTempDir &) = delete;
+    ScopedTempDir &operator=(const ScopedTempDir &) = delete;
+
+    const std::filesystem::path &path() const {
+        return path_;
+    }
+
+    void write_file(const std::filesystem::path &relative_path, std::string_view text) const {
+        const auto full_path = path_ / relative_path;
+        std::filesystem::create_directories(full_path.parent_path());
+        std::ofstream output(full_path, std::ios::binary);
+        output.write(text.data(), static_cast<std::streamsize>(text.size()));
+    }
+
+  private:
+    std::filesystem::path path_;
+};
 
 inline void drive_quic_handshake(QuicCore &client, QuicCore &server, QuicCoreTimePoint now,
                                  std::vector<QuicCoreStateChange> *client_events = nullptr,

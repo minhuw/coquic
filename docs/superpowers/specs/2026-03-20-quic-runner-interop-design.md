@@ -27,7 +27,8 @@ The official QUIC interop runner expects a different application contract:
 
 - the server serves files from `/www`
 - the client stores downloaded files under `/downloads`
-- request URLs are passed in the `REQUESTS` environment variable
+- request URLs are passed in the `REQUESTS` environment variable as a
+  space-separated list of absolute URLs
 - the server listens on UDP port `443`
 - test cases use HTTP/0.9 unless noted otherwise
 - the `handshake` test establishes one connection and downloads one or more
@@ -151,8 +152,12 @@ Interop runtime behavior depends on the runner testcase:
   - one connection
   - one bidirectional stream per requested file
   - concurrent downloads
-  - client transport parameters must use small initial flow-control windows so
-    the transfer exercises `MAX_DATA` and `MAX_STREAM_DATA`
+  - client transport parameters must use explicit small initial flow-control
+    windows so the transfer exercises `MAX_DATA` and `MAX_STREAM_DATA`
+  - use `initial_max_data = 64 KiB` and
+    `initial_max_stream_data_bidi_local = 16 KiB`
+  - keep the other transport parameters at their normal interop defaults for
+    this slice
 
 This testcase-dependent behavior should be represented explicitly in endpoint or
 runtime configuration rather than hidden in ad hoc branching throughout the UDP
@@ -199,6 +204,12 @@ fixed.
 #### Client Endpoint Responsibilities
 
 - parse `REQUESTS` into ordered transfer intents
+- parse `REQUESTS` as a space-separated list of absolute URLs, matching the
+  runner contract directly
+- split `REQUESTS` on ASCII spaces only; filenames or URLs containing spaces
+  are out of scope for this slice
+- require all URLs in one run to share the same scheme, host, and port because
+  this slice uses one QUIC connection per testcase run
 - maintain one QUIC connection
 - allocate client-initiated bidirectional stream IDs for requests
 - send one HTTP/0.9 `GET` request per transfer

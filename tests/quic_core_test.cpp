@@ -2158,6 +2158,323 @@ TEST(QuicCoreTest, CongestionWindowGatesAckElicitingSendsUntilAckArrives) {
     EXPECT_FALSE(after_ack.empty());
 }
 
+TEST(QuicCoreTest, ConnectionFlowControlTracksMaxDataAndDataBlockedFrames) {
+    coquic::quic::ConnectionFlowControlState state;
+    state.peer_max_data = 4;
+
+    EXPECT_EQ(state.sendable_bytes(/*queued_bytes=*/10), 4u);
+    EXPECT_TRUE(state.should_send_data_blocked(/*queued_bytes=*/5));
+
+    state.note_peer_max_data(/*maximum_data=*/4);
+    EXPECT_EQ(state.peer_max_data, 4u);
+    state.note_peer_max_data(/*maximum_data=*/8);
+    EXPECT_EQ(state.peer_max_data, 8u);
+
+    state.advertised_max_data = 10;
+    state.queue_max_data(/*maximum_data=*/10);
+    EXPECT_FALSE(state.take_max_data_frame().has_value());
+
+    state.queue_max_data(/*maximum_data=*/20);
+    const auto max_data = state.take_max_data_frame();
+    ASSERT_TRUE(max_data.has_value());
+    const auto max_data_frame = max_data.value_or(coquic::quic::MaxDataFrame{});
+    state.mark_max_data_frame_lost(max_data_frame);
+    const auto resent_max_data = state.take_max_data_frame();
+    ASSERT_TRUE(resent_max_data.has_value());
+    const auto resent_max_data_frame = resent_max_data.value_or(coquic::quic::MaxDataFrame{});
+    state.acknowledge_max_data_frame(resent_max_data_frame);
+    EXPECT_EQ(state.max_data_state, coquic::quic::StreamControlFrameState::acknowledged);
+
+    state.queue_data_blocked(/*maximum_data=*/30);
+    state.queue_data_blocked(/*maximum_data=*/30);
+    const auto data_blocked = state.take_data_blocked_frame();
+    ASSERT_TRUE(data_blocked.has_value());
+    const auto data_blocked_frame = data_blocked.value_or(coquic::quic::DataBlockedFrame{});
+    state.mark_data_blocked_frame_lost(data_blocked_frame);
+    const auto resent_data_blocked = state.take_data_blocked_frame();
+    ASSERT_TRUE(resent_data_blocked.has_value());
+    const auto resent_data_blocked_frame =
+        resent_data_blocked.value_or(coquic::quic::DataBlockedFrame{});
+    state.acknowledge_data_blocked_frame(resent_data_blocked_frame);
+    EXPECT_EQ(state.data_blocked_state, coquic::quic::StreamControlFrameState::acknowledged);
+}
+
+TEST(QuicCoreTest, QueueStreamSendRejectsInvalidIdsAndClosedSendSide) {
+    auto connection = make_connected_client_connection();
+    const auto payload = bytes_from_ints({0x61});
+    connection.stream_open_limits_.peer_max_bidirectional = 1;
+
+    ASSERT_TRUE(connection.queue_stream_send(/*stream_id=*/1, payload, false).has_value());
+
+    const auto invalid_local = connection.queue_stream_send(/*stream_id=*/4, payload, false);
+    ASSERT_FALSE(invalid_local.has_value());
+    EXPECT_EQ(invalid_local.error().code, coquic::quic::StreamStateErrorCode::invalid_stream_id);
+
+    const auto peer_unidirectional = connection.queue_stream_send(/*stream_id=*/3, payload, false);
+    ASSERT_FALSE(peer_unidirectional.has_value());
+    EXPECT_EQ(peer_unidirectional.error().code,
+              coquic::quic::StreamStateErrorCode::invalid_stream_direction);
+
+    ASSERT_TRUE(connection.queue_stream_send(/*stream_id=*/0, {}, /*fin=*/true).has_value());
+    const auto closed = connection.queue_stream_send(/*stream_id=*/0, payload, /*fin=*/false);
+    ASSERT_FALSE(closed.has_value());
+    EXPECT_EQ(closed.error().code, coquic::quic::StreamStateErrorCode::send_side_closed);
+}
+
+TEST(QuicCoreTest, RetireAckedPacketAcknowledgesConnectionAndStreamControlState) {
+    auto connection = make_connected_client_connection();
+    auto &stream = connection.streams_
+                       .emplace(0, coquic::quic::make_implicit_stream_state(
+                                       /*stream_id=*/0, connection.config_.role))
+                       .first->second;
+    auto &fin_stream = connection.streams_
+                           .emplace(4, coquic::quic::make_implicit_stream_state(
+                                           /*stream_id=*/4, connection.config_.role))
+                           .first->second;
+
+    connection.connection_flow_control_.pending_max_data_frame =
+        coquic::quic::MaxDataFrame{.maximum_data = 20};
+    connection.connection_flow_control_.max_data_state =
+        coquic::quic::StreamControlFrameState::sent;
+    connection.connection_flow_control_.pending_data_blocked_frame =
+        coquic::quic::DataBlockedFrame{.maximum_data = 30};
+    connection.connection_flow_control_.data_blocked_state =
+        coquic::quic::StreamControlFrameState::sent;
+
+    stream.flow_control.pending_max_stream_data_frame = coquic::quic::MaxStreamDataFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 40,
+    };
+    stream.flow_control.max_stream_data_state = coquic::quic::StreamControlFrameState::sent;
+    stream.flow_control.pending_stream_data_blocked_frame = coquic::quic::StreamDataBlockedFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 50,
+    };
+    stream.flow_control.stream_data_blocked_state = coquic::quic::StreamControlFrameState::sent;
+    stream.pending_reset_frame = coquic::quic::ResetStreamFrame{
+        .stream_id = 0,
+        .application_protocol_error_code = 7,
+        .final_size = 5,
+    };
+    stream.reset_state = coquic::quic::StreamControlFrameState::sent;
+    stream.pending_stop_sending_frame = coquic::quic::StopSendingFrame{
+        .stream_id = 0,
+        .application_protocol_error_code = 9,
+    };
+    stream.stop_sending_state = coquic::quic::StreamControlFrameState::sent;
+    fin_stream.send_fin_state = coquic::quic::StreamSendFinState::sent;
+
+    const auto packet = coquic::quic::SentPacketRecord{
+        .packet_number = 7,
+        .max_data_frame = coquic::quic::MaxDataFrame{.maximum_data = 20},
+        .max_stream_data_frames =
+            {
+                coquic::quic::MaxStreamDataFrame{
+                    .stream_id = 0,
+                    .maximum_stream_data = 40,
+                },
+                coquic::quic::MaxStreamDataFrame{
+                    .stream_id = 99,
+                    .maximum_stream_data = 1,
+                },
+            },
+        .data_blocked_frame = coquic::quic::DataBlockedFrame{.maximum_data = 30},
+        .stream_data_blocked_frames =
+            {
+                coquic::quic::StreamDataBlockedFrame{
+                    .stream_id = 0,
+                    .maximum_stream_data = 50,
+                },
+                coquic::quic::StreamDataBlockedFrame{
+                    .stream_id = 99,
+                    .maximum_stream_data = 2,
+                },
+            },
+        .stream_fragments =
+            {
+                coquic::quic::StreamFrameSendFragment{
+                    .stream_id = 4,
+                    .offset = 5,
+                    .bytes = {},
+                    .fin = true,
+                },
+                coquic::quic::StreamFrameSendFragment{
+                    .stream_id = 99,
+                    .offset = 0,
+                    .bytes = {},
+                    .fin = false,
+                },
+            },
+        .reset_stream_frames =
+            {
+                coquic::quic::ResetStreamFrame{
+                    .stream_id = 0,
+                    .application_protocol_error_code = 7,
+                    .final_size = 5,
+                },
+                coquic::quic::ResetStreamFrame{
+                    .stream_id = 99,
+                    .application_protocol_error_code = 1,
+                    .final_size = 0,
+                },
+            },
+        .stop_sending_frames =
+            {
+                coquic::quic::StopSendingFrame{
+                    .stream_id = 0,
+                    .application_protocol_error_code = 9,
+                },
+                coquic::quic::StopSendingFrame{
+                    .stream_id = 99,
+                    .application_protocol_error_code = 1,
+                },
+            },
+    };
+    connection.application_space_.sent_packets.emplace(packet.packet_number, packet);
+
+    connection.retire_acked_packet(connection.application_space_, packet);
+
+    EXPECT_EQ(connection.connection_flow_control_.max_data_state,
+              coquic::quic::StreamControlFrameState::acknowledged);
+    EXPECT_EQ(connection.connection_flow_control_.data_blocked_state,
+              coquic::quic::StreamControlFrameState::acknowledged);
+    EXPECT_EQ(stream.flow_control.max_stream_data_state,
+              coquic::quic::StreamControlFrameState::acknowledged);
+    EXPECT_EQ(stream.flow_control.stream_data_blocked_state,
+              coquic::quic::StreamControlFrameState::acknowledged);
+    EXPECT_EQ(stream.reset_state, coquic::quic::StreamControlFrameState::acknowledged);
+    EXPECT_EQ(stream.stop_sending_state, coquic::quic::StreamControlFrameState::acknowledged);
+    EXPECT_EQ(fin_stream.send_fin_state, coquic::quic::StreamSendFinState::acknowledged);
+    EXPECT_FALSE(connection.application_space_.sent_packets.contains(packet.packet_number));
+}
+
+TEST(QuicCoreTest, MarkLostPacketRequeuesConnectionAndStreamControlState) {
+    auto connection = make_connected_client_connection();
+    auto &stream = connection.streams_
+                       .emplace(0, coquic::quic::make_implicit_stream_state(
+                                       /*stream_id=*/0, connection.config_.role))
+                       .first->second;
+    auto &fin_stream = connection.streams_
+                           .emplace(4, coquic::quic::make_implicit_stream_state(
+                                           /*stream_id=*/4, connection.config_.role))
+                           .first->second;
+
+    connection.connection_flow_control_.pending_max_data_frame =
+        coquic::quic::MaxDataFrame{.maximum_data = 20};
+    connection.connection_flow_control_.max_data_state =
+        coquic::quic::StreamControlFrameState::sent;
+    connection.connection_flow_control_.pending_data_blocked_frame =
+        coquic::quic::DataBlockedFrame{.maximum_data = 30};
+    connection.connection_flow_control_.data_blocked_state =
+        coquic::quic::StreamControlFrameState::sent;
+
+    stream.flow_control.pending_max_stream_data_frame = coquic::quic::MaxStreamDataFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 40,
+    };
+    stream.flow_control.max_stream_data_state = coquic::quic::StreamControlFrameState::sent;
+    stream.flow_control.pending_stream_data_blocked_frame = coquic::quic::StreamDataBlockedFrame{
+        .stream_id = 0,
+        .maximum_stream_data = 50,
+    };
+    stream.flow_control.stream_data_blocked_state = coquic::quic::StreamControlFrameState::sent;
+    stream.pending_reset_frame = coquic::quic::ResetStreamFrame{
+        .stream_id = 0,
+        .application_protocol_error_code = 7,
+        .final_size = 5,
+    };
+    stream.reset_state = coquic::quic::StreamControlFrameState::sent;
+    stream.pending_stop_sending_frame = coquic::quic::StopSendingFrame{
+        .stream_id = 0,
+        .application_protocol_error_code = 9,
+    };
+    stream.stop_sending_state = coquic::quic::StreamControlFrameState::sent;
+    fin_stream.send_fin_state = coquic::quic::StreamSendFinState::sent;
+
+    const auto packet = coquic::quic::SentPacketRecord{
+        .packet_number = 9,
+        .max_data_frame = coquic::quic::MaxDataFrame{.maximum_data = 20},
+        .max_stream_data_frames =
+            {
+                coquic::quic::MaxStreamDataFrame{
+                    .stream_id = 0,
+                    .maximum_stream_data = 40,
+                },
+                coquic::quic::MaxStreamDataFrame{
+                    .stream_id = 99,
+                    .maximum_stream_data = 1,
+                },
+            },
+        .data_blocked_frame = coquic::quic::DataBlockedFrame{.maximum_data = 30},
+        .stream_data_blocked_frames =
+            {
+                coquic::quic::StreamDataBlockedFrame{
+                    .stream_id = 0,
+                    .maximum_stream_data = 50,
+                },
+                coquic::quic::StreamDataBlockedFrame{
+                    .stream_id = 99,
+                    .maximum_stream_data = 2,
+                },
+            },
+        .stream_fragments =
+            {
+                coquic::quic::StreamFrameSendFragment{
+                    .stream_id = 4,
+                    .offset = 5,
+                    .bytes = {},
+                    .fin = true,
+                },
+                coquic::quic::StreamFrameSendFragment{
+                    .stream_id = 99,
+                    .offset = 0,
+                    .bytes = {},
+                    .fin = false,
+                },
+            },
+        .reset_stream_frames =
+            {
+                coquic::quic::ResetStreamFrame{
+                    .stream_id = 0,
+                    .application_protocol_error_code = 7,
+                    .final_size = 5,
+                },
+                coquic::quic::ResetStreamFrame{
+                    .stream_id = 99,
+                    .application_protocol_error_code = 1,
+                    .final_size = 0,
+                },
+            },
+        .stop_sending_frames =
+            {
+                coquic::quic::StopSendingFrame{
+                    .stream_id = 0,
+                    .application_protocol_error_code = 9,
+                },
+                coquic::quic::StopSendingFrame{
+                    .stream_id = 99,
+                    .application_protocol_error_code = 1,
+                },
+            },
+    };
+    connection.application_space_.sent_packets.emplace(packet.packet_number, packet);
+
+    connection.mark_lost_packet(connection.application_space_, packet);
+
+    EXPECT_EQ(connection.connection_flow_control_.max_data_state,
+              coquic::quic::StreamControlFrameState::pending);
+    EXPECT_EQ(connection.connection_flow_control_.data_blocked_state,
+              coquic::quic::StreamControlFrameState::pending);
+    EXPECT_EQ(stream.flow_control.max_stream_data_state,
+              coquic::quic::StreamControlFrameState::pending);
+    EXPECT_EQ(stream.flow_control.stream_data_blocked_state,
+              coquic::quic::StreamControlFrameState::pending);
+    EXPECT_EQ(stream.reset_state, coquic::quic::StreamControlFrameState::pending);
+    EXPECT_EQ(stream.stop_sending_state, coquic::quic::StreamControlFrameState::pending);
+    EXPECT_EQ(fin_stream.send_fin_state, coquic::quic::StreamSendFinState::pending);
+    EXPECT_FALSE(connection.application_space_.sent_packets.contains(packet.packet_number));
+}
+
 TEST(QuicCoreTest, FailureEventIsEdgeTriggeredAndLaterCallsAreInert) {
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 

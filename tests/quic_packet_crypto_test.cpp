@@ -585,6 +585,12 @@ INSTANTIATE_TEST_SUITE_P(
             .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
         },
         PacketCryptoFaultCase{
+            .name = "NativeSeal",
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::seal_native_seal,
+            .occurrence = 1,
+            .error_code = coquic::quic::CodecErrorCode::invalid_packet_protection_state,
+        },
+        PacketCryptoFaultCase{
             .name = "Final",
             .fault_point = coquic::quic::test::PacketCryptoFaultPoint::seal_final,
             .occurrence = 1,
@@ -650,6 +656,29 @@ INSTANTIATE_TEST_SUITE_P(
             .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
             .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
             .fault_point = coquic::quic::test::PacketCryptoFaultPoint::header_protection_aes_init,
+        },
+        PacketCryptoHeaderProtectionFaultCase{
+            .name = "AesContextNew",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+            .fault_point =
+                coquic::quic::test::PacketCryptoFaultPoint::header_protection_aes_context_new,
+        },
+        PacketCryptoHeaderProtectionFaultCase{
+            .name = "AesSetPadding",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+            .fault_point =
+                coquic::quic::test::PacketCryptoFaultPoint::header_protection_aes_set_padding,
+        },
+        PacketCryptoHeaderProtectionFaultCase{
+            .name = "AesUpdate",
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+            .fault_point = coquic::quic::test::PacketCryptoFaultPoint::header_protection_aes_update,
         },
         PacketCryptoHeaderProtectionFaultCase{
             .name = "AesFinal",

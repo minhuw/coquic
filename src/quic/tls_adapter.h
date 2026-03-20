@@ -37,6 +37,7 @@ struct TlsAdapterConfig {
     EndpointRole role = EndpointRole::client;
     bool verify_peer = false;
     std::string server_name = "localhost";
+    std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
     std::vector<std::byte> local_transport_parameters;
 };

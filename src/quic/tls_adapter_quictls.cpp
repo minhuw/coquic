@@ -7,6 +7,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -237,6 +239,56 @@ COQUIC_NO_PROFILE bool transport_params_failed(SSL *ssl,
                                          transport_params.size()) != 1;
 }
 
+bool application_protocol_valid(std::string_view application_protocol) {
+    return !application_protocol.empty() && application_protocol.size() <= UINT8_MAX;
+}
+
+std::vector<uint8_t> encode_application_protocol_list(std::string_view application_protocol) {
+    if (!application_protocol_valid(application_protocol)) {
+        return {};
+    }
+
+    std::vector<uint8_t> encoded;
+    encoded.reserve(application_protocol.size() + 1);
+    encoded.push_back(static_cast<uint8_t>(application_protocol.size()));
+    encoded.insert(encoded.end(), application_protocol.begin(), application_protocol.end());
+    return encoded;
+}
+
+bool set_alpn_protos_failed(SSL *ssl, const std::vector<uint8_t> &encoded) {
+    return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_client_alpn) ||
+           (consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_client_alpn_set_protos)
+                ? -1
+                : SSL_set_alpn_protos(ssl, encoded.data(), encoded.size())) != 0;
+}
+
+bool client_alpn_failed(SSL *ssl, std::string_view application_protocol) {
+    const auto encoded = encode_application_protocol_list(application_protocol);
+    return encoded.empty() || set_alpn_protos_failed(ssl, encoded);
+}
+
+bool client_offered_application_protocol(std::span<const uint8_t> offered,
+                                         std::string_view application_protocol) {
+    std::size_t offset = 0;
+    while (offset < offered.size()) {
+        const auto protocol_length = offered[offset];
+        ++offset;
+        if (protocol_length == 0 || offset + protocol_length > offered.size()) {
+            return false;
+        }
+
+        const auto candidate = std::string_view(
+            reinterpret_cast<const char *>(offered.data() + offset), protocol_length);
+        if (candidate == application_protocol) {
+            return true;
+        }
+
+        offset += protocol_length;
+    }
+
+    return false;
+}
+
 COQUIC_NO_PROFILE bool install_identity_failed(SSL_CTX *ctx, X509 *certificate,
                                                EVP_PKEY *private_key) {
     return consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_use_certificate) ||
@@ -378,6 +430,21 @@ class TlsAdapter::Impl {
         return impl->on_send_alert(level, alert);
     }
 
+    static int select_application_protocol(SSL *, const uint8_t **out, uint8_t *out_len,
+                                           const uint8_t *in, unsigned in_len, void *arg) {
+        auto *impl = static_cast<Impl *>(arg);
+        if (impl == nullptr || out == nullptr || out_len == nullptr ||
+            !application_protocol_valid(impl->config_.application_protocol) ||
+            !client_offered_application_protocol(std::span(in, in_len),
+                                                 impl->config_.application_protocol)) {
+            return SSL_TLSEXT_ERR_ALERT_FATAL;
+        }
+
+        *out = reinterpret_cast<const uint8_t *>(impl->config_.application_protocol.data());
+        *out_len = static_cast<uint8_t>(impl->config_.application_protocol.size());
+        return SSL_TLSEXT_ERR_OK;
+    }
+
   private:
     void initialize() {
         ERR_clear_error();
@@ -408,8 +475,25 @@ class TlsAdapter::Impl {
             return;
         }
 
+        if (!application_protocol_valid(config_.application_protocol)) {
+            sticky_error_ =
+                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
+            return;
+        }
+
+        if (config_.role == EndpointRole::server) {
+            SSL_CTX_set_alpn_select_cb(ctx_.get(), &Impl::select_application_protocol, this);
+        }
+
         ssl_.reset(new_ssl(ctx_.get()));
         if (ssl_ == nullptr) {
+            sticky_error_ =
+                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
+            return;
+        }
+
+        if (config_.role == EndpointRole::client &&
+            client_alpn_failed(ssl_.get(), config_.application_protocol)) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;
@@ -623,10 +707,10 @@ class TlsAdapter::Impl {
     }
 
     static inline const SSL_QUIC_METHOD kQuicMethod{
-        .set_encryption_secrets = &Impl::set_encryption_secrets,
-        .add_handshake_data = &Impl::add_handshake_data,
-        .flush_flight = &Impl::flush_flight,
-        .send_alert = &Impl::send_alert,
+        &Impl::set_encryption_secrets,
+        &Impl::add_handshake_data,
+        &Impl::flush_flight,
+        &Impl::send_alert,
     };
 
     TlsAdapterConfig config_;
@@ -719,6 +803,31 @@ CodecResult<CipherSuite> TlsAdapterTestPeer::cipher_suite_for_ssl(TlsAdapter &ad
     return ::cipher_suite_for_ssl(adapter.impl_->ssl_.get());
 }
 
+std::vector<uint8_t>
+TlsAdapterTestPeer::encode_application_protocol_list(std::string_view application_protocol) {
+    return ::encode_application_protocol_list(application_protocol);
+}
+
+bool TlsAdapterTestPeer::client_offered_application_protocol(
+    std::span<const uint8_t> offered, std::string_view application_protocol) {
+    return ::client_offered_application_protocol(offered, application_protocol);
+}
+
+bool TlsAdapterTestPeer::call_client_alpn_failed(TlsAdapter &adapter,
+                                                 std::string_view application_protocol) {
+    auto *ssl = adapter.impl_->ssl_.get();
+    if (ssl == nullptr) {
+        return true;
+    }
+
+    return ::client_alpn_failed(ssl, application_protocol);
+}
+
+void TlsAdapterTestPeer::set_application_protocol(TlsAdapter &adapter,
+                                                  std::string_view application_protocol) {
+    adapter.impl_->config_.application_protocol = std::string(application_protocol);
+}
+
 CodecResult<bool> TlsAdapterTestPeer::drive_handshake(TlsAdapter &adapter) {
     return adapter.impl_->drive_handshake();
 }
@@ -770,6 +879,25 @@ int TlsAdapterTestPeer::call_on_set_encryption_secrets(TlsAdapter &adapter,
                                                     write_secret, secret_len);
 }
 
+int TlsAdapterTestPeer::call_on_set_secret(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
+                                           EndpointRole sender, const uint8_t *secret,
+                                           size_t secret_len) {
+    if (secret == nullptr) {
+        return 1;
+    }
+
+    auto *ssl = adapter.impl_->ssl_.get();
+    if (ssl == nullptr) {
+        return 0;
+    }
+
+    if (sender == opposite_role(adapter.impl_->config_.role)) {
+        return adapter.impl_->on_set_encryption_secrets(ssl, level, secret, nullptr, secret_len);
+    }
+
+    return adapter.impl_->on_set_encryption_secrets(ssl, level, nullptr, secret, secret_len);
+}
+
 int TlsAdapterTestPeer::call_on_add_handshake_data(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
                                                    const uint8_t *data, size_t len) {
     return adapter.impl_->on_add_handshake_data(level, data, len);
@@ -794,6 +922,30 @@ int TlsAdapterTestPeer::call_static_send_alert(TlsAdapter &adapter, OSSL_ENCRYPT
     return TlsAdapter::Impl::send_alert(ssl, level, alert);
 }
 
+int TlsAdapterTestPeer::call_static_select_application_protocol(TlsAdapter *adapter,
+                                                                const uint8_t **out,
+                                                                uint8_t *out_len,
+                                                                std::span<const uint8_t> offered) {
+    return TlsAdapter::Impl::select_application_protocol(
+        nullptr, out, out_len, offered.data(), static_cast<unsigned>(offered.size()),
+        adapter == nullptr ? nullptr : adapter->impl_.get());
+}
+
+std::optional<std::uint16_t>
+TlsAdapterTestPeer::pending_or_current_cipher_protocol_id(TlsAdapter &adapter) {
+    auto *ssl = adapter.impl_->ssl_.get();
+    if (ssl == nullptr) {
+        return std::nullopt;
+    }
+
+    const SSL_CIPHER *cipher = SSL_get_current_cipher(ssl);
+    if (cipher == nullptr) {
+        return std::nullopt;
+    }
+
+    return SSL_CIPHER_get_protocol_id(cipher);
+}
+
 template <typename Callback>
 COQUIC_NO_PROFILE int call_with_null_app_data(SSL *ssl, Callback callback) {
     if (ssl == nullptr) {
@@ -807,12 +959,21 @@ COQUIC_NO_PROFILE int call_with_null_app_data(SSL *ssl, Callback callback) {
     return result;
 }
 
-int TlsAdapterTestPeer::call_static_set_encryption_secrets_with_null_app_data(
-    TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level, const uint8_t *read_secret,
-    const uint8_t *write_secret, size_t secret_len) {
+int TlsAdapterTestPeer::call_static_set_read_secret_with_null_app_data(TlsAdapter &adapter,
+                                                                       OSSL_ENCRYPTION_LEVEL level,
+                                                                       const uint8_t *secret,
+                                                                       size_t secret_len) {
     return call_with_null_app_data(adapter.impl_->ssl_.get(), [&](SSL *ssl) {
-        return TlsAdapter::Impl::set_encryption_secrets(ssl, level, read_secret, write_secret,
-                                                        secret_len);
+        return TlsAdapter::Impl::set_encryption_secrets(ssl, level, secret, nullptr, secret_len);
+    });
+}
+
+int TlsAdapterTestPeer::call_static_set_write_secret_with_null_app_data(TlsAdapter &adapter,
+                                                                        OSSL_ENCRYPTION_LEVEL level,
+                                                                        const uint8_t *secret,
+                                                                        size_t secret_len) {
+    return call_with_null_app_data(adapter.impl_->ssl_.get(), [&](SSL *ssl) {
+        return TlsAdapter::Impl::set_encryption_secrets(ssl, level, nullptr, secret, secret_len);
     });
 }
 

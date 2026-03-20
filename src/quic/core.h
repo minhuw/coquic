@@ -32,6 +32,7 @@ struct QuicCoreConfig {
     ConnectionId initial_destination_connection_id;
     bool verify_peer = false;
     std::string server_name = "localhost";
+    std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
     QuicTransportConfig transport;
 };

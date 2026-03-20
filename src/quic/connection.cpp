@@ -811,6 +811,7 @@ void QuicConnection::start_client_if_needed() {
         .role = config_.role,
         .verify_peer = config_.verify_peer,
         .server_name = config_.server_name,
+        .application_protocol = config_.application_protocol,
         .identity = config_.identity,
         .local_transport_parameters = serialized_transport_parameters.value(),
     });
@@ -865,6 +866,7 @@ void QuicConnection::start_server_if_needed(
         .role = config_.role,
         .verify_peer = config_.verify_peer,
         .server_name = config_.server_name,
+        .application_protocol = config_.application_protocol,
         .identity = config_.identity,
         .local_transport_parameters = serialized_transport_parameters.value(),
     });

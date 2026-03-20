@@ -32,6 +32,20 @@ fn appendTlsAdapterSource(files: *std.ArrayList([]const u8), tls_backend: []cons
     std.debug.panic("unsupported tls_backend {s}", .{tls_backend});
 }
 
+fn appendPacketCryptoSource(files: *std.ArrayList([]const u8), tls_backend: []const u8) void {
+    if (std.mem.eql(u8, tls_backend, "quictls")) {
+        files.append("src/quic/packet_crypto_quictls.cpp") catch @panic("oom");
+        return;
+    }
+
+    if (std.mem.eql(u8, tls_backend, "boringssl")) {
+        files.append("src/quic/packet_crypto_boringssl.cpp") catch @panic("oom");
+        return;
+    }
+
+    std.debug.panic("unsupported tls_backend {s}", .{tls_backend});
+}
+
 fn tlsIncludeDir(b: *std.Build, tls_backend: []const u8) []const u8 {
     if (std.mem.eql(u8, tls_backend, "quictls"))
         return requireEnv(b, "QUICTLS_INCLUDE_DIR");
@@ -83,7 +97,6 @@ fn addProjectLibrary(
         "src/quic/demo_channel.cpp",
         "src/quic/frame.cpp",
         "src/quic/packet.cpp",
-        "src/quic/packet_crypto.cpp",
         "src/quic/packet_number.cpp",
         "src/quic/plaintext_codec.cpp",
         "src/quic/recovery.cpp",
@@ -92,6 +105,7 @@ fn addProjectLibrary(
         "src/quic/transport_parameters.cpp",
         "src/quic/varint.cpp",
     }) catch @panic("oom");
+    appendPacketCryptoSource(&files, tls_backend);
     appendTlsAdapterSource(&files, tls_backend);
     lib.addCSourceFiles(.{
         .root = b.path("."),
@@ -102,10 +116,33 @@ fn addProjectLibrary(
     return lib;
 }
 
-fn linkTlsBackend(compile: *std.Build.Step.Compile, tls_lib_dir: []const u8) void {
-    compile.addLibraryPath(.{ .cwd_relative = tls_lib_dir });
-    compile.linkSystemLibrary("ssl");
-    compile.linkSystemLibrary("crypto");
+fn linkTlsBackend(
+    b: *std.Build,
+    compile: *std.Build.Step.Compile,
+    tls_backend: []const u8,
+    tls_lib_dir: []const u8,
+) void {
+    if (std.mem.eql(u8, tls_backend, "quictls")) {
+        compile.addObjectFile(.{
+            .cwd_relative = b.pathJoin(&.{ tls_lib_dir, "libssl.so" }),
+        });
+        compile.addObjectFile(.{
+            .cwd_relative = b.pathJoin(&.{ tls_lib_dir, "libcrypto.so" }),
+        });
+        return;
+    }
+
+    if (std.mem.eql(u8, tls_backend, "boringssl")) {
+        compile.addObjectFile(.{
+            .cwd_relative = b.pathJoin(&.{ tls_lib_dir, "libssl.a" }),
+        });
+        compile.addObjectFile(.{
+            .cwd_relative = b.pathJoin(&.{ tls_lib_dir, "libcrypto.a" }),
+        });
+        return;
+    }
+
+    std.debug.panic("unsupported tls_backend {s}", .{tls_backend});
 }
 
 fn linkSpdlog(compile: *std.Build.Step.Compile) void {
@@ -222,7 +259,7 @@ pub fn build(b: *std.Build) void {
         .flags = cpp_flags,
     });
     exe.linkLibrary(project_lib);
-    linkTlsBackend(exe, tls_lib_dir);
+    linkTlsBackend(b, exe, tls_backend, tls_lib_dir);
     linkSpdlog(exe);
     exe.linkLibCpp();
     b.installArtifact(exe);
@@ -245,7 +282,7 @@ pub fn build(b: *std.Build) void {
         gtest_root,
         default_test_files,
     );
-    linkTlsBackend(smoke, tls_lib_dir);
+    linkTlsBackend(b, smoke, tls_backend, tls_lib_dir);
     linkSpdlog(smoke);
     const smoke_run = b.addRunArtifact(smoke);
     if (b.args) |args| {
@@ -275,7 +312,7 @@ pub fn build(b: *std.Build) void {
         gtest_root,
         default_test_files,
     );
-    linkTlsBackend(coverage_test, tls_lib_dir);
+    linkTlsBackend(b, coverage_test, tls_backend, tls_lib_dir);
     linkSpdlog(coverage_test);
     coverage_test.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     coverage_test.forceUndefinedSymbol("__llvm_profile_runtime");

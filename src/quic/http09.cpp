@@ -9,7 +9,7 @@ namespace coquic::quic {
 
 namespace {
 
-constexpr CodecErrorCode kHttp09ParseError = CodecErrorCode::invalid_varint;
+constexpr CodecErrorCode kHttp09ParseError = CodecErrorCode::http09_parse_error;
 
 CodecResult<QuicHttp09Request> parse_absolute_https_request(std::string_view token) {
     constexpr std::string_view scheme = "https://";
@@ -35,12 +35,17 @@ CodecResult<QuicHttp09Request> parse_absolute_https_request(std::string_view tok
         return CodecResult<QuicHttp09Request>::failure(kHttp09ParseError, 0);
     }
 
-    const std::string_view relative = request_target.substr(1);
+    const auto resolved_target =
+        resolve_http09_path_under_root(std::filesystem::path("/"), request_target);
+    if (!resolved_target.has_value()) {
+        return CodecResult<QuicHttp09Request>::failure(kHttp09ParseError, 0);
+    }
+
     return CodecResult<QuicHttp09Request>::success(QuicHttp09Request{
         .url = std::string(token),
         .authority = std::string(authority),
         .request_target = std::string(request_target),
-        .relative_output_path = std::filesystem::path(relative),
+        .relative_output_path = resolved_target.value().lexically_relative("/"),
     });
 }
 
@@ -100,30 +105,37 @@ parse_http09_requests_env(std::string_view requests_env) {
 }
 
 CodecResult<std::string> parse_http09_request_target(std::span<const std::byte> bytes) {
-    std::string request_line;
-    request_line.reserve(bytes.size());
+    std::string request_bytes;
+    request_bytes.reserve(bytes.size());
     for (const auto byte : bytes) {
-        request_line.push_back(static_cast<char>(std::to_integer<unsigned char>(byte)));
+        request_bytes.push_back(static_cast<char>(std::to_integer<unsigned char>(byte)));
     }
 
     constexpr std::string_view method = "GET ";
-    constexpr std::string_view line_end = "\r\n";
-    if (!request_line.starts_with(method) || !request_line.ends_with(line_end)) {
+    const std::size_t line_end = request_bytes.find('\n');
+    if (line_end == std::string::npos) {
         return CodecResult<std::string>::failure(kHttp09ParseError, 0);
     }
 
-    const std::size_t target_begin = method.size();
-    const std::size_t target_end = request_line.size() - line_end.size();
-    if (target_end <= target_begin) {
+    std::string_view request_line(request_bytes.data(), line_end);
+    if (!request_line.empty() && request_line.back() == '\r') {
+        request_line.remove_suffix(1);
+    }
+
+    if (!request_line.starts_with(method)) {
         return CodecResult<std::string>::failure(kHttp09ParseError, 0);
     }
 
-    std::string target = request_line.substr(target_begin, target_end - target_begin);
-    if (target.empty() || target.front() != '/' || target.find(' ') != std::string::npos) {
+    const std::string_view target = request_line.substr(method.size());
+    if (target.empty()) {
         return CodecResult<std::string>::failure(kHttp09ParseError, 0);
     }
 
-    return CodecResult<std::string>::success(std::move(target));
+    if (target.front() != '/' || target.find(' ') != std::string::npos) {
+        return CodecResult<std::string>::failure(kHttp09ParseError, 0);
+    }
+
+    return CodecResult<std::string>::success(std::string(target));
 }
 
 CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::filesystem::path &root,
@@ -148,6 +160,7 @@ CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::fil
         return CodecResult<std::filesystem::path>::failure(kHttp09ParseError, 0);
     }
 
+    // This is a lexical containment check; it does not resolve symlinks.
     const std::filesystem::path candidate = (normalized_root / relative).lexically_normal();
     if (!path_has_prefix(candidate, normalized_root)) {
         return CodecResult<std::filesystem::path>::failure(kHttp09ParseError, 0);

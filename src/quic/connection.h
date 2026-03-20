@@ -35,6 +35,16 @@ struct PacketSpaceState {
     std::optional<QuicCoreTimePoint> pending_ack_deadline;
 };
 
+struct LocalResetCommand {
+    std::uint64_t stream_id = 0;
+    std::uint64_t application_error_code = 0;
+};
+
+struct LocalStopSendingCommand {
+    std::uint64_t stream_id = 0;
+    std::uint64_t application_error_code = 0;
+};
+
 class QuicConnection {
   public:
     explicit QuicConnection(QuicCoreConfig config);
@@ -43,9 +53,13 @@ class QuicConnection {
     void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now);
     StreamStateResult<bool> queue_stream_send(std::uint64_t stream_id,
                                               std::span<const std::byte> bytes, bool fin);
+    StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
+    StreamStateResult<bool> queue_stop_sending(LocalStopSendingCommand command);
     std::vector<std::byte> drain_outbound_datagram(QuicCoreTimePoint now);
     void on_timeout(QuicCoreTimePoint now);
     std::optional<QuicCoreReceiveStreamData> take_received_stream_data();
+    std::optional<QuicCorePeerResetStream> take_peer_reset_stream();
+    std::optional<QuicCorePeerStopSending> take_peer_stop_sending();
     std::optional<QuicCoreStateChange> take_state_change();
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     bool is_handshake_complete() const;
@@ -84,7 +98,9 @@ class QuicConnection {
     std::optional<TransportParametersValidationContext>
     peer_transport_parameters_validation_context() const;
     StreamStateResult<StreamState *> get_or_open_local_stream(std::uint64_t stream_id);
+    StreamStateResult<StreamState *> get_existing_receive_stream(std::uint64_t stream_id);
     CodecResult<StreamState *> get_or_open_receive_stream(std::uint64_t stream_id);
+    CodecResult<StreamState *> get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id);
     PeerStreamOpenLimits peer_stream_open_limits() const;
     bool has_pending_application_send() const;
     ConnectionId outbound_destination_connection_id() const;
@@ -107,6 +123,8 @@ class QuicConnection {
     bool peer_transport_parameters_validated_ = false;
     std::map<std::uint64_t, StreamState> streams_;
     std::vector<QuicCoreReceiveStreamData> pending_stream_receive_effects_;
+    std::vector<QuicCorePeerResetStream> pending_peer_reset_effects_;
+    std::vector<QuicCorePeerStopSending> pending_peer_stop_effects_;
     std::vector<QuicCoreStateChange> pending_state_changes_;
     std::uint32_t pto_count_ = 0;
     bool handshake_confirmed_ = false;

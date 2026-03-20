@@ -159,6 +159,17 @@ inline std::vector<QuicCorePeerResetStream> peer_resets_from(const QuicCoreResul
     return out;
 }
 
+inline std::vector<QuicCorePeerStopSending> peer_stops_from(const QuicCoreResult &result) {
+    std::vector<QuicCorePeerStopSending> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *stop = std::get_if<QuicCorePeerStopSending>(&effect)) {
+            out.push_back(*stop);
+        }
+    }
+
+    return out;
+}
+
 inline QuicCoreResult relay_send_datagrams_to_peer(const QuicCoreResult &result, QuicCore &peer,
                                                    QuicCoreTimePoint now) {
     QuicCoreResult combined;

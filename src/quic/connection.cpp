@@ -54,6 +54,8 @@ bool is_padding_frame(const Frame &frame) {
 
 bool is_ack_eliciting_frame(const Frame &frame) {
     return std::holds_alternative<CryptoFrame>(frame) ||
+           std::holds_alternative<ResetStreamFrame>(frame) ||
+           std::holds_alternative<StopSendingFrame>(frame) ||
            std::holds_alternative<StreamFrame>(frame) || std::holds_alternative<PingFrame>(frame);
 }
 
@@ -238,6 +240,46 @@ StreamStateResult<bool> QuicConnection::queue_stream_send(std::uint64_t stream_i
     return StreamStateResult<bool>::success(true);
 }
 
+StreamStateResult<bool> QuicConnection::queue_stream_reset(LocalResetCommand command) {
+    if (status_ == HandshakeStatus::failed) {
+        return StreamStateResult<bool>::success(true);
+    }
+
+    auto stream_state = get_or_open_local_stream(command.stream_id);
+    if (!stream_state.has_value()) {
+        return StreamStateResult<bool>::failure(stream_state.error().code,
+                                                stream_state.error().stream_id);
+    }
+
+    auto *stream = stream_state.value();
+    const auto validated = stream->validate_local_reset(command.application_error_code);
+    if (!validated.has_value()) {
+        return validated;
+    }
+
+    return StreamStateResult<bool>::success(true);
+}
+
+StreamStateResult<bool> QuicConnection::queue_stop_sending(LocalStopSendingCommand command) {
+    if (status_ == HandshakeStatus::failed) {
+        return StreamStateResult<bool>::success(true);
+    }
+
+    auto stream_state = get_existing_receive_stream(command.stream_id);
+    if (!stream_state.has_value()) {
+        return StreamStateResult<bool>::failure(stream_state.error().code,
+                                                stream_state.error().stream_id);
+    }
+
+    auto *stream = stream_state.value();
+    const auto validated = stream->validate_local_stop_sending(command.application_error_code);
+    if (!validated.has_value()) {
+        return validated;
+    }
+
+    return StreamStateResult<bool>::success(true);
+}
+
 std::vector<std::byte> QuicConnection::drain_outbound_datagram(QuicCoreTimePoint now) {
     if (status_ == HandshakeStatus::failed) {
         return {};
@@ -267,6 +309,26 @@ std::optional<QuicCoreReceiveStreamData> QuicConnection::take_received_stream_da
 
     auto next = std::move(pending_stream_receive_effects_.front());
     pending_stream_receive_effects_.erase(pending_stream_receive_effects_.begin());
+    return next;
+}
+
+std::optional<QuicCorePeerResetStream> QuicConnection::take_peer_reset_stream() {
+    if (status_ == HandshakeStatus::failed || pending_peer_reset_effects_.empty()) {
+        return std::nullopt;
+    }
+
+    const auto next = pending_peer_reset_effects_.front();
+    pending_peer_reset_effects_.erase(pending_peer_reset_effects_.begin());
+    return next;
+}
+
+std::optional<QuicCorePeerStopSending> QuicConnection::take_peer_stop_sending() {
+    if (status_ == HandshakeStatus::failed || pending_peer_stop_effects_.empty()) {
+        return std::nullopt;
+    }
+
+    const auto next = pending_peer_stop_effects_.front();
+    pending_peer_stop_effects_.erase(pending_peer_stop_effects_.begin());
     return next;
 }
 
@@ -454,7 +516,9 @@ QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
         if (!packet.ack_eliciting || !packet.in_flight) {
             continue;
         }
-        if (!packet.crypto_ranges.empty() || !packet.stream_fragments.empty() || packet.has_ping) {
+        if (!packet.crypto_ranges.empty() || !packet.reset_stream_frames.empty() ||
+            !packet.stop_sending_frames.empty() || !packet.stream_fragments.empty() ||
+            packet.has_ping) {
             return packet;
         }
     }
@@ -858,6 +922,22 @@ void QuicConnection::retire_acked_packet(PacketSpaceState &packet_space,
 
         stream->second.acknowledge_send_fragment(fragment);
     }
+    for (const auto &frame : packet.reset_stream_frames) {
+        const auto stream = streams_.find(frame.stream_id);
+        if (stream == streams_.end()) {
+            continue;
+        }
+
+        stream->second.acknowledge_reset_frame(frame);
+    }
+    for (const auto &frame : packet.stop_sending_frames) {
+        const auto stream = streams_.find(frame.stream_id);
+        if (stream == streams_.end()) {
+            continue;
+        }
+
+        stream->second.acknowledge_stop_sending_frame(frame);
+    }
 
     packet_space.sent_packets.erase(packet.packet_number);
 }
@@ -874,6 +954,22 @@ void QuicConnection::mark_lost_packet(PacketSpaceState &packet_space,
         }
 
         stream->second.mark_send_fragment_lost(fragment);
+    }
+    for (const auto &frame : packet.reset_stream_frames) {
+        const auto stream = streams_.find(frame.stream_id);
+        if (stream == streams_.end()) {
+            continue;
+        }
+
+        stream->second.mark_reset_frame_lost(frame);
+    }
+    for (const auto &frame : packet.stop_sending_frames) {
+        const auto stream = streams_.find(frame.stream_id);
+        if (stream == streams_.end()) {
+            continue;
+        }
+
+        stream->second.mark_stop_sending_frame_lost(frame);
     }
 
     packet_space.sent_packets.erase(packet.packet_number);
@@ -921,52 +1017,104 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
         }
 
         const auto *stream_frame = std::get_if<StreamFrame>(&frame);
-        if (stream_frame == nullptr) {
+        if (stream_frame != nullptr) {
+            if (status_ != HandshakeStatus::connected) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+            if (!stream_frame->has_offset || !stream_frame->offset.has_value() ||
+                !stream_frame->has_length) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            auto stream = get_or_open_receive_stream(stream_frame->stream_id);
+            if (!stream.has_value()) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+            auto *stream_state = stream.value();
+            if (stream_state->peer_reset_received) {
+                continue;
+            }
+
+            const auto validated = stream_state->validate_receive_range(
+                stream_frame->offset.value(), stream_frame->stream_data.size(), stream_frame->fin);
+            if (!validated.has_value()) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            const auto contiguous_bytes = stream_state->receive_buffer.push(
+                stream_frame->offset.value(), stream_frame->stream_data);
+            if (!contiguous_bytes.has_value()) {
+                return CodecResult<bool>::failure(contiguous_bytes.error().code,
+                                                  contiguous_bytes.error().offset);
+            }
+
+            stream_state->receive_flow_control_consumed +=
+                static_cast<std::uint64_t>(contiguous_bytes.value().size());
+            const auto fin_ready =
+                stream_state->peer_final_size.has_value() &&
+                stream_state->receive_flow_control_consumed == *stream_state->peer_final_size &&
+                !stream_state->peer_fin_delivered;
+            if (!contiguous_bytes.value().empty() || fin_ready) {
+                pending_stream_receive_effects_.push_back(QuicCoreReceiveStreamData{
+                    .stream_id = stream_frame->stream_id,
+                    .bytes = contiguous_bytes.value(),
+                    .fin = fin_ready,
+                });
+                if (fin_ready) {
+                    stream_state->peer_fin_delivered = true;
+                }
+            }
+            continue;
+        }
+
+        if (const auto *reset_stream = std::get_if<ResetStreamFrame>(&frame)) {
+            if (status_ != HandshakeStatus::connected) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            auto stream = get_or_open_receive_stream(reset_stream->stream_id);
+            if (!stream.has_value()) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+            auto *stream_state = stream.value();
+            const auto noted = stream_state->note_peer_reset(*reset_stream);
+            if (!noted.has_value()) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            pending_peer_reset_effects_.push_back(QuicCorePeerResetStream{
+                .stream_id = reset_stream->stream_id,
+                .application_error_code = reset_stream->application_protocol_error_code,
+                .final_size = reset_stream->final_size,
+            });
+            continue;
+        }
+
+        if (const auto *stop_sending = std::get_if<StopSendingFrame>(&frame)) {
+            if (status_ != HandshakeStatus::connected) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            auto stream = get_or_open_send_stream_for_peer_stop(stop_sending->stream_id);
+            if (!stream.has_value()) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+            auto *stream_state = stream.value();
+            const auto noted =
+                stream_state->note_peer_stop_sending(stop_sending->application_protocol_error_code);
+            if (!noted.has_value()) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            pending_peer_stop_effects_.push_back(QuicCorePeerStopSending{
+                .stream_id = stop_sending->stream_id,
+                .application_error_code = stop_sending->application_protocol_error_code,
+            });
             continue;
         }
 
         if (status_ != HandshakeStatus::connected) {
             return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
-        }
-        if (!stream_frame->has_offset || !stream_frame->offset.has_value() ||
-            !stream_frame->has_length) {
-            return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
-        }
-
-        auto stream = get_or_open_receive_stream(stream_frame->stream_id);
-        if (!stream.has_value()) {
-            return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
-        }
-        auto *stream_state = stream.value();
-
-        const auto validated = stream_state->validate_receive_range(
-            stream_frame->offset.value(), stream_frame->stream_data.size(), stream_frame->fin);
-        if (!validated.has_value()) {
-            return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
-        }
-
-        const auto contiguous_bytes = stream_state->receive_buffer.push(
-            stream_frame->offset.value(), stream_frame->stream_data);
-        if (!contiguous_bytes.has_value()) {
-            return CodecResult<bool>::failure(contiguous_bytes.error().code,
-                                              contiguous_bytes.error().offset);
-        }
-
-        stream_state->receive_flow_control_consumed +=
-            static_cast<std::uint64_t>(contiguous_bytes.value().size());
-        const auto fin_ready =
-            stream_state->peer_final_size.has_value() &&
-            stream_state->receive_flow_control_consumed == *stream_state->peer_final_size &&
-            !stream_state->peer_fin_delivered;
-        if (!contiguous_bytes.value().empty() || fin_ready) {
-            pending_stream_receive_effects_.push_back(QuicCoreReceiveStreamData{
-                .stream_id = stream_frame->stream_id,
-                .bytes = contiguous_bytes.value(),
-                .fin = fin_ready,
-            });
-            if (fin_ready) {
-                stream_state->peer_fin_delivered = true;
-            }
         }
     }
 
@@ -1078,6 +1226,8 @@ void QuicConnection::mark_failed() {
     status_ = HandshakeStatus::failed;
     streams_.clear();
     pending_stream_receive_effects_.clear();
+    pending_peer_reset_effects_.clear();
+    pending_peer_stop_effects_.clear();
     pending_state_changes_.clear();
     queue_state_change(QuicCoreStateChange::failed);
 }
@@ -1133,9 +1283,8 @@ StreamStateResult<StreamState *> QuicConnection::get_or_open_local_stream(std::u
 
     if (!is_local_implicit_stream_open_allowed(stream_id, config_.role)) {
         const auto id_info = classify_stream_id(stream_id, config_.role);
-        const auto code = id_info.initiator == StreamInitiator::local
-                              ? StreamStateErrorCode::invalid_stream_direction
-                              : StreamStateErrorCode::invalid_stream_id;
+        const auto code = !id_info.local_can_send ? StreamStateErrorCode::invalid_stream_direction
+                                                  : StreamStateErrorCode::invalid_stream_id;
         return StreamStateResult<StreamState *>::failure(code, stream_id);
     }
 
@@ -1143,6 +1292,22 @@ StreamStateResult<StreamState *> QuicConnection::get_or_open_local_stream(std::u
         streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
     static_cast<void>(inserted);
     return StreamStateResult<StreamState *>::success(&it->second);
+}
+
+StreamStateResult<StreamState *>
+QuicConnection::get_existing_receive_stream(std::uint64_t stream_id) {
+    if (const auto existing = streams_.find(stream_id); existing != streams_.end()) {
+        return StreamStateResult<StreamState *>::success(&existing->second);
+    }
+
+    const auto id_info = classify_stream_id(stream_id, config_.role);
+    if (!id_info.local_can_receive) {
+        return StreamStateResult<StreamState *>::failure(
+            StreamStateErrorCode::invalid_stream_direction, stream_id);
+    }
+
+    return StreamStateResult<StreamState *>::failure(StreamStateErrorCode::invalid_stream_id,
+                                                     stream_id);
 }
 
 CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint64_t stream_id) {
@@ -1162,6 +1327,30 @@ CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint6
     }
     if (id_info.initiator != StreamInitiator::peer ||
         !is_peer_implicit_stream_open_allowed_by_limits(stream_id, config_.role,
+                                                        peer_stream_open_limits())) {
+        return CodecResult<StreamState *>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    auto [it, inserted] =
+        streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
+    static_cast<void>(inserted);
+    return CodecResult<StreamState *>::success(&it->second);
+}
+
+CodecResult<StreamState *>
+QuicConnection::get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id) {
+    if (const auto existing = streams_.find(stream_id); existing != streams_.end()) {
+        return CodecResult<StreamState *>::success(&existing->second);
+    }
+
+    const auto id_info = classify_stream_id(stream_id, config_.role);
+    if (!id_info.local_can_send) {
+        return CodecResult<StreamState *>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+    if (id_info.initiator == StreamInitiator::local) {
+        return CodecResult<StreamState *>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+    if (!is_peer_implicit_stream_open_allowed_by_limits(stream_id, config_.role,
                                                         peer_stream_open_limits())) {
         return CodecResult<StreamState *>::failure(CodecErrorCode::invalid_varint, 0);
     }
@@ -1350,6 +1539,28 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
          application_space_.pending_probe_packet.has_value())) {
         const auto base_ack_frame = application_space_.received_packets.build_ack_frame(
             local_transport_parameters_.ack_delay_exponent, now);
+        const auto take_reset_stream_frames = [](auto &streams) -> std::vector<ResetStreamFrame> {
+            std::vector<ResetStreamFrame> frames;
+            for (auto &[stream_id, stream] : streams) {
+                static_cast<void>(stream_id);
+                if (const auto frame = stream.take_reset_frame()) {
+                    frames.push_back(*frame);
+                }
+            }
+
+            return frames;
+        };
+        const auto take_stop_sending_frames = [](auto &streams) -> std::vector<StopSendingFrame> {
+            std::vector<StopSendingFrame> frames;
+            for (auto &[stream_id, stream] : streams) {
+                static_cast<void>(stream_id);
+                if (const auto frame = stream.take_stop_sending_frame()) {
+                    frames.push_back(*frame);
+                }
+            }
+
+            return frames;
+        };
         const auto take_stream_fragments =
             [](auto &streams, std::size_t max_bytes) -> std::vector<StreamFrameSendFragment> {
             std::vector<StreamFrameSendFragment> fragments;
@@ -1366,11 +1577,19 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         };
         const auto serialize_application_candidate =
             [&](const std::optional<AckFrame> &ack_frame,
+                std::span<const ResetStreamFrame> reset_stream_frames,
+                std::span<const StopSendingFrame> stop_sending_frames,
                 std::span<const StreamFrameSendFragment> stream_fragments,
                 bool include_ping) -> CodecResult<std::vector<std::byte>> {
             std::vector<Frame> candidate_frames;
             if (ack_frame.has_value()) {
                 candidate_frames.emplace_back(*ack_frame);
+            }
+            for (const auto &frame : reset_stream_frames) {
+                candidate_frames.emplace_back(frame);
+            }
+            for (const auto &frame : stop_sending_frames) {
+                candidate_frames.emplace_back(frame);
             }
             for (const auto &fragment : stream_fragments) {
                 candidate_frames.emplace_back(StreamFrame{
@@ -1405,6 +1624,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         };
         const auto trim_application_ack_frame =
             [&](const std::optional<AckFrame> &candidate_ack_frame,
+                std::span<const ResetStreamFrame> reset_stream_frames,
+                std::span<const StopSendingFrame> stop_sending_frames,
                 std::span<const StreamFrameSendFragment> stream_fragments,
                 bool include_ping) -> std::optional<AckFrame> {
             if (!candidate_ack_frame.has_value()) {
@@ -1412,7 +1633,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
 
             auto candidate_datagram = serialize_application_candidate(
-                candidate_ack_frame, stream_fragments, include_ping);
+                candidate_ack_frame, reset_stream_frames, stop_sending_frames, stream_fragments,
+                include_ping);
             if (!candidate_datagram.has_value()) {
                 mark_failed();
                 return std::nullopt;
@@ -1433,7 +1655,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 trimmed_ack_frame->additional_ranges.resize(retained_ranges);
 
                 candidate_datagram = CodecResult<std::vector<std::byte>>::success(
-                    serialize_application_candidate(trimmed_ack_frame, stream_fragments,
+                    serialize_application_candidate(trimmed_ack_frame, reset_stream_frames,
+                                                    stop_sending_frames, stream_fragments,
                                                     include_ping)
                         .value());
 
@@ -1455,16 +1678,20 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         if (!has_pending_application_send() &&
             application_space_.pending_probe_packet.has_value()) {
             const auto &probe_packet = *application_space_.pending_probe_packet;
-            const auto include_ping = probe_packet.stream_fragments.empty();
+            const auto include_ping = probe_packet.reset_stream_frames.empty() &&
+                                      probe_packet.stop_sending_frames.empty() &&
+                                      probe_packet.stream_fragments.empty();
             auto ack_frame = trim_application_ack_frame(
-                base_ack_frame, probe_packet.stream_fragments, include_ping);
+                base_ack_frame, probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                probe_packet.stream_fragments, include_ping);
             if (base_ack_frame.has_value() && !ack_frame.has_value()) {
                 mark_failed();
                 return {};
             }
 
             const auto datagram = serialize_application_candidate(
-                ack_frame, probe_packet.stream_fragments, include_ping);
+                ack_frame, probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                probe_packet.stream_fragments, include_ping);
             if (!datagram.has_value() || datagram.value().size() > kMaximumDatagramSize) {
                 mark_failed();
                 return {};
@@ -1473,6 +1700,12 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             std::vector<Frame> frames;
             if (ack_frame.has_value()) {
                 frames.emplace_back(*ack_frame);
+            }
+            for (const auto &frame : probe_packet.reset_stream_frames) {
+                frames.emplace_back(frame);
+            }
+            for (const auto &frame : probe_packet.stop_sending_frames) {
+                frames.emplace_back(frame);
             }
             for (const auto &fragment : probe_packet.stream_fragments) {
                 frames.emplace_back(StreamFrame{
@@ -1504,6 +1737,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     .ack_eliciting = true,
                     .in_flight = true,
                     .declared_lost = false,
+                    .reset_stream_frames = probe_packet.reset_stream_frames,
+                    .stop_sending_frames = probe_packet.stop_sending_frames,
                     .stream_fragments = probe_packet.stream_fragments,
                     .has_ping = include_ping,
                     .bytes_in_flight = stream_fragment_bytes(probe_packet.stream_fragments),
@@ -1522,17 +1757,21 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             while (low <= high) {
                 const auto candidate_length = low + (high - low) / 2;
                 auto candidate_streams = streams_;
+                auto candidate_reset_frames = take_reset_stream_frames(candidate_streams);
+                auto candidate_stop_frames = take_stop_sending_frames(candidate_streams);
                 auto candidate_fragments =
                     take_stream_fragments(candidate_streams, candidate_length);
                 auto fitting_ack_frame = trim_application_ack_frame(
-                    base_ack_frame, candidate_fragments, /*include_ping=*/false);
+                    base_ack_frame, candidate_reset_frames, candidate_stop_frames,
+                    candidate_fragments, /*include_ping=*/false);
                 if (base_ack_frame.has_value() && !fitting_ack_frame.has_value()) {
                     mark_failed();
                     return {};
                 }
 
                 const auto candidate_datagram = serialize_application_candidate(
-                    fitting_ack_frame, candidate_fragments, /*include_ping=*/false);
+                    fitting_ack_frame, candidate_reset_frames, candidate_stop_frames,
+                    candidate_fragments, /*include_ping=*/false);
                 if (!candidate_datagram.has_value()) {
                     mark_failed();
                     return {};
@@ -1554,9 +1793,12 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             if (best_ack_frame.has_value()) {
                 frames.emplace_back(*best_ack_frame);
             }
+            auto reset_stream_frames = take_reset_stream_frames(streams_);
+            auto stop_sending_frames = take_stop_sending_frames(streams_);
             auto stream_fragments = take_stream_fragments(streams_, best_length);
             auto candidate_datagram = serialize_application_candidate(
-                best_ack_frame, stream_fragments, /*include_ping=*/false);
+                best_ack_frame, reset_stream_frames, stop_sending_frames, stream_fragments,
+                /*include_ping=*/false);
             if (!candidate_datagram.has_value()) {
                 mark_failed();
                 return {};
@@ -1575,7 +1817,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 }
                 stream_fragments.pop_back();
                 candidate_datagram = serialize_application_candidate(
-                    best_ack_frame, stream_fragments, /*include_ping=*/false);
+                    best_ack_frame, reset_stream_frames, stop_sending_frames, stream_fragments,
+                    /*include_ping=*/false);
                 if (!candidate_datagram.has_value()) {
                     mark_failed();
                     return {};
@@ -1586,6 +1829,12 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 return {};
             }
 
+            for (const auto &frame : reset_stream_frames) {
+                frames.emplace_back(frame);
+            }
+            for (const auto &frame : stop_sending_frames) {
+                frames.emplace_back(frame);
+            }
             for (const auto &fragment : stream_fragments) {
                 frames.emplace_back(StreamFrame{
                     .fin = fragment.fin,
@@ -1614,9 +1863,13 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                               SentPacketRecord{
                                   .packet_number = packet_number,
                                   .sent_time = now,
-                                  .ack_eliciting = ack_eliciting,
-                                  .in_flight = ack_eliciting,
+                                  .ack_eliciting = ack_eliciting || !reset_stream_frames.empty() ||
+                                                   !stop_sending_frames.empty(),
+                                  .in_flight = ack_eliciting || !reset_stream_frames.empty() ||
+                                               !stop_sending_frames.empty(),
                                   .declared_lost = false,
+                                  .reset_stream_frames = reset_stream_frames,
+                                  .stop_sending_frames = stop_sending_frames,
                                   .stream_fragments = stream_fragments,
                                   .bytes_in_flight = stream_fragment_bytes(stream_fragments),
                               });

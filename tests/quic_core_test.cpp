@@ -295,34 +295,270 @@ TEST(QuicCoreTest, StreamReceiveEffectCarriesFinWhenQueuedAfterOutstandingData) 
               (coquic::quic::test::StreamPayload{0, "", true}));
 }
 
-TEST(QuicCoreTest, ResetStreamReportsUnsupportedOperationWithoutFailingConnection) {
+TEST(QuicCoreTest, ResetStreamLocalCommandEmitsPeerResetEffect) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
 
-    const auto result = client.advance(
+    const auto reset = client.advance(
         coquic::quic::QuicCoreResetStream{
             .stream_id = 0,
             .application_error_code = 7,
         },
-        coquic::quic::test::test_time());
+        coquic::quic::test::test_time(1));
 
-    expect_local_error(result, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation, 0);
-    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(result).empty());
-    EXPECT_FALSE(client.has_failed());
+    EXPECT_FALSE(reset.local_error.has_value());
+    EXPECT_FALSE(coquic::quic::test::send_datagrams_from(reset).empty());
+
+    const auto received = coquic::quic::test::relay_send_datagrams_to_peer(
+        reset, server, coquic::quic::test::test_time(2));
+
+    ASSERT_EQ(coquic::quic::test::peer_resets_from(received).size(), 1u);
+    EXPECT_EQ(coquic::quic::test::peer_resets_from(received)[0].stream_id, 0u);
+    EXPECT_EQ(coquic::quic::test::peer_resets_from(received)[0].application_error_code, 7u);
+    EXPECT_EQ(coquic::quic::test::peer_resets_from(received)[0].final_size, 0u);
+    EXPECT_FALSE(server.has_failed());
 }
 
-TEST(QuicCoreTest, StopSendingReportsUnsupportedOperationWithoutFailingConnection) {
+TEST(QuicCoreTest, ResetStreamLocalCommandRejectsReceiveOnlyStreams) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
 
     const auto result = client.advance(
-        coquic::quic::QuicCoreStopSending{
-            .stream_id = 0,
+        coquic::quic::QuicCoreResetStream{
+            .stream_id = 3,
             .application_error_code = 7,
         },
         coquic::quic::test::test_time());
 
-    expect_local_error(result, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation, 0);
+    expect_local_error(result, coquic::quic::QuicCoreLocalErrorCode::invalid_stream_direction, 3);
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(result).empty());
     EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicCoreTest, StopSendingLocalCommandEmitsPeerStopEffect) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+
+    const auto open = server.advance(
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 3,
+            .bytes = coquic::quic::test::bytes_from_string("hello"),
+            .fin = false,
+        },
+        coquic::quic::test::test_time(1));
+    const auto opened = coquic::quic::test::relay_send_datagrams_to_peer(
+        open, client, coquic::quic::test::test_time(2));
+    ASSERT_EQ(coquic::quic::test::stream_payloads_from(opened).size(), 1u);
+
+    const auto stop = client.advance(
+        coquic::quic::QuicCoreStopSending{
+            .stream_id = 3,
+            .application_error_code = 11,
+        },
+        coquic::quic::test::test_time(3));
+
+    EXPECT_FALSE(stop.local_error.has_value());
+    EXPECT_FALSE(coquic::quic::test::send_datagrams_from(stop).empty());
+
+    const auto received = coquic::quic::test::relay_send_datagrams_to_peer(
+        stop, server, coquic::quic::test::test_time(4));
+
+    ASSERT_EQ(coquic::quic::test::peer_stops_from(received).size(), 1u);
+    EXPECT_EQ(coquic::quic::test::peer_stops_from(received)[0].stream_id, 3u);
+    EXPECT_EQ(coquic::quic::test::peer_stops_from(received)[0].application_error_code, 11u);
+    EXPECT_FALSE(server.has_failed());
+}
+
+TEST(QuicCoreTest, StopSendingLocalCommandRejectsSendOnlyStreams) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+
+    const auto result = client.advance(
+        coquic::quic::QuicCoreStopSending{
+            .stream_id = 2,
+            .application_error_code = 7,
+        },
+        coquic::quic::test::test_time());
+
+    expect_local_error(result, coquic::quic::QuicCoreLocalErrorCode::invalid_stream_direction, 2);
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(result).empty());
+    EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicCoreTest, PeerStopSendingQueuesAutomaticReset) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+
+    const auto sent = client.advance(
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 0,
+            .bytes = coquic::quic::test::bytes_from_string("abc"),
+            .fin = false,
+        },
+        coquic::quic::test::test_time(1));
+    const auto delivered = coquic::quic::test::relay_send_datagrams_to_peer(
+        sent, server, coquic::quic::test::test_time(2));
+    ASSERT_EQ(coquic::quic::test::stream_payloads_from(delivered).size(), 1u);
+
+    const auto stop = server.advance(
+        coquic::quic::QuicCoreStopSending{
+            .stream_id = 0,
+            .application_error_code = 19,
+        },
+        coquic::quic::test::test_time(3));
+    const auto client_result = coquic::quic::test::relay_send_datagrams_to_peer(
+        stop, client, coquic::quic::test::test_time(4));
+
+    ASSERT_EQ(coquic::quic::test::peer_stops_from(client_result).size(), 1u);
+    EXPECT_EQ(coquic::quic::test::peer_stops_from(client_result)[0].stream_id, 0u);
+    EXPECT_EQ(coquic::quic::test::peer_stops_from(client_result)[0].application_error_code, 19u);
+    EXPECT_FALSE(coquic::quic::test::send_datagrams_from(client_result).empty());
+
+    const auto server_result = coquic::quic::test::relay_send_datagrams_to_peer(
+        client_result, server, coquic::quic::test::test_time(5));
+    ASSERT_EQ(coquic::quic::test::peer_resets_from(server_result).size(), 1u);
+    EXPECT_EQ(coquic::quic::test::peer_resets_from(server_result)[0].stream_id, 0u);
+    EXPECT_EQ(coquic::quic::test::peer_resets_from(server_result)[0].application_error_code, 19u);
+    EXPECT_EQ(coquic::quic::test::peer_resets_from(server_result)[0].final_size, 3u);
+}
+
+TEST(QuicCoreTest, InboundResetStreamFailsForSendOnlyStream) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        connection, coquic::quic::HandshakeStatus::connected);
+
+    const auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::ResetStreamFrame{
+                        .stream_id = 2,
+                        .application_protocol_error_code = 7,
+                        .final_size = 0,
+                    }});
+
+    EXPECT_FALSE(injected);
+    EXPECT_TRUE(connection.has_failed());
+}
+
+TEST(QuicCoreTest, InboundStreamDataIsIgnoredAfterPeerResetStream) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        connection, coquic::quic::HandshakeStatus::connected);
+
+    const auto out_of_order =
+        coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+            connection,
+            {coquic::quic::test::make_inbound_application_stream_frame("lo", 3, 0, false)});
+    EXPECT_TRUE(out_of_order);
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+
+    const auto reset = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::ResetStreamFrame{
+                        .stream_id = 0,
+                        .application_protocol_error_code = 7,
+                        .final_size = 5,
+                    }});
+    EXPECT_TRUE(reset);
+    EXPECT_FALSE(connection.has_failed());
+
+    const auto peer_reset = connection.take_peer_reset_stream();
+    ASSERT_TRUE(peer_reset.has_value());
+    if (!peer_reset.has_value()) {
+        return;
+    }
+    EXPECT_EQ(peer_reset.value().stream_id, 0u);
+    EXPECT_EQ(peer_reset.value().final_size, 5u);
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+
+    const auto delayed = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection,
+        {coquic::quic::test::make_inbound_application_stream_frame("hel", 0, 0, false)});
+    EXPECT_TRUE(delayed);
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+}
+
+TEST(QuicCoreTest, InboundStopSendingFailsForReceiveOnlyStream) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        connection, coquic::quic::HandshakeStatus::connected);
+
+    const auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::StopSendingFrame{
+                        .stream_id = 3,
+                        .application_protocol_error_code = 9,
+                    }});
+
+    EXPECT_FALSE(injected);
+    EXPECT_TRUE(connection.has_failed());
+}
+
+TEST(QuicCoreTest, LostResetStreamIsReEmitted) {
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(connection
+                    .queue_stream_reset({
+                        .stream_id = 0,
+                        .application_error_code = 7,
+                    })
+                    .has_value());
+
+    const auto first_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_datagram.empty());
+    ASSERT_EQ(connection.application_space_.sent_packets.size(), 1u);
+    const auto first_packet = connection.application_space_.sent_packets.begin()->second;
+    ASSERT_EQ(first_packet.reset_stream_frames.size(), 1u);
+
+    connection.mark_lost_packet(connection.application_space_, first_packet);
+
+    const auto second_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(second_datagram.empty());
+    const auto packets = decode_sender_datagram(connection, second_datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
+    ASSERT_NE(application, nullptr);
+
+    bool saw_reset = false;
+    for (const auto &frame : application->frames) {
+        saw_reset = saw_reset || std::holds_alternative<coquic::quic::ResetStreamFrame>(frame);
+    }
+    EXPECT_TRUE(saw_reset);
+}
+
+TEST(QuicCoreTest, LostStopSendingIsReEmitted) {
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::test::make_inbound_application_stream_frame("a", 0, 3)}));
+    ASSERT_TRUE(connection
+                    .queue_stop_sending({
+                        .stream_id = 3,
+                        .application_error_code = 11,
+                    })
+                    .has_value());
+
+    const auto first_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_datagram.empty());
+    ASSERT_EQ(connection.application_space_.sent_packets.size(), 1u);
+    const auto first_packet = connection.application_space_.sent_packets.begin()->second;
+    ASSERT_EQ(first_packet.stop_sending_frames.size(), 1u);
+
+    connection.mark_lost_packet(connection.application_space_, first_packet);
+
+    const auto second_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(second_datagram.empty());
+    const auto packets = decode_sender_datagram(connection, second_datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
+    ASSERT_NE(application, nullptr);
+
+    bool saw_stop = false;
+    for (const auto &frame : application->frames) {
+        saw_stop = saw_stop || std::holds_alternative<coquic::quic::StopSendingFrame>(frame);
+    }
+    EXPECT_TRUE(saw_stop);
 }
 
 TEST(QuicCoreTest, MoveConstructionPreservesStartBehavior) {

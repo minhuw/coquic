@@ -165,6 +165,15 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
             .bytes = {std::byte{0xcc}},
             .fin = false,
         }},
+        .reset_stream_frames = {coquic::quic::ResetStreamFrame{
+            .stream_id = 8,
+            .application_protocol_error_code = 9,
+            .final_size = 10,
+        }},
+        .stop_sending_frames = {coquic::quic::StopSendingFrame{
+            .stream_id = 12,
+            .application_protocol_error_code = 13,
+        }},
         .has_ping = true,
     });
     recovery.on_packet_sent(SentPacketRecord{
@@ -181,6 +190,15 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
             .offset = 41,
             .bytes = {std::byte{0xee}, std::byte{0xff}},
             .fin = true,
+        }},
+        .reset_stream_frames = {coquic::quic::ResetStreamFrame{
+            .stream_id = 14,
+            .application_protocol_error_code = 15,
+            .final_size = 16,
+        }},
+        .stop_sending_frames = {coquic::quic::StopSendingFrame{
+            .stream_id = 18,
+            .application_protocol_error_code = 19,
         }},
     });
 
@@ -199,6 +217,13 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
     EXPECT_EQ(acked_packet.stream_fragments[0].stream_id, 4u);
     EXPECT_EQ(acked_packet.stream_fragments[0].offset, 41u);
     EXPECT_TRUE(acked_packet.stream_fragments[0].fin);
+    ASSERT_EQ(acked_packet.reset_stream_frames.size(), 1u);
+    EXPECT_EQ(acked_packet.reset_stream_frames[0].stream_id, 14u);
+    EXPECT_EQ(acked_packet.reset_stream_frames[0].application_protocol_error_code, 15u);
+    EXPECT_EQ(acked_packet.reset_stream_frames[0].final_size, 16u);
+    ASSERT_EQ(acked_packet.stop_sending_frames.size(), 1u);
+    EXPECT_EQ(acked_packet.stop_sending_frames[0].stream_id, 18u);
+    EXPECT_EQ(acked_packet.stop_sending_frames[0].application_protocol_error_code, 19u);
     EXPECT_FALSE(acked_packet.has_ping);
 
     const auto &lost_packet = result.lost_packets.front();
@@ -208,6 +233,13 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
     EXPECT_EQ(lost_packet.stream_fragments[0].stream_id, 0u);
     EXPECT_EQ(lost_packet.stream_fragments[0].offset, 21u);
     EXPECT_FALSE(lost_packet.stream_fragments[0].fin);
+    ASSERT_EQ(lost_packet.reset_stream_frames.size(), 1u);
+    EXPECT_EQ(lost_packet.reset_stream_frames[0].stream_id, 8u);
+    EXPECT_EQ(lost_packet.reset_stream_frames[0].application_protocol_error_code, 9u);
+    EXPECT_EQ(lost_packet.reset_stream_frames[0].final_size, 10u);
+    ASSERT_EQ(lost_packet.stop_sending_frames.size(), 1u);
+    EXPECT_EQ(lost_packet.stop_sending_frames[0].stream_id, 12u);
+    EXPECT_EQ(lost_packet.stop_sending_frames[0].application_protocol_error_code, 13u);
     EXPECT_TRUE(lost_packet.has_ping);
 }
 

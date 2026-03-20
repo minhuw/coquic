@@ -15,13 +15,6 @@ template <typename... Ts> struct overloaded : Ts... {
 
 template <typename... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 
-QuicCoreLocalError unsupported_operation_error(std::uint64_t stream_id) {
-    return QuicCoreLocalError{
-        .code = QuicCoreLocalErrorCode::unsupported_operation,
-        .stream_id = stream_id,
-    };
-}
-
 QuicCoreLocalError stream_state_error_to_local_error(const StreamStateError &error) {
     auto code = QuicCoreLocalErrorCode::invalid_stream_id;
     switch (error.code) {
@@ -75,10 +68,22 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                        }
                    },
                    [&](const QuicCoreResetStream &in) {
-                       result.local_error = unsupported_operation_error(in.stream_id);
+                       const auto queued = connection_->queue_stream_reset(LocalResetCommand{
+                           .stream_id = in.stream_id,
+                           .application_error_code = in.application_error_code,
+                       });
+                       if (!queued.has_value()) {
+                           result.local_error = stream_state_error_to_local_error(queued.error());
+                       }
                    },
                    [&](const QuicCoreStopSending &in) {
-                       result.local_error = unsupported_operation_error(in.stream_id);
+                       const auto queued = connection_->queue_stop_sending(LocalStopSendingCommand{
+                           .stream_id = in.stream_id,
+                           .application_error_code = in.application_error_code,
+                       });
+                       if (!queued.has_value()) {
+                           result.local_error = stream_state_error_to_local_error(queued.error());
+                       }
                    },
                    [&](const QuicCoreTimerExpired &) { connection_->on_timeout(now); },
                },
@@ -93,6 +98,12 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     }
     while (const auto received = connection_->take_received_stream_data()) {
         result.effects.emplace_back(*received);
+    }
+    while (const auto reset = connection_->take_peer_reset_stream()) {
+        result.effects.emplace_back(*reset);
+    }
+    while (const auto stop = connection_->take_peer_stop_sending()) {
+        result.effects.emplace_back(*stop);
     }
     while (const auto event = connection_->take_state_change()) {
         result.effects.emplace_back(QuicCoreStateEvent{*event});

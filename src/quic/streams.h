@@ -108,6 +108,13 @@ enum class StreamSendFinState : std::uint8_t {
     acknowledged,
 };
 
+enum class StreamControlFrameState : std::uint8_t {
+    none,
+    pending,
+    sent,
+    acknowledged,
+};
+
 struct StreamState {
     std::uint64_t stream_id = 0;
     StreamIdInfo id_info;
@@ -120,6 +127,11 @@ struct StreamState {
     std::optional<std::uint64_t> peer_final_size;
     std::optional<std::uint64_t> send_final_size;
     StreamSendFinState send_fin_state = StreamSendFinState::none;
+    std::optional<ResetStreamFrame> pending_reset_frame;
+    StreamControlFrameState reset_state = StreamControlFrameState::none;
+    std::optional<StopSendingFrame> pending_stop_sending_frame;
+    StreamControlFrameState stop_sending_state = StreamControlFrameState::none;
+    bool peer_reset_received = false;
     std::uint64_t send_flow_control_limit = 0;
     std::uint64_t send_flow_control_committed = 0;
     std::uint64_t receive_flow_control_limit = 0;
@@ -127,12 +139,22 @@ struct StreamState {
     std::uint64_t highest_received_offset = 0;
 
     StreamStateResult<bool> validate_local_send(bool fin);
+    StreamStateResult<bool> validate_local_reset(std::uint64_t application_error_code);
+    StreamStateResult<bool> validate_local_stop_sending(std::uint64_t application_error_code);
     StreamStateResult<bool> validate_receive_range(std::uint64_t offset, std::size_t length,
                                                    bool fin);
     StreamStateResult<bool> note_peer_final_size(std::uint64_t final_size);
+    StreamStateResult<bool> note_peer_reset(const ResetStreamFrame &frame);
+    StreamStateResult<bool> note_peer_stop_sending(std::uint64_t application_error_code);
     bool has_pending_send() const;
     bool has_outstanding_send() const;
+    std::optional<ResetStreamFrame> take_reset_frame();
+    std::optional<StopSendingFrame> take_stop_sending_frame();
     std::vector<StreamFrameSendFragment> take_send_fragments(std::size_t max_bytes);
+    void acknowledge_reset_frame(const ResetStreamFrame &frame);
+    void mark_reset_frame_lost(const ResetStreamFrame &frame);
+    void acknowledge_stop_sending_frame(const StopSendingFrame &frame);
+    void mark_stop_sending_frame_lost(const StopSendingFrame &frame);
     void acknowledge_send_fragment(const StreamFrameSendFragment &fragment);
     void mark_send_fragment_lost(const StreamFrameSendFragment &fragment);
 };

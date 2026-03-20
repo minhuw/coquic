@@ -25,6 +25,8 @@ struct SentPacketRecord {
     bool in_flight = false;
     bool declared_lost = false;
     std::vector<ByteRange> crypto_ranges;
+    std::vector<ResetStreamFrame> reset_stream_frames;
+    std::vector<StopSendingFrame> stop_sending_frames;
     std::vector<StreamFrameSendFragment> stream_fragments;
     bool has_ping = false;
     std::size_t bytes_in_flight = 0;

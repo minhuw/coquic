@@ -167,4 +167,103 @@ TEST(QuicStreamsTest, TakeSendFragmentsSupportsFinOnlySend) {
     EXPECT_TRUE(fragments[0].fin);
 }
 
+TEST(QuicStreamsTest, LocalResetQueuesFinalSizeAndStopsRetransmittingStreamData) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    state.send_buffer.append(bytes_from_string("hello"));
+    state.send_flow_control_committed = 5;
+
+    ASSERT_TRUE(state.validate_local_reset(/*application_error_code=*/9).has_value());
+    ASSERT_TRUE(state.has_pending_send());
+
+    const auto reset = state.take_reset_frame();
+    ASSERT_TRUE(reset.has_value());
+    if (!reset.has_value()) {
+        GTEST_FAIL() << "expected pending reset frame";
+        return;
+    }
+    const auto reset_frame = reset.value();
+    EXPECT_EQ(reset_frame.stream_id, 0u);
+    EXPECT_EQ(reset_frame.application_protocol_error_code, 9u);
+    EXPECT_EQ(reset_frame.final_size, 5u);
+    EXPECT_TRUE(state.take_send_fragments(/*max_bytes=*/16).empty());
+
+    state.mark_send_fragment_lost(coquic::quic::StreamFrameSendFragment{
+        .stream_id = 0,
+        .offset = 0,
+        .bytes = bytes_from_string("hello"),
+        .fin = false,
+    });
+    EXPECT_FALSE(state.has_pending_send());
+
+    state.mark_reset_frame_lost(reset_frame);
+    EXPECT_TRUE(state.has_pending_send());
+    ASSERT_TRUE(state.take_reset_frame().has_value());
+}
+
+TEST(QuicStreamsTest, LocalStopQueuesControlFrameAndRejectsSendOnlyStreams) {
+    StreamState receive_only = make_implicit_stream_state(/*stream_id=*/3, EndpointRole::client);
+    ASSERT_TRUE(receive_only.validate_local_stop_sending(/*application_error_code=*/7).has_value());
+
+    const auto stop = receive_only.take_stop_sending_frame();
+    ASSERT_TRUE(stop.has_value());
+    if (!stop.has_value()) {
+        GTEST_FAIL() << "expected pending stop_sending frame";
+        return;
+    }
+    const auto stop_frame = stop.value();
+    EXPECT_EQ(stop_frame.stream_id, 3u);
+    EXPECT_EQ(stop_frame.application_protocol_error_code, 7u);
+
+    StreamState send_only = make_implicit_stream_state(/*stream_id=*/2, EndpointRole::client);
+    const auto invalid = send_only.validate_local_stop_sending(/*application_error_code=*/7);
+    ASSERT_FALSE(invalid.has_value());
+    EXPECT_EQ(invalid.error().code, StreamStateErrorCode::invalid_stream_direction);
+}
+
+TEST(QuicStreamsTest, PeerResetRecordsFinalSizeAndRejectsSendOnlyStreams) {
+    StreamState bidirectional = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    ASSERT_TRUE(bidirectional
+                    .note_peer_reset(coquic::quic::ResetStreamFrame{
+                        .stream_id = 0,
+                        .application_protocol_error_code = 11,
+                        .final_size = 5,
+                    })
+                    .has_value());
+    EXPECT_TRUE(bidirectional.peer_send_closed);
+    EXPECT_EQ(bidirectional.peer_final_size, 5u);
+
+    StreamState send_only = make_implicit_stream_state(/*stream_id=*/2, EndpointRole::client);
+    const auto invalid = send_only.note_peer_reset(coquic::quic::ResetStreamFrame{
+        .stream_id = 2,
+        .application_protocol_error_code = 11,
+        .final_size = 0,
+    });
+    ASSERT_FALSE(invalid.has_value());
+    EXPECT_EQ(invalid.error().code, StreamStateErrorCode::invalid_stream_direction);
+}
+
+TEST(QuicStreamsTest, PeerStopQueuesAutomaticResetForActiveSendSide) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    state.send_buffer.append(bytes_from_string("abc"));
+    state.send_flow_control_committed = 3;
+
+    ASSERT_TRUE(state.note_peer_stop_sending(/*application_error_code=*/13).has_value());
+
+    const auto reset = state.take_reset_frame();
+    ASSERT_TRUE(reset.has_value());
+    if (!reset.has_value()) {
+        GTEST_FAIL() << "expected pending reset frame";
+        return;
+    }
+    const auto reset_frame = reset.value();
+    EXPECT_EQ(reset_frame.stream_id, 0u);
+    EXPECT_EQ(reset_frame.application_protocol_error_code, 13u);
+    EXPECT_EQ(reset_frame.final_size, 3u);
+
+    StreamState receive_only = make_implicit_stream_state(/*stream_id=*/3, EndpointRole::client);
+    const auto invalid = receive_only.note_peer_stop_sending(/*application_error_code=*/13);
+    ASSERT_FALSE(invalid.has_value());
+    EXPECT_EQ(invalid.error().code, StreamStateErrorCode::invalid_stream_direction);
+}
+
 } // namespace

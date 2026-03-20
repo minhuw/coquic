@@ -56,7 +56,14 @@ bool is_ack_eliciting_frame(const Frame &frame) {
     return std::holds_alternative<CryptoFrame>(frame) ||
            std::holds_alternative<ResetStreamFrame>(frame) ||
            std::holds_alternative<StopSendingFrame>(frame) ||
-           std::holds_alternative<StreamFrame>(frame) || std::holds_alternative<PingFrame>(frame);
+           std::holds_alternative<StreamFrame>(frame) ||
+           std::holds_alternative<MaxDataFrame>(frame) ||
+           std::holds_alternative<MaxStreamDataFrame>(frame) ||
+           std::holds_alternative<MaxStreamsFrame>(frame) ||
+           std::holds_alternative<DataBlockedFrame>(frame) ||
+           std::holds_alternative<StreamDataBlockedFrame>(frame) ||
+           std::holds_alternative<StreamsBlockedFrame>(frame) ||
+           std::holds_alternative<PingFrame>(frame);
 }
 
 bool has_ack_eliciting_frame(std::span<const Frame> frames) {
@@ -130,9 +137,140 @@ CodecResult<std::vector<std::byte>> serialize_locally_validated_transport_parame
     return serialize_transport_parameters(parameters);
 }
 
+bool max_data_frame_matches(const std::optional<MaxDataFrame> &candidate,
+                            const MaxDataFrame &frame) {
+    return candidate.has_value() && candidate->maximum_data == frame.maximum_data;
+}
+
+bool data_blocked_frame_matches(const std::optional<DataBlockedFrame> &candidate,
+                                const DataBlockedFrame &frame) {
+    return candidate.has_value() && candidate->maximum_data == frame.maximum_data;
+}
+
+bool should_refresh_receive_window(std::uint64_t delivered_bytes, std::uint64_t advertised_limit,
+                                   std::uint64_t window, bool force) {
+    if (window == 0 || advertised_limit < delivered_bytes) {
+        return false;
+    }
+
+    if (force) {
+        return true;
+    }
+
+    const auto remaining = advertised_limit - delivered_bytes;
+    if (window <= 1) {
+        return remaining == 0;
+    }
+
+    return remaining < (window / 2);
+}
+
 } // namespace
 
+std::uint64_t ConnectionFlowControlState::sendable_bytes(std::uint64_t queued_bytes) const {
+    const auto remaining_credit = peer_max_data > highest_sent ? peer_max_data - highest_sent : 0;
+    const auto unsent_bytes = queued_bytes > highest_sent ? queued_bytes - highest_sent : 0;
+    return std::min(remaining_credit, unsent_bytes);
+}
+
+bool ConnectionFlowControlState::should_send_data_blocked(std::uint64_t queued_bytes) const {
+    return queued_bytes > peer_max_data;
+}
+
+void ConnectionFlowControlState::note_peer_max_data(std::uint64_t maximum_data) {
+    if (maximum_data <= peer_max_data) {
+        return;
+    }
+
+    peer_max_data = maximum_data;
+}
+
+void ConnectionFlowControlState::queue_max_data(std::uint64_t maximum_data) {
+    if (maximum_data <= advertised_max_data) {
+        return;
+    }
+
+    advertised_max_data = maximum_data;
+    pending_max_data_frame = MaxDataFrame{
+        .maximum_data = maximum_data,
+    };
+    max_data_state = StreamControlFrameState::pending;
+}
+
+std::optional<MaxDataFrame> ConnectionFlowControlState::take_max_data_frame() {
+    if (max_data_state != StreamControlFrameState::pending || !pending_max_data_frame.has_value()) {
+        return std::nullopt;
+    }
+
+    max_data_state = StreamControlFrameState::sent;
+    return pending_max_data_frame;
+}
+
+void ConnectionFlowControlState::acknowledge_max_data_frame(const MaxDataFrame &frame) {
+    if (max_data_frame_matches(pending_max_data_frame, frame)) {
+        max_data_state = StreamControlFrameState::acknowledged;
+    }
+}
+
+void ConnectionFlowControlState::mark_max_data_frame_lost(const MaxDataFrame &frame) {
+    if (max_data_state != StreamControlFrameState::acknowledged &&
+        max_data_frame_matches(pending_max_data_frame, frame)) {
+        max_data_state = StreamControlFrameState::pending;
+    }
+}
+
+void ConnectionFlowControlState::queue_data_blocked(std::uint64_t maximum_data) {
+    if (pending_data_blocked_frame.has_value() &&
+        pending_data_blocked_frame->maximum_data == maximum_data &&
+        data_blocked_state != StreamControlFrameState::none) {
+        return;
+    }
+
+    pending_data_blocked_frame = DataBlockedFrame{
+        .maximum_data = maximum_data,
+    };
+    data_blocked_state = StreamControlFrameState::pending;
+}
+
+std::optional<DataBlockedFrame> ConnectionFlowControlState::take_data_blocked_frame() {
+    if (data_blocked_state != StreamControlFrameState::pending ||
+        !pending_data_blocked_frame.has_value()) {
+        return std::nullopt;
+    }
+
+    data_blocked_state = StreamControlFrameState::sent;
+    return pending_data_blocked_frame;
+}
+
+void ConnectionFlowControlState::acknowledge_data_blocked_frame(const DataBlockedFrame &frame) {
+    if (data_blocked_frame_matches(pending_data_blocked_frame, frame)) {
+        data_blocked_state = StreamControlFrameState::acknowledged;
+    }
+}
+
+void ConnectionFlowControlState::mark_data_blocked_frame_lost(const DataBlockedFrame &frame) {
+    if (data_blocked_state != StreamControlFrameState::acknowledged &&
+        data_blocked_frame_matches(pending_data_blocked_frame, frame)) {
+        data_blocked_state = StreamControlFrameState::pending;
+    }
+}
+
 QuicConnection::QuicConnection(QuicCoreConfig config) : config_(std::move(config)) {
+    local_transport_parameters_ = TransportParameters{
+        .max_udp_payload_size = config_.transport.max_udp_payload_size,
+        .active_connection_id_limit = 2,
+        .ack_delay_exponent = config_.transport.ack_delay_exponent,
+        .max_ack_delay = config_.transport.max_ack_delay,
+        .initial_max_data = config_.transport.initial_max_data,
+        .initial_max_stream_data_bidi_local = config_.transport.initial_max_stream_data_bidi_local,
+        .initial_max_stream_data_bidi_remote =
+            config_.transport.initial_max_stream_data_bidi_remote,
+        .initial_max_stream_data_uni = config_.transport.initial_max_stream_data_uni,
+        .initial_max_streams_bidi = config_.transport.initial_max_streams_bidi,
+        .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
+        .initial_source_connection_id = config_.source_connection_id,
+    };
+    initialize_local_flow_control();
 }
 
 void QuicConnection::start() {
@@ -216,10 +354,13 @@ StreamStateResult<bool> QuicConnection::queue_stream_send(std::uint64_t stream_i
         return StreamStateResult<bool>::success(true);
     }
 
-    auto stream_state = get_or_open_local_stream(stream_id);
+    auto stream_state = get_or_open_send_stream(stream_id);
     if (!stream_state.has_value()) {
-        return StreamStateResult<bool>::failure(stream_state.error().code,
-                                                stream_state.error().stream_id);
+        const auto id_info = classify_stream_id(stream_id, config_.role);
+        return StreamStateResult<bool>::failure(
+            id_info.local_can_send ? StreamStateErrorCode::invalid_stream_id
+                                   : StreamStateErrorCode::invalid_stream_direction,
+            stream_id);
     }
 
     auto *stream = stream_state.value();
@@ -245,10 +386,13 @@ StreamStateResult<bool> QuicConnection::queue_stream_reset(LocalResetCommand com
         return StreamStateResult<bool>::success(true);
     }
 
-    auto stream_state = get_or_open_local_stream(command.stream_id);
+    auto stream_state = get_or_open_send_stream(command.stream_id);
     if (!stream_state.has_value()) {
-        return StreamStateResult<bool>::failure(stream_state.error().code,
-                                                stream_state.error().stream_id);
+        const auto id_info = classify_stream_id(command.stream_id, config_.role);
+        return StreamStateResult<bool>::failure(
+            id_info.local_can_send ? StreamStateErrorCode::invalid_stream_id
+                                   : StreamStateErrorCode::invalid_stream_direction,
+            command.stream_id);
     }
 
     auto *stream = stream_state.value();
@@ -517,7 +661,9 @@ QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
             continue;
         }
         if (!packet.crypto_ranges.empty() || !packet.reset_stream_frames.empty() ||
-            !packet.stop_sending_frames.empty() || !packet.stream_fragments.empty() ||
+            !packet.stop_sending_frames.empty() || packet.max_data_frame.has_value() ||
+            !packet.max_stream_data_frames.empty() || packet.data_blocked_frame.has_value() ||
+            !packet.stream_data_blocked_frames.empty() || !packet.stream_fragments.empty() ||
             packet.has_ping) {
             return packet;
         }
@@ -559,6 +705,7 @@ void QuicConnection::start_client_if_needed() {
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
     };
+    initialize_local_flow_control();
 
     const auto serialized_transport_parameters = serialize_locally_validated_transport_parameters(
         config_.role, local_transport_parameters_,
@@ -611,6 +758,7 @@ void QuicConnection::start_server_if_needed(
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
     };
+    initialize_local_flow_control();
 
     const auto serialized_transport_parameters = serialize_locally_validated_transport_parameters(
         config_.role, local_transport_parameters_,
@@ -914,6 +1062,28 @@ void QuicConnection::retire_acked_packet(PacketSpaceState &packet_space,
     for (const auto &range : packet.crypto_ranges) {
         packet_space.send_crypto.acknowledge(range.offset, range.bytes.size());
     }
+    if (packet.max_data_frame.has_value()) {
+        connection_flow_control_.acknowledge_max_data_frame(*packet.max_data_frame);
+    }
+    if (packet.data_blocked_frame.has_value()) {
+        connection_flow_control_.acknowledge_data_blocked_frame(*packet.data_blocked_frame);
+    }
+    for (const auto &frame : packet.max_stream_data_frames) {
+        const auto stream = streams_.find(frame.stream_id);
+        if (stream == streams_.end()) {
+            continue;
+        }
+
+        stream->second.acknowledge_max_stream_data_frame(frame);
+    }
+    for (const auto &frame : packet.stream_data_blocked_frames) {
+        const auto stream = streams_.find(frame.stream_id);
+        if (stream == streams_.end()) {
+            continue;
+        }
+
+        stream->second.acknowledge_stream_data_blocked_frame(frame);
+    }
     for (const auto &fragment : packet.stream_fragments) {
         const auto stream = streams_.find(fragment.stream_id);
         if (stream == streams_.end()) {
@@ -946,6 +1116,28 @@ void QuicConnection::mark_lost_packet(PacketSpaceState &packet_space,
                                       const SentPacketRecord &packet) {
     for (const auto &range : packet.crypto_ranges) {
         packet_space.send_crypto.mark_lost(range.offset, range.bytes.size());
+    }
+    if (packet.max_data_frame.has_value()) {
+        connection_flow_control_.mark_max_data_frame_lost(*packet.max_data_frame);
+    }
+    if (packet.data_blocked_frame.has_value()) {
+        connection_flow_control_.mark_data_blocked_frame_lost(*packet.data_blocked_frame);
+    }
+    for (const auto &frame : packet.max_stream_data_frames) {
+        const auto stream = streams_.find(frame.stream_id);
+        if (stream == streams_.end()) {
+            continue;
+        }
+
+        stream->second.mark_max_stream_data_frame_lost(frame);
+    }
+    for (const auto &frame : packet.stream_data_blocked_frames) {
+        const auto stream = streams_.find(frame.stream_id);
+        if (stream == streams_.end()) {
+            continue;
+        }
+
+        stream->second.mark_stream_data_blocked_frame_lost(frame);
     }
     for (const auto &fragment : packet.stream_fragments) {
         const auto stream = streams_.find(fragment.stream_id);
@@ -1035,11 +1227,21 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
                 continue;
             }
 
+            const auto previous_highest_offset = stream_state->highest_received_offset;
             const auto validated = stream_state->validate_receive_range(
                 stream_frame->offset.value(), stream_frame->stream_data.size(), stream_frame->fin);
             if (!validated.has_value()) {
                 return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
             }
+            const auto received_delta =
+                stream_state->highest_received_offset - previous_highest_offset;
+            if (connection_flow_control_.received_committed >
+                    connection_flow_control_.advertised_max_data ||
+                received_delta > connection_flow_control_.advertised_max_data -
+                                     connection_flow_control_.received_committed) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+            connection_flow_control_.received_committed += received_delta;
 
             const auto contiguous_bytes = stream_state->receive_buffer.push(
                 stream_frame->offset.value(), stream_frame->stream_data);
@@ -1060,9 +1262,15 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
                     .bytes = contiguous_bytes.value(),
                     .fin = fin_ready,
                 });
+                stream_state->flow_control.delivered_bytes +=
+                    static_cast<std::uint64_t>(contiguous_bytes.value().size());
+                connection_flow_control_.delivered_bytes +=
+                    static_cast<std::uint64_t>(contiguous_bytes.value().size());
                 if (fin_ready) {
                     stream_state->peer_fin_delivered = true;
                 }
+                maybe_refresh_stream_receive_credit(*stream_state, /*force=*/false);
+                maybe_refresh_connection_receive_credit(/*force=*/false);
             }
             continue;
         }
@@ -1110,6 +1318,78 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
                 .stream_id = stop_sending->stream_id,
                 .application_error_code = stop_sending->application_protocol_error_code,
             });
+            continue;
+        }
+
+        if (const auto *max_data = std::get_if<MaxDataFrame>(&frame)) {
+            if (status_ != HandshakeStatus::connected) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            connection_flow_control_.note_peer_max_data(max_data->maximum_data);
+            if (total_queued_stream_bytes() <= connection_flow_control_.peer_max_data) {
+                connection_flow_control_.pending_data_blocked_frame = std::nullopt;
+                connection_flow_control_.data_blocked_state = StreamControlFrameState::none;
+            }
+            continue;
+        }
+
+        if (const auto *max_stream_data = std::get_if<MaxStreamDataFrame>(&frame)) {
+            if (status_ != HandshakeStatus::connected) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            auto stream = get_or_open_send_stream(max_stream_data->stream_id);
+            if (!stream.has_value()) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+            stream.value()->note_peer_max_stream_data(max_stream_data->maximum_stream_data);
+            continue;
+        }
+
+        if (const auto *max_streams = std::get_if<MaxStreamsFrame>(&frame)) {
+            if (status_ != HandshakeStatus::connected) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            stream_open_limits_.note_peer_max_streams(max_streams->stream_type,
+                                                      max_streams->maximum_streams);
+            continue;
+        }
+
+        if (const auto *data_blocked = std::get_if<DataBlockedFrame>(&frame)) {
+            if (status_ != HandshakeStatus::connected) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            if (data_blocked->maximum_data >= connection_flow_control_.advertised_max_data) {
+                maybe_refresh_connection_receive_credit(/*force=*/true);
+            }
+            continue;
+        }
+
+        if (const auto *stream_data_blocked = std::get_if<StreamDataBlockedFrame>(&frame)) {
+            if (status_ != HandshakeStatus::connected) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            auto stream = get_or_open_receive_stream(stream_data_blocked->stream_id);
+            if (!stream.has_value()) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            auto *stream_state = stream.value();
+            if (stream_data_blocked->maximum_stream_data >=
+                stream_state->flow_control.advertised_max_stream_data) {
+                maybe_refresh_stream_receive_credit(*stream_state, /*force=*/true);
+            }
+            continue;
+        }
+
+        if (std::holds_alternative<StreamsBlockedFrame>(frame)) {
+            if (status_ != HandshakeStatus::connected) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
             continue;
         }
 
@@ -1193,6 +1473,7 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
     }
 
     peer_transport_parameters_validated_ = true;
+    initialize_peer_flow_control_from_transport_parameters();
     return CodecResult<bool>::success(true);
 }
 
@@ -1270,15 +1551,75 @@ QuicConnection::peer_transport_parameters_validation_context() const {
     };
 }
 
+void QuicConnection::initialize_local_flow_control() {
+    connection_flow_control_ = ConnectionFlowControlState{
+        .local_receive_window = local_transport_parameters_.initial_max_data,
+        .advertised_max_data = local_transport_parameters_.initial_max_data,
+    };
+}
+
+void QuicConnection::initialize_peer_flow_control_from_transport_parameters() {
+    if (!peer_transport_parameters_.has_value()) {
+        return;
+    }
+
+    connection_flow_control_.note_peer_max_data(peer_transport_parameters_->initial_max_data);
+    stream_open_limits_.note_peer_max_streams(StreamLimitType::bidirectional,
+                                              peer_transport_parameters_->initial_max_streams_bidi);
+    stream_open_limits_.note_peer_max_streams(StreamLimitType::unidirectional,
+                                              peer_transport_parameters_->initial_max_streams_uni);
+
+    for (auto &[stream_id, stream] : streams_) {
+        static_cast<void>(stream_id);
+        initialize_stream_flow_control(stream);
+    }
+}
+
+std::uint64_t QuicConnection::initial_stream_send_limit(std::uint64_t stream_id) const {
+    if (!peer_transport_parameters_.has_value()) {
+        return 0;
+    }
+
+    const auto id_info = classify_stream_id(stream_id, config_.role);
+    if (!id_info.local_can_send) {
+        return 0;
+    }
+    if (id_info.direction == StreamDirection::unidirectional) {
+        return peer_transport_parameters_->initial_max_stream_data_uni;
+    }
+    if (id_info.initiator == StreamInitiator::local) {
+        return peer_transport_parameters_->initial_max_stream_data_bidi_remote;
+    }
+
+    return peer_transport_parameters_->initial_max_stream_data_bidi_local;
+}
+
+std::uint64_t QuicConnection::initial_stream_receive_window(std::uint64_t stream_id) const {
+    const auto id_info = classify_stream_id(stream_id, config_.role);
+    if (!id_info.local_can_receive) {
+        return 0;
+    }
+    if (id_info.direction == StreamDirection::unidirectional) {
+        return local_transport_parameters_.initial_max_stream_data_uni;
+    }
+    if (id_info.initiator == StreamInitiator::local) {
+        return local_transport_parameters_.initial_max_stream_data_bidi_local;
+    }
+
+    return local_transport_parameters_.initial_max_stream_data_bidi_remote;
+}
+
+void QuicConnection::initialize_stream_flow_control(StreamState &stream) const {
+    stream.flow_control.peer_max_stream_data = initial_stream_send_limit(stream.stream_id);
+    stream.flow_control.local_receive_window = initial_stream_receive_window(stream.stream_id);
+    stream.flow_control.advertised_max_stream_data = stream.flow_control.local_receive_window;
+    stream.send_flow_control_limit = stream.flow_control.peer_max_stream_data;
+    stream.receive_flow_control_limit = stream.flow_control.advertised_max_stream_data;
+}
+
 StreamStateResult<StreamState *> QuicConnection::get_or_open_local_stream(std::uint64_t stream_id) {
     if (const auto existing = streams_.find(stream_id); existing != streams_.end()) {
         return StreamStateResult<StreamState *>::success(&existing->second);
-    }
-    if (stream_id == kCompatibilityStreamId) {
-        auto [it, inserted] =
-            streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
-        static_cast<void>(inserted);
-        return StreamStateResult<StreamState *>::success(&it->second);
     }
 
     if (!is_local_implicit_stream_open_allowed(stream_id, config_.role)) {
@@ -1287,10 +1628,15 @@ StreamStateResult<StreamState *> QuicConnection::get_or_open_local_stream(std::u
                                                   : StreamStateErrorCode::invalid_stream_id;
         return StreamStateResult<StreamState *>::failure(code, stream_id);
     }
+    if (!stream_open_limits_.can_open_local_stream(stream_id, config_.role)) {
+        return StreamStateResult<StreamState *>::failure(StreamStateErrorCode::invalid_stream_id,
+                                                         stream_id);
+    }
 
     auto [it, inserted] =
         streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
     static_cast<void>(inserted);
+    initialize_stream_flow_control(it->second);
     return StreamStateResult<StreamState *>::success(&it->second);
 }
 
@@ -1323,6 +1669,7 @@ CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint6
         auto [it, inserted] =
             streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
         static_cast<void>(inserted);
+        initialize_stream_flow_control(it->second);
         return CodecResult<StreamState *>::success(&it->second);
     }
     if (id_info.initiator != StreamInitiator::peer ||
@@ -1334,11 +1681,11 @@ CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint6
     auto [it, inserted] =
         streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
     static_cast<void>(inserted);
+    initialize_stream_flow_control(it->second);
     return CodecResult<StreamState *>::success(&it->second);
 }
 
-CodecResult<StreamState *>
-QuicConnection::get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id) {
+CodecResult<StreamState *> QuicConnection::get_or_open_send_stream(std::uint64_t stream_id) {
     if (const auto existing = streams_.find(stream_id); existing != streams_.end()) {
         return CodecResult<StreamState *>::success(&existing->second);
     }
@@ -1347,9 +1694,15 @@ QuicConnection::get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id) {
     if (!id_info.local_can_send) {
         return CodecResult<StreamState *>::failure(CodecErrorCode::invalid_varint, 0);
     }
+
     if (id_info.initiator == StreamInitiator::local) {
-        return CodecResult<StreamState *>::failure(CodecErrorCode::invalid_varint, 0);
+        const auto local_stream = get_or_open_local_stream(stream_id);
+        if (!local_stream.has_value()) {
+            return CodecResult<StreamState *>::failure(CodecErrorCode::invalid_varint, 0);
+        }
+        return CodecResult<StreamState *>::success(local_stream.value());
     }
+
     if (!is_peer_implicit_stream_open_allowed_by_limits(stream_id, config_.role,
                                                         peer_stream_open_limits())) {
         return CodecResult<StreamState *>::failure(CodecErrorCode::invalid_varint, 0);
@@ -1358,7 +1711,13 @@ QuicConnection::get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id) {
     auto [it, inserted] =
         streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
     static_cast<void>(inserted);
+    initialize_stream_flow_control(it->second);
     return CodecResult<StreamState *>::success(&it->second);
+}
+
+CodecResult<StreamState *>
+QuicConnection::get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id) {
+    return get_or_open_send_stream(stream_id);
 }
 
 PeerStreamOpenLimits QuicConnection::peer_stream_open_limits() const {
@@ -1373,14 +1732,91 @@ PeerStreamOpenLimits QuicConnection::peer_stream_open_limits() const {
 }
 
 bool QuicConnection::has_pending_application_send() const {
+    if (connection_flow_control_.max_data_state == StreamControlFrameState::pending ||
+        connection_flow_control_.data_blocked_state == StreamControlFrameState::pending) {
+        return true;
+    }
+
+    const auto connection_send_credit =
+        connection_flow_control_.peer_max_data > connection_flow_control_.highest_sent
+            ? connection_flow_control_.peer_max_data - connection_flow_control_.highest_sent
+            : 0;
     for (const auto &[stream_id, stream] : streams_) {
         static_cast<void>(stream_id);
-        if (stream.has_pending_send()) {
+        if (stream.reset_state == StreamControlFrameState::pending ||
+            stream.stop_sending_state == StreamControlFrameState::pending ||
+            stream.flow_control.max_stream_data_state == StreamControlFrameState::pending ||
+            stream.flow_control.stream_data_blocked_state == StreamControlFrameState::pending) {
+            return true;
+        }
+        if (stream.reset_state != StreamControlFrameState::none) {
+            continue;
+        }
+
+        const auto fin_sendable =
+            stream.send_fin_state == StreamSendFinState::pending &&
+            stream.send_final_size.has_value() &&
+            *stream.send_final_size <= stream.flow_control.peer_max_stream_data &&
+            !stream.send_buffer.has_pending_data();
+        if (stream.send_buffer.has_lost_data() || fin_sendable) {
+            return true;
+        }
+        if (connection_send_credit != 0 && stream.sendable_bytes() != 0) {
             return true;
         }
     }
 
     return false;
+}
+
+std::uint64_t QuicConnection::total_queued_stream_bytes() const {
+    std::uint64_t total = 0;
+    for (const auto &[stream_id, stream] : streams_) {
+        static_cast<void>(stream_id);
+        total += stream.send_flow_control_committed;
+    }
+
+    return total;
+}
+
+void QuicConnection::maybe_queue_connection_blocked_frame() {
+    const auto queued_bytes = total_queued_stream_bytes();
+    if (!connection_flow_control_.should_send_data_blocked(queued_bytes) ||
+        connection_flow_control_.sendable_bytes(queued_bytes) != 0) {
+        return;
+    }
+
+    connection_flow_control_.queue_data_blocked(connection_flow_control_.peer_max_data);
+}
+
+void QuicConnection::maybe_queue_stream_blocked_frame(StreamState &stream) {
+    if (stream.sendable_bytes() != 0) {
+        return;
+    }
+
+    stream.queue_stream_data_blocked();
+}
+
+void QuicConnection::maybe_refresh_connection_receive_credit(bool force) {
+    if (!should_refresh_receive_window(connection_flow_control_.delivered_bytes,
+                                       connection_flow_control_.advertised_max_data,
+                                       connection_flow_control_.local_receive_window, force)) {
+        return;
+    }
+
+    connection_flow_control_.queue_max_data(connection_flow_control_.delivered_bytes +
+                                            connection_flow_control_.local_receive_window);
+}
+
+void QuicConnection::maybe_refresh_stream_receive_credit(StreamState &stream, bool force) {
+    if (!should_refresh_receive_window(stream.flow_control.delivered_bytes,
+                                       stream.flow_control.advertised_max_stream_data,
+                                       stream.flow_control.local_receive_window, force)) {
+        return;
+    }
+
+    stream.queue_max_stream_data(stream.flow_control.delivered_bytes +
+                                 stream.flow_control.local_receive_window);
 }
 
 ConnectionId QuicConnection::outbound_destination_connection_id() const {
@@ -1539,6 +1975,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
          application_space_.pending_probe_packet.has_value())) {
         const auto base_ack_frame = application_space_.received_packets.build_ack_frame(
             local_transport_parameters_.ack_delay_exponent, now);
+        for (auto &[stream_id, stream] : streams_) {
+            static_cast<void>(stream_id);
+            maybe_queue_stream_blocked_frame(stream);
+        }
+        maybe_queue_connection_blocked_frame();
         const auto take_reset_stream_frames = [](auto &streams) -> std::vector<ResetStreamFrame> {
             std::vector<ResetStreamFrame> frames;
             for (auto &[stream_id, stream] : streams) {
@@ -1561,13 +2002,49 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
             return frames;
         };
-        const auto take_stream_fragments =
-            [](auto &streams, std::size_t max_bytes) -> std::vector<StreamFrameSendFragment> {
-            std::vector<StreamFrameSendFragment> fragments;
-            auto remaining_bytes = max_bytes;
+        const auto take_max_stream_data_frames =
+            [](auto &streams) -> std::vector<MaxStreamDataFrame> {
+            std::vector<MaxStreamDataFrame> frames;
             for (auto &[stream_id, stream] : streams) {
                 static_cast<void>(stream_id);
-                auto stream_fragments = stream.take_send_fragments(remaining_bytes);
+                if (const auto frame = stream.take_max_stream_data_frame()) {
+                    frames.push_back(*frame);
+                }
+            }
+
+            return frames;
+        };
+        const auto take_stream_data_blocked_frames =
+            [](auto &streams) -> std::vector<StreamDataBlockedFrame> {
+            std::vector<StreamDataBlockedFrame> frames;
+            for (auto &[stream_id, stream] : streams) {
+                static_cast<void>(stream_id);
+                if (const auto frame = stream.take_stream_data_blocked_frame()) {
+                    frames.push_back(*frame);
+                }
+            }
+
+            return frames;
+        };
+        const auto take_stream_fragments =
+            [](auto &connection_flow, auto &streams,
+               std::size_t max_bytes) -> std::vector<StreamFrameSendFragment> {
+            std::vector<StreamFrameSendFragment> fragments;
+            auto remaining_bytes = max_bytes;
+            auto remaining_connection_credit =
+                connection_flow.peer_max_data > connection_flow.highest_sent
+                    ? connection_flow.peer_max_data - connection_flow.highest_sent
+                    : 0;
+            for (auto &[stream_id, stream] : streams) {
+                static_cast<void>(stream_id);
+                const auto highest_sent_before = stream.flow_control.highest_sent;
+                auto stream_fragments = stream.take_send_fragments(StreamSendBudget{
+                    .packet_bytes = remaining_bytes,
+                    .new_bytes = remaining_connection_credit,
+                });
+                const auto new_bytes_sent = stream.flow_control.highest_sent - highest_sent_before;
+                connection_flow.highest_sent += new_bytes_sent;
+                remaining_connection_credit -= new_bytes_sent;
                 remaining_bytes -= stream_fragment_bytes(stream_fragments);
                 fragments.insert(fragments.end(), std::make_move_iterator(stream_fragments.begin()),
                                  std::make_move_iterator(stream_fragments.end()));
@@ -1577,18 +2054,34 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         };
         const auto serialize_application_candidate =
             [&](const std::optional<AckFrame> &ack_frame,
+                const std::optional<MaxDataFrame> &max_data_frame,
+                std::span<const MaxStreamDataFrame> max_stream_data_frames,
                 std::span<const ResetStreamFrame> reset_stream_frames,
                 std::span<const StopSendingFrame> stop_sending_frames,
+                const std::optional<DataBlockedFrame> &data_blocked_frame,
+                std::span<const StreamDataBlockedFrame> stream_data_blocked_frames,
                 std::span<const StreamFrameSendFragment> stream_fragments,
                 bool include_ping) -> CodecResult<std::vector<std::byte>> {
             std::vector<Frame> candidate_frames;
             if (ack_frame.has_value()) {
                 candidate_frames.emplace_back(*ack_frame);
             }
+            if (max_data_frame.has_value()) {
+                candidate_frames.emplace_back(*max_data_frame);
+            }
+            for (const auto &frame : max_stream_data_frames) {
+                candidate_frames.emplace_back(frame);
+            }
             for (const auto &frame : reset_stream_frames) {
                 candidate_frames.emplace_back(frame);
             }
             for (const auto &frame : stop_sending_frames) {
+                candidate_frames.emplace_back(frame);
+            }
+            if (data_blocked_frame.has_value()) {
+                candidate_frames.emplace_back(*data_blocked_frame);
+            }
+            for (const auto &frame : stream_data_blocked_frames) {
                 candidate_frames.emplace_back(frame);
             }
             for (const auto &fragment : stream_fragments) {
@@ -1624,8 +2117,12 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         };
         const auto trim_application_ack_frame =
             [&](const std::optional<AckFrame> &candidate_ack_frame,
+                const std::optional<MaxDataFrame> &max_data_frame,
+                std::span<const MaxStreamDataFrame> max_stream_data_frames,
                 std::span<const ResetStreamFrame> reset_stream_frames,
                 std::span<const StopSendingFrame> stop_sending_frames,
+                const std::optional<DataBlockedFrame> &data_blocked_frame,
+                std::span<const StreamDataBlockedFrame> stream_data_blocked_frames,
                 std::span<const StreamFrameSendFragment> stream_fragments,
                 bool include_ping) -> std::optional<AckFrame> {
             if (!candidate_ack_frame.has_value()) {
@@ -1633,8 +2130,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
 
             auto candidate_datagram = serialize_application_candidate(
-                candidate_ack_frame, reset_stream_frames, stop_sending_frames, stream_fragments,
-                include_ping);
+                candidate_ack_frame, max_data_frame, max_stream_data_frames, reset_stream_frames,
+                stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
+                stream_fragments, include_ping);
             if (!candidate_datagram.has_value()) {
                 mark_failed();
                 return std::nullopt;
@@ -1655,9 +2153,10 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 trimmed_ack_frame->additional_ranges.resize(retained_ranges);
 
                 candidate_datagram = CodecResult<std::vector<std::byte>>::success(
-                    serialize_application_candidate(trimmed_ack_frame, reset_stream_frames,
-                                                    stop_sending_frames, stream_fragments,
-                                                    include_ping)
+                    serialize_application_candidate(
+                        trimmed_ack_frame, max_data_frame, max_stream_data_frames,
+                        reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                        stream_data_blocked_frames, stream_fragments, include_ping)
                         .value());
 
                 if (candidate_datagram.value().size() <= kMaximumDatagramSize) {
@@ -1680,9 +2179,15 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             const auto &probe_packet = *application_space_.pending_probe_packet;
             const auto include_ping = probe_packet.reset_stream_frames.empty() &&
                                       probe_packet.stop_sending_frames.empty() &&
+                                      !probe_packet.max_data_frame.has_value() &&
+                                      probe_packet.max_stream_data_frames.empty() &&
+                                      !probe_packet.data_blocked_frame.has_value() &&
+                                      probe_packet.stream_data_blocked_frames.empty() &&
                                       probe_packet.stream_fragments.empty();
             auto ack_frame = trim_application_ack_frame(
-                base_ack_frame, probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                base_ack_frame, probe_packet.max_data_frame, probe_packet.max_stream_data_frames,
+                probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
                 probe_packet.stream_fragments, include_ping);
             if (base_ack_frame.has_value() && !ack_frame.has_value()) {
                 mark_failed();
@@ -1690,7 +2195,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
 
             const auto datagram = serialize_application_candidate(
-                ack_frame, probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                ack_frame, probe_packet.max_data_frame, probe_packet.max_stream_data_frames,
+                probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
                 probe_packet.stream_fragments, include_ping);
             if (!datagram.has_value() || datagram.value().size() > kMaximumDatagramSize) {
                 mark_failed();
@@ -1701,10 +2208,22 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             if (ack_frame.has_value()) {
                 frames.emplace_back(*ack_frame);
             }
+            if (probe_packet.max_data_frame.has_value()) {
+                frames.emplace_back(*probe_packet.max_data_frame);
+            }
+            for (const auto &frame : probe_packet.max_stream_data_frames) {
+                frames.emplace_back(frame);
+            }
             for (const auto &frame : probe_packet.reset_stream_frames) {
                 frames.emplace_back(frame);
             }
             for (const auto &frame : probe_packet.stop_sending_frames) {
+                frames.emplace_back(frame);
+            }
+            if (probe_packet.data_blocked_frame.has_value()) {
+                frames.emplace_back(*probe_packet.data_blocked_frame);
+            }
+            for (const auto &frame : probe_packet.stream_data_blocked_frames) {
                 frames.emplace_back(frame);
             }
             for (const auto &fragment : probe_packet.stream_fragments) {
@@ -1739,6 +2258,10 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     .declared_lost = false,
                     .reset_stream_frames = probe_packet.reset_stream_frames,
                     .stop_sending_frames = probe_packet.stop_sending_frames,
+                    .max_data_frame = probe_packet.max_data_frame,
+                    .max_stream_data_frames = probe_packet.max_stream_data_frames,
+                    .data_blocked_frame = probe_packet.data_blocked_frame,
+                    .stream_data_blocked_frames = probe_packet.stream_data_blocked_frames,
                     .stream_fragments = probe_packet.stream_fragments,
                     .has_ping = include_ping,
                     .bytes_in_flight = stream_fragment_bytes(probe_packet.stream_fragments),
@@ -1756,22 +2279,34 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
             while (low <= high) {
                 const auto candidate_length = low + (high - low) / 2;
+                auto candidate_connection_flow = connection_flow_control_;
                 auto candidate_streams = streams_;
+                auto candidate_max_data_frame = candidate_connection_flow.take_max_data_frame();
+                auto candidate_data_blocked_frame =
+                    candidate_connection_flow.take_data_blocked_frame();
+                auto candidate_max_stream_data_frames =
+                    take_max_stream_data_frames(candidate_streams);
                 auto candidate_reset_frames = take_reset_stream_frames(candidate_streams);
                 auto candidate_stop_frames = take_stop_sending_frames(candidate_streams);
-                auto candidate_fragments =
-                    take_stream_fragments(candidate_streams, candidate_length);
+                auto candidate_stream_data_blocked_frames =
+                    take_stream_data_blocked_frames(candidate_streams);
+                auto candidate_fragments = take_stream_fragments(
+                    candidate_connection_flow, candidate_streams, candidate_length);
                 auto fitting_ack_frame = trim_application_ack_frame(
-                    base_ack_frame, candidate_reset_frames, candidate_stop_frames,
-                    candidate_fragments, /*include_ping=*/false);
+                    base_ack_frame, candidate_max_data_frame, candidate_max_stream_data_frames,
+                    candidate_reset_frames, candidate_stop_frames, candidate_data_blocked_frame,
+                    candidate_stream_data_blocked_frames, candidate_fragments,
+                    /*include_ping=*/false);
                 if (base_ack_frame.has_value() && !fitting_ack_frame.has_value()) {
                     mark_failed();
                     return {};
                 }
 
                 const auto candidate_datagram = serialize_application_candidate(
-                    fitting_ack_frame, candidate_reset_frames, candidate_stop_frames,
-                    candidate_fragments, /*include_ping=*/false);
+                    fitting_ack_frame, candidate_max_data_frame, candidate_max_stream_data_frames,
+                    candidate_reset_frames, candidate_stop_frames, candidate_data_blocked_frame,
+                    candidate_stream_data_blocked_frames, candidate_fragments,
+                    /*include_ping=*/false);
                 if (!candidate_datagram.has_value()) {
                     mark_failed();
                     return {};
@@ -1793,12 +2328,18 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             if (best_ack_frame.has_value()) {
                 frames.emplace_back(*best_ack_frame);
             }
+            auto max_data_frame = connection_flow_control_.take_max_data_frame();
+            auto data_blocked_frame = connection_flow_control_.take_data_blocked_frame();
+            auto max_stream_data_frames = take_max_stream_data_frames(streams_);
             auto reset_stream_frames = take_reset_stream_frames(streams_);
             auto stop_sending_frames = take_stop_sending_frames(streams_);
-            auto stream_fragments = take_stream_fragments(streams_, best_length);
+            auto stream_data_blocked_frames = take_stream_data_blocked_frames(streams_);
+            auto stream_fragments =
+                take_stream_fragments(connection_flow_control_, streams_, best_length);
             auto candidate_datagram = serialize_application_candidate(
-                best_ack_frame, reset_stream_frames, stop_sending_frames, stream_fragments,
-                /*include_ping=*/false);
+                best_ack_frame, max_data_frame, max_stream_data_frames, reset_stream_frames,
+                stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
+                stream_fragments, /*include_ping=*/false);
             if (!candidate_datagram.has_value()) {
                 mark_failed();
                 return {};
@@ -1817,8 +2358,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 }
                 stream_fragments.pop_back();
                 candidate_datagram = serialize_application_candidate(
-                    best_ack_frame, reset_stream_frames, stop_sending_frames, stream_fragments,
-                    /*include_ping=*/false);
+                    best_ack_frame, max_data_frame, max_stream_data_frames, reset_stream_frames,
+                    stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
+                    stream_fragments, /*include_ping=*/false);
                 if (!candidate_datagram.has_value()) {
                     mark_failed();
                     return {};
@@ -1833,6 +2375,18 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 frames.emplace_back(frame);
             }
             for (const auto &frame : stop_sending_frames) {
+                frames.emplace_back(frame);
+            }
+            if (max_data_frame.has_value()) {
+                frames.emplace_back(*max_data_frame);
+            }
+            for (const auto &frame : max_stream_data_frames) {
+                frames.emplace_back(frame);
+            }
+            if (data_blocked_frame.has_value()) {
+                frames.emplace_back(*data_blocked_frame);
+            }
+            for (const auto &frame : stream_data_blocked_frames) {
                 frames.emplace_back(frame);
             }
             for (const auto &fragment : stream_fragments) {
@@ -1858,18 +2412,24 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 .frames = std::move(frames),
             });
 
-            const auto ack_eliciting = !stream_fragments.empty();
+            const auto ack_eliciting =
+                max_data_frame.has_value() || !max_stream_data_frames.empty() ||
+                !reset_stream_frames.empty() || !stop_sending_frames.empty() ||
+                data_blocked_frame.has_value() || !stream_data_blocked_frames.empty() ||
+                !stream_fragments.empty();
             track_sent_packet(application_space_,
                               SentPacketRecord{
                                   .packet_number = packet_number,
                                   .sent_time = now,
-                                  .ack_eliciting = ack_eliciting || !reset_stream_frames.empty() ||
-                                                   !stop_sending_frames.empty(),
-                                  .in_flight = ack_eliciting || !reset_stream_frames.empty() ||
-                                               !stop_sending_frames.empty(),
+                                  .ack_eliciting = ack_eliciting,
+                                  .in_flight = ack_eliciting,
                                   .declared_lost = false,
                                   .reset_stream_frames = reset_stream_frames,
                                   .stop_sending_frames = stop_sending_frames,
+                                  .max_data_frame = max_data_frame,
+                                  .max_stream_data_frames = max_stream_data_frames,
+                                  .data_blocked_frame = data_blocked_frame,
+                                  .stream_data_blocked_frames = stream_data_blocked_frames,
                                   .stream_fragments = stream_fragments,
                                   .bytes_in_flight = stream_fragment_bytes(stream_fragments),
                               });

@@ -15,6 +15,7 @@ using coquic::quic::is_peer_implicit_stream_open_allowed_by_limits;
 using coquic::quic::make_implicit_stream_state;
 using coquic::quic::StreamDirection;
 using coquic::quic::StreamInitiator;
+using coquic::quic::StreamOpenLimits;
 using coquic::quic::StreamState;
 using coquic::quic::StreamStateErrorCode;
 
@@ -133,6 +134,25 @@ TEST(QuicStreamsTest, StreamStateCarriesFlowControlBookkeepingGroundwork) {
     EXPECT_EQ(state.send_flow_control_committed, 0u);
     EXPECT_EQ(state.receive_flow_control_limit, 0u);
     EXPECT_EQ(state.receive_flow_control_consumed, 0u);
+}
+
+TEST(QuicStreamsTest, FlowControlBlocksNewBytesAtPeerMaxStreamData) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    state.flow_control.peer_max_stream_data = 4;
+    state.send_buffer.append(bytes_from_string("abcdef"));
+    state.flow_control.highest_sent = 0;
+    state.send_flow_control_committed = 6;
+
+    EXPECT_EQ(state.sendable_bytes(), 4u);
+    EXPECT_TRUE(state.should_send_stream_data_blocked());
+}
+
+TEST(QuicStreamsTest, MaxStreamsLimitBlocksSecondLocalBidirectionalStream) {
+    StreamOpenLimits limits;
+    limits.peer_max_bidirectional = 1;
+
+    EXPECT_TRUE(limits.can_open_local_stream(/*stream_id=*/0, EndpointRole::client));
+    EXPECT_FALSE(limits.can_open_local_stream(/*stream_id=*/4, EndpointRole::client));
 }
 
 TEST(QuicStreamsTest, TakeSendFragmentsCarriesFinOnFinalFragment) {

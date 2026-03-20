@@ -29,6 +29,18 @@ bool stop_sending_frame_matches(const std::optional<StopSendingFrame> &candidate
            candidate->application_protocol_error_code == frame.application_protocol_error_code;
 }
 
+bool max_stream_data_frame_matches(const std::optional<MaxStreamDataFrame> &candidate,
+                                   const MaxStreamDataFrame &frame) {
+    return candidate.has_value() && candidate->stream_id == frame.stream_id &&
+           candidate->maximum_stream_data == frame.maximum_stream_data;
+}
+
+bool stream_data_blocked_frame_matches(const std::optional<StreamDataBlockedFrame> &candidate,
+                                       const StreamDataBlockedFrame &frame) {
+    return candidate.has_value() && candidate->stream_id == frame.stream_id &&
+           candidate->maximum_stream_data == frame.maximum_stream_data;
+}
+
 } // namespace
 
 StreamIdInfo classify_stream_id(std::uint64_t stream_id, EndpointRole local_role) {
@@ -71,6 +83,31 @@ bool is_peer_implicit_stream_open_allowed_by_limits(std::uint64_t stream_id,
     }
 
     return stream_index < limits.unidirectional;
+}
+
+bool StreamOpenLimits::can_open_local_stream(std::uint64_t stream_id,
+                                             EndpointRole local_role) const {
+    if (!is_local_implicit_stream_open_allowed(stream_id, local_role)) {
+        return false;
+    }
+
+    const auto id_info = classify_stream_id(stream_id, local_role);
+    const auto stream_index = stream_id >> 2u;
+    if (id_info.direction == StreamDirection::bidirectional) {
+        return stream_index < peer_max_bidirectional;
+    }
+
+    return stream_index < peer_max_unidirectional;
+}
+
+void StreamOpenLimits::note_peer_max_streams(StreamLimitType stream_type,
+                                             std::uint64_t maximum_streams) {
+    if (stream_type == StreamLimitType::bidirectional) {
+        peer_max_bidirectional = std::max(peer_max_bidirectional, maximum_streams);
+        return;
+    }
+
+    peer_max_unidirectional = std::max(peer_max_unidirectional, maximum_streams);
 }
 
 StreamStateResult<bool> StreamState::validate_local_send(bool fin) {
@@ -151,6 +188,10 @@ StreamStateResult<bool> StreamState::validate_receive_range(std::uint64_t offset
     }
 
     const auto range_end = saturating_add(offset, length);
+    if (range_end > flow_control.advertised_max_stream_data) {
+        return StreamStateResult<bool>::failure(StreamStateErrorCode::final_size_conflict,
+                                                stream_id);
+    }
     if (peer_final_size.has_value() && range_end > *peer_final_size) {
         return StreamStateResult<bool>::failure(StreamStateErrorCode::final_size_conflict,
                                                 stream_id);
@@ -219,7 +260,9 @@ StreamStateResult<bool> StreamState::note_peer_stop_sending(std::uint64_t applic
 
 bool StreamState::has_pending_send() const {
     if (reset_state == StreamControlFrameState::pending ||
-        stop_sending_state == StreamControlFrameState::pending) {
+        stop_sending_state == StreamControlFrameState::pending ||
+        flow_control.max_stream_data_state == StreamControlFrameState::pending ||
+        flow_control.stream_data_blocked_state == StreamControlFrameState::pending) {
         return true;
     }
 
@@ -227,12 +270,17 @@ bool StreamState::has_pending_send() const {
         return false;
     }
 
-    return send_buffer.has_pending_data() || send_fin_state == StreamSendFinState::pending;
+    const auto fin_sendable =
+        send_fin_state == StreamSendFinState::pending && send_final_size.has_value() &&
+        *send_final_size <= flow_control.peer_max_stream_data && !send_buffer.has_pending_data();
+    return send_buffer.has_lost_data() || sendable_bytes() != 0 || fin_sendable;
 }
 
 bool StreamState::has_outstanding_send() const {
     if (reset_state == StreamControlFrameState::sent ||
-        stop_sending_state == StreamControlFrameState::sent) {
+        stop_sending_state == StreamControlFrameState::sent ||
+        flow_control.max_stream_data_state == StreamControlFrameState::sent ||
+        flow_control.stream_data_blocked_state == StreamControlFrameState::sent) {
         return true;
     }
 
@@ -241,6 +289,113 @@ bool StreamState::has_outstanding_send() const {
     }
 
     return send_buffer.has_outstanding_data() || send_fin_state == StreamSendFinState::sent;
+}
+
+std::uint64_t StreamState::sendable_bytes() const {
+    const auto remaining_credit =
+        flow_control.peer_max_stream_data > flow_control.highest_sent
+            ? flow_control.peer_max_stream_data - flow_control.highest_sent
+            : 0;
+    const auto unsent_bytes = send_flow_control_committed > flow_control.highest_sent
+                                  ? send_flow_control_committed - flow_control.highest_sent
+                                  : 0;
+    return std::min(remaining_credit, unsent_bytes);
+}
+
+bool StreamState::should_send_stream_data_blocked() const {
+    return id_info.local_can_send && reset_state == StreamControlFrameState::none &&
+           send_flow_control_committed > flow_control.peer_max_stream_data;
+}
+
+void StreamState::note_peer_max_stream_data(std::uint64_t maximum_stream_data) {
+    if (maximum_stream_data <= flow_control.peer_max_stream_data) {
+        return;
+    }
+
+    flow_control.peer_max_stream_data = maximum_stream_data;
+    send_flow_control_limit = maximum_stream_data;
+    if (send_flow_control_committed <= flow_control.peer_max_stream_data) {
+        flow_control.pending_stream_data_blocked_frame = std::nullopt;
+        flow_control.stream_data_blocked_state = StreamControlFrameState::none;
+    }
+}
+
+void StreamState::queue_max_stream_data(std::uint64_t maximum_stream_data) {
+    if (maximum_stream_data <= flow_control.advertised_max_stream_data) {
+        return;
+    }
+
+    flow_control.advertised_max_stream_data = maximum_stream_data;
+    receive_flow_control_limit = maximum_stream_data;
+    flow_control.pending_max_stream_data_frame = MaxStreamDataFrame{
+        .stream_id = stream_id,
+        .maximum_stream_data = maximum_stream_data,
+    };
+    flow_control.max_stream_data_state = StreamControlFrameState::pending;
+}
+
+std::optional<MaxStreamDataFrame> StreamState::take_max_stream_data_frame() {
+    if (flow_control.max_stream_data_state != StreamControlFrameState::pending ||
+        !flow_control.pending_max_stream_data_frame.has_value()) {
+        return std::nullopt;
+    }
+
+    flow_control.max_stream_data_state = StreamControlFrameState::sent;
+    return flow_control.pending_max_stream_data_frame;
+}
+
+void StreamState::acknowledge_max_stream_data_frame(const MaxStreamDataFrame &frame) {
+    if (max_stream_data_frame_matches(flow_control.pending_max_stream_data_frame, frame)) {
+        flow_control.max_stream_data_state = StreamControlFrameState::acknowledged;
+    }
+}
+
+void StreamState::mark_max_stream_data_frame_lost(const MaxStreamDataFrame &frame) {
+    if (flow_control.max_stream_data_state != StreamControlFrameState::acknowledged &&
+        max_stream_data_frame_matches(flow_control.pending_max_stream_data_frame, frame)) {
+        flow_control.max_stream_data_state = StreamControlFrameState::pending;
+    }
+}
+
+void StreamState::queue_stream_data_blocked() {
+    if (!should_send_stream_data_blocked()) {
+        return;
+    }
+    if (flow_control.pending_stream_data_blocked_frame.has_value() &&
+        flow_control.pending_stream_data_blocked_frame->maximum_stream_data ==
+            flow_control.peer_max_stream_data &&
+        flow_control.stream_data_blocked_state != StreamControlFrameState::none) {
+        return;
+    }
+
+    flow_control.pending_stream_data_blocked_frame = StreamDataBlockedFrame{
+        .stream_id = stream_id,
+        .maximum_stream_data = flow_control.peer_max_stream_data,
+    };
+    flow_control.stream_data_blocked_state = StreamControlFrameState::pending;
+}
+
+std::optional<StreamDataBlockedFrame> StreamState::take_stream_data_blocked_frame() {
+    if (flow_control.stream_data_blocked_state != StreamControlFrameState::pending ||
+        !flow_control.pending_stream_data_blocked_frame.has_value()) {
+        return std::nullopt;
+    }
+
+    flow_control.stream_data_blocked_state = StreamControlFrameState::sent;
+    return flow_control.pending_stream_data_blocked_frame;
+}
+
+void StreamState::acknowledge_stream_data_blocked_frame(const StreamDataBlockedFrame &frame) {
+    if (stream_data_blocked_frame_matches(flow_control.pending_stream_data_blocked_frame, frame)) {
+        flow_control.stream_data_blocked_state = StreamControlFrameState::acknowledged;
+    }
+}
+
+void StreamState::mark_stream_data_blocked_frame_lost(const StreamDataBlockedFrame &frame) {
+    if (flow_control.stream_data_blocked_state != StreamControlFrameState::acknowledged &&
+        stream_data_blocked_frame_matches(flow_control.pending_stream_data_blocked_frame, frame)) {
+        flow_control.stream_data_blocked_state = StreamControlFrameState::pending;
+    }
 }
 
 std::optional<ResetStreamFrame> StreamState::take_reset_frame() {
@@ -263,12 +418,19 @@ std::optional<StopSendingFrame> StreamState::take_stop_sending_frame() {
 }
 
 std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(std::size_t max_bytes) {
+    return take_send_fragments(StreamSendBudget{
+        .packet_bytes = max_bytes,
+    });
+}
+
+std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSendBudget budget) {
     if (reset_state != StreamControlFrameState::none) {
         return {};
     }
 
     std::vector<StreamFrameSendFragment> fragments;
-    for (auto &range : send_buffer.take_ranges(max_bytes)) {
+    auto remaining_bytes = budget.packet_bytes;
+    const auto append_fragment = [&](ByteRange range) {
         const auto range_end = saturating_add(range.offset, range.bytes.size());
         const auto fin = send_fin_state == StreamSendFinState::pending &&
                          send_final_size.has_value() && range_end == *send_final_size;
@@ -281,10 +443,27 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(std::size_
         if (fin) {
             send_fin_state = StreamSendFinState::sent;
         }
+    };
+
+    for (auto &range : send_buffer.take_lost_ranges(remaining_bytes)) {
+        remaining_bytes -= range.bytes.size();
+        append_fragment(std::move(range));
+    }
+
+    const auto capped_new_bytes =
+        std::min<std::uint64_t>(budget.new_bytes, static_cast<std::uint64_t>(remaining_bytes));
+    auto new_ranges = send_buffer.take_unsent_ranges(static_cast<std::size_t>(capped_new_bytes),
+                                                     flow_control.peer_max_stream_data);
+    for (auto &range : new_ranges) {
+        const auto range_end = saturating_add(range.offset, range.bytes.size());
+        flow_control.highest_sent = std::max(flow_control.highest_sent, range_end);
+        remaining_bytes -= range.bytes.size();
+        append_fragment(std::move(range));
     }
 
     if (fragments.empty() && send_fin_state == StreamSendFinState::pending &&
-        send_final_size.has_value() && !send_buffer.has_pending_data()) {
+        send_final_size.has_value() && !send_buffer.has_pending_data() &&
+        *send_final_size <= flow_control.peer_max_stream_data) {
         fragments.push_back(StreamFrameSendFragment{
             .stream_id = stream_id,
             .offset = *send_final_size,
@@ -350,6 +529,11 @@ StreamState make_implicit_stream_state(std::uint64_t stream_id, EndpointRole loc
         .id_info = id_info,
         .send_closed = !id_info.local_can_send,
         .receive_closed = !id_info.local_can_receive,
+        .flow_control =
+            StreamFlowControlState{
+                .peer_max_stream_data = std::numeric_limits<std::uint64_t>::max(),
+                .advertised_max_stream_data = std::numeric_limits<std::uint64_t>::max(),
+            },
     };
 }
 

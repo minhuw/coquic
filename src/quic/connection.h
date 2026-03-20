@@ -9,6 +9,7 @@
 #include "src/quic/core.h"
 #include "src/quic/crypto_stream.h"
 #include "src/quic/recovery.h"
+#include "src/quic/streams.h"
 #include "src/quic/tls_adapter.h"
 #include "src/quic/transport_parameters.h"
 
@@ -43,6 +44,31 @@ struct LocalResetCommand {
 struct LocalStopSendingCommand {
     std::uint64_t stream_id = 0;
     std::uint64_t application_error_code = 0;
+};
+
+struct ConnectionFlowControlState {
+    std::uint64_t peer_max_data = 0;
+    std::uint64_t highest_sent = 0;
+    std::uint64_t local_receive_window = 0;
+    std::uint64_t advertised_max_data = 0;
+    std::uint64_t delivered_bytes = 0;
+    std::uint64_t received_committed = 0;
+    std::optional<MaxDataFrame> pending_max_data_frame;
+    StreamControlFrameState max_data_state = StreamControlFrameState::none;
+    std::optional<DataBlockedFrame> pending_data_blocked_frame;
+    StreamControlFrameState data_blocked_state = StreamControlFrameState::none;
+
+    std::uint64_t sendable_bytes(std::uint64_t queued_bytes) const;
+    bool should_send_data_blocked(std::uint64_t queued_bytes) const;
+    void note_peer_max_data(std::uint64_t maximum_data);
+    void queue_max_data(std::uint64_t maximum_data);
+    std::optional<MaxDataFrame> take_max_data_frame();
+    void acknowledge_max_data_frame(const MaxDataFrame &frame);
+    void mark_max_data_frame_lost(const MaxDataFrame &frame);
+    void queue_data_blocked(std::uint64_t maximum_data);
+    std::optional<DataBlockedFrame> take_data_blocked_frame();
+    void acknowledge_data_blocked_frame(const DataBlockedFrame &frame);
+    void mark_data_blocked_frame_lost(const DataBlockedFrame &frame);
 };
 
 class QuicConnection {
@@ -97,12 +123,23 @@ class QuicConnection {
     void update_handshake_status();
     std::optional<TransportParametersValidationContext>
     peer_transport_parameters_validation_context() const;
+    void initialize_local_flow_control();
+    void initialize_peer_flow_control_from_transport_parameters();
+    void initialize_stream_flow_control(StreamState &stream) const;
+    std::uint64_t initial_stream_send_limit(std::uint64_t stream_id) const;
+    std::uint64_t initial_stream_receive_window(std::uint64_t stream_id) const;
     StreamStateResult<StreamState *> get_or_open_local_stream(std::uint64_t stream_id);
     StreamStateResult<StreamState *> get_existing_receive_stream(std::uint64_t stream_id);
     CodecResult<StreamState *> get_or_open_receive_stream(std::uint64_t stream_id);
+    CodecResult<StreamState *> get_or_open_send_stream(std::uint64_t stream_id);
     CodecResult<StreamState *> get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id);
     PeerStreamOpenLimits peer_stream_open_limits() const;
     bool has_pending_application_send() const;
+    std::uint64_t total_queued_stream_bytes() const;
+    void maybe_queue_connection_blocked_frame();
+    void maybe_queue_stream_blocked_frame(StreamState &stream);
+    void maybe_refresh_connection_receive_credit(bool force);
+    void maybe_refresh_stream_receive_credit(StreamState &stream, bool force);
     ConnectionId outbound_destination_connection_id() const;
     ConnectionId client_initial_destination_connection_id() const;
     std::vector<std::byte> flush_outbound_datagram(QuicCoreTimePoint now);
@@ -122,6 +159,8 @@ class QuicConnection {
     std::optional<TransportParameters> peer_transport_parameters_;
     bool peer_transport_parameters_validated_ = false;
     std::map<std::uint64_t, StreamState> streams_;
+    ConnectionFlowControlState connection_flow_control_;
+    StreamOpenLimits stream_open_limits_;
     std::vector<QuicCoreReceiveStreamData> pending_stream_receive_effects_;
     std::vector<QuicCorePeerResetStream> pending_peer_reset_effects_;
     std::vector<QuicCorePeerStopSending> pending_peer_stop_effects_;

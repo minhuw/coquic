@@ -47,10 +47,18 @@ void ReliableSendBuffer::append(std::span<const std::byte> bytes) {
     merge_adjacent_segments();
 }
 
-std::vector<ByteRange> ReliableSendBuffer::take_ranges_by_state(SegmentState state,
-                                                                std::size_t &remaining_bytes) {
+std::vector<ByteRange>
+ReliableSendBuffer::take_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
+                                         std::optional<std::uint64_t> max_offset) {
     std::vector<ByteRange> ranges;
+    if (max_offset.has_value()) {
+        split_at(*max_offset);
+    }
+
     for (auto it = segments_.begin(); it != segments_.end() && remaining_bytes > 0; ++it) {
+        if (max_offset.has_value() && it->first >= *max_offset) {
+            break;
+        }
         if (it->second.state != state) {
             continue;
         }
@@ -96,6 +104,32 @@ std::vector<ByteRange> ReliableSendBuffer::take_ranges(std::size_t max_bytes) {
     auto unsent_ranges = take_ranges_by_state(SegmentState::unsent, remaining_bytes);
     ranges.insert(ranges.end(), std::make_move_iterator(unsent_ranges.begin()),
                   std::make_move_iterator(unsent_ranges.end()));
+    merge_adjacent_segments();
+    return ranges;
+}
+
+std::vector<ByteRange>
+ReliableSendBuffer::take_lost_ranges(std::size_t max_bytes,
+                                     std::optional<std::uint64_t> max_offset) {
+    if (max_bytes == 0) {
+        return {};
+    }
+
+    auto remaining_bytes = max_bytes;
+    auto ranges = take_ranges_by_state(SegmentState::lost, remaining_bytes, max_offset);
+    merge_adjacent_segments();
+    return ranges;
+}
+
+std::vector<ByteRange>
+ReliableSendBuffer::take_unsent_ranges(std::size_t max_bytes,
+                                       std::optional<std::uint64_t> max_offset) {
+    if (max_bytes == 0) {
+        return {};
+    }
+
+    auto remaining_bytes = max_bytes;
+    auto ranges = take_ranges_by_state(SegmentState::unsent, remaining_bytes, max_offset);
     merge_adjacent_segments();
     return ranges;
 }
@@ -194,6 +228,17 @@ bool ReliableSendBuffer::has_outstanding_data() const {
     for (const auto &[offset, segment] : segments_) {
         static_cast<void>(offset);
         if (segment.state == SegmentState::sent || segment.state == SegmentState::lost) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ReliableSendBuffer::has_lost_data() const {
+    for (const auto &[offset, segment] : segments_) {
+        static_cast<void>(offset);
+        if (segment.state == SegmentState::lost) {
             return true;
         }
     }

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -20,10 +21,16 @@ class ReliableSendBuffer {
   public:
     void append(std::span<const std::byte> bytes);
     std::vector<ByteRange> take_ranges(std::size_t max_bytes);
+    std::vector<ByteRange> take_lost_ranges(std::size_t max_bytes,
+                                            std::optional<std::uint64_t> max_offset = std::nullopt);
+    std::vector<ByteRange>
+    take_unsent_ranges(std::size_t max_bytes,
+                       std::optional<std::uint64_t> max_offset = std::nullopt);
     void acknowledge(std::uint64_t offset, std::size_t length);
     void mark_lost(std::uint64_t offset, std::size_t length);
     bool has_pending_data() const;
     bool has_outstanding_data() const;
+    bool has_lost_data() const;
 
   private:
     enum class SegmentState : std::uint8_t {
@@ -37,7 +44,9 @@ class ReliableSendBuffer {
         std::vector<std::byte> bytes;
     };
 
-    std::vector<ByteRange> take_ranges_by_state(SegmentState state, std::size_t &remaining_bytes);
+    std::vector<ByteRange>
+    take_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
+                         std::optional<std::uint64_t> max_offset = std::nullopt);
     void split_at(std::uint64_t offset);
     void merge_adjacent_segments();
 

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -89,6 +90,11 @@ struct StreamFrameSendFragment {
     bool fin = false;
 };
 
+struct StreamSendBudget {
+    std::size_t packet_bytes = 0;
+    std::uint64_t new_bytes = std::numeric_limits<std::uint64_t>::max();
+};
+
 StreamIdInfo classify_stream_id(std::uint64_t stream_id, EndpointRole local_role);
 bool is_local_implicit_stream_open_allowed(std::uint64_t stream_id, EndpointRole local_role);
 
@@ -115,6 +121,26 @@ enum class StreamControlFrameState : std::uint8_t {
     acknowledged,
 };
 
+struct StreamFlowControlState {
+    std::uint64_t peer_max_stream_data = 0;
+    std::uint64_t highest_sent = 0;
+    std::uint64_t local_receive_window = 0;
+    std::uint64_t advertised_max_stream_data = 0;
+    std::uint64_t delivered_bytes = 0;
+    std::optional<MaxStreamDataFrame> pending_max_stream_data_frame;
+    StreamControlFrameState max_stream_data_state = StreamControlFrameState::none;
+    std::optional<StreamDataBlockedFrame> pending_stream_data_blocked_frame;
+    StreamControlFrameState stream_data_blocked_state = StreamControlFrameState::none;
+};
+
+struct StreamOpenLimits {
+    std::uint64_t peer_max_bidirectional = 0;
+    std::uint64_t peer_max_unidirectional = 0;
+
+    bool can_open_local_stream(std::uint64_t stream_id, EndpointRole local_role) const;
+    void note_peer_max_streams(StreamLimitType stream_type, std::uint64_t maximum_streams);
+};
+
 struct StreamState {
     std::uint64_t stream_id = 0;
     StreamIdInfo id_info;
@@ -137,6 +163,7 @@ struct StreamState {
     std::uint64_t receive_flow_control_limit = 0;
     std::uint64_t receive_flow_control_consumed = 0;
     std::uint64_t highest_received_offset = 0;
+    StreamFlowControlState flow_control;
 
     StreamStateResult<bool> validate_local_send(bool fin);
     StreamStateResult<bool> validate_local_reset(std::uint64_t application_error_code);
@@ -146,11 +173,23 @@ struct StreamState {
     StreamStateResult<bool> note_peer_final_size(std::uint64_t final_size);
     StreamStateResult<bool> note_peer_reset(const ResetStreamFrame &frame);
     StreamStateResult<bool> note_peer_stop_sending(std::uint64_t application_error_code);
+    std::uint64_t sendable_bytes() const;
+    bool should_send_stream_data_blocked() const;
     bool has_pending_send() const;
     bool has_outstanding_send() const;
+    void note_peer_max_stream_data(std::uint64_t maximum_stream_data);
+    void queue_max_stream_data(std::uint64_t maximum_stream_data);
+    std::optional<MaxStreamDataFrame> take_max_stream_data_frame();
+    void acknowledge_max_stream_data_frame(const MaxStreamDataFrame &frame);
+    void mark_max_stream_data_frame_lost(const MaxStreamDataFrame &frame);
+    void queue_stream_data_blocked();
+    std::optional<StreamDataBlockedFrame> take_stream_data_blocked_frame();
+    void acknowledge_stream_data_blocked_frame(const StreamDataBlockedFrame &frame);
+    void mark_stream_data_blocked_frame_lost(const StreamDataBlockedFrame &frame);
     std::optional<ResetStreamFrame> take_reset_frame();
     std::optional<StopSendingFrame> take_stop_sending_frame();
     std::vector<StreamFrameSendFragment> take_send_fragments(std::size_t max_bytes);
+    std::vector<StreamFrameSendFragment> take_send_fragments(StreamSendBudget budget);
     void acknowledge_reset_frame(const ResetStreamFrame &frame);
     void mark_reset_frame_lost(const ResetStreamFrame &frame);
     void acknowledge_stop_sending_frame(const StopSendingFrame &frame);

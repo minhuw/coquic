@@ -5,13 +5,17 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
 #include <optional>
+#include <sstream>
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -257,6 +261,57 @@ inline QuicCoreResult relay_datagrams_to_peer(std::span<const std::vector<std::b
 
     return combined;
 }
+
+inline QuicCoreResult advance_core_with_inputs(QuicCore &core,
+                                               std::span<const QuicCoreInput> inputs,
+                                               QuicCoreTimePoint now) {
+    QuicCoreResult combined;
+    for (const auto &input : inputs) {
+        auto step = core.advance(input, now);
+        combined.effects.insert(combined.effects.end(),
+                                std::make_move_iterator(step.effects.begin()),
+                                std::make_move_iterator(step.effects.end()));
+        combined.next_wakeup = step.next_wakeup;
+        if (step.local_error.has_value()) {
+            combined.local_error = step.local_error;
+            break;
+        }
+    }
+
+    return combined;
+}
+
+class ScopedTempDir {
+  public:
+    ScopedTempDir() {
+        std::ostringstream suffix;
+        suffix << "coquic-http09-" << std::rand();
+        path_ = std::filesystem::temp_directory_path() / suffix.str();
+        std::filesystem::create_directories(path_);
+    }
+
+    ~ScopedTempDir() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+
+    ScopedTempDir(const ScopedTempDir &) = delete;
+    ScopedTempDir &operator=(const ScopedTempDir &) = delete;
+
+    const std::filesystem::path &path() const {
+        return path_;
+    }
+
+    void write_file(const std::filesystem::path &relative_path, std::string_view text) const {
+        const auto full_path = path_ / relative_path;
+        std::filesystem::create_directories(full_path.parent_path());
+        std::ofstream output(full_path, std::ios::binary);
+        output.write(text.data(), static_cast<std::streamsize>(text.size()));
+    }
+
+  private:
+    std::filesystem::path path_;
+};
 
 inline std::vector<std::vector<std::byte>>
 send_datagrams_from(const QuicDemoChannelResult &result) {

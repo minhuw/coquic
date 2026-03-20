@@ -4,9 +4,12 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <csignal>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -74,9 +77,83 @@ class ScopedFd {
     ScopedFd(const ScopedFd &) = delete;
     ScopedFd &operator=(const ScopedFd &) = delete;
 
+    int get() const {
+        return fd_;
+    }
+
   private:
     int fd_ = -1;
 };
+
+class ScopedChildProcess {
+  public:
+    explicit ScopedChildProcess(pid_t pid) : pid_(pid) {
+    }
+
+    ~ScopedChildProcess() {
+        terminate();
+    }
+
+    ScopedChildProcess(const ScopedChildProcess &) = delete;
+    ScopedChildProcess &operator=(const ScopedChildProcess &) = delete;
+
+    std::optional<int> wait_for_exit(std::chrono::milliseconds timeout) {
+        if (pid_ <= 0) {
+            return cached_status_;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        for (;;) {
+            int status = 0;
+            const auto result = ::waitpid(pid_, &status, WNOHANG);
+            if (result == pid_) {
+                pid_ = -1;
+                cached_status_ = status;
+                return status;
+            }
+            if (result < 0) {
+                pid_ = -1;
+                return std::nullopt;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return std::nullopt;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+
+    void terminate() {
+        if (pid_ <= 0) {
+            return;
+        }
+
+        int status = 0;
+        const auto waited = ::waitpid(pid_, &status, WNOHANG);
+        if (waited == pid_) {
+            pid_ = -1;
+            cached_status_ = status;
+            return;
+        }
+
+        ::kill(pid_, SIGTERM);
+        if (::waitpid(pid_, &status, 0) == pid_) {
+            cached_status_ = status;
+        }
+        pid_ = -1;
+    }
+
+  private:
+    pid_t pid_ = -1;
+    std::optional<int> cached_status_;
+};
+
+ScopedChildProcess launch_runtime_server_process(const coquic::quic::Http09RuntimeConfig &config) {
+    const auto pid = ::fork();
+    if (pid == 0) {
+        ::_exit(coquic::quic::run_http09_runtime(config));
+    }
+    return ScopedChildProcess(pid);
+}
 
 std::uint16_t allocate_udp_loopback_port() {
     const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -336,14 +413,72 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
         .requests_env = "https://localhost/hello.txt",
     };
 
-    auto server_future = std::async(
-        std::launch::async, [&server]() { return coquic::quic::run_http09_runtime(server); });
+    auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
-    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    EXPECT_EQ(server_future.get(), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-over-udp");
+}
+
+TEST(QuicHttp09RuntimeTest, ServerDoesNotExitAfterMalformedTraffic) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    const int client_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(client_fd, 0);
+    ScopedFd client_socket(client_fd);
+
+    sockaddr_in server_address{};
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(port);
+    ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
+
+    const std::array<std::byte, 4> garbage = {
+        std::byte{0xde},
+        std::byte{0xad},
+        std::byte{0xbe},
+        std::byte{0xef},
+    };
+    ASSERT_GE(::sendto(client_socket.get(), garbage.data(), garbage.size(), 0,
+                       reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address)),
+              0);
+
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(1500)).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, ServerFailsFastWhenTlsFilesMissing) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .certificate_chain_path = "/no/such/cert.pem",
+        .private_key_path = "/no/such/key.pem",
+    };
+
+    auto server_process = launch_runtime_server_process(server);
+    const auto status = server_process.wait_for_exit(std::chrono::milliseconds(250));
+    if (!status.has_value()) {
+        FAIL() << "expected child process to exit quickly";
+    }
+    const auto process_status = *status;
+    ASSERT_TRUE(WIFEXITED(process_status));
+    EXPECT_EQ(WEXITSTATUS(process_status), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, TransferCaseUsesSingleConnectionAndMultipleStreams) {
@@ -454,8 +589,7 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
-    auto server_future = std::async(
-        std::launch::async, [&]() { return coquic::quic::run_http09_runtime(server_runtime); });
+    auto server_process = launch_runtime_server_process(server_runtime);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     const int client_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -534,8 +668,8 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {
         EXPECT_FALSE(first_header_is_retry_packet(datagram));
     }
 
-    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    EXPECT_EQ(server_future.get(), 0);
+    EXPECT_TRUE(client.is_handshake_complete());
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
 }
 
 } // namespace

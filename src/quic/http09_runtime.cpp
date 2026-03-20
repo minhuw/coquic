@@ -74,6 +74,18 @@ std::string read_text_file(const std::filesystem::path &path) {
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 }
 
+std::optional<std::string> read_required_text_file(const std::filesystem::path &path,
+                                                   std::string_view label) {
+    auto content = read_text_file(path);
+    if (!content.empty()) {
+        return content;
+    }
+
+    std::cerr << "http09-server failed: unable to load required TLS " << label << " '"
+              << path.string() << "'\n";
+    return std::nullopt;
+}
+
 std::optional<std::uint16_t> parse_port(std::string_view value) {
     if (value.empty()) {
         return std::nullopt;
@@ -124,6 +136,18 @@ bool make_ipv4_address(std::string_view host, std::uint16_t port, sockaddr_in &a
 
 int open_udp_socket() {
     return ::socket(AF_INET, SOCK_DGRAM, 0);
+}
+
+QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeConfig &config,
+                                                            TlsIdentity identity) {
+    return QuicCoreConfig{
+        .role = EndpointRole::server,
+        .source_connection_id = {std::byte{0x53}, std::byte{0x01}},
+        .verify_peer = config.verify_peer,
+        .server_name = config.server_name,
+        .application_protocol = std::string(kInteropApplicationProtocol),
+        .identity = std::move(identity),
+    };
 }
 
 bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer,
@@ -432,14 +456,27 @@ int run_http09_server(const Http09RuntimeConfig &config) {
         return 1;
     }
 
+    auto certificate_pem =
+        read_required_text_file(config.certificate_chain_path, "certificate chain");
+    if (!certificate_pem.has_value()) {
+        return 1;
+    }
+    auto private_key_pem = read_required_text_file(config.private_key_path, "private key");
+    if (!private_key_pem.has_value()) {
+        return 1;
+    }
+
     QuicHttp09ServerEndpoint endpoint(
         QuicHttp09ServerConfig{.document_root = config.document_root});
-    QuicCore core(make_http09_server_core_config(config));
+    QuicCore core(make_http09_server_core_config_with_identity(
+        config, TlsIdentity{
+                    .certificate_pem = std::move(*certificate_pem),
+                    .private_key_pem = std::move(*private_key_pem),
+                }));
 
     sockaddr_storage peer{};
     socklen_t peer_len = 0;
     bool have_peer = false;
-    bool saw_peer_activity = false;
     EndpointDriveState state;
 
     auto start_result = core.advance(QuicCoreStart{}, now());
@@ -460,7 +497,7 @@ int run_http09_server(const Http09RuntimeConfig &config) {
             return 1;
         }
         if (step->idle_timeout) {
-            return saw_peer_activity ? 0 : 1;
+            continue;
         }
         if (!step->input.has_value()) {
             continue;
@@ -470,7 +507,6 @@ int run_http09_server(const Http09RuntimeConfig &config) {
             peer = step->source;
             peer_len = step->source_len;
             have_peer = true;
-            saw_peer_activity = true;
         }
 
         auto step_result = core.advance(std::move(*step->input), step->input_time);
@@ -670,18 +706,11 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
 }
 
 QuicCoreConfig make_http09_server_core_config(const Http09RuntimeConfig &config) {
-    return QuicCoreConfig{
-        .role = EndpointRole::server,
-        .source_connection_id = {std::byte{0x53}, std::byte{0x01}},
-        .verify_peer = config.verify_peer,
-        .server_name = config.server_name,
-        .application_protocol = std::string(kInteropApplicationProtocol),
-        .identity =
-            TlsIdentity{
-                .certificate_pem = read_text_file(config.certificate_chain_path),
-                .private_key_pem = read_text_file(config.private_key_path),
-            },
-    };
+    return make_http09_server_core_config_with_identity(
+        config, TlsIdentity{
+                    .certificate_pem = read_text_file(config.certificate_chain_path),
+                    .private_key_pem = read_text_file(config.private_key_path),
+                });
 }
 
 int run_http09_runtime(const Http09RuntimeConfig &config) {

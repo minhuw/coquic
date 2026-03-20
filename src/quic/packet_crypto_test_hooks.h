@@ -16,6 +16,7 @@ enum class PacketCryptoFaultPoint : std::uint8_t {
     seal_init,
     seal_aad_update,
     seal_payload_update,
+    seal_native_seal,
     seal_final,
     seal_get_tag,
     open_length_guard,
@@ -28,7 +29,10 @@ enum class PacketCryptoFaultPoint : std::uint8_t {
     header_protection_chacha_init,
     header_protection_chacha_final,
     header_protection_chacha_bad_length,
+    header_protection_aes_context_new,
     header_protection_aes_init,
+    header_protection_aes_set_padding,
+    header_protection_aes_update,
     header_protection_aes_final,
     header_protection_aes_bad_length,
 };

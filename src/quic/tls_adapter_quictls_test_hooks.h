@@ -4,11 +4,16 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include <openssl/ssl.h>
 
 #include "src/quic/tls_adapter.h"
+
+#if !defined(OSSL_ENCRYPTION_LEVEL)
+typedef enum ssl_encryption_level_t OSSL_ENCRYPTION_LEVEL;
+#endif
 
 namespace coquic::quic::test {
 
@@ -21,6 +26,8 @@ enum class TlsAdapterFaultPoint : std::uint8_t {
     load_identity_use_certificate,
     initialize_ssl_new,
     initialize_ssl_set_quic_method,
+    initialize_client_alpn,
+    initialize_client_alpn_set_protos,
     initialize_server_name,
     initialize_transport_params,
     provide_quic_data,
@@ -54,6 +61,13 @@ class TlsAdapterTestPeer {
     cipher_suite_for_protocol_ids(std::optional<std::uint16_t> pending_protocol_id,
                                   std::optional<std::uint16_t> current_protocol_id);
     static CodecResult<CipherSuite> cipher_suite_for_ssl(TlsAdapter &adapter);
+    static std::vector<uint8_t>
+    encode_application_protocol_list(std::string_view application_protocol);
+    static bool client_offered_application_protocol(std::span<const uint8_t> offered,
+                                                    std::string_view application_protocol);
+    static bool call_client_alpn_failed(TlsAdapter &adapter, std::string_view application_protocol);
+    static void set_application_protocol(TlsAdapter &adapter,
+                                         std::string_view application_protocol);
 
     static CodecResult<bool> drive_handshake(TlsAdapter &adapter);
     static void reset_ssl(TlsAdapter &adapter);
@@ -68,18 +82,27 @@ class TlsAdapterTestPeer {
     static int call_on_set_encryption_secrets(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
                                               const uint8_t *read_secret,
                                               const uint8_t *write_secret, size_t secret_len);
+    static int call_on_set_secret(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
+                                  EndpointRole sender, const uint8_t *secret, size_t secret_len);
     static int call_on_add_handshake_data(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
                                           const uint8_t *data, size_t len);
     static int call_on_flush_flight(TlsAdapter &adapter);
     static int call_on_send_alert(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level, uint8_t alert);
     static int call_static_send_alert(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
                                       uint8_t alert);
+    static int call_static_select_application_protocol(TlsAdapter *adapter, const uint8_t **out,
+                                                       uint8_t *out_len,
+                                                       std::span<const uint8_t> offered);
+    static std::optional<std::uint16_t> pending_or_current_cipher_protocol_id(TlsAdapter &adapter);
 
-    static int call_static_set_encryption_secrets_with_null_app_data(TlsAdapter &adapter,
-                                                                     OSSL_ENCRYPTION_LEVEL level,
-                                                                     const uint8_t *read_secret,
-                                                                     const uint8_t *write_secret,
-                                                                     size_t secret_len);
+    static int call_static_set_read_secret_with_null_app_data(TlsAdapter &adapter,
+                                                              OSSL_ENCRYPTION_LEVEL level,
+                                                              const uint8_t *secret,
+                                                              size_t secret_len);
+    static int call_static_set_write_secret_with_null_app_data(TlsAdapter &adapter,
+                                                               OSSL_ENCRYPTION_LEVEL level,
+                                                               const uint8_t *secret,
+                                                               size_t secret_len);
     static int call_static_add_handshake_data_with_null_app_data(TlsAdapter &adapter,
                                                                  OSSL_ENCRYPTION_LEVEL level,
                                                                  const uint8_t *data, size_t len);

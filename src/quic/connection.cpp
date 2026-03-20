@@ -165,6 +165,39 @@ bool should_refresh_receive_window(std::uint64_t delivered_bytes, std::uint64_t 
     return remaining < (window / 2);
 }
 
+bool stream_fin_sendable(const StreamState &stream) {
+    return stream.send_fin_state == StreamSendFinState::pending &&
+           stream.send_final_size.has_value() &&
+           *stream.send_final_size <= stream.flow_control.peer_max_stream_data &&
+           !stream.send_buffer.has_pending_data();
+}
+
+std::vector<std::uint64_t>
+round_robin_stream_order(const std::map<std::uint64_t, StreamState> &streams,
+                         std::optional<std::uint64_t> last_stream_id) {
+    std::vector<std::uint64_t> order;
+    order.reserve(streams.size());
+    if (streams.empty()) {
+        return order;
+    }
+
+    auto append_order = [&](auto begin, auto end) {
+        for (auto it = begin; it != end; ++it) {
+            order.push_back(it->first);
+        }
+    };
+
+    if (!last_stream_id.has_value()) {
+        append_order(streams.begin(), streams.end());
+        return order;
+    }
+
+    const auto start = streams.upper_bound(*last_stream_id);
+    append_order(start, streams.end());
+    append_order(streams.begin(), start);
+    return order;
+}
+
 } // namespace
 
 std::uint64_t ConnectionFlowControlState::sendable_bytes(std::uint64_t queued_bytes) const {
@@ -1753,11 +1786,7 @@ bool QuicConnection::has_pending_application_send() const {
             continue;
         }
 
-        const auto fin_sendable =
-            stream.send_fin_state == StreamSendFinState::pending &&
-            stream.send_final_size.has_value() &&
-            *stream.send_final_size <= stream.flow_control.peer_max_stream_data &&
-            !stream.send_buffer.has_pending_data();
+        const auto fin_sendable = stream_fin_sendable(stream);
         if (stream.send_buffer.has_lost_data() || fin_sendable) {
             return true;
         }
@@ -2027,27 +2056,92 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             return frames;
         };
         const auto take_stream_fragments =
-            [](auto &connection_flow, auto &streams,
-               std::size_t max_bytes) -> std::vector<StreamFrameSendFragment> {
+            [](auto &connection_flow, auto &streams, std::size_t max_bytes,
+               auto &last_stream_id) -> std::vector<StreamFrameSendFragment> {
             std::vector<StreamFrameSendFragment> fragments;
             auto remaining_bytes = max_bytes;
             auto remaining_connection_credit =
                 connection_flow.peer_max_data > connection_flow.highest_sent
                     ? connection_flow.peer_max_data - connection_flow.highest_sent
                     : 0;
-            for (auto &[stream_id, stream] : streams) {
-                static_cast<void>(stream_id);
-                const auto highest_sent_before = stream.flow_control.highest_sent;
-                auto stream_fragments = stream.take_send_fragments(StreamSendBudget{
-                    .packet_bytes = remaining_bytes,
-                    .new_bytes = remaining_connection_credit,
-                });
-                const auto new_bytes_sent = stream.flow_control.highest_sent - highest_sent_before;
-                connection_flow.highest_sent += new_bytes_sent;
-                remaining_connection_credit -= new_bytes_sent;
-                remaining_bytes -= stream_fragment_bytes(stream_fragments);
-                fragments.insert(fragments.end(), std::make_move_iterator(stream_fragments.begin()),
-                                 std::make_move_iterator(stream_fragments.end()));
+            auto loss_phase = true;
+            auto allow_zero_byte_round = true;
+
+            while (remaining_bytes > 0 || allow_zero_byte_round) {
+                const auto zero_byte_round = remaining_bytes == 0;
+                allow_zero_byte_round = false;
+                const auto order = round_robin_stream_order(streams, last_stream_id);
+                std::vector<std::uint64_t> active_stream_ids;
+                active_stream_ids.reserve(order.size());
+                for (const auto stream_id : order) {
+                    const auto stream = streams.find(stream_id);
+                    if (stream == streams.end() ||
+                        stream->second.reset_state != StreamControlFrameState::none) {
+                        continue;
+                    }
+
+                    const auto active = loss_phase ? stream->second.send_buffer.has_lost_data() ||
+                                                         stream_fin_sendable(stream->second)
+                                                   : stream->second.sendable_bytes() != 0 ||
+                                                         stream_fin_sendable(stream->second);
+                    if (active) {
+                        active_stream_ids.push_back(stream_id);
+                    }
+                }
+
+                if (active_stream_ids.empty()) {
+                    if (loss_phase) {
+                        loss_phase = false;
+                        continue;
+                    }
+
+                    break;
+                }
+
+                std::size_t bytes_sent_this_round = 0;
+                bool emitted_fragment = false;
+                for (const auto stream_id : active_stream_ids) {
+                    auto stream = streams.find(stream_id);
+                    if (stream == streams.end()) {
+                        continue;
+                    }
+
+                    const auto highest_sent_before = stream->second.flow_control.highest_sent;
+                    const auto packet_share =
+                        zero_byte_round
+                            ? 0
+                            : std::max<std::size_t>(1, remaining_bytes / active_stream_ids.size());
+                    const auto new_byte_share =
+                        loss_phase || remaining_connection_credit == 0
+                            ? 0
+                            : std::max<std::uint64_t>(1, remaining_connection_credit /
+                                                             active_stream_ids.size());
+                    auto stream_fragments = stream->second.take_send_fragments(StreamSendBudget{
+                        .packet_bytes = std::min(remaining_bytes, packet_share),
+                        .new_bytes = new_byte_share,
+                    });
+                    const auto new_bytes_sent =
+                        stream->second.flow_control.highest_sent - highest_sent_before;
+                    connection_flow.highest_sent += new_bytes_sent;
+                    remaining_connection_credit -= new_bytes_sent;
+                    const auto fragment_bytes = stream_fragment_bytes(stream_fragments);
+                    remaining_bytes -= fragment_bytes;
+                    if (!stream_fragments.empty()) {
+                        emitted_fragment = true;
+                        last_stream_id = stream_id;
+                    }
+                    bytes_sent_this_round += fragment_bytes;
+                    fragments.insert(fragments.end(),
+                                     std::make_move_iterator(stream_fragments.begin()),
+                                     std::make_move_iterator(stream_fragments.end()));
+                    if (remaining_bytes == 0 && !zero_byte_round) {
+                        break;
+                    }
+                }
+
+                if (!emitted_fragment || bytes_sent_this_round == 0) {
+                    break;
+                }
             }
 
             return fragments;
@@ -2290,8 +2384,10 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 auto candidate_stop_frames = take_stop_sending_frames(candidate_streams);
                 auto candidate_stream_data_blocked_frames =
                     take_stream_data_blocked_frames(candidate_streams);
-                auto candidate_fragments = take_stream_fragments(
-                    candidate_connection_flow, candidate_streams, candidate_length);
+                auto candidate_last_stream_id = last_application_send_stream_id_;
+                auto candidate_fragments =
+                    take_stream_fragments(candidate_connection_flow, candidate_streams,
+                                          candidate_length, candidate_last_stream_id);
                 auto fitting_ack_frame = trim_application_ack_frame(
                     base_ack_frame, candidate_max_data_frame, candidate_max_stream_data_frames,
                     candidate_reset_frames, candidate_stop_frames, candidate_data_blocked_frame,
@@ -2334,8 +2430,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             auto reset_stream_frames = take_reset_stream_frames(streams_);
             auto stop_sending_frames = take_stop_sending_frames(streams_);
             auto stream_data_blocked_frames = take_stream_data_blocked_frames(streams_);
-            auto stream_fragments =
-                take_stream_fragments(connection_flow_control_, streams_, best_length);
+            auto stream_fragments = take_stream_fragments(
+                connection_flow_control_, streams_, best_length, last_application_send_stream_id_);
             auto candidate_datagram = serialize_application_candidate(
                 best_ack_frame, max_data_frame, max_stream_data_frames, reset_stream_frames,
                 stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,

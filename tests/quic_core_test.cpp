@@ -91,6 +91,33 @@ decode_sender_datagram(const coquic::quic::QuicConnection &connection,
     return decoded.value();
 }
 
+std::vector<std::uint64_t>
+application_stream_ids_from_datagram(const coquic::quic::QuicConnection &connection,
+                                     std::span<const std::byte> datagram) {
+    const auto packets = decode_sender_datagram(connection, datagram);
+    std::vector<std::uint64_t> stream_ids;
+    for (const auto &packet : packets) {
+        const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+        if (application == nullptr) {
+            continue;
+        }
+
+        for (const auto &frame : application->frames) {
+            const auto *stream = std::get_if<coquic::quic::StreamFrame>(&frame);
+            if (stream == nullptr) {
+                continue;
+            }
+
+            if (std::find(stream_ids.begin(), stream_ids.end(), stream->stream_id) ==
+                stream_ids.end()) {
+                stream_ids.push_back(stream->stream_id);
+            }
+        }
+    }
+
+    return stream_ids;
+}
+
 template <typename Core>
 concept has_receive = requires(Core &core) { core.receive(std::vector<std::byte>{}); };
 
@@ -2050,6 +2077,45 @@ TEST(QuicCoreTest, ApplicationSendBudgetsManyFinOnlyStreamsWithinDatagramLimit) 
     EXPECT_LE(datagram.size(), 1200u);
     EXPECT_FALSE(connection.has_failed());
     EXPECT_TRUE(connection.has_pending_application_send());
+}
+
+TEST(QuicCoreTest, NewDataSchedulingRoundsRobinAcrossSendableStreams) {
+    auto connection = make_connected_client_connection();
+    const auto payload = std::vector<std::byte>(static_cast<std::size_t>(2000), std::byte{0x61});
+
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+    ASSERT_TRUE(connection.queue_stream_send(4, payload, false).has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    const auto stream_ids = application_stream_ids_from_datagram(connection, datagram);
+    EXPECT_NE(std::find(stream_ids.begin(), stream_ids.end(), 0), stream_ids.end());
+    EXPECT_NE(std::find(stream_ids.begin(), stream_ids.end(), 4), stream_ids.end());
+}
+
+TEST(QuicCoreTest, RetransmissionPreservesStreamIdentityAcrossMultipleStreams) {
+    auto connection = make_connected_client_connection();
+    const auto payload = std::vector<std::byte>(static_cast<std::size_t>(2000), std::byte{0x62});
+
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+    ASSERT_TRUE(connection.queue_stream_send(4, payload, false).has_value());
+
+    const auto first_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_datagram.empty());
+    ASSERT_EQ(connection.application_space_.sent_packets.size(), 1u);
+    const auto first_packet = connection.application_space_.sent_packets.begin()->second;
+
+    connection.mark_lost_packet(connection.application_space_, first_packet);
+
+    const auto repaired_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(repaired_datagram.empty());
+
+    const auto stream_ids = application_stream_ids_from_datagram(connection, repaired_datagram);
+    EXPECT_NE(std::find(stream_ids.begin(), stream_ids.end(), 0), stream_ids.end());
+    EXPECT_NE(std::find(stream_ids.begin(), stream_ids.end(), 4), stream_ids.end());
 }
 
 TEST(QuicCoreTest, FailureEventIsEdgeTriggeredAndLaterCallsAreInert) {

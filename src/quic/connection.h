@@ -165,6 +165,7 @@ class QuicConnection {
     std::vector<QuicCorePeerResetStream> pending_peer_reset_effects_;
     std::vector<QuicCorePeerStopSending> pending_peer_stop_effects_;
     std::vector<QuicCoreStateChange> pending_state_changes_;
+    std::optional<std::uint64_t> last_application_send_stream_id_;
     std::uint32_t pto_count_ = 0;
     bool handshake_confirmed_ = false;
     bool handshake_ready_emitted_ = false;

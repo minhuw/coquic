@@ -94,6 +94,53 @@ void merge_result(coquic::quic::QuicDemoChannelResult &combined,
     combined.next_wakeup = step.next_wakeup;
 }
 
+std::vector<std::uint64_t>
+application_stream_ids_from_datagram(const coquic::quic::QuicConnection &connection,
+                                     std::span<const std::byte> datagram) {
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        datagram, coquic::quic::DeserializeProtectionContext{
+                      .peer_role = connection.config_.role,
+                      .client_initial_destination_connection_id =
+                          connection.client_initial_destination_connection_id(),
+                      .handshake_secret = connection.handshake_space_.write_secret,
+                      .one_rtt_secret = connection.application_space_.write_secret,
+                      .largest_authenticated_initial_packet_number =
+                          connection.initial_space_.largest_authenticated_packet_number,
+                      .largest_authenticated_handshake_packet_number =
+                          connection.handshake_space_.largest_authenticated_packet_number,
+                      .largest_authenticated_application_packet_number =
+                          connection.application_space_.largest_authenticated_packet_number,
+                      .one_rtt_destination_connection_id_length =
+                          connection.config_.source_connection_id.size(),
+                  });
+    EXPECT_TRUE(decoded.has_value());
+    if (!decoded.has_value()) {
+        return {};
+    }
+
+    std::vector<std::uint64_t> stream_ids;
+    for (const auto &packet : decoded.value()) {
+        const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+        if (application == nullptr) {
+            continue;
+        }
+
+        for (const auto &frame : application->frames) {
+            const auto *stream = std::get_if<coquic::quic::StreamFrame>(&frame);
+            if (stream == nullptr) {
+                continue;
+            }
+
+            if (std::find(stream_ids.begin(), stream_ids.end(), stream->stream_id) ==
+                stream_ids.end()) {
+                stream_ids.push_back(stream->stream_id);
+            }
+        }
+    }
+
+    return stream_ids;
+}
+
 TEST(QuicDemoChannelTest, ClientStartProducesSendDatagramEffect) {
     coquic::quic::QuicDemoChannel client(coquic::quic::test::make_client_core_config());
 
@@ -224,6 +271,29 @@ TEST(QuicDemoChannelTest, ReceivedMessagesAreDeliveredThroughEffects) {
 
     ASSERT_EQ(messages.size(), 1u);
     EXPECT_EQ(coquic::quic::test::string_from_bytes(messages.front()), "ping");
+}
+
+TEST(QuicDemoChannelTest, QueuedMessageUsesTransportStream0) {
+    coquic::quic::QuicDemoChannel client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicDemoChannel server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_demo_channel_handshake(client, server,
+                                                     coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_ready());
+    ASSERT_TRUE(server.is_ready());
+
+    const auto send = client.advance(
+        coquic::quic::QuicDemoChannelQueueMessage{
+            .bytes = coquic::quic::test::bytes_from_string("stream-zero"),
+        },
+        coquic::quic::test::test_time(1));
+    const auto datagrams = coquic::quic::test::send_datagrams_from(send);
+
+    ASSERT_EQ(datagrams.size(), 1u);
+    const auto stream_ids =
+        application_stream_ids_from_datagram(*client.core_.connection_, datagrams.front());
+    ASSERT_EQ(stream_ids.size(), 1u);
+    EXPECT_EQ(stream_ids.front(), 0u);
 }
 
 TEST(QuicDemoChannelTest, QueuedMessageIsDeliveredAfterSingleDatagramLoss) {

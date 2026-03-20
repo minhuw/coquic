@@ -1,0 +1,10 @@
+*
+!build.zig
+!flake.nix
+!flake.lock
+!LICENSE
+!README.md
+!src/
+!src/**
+!scripts/
+!scripts/**

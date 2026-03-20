@@ -1640,6 +1640,20 @@ TEST(QuicCoreTest, ApplicationSendClearsPendingProbeAfterSendingStreamData) {
         connection.application_space_.sent_packets.begin()->second.stream_fragments.empty());
 }
 
+TEST(QuicCoreTest, ApplicationSendBudgetsManyFinOnlyStreamsWithinDatagramLimit) {
+    auto connection = make_connected_client_connection();
+    for (std::uint64_t stream_index = 0; stream_index < 512; ++stream_index) {
+        ASSERT_TRUE(connection.queue_stream_send(stream_index * 4, {}, true).has_value());
+    }
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_LE(datagram.size(), 1200u);
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_TRUE(connection.has_pending_application_send());
+}
+
 TEST(QuicCoreTest, FailureEventIsEdgeTriggeredAndLaterCallsAreInert) {
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 
@@ -1734,6 +1748,22 @@ TEST(QuicCoreTest, InboundApplicationStreamFailsForNonZeroStreamId) {
 
     EXPECT_FALSE(injected);
     EXPECT_TRUE(connection.has_failed());
+}
+
+TEST(QuicCoreTest,
+     InboundApplicationCompatibilityStreamZeroRespectsAdvertisedBidirectionalStreamLimit) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.transport.initial_max_streams_bidi = 0;
+    coquic::quic::QuicConnection connection(std::move(config));
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        connection, coquic::quic::HandshakeStatus::connected);
+
+    const auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::test::make_inbound_application_stream_frame("ping", 0, 0)});
+
+    EXPECT_FALSE(injected);
+    EXPECT_TRUE(connection.has_failed());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
 }
 
 TEST(QuicCoreTest, InboundApplicationStreamCarriesFinWhenFinalDataBecomesContiguous) {

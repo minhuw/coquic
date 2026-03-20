@@ -1149,16 +1149,16 @@ CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint6
     if (const auto existing = streams_.find(stream_id); existing != streams_.end()) {
         return CodecResult<StreamState *>::success(&existing->second);
     }
-    if (stream_id == kCompatibilityStreamId) {
-        auto [it, inserted] =
-            streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
-        static_cast<void>(inserted);
-        return CodecResult<StreamState *>::success(&it->second);
-    }
 
     const auto id_info = classify_stream_id(stream_id, config_.role);
     if (!id_info.local_can_receive) {
         return CodecResult<StreamState *>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+    if (stream_id == kCompatibilityStreamId && id_info.initiator == StreamInitiator::local) {
+        auto [it, inserted] =
+            streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
+        static_cast<void>(inserted);
+        return CodecResult<StreamState *>::success(&it->second);
     }
     if (id_info.initiator != StreamInitiator::peer ||
         !is_peer_implicit_stream_open_allowed_by_limits(stream_id, config_.role,
@@ -1554,7 +1554,38 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             if (best_ack_frame.has_value()) {
                 frames.emplace_back(*best_ack_frame);
             }
-            const auto stream_fragments = take_stream_fragments(streams_, best_length);
+            auto stream_fragments = take_stream_fragments(streams_, best_length);
+            auto candidate_datagram = serialize_application_candidate(
+                best_ack_frame, stream_fragments, /*include_ping=*/false);
+            if (!candidate_datagram.has_value()) {
+                mark_failed();
+                return {};
+            }
+            while (candidate_datagram.value().size() > kMaximumDatagramSize &&
+                   !stream_fragments.empty()) {
+                const auto &last_fragment = stream_fragments.back();
+                if (!last_fragment.fin || !last_fragment.bytes.empty()) {
+                    mark_failed();
+                    return {};
+                }
+
+                if (const auto stream = streams_.find(last_fragment.stream_id);
+                    stream != streams_.end()) {
+                    stream->second.mark_send_fragment_lost(last_fragment);
+                }
+                stream_fragments.pop_back();
+                candidate_datagram = serialize_application_candidate(
+                    best_ack_frame, stream_fragments, /*include_ping=*/false);
+                if (!candidate_datagram.has_value()) {
+                    mark_failed();
+                    return {};
+                }
+            }
+            if (candidate_datagram.value().size() > kMaximumDatagramSize) {
+                mark_failed();
+                return {};
+            }
+
             for (const auto &fragment : stream_fragments) {
                 frames.emplace_back(StreamFrame{
                     .fin = fragment.fin,

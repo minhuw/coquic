@@ -33,6 +33,7 @@ class QuicHttp09ClientEndpoint {
     };
 
     QuicHttp09EndpointUpdate make_failure_update() const;
+    QuicHttp09EndpointUpdate fail_endpoint();
     QuicHttp09EndpointUpdate drain_pending_inputs();
     bool process_receive_stream_data(const QuicCoreReceiveStreamData &received);
     bool all_streams_complete() const;

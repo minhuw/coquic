@@ -150,4 +150,51 @@ TEST(QuicHttp09ClientTest, ReportsSuccessOnlyAfterAllStreamsFinishWithFin) {
     EXPECT_FALSE(third.terminal_failure);
 }
 
+TEST(QuicHttp09ClientTest, AppendsMultipleReceiveChunksToSameOutputFile) {
+    const auto now = coquic::quic::test::test_time();
+    coquic::quic::test::ScopedTempDir download_root;
+
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/chunked.txt")},
+        .download_root = download_root.path(),
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+
+    const auto first =
+        endpoint.on_core_result(receive_result(0, "hel", false), coquic::quic::test::test_time(1));
+    EXPECT_FALSE(first.terminal_success);
+    EXPECT_FALSE(first.terminal_failure);
+    EXPECT_EQ(read_file_bytes(download_root.path() / "chunked.txt"), "hel");
+
+    const auto second =
+        endpoint.on_core_result(receive_result(0, "lo", true), coquic::quic::test::test_time(2));
+    EXPECT_TRUE(second.terminal_success);
+    EXPECT_FALSE(second.terminal_failure);
+    EXPECT_EQ(read_file_bytes(download_root.path() / "chunked.txt"), "hello");
+}
+
+TEST(QuicHttp09ClientTest, FailsDeterministicallyWhenDirectoryCreationFails) {
+    const auto now = coquic::quic::test::test_time();
+    coquic::quic::test::ScopedTempDir temp_root;
+    const auto blocking_file = temp_root.path() / "not-a-directory";
+    temp_root.write_file("not-a-directory", "x");
+
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/out.txt")},
+        .download_root = blocking_file,
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, "data", true), coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_FALSE(update.terminal_success);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
 } // namespace

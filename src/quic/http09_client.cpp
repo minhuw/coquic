@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <fstream>
+#include <system_error>
 #include <utility>
 
 namespace coquic::quic {
@@ -13,9 +14,7 @@ QuicHttp09ClientEndpoint::QuicHttp09ClientEndpoint(QuicHttp09ClientConfig config
 QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCoreResult &result,
                                                                   QuicCoreTimePoint /*now*/) {
     if (failed_ || result.local_error.has_value()) {
-        failed_ = true;
-        clear_state();
-        return make_failure_update();
+        return fail_endpoint();
     }
 
     for (const auto &effect : result.effects) {
@@ -23,9 +22,7 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
             if (event->change == QuicCoreStateChange::handshake_ready) {
                 handshake_ready_ = true;
             } else if (event->change == QuicCoreStateChange::failed) {
-                failed_ = true;
-                clear_state();
-                return make_failure_update();
+                return fail_endpoint();
             }
             continue;
         }
@@ -36,9 +33,7 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
         }
 
         if (!process_receive_stream_data(*received)) {
-            failed_ = true;
-            clear_state();
-            return make_failure_update();
+            return fail_endpoint();
         }
     }
 
@@ -99,6 +94,15 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::make_failure_update() const {
     };
 }
 
+QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::fail_endpoint() {
+    failed_ = true;
+    handshake_ready_ = false;
+    requests_issued_ = false;
+    complete_ = false;
+    clear_state();
+    return make_failure_update();
+}
+
 QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::drain_pending_inputs() {
     QuicHttp09EndpointUpdate update;
     while (!pending_core_inputs_.empty()) {
@@ -106,8 +110,7 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::drain_pending_inputs() {
         pending_core_inputs_.pop_front();
     }
 
-    const bool waiting_to_issue_requests = handshake_ready_ && !requests_issued_;
-    update.has_pending_work = waiting_to_issue_requests || !pending_core_inputs_.empty();
+    update.has_pending_work = handshake_ready_ && !requests_issued_;
     return update;
 }
 
@@ -127,14 +130,21 @@ bool QuicHttp09ClientEndpoint::process_receive_stream_data(
         return false;
     }
 
-    std::filesystem::create_directories(resolved_path.value().parent_path());
+    std::error_code mkdir_error;
+    const auto &parent_path = resolved_path.value().parent_path();
+    std::filesystem::create_directories(parent_path, mkdir_error);
+    if (mkdir_error) {
+        return false;
+    }
+
     std::ofstream output(resolved_path.value(), std::ios::binary | std::ios::app);
     if (!output.is_open()) {
         return false;
     }
 
-    for (const auto byte : received.bytes) {
-        output.put(static_cast<char>(std::to_integer<unsigned char>(byte)));
+    if (!received.bytes.empty()) {
+        output.write(reinterpret_cast<const char *>(received.bytes.data()),
+                     static_cast<std::streamsize>(received.bytes.size()));
     }
 
     if (!output.good()) {

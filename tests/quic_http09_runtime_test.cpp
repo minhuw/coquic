@@ -416,13 +416,16 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
     EXPECT_EQ(runtime.certificate_chain_path, std::filesystem::path("/certs/cert.pem"));
     EXPECT_EQ(runtime.private_key_path, std::filesystem::path("/certs/priv.key"));
 
-    const auto client_core = coquic::quic::make_http09_client_core_config(runtime);
+    auto overridden_runtime = runtime;
+    overridden_runtime.application_protocol = "not-hq-interop";
+
+    const auto client_core = coquic::quic::make_http09_client_core_config(overridden_runtime);
     EXPECT_EQ(client_core.application_protocol, "hq-interop");
     EXPECT_EQ(client_core.transport.initial_max_data, 64u * 1024u);
     EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_local, 16u * 1024u);
     EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_remote, 256u * 1024u);
 
-    auto server_runtime = runtime;
+    auto server_runtime = overridden_runtime;
     server_runtime.mode = coquic::quic::Http09RuntimeMode::server;
     server_runtime.certificate_chain_path = "tests/fixtures/quic-server-cert.pem";
     server_runtime.private_key_path = "tests/fixtures/quic-server-key.pem";

@@ -28,6 +28,7 @@ namespace {
 constexpr std::size_t kMaxDatagramBytes = 65535;
 constexpr int kClientReceiveTimeoutMs = 10000;
 constexpr int kServerIdleTimeoutMs = 1000;
+constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
     "[--testcase handshake|transfer] [--requests URLS] [--document-root PATH] "
@@ -662,7 +663,7 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
                                               std::byte{0x57}, std::byte{0x08}},
         .verify_peer = config.verify_peer,
         .server_name = config.server_name,
-        .application_protocol = config.application_protocol,
+        .application_protocol = std::string(kInteropApplicationProtocol),
         .transport = http09_client_transport_for_testcase(config.testcase),
     };
     return core;
@@ -674,7 +675,7 @@ QuicCoreConfig make_http09_server_core_config(const Http09RuntimeConfig &config)
         .source_connection_id = {std::byte{0x53}, std::byte{0x01}},
         .verify_peer = config.verify_peer,
         .server_name = config.server_name,
-        .application_protocol = config.application_protocol,
+        .application_protocol = std::string(kInteropApplicationProtocol),
         .identity =
             TlsIdentity{
                 .certificate_pem = read_text_file(config.certificate_chain_path),

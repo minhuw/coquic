@@ -6,6 +6,7 @@
 #include <span>
 #include <vector>
 
+#include "src/quic/congestion.h"
 #include "src/quic/core.h"
 #include "src/quic/crypto_stream.h"
 #include "src/quic/recovery.h"
@@ -166,6 +167,7 @@ class QuicConnection {
     std::vector<QuicCorePeerStopSending> pending_peer_stop_effects_;
     std::vector<QuicCoreStateChange> pending_state_changes_;
     std::optional<std::uint64_t> last_application_send_stream_id_;
+    NewRenoCongestionController congestion_controller_;
     std::uint32_t pto_count_ = 0;
     bool handshake_confirmed_ = false;
     bool handshake_ready_emitted_ = false;

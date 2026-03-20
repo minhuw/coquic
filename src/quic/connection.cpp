@@ -21,6 +21,7 @@ constexpr std::size_t kMaximumDatagramSize = 1200;
 constexpr std::uint32_t kQuicVersion1 = 1;
 constexpr std::uint8_t kDefaultInitialPacketNumberLength = 2;
 constexpr std::uint64_t kCompatibilityStreamId = 0;
+constexpr std::uint32_t kPersistentCongestionThreshold = 3;
 
 EndpointRole opposite_role(EndpointRole role) {
     return role == EndpointRole::client ? EndpointRole::server : EndpointRole::client;
@@ -165,6 +166,11 @@ bool should_refresh_receive_window(std::uint64_t delivered_bytes, std::uint64_t 
     return remaining < (window / 2);
 }
 
+bool packet_space_is_application(const PacketSpaceState &packet_space,
+                                 const PacketSpaceState &application_space) {
+    return &packet_space == &application_space;
+}
+
 bool stream_fin_sendable(const StreamState &stream) {
     return stream.send_fin_state == StreamSendFinState::pending &&
            stream.send_final_size.has_value() &&
@@ -196,6 +202,43 @@ round_robin_stream_order(const std::map<std::uint64_t, StreamState> &streams,
     append_order(start, streams.end());
     append_order(streams.begin(), start);
     return order;
+}
+
+bool has_ack_eliciting_in_flight_loss(std::span<const SentPacketRecord> packets) {
+    return std::any_of(packets.begin(), packets.end(), [](const SentPacketRecord &packet) {
+        return packet.ack_eliciting && packet.in_flight && packet.bytes_in_flight != 0;
+    });
+}
+
+bool establishes_persistent_congestion(std::span<const SentPacketRecord> lost_packets,
+                                       const RecoveryRttState &rtt,
+                                       std::chrono::milliseconds max_ack_delay) {
+    if (!rtt.latest_rtt.has_value()) {
+        return false;
+    }
+
+    std::optional<QuicCoreTimePoint> first_loss_time;
+    std::optional<QuicCoreTimePoint> last_loss_time;
+    for (const auto &packet : lost_packets) {
+        if (!packet.ack_eliciting || !packet.in_flight || packet.bytes_in_flight == 0) {
+            continue;
+        }
+
+        if (!first_loss_time.has_value()) {
+            first_loss_time = packet.sent_time;
+        }
+        last_loss_time = packet.sent_time;
+    }
+
+    if (!first_loss_time.has_value() || !last_loss_time.has_value() ||
+        *last_loss_time <= *first_loss_time) {
+        return false;
+    }
+
+    const auto persistent_congestion_duration =
+        (rtt.smoothed_rtt + std::max(rtt.rttvar * 4, kGranularity) + max_ack_delay) *
+        kPersistentCongestionThreshold;
+    return *last_loss_time - *first_loss_time >= persistent_congestion_duration;
 }
 
 } // namespace
@@ -288,7 +331,8 @@ void ConnectionFlowControlState::mark_data_blocked_frame_lost(const DataBlockedF
     }
 }
 
-QuicConnection::QuicConnection(QuicCoreConfig config) : config_(std::move(config)) {
+QuicConnection::QuicConnection(QuicCoreConfig config)
+    : config_(std::move(config)), congestion_controller_(kMaximumDatagramSize) {
     local_transport_parameters_ = TransportParameters{
         .max_udp_payload_size = config_.transport.max_udp_payload_size,
         .active_connection_id_limit = 2,
@@ -628,6 +672,17 @@ void QuicConnection::detect_lost_packets(PacketSpaceState &packet_space, QuicCor
 
     for (const auto &packet : lost_packets) {
         mark_lost_packet(packet_space, packet);
+    }
+    if (packet_space_is_application(packet_space, application_space_) &&
+        has_ack_eliciting_in_flight_loss(lost_packets)) {
+        const auto application_max_ack_delay = std::chrono::milliseconds(
+            peer_transport_parameters_.has_value() ? peer_transport_parameters_->max_ack_delay
+                                                   : TransportParameters{}.max_ack_delay);
+        congestion_controller_.on_loss_event(now);
+        if (establishes_persistent_congestion(lost_packets, packet_space.recovery.rtt_state(),
+                                              application_max_ack_delay)) {
+            congestion_controller_.on_persistent_congestion();
+        }
     }
     rebuild_recovery(packet_space);
 }
@@ -1077,6 +1132,18 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
     if (&packet_space == &application_space_ && !ack_result.acked_packets.empty()) {
         handshake_confirmed_ = true;
     }
+    if (packet_space_is_application(packet_space, application_space_)) {
+        if (has_ack_eliciting_in_flight_loss(ack_result.lost_packets)) {
+            congestion_controller_.on_loss_event(now);
+            if (establishes_persistent_congestion(ack_result.lost_packets,
+                                                  packet_space.recovery.rtt_state(),
+                                                  std::chrono::milliseconds(max_ack_delay_ms))) {
+                congestion_controller_.on_persistent_congestion();
+            }
+        }
+        congestion_controller_.on_packets_acked(ack_result.acked_packets,
+                                                !has_pending_application_send());
+    }
     if (!ack_result.acked_packets.empty() && !suppress_pto_reset) {
         pto_count_ = 0;
     }
@@ -1088,6 +1155,9 @@ void QuicConnection::track_sent_packet(PacketSpaceState &packet_space,
                                        const SentPacketRecord &packet) {
     packet_space.sent_packets[packet.packet_number] = packet;
     packet_space.recovery.on_packet_sent(packet);
+    if (packet_space_is_application(packet_space, application_space_)) {
+        congestion_controller_.on_packet_sent(packet.bytes_in_flight, packet.ack_eliciting);
+    }
 }
 
 void QuicConnection::retire_acked_packet(PacketSpaceState &packet_space,
@@ -1147,6 +1217,9 @@ void QuicConnection::retire_acked_packet(PacketSpaceState &packet_space,
 
 void QuicConnection::mark_lost_packet(PacketSpaceState &packet_space,
                                       const SentPacketRecord &packet) {
+    if (packet_space_is_application(packet_space, application_space_)) {
+        congestion_controller_.on_packets_lost(std::span<const SentPacketRecord>(&packet, 1));
+    }
     for (const auto &range : packet.crypto_ranges) {
         packet_space.send_crypto.mark_lost(range.offset, range.bytes.size());
     }
@@ -2358,7 +2431,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     .stream_data_blocked_frames = probe_packet.stream_data_blocked_frames,
                     .stream_fragments = probe_packet.stream_fragments,
                     .has_ping = include_ping,
-                    .bytes_in_flight = stream_fragment_bytes(probe_packet.stream_fragments),
+                    .bytes_in_flight = datagram.value().size(),
                 });
             if (application_space_.received_packets.has_ack_to_send()) {
                 application_space_.received_packets.on_ack_sent();
@@ -2466,6 +2539,15 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 mark_failed();
                 return {};
             }
+            const auto ack_eliciting =
+                max_data_frame.has_value() || !max_stream_data_frames.empty() ||
+                !reset_stream_frames.empty() || !stop_sending_frames.empty() ||
+                data_blocked_frame.has_value() || !stream_data_blocked_frames.empty() ||
+                !stream_fragments.empty();
+            if (ack_eliciting &&
+                !congestion_controller_.can_send_ack_eliciting(candidate_datagram.value().size())) {
+                return {};
+            }
 
             for (const auto &frame : reset_stream_frames) {
                 frames.emplace_back(frame);
@@ -2508,11 +2590,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 .frames = std::move(frames),
             });
 
-            const auto ack_eliciting =
-                max_data_frame.has_value() || !max_stream_data_frames.empty() ||
-                !reset_stream_frames.empty() || !stop_sending_frames.empty() ||
-                data_blocked_frame.has_value() || !stream_data_blocked_frames.empty() ||
-                !stream_fragments.empty();
             track_sent_packet(application_space_,
                               SentPacketRecord{
                                   .packet_number = packet_number,
@@ -2527,7 +2604,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                   .data_blocked_frame = data_blocked_frame,
                                   .stream_data_blocked_frames = stream_data_blocked_frames,
                                   .stream_fragments = stream_fragments,
-                                  .bytes_in_flight = stream_fragment_bytes(stream_fragments),
+                                  .bytes_in_flight = candidate_datagram.value().size(),
                               });
             if (application_space_.received_packets.has_ack_to_send()) {
                 application_space_.received_packets.on_ack_sent();

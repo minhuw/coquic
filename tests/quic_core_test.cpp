@@ -2118,6 +2118,46 @@ TEST(QuicCoreTest, RetransmissionPreservesStreamIdentityAcrossMultipleStreams) {
     EXPECT_NE(std::find(stream_ids.begin(), stream_ids.end(), 4), stream_ids.end());
 }
 
+TEST(QuicCoreTest, CongestionWindowGatesAckElicitingSendsUntilAckArrives) {
+    auto connection = make_connected_client_connection();
+    const auto payload =
+        std::vector<std::byte>(static_cast<std::size_t>(32) * 1024U, std::byte{0x43});
+
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    std::size_t sent_datagrams = 0;
+    while (true) {
+        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        if (datagram.empty()) {
+            break;
+        }
+
+        ++sent_datagrams;
+    }
+
+    EXPECT_GT(sent_datagrams, 0u);
+    EXPECT_TRUE(connection.has_pending_application_send());
+    const auto blocked = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    EXPECT_TRUE(blocked.empty());
+
+    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+    const auto largest_packet_number = connection.application_space_.sent_packets.rbegin()->first;
+    ASSERT_TRUE(connection
+                    .process_inbound_ack(connection.application_space_,
+                                         coquic::quic::AckFrame{
+                                             .largest_acknowledged = largest_packet_number,
+                                             .first_ack_range = largest_packet_number,
+                                         },
+                                         coquic::quic::test::test_time(3),
+                                         /*ack_delay_exponent=*/3,
+                                         /*max_ack_delay_ms=*/25,
+                                         /*suppress_pto_reset=*/false)
+                    .has_value());
+
+    const auto after_ack = connection.drain_outbound_datagram(coquic::quic::test::test_time(4));
+    EXPECT_FALSE(after_ack.empty());
+}
+
 TEST(QuicCoreTest, FailureEventIsEdgeTriggeredAndLaterCallsAreInert) {
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 

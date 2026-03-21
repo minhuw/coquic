@@ -26,6 +26,21 @@ TEST(QuicHttp09Test, ParsesRequestsEnvAsSpaceSeparatedAbsoluteUrls) {
     EXPECT_EQ(parsed.value()[1].request_target, "/b/c");
 }
 
+TEST(QuicHttp09Test, RejectsNonHttpsAbsoluteRequestUrls) {
+    EXPECT_FALSE(coquic::quic::parse_http09_requests_env("http://example.test/a").has_value());
+}
+
+TEST(QuicHttp09Test, RejectsEmptyAuthorityAndEmptyRemainder) {
+    EXPECT_FALSE(coquic::quic::parse_http09_requests_env("https://").has_value());
+    EXPECT_FALSE(coquic::quic::parse_http09_requests_env("https:///a").has_value());
+}
+
+TEST(QuicHttp09Test, DefaultsAuthorityOnlyUrlToRootTarget) {
+    const auto parsed = coquic::quic::parse_http09_requests_env("https://example.test");
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed.value()[0].request_target, "/");
+}
+
 TEST(QuicHttp09Test, RejectsMixedAuthoritiesInSingleClientRun) {
     const auto parsed =
         coquic::quic::parse_http09_requests_env("https://a.test/x https://b.test/y");
@@ -65,6 +80,11 @@ TEST(QuicHttp09Test, RejectsTraversalQueriesAndFragmentsWhenResolvingPath) {
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a?b").has_value());
     EXPECT_FALSE(
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a#b").has_value());
+}
+
+TEST(QuicHttp09Test, RejectsInvalidTargetsDuringPathResolution) {
+    EXPECT_FALSE(coquic::quic::resolve_http09_path_under_root("/tmp/root", "").has_value());
+    EXPECT_FALSE(coquic::quic::resolve_http09_path_under_root("/tmp/root", "relative").has_value());
 }
 
 TEST(QuicHttp09Test, ParsesRequestTargetFromCrLfTerminatedLine) {

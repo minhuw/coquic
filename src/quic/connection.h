@@ -122,6 +122,9 @@ class QuicConnection {
     CodecResult<bool> sync_tls_state();
     CodecResult<bool> validate_peer_transport_parameters_if_ready();
     void update_handshake_status();
+    void confirm_handshake();
+    void discard_initial_packet_space();
+    void discard_handshake_packet_space();
     std::optional<TransportParametersValidationContext>
     peer_transport_parameters_validation_context() const;
     void initialize_local_flow_control();
@@ -172,8 +175,10 @@ class QuicConnection {
     bool application_read_key_phase_ = false;
     bool application_write_key_phase_ = false;
     bool handshake_confirmed_ = false;
+    StreamControlFrameState handshake_done_state_ = StreamControlFrameState::none;
     bool handshake_ready_emitted_ = false;
     bool failed_emitted_ = false;
+    std::vector<std::vector<std::byte>> deferred_protected_packets_;
 };
 
 } // namespace coquic::quic

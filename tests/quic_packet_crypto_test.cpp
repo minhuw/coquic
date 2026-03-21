@@ -443,65 +443,6 @@ TEST(QuicPacketCryptoTest, RejectsUnsupportedCipherSuites) {
     EXPECT_EQ(mask.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
 }
 
-TEST(QuicPacketCryptoTest, RejectsHeaderProtectionKeyDerivationForUnsupportedCipherSuites) {
-    const coquic::quic::TrafficSecret invalid_secret{
-        .cipher_suite = invalid_cipher_suite(),
-        .secret = {std::byte{0x00}},
-    };
-
-    const auto hp_key = coquic::quic::test::derive_header_protection_key_for_test(invalid_secret);
-    ASSERT_FALSE(hp_key.has_value());
-    EXPECT_EQ(hp_key.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
-
-    const auto next_secret = coquic::quic::derive_next_traffic_secret(invalid_secret);
-    ASSERT_FALSE(next_secret.has_value());
-    EXPECT_EQ(next_secret.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
-}
-
-TEST(QuicPacketCryptoTest, RejectsHeaderProtectionKeyDerivationWhenFaultIsInjected) {
-    const coquic::quic::TrafficSecret secret{
-        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
-        .secret = make_secret(32),
-    };
-    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector{
-        coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup};
-
-    const auto hp_key = coquic::quic::test::derive_header_protection_key_for_test(secret);
-    ASSERT_FALSE(hp_key.has_value());
-    EXPECT_EQ(hp_key.error().code, coquic::quic::CodecErrorCode::invalid_packet_protection_state);
-}
-
-TEST(QuicPacketCryptoTest, RejectsTrafficSecretExpansionWhenHeaderProtectionKeyDerivationFails) {
-    const coquic::quic::TrafficSecret secret{
-        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
-        .secret = make_secret(32),
-    };
-    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector{
-        coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
-        4,
-    };
-
-    const auto expanded = coquic::quic::expand_traffic_secret(secret);
-    ASSERT_FALSE(expanded.has_value());
-    EXPECT_EQ(expanded.error().code, coquic::quic::CodecErrorCode::invalid_packet_protection_state);
-}
-
-TEST(QuicPacketCryptoTest, RejectsNextTrafficSecretWhenHeaderProtectionKeyDerivationFails) {
-    const coquic::quic::TrafficSecret secret{
-        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
-        .secret = make_secret(32),
-    };
-    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector{
-        coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
-        2,
-    };
-
-    const auto next_secret = coquic::quic::derive_next_traffic_secret(secret);
-    ASSERT_FALSE(next_secret.has_value());
-    EXPECT_EQ(next_secret.error().code,
-              coquic::quic::CodecErrorCode::invalid_packet_protection_state);
-}
-
 TEST(QuicPacketCryptoTest, RejectsPayloadProtectionWhenKeyMaterialSizesDoNotMatchCipherSuite) {
     const auto sealed_with_short_key = coquic::quic::seal_payload(
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,

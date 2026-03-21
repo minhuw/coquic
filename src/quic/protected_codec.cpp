@@ -719,6 +719,15 @@ deserialize_protected_handshake_packet(std::span<const std::byte> bytes,
     });
 }
 
+void pad_short_header_plaintext_for_header_protection(std::vector<std::byte> &plaintext_image,
+                                                      std::size_t packet_number_offset) {
+    const auto minimum_plaintext_size = packet_number_offset + kHeaderProtectionSampleOffset;
+    if (plaintext_image.size() < minimum_plaintext_size) {
+        // Trailing zero bytes decode as PADDING frames and make the protected sample available.
+        plaintext_image.resize(minimum_plaintext_size, std::byte{0x00});
+    }
+}
+
 CodecResult<std::vector<std::byte>>
 serialize_protected_one_rtt_packet(const ProtectedOneRttPacket &packet,
                                    const SerializeProtectionContext &context) {
@@ -738,13 +747,15 @@ serialize_protected_one_rtt_packet(const ProtectedOneRttPacket &packet,
         return CodecResult<std::vector<std::byte>>::failure(plaintext_packet.error().code,
                                                             plaintext_packet.error().offset);
 
+    const auto packet_number_offset = 1 + packet.destination_connection_id.size();
+    const auto payload_offset = packet_number_offset + packet.packet_number_length;
     const auto plaintext_image = serialize_packet(Packet{plaintext_packet.value()});
     if (!plaintext_image.has_value())
         return CodecResult<std::vector<std::byte>>::failure(plaintext_image.error().code,
                                                             plaintext_image.error().offset);
 
-    const auto packet_number_offset = 1 + packet.destination_connection_id.size();
-    const auto payload_offset = packet_number_offset + packet.packet_number_length;
+    auto padded_plaintext_image = plaintext_image.value();
+    pad_short_header_plaintext_for_header_protection(padded_plaintext_image, packet_number_offset);
 
     const auto cipher_suite = context.one_rtt_secret->cipher_suite;
     const auto nonce =
@@ -752,14 +763,14 @@ serialize_protected_one_rtt_packet(const ProtectedOneRttPacket &packet,
 
     const auto ciphertext =
         seal_payload(cipher_suite, keys.value().key, nonce,
-                     std::span<const std::byte>(plaintext_image.value()).first(payload_offset),
-                     std::span<const std::byte>(plaintext_image.value()).subspan(payload_offset));
+                     std::span<const std::byte>(padded_plaintext_image).first(payload_offset),
+                     std::span<const std::byte>(padded_plaintext_image).subspan(payload_offset));
     if (!ciphertext.has_value())
         return CodecResult<std::vector<std::byte>>::failure(ciphertext.error().code,
                                                             ciphertext.error().offset);
 
-    auto sealed_packet = std::vector<std::byte>(plaintext_image.value().begin(),
-                                                plaintext_image.value().begin() +
+    auto sealed_packet = std::vector<std::byte>(padded_plaintext_image.begin(),
+                                                padded_plaintext_image.begin() +
                                                     static_cast<std::ptrdiff_t>(payload_offset));
     sealed_packet.insert(sealed_packet.end(), ciphertext.value().begin(), ciphertext.value().end());
 

@@ -88,6 +88,7 @@ struct StreamFrameSendFragment {
     std::uint64_t offset = 0;
     std::vector<std::byte> bytes;
     bool fin = false;
+    bool consumes_flow_control = false;
 };
 
 struct StreamSendBudget {

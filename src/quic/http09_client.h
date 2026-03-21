@@ -11,10 +11,6 @@
 
 namespace coquic::quic {
 
-namespace test {
-struct QuicHttp09ClientEndpointTestPeer;
-}
-
 struct QuicHttp09ClientConfig {
     std::vector<QuicHttp09Request> requests;
     std::filesystem::path download_root;
@@ -50,8 +46,6 @@ class QuicHttp09ClientEndpoint {
     bool failed_ = false;
     std::unordered_map<std::uint64_t, RequestState> request_streams_;
     std::deque<QuicCoreInput> pending_core_inputs_;
-
-    friend struct test::QuicHttp09ClientEndpointTestPeer;
 };
 
 } // namespace coquic::quic

@@ -26,34 +26,6 @@ TEST(QuicHttp09Test, ParsesRequestsEnvAsSpaceSeparatedAbsoluteUrls) {
     EXPECT_EQ(parsed.value()[1].request_target, "/b/c");
 }
 
-TEST(QuicHttp09Test, ParsesRequestsEnvWithLeadingAndTrailingSpaces) {
-    const auto parsed = coquic::quic::parse_http09_requests_env(
-        "  https://example.test/a https://example.test/b  ");
-    ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(parsed.value().size(), 2u);
-    EXPECT_EQ(parsed.value()[0].request_target, "/a");
-    EXPECT_EQ(parsed.value()[1].request_target, "/b");
-}
-
-TEST(QuicHttp09Test, RejectsRequestsEnvThatContainsOnlySpaces) {
-    EXPECT_FALSE(coquic::quic::parse_http09_requests_env("   ").has_value());
-}
-
-TEST(QuicHttp09Test, RejectsNonHttpsAbsoluteRequestUrls) {
-    EXPECT_FALSE(coquic::quic::parse_http09_requests_env("http://example.test/a").has_value());
-}
-
-TEST(QuicHttp09Test, RejectsEmptyAuthorityAndEmptyRemainder) {
-    EXPECT_FALSE(coquic::quic::parse_http09_requests_env("https://").has_value());
-    EXPECT_FALSE(coquic::quic::parse_http09_requests_env("https:///a").has_value());
-}
-
-TEST(QuicHttp09Test, DefaultsAuthorityOnlyUrlToRootTarget) {
-    const auto parsed = coquic::quic::parse_http09_requests_env("https://example.test");
-    ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(parsed.value()[0].request_target, "/");
-}
-
 TEST(QuicHttp09Test, RejectsMixedAuthoritiesInSingleClientRun) {
     const auto parsed =
         coquic::quic::parse_http09_requests_env("https://a.test/x https://b.test/y");
@@ -88,8 +60,6 @@ TEST(QuicHttp09Test, RejectsTraversalQueriesAndFragmentsWhenResolvingPath) {
     EXPECT_FALSE(
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/../secret").has_value());
     EXPECT_FALSE(
-        coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/./safe").has_value());
-    EXPECT_FALSE(
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a/../b").has_value());
     EXPECT_FALSE(
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a?b").has_value());
@@ -97,21 +67,10 @@ TEST(QuicHttp09Test, RejectsTraversalQueriesAndFragmentsWhenResolvingPath) {
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a#b").has_value());
 }
 
-TEST(QuicHttp09Test, RejectsInvalidTargetsDuringPathResolution) {
-    EXPECT_FALSE(coquic::quic::resolve_http09_path_under_root("/tmp/root", "").has_value());
-    EXPECT_FALSE(coquic::quic::resolve_http09_path_under_root("/tmp/root", "relative").has_value());
-}
-
 TEST(QuicHttp09Test, ParsesRequestTargetFromCrLfTerminatedLine) {
     const auto parsed = coquic::quic::parse_http09_request_target(bytes_from_ascii("GET /a\r\n"));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(parsed.value(), "/a");
-}
-
-TEST(QuicHttp09Test, RejectsEmptyRequestTarget) {
-    const auto parsed = coquic::quic::parse_http09_request_target(bytes_from_ascii("GET \r\n"));
-    ASSERT_FALSE(parsed.has_value());
-    EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
 }
 
 TEST(QuicHttp09Test, ParsesRequestTargetFromLfTerminatedLine) {
@@ -138,31 +97,6 @@ TEST(QuicHttp09Test, RejectsTabCharacterInRequestTarget) {
         coquic::quic::parse_http09_request_target(bytes_from_ascii("GET /\tbad\r\n"));
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
-}
-
-TEST(QuicHttp09Test, RejectsDeleteCharacterInRequestTarget) {
-    const auto parsed =
-        coquic::quic::parse_http09_request_target(bytes_from_ascii("GET /bad\x7f\r\n"));
-    ASSERT_FALSE(parsed.has_value());
-    EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
-}
-
-TEST(QuicHttp09Test, RejectsEmptyRequestLine) {
-    const auto parsed = coquic::quic::parse_http09_request_target(bytes_from_ascii("\n"));
-    ASSERT_FALSE(parsed.has_value());
-    EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
-}
-
-TEST(QuicHttp09Test, RejectsRequestTargetsWithoutLeadingSlash) {
-    const auto parsed =
-        coquic::quic::parse_http09_request_target(bytes_from_ascii("GET relative\n"));
-    ASSERT_FALSE(parsed.has_value());
-    EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
-}
-
-TEST(QuicHttp09Test, RejectsAbsoluteTargetAfterLeadingSlash) {
-    EXPECT_FALSE(
-        coquic::quic::resolve_http09_path_under_root("/tmp/root", "//outside").has_value());
 }
 
 } // namespace

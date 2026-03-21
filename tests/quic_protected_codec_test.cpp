@@ -1194,7 +1194,7 @@ TEST(QuicProtectedCodecTest, RejectsOneRttPacketsTooShortToRemoveHeaderProtectio
               coquic::quic::CodecErrorCode::header_protection_sample_too_short);
 }
 
-TEST(QuicProtectedCodecTest, RejectsPacketsTooShortForHeaderProtectionSample) {
+TEST(QuicProtectedCodecTest, PadsPacketsTooShortForHeaderProtectionSample) {
     const std::vector<coquic::quic::ProtectedPacket> packets{
         coquic::quic::ProtectedOneRttPacket{
             .spin_bit = false,
@@ -1217,9 +1217,29 @@ TEST(QuicProtectedCodecTest, RejectsPacketsTooShortForHeaderProtectionSample) {
     const auto encoded = coquic::quic::serialize_protected_datagram(
         packets,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
-    ASSERT_FALSE(encoded.has_value());
-    EXPECT_EQ(encoded.error().code,
-              coquic::quic::CodecErrorCode::header_protection_sample_too_short);
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        coquic::quic::DeserializeProtectionContext{
+            .peer_role = coquic::quic::EndpointRole::client,
+            .one_rtt_secret =
+                coquic::quic::TrafficSecret{
+                    .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                    .secret = make_secret(32),
+                },
+            .largest_authenticated_application_packet_number = 0,
+            .one_rtt_destination_connection_id_length = 4,
+        });
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+
+    const auto *one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded.value().front());
+    ASSERT_NE(one_rtt, nullptr);
+    ASSERT_GE(one_rtt->frames.size(), 2u);
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::PingFrame>(one_rtt->frames[0]));
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::PaddingFrame>(one_rtt->frames[1]));
 }
 
 TEST(QuicProtectedCodecTest, RejectsInitialPacketWhenHeaderProtectionRevealsTooLongPacketNumber) {

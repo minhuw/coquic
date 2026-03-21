@@ -460,7 +460,7 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
 
     std::vector<StreamFrameSendFragment> fragments;
     auto remaining_bytes = budget.packet_bytes;
-    const auto append_fragment = [&](ByteRange range) {
+    const auto append_fragment = [&](ByteRange range, bool consumes_flow_control) {
         const auto range_end = saturating_add(range.offset, range.bytes.size());
         bool fin = false;
         if (send_fin_state == StreamSendFinState::pending && send_final_size.has_value()) {
@@ -471,6 +471,7 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
             .offset = range.offset,
             .bytes = std::move(range.bytes),
             .fin = fin,
+            .consumes_flow_control = consumes_flow_control,
         });
         if (fin) {
             send_fin_state = StreamSendFinState::sent;
@@ -479,7 +480,7 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
 
     for (auto &range : send_buffer.take_lost_ranges(remaining_bytes)) {
         remaining_bytes -= range.bytes.size();
-        append_fragment(std::move(range));
+        append_fragment(std::move(range), /*consumes_flow_control=*/false);
     }
 
     const auto capped_new_bytes =
@@ -490,7 +491,7 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
         const auto range_end = saturating_add(range.offset, range.bytes.size());
         flow_control.highest_sent = std::max(flow_control.highest_sent, range_end);
         remaining_bytes -= range.bytes.size();
-        append_fragment(std::move(range));
+        append_fragment(std::move(range), /*consumes_flow_control=*/true);
     }
 
     bool fin_only_sendable = false;
@@ -504,6 +505,7 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
             .offset = *send_final_size,
             .bytes = {},
             .fin = true,
+            .consumes_flow_control = false,
         });
         send_fin_state = StreamSendFinState::sent;
     }

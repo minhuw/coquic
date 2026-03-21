@@ -7,7 +7,7 @@ testcase="${TESTCASE:-}"
 
 supports_testcase() {
   case "$1" in
-    handshake | transfer)
+    handshake | transfer | multiconnect)
       return 0
       ;;
     *)

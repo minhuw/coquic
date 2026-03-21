@@ -24,6 +24,7 @@ struct SentPacketRecord {
     bool ack_eliciting = false;
     bool in_flight = false;
     bool declared_lost = false;
+    bool has_handshake_done = false;
     std::vector<ByteRange> crypto_ranges;
     std::vector<ResetStreamFrame> reset_stream_frames;
     std::vector<StopSendingFrame> stop_sending_frames;

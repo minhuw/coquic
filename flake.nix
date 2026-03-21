@@ -136,6 +136,7 @@
               pkg-config
               python3
               qdrant
+              wireshark
             ])
             ++ pre-commit-check.enabledPackages;
 

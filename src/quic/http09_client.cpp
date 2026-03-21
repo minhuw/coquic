@@ -74,9 +74,6 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::poll(QuicCoreTimePoint /*now*
                                               });
         }
         requests_issued_ = true;
-        if (request_streams_.empty()) {
-            complete_ = true;
-        }
     }
 
     auto update = drain_pending_inputs();

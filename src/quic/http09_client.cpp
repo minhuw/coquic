@@ -148,6 +148,8 @@ bool QuicHttp09ClientEndpoint::process_receive_stream_data(
                      static_cast<std::streamsize>(received.bytes.size()));
     }
 
+    output.flush();
+
     if (!output.good()) {
         return false;
     }

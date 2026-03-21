@@ -26,6 +26,19 @@ TEST(QuicHttp09Test, ParsesRequestsEnvAsSpaceSeparatedAbsoluteUrls) {
     EXPECT_EQ(parsed.value()[1].request_target, "/b/c");
 }
 
+TEST(QuicHttp09Test, ParsesRequestsEnvWithLeadingAndTrailingSpaces) {
+    const auto parsed = coquic::quic::parse_http09_requests_env(
+        "  https://example.test/a https://example.test/b  ");
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed.value().size(), 2u);
+    EXPECT_EQ(parsed.value()[0].request_target, "/a");
+    EXPECT_EQ(parsed.value()[1].request_target, "/b");
+}
+
+TEST(QuicHttp09Test, RejectsRequestsEnvThatContainsOnlySpaces) {
+    EXPECT_FALSE(coquic::quic::parse_http09_requests_env("   ").has_value());
+}
+
 TEST(QuicHttp09Test, RejectsNonHttpsAbsoluteRequestUrls) {
     EXPECT_FALSE(coquic::quic::parse_http09_requests_env("http://example.test/a").has_value());
 }
@@ -93,6 +106,12 @@ TEST(QuicHttp09Test, ParsesRequestTargetFromCrLfTerminatedLine) {
     EXPECT_EQ(parsed.value(), "/a");
 }
 
+TEST(QuicHttp09Test, RejectsEmptyRequestTarget) {
+    const auto parsed = coquic::quic::parse_http09_request_target(bytes_from_ascii("GET \r\n"));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
+}
+
 TEST(QuicHttp09Test, ParsesRequestTargetFromLfTerminatedLine) {
     const auto parsed = coquic::quic::parse_http09_request_target(bytes_from_ascii("GET /b\n"));
     ASSERT_TRUE(parsed.has_value());
@@ -117,6 +136,11 @@ TEST(QuicHttp09Test, RejectsTabCharacterInRequestTarget) {
         coquic::quic::parse_http09_request_target(bytes_from_ascii("GET /\tbad\r\n"));
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
+}
+
+TEST(QuicHttp09Test, RejectsAbsoluteTargetAfterLeadingSlash) {
+    EXPECT_FALSE(
+        coquic::quic::resolve_http09_path_under_root("/tmp/root", "//outside").has_value());
 }
 
 } // namespace

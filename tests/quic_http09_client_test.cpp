@@ -12,6 +12,16 @@
 #include "src/quic/http09_client.h"
 #include "tests/quic_test_utils.h"
 
+namespace coquic::quic::test {
+
+struct QuicHttp09ClientEndpointTestPeer {
+    static bool all_streams_complete(const QuicHttp09ClientEndpoint &endpoint) {
+        return endpoint.all_streams_complete();
+    }
+};
+
+} // namespace coquic::quic::test
+
 namespace {
 
 using coquic::quic::QuicCoreEffect;
@@ -24,6 +34,7 @@ using coquic::quic::QuicHttp09ClientConfig;
 using coquic::quic::QuicHttp09ClientEndpoint;
 using coquic::quic::QuicHttp09EndpointUpdate;
 using coquic::quic::QuicHttp09Request;
+using coquic::quic::test::QuicHttp09ClientEndpointTestPeer;
 
 QuicCoreResult handshake_ready_result() {
     QuicCoreResult result;
@@ -190,6 +201,90 @@ TEST(QuicHttp09ClientTest, FailsWhenCoreResultCarriesLocalError) {
     const auto update = endpoint.on_core_result(result, coquic::quic::test::test_time());
     EXPECT_TRUE(update.terminal_failure);
     EXPECT_TRUE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ClientTest, FailsWhenReceiveDataTargetsInvalidOutputPath) {
+    const auto now = coquic::quic::test::test_time();
+    QuicHttp09ClientEndpoint endpoint(coquic::quic::QuicHttp09ClientConfig{
+        .requests = {request_for_target("/illegal?path")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, "data", true), coquic::quic::test::test_time(1));
+    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ClientTest, PollReturnsFailureWhenEndpointHasFailed) {
+    coquic::quic::QuicCoreResult result;
+    result.local_error = coquic::quic::QuicCoreLocalError{
+        .code = coquic::quic::QuicCoreLocalErrorCode::unsupported_operation,
+        .stream_id = std::nullopt,
+    };
+    QuicHttp09ClientEndpoint endpoint(coquic::quic::QuicHttp09ClientConfig{
+        .requests = {request_for_target("/ok.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    endpoint.on_core_result(result, coquic::quic::test::test_time());
+
+    const auto update = endpoint.poll(coquic::quic::test::test_time(1));
+    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_FALSE(update.has_pending_work);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ClientTest, FailsWhenOutputPathIsDirectory) {
+    const auto now = coquic::quic::test::test_time();
+    coquic::quic::test::ScopedTempDir download_root;
+    const auto blocked_path = download_root.path() / "blocked";
+    std::filesystem::create_directories(blocked_path);
+
+    QuicHttp09ClientEndpoint endpoint(coquic::quic::QuicHttp09ClientConfig{
+        .requests = {request_for_target("/blocked")},
+        .download_root = download_root.path(),
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, "data", true), coquic::quic::test::test_time(1));
+    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ClientTest, FailsWhenWriteTripsDevFull) {
+    if (!std::filesystem::exists("/dev/full")) {
+        GTEST_SKIP() << "/dev/full is unavailable";
+    }
+
+    const auto now = coquic::quic::test::test_time();
+    QuicHttp09ClientEndpoint endpoint(coquic::quic::QuicHttp09ClientConfig{
+        .requests = {request_for_target("/dev/full")},
+        .download_root = std::filesystem::path("/"),
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+
+    const auto update = endpoint.on_core_result(receive_result(0, "payload", true),
+                                                coquic::quic::test::test_time(1));
+    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ClientTest, AllStreamsCompleteRequiresRequestsToBeIssued) {
+    QuicHttp09ClientEndpoint endpoint(coquic::quic::QuicHttp09ClientConfig{
+        .requests = {request_for_target("/ok.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    EXPECT_FALSE(QuicHttp09ClientEndpointTestPeer::all_streams_complete(endpoint));
 }
 
 TEST(QuicHttp09ClientTest, FailsWhenCoreReportsFailedStateEvent) {

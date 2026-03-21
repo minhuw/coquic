@@ -1,0 +1,33 @@
+name: Interop
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  interop-quicgo:
+    name: quic-go Handshake and Transfer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Enable Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Verify Workflow Contract
+        run: bash tests/nix/github_interop_workflow_test.sh
+
+      - name: Run quic-go Interop Smoke Tests
+        run: bash tests/nix/quicgo_interop_smoke_test.sh

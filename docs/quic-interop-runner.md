@@ -39,13 +39,13 @@ COQUIC_SKIP_SETUP=1 COQUIC_SKIP_WAIT=1
 
 ## Local Manual Runs
 
-Build the binary with quictls:
+Build the packaged binary with quictls:
 
 ```bash
-nix develop -c zig build -Dtls_backend=quictls
+nix build .#coquic-quictls
 ```
 
-Run a server directly from the repo:
+Run a server directly from the package output:
 
 ```bash
 TESTCASE=handshake \
@@ -54,10 +54,10 @@ PORT=443 \
 DOCUMENT_ROOT=/tmp/www \
 CERTIFICATE_CHAIN_PATH=tests/fixtures/quic-server-cert.pem \
 PRIVATE_KEY_PATH=tests/fixtures/quic-server-key.pem \
-./zig-out/bin/coquic interop-server
+$(nix path-info .#coquic-quictls)/bin/coquic interop-server
 ```
 
-Run a client directly from the repo:
+Run a client directly from the package output:
 
 ```bash
 TESTCASE=transfer \
@@ -66,23 +66,96 @@ PORT=443 \
 SERVER_NAME=localhost \
 DOWNLOAD_ROOT=/tmp/downloads \
 REQUESTS="https://localhost/hello.txt" \
-./zig-out/bin/coquic interop-client
+$(nix path-info .#coquic-quictls)/bin/coquic interop-client
 ```
 
-## Docker Image
-
-Build the official-runner image:
+If you want an editable build environment instead of a packaged binary, use the
+matching backend shell:
 
 ```bash
-docker build -t coquic-interop:latest .
+nix develop .#quictls
+nix develop .#boringssl
 ```
 
-The image:
+## Container Image
 
-- builds `coquic` with `quictls` in `ReleaseFast`
-- copies the resulting binary plus its runtime shared-library closure
-- uses `martenseemann/quic-network-simulator-endpoint:latest` as the final base
-- starts with `/run_endpoint.sh`
+Build the quictls runner image tarball:
+
+```bash
+nix build .#interop-image-quictls
+```
+
+Load it into Docker:
+
+```bash
+docker load -i "$(nix path-info .#interop-image-quictls)"
+```
+
+The resulting image tag is:
+
+```bash
+coquic-interop:quictls
+```
+
+Build and load the boringssl image the same way:
+
+```bash
+nix build .#interop-image-boringssl
+docker load -i "$(nix path-info .#interop-image-boringssl)"
+```
+
+That image loads as:
+
+```bash
+coquic-interop:boringssl
+```
+
+For the boringssl musl image layered on top of the official simulator endpoint
+base image:
+
+```bash
+nix build .#interop-image-boringssl-musl
+docker load -i "$(nix path-info .#interop-image-boringssl-musl)"
+```
+
+That image loads as:
+
+```bash
+coquic-interop:boringssl-musl
+```
+
+The corresponding static package and shell are:
+
+```bash
+nix build .#coquic-boringssl-musl
+nix develop .#boringssl-musl
+```
+
+## Local quic-go Smoke Matrix
+
+Run the checked-in mixed-image smoke matrix against `quic-go` with:
+
+```bash
+bash tests/nix/quicgo_interop_smoke_test.sh
+```
+
+That script builds and loads `coquic-interop:boringssl-musl`, pulls
+`martenseemann/quic-go-interop:latest`, and runs the four currently supported
+cases:
+
+- `quic-go` client -> `coquic` server: `handshake`, `transfer`
+- `coquic` client -> `quic-go` server: `handshake`, `transfer`
+
+The separate GitHub Actions workflow in `.github/workflows/interop.yml` calls
+the same script.
+
+The Nix-native images are built with `dockerTools.buildLayeredImage`. They
+embed the `coquic` package closure plus the runner wrapper and vendored
+simulator helper scripts:
+
+- `/run_endpoint.sh`
+- `/setup.sh`
+- `/wait-for-it.sh`
 
 ## quic-interop-runner Usage
 
@@ -107,4 +180,4 @@ wrapper script cooperates with the simulator endpoint hooks:
 - `/wait-for-it.sh sim:57832`
 
 That keeps the image aligned with the endpoint expectations documented by the
-simulator project instead of re-implementing simulator-specific setup in C++.
+simulator project without a separate Dockerfile path.

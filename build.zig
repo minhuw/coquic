@@ -18,6 +18,22 @@ fn withExtraFlags(
     return flags.toOwnedSlice() catch @panic("failed to allocate flags");
 }
 
+fn withSpdlogFlags(
+    b: *std.Build,
+    base: []const []const u8,
+    spdlog_shared: bool,
+) []const []const u8 {
+    var extra = std.ArrayList([]const u8).init(b.allocator);
+    if (spdlog_shared) {
+        extra.append("-DSPDLOG_SHARED_LIB") catch @panic("failed to append spdlog flag");
+    }
+    extra.appendSlice(&.{
+        "-DSPDLOG_COMPILED_LIB",
+        "-DSPDLOG_FMT_EXTERNAL",
+    }) catch @panic("failed to append spdlog flags");
+    return withExtraFlags(b, base, extra.items);
+}
+
 fn appendTlsAdapterSource(files: *std.ArrayList([]const u8), tls_backend: []const u8) void {
     if (std.mem.eql(u8, tls_backend, "quictls")) {
         files.append("src/quic/tls_adapter_quictls.cpp") catch @panic("oom");
@@ -199,21 +215,17 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const tls_backend =
         b.option([]const u8, "tls_backend", "quictls or boringssl") orelse "quictls";
+    const spdlog_shared =
+        b.option(bool, "spdlog_shared", "whether spdlog is linked as a shared library") orelse
+        true;
     const cpp_flags = &.{"-std=c++20"};
-    const spdlog_cpp_flags = withExtraFlags(b, cpp_flags, &.{
-        "-DSPDLOG_SHARED_LIB",
-        "-DSPDLOG_COMPILED_LIB",
-        "-DSPDLOG_FMT_EXTERNAL",
-    });
+    const spdlog_cpp_flags = withSpdlogFlags(b, cpp_flags, spdlog_shared);
     const coverage_cpp_flags = withExtraFlags(b, cpp_flags, &.{
         "-fprofile-instr-generate",
         "-fcoverage-mapping",
     });
-    const coverage_spdlog_cpp_flags = withExtraFlags(b, coverage_cpp_flags, &.{
-        "-DSPDLOG_SHARED_LIB",
-        "-DSPDLOG_COMPILED_LIB",
-        "-DSPDLOG_FMT_EXTERNAL",
-    });
+    const coverage_spdlog_cpp_flags =
+        withSpdlogFlags(b, coverage_cpp_flags, spdlog_shared);
     const gtest_root = requireEnv(b, "GTEST_SOURCE_DIR");
     const tls_include_dir = tlsIncludeDir(b, tls_backend);
     const tls_lib_dir = tlsLibDir(b, tls_backend);

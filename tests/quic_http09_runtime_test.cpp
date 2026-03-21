@@ -187,10 +187,25 @@ void flush_llvm_profile_if_available() {
     }
 }
 
+extern "C" void flush_llvm_profile_and_exit_on_signal(int signal_number) {
+    // Runtime server children are intentionally terminated by these tests.
+    flush_llvm_profile_if_available();
+    ::_exit(128 + signal_number);
+}
+
+void install_child_signal_handlers() {
+    struct sigaction action{};
+    action.sa_handler = flush_llvm_profile_and_exit_on_signal;
+    ::sigemptyset(&action.sa_mask);
+    ::sigaction(SIGTERM, &action, nullptr);
+    ::sigaction(SIGINT, &action, nullptr);
+}
+
 ScopedChildProcess launch_runtime_server_process(const coquic::quic::Http09RuntimeConfig &config) {
     const auto pid = ::fork();
     if (pid == 0) {
         prepare_llvm_profile_for_child_process();
+        install_child_signal_handlers();
         const auto exit_code = coquic::quic::run_http09_runtime(config);
         flush_llvm_profile_if_available();
         ::_exit(exit_code);

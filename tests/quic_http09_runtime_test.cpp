@@ -30,6 +30,11 @@
 
 namespace {
 
+extern "C" void llvm_profile_set_filename(const char *) __asm__("__llvm_profile_set_filename")
+    __attribute__((weak));
+extern "C" int llvm_profile_write_file(void) __asm__("__llvm_profile_write_file")
+    __attribute__((weak));
+
 class ScopedEnvVar {
   public:
     ScopedEnvVar(std::string name, std::optional<std::string> value) : name_(std::move(name)) {
@@ -147,10 +152,47 @@ class ScopedChildProcess {
     std::optional<int> cached_status_;
 };
 
+std::string profile_filename_for_current_process(std::string filename_pattern) {
+    constexpr std::string_view pid_token = "%p";
+    const std::string pid = std::to_string(static_cast<long long>(::getpid()));
+
+    std::size_t position = 0;
+    while ((position = filename_pattern.find(pid_token, position)) != std::string::npos) {
+        filename_pattern.replace(position, pid_token.size(), pid);
+        position += pid.size();
+    }
+
+    return filename_pattern;
+}
+
+void prepare_llvm_profile_for_child_process() {
+    if (llvm_profile_set_filename == nullptr) {
+        return;
+    }
+
+    const char *profile_pattern = std::getenv("LLVM_PROFILE_FILE");
+    if (profile_pattern == nullptr) {
+        return;
+    }
+
+    static std::string child_profile_filename;
+    child_profile_filename = profile_filename_for_current_process(profile_pattern);
+    llvm_profile_set_filename(child_profile_filename.c_str());
+}
+
+void flush_llvm_profile_if_available() {
+    if (llvm_profile_write_file != nullptr) {
+        (void)llvm_profile_write_file();
+    }
+}
+
 ScopedChildProcess launch_runtime_server_process(const coquic::quic::Http09RuntimeConfig &config) {
     const auto pid = ::fork();
     if (pid == 0) {
-        ::_exit(coquic::quic::run_http09_runtime(config));
+        prepare_llvm_profile_for_child_process();
+        const auto exit_code = coquic::quic::run_http09_runtime(config);
+        flush_llvm_profile_if_available();
+        ::_exit(exit_code);
     }
     return ScopedChildProcess(pid);
 }

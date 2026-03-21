@@ -19,6 +19,13 @@ struct QuicHttp09ServerEndpointTestPeer {
     static std::size_t pending_response_count(const QuicHttp09ServerEndpoint &endpoint) {
         return endpoint.pending_responses_.size();
     }
+
+    static void insert_bad_pending_response(QuicHttp09ServerEndpoint &endpoint,
+                                            std::uint64_t stream_id) {
+        QuicHttp09ServerEndpoint::PendingResponse response;
+        response.file.setstate(std::ios::badbit);
+        endpoint.pending_responses_.insert_or_assign(stream_id, std::move(response));
+    }
 };
 
 } // namespace coquic::quic::test
@@ -292,6 +299,46 @@ TEST(QuicHttp09ServerTest, MissingFileCausesStreamLocalResetWithoutEndpointFailu
         std::holds_alternative<coquic::quic::QuicCoreResetStream>(endpoint_update.core_inputs[0]));
     EXPECT_TRUE(
         std::holds_alternative<coquic::quic::QuicCoreStopSending>(endpoint_update.core_inputs[1]));
+    EXPECT_FALSE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ServerTest, LocalErrorMarksEndpointFailedAndPollStaysFailed) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello");
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    QuicCoreResult result;
+    result.local_error = coquic::quic::QuicCoreLocalError{
+        .code = coquic::quic::QuicCoreLocalErrorCode::unsupported_operation,
+        .stream_id = std::nullopt,
+    };
+
+    const auto update = endpoint.on_core_result(result, coquic::quic::test::test_time(1));
+    EXPECT_TRUE(endpoint.has_failed());
+    EXPECT_TRUE(update.terminal_failure);
+
+    const auto poll_update = endpoint.poll(coquic::quic::test::test_time(2));
+    EXPECT_TRUE(poll_update.terminal_failure);
+}
+
+TEST(QuicHttp09ServerTest, PollResetsStreamWhenPendingResponseReadFails) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello");
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::insert_bad_pending_response(endpoint, 0);
+
+    const auto update = endpoint.poll(coquic::quic::test::test_time(1));
+
+    ASSERT_EQ(
+        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 0u);
+    ASSERT_EQ(update.core_inputs.size(), 2u);
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::QuicCoreResetStream>(update.core_inputs[0]));
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::QuicCoreStopSending>(update.core_inputs[1]));
+    EXPECT_FALSE(update.has_pending_work);
     EXPECT_FALSE(endpoint.has_failed());
 }
 

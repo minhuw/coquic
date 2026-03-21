@@ -659,8 +659,10 @@ TEST(QuicHttp09RuntimeTest, ParsesHealthCheckAndRejectsInvalidPorts) {
     EXPECT_EQ(health.mode, coquic::quic::Http09RuntimeMode::health_check);
     EXPECT_EQ(health.port, 443);
 
-    ScopedEnvVar invalid_port("PORT", "65536");
-    EXPECT_FALSE(parse_runtime_args({"coquic"}).has_value());
+    {
+        ScopedEnvVar invalid_port("PORT", "65536");
+        EXPECT_FALSE(parse_runtime_args({"coquic"}).has_value());
+    }
 
     EXPECT_FALSE(parse_runtime_args({"coquic", "interop-client", "--requests",
                                      "https://localhost/a.txt", "--port", "bad-port"})
@@ -688,10 +690,27 @@ TEST(QuicHttp09RuntimeTest, ParsesRuntimeRoleAndTestcaseFromEnvAndCli) {
     EXPECT_EQ(env.mode, coquic::quic::Http09RuntimeMode::server);
     EXPECT_EQ(env.testcase, coquic::quic::QuicHttp09Testcase::handshake);
 
-    const auto cli_config =
-        parse_runtime_args({"coquic", "interop-client", "--host", "127.0.0.1", "--port", "4443",
-                            "--testcase", "transfer", "--requests", "https://localhost/a.txt",
-                            "--verify-peer", "--server-name", "example.test"});
+    const auto cli_config = parse_runtime_args({"coquic",
+                                                "interop-client",
+                                                "--host",
+                                                "127.0.0.1",
+                                                "--port",
+                                                "4443",
+                                                "--testcase",
+                                                "transfer",
+                                                "--requests",
+                                                "https://localhost/a.txt",
+                                                "--document-root",
+                                                "/srv/http",
+                                                "--download-root",
+                                                "/var/downloads",
+                                                "--certificate-chain",
+                                                "/etc/coquic/cert.pem",
+                                                "--private-key",
+                                                "/etc/coquic/key.pem",
+                                                "--verify-peer",
+                                                "--server-name",
+                                                "example.test"});
     if (!cli_config.has_value()) {
         ADD_FAILURE() << "expected cli runtime config";
         return;
@@ -701,42 +720,135 @@ TEST(QuicHttp09RuntimeTest, ParsesRuntimeRoleAndTestcaseFromEnvAndCli) {
     EXPECT_EQ(cli.host, "127.0.0.1");
     EXPECT_EQ(cli.port, 4443);
     EXPECT_EQ(cli.testcase, coquic::quic::QuicHttp09Testcase::transfer);
+    EXPECT_EQ(cli.document_root, std::filesystem::path("/srv/http"));
+    EXPECT_EQ(cli.download_root, std::filesystem::path("/var/downloads"));
+    EXPECT_EQ(cli.certificate_chain_path, std::filesystem::path("/etc/coquic/cert.pem"));
+    EXPECT_EQ(cli.private_key_path, std::filesystem::path("/etc/coquic/key.pem"));
     EXPECT_TRUE(cli.verify_peer);
     EXPECT_EQ(cli.server_name, "example.test");
 }
 
 TEST(QuicHttp09RuntimeTest, RejectsInvalidRoleTestcaseAndMissingCliValues) {
-    ScopedEnvVar role("ROLE", "invalid-role");
-    ScopedEnvVar testcase("TESTCASE", std::nullopt);
-    ScopedEnvVar requests("REQUESTS", std::nullopt);
-    ScopedEnvVar host("HOST", std::nullopt);
-    ScopedEnvVar port("PORT", std::nullopt);
-    ScopedEnvVar document_root("DOCUMENT_ROOT", std::nullopt);
-    ScopedEnvVar download_root("DOWNLOAD_ROOT", std::nullopt);
-    ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", std::nullopt);
-    ScopedEnvVar private_key("PRIVATE_KEY_PATH", std::nullopt);
-    ScopedEnvVar server_name("SERVER_NAME", std::nullopt);
-    EXPECT_FALSE(parse_runtime_args({"coquic"}).has_value());
-
-    ScopedEnvVar valid_role("ROLE", "server");
-    ScopedEnvVar invalid_testcase("TESTCASE", "invalid-case");
-    EXPECT_FALSE(parse_runtime_args({"coquic"}).has_value());
-
-    const std::vector<std::string> flags_missing_values = {
-        "--host",          "--port",          "--testcase",          "--requests",
-        "--document-root", "--download-root", "--certificate-chain", "--private-key",
-        "--server-name",
-    };
-    for (const auto &flag : flags_missing_values) {
-        EXPECT_FALSE(parse_runtime_args({"coquic", "interop-client", "--requests",
-                                         "https://localhost/a.txt", flag})
-                         .has_value())
-            << "flag " << flag << " should require a value";
+    {
+        ScopedEnvVar role("ROLE", "invalid-role");
+        ScopedEnvVar testcase("TESTCASE", std::nullopt);
+        ScopedEnvVar requests("REQUESTS", std::nullopt);
+        ScopedEnvVar host("HOST", std::nullopt);
+        ScopedEnvVar port("PORT", std::nullopt);
+        ScopedEnvVar document_root("DOCUMENT_ROOT", std::nullopt);
+        ScopedEnvVar download_root("DOWNLOAD_ROOT", std::nullopt);
+        ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", std::nullopt);
+        ScopedEnvVar private_key("PRIVATE_KEY_PATH", std::nullopt);
+        ScopedEnvVar server_name("SERVER_NAME", std::nullopt);
+        EXPECT_FALSE(parse_runtime_args({"coquic"}).has_value());
     }
 
-    EXPECT_FALSE(parse_runtime_args({"coquic", "interop-client", "--requests",
-                                     "https://localhost/a.txt", "--unknown-flag"})
-                     .has_value());
+    {
+        ScopedEnvVar role("ROLE", "server");
+        ScopedEnvVar testcase("TESTCASE", "invalid-case");
+        ScopedEnvVar requests("REQUESTS", std::nullopt);
+        ScopedEnvVar host("HOST", std::nullopt);
+        ScopedEnvVar port("PORT", std::nullopt);
+        ScopedEnvVar document_root("DOCUMENT_ROOT", std::nullopt);
+        ScopedEnvVar download_root("DOWNLOAD_ROOT", std::nullopt);
+        ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", std::nullopt);
+        ScopedEnvVar private_key("PRIVATE_KEY_PATH", std::nullopt);
+        ScopedEnvVar server_name("SERVER_NAME", std::nullopt);
+        EXPECT_FALSE(parse_runtime_args({"coquic"}).has_value());
+    }
+
+    {
+        ScopedEnvVar role("ROLE", std::nullopt);
+        ScopedEnvVar testcase("TESTCASE", std::nullopt);
+        ScopedEnvVar requests("REQUESTS", std::nullopt);
+        ScopedEnvVar host("HOST", std::nullopt);
+        ScopedEnvVar port("PORT", std::nullopt);
+        ScopedEnvVar document_root("DOCUMENT_ROOT", std::nullopt);
+        ScopedEnvVar download_root("DOWNLOAD_ROOT", std::nullopt);
+        ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", std::nullopt);
+        ScopedEnvVar private_key("PRIVATE_KEY_PATH", std::nullopt);
+        ScopedEnvVar server_name("SERVER_NAME", std::nullopt);
+
+        const std::vector<std::string> flags_missing_values = {
+            "--host",          "--port",          "--testcase",          "--requests",
+            "--document-root", "--download-root", "--certificate-chain", "--private-key",
+            "--server-name",
+        };
+        for (const auto &flag : flags_missing_values) {
+            EXPECT_FALSE(parse_runtime_args({"coquic", "interop-client", "--requests",
+                                             "https://localhost/a.txt", flag})
+                             .has_value())
+                << "flag " << flag << " should require a value";
+        }
+
+        EXPECT_FALSE(parse_runtime_args({"coquic", "interop-client"}).has_value());
+        EXPECT_FALSE(parse_runtime_args({"coquic", "interop-client", "--requests",
+                                         "https://localhost/a.txt", "--testcase", "invalid"})
+                         .has_value());
+        EXPECT_FALSE(parse_runtime_args({"coquic", "interop-client", "--requests",
+                                         "https://localhost/a.txt", "--unknown-flag"})
+                         .has_value());
+    }
+}
+
+TEST(QuicHttp09RuntimeTest, ParsesRuntimeEnvAndServerCliOverrides) {
+    {
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar testcase("TESTCASE", "transfer");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+        ScopedEnvVar host("HOST", "198.51.100.10");
+        ScopedEnvVar port("PORT", "9443");
+        ScopedEnvVar document_root("DOCUMENT_ROOT", "/env/www");
+        ScopedEnvVar download_root("DOWNLOAD_ROOT", "/env/downloads");
+        ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", "/env/cert.pem");
+        ScopedEnvVar private_key("PRIVATE_KEY_PATH", "/env/key.pem");
+        ScopedEnvVar server_name("SERVER_NAME", "env.example");
+
+        const auto env_config = parse_runtime_args({"coquic"});
+        if (!env_config.has_value()) {
+            ADD_FAILURE() << "expected env override config";
+            return;
+        }
+        const auto &env = *env_config;
+        EXPECT_EQ(env.mode, coquic::quic::Http09RuntimeMode::client);
+        EXPECT_EQ(env.testcase, coquic::quic::QuicHttp09Testcase::transfer);
+        EXPECT_EQ(env.requests_env, "https://localhost/a.txt");
+        EXPECT_EQ(env.host, "198.51.100.10");
+        EXPECT_EQ(env.port, 9443);
+        EXPECT_EQ(env.document_root, std::filesystem::path("/env/www"));
+        EXPECT_EQ(env.download_root, std::filesystem::path("/env/downloads"));
+        EXPECT_EQ(env.certificate_chain_path, std::filesystem::path("/env/cert.pem"));
+        EXPECT_EQ(env.private_key_path, std::filesystem::path("/env/key.pem"));
+        EXPECT_EQ(env.server_name, "env.example");
+    }
+
+    {
+        ScopedEnvVar role("ROLE", std::nullopt);
+        ScopedEnvVar testcase("TESTCASE", std::nullopt);
+        ScopedEnvVar requests("REQUESTS", std::nullopt);
+        ScopedEnvVar host("HOST", std::nullopt);
+        ScopedEnvVar port("PORT", std::nullopt);
+        ScopedEnvVar document_root("DOCUMENT_ROOT", std::nullopt);
+        ScopedEnvVar download_root("DOWNLOAD_ROOT", std::nullopt);
+        ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", std::nullopt);
+        ScopedEnvVar private_key("PRIVATE_KEY_PATH", std::nullopt);
+        ScopedEnvVar server_name("SERVER_NAME", std::nullopt);
+
+        const auto server_config = parse_runtime_args(
+            {"coquic", "interop-server", "--host", "0.0.0.0", "--port", "8443", "--document-root",
+             "/srv/www", "--certificate-chain", "/srv/cert.pem", "--private-key", "/srv/key.pem"});
+        if (!server_config.has_value()) {
+            ADD_FAILURE() << "expected server cli config";
+            return;
+        }
+        const auto &server = *server_config;
+        EXPECT_EQ(server.mode, coquic::quic::Http09RuntimeMode::server);
+        EXPECT_EQ(server.host, "0.0.0.0");
+        EXPECT_EQ(server.port, 8443);
+        EXPECT_EQ(server.document_root, std::filesystem::path("/srv/www"));
+        EXPECT_EQ(server.certificate_chain_path, std::filesystem::path("/srv/cert.pem"));
+        EXPECT_EQ(server.private_key_path, std::filesystem::path("/srv/key.pem"));
+    }
 }
 
 TEST(QuicHttp09RuntimeTest, ParsesRuntimePortAndTestcaseHelpers) {
@@ -875,6 +987,14 @@ TEST(QuicHttp09RuntimeTest, RunsHealthCheckAndDispatchesClientAndServerFailures)
     };
     EXPECT_EQ(coquic::quic::run_http09_runtime(bad_client_authority), 1);
 
+    const auto bad_client_host = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "invalid host name",
+        .server_name = "localhost",
+        .requests_env = "https://localhost/file.txt",
+    };
+    EXPECT_EQ(coquic::quic::run_http09_runtime(bad_client_host), 1);
+
     const auto bad_server_host = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "not-an-ipv4-address",
@@ -882,6 +1002,43 @@ TEST(QuicHttp09RuntimeTest, RunsHealthCheckAndDispatchesClientAndServerFailures)
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
     EXPECT_EQ(coquic::quic::run_http09_runtime(bad_server_host), 1);
+
+    const auto free_port = allocate_udp_loopback_port();
+    ASSERT_NE(free_port, 0);
+
+    const auto missing_server_key = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = free_port,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "/no/such/key.pem",
+    };
+    EXPECT_EQ(coquic::quic::run_http09_runtime(missing_server_key), 1);
+
+    const int occupied_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(occupied_fd, 0);
+    ScopedFd occupied_socket(occupied_fd);
+
+    sockaddr_in occupied_address{};
+    occupied_address.sin_family = AF_INET;
+    occupied_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    occupied_address.sin_port = htons(0);
+    ASSERT_EQ(::bind(occupied_socket.get(), reinterpret_cast<const sockaddr *>(&occupied_address),
+                     sizeof(occupied_address)),
+              0);
+    socklen_t occupied_length = sizeof(occupied_address);
+    ASSERT_EQ(::getsockname(occupied_socket.get(), reinterpret_cast<sockaddr *>(&occupied_address),
+                            &occupied_length),
+              0);
+
+    const auto bound_server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = ntohs(occupied_address.sin_port),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    EXPECT_EQ(coquic::quic::run_http09_runtime(bound_server), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefaults) {

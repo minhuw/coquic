@@ -50,10 +50,6 @@ class ScopedFd {
     ScopedFd(const ScopedFd &) = delete;
     ScopedFd &operator=(const ScopedFd &) = delete;
 
-    int get() const {
-        return fd_;
-    }
-
   private:
     int fd_ = -1;
 };
@@ -180,9 +176,6 @@ std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view aut
     }
 
     parsed.host = std::string(authority);
-    if (parsed.host.empty()) {
-        return std::nullopt;
-    }
     return parsed;
 }
 

@@ -28,11 +28,8 @@ CodecResult<QuicHttp09Request> parse_absolute_https_request(std::string_view tok
         return CodecResult<QuicHttp09Request>::failure(kHttp09ParseError, 0);
     }
 
-    std::string_view request_target =
+    const std::string_view request_target =
         slash == std::string_view::npos ? std::string_view{"/"} : remainder.substr(slash);
-    if (request_target.empty() || request_target.front() != '/') {
-        return CodecResult<QuicHttp09Request>::failure(kHttp09ParseError, 0);
-    }
 
     const auto resolved_target =
         resolve_http09_path_under_root(std::filesystem::path("/"), request_target);
@@ -46,18 +43,6 @@ CodecResult<QuicHttp09Request> parse_absolute_https_request(std::string_view tok
         .request_target = std::string(request_target),
         .relative_output_path = resolved_target.value().lexically_relative("/"),
     });
-}
-
-bool path_has_prefix(const std::filesystem::path &path, const std::filesystem::path &prefix) {
-    auto path_it = path.begin();
-    auto prefix_it = prefix.begin();
-    for (; prefix_it != prefix.end(); ++prefix_it, ++path_it) {
-        if (path_it == path.end() || *path_it != *prefix_it) {
-            return false;
-        }
-    }
-
-    return true;
 }
 
 bool has_raw_dot_segment(const std::filesystem::path &path) {
@@ -172,12 +157,7 @@ CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::fil
 
     const std::filesystem::path relative = raw_relative.lexically_normal();
 
-    // This is a lexical containment check; it does not resolve symlinks.
     const std::filesystem::path candidate = (normalized_root / relative).lexically_normal();
-    if (!path_has_prefix(candidate, normalized_root)) {
-        return CodecResult<std::filesystem::path>::failure(kHttp09ParseError, 0);
-    }
-
     return CodecResult<std::filesystem::path>::success(candidate);
 }
 

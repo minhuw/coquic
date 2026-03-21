@@ -186,15 +186,9 @@ std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view aut
     return parsed;
 }
 
-struct Http09ClientRemote {
-    std::string host;
-    std::uint16_t port = 443;
-    std::string server_name;
-};
-
 std::optional<Http09ClientRemote>
-derive_http09_client_remote(const Http09RuntimeConfig &config,
-                            const std::vector<QuicHttp09Request> &requests) {
+derive_http09_client_remote_impl(const Http09RuntimeConfig &config,
+                                 const std::vector<QuicHttp09Request> &requests) {
     Http09ClientRemote remote{
         .host = config.host,
         .port = config.port,
@@ -483,7 +477,7 @@ int run_http09_client(const Http09RuntimeConfig &config) {
         return 1;
     }
 
-    const auto remote = derive_http09_client_remote(config, requests.value());
+    const auto remote = derive_http09_client_remote_impl(config, requests.value());
     if (!remote.has_value()) {
         std::cerr << "http09-client failed: invalid request authority\n";
         return 1;
@@ -645,6 +639,20 @@ int run_http09_server(const Http09RuntimeConfig &config) {
 }
 
 } // namespace
+
+std::optional<std::uint16_t> parse_http09_runtime_port(std::string_view value) {
+    return parse_port(value);
+}
+
+std::optional<QuicHttp09Testcase> parse_http09_runtime_testcase(std::string_view value) {
+    return parse_testcase(value);
+}
+
+std::optional<Http09ClientRemote>
+derive_http09_client_remote(const Http09RuntimeConfig &config,
+                            const std::vector<QuicHttp09Request> &requests) {
+    return derive_http09_client_remote_impl(config, requests);
+}
 
 std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **argv) {
     Http09RuntimeConfig config;

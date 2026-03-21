@@ -26,6 +26,7 @@ enum class EndpointRole : std::uint8_t {
 struct TrafficSecret {
     CipherSuite cipher_suite;
     std::vector<std::byte> secret;
+    std::optional<std::vector<std::byte>> header_protection_key;
 };
 
 struct ProtectedInitialPacket {

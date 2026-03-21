@@ -3,6 +3,7 @@
 #include "src/coquic.h"
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -132,6 +133,121 @@ bool make_ipv4_address(std::string_view host, std::uint16_t port, sockaddr_in &a
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
     return ::inet_pton(AF_INET, std::string(host).c_str(), &address.sin_addr) == 1;
+}
+
+struct ParsedHttp09Authority {
+    std::string host;
+    std::optional<std::uint16_t> port;
+};
+
+std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view authority) {
+    if (authority.empty()) {
+        return std::nullopt;
+    }
+
+    ParsedHttp09Authority parsed;
+    if (authority.front() == '[') {
+        const auto closing = authority.find(']');
+        if (closing == std::string_view::npos || closing == 1) {
+            return std::nullopt;
+        }
+        parsed.host = std::string(authority.substr(1, closing - 1));
+        const auto suffix = authority.substr(closing + 1);
+        if (suffix.empty()) {
+            return parsed;
+        }
+        if (!suffix.starts_with(':')) {
+            return std::nullopt;
+        }
+        const auto parsed_port = parse_port(suffix.substr(1));
+        if (!parsed_port.has_value()) {
+            return std::nullopt;
+        }
+        parsed.port = parsed_port;
+        return parsed;
+    }
+
+    const auto first_colon = authority.find(':');
+    const auto last_colon = authority.rfind(':');
+    if (first_colon != std::string_view::npos && first_colon == last_colon) {
+        parsed.host = std::string(authority.substr(0, first_colon));
+        const auto parsed_port = parse_port(authority.substr(first_colon + 1));
+        if (parsed.host.empty() || !parsed_port.has_value()) {
+            return std::nullopt;
+        }
+        parsed.port = parsed_port;
+        return parsed;
+    }
+
+    parsed.host = std::string(authority);
+    if (parsed.host.empty()) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+struct Http09ClientRemote {
+    std::string host;
+    std::uint16_t port = 443;
+    std::string server_name;
+};
+
+std::optional<Http09ClientRemote>
+derive_http09_client_remote(const Http09RuntimeConfig &config,
+                            const std::vector<QuicHttp09Request> &requests) {
+    Http09ClientRemote remote{
+        .host = config.host,
+        .port = config.port,
+        .server_name = config.server_name,
+    };
+
+    if (!remote.host.empty() && !remote.server_name.empty()) {
+        return remote;
+    }
+
+    if (requests.empty()) {
+        return std::nullopt;
+    }
+
+    const auto parsed_authority = parse_http09_authority(requests.front().authority);
+    if (!parsed_authority.has_value()) {
+        return std::nullopt;
+    }
+
+    if (remote.host.empty()) {
+        remote.host = parsed_authority->host;
+        if (parsed_authority->port.has_value()) {
+            remote.port = *parsed_authority->port;
+        }
+    }
+
+    if (remote.server_name.empty()) {
+        remote.server_name = parsed_authority->host;
+    }
+
+    return remote;
+}
+
+bool resolve_udp_peer_ipv4(std::string_view host, std::uint16_t port, sockaddr_in &address) {
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+    hints.ai_flags = AI_NUMERICSERV;
+
+    addrinfo *results = nullptr;
+    const auto service = std::to_string(port);
+    const int status = ::getaddrinfo(std::string(host).c_str(), service.c_str(), &hints, &results);
+    if (status != 0 || results == nullptr) {
+        if (results != nullptr) {
+            ::freeaddrinfo(results);
+        }
+        return false;
+    }
+
+    address = *reinterpret_cast<sockaddr_in *>(results->ai_addr);
+    ::freeaddrinfo(results);
+    return true;
 }
 
 int open_udp_socket() {
@@ -367,6 +483,12 @@ int run_http09_client(const Http09RuntimeConfig &config) {
         return 1;
     }
 
+    const auto remote = derive_http09_client_remote(config, requests.value());
+    if (!remote.has_value()) {
+        std::cerr << "http09-client failed: invalid request authority\n";
+        return 1;
+    }
+
     const int socket_fd = open_udp_socket();
     if (socket_fd < 0) {
         std::cerr << "http09-client failed: unable to create UDP socket: " << std::strerror(errno)
@@ -376,7 +498,7 @@ int run_http09_client(const Http09RuntimeConfig &config) {
     ScopedFd socket_guard(socket_fd);
 
     sockaddr_in server_address{};
-    if (!make_ipv4_address(config.host, config.port, server_address)) {
+    if (!resolve_udp_peer_ipv4(remote->host, remote->port, server_address)) {
         std::cerr << "http09-client failed: invalid host address\n";
         return 1;
     }
@@ -389,7 +511,9 @@ int run_http09_client(const Http09RuntimeConfig &config) {
         .requests = requests.value(),
         .download_root = config.download_root,
     });
-    QuicCore core(make_http09_client_core_config(config));
+    auto client_config = config;
+    client_config.server_name = remote->server_name;
+    QuicCore core(make_http09_client_core_config(client_config));
 
     EndpointDriveState state;
 
@@ -524,6 +648,8 @@ int run_http09_server(const Http09RuntimeConfig &config) {
 
 std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **argv) {
     Http09RuntimeConfig config;
+    bool host_specified = false;
+    bool server_name_specified = false;
 
     if (const auto role = getenv_string("ROLE"); role.has_value()) {
         if (!parse_role_into(config, *role)) {
@@ -544,6 +670,7 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
     }
     if (const auto host = getenv_string("HOST"); host.has_value()) {
         config.host = *host;
+        host_specified = true;
     }
     if (const auto port = getenv_string("PORT"); port.has_value()) {
         const auto parsed = parse_port(*port);
@@ -567,6 +694,7 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
     }
     if (const auto server_name = getenv_string("SERVER_NAME"); server_name.has_value()) {
         config.server_name = *server_name;
+        server_name_specified = true;
     }
 
     int index = 1;
@@ -597,6 +725,7 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
                 return std::nullopt;
             }
             config.host = std::string(*value);
+            host_specified = true;
             continue;
         }
         if (arg == "--port") {
@@ -671,6 +800,7 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
                 return std::nullopt;
             }
             config.server_name = std::string(*value);
+            server_name_specified = true;
             continue;
         }
         if (arg == "--verify-peer") {
@@ -686,6 +816,12 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
         std::cerr << kUsageLine << '\n';
         return std::nullopt;
     }
+    if (config.mode == Http09RuntimeMode::client && !host_specified) {
+        config.host.clear();
+    }
+    if (config.mode == Http09RuntimeMode::client && !server_name_specified) {
+        config.server_name.clear();
+    }
 
     return config;
 }
@@ -698,7 +834,7 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
                                               std::byte{0xf0}, std::byte{0x3e}, std::byte{0x51},
                                               std::byte{0x57}, std::byte{0x08}},
         .verify_peer = config.verify_peer,
-        .server_name = config.server_name,
+        .server_name = config.server_name.empty() ? "localhost" : config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),
         .transport = http09_client_transport_for_testcase(config.testcase),
     };

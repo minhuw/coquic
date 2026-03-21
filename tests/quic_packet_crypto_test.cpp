@@ -12,6 +12,10 @@
 #include "src/quic/packet_crypto.h"
 #include "src/quic/packet_crypto_test_hooks.h"
 
+namespace coquic::quic {
+CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secret);
+}
+
 namespace {
 
 std::vector<std::byte> hex_bytes(const char *hex) {
@@ -130,6 +134,23 @@ TEST_P(QuicPacketCryptoTrafficSecretFaultTest, RejectsTrafficSecretExpansionWhen
     const auto keys = coquic::quic::expand_traffic_secret(secret);
     ASSERT_FALSE(keys.has_value());
     EXPECT_EQ(keys.error().code, params.error_code);
+}
+
+TEST(QuicPacketCryptoTest, DerivesNextTrafficSecretFromRfc9001AppendixA5) {
+    const coquic::quic::TrafficSecret secret{
+        .cipher_suite = coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        .secret = hex_bytes("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b"),
+    };
+
+    const auto next_secret = coquic::quic::derive_next_traffic_secret(secret);
+    ASSERT_TRUE(next_secret.has_value());
+    EXPECT_EQ(to_hex(next_secret.value().secret),
+              "1223504755036d556342ee9361d253421a826c9ecdf3c7148684b36b714881f9");
+
+    const auto expanded = coquic::quic::expand_traffic_secret(next_secret.value());
+    ASSERT_TRUE(expanded.has_value());
+    EXPECT_EQ(to_hex(expanded.value().hp_key),
+              "25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4");
 }
 
 TEST_P(QuicPacketCryptoSealFaultTest, RejectsSealingWhenFaultInjected) {

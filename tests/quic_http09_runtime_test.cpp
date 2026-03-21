@@ -421,6 +421,41 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-over-udp");
 }
 
+TEST(QuicHttp09RuntimeTest, ClientDerivesPeerAddressAndServerNameFromRequests) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+    document_root.write_file("hello.txt", "hello-from-request-authority");
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "",
+        .port = 443,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .download_root = download_root.path(),
+        .server_name = "",
+        .requests_env = "https://localhost:" + std::to_string(port) + "/hello.txt",
+    };
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
+    EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-from-request-authority");
+}
+
 TEST(QuicHttp09RuntimeTest, ServerDoesNotExitAfterMalformedTraffic) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
@@ -545,6 +580,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
     }
     const auto &runtime = *parsed;
     EXPECT_EQ(runtime.mode, coquic::quic::Http09RuntimeMode::client);
+    EXPECT_TRUE(runtime.host.empty());
+    EXPECT_TRUE(runtime.server_name.empty());
     EXPECT_EQ(runtime.application_protocol, "hq-interop");
     EXPECT_EQ(runtime.document_root, std::filesystem::path("/www"));
     EXPECT_EQ(runtime.download_root, std::filesystem::path("/downloads"));
@@ -556,8 +593,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
 
     const auto client_core = coquic::quic::make_http09_client_core_config(overridden_runtime);
     EXPECT_EQ(client_core.application_protocol, "hq-interop");
-    EXPECT_EQ(client_core.transport.initial_max_data, 64u * 1024u);
-    EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_local, 16u * 1024u);
+    EXPECT_EQ(client_core.transport.initial_max_data, 32u * 1024u * 1024u);
+    EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_local, 16u * 1024u * 1024u);
     EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_remote, 256u * 1024u);
 
     auto server_runtime = overridden_runtime;

@@ -184,8 +184,8 @@ CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::fil
 QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase) {
     auto config = QuicTransportConfig{};
     if (testcase == QuicHttp09Testcase::transfer) {
-        config.initial_max_data = 64ull * 1024ull;
-        config.initial_max_stream_data_bidi_local = 16ull * 1024ull;
+        config.initial_max_data = 32ull * 1024ull * 1024ull;
+        config.initial_max_stream_data_bidi_local = 16ull * 1024ull * 1024ull;
     }
     return config;
 }

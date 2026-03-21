@@ -3,6 +3,18 @@ set -euo pipefail
 
 binary="${COQUIC_BIN:-/usr/local/bin/coquic}"
 role="${ROLE:-}"
+testcase="${TESTCASE:-}"
+
+supports_testcase() {
+  case "$1" in
+    handshake | transfer)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
 run_setup() {
   if [ "${COQUIC_SKIP_SETUP:-0}" != "1" ] && [ -x /setup.sh ]; then
@@ -15,6 +27,11 @@ wait_for_sim() {
     /wait-for-it.sh sim:57832 -s -t "${SIM_WAIT_TIMEOUT_SECONDS:-30}" -- true
   fi
 }
+
+if [ -n "${testcase}" ] && ! supports_testcase "${testcase}"; then
+  echo "unsupported TESTCASE=${testcase}" >&2
+  exit 127
+fi
 
 case "${role}" in
 server)
@@ -29,9 +46,9 @@ server)
 client)
   run_setup
   wait_for_sim
-  export HOST="${HOST:-server}"
+  export HOST="${HOST:-}"
   export PORT="${PORT:-443}"
-  export SERVER_NAME="${SERVER_NAME:-server}"
+  export SERVER_NAME="${SERVER_NAME:-}"
   export DOWNLOAD_ROOT="${DOWNLOAD_ROOT:-/downloads}"
   exec "${binary}" interop-client
   ;;

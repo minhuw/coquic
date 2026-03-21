@@ -20,6 +20,7 @@ derive_initial_packet_keys(EndpointRole local_role, bool for_local_send,
                            const ConnectionId &client_initial_destination_connection_id);
 
 CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &secret);
+CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secret);
 
 CodecResult<std::vector<std::byte>> make_packet_protection_nonce(std::span<const std::byte> iv,
                                                                  std::uint64_t packet_number);

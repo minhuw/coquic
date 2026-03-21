@@ -186,6 +186,25 @@ CodecResult<PacketProtectionKeys> expand_secret(CipherSuite cipher_suite,
     });
 }
 
+CodecResult<std::vector<std::byte>> derive_header_protection_key(const TrafficSecret &secret) {
+    if (secret.header_protection_key.has_value()) {
+        return CodecResult<std::vector<std::byte>>::success(secret.header_protection_key.value());
+    }
+
+    const auto parameters = cipher_suite_parameters(secret.cipher_suite);
+    if (!parameters.has_value()) {
+        return crypto_failure(parameters.error().code);
+    }
+
+    auto hp_key = hkdf_expand_label(parameters.value().digest(), secret.secret, "quic hp",
+                                    parameters.value().hp_key_length);
+    if (!hp_key.has_value()) {
+        return crypto_failure(hp_key.error().code);
+    }
+
+    return hp_key;
+}
+
 struct SealAeadRequest {
     std::span<const std::byte> key;
     std::span<const std::byte> nonce;
@@ -316,7 +335,47 @@ derive_initial_packet_keys(EndpointRole local_role, bool for_local_send,
 }
 
 CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &secret) {
-    return expand_secret(secret.cipher_suite, secret.secret);
+    auto keys = expand_secret(secret.cipher_suite, secret.secret);
+    if (!keys.has_value()) {
+        return keys;
+    }
+
+    const auto hp_key = derive_header_protection_key(secret);
+    if (!hp_key.has_value()) {
+        return CodecResult<PacketProtectionKeys>::failure(hp_key.error().code,
+                                                          hp_key.error().offset);
+    }
+
+    auto expanded = keys.value();
+    expanded.hp_key = hp_key.value();
+    return CodecResult<PacketProtectionKeys>::success(std::move(expanded));
+}
+
+CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secret) {
+    const auto parameters = cipher_suite_parameters(secret.cipher_suite);
+    if (!parameters.has_value()) {
+        return CodecResult<TrafficSecret>::failure(parameters.error().code,
+                                                   parameters.error().offset);
+    }
+
+    const auto digest = parameters.value().digest();
+    const auto secret_length = static_cast<std::size_t>(EVP_MD_size(digest));
+    const auto next_secret = hkdf_expand_label(digest, secret.secret, "quic ku", secret_length);
+    if (!next_secret.has_value()) {
+        return CodecResult<TrafficSecret>::failure(next_secret.error().code,
+                                                   next_secret.error().offset);
+    }
+
+    const auto hp_key = derive_header_protection_key(secret);
+    if (!hp_key.has_value()) {
+        return CodecResult<TrafficSecret>::failure(hp_key.error().code, hp_key.error().offset);
+    }
+
+    return CodecResult<TrafficSecret>::success(TrafficSecret{
+        .cipher_suite = secret.cipher_suite,
+        .secret = next_secret.value(),
+        .header_protection_key = hp_key.value(),
+    });
 }
 
 CodecResult<std::vector<std::byte>> make_packet_protection_nonce(std::span<const std::byte> iv,

@@ -42,11 +42,11 @@ TEST(QuicHttp09Test, RejectsUnsafeRequestTargetsDuringRequestEnvParse) {
     EXPECT_FALSE(coquic::quic::parse_http09_requests_env("https://example.test/a#b").has_value());
 }
 
-TEST(QuicHttp09Test, UsesSmallTransferFlowControlProfileForTransferCase) {
+TEST(QuicHttp09Test, UsesGenerousTransferFlowControlProfileForTransferCase) {
     const auto config = coquic::quic::http09_client_transport_for_testcase(
         coquic::quic::QuicHttp09Testcase::transfer);
-    EXPECT_EQ(config.initial_max_data, 64u * 1024u);
-    EXPECT_EQ(config.initial_max_stream_data_bidi_local, 16u * 1024u);
+    EXPECT_EQ(config.initial_max_data, 32u * 1024u * 1024u);
+    EXPECT_EQ(config.initial_max_stream_data_bidi_local, 16u * 1024u * 1024u);
 }
 
 TEST(QuicHttp09Test, ResolvesRequestTargetUnderRootWithoutDiscardingRoot) {

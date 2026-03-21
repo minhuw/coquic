@@ -79,7 +79,7 @@ docker build -t coquic-interop:latest .
 
 The image:
 
-- builds `coquic` with `quictls`
+- builds `coquic` with `quictls` in `ReleaseFast`
 - copies the resulting binary plus its runtime shared-library closure
 - uses `martenseemann/quic-network-simulator-endpoint:latest` as the final base
 - starts with `/run_endpoint.sh`

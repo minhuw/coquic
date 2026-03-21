@@ -169,6 +169,8 @@ class QuicConnection {
     std::optional<std::uint64_t> last_application_send_stream_id_;
     NewRenoCongestionController congestion_controller_;
     std::uint32_t pto_count_ = 0;
+    bool application_read_key_phase_ = false;
+    bool application_write_key_phase_ = false;
     bool handshake_confirmed_ = false;
     bool handshake_ready_emitted_ = false;
     bool failed_emitted_ = false;

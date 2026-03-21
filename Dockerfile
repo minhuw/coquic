@@ -6,7 +6,7 @@ WORKDIR /src
 COPY build.zig flake.nix flake.lock ./
 COPY src ./src
 
-RUN nix develop .#interop-image -c bash -lc 'zig build -Dtls_backend=quictls'
+RUN nix develop .#interop-image -c bash -lc 'zig build -Dtls_backend=quictls -Doptimize=ReleaseFast'
 
 RUN nix develop .#interop-image -c bash -lc 'set -euo pipefail \
     && binary=/src/zig-out/bin/coquic \

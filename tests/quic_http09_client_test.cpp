@@ -258,12 +258,15 @@ TEST(QuicHttp09ClientTest, FailsWhenOutputPathIsDirectory) {
     EXPECT_TRUE(endpoint.has_failed());
 }
 
-TEST(QuicHttp09ClientTest, FailsWhenWriteTripsDevFull) {
+TEST(QuicHttp09ClientTest, FailsWhenLargeWriteTripsDevFull) {
     if (!std::filesystem::exists("/dev/full")) {
         GTEST_SKIP() << "/dev/full is unavailable";
     }
 
     const auto now = coquic::quic::test::test_time();
+    constexpr std::size_t kib = 1024u;
+    constexpr std::size_t payload_size = kib * kib;
+    const std::string payload(payload_size, 'x');
     QuicHttp09ClientEndpoint endpoint(coquic::quic::QuicHttp09ClientConfig{
         .requests = {request_for_target("/dev/full")},
         .download_root = std::filesystem::path("/"),
@@ -272,8 +275,8 @@ TEST(QuicHttp09ClientTest, FailsWhenWriteTripsDevFull) {
     endpoint.on_core_result(handshake_ready_result(), now);
     endpoint.poll(now);
 
-    const auto update = endpoint.on_core_result(receive_result(0, "payload", true),
-                                                coquic::quic::test::test_time(1));
+    const auto update =
+        endpoint.on_core_result(receive_result(0, payload, true), coquic::quic::test::test_time(1));
     EXPECT_TRUE(update.terminal_failure);
     EXPECT_TRUE(endpoint.has_failed());
 }

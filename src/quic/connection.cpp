@@ -470,11 +470,11 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             make_deserialize_context(application_space_.read_secret, application_read_key_phase_));
         if (!packets.has_value() &&
             packets.error().code == CodecErrorCode::invalid_packet_protection_state &&
-            !datagram.empty() && (std::to_integer<std::uint8_t>(datagram.front()) & 0x80u) == 0 &&
-            application_space_.read_secret.has_value() &&
+            (std::to_integer<std::uint8_t>(datagram.front()) & 0x80u) == 0 &&
             application_space_.write_secret.has_value()) {
+            // Short-header invalid protection state implies a read secret existed during decode.
             const auto next_read_secret =
-                derive_next_traffic_secret(*application_space_.read_secret);
+                derive_next_traffic_secret(application_space_.read_secret.value());
             if (next_read_secret.has_value()) {
                 auto updated_packets = deserialize_protected_datagram(
                     datagram, make_deserialize_context(next_read_secret.value(),
@@ -713,10 +713,8 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
                 continue;
             }
 
-            if (!last_ack_eliciting_sent_time.has_value() ||
-                packet.sent_time > *last_ack_eliciting_sent_time) {
-                last_ack_eliciting_sent_time = packet.sent_time;
-            }
+            last_ack_eliciting_sent_time =
+                std::max(last_ack_eliciting_sent_time.value_or(packet.sent_time), packet.sent_time);
         }
 
         if (!last_ack_eliciting_sent_time.has_value()) {
@@ -1161,11 +1159,8 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                 const auto processed = process_inbound_application(protected_packet.frames, now);
                 if (!processed.has_value()) {
                     std::cerr << "quic one-rtt packet reject: status=" << static_cast<int>(status_)
-                              << " frame_count=" << protected_packet.frames.size();
-                    if (!protected_packet.frames.empty()) {
-                        std::cerr << " first_frame=" << protected_packet.frames.front().index();
-                    }
-                    std::cerr << '\n';
+                              << " frame_count=" << protected_packet.frames.size()
+                              << " first_frame=" << protected_packet.frames.front().index() << '\n';
                 }
                 if (processed.has_value()) {
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);

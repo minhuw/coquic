@@ -65,16 +65,15 @@ bool queue_one_response_chunk(std::uint64_t stream_id, std::ifstream &input,
     }
 
     const bool fin = input.peek() == std::char_traits<char>::eof();
-    if (input.bad()) {
-        return false;
-    }
-
+    const bool ok = !input.bad();
+    const auto queued_before = out.size();
     out.emplace_back(QuicCoreSendStreamData{
         .stream_id = stream_id,
         .bytes = std::move(chunk),
         .fin = fin,
     });
-    return true;
+    out.resize(queued_before + static_cast<std::size_t>(ok));
+    return ok;
 }
 
 } // namespace
@@ -133,7 +132,7 @@ QuicHttp09EndpointUpdate QuicHttp09ServerEndpoint::drain_pending_inputs() {
         update.core_inputs.push_back(std::move(pending_core_inputs_.front()));
         pending_core_inputs_.pop_front();
     }
-    update.has_pending_work = !pending_responses_.empty() || !pending_core_inputs_.empty();
+    update.has_pending_work = !pending_responses_.empty();
     return update;
 }
 
@@ -149,8 +148,8 @@ void QuicHttp09ServerEndpoint::pump_response_chunks(std::size_t max_chunks) {
             continue;
         }
 
-        const auto *send = std::get_if<QuicCoreSendStreamData>(&pending_core_inputs_.back());
-        if (send != nullptr && send->fin) {
+        const auto &send = std::get<QuicCoreSendStreamData>(pending_core_inputs_.back());
+        if (send.fin) {
             pending_responses_.erase(current);
         }
         ++emitted_chunks;

@@ -26,6 +26,10 @@ struct QuicHttp09ServerEndpointTestPeer {
         response.file.setstate(std::ios::badbit);
         endpoint.pending_responses_.insert_or_assign(stream_id, std::move(response));
     }
+
+    static void pump_response_chunks(QuicHttp09ServerEndpoint &endpoint, std::size_t max_chunks) {
+        endpoint.pump_response_chunks(max_chunks);
+    }
 };
 
 } // namespace coquic::quic::test
@@ -323,6 +327,27 @@ TEST(QuicHttp09ServerTest, LocalErrorMarksEndpointFailedAndPollStaysFailed) {
     EXPECT_TRUE(poll_update.terminal_failure);
 }
 
+TEST(QuicHttp09ServerTest, OnCoreResultRemainsFailedAfterEndpointAlreadyFailed) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello");
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    QuicCoreResult local_error;
+    local_error.local_error = coquic::quic::QuicCoreLocalError{
+        .code = coquic::quic::QuicCoreLocalErrorCode::unsupported_operation,
+        .stream_id = std::nullopt,
+    };
+    const auto first = endpoint.on_core_result(local_error, coquic::quic::test::test_time(1));
+    EXPECT_TRUE(first.terminal_failure);
+
+    const auto second = endpoint.on_core_result(
+        single_receive_result(0, "GET /hello.txt\r\n", true), coquic::quic::test::test_time(2));
+    EXPECT_TRUE(second.terminal_failure);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
 TEST(QuicHttp09ServerTest, PollResetsStreamWhenPendingResponseReadFails) {
     coquic::quic::test::ScopedTempDir document_root;
     document_root.write_file("hello.txt", "hello");
@@ -340,6 +365,27 @@ TEST(QuicHttp09ServerTest, PollResetsStreamWhenPendingResponseReadFails) {
     EXPECT_TRUE(std::holds_alternative<coquic::quic::QuicCoreStopSending>(update.core_inputs[1]));
     EXPECT_FALSE(update.has_pending_work);
     EXPECT_FALSE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ServerTest, PumpResponseChunksWithZeroBudgetLeavesPendingResponseQueued) {
+    coquic::quic::test::ScopedTempDir document_root;
+    std::string body;
+    body.append(static_cast<std::string::size_type>(20u * 1024u), 'x');
+    document_root.write_file("large.bin", body);
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    const auto first = endpoint.on_core_result(single_receive_result(0, "GET /large.bin\r\n", true),
+                                               coquic::quic::test::test_time(1));
+    ASSERT_TRUE(first.has_pending_work);
+    ASSERT_EQ(
+        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
+
+    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pump_response_chunks(endpoint, 0);
+
+    EXPECT_EQ(
+        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
 }
 
 TEST(QuicHttp09ServerTest, RejectsNonGetRequestLine) {
@@ -407,6 +453,23 @@ TEST(QuicHttp09ServerTest, RejectsReceiveDataAfterResponseIsAlreadyPending) {
         single_receive_result(0, "GET /large.bin\r\n", true), coquic::quic::test::test_time(2));
     EXPECT_TRUE(duplicate.terminal_failure);
     EXPECT_TRUE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ServerTest, EmptyNonFinalReceiveKeepsRequestOpen) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello");
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    const auto update = endpoint.on_core_result(single_receive_result(0, "", false),
+                                                coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(update.terminal_failure);
+    EXPECT_FALSE(endpoint.has_failed());
+    EXPECT_TRUE(update.core_inputs.empty());
+    EXPECT_EQ(coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
+              1u);
 }
 
 TEST(QuicHttp09ServerTest, SendsFinForEmptyFileResponses) {

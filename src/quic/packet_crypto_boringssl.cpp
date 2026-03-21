@@ -560,4 +560,9 @@ ScopedPacketCryptoFaultInjector::~ScopedPacketCryptoFaultInjector() {
     detail::set_packet_crypto_fault_state(previous_fault_point_, previous_occurrence_);
 }
 
+CodecResult<std::vector<std::byte>>
+derive_header_protection_key_for_test(const TrafficSecret &secret) {
+    return derive_header_protection_key(secret);
+}
+
 } // namespace coquic::quic::test

@@ -88,6 +88,8 @@ TEST(QuicHttp09Test, RejectsTraversalQueriesAndFragmentsWhenResolvingPath) {
     EXPECT_FALSE(
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/../secret").has_value());
     EXPECT_FALSE(
+        coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/./safe").has_value());
+    EXPECT_FALSE(
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a/../b").has_value());
     EXPECT_FALSE(
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a?b").has_value());
@@ -134,6 +136,26 @@ TEST(QuicHttp09Test, ReportsTruncatedInputForPartialRequestLine) {
 TEST(QuicHttp09Test, RejectsTabCharacterInRequestTarget) {
     const auto parsed =
         coquic::quic::parse_http09_request_target(bytes_from_ascii("GET /\tbad\r\n"));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
+}
+
+TEST(QuicHttp09Test, RejectsDeleteCharacterInRequestTarget) {
+    const auto parsed =
+        coquic::quic::parse_http09_request_target(bytes_from_ascii("GET /bad\x7f\r\n"));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
+}
+
+TEST(QuicHttp09Test, RejectsEmptyRequestLine) {
+    const auto parsed = coquic::quic::parse_http09_request_target(bytes_from_ascii("\n"));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
+}
+
+TEST(QuicHttp09Test, RejectsRequestTargetsWithoutLeadingSlash) {
+    const auto parsed =
+        coquic::quic::parse_http09_request_target(bytes_from_ascii("GET relative\n"));
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::http09_parse_error);
 }

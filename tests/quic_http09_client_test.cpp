@@ -238,6 +238,26 @@ TEST(QuicHttp09ClientTest, PollReturnsFailureWhenEndpointHasFailed) {
     EXPECT_TRUE(endpoint.has_failed());
 }
 
+TEST(QuicHttp09ClientTest, OnCoreResultReturnsFailureWhenEndpointAlreadyFailed) {
+    QuicCoreResult result;
+    result.local_error = coquic::quic::QuicCoreLocalError{
+        .code = coquic::quic::QuicCoreLocalErrorCode::unsupported_operation,
+        .stream_id = std::nullopt,
+    };
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/ok.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    const auto first = endpoint.on_core_result(result, coquic::quic::test::test_time());
+    EXPECT_TRUE(first.terminal_failure);
+
+    const auto second =
+        endpoint.on_core_result(handshake_ready_result(), coquic::quic::test::test_time(1));
+    EXPECT_TRUE(second.terminal_failure);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
 TEST(QuicHttp09ClientTest, FailsWhenOutputPathIsDirectory) {
     const auto now = coquic::quic::test::test_time();
     coquic::quic::test::ScopedTempDir download_root;
@@ -353,6 +373,51 @@ TEST(QuicHttp09ClientTest, CompletesImmediatelyWhenHandshakeHasNoRequestsToIssue
     EXPECT_FALSE(update.terminal_failure);
     EXPECT_FALSE(update.has_pending_work);
     EXPECT_TRUE(endpoint.is_complete());
+}
+
+TEST(QuicHttp09ClientTest, PollDoesNothingBeforeHandshakeAndAfterRequestsAreIssued) {
+    const auto now = coquic::quic::test::test_time();
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/ok.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    const auto before_handshake = endpoint.poll(now);
+    EXPECT_TRUE(before_handshake.core_inputs.empty());
+    EXPECT_FALSE(before_handshake.has_pending_work);
+    EXPECT_FALSE(before_handshake.terminal_success);
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    const auto first_poll = endpoint.poll(coquic::quic::test::test_time(1));
+    ASSERT_EQ(send_stream_inputs_from(first_poll).size(), 1u);
+    EXPECT_FALSE(first_poll.has_pending_work);
+
+    const auto second_poll = endpoint.poll(coquic::quic::test::test_time(2));
+    EXPECT_TRUE(second_poll.core_inputs.empty());
+    EXPECT_FALSE(second_poll.has_pending_work);
+    EXPECT_FALSE(second_poll.terminal_success);
+}
+
+TEST(QuicHttp09ClientTest, RepeatedHandshakeReadyDoesNotReissueRequests) {
+    const auto now = coquic::quic::test::test_time();
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/ok.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    const auto first_poll = endpoint.poll(coquic::quic::test::test_time(1));
+    ASSERT_EQ(send_stream_inputs_from(first_poll).size(), 1u);
+
+    const auto repeated =
+        endpoint.on_core_result(handshake_ready_result(), coquic::quic::test::test_time(2));
+    EXPECT_TRUE(repeated.core_inputs.empty());
+    EXPECT_FALSE(repeated.terminal_failure);
+    EXPECT_FALSE(repeated.terminal_success);
+
+    const auto second_poll = endpoint.poll(coquic::quic::test::test_time(3));
+    EXPECT_TRUE(second_poll.core_inputs.empty());
+    EXPECT_FALSE(second_poll.has_pending_work);
 }
 
 TEST(QuicHttp09ClientTest, FailsDeterministicallyWhenDirectoryCreationFails) {

@@ -1,5 +1,7 @@
 #include "src/quic/http09_runtime.h"
 
+#include "src/quic/http09_runtime_test_hooks.h"
+
 #include "src/coquic.h"
 
 #include <arpa/inet.h>
@@ -36,15 +38,92 @@ constexpr std::string_view kUsageLine =
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
     "[--server-name NAME] [--verify-peer]";
 
+struct RuntimeFaultState {
+    test::RuntimeFaultConfig config;
+    std::size_t open_udp_socket_calls = 0;
+    std::size_t send_datagram_calls = 0;
+    std::size_t drive_endpoint_calls = 0;
+};
+
+RuntimeFaultState &runtime_fault_state() {
+    static RuntimeFaultState state;
+    return state;
+}
+
+template <typename Outcome>
+std::optional<Outcome> take_scripted_outcome(std::vector<Outcome> &outcomes) {
+    if (outcomes.empty()) {
+        return std::nullopt;
+    }
+
+    auto outcome = std::move(outcomes.front());
+    outcomes.erase(outcomes.begin());
+    return outcome;
+}
+
+int runtime_poll(pollfd *descriptor, int timeout_ms) {
+    auto &state = runtime_fault_state();
+    if (auto scripted = take_scripted_outcome(state.config.poll_outcomes); scripted.has_value()) {
+        descriptor->revents = scripted->revents;
+        if (scripted->result < 0) {
+            errno = scripted->error;
+        }
+        return scripted->result;
+    }
+
+    return ::poll(descriptor, 1, timeout_ms);
+}
+
+ssize_t runtime_recvfrom(int socket_fd, void *buffer, std::size_t buffer_size, int flags,
+                         sockaddr *source, socklen_t *source_len) {
+    auto &state = runtime_fault_state();
+    if (auto scripted = take_scripted_outcome(state.config.recvfrom_outcomes);
+        scripted.has_value()) {
+        if (scripted->result < 0) {
+            errno = scripted->error;
+            return -1;
+        }
+
+        const auto copied = std::min<std::size_t>(static_cast<std::size_t>(scripted->result),
+                                                  scripted->bytes.size());
+        if (copied > 0) {
+            std::memcpy(buffer, scripted->bytes.data(), copied);
+        }
+        if (source != nullptr && source_len != nullptr) {
+            const auto writable = std::min<socklen_t>(*source_len, scripted->source_len);
+            if (writable > 0) {
+                std::memcpy(source, &scripted->source, writable);
+            }
+            *source_len = scripted->source_len;
+        }
+        return scripted->result;
+    }
+
+    return ::recvfrom(socket_fd, buffer, buffer_size, flags, source, source_len);
+}
+
+bool runtime_project_name_empty() {
+    const auto &state = runtime_fault_state();
+    return state.config.project_name_empty.value_or(coquic::project_name().empty());
+}
+
+bool runtime_openssl_available() {
+    const auto &state = runtime_fault_state();
+    return state.config.openssl_available.value_or(coquic::openssl_available());
+}
+
+bool runtime_logging_ready() {
+    const auto &state = runtime_fault_state();
+    return state.config.logging_ready.value_or(coquic::logging_ready());
+}
+
 class ScopedFd {
   public:
     explicit ScopedFd(int fd) : fd_(fd) {
     }
 
     ~ScopedFd() {
-        if (fd_ >= 0) {
-            ::close(fd_);
-        }
+        ::close(fd_);
     }
 
     ScopedFd(const ScopedFd &) = delete;
@@ -225,10 +304,7 @@ bool resolve_udp_peer_ipv4(std::string_view host, std::uint16_t port, sockaddr_i
     addrinfo *results = nullptr;
     const auto service = std::to_string(port);
     const int status = ::getaddrinfo(std::string(host).c_str(), service.c_str(), &hints, &results);
-    if (status != 0 || results == nullptr) {
-        if (results != nullptr) {
-            ::freeaddrinfo(results);
-        }
+    if (status != 0) {
         return false;
     }
 
@@ -238,6 +314,13 @@ bool resolve_udp_peer_ipv4(std::string_view host, std::uint16_t port, sockaddr_i
 }
 
 int open_udp_socket() {
+    auto &state = runtime_fault_state();
+    ++state.open_udp_socket_calls;
+    if (state.config.open_udp_socket_failure_occurrence == state.open_udp_socket_calls) {
+        errno = EMFILE;
+        return -1;
+    }
+
     return ::socket(AF_INET, SOCK_DGRAM, 0);
 }
 
@@ -255,10 +338,15 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
 
 bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer,
                    socklen_t peer_len, std::string_view role_name) {
+    auto &state = runtime_fault_state();
+    ++state.send_datagram_calls;
     const auto *buffer =
         datagram.empty() ? nullptr : reinterpret_cast<const void *>(datagram.data());
-    const ssize_t sent = ::sendto(fd, buffer, datagram.size(), 0,
-                                  reinterpret_cast<const sockaddr *>(&peer), peer_len);
+    const bool fail_send =
+        state.config.send_datagram_failure_occurrence == state.send_datagram_calls;
+    const ssize_t sent = fail_send ? (errno = EIO, -1)
+                                   : ::sendto(fd, buffer, datagram.size(), 0,
+                                              reinterpret_cast<const sockaddr *>(&peer), peer_len);
     if (sent >= 0) {
         return true;
     }
@@ -286,6 +374,24 @@ struct RuntimeWaitConfig {
 std::optional<RuntimeWaitStep>
 wait_for_socket_or_deadline(const RuntimeWaitConfig &config,
                             const std::optional<QuicCoreTimePoint> &next_wakeup) {
+    auto &fault_state = runtime_fault_state();
+    if (auto scripted = take_scripted_outcome(fault_state.config.wait_outcomes);
+        scripted.has_value()) {
+        if (!scripted->has_value()) {
+            return std::nullopt;
+        }
+
+        const auto &outcome = scripted->value();
+        return RuntimeWaitStep{
+            .input = outcome.input,
+            .input_time = outcome.input_time,
+            .source = outcome.source,
+            .source_len = outcome.source_len,
+            .has_source = outcome.has_source,
+            .idle_timeout = outcome.idle_timeout,
+        };
+    }
+
     int timeout_ms = config.idle_timeout_ms;
     if (next_wakeup.has_value()) {
         const auto current = now();
@@ -300,9 +406,6 @@ wait_for_socket_or_deadline(const RuntimeWaitConfig &config,
         timeout_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                           remaining + std::chrono::milliseconds(1))
                                           .count());
-        if (timeout_ms < 1) {
-            timeout_ms = 1;
-        }
     }
 
     pollfd descriptor{};
@@ -311,7 +414,7 @@ wait_for_socket_or_deadline(const RuntimeWaitConfig &config,
 
     int poll_result = 0;
     do {
-        poll_result = ::poll(&descriptor, 1, timeout_ms);
+        poll_result = runtime_poll(&descriptor, timeout_ms);
     } while (poll_result < 0 && errno == EINTR);
 
     if (poll_result < 0) {
@@ -344,8 +447,8 @@ wait_for_socket_or_deadline(const RuntimeWaitConfig &config,
     socklen_t source_len = sizeof(source);
     ssize_t bytes_read = 0;
     do {
-        bytes_read = ::recvfrom(config.socket_fd, inbound.data(), inbound.size(), 0,
-                                reinterpret_cast<sockaddr *>(&source), &source_len);
+        bytes_read = runtime_recvfrom(config.socket_fd, inbound.data(), inbound.size(), 0,
+                                      reinterpret_cast<sockaddr *>(&source), &source_len);
     } while (bytes_read < 0 && errno == EINTR);
 
     if (bytes_read < 0) {
@@ -412,11 +515,38 @@ struct EndpointDriveState {
     bool terminal_failure = false;
 };
 
-template <typename Endpoint>
-bool drive_endpoint_until_blocked(Endpoint &endpoint, QuicCore &core, int fd,
+struct EndpointDriver {
+    void *endpoint = nullptr;
+    QuicHttp09EndpointUpdate (*on_core_result)(void *endpoint, const QuicCoreResult &result,
+                                               QuicCoreTimePoint now) = nullptr;
+    QuicHttp09EndpointUpdate (*poll)(void *endpoint, QuicCoreTimePoint now) = nullptr;
+};
+
+template <typename Endpoint> EndpointDriver make_endpoint_driver(Endpoint &endpoint) {
+    return EndpointDriver{
+        .endpoint = &endpoint,
+        .on_core_result =
+            [](void *opaque, const QuicCoreResult &result, QuicCoreTimePoint step_now) {
+                return static_cast<Endpoint *>(opaque)->on_core_result(result, step_now);
+            },
+        .poll =
+            [](void *opaque, QuicCoreTimePoint step_now) {
+                return static_cast<Endpoint *>(opaque)->poll(step_now);
+            },
+    };
+}
+
+bool drive_endpoint_until_blocked(const EndpointDriver &driver, QuicCore &core, int fd,
                                   const sockaddr_storage *peer, socklen_t peer_len,
                                   const QuicCoreResult &initial_result, EndpointDriveState &state,
                                   std::string_view role_name) {
+    auto &fault_state = runtime_fault_state();
+    ++fault_state.drive_endpoint_calls;
+    if (fault_state.config.drive_endpoint_failure_occurrence == fault_state.drive_endpoint_calls) {
+        state.terminal_failure = true;
+        return false;
+    }
+
     QuicCoreResult current_result = initial_result;
 
     for (;;) {
@@ -430,7 +560,7 @@ bool drive_endpoint_until_blocked(Endpoint &endpoint, QuicCore &core, int fd,
             return false;
         }
 
-        auto update = endpoint.on_core_result(current_result, now());
+        auto update = driver.on_core_result(driver.endpoint, current_result, now());
         if (update.terminal_failure) {
             state.terminal_failure = true;
             return false;
@@ -450,7 +580,7 @@ bool drive_endpoint_until_blocked(Endpoint &endpoint, QuicCore &core, int fd,
                 return true;
             }
 
-            update = endpoint.poll(now());
+            update = driver.poll(driver.endpoint, now());
             if (update.terminal_failure) {
                 state.terminal_failure = true;
                 return false;
@@ -503,45 +633,42 @@ int run_http09_client(const Http09RuntimeConfig &config) {
     QuicCore core(make_http09_client_core_config(client_config));
 
     EndpointDriveState state;
+    auto endpoint_driver = make_endpoint_driver(endpoint);
 
-    auto start_result = core.advance(QuicCoreStart{}, now());
-    if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, start_result,
-                                      state, "client")) {
-        return 1;
-    }
-    if (state.terminal_success) {
-        return 0;
-    }
-
+    bool needs_start = true;
     for (;;) {
-        auto step = wait_for_socket_or_deadline(
-            RuntimeWaitConfig{
-                .socket_fd = socket_fd,
-                .idle_timeout_ms = kClientReceiveTimeoutMs,
-                .role_name = "client",
-            },
-            state.next_wakeup);
-        if (!step.has_value()) {
-            return 1;
-        }
-        if (step->idle_timeout) {
-            std::cerr << "http09-client failed: timed out waiting for progress\n";
-            return 1;
-        }
-        if (!step->input.has_value()) {
-            continue;
+        QuicCoreResult step_result;
+        if (needs_start) {
+            needs_start = false;
+            step_result = core.advance(QuicCoreStart{}, now());
+        } else {
+            auto step = wait_for_socket_or_deadline(
+                RuntimeWaitConfig{
+                    .socket_fd = socket_fd,
+                    .idle_timeout_ms = kClientReceiveTimeoutMs,
+                    .role_name = "client",
+                },
+                state.next_wakeup);
+            if (!step.has_value()) {
+                return 1;
+            }
+            if (step->idle_timeout) {
+                std::cerr << "http09-client failed: timed out waiting for progress\n";
+                return 1;
+            }
+            if (!step->input.has_value()) {
+                continue;
+            }
+
+            step_result = core.advance(std::move(*step->input), step->input_time);
         }
 
-        auto step_result = core.advance(std::move(*step->input), step->input_time);
-        if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, step_result,
-                                          state, "client")) {
+        if (!drive_endpoint_until_blocked(endpoint_driver, core, socket_fd, &peer, peer_len,
+                                          step_result, state, "client")) {
             return 1;
         }
         if (state.terminal_success) {
             return 0;
-        }
-        if (state.terminal_failure) {
-            return 1;
         }
     }
 }
@@ -589,43 +716,44 @@ int run_http09_server(const Http09RuntimeConfig &config) {
     socklen_t peer_len = 0;
     bool have_peer = false;
     EndpointDriveState state;
+    auto endpoint_driver = make_endpoint_driver(endpoint);
 
-    auto start_result = core.advance(QuicCoreStart{}, now());
-    if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, nullptr, 0, start_result, state,
-                                      "server")) {
-        return 1;
-    }
-
+    bool needs_start = true;
     for (;;) {
-        auto step = wait_for_socket_or_deadline(
-            RuntimeWaitConfig{
-                .socket_fd = socket_fd,
-                .idle_timeout_ms = kServerIdleTimeoutMs,
-                .role_name = "server",
-            },
-            state.next_wakeup);
-        if (!step.has_value()) {
-            return 1;
-        }
-        if (step->idle_timeout) {
-            continue;
-        }
-        if (!step->input.has_value()) {
-            continue;
+        QuicCoreResult step_result;
+        if (needs_start) {
+            needs_start = false;
+            step_result = core.advance(QuicCoreStart{}, now());
+        } else {
+            auto step = wait_for_socket_or_deadline(
+                RuntimeWaitConfig{
+                    .socket_fd = socket_fd,
+                    .idle_timeout_ms = kServerIdleTimeoutMs,
+                    .role_name = "server",
+                },
+                state.next_wakeup);
+            if (!step.has_value()) {
+                return 1;
+            }
+            if (step->idle_timeout) {
+                continue;
+            }
+            if (!step->input.has_value()) {
+                continue;
+            }
+
+            if (step->has_source) {
+                peer = step->source;
+                peer_len = step->source_len;
+                have_peer = true;
+            }
+
+            step_result = core.advance(std::move(*step->input), step->input_time);
         }
 
-        if (step->has_source) {
-            peer = step->source;
-            peer_len = step->source_len;
-            have_peer = true;
-        }
-
-        auto step_result = core.advance(std::move(*step->input), step->input_time);
-        if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, have_peer ? &peer : nullptr,
-                                          peer_len, step_result, state, "server")) {
-            return 1;
-        }
-        if (state.terminal_failure) {
+        if (!drive_endpoint_until_blocked(endpoint_driver, core, socket_fd,
+                                          have_peer ? &peer : nullptr, peer_len, step_result, state,
+                                          "server")) {
             return 1;
         }
     }
@@ -855,8 +983,16 @@ int run_http09_runtime(const Http09RuntimeConfig &config) {
 
     switch (config.mode) {
     case Http09RuntimeMode::health_check:
-        return coquic::project_name().empty() || !coquic::openssl_available() ||
-               !coquic::logging_ready();
+        if (runtime_project_name_empty()) {
+            return 1;
+        }
+        if (!runtime_openssl_available()) {
+            return 1;
+        }
+        if (!runtime_logging_ready()) {
+            return 1;
+        }
+        return 0;
     case Http09RuntimeMode::client:
         return run_http09_client(config);
     case Http09RuntimeMode::server:
@@ -867,3 +1003,128 @@ int run_http09_runtime(const Http09RuntimeConfig &config) {
 }
 
 } // namespace coquic::quic
+
+namespace coquic::quic::test {
+
+namespace {
+
+class ScriptedEndpoint {
+  public:
+    explicit ScriptedEndpoint(std::initializer_list<QuicHttp09EndpointUpdate> scripted_updates)
+        : updates_(scripted_updates) {
+    }
+
+    QuicHttp09EndpointUpdate on_core_result(const QuicCoreResult & /*result*/,
+                                            QuicCoreTimePoint /*now*/) {
+        return take_next();
+    }
+
+    QuicHttp09EndpointUpdate poll(QuicCoreTimePoint /*now*/) {
+        return take_next();
+    }
+
+  private:
+    QuicHttp09EndpointUpdate take_next() {
+        if (next_update_ >= updates_.size()) {
+            return {};
+        }
+        return updates_[next_update_++];
+    }
+
+    std::vector<QuicHttp09EndpointUpdate> updates_;
+    std::size_t next_update_ = 0;
+};
+
+} // namespace
+
+ScopedRuntimeFaultInjector::ScopedRuntimeFaultInjector(RuntimeFaultConfig config) {
+    auto &state = runtime_fault_state();
+    previous_config_ = std::move(state.config);
+    previous_open_udp_socket_calls_ = state.open_udp_socket_calls;
+    previous_send_datagram_calls_ = state.send_datagram_calls;
+    previous_drive_endpoint_calls_ = state.drive_endpoint_calls;
+    state.config = std::move(config);
+    state.open_udp_socket_calls = 0;
+    state.send_datagram_calls = 0;
+    state.drive_endpoint_calls = 0;
+}
+
+ScopedRuntimeFaultInjector::~ScopedRuntimeFaultInjector() {
+    auto &state = runtime_fault_state();
+    state.config = std::move(previous_config_);
+    state.open_udp_socket_calls = previous_open_udp_socket_calls_;
+    state.send_datagram_calls = previous_send_datagram_calls_;
+    state.drive_endpoint_calls = previous_drive_endpoint_calls_;
+}
+
+bool Http09RuntimeTestPeer::call_resolve_udp_peer_ipv4(std::string_view host, std::uint16_t port,
+                                                       sockaddr_in &address) {
+    return resolve_udp_peer_ipv4(host, port, address);
+}
+
+bool Http09RuntimeTestPeer::call_send_datagram(int fd, std::span<const std::byte> datagram,
+                                               const sockaddr_storage &peer, socklen_t peer_len,
+                                               std::string_view role_name) {
+    return send_datagram(fd, datagram, peer, peer_len, role_name);
+}
+
+ssize_t Http09RuntimeTestPeer::call_runtime_recvfrom(int socket_fd, void *buffer,
+                                                     std::size_t buffer_size, int flags,
+                                                     sockaddr *source, socklen_t *source_len) {
+    return runtime_recvfrom(socket_fd, buffer, buffer_size, flags, source, source_len);
+}
+
+RuntimeWaitObservation Http09RuntimeTestPeer::call_wait_for_socket_or_deadline(
+    int socket_fd, int idle_timeout_ms, std::string_view role_name,
+    const std::optional<QuicCoreTimePoint> &next_wakeup) {
+    RuntimeWaitObservation observation;
+    const auto step = wait_for_socket_or_deadline(
+        RuntimeWaitConfig{
+            .socket_fd = socket_fd,
+            .idle_timeout_ms = idle_timeout_ms,
+            .role_name = role_name,
+        },
+        next_wakeup);
+    if (!step.has_value()) {
+        return observation;
+    }
+
+    observation.has_value = true;
+    observation.input = step->input;
+    observation.input_time = step->input_time;
+    observation.source = step->source;
+    observation.source_len = step->source_len;
+    observation.has_source = step->has_source;
+    observation.idle_timeout = step->idle_timeout;
+    return observation;
+}
+
+bool Http09RuntimeTestPeer::call_handle_core_effects(int fd, const QuicCoreResult &result,
+                                                     const sockaddr_storage *peer,
+                                                     socklen_t peer_len,
+                                                     std::string_view role_name) {
+    return handle_core_effects(fd, result, peer, peer_len, role_name);
+}
+
+QuicCoreResult Http09RuntimeTestPeer::call_advance_core_with_inputs(
+    QuicCore &core, std::span<const QuicCoreInput> inputs, QuicCoreTimePoint step_time) {
+    return advance_core_with_inputs(core, inputs, step_time);
+}
+
+RuntimeDriveObservation Http09RuntimeTestPeer::call_drive_scripted_endpoint_until_blocked(
+    QuicCore &core, int fd, const sockaddr_storage *peer, socklen_t peer_len,
+    const QuicCoreResult &initial_result,
+    std::initializer_list<QuicHttp09EndpointUpdate> scripted_updates, std::string_view role_name) {
+    ScriptedEndpoint endpoint(scripted_updates);
+    const auto endpoint_driver = make_endpoint_driver(endpoint);
+    EndpointDriveState state;
+    RuntimeDriveObservation observation;
+    observation.returned = drive_endpoint_until_blocked(endpoint_driver, core, fd, peer, peer_len,
+                                                        initial_result, state, role_name);
+    observation.next_wakeup = state.next_wakeup;
+    observation.terminal_success = state.terminal_success;
+    observation.terminal_failure = state.terminal_failure;
+    return observation;
+}
+
+} // namespace coquic::quic::test

@@ -25,7 +25,7 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
                     requests_issued_ = true;
                     complete_ = true;
                 }
-            } else if (event->change == QuicCoreStateChange::failed) {
+            } else {
                 return fail_endpoint();
             }
             continue;

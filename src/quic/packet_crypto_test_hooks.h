@@ -3,6 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
+
+#include "src/quic/packet_crypto.h"
 
 namespace coquic::quic::test {
 
@@ -50,5 +53,8 @@ class ScopedPacketCryptoFaultInjector {
     std::optional<PacketCryptoFaultPoint> previous_fault_point_;
     std::size_t previous_occurrence_ = 0;
 };
+
+CodecResult<std::vector<std::byte>>
+derive_header_protection_key_for_test(const TrafficSecret &secret);
 
 } // namespace coquic::quic::test

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -173,6 +174,87 @@ TEST(QuicHttp09ClientTest, AppendsMultipleReceiveChunksToSameOutputFile) {
     EXPECT_TRUE(second.terminal_success);
     EXPECT_FALSE(second.terminal_failure);
     EXPECT_EQ(read_file_bytes(download_root.path() / "chunked.txt"), "hello");
+}
+
+TEST(QuicHttp09ClientTest, FailsWhenCoreResultCarriesLocalError) {
+    coquic::quic::QuicCoreResult result;
+    result.local_error = coquic::quic::QuicCoreLocalError{
+        .code = coquic::quic::QuicCoreLocalErrorCode::unsupported_operation,
+        .stream_id = std::nullopt,
+    };
+    QuicHttp09ClientEndpoint endpoint(coquic::quic::QuicHttp09ClientConfig{
+        .requests = {request_for_target("/ok.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    const auto update = endpoint.on_core_result(result, coquic::quic::test::test_time());
+    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ClientTest, FailsWhenCoreReportsFailedStateEvent) {
+    QuicCoreResult result;
+    result.effects.push_back(QuicCoreEffect{
+        QuicCoreStateEvent{
+            .change = QuicCoreStateChange::failed,
+        },
+    });
+    QuicHttp09ClientEndpoint endpoint(coquic::quic::QuicHttp09ClientConfig{
+        .requests = {request_for_target("/ok.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    const auto update = endpoint.on_core_result(result, coquic::quic::test::test_time());
+    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ClientTest, RejectsUnknownOrDuplicateStreamData) {
+    const auto now = coquic::quic::test::test_time();
+    coquic::quic::test::ScopedTempDir download_root;
+
+    QuicHttp09ClientEndpoint unknown_stream_endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/only.txt")},
+        .download_root = download_root.path(),
+    });
+    unknown_stream_endpoint.on_core_result(handshake_ready_result(), now);
+    unknown_stream_endpoint.poll(now);
+
+    const auto unknown = unknown_stream_endpoint.on_core_result(receive_result(4, "oops", true),
+                                                                coquic::quic::test::test_time(1));
+    EXPECT_TRUE(unknown.terminal_failure);
+    EXPECT_TRUE(unknown_stream_endpoint.has_failed());
+
+    QuicHttp09ClientEndpoint duplicate_stream_endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/only.txt")},
+        .download_root = download_root.path(),
+    });
+    duplicate_stream_endpoint.on_core_result(handshake_ready_result(), now);
+    duplicate_stream_endpoint.poll(now);
+
+    const auto first = duplicate_stream_endpoint.on_core_result(receive_result(0, "ok", true),
+                                                                coquic::quic::test::test_time(2));
+    EXPECT_TRUE(first.terminal_success);
+    EXPECT_FALSE(first.terminal_failure);
+
+    const auto duplicate = duplicate_stream_endpoint.on_core_result(
+        receive_result(0, "again", false), coquic::quic::test::test_time(3));
+    EXPECT_TRUE(duplicate.terminal_failure);
+    EXPECT_TRUE(duplicate_stream_endpoint.has_failed());
+}
+
+TEST(QuicHttp09ClientTest, CompletesImmediatelyWhenHandshakeHasNoRequestsToIssue) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    const auto update =
+        endpoint.on_core_result(handshake_ready_result(), coquic::quic::test::test_time());
+    EXPECT_TRUE(update.terminal_success);
+    EXPECT_FALSE(update.terminal_failure);
+    EXPECT_FALSE(update.has_pending_work);
+    EXPECT_TRUE(endpoint.is_complete());
 }
 
 TEST(QuicHttp09ClientTest, FailsDeterministicallyWhenDirectoryCreationFails) {

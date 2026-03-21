@@ -21,6 +21,10 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
         if (const auto *event = std::get_if<QuicCoreStateEvent>(&effect)) {
             if (event->change == QuicCoreStateChange::handshake_ready) {
                 handshake_ready_ = true;
+                if (!requests_issued_ && config_.requests.empty()) {
+                    requests_issued_ = true;
+                    complete_ = true;
+                }
             } else if (event->change == QuicCoreStateChange::failed) {
                 return fail_endpoint();
             }

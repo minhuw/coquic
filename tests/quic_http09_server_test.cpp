@@ -15,6 +15,10 @@ struct QuicHttp09ServerEndpointTestPeer {
     static std::size_t pending_request_count(const QuicHttp09ServerEndpoint &endpoint) {
         return endpoint.pending_requests_.size();
     }
+
+    static std::size_t pending_response_count(const QuicHttp09ServerEndpoint &endpoint) {
+        return endpoint.pending_responses_.size();
+    }
 };
 
 } // namespace coquic::quic::test
@@ -315,6 +319,92 @@ TEST(QuicHttp09ServerTest, RejectsReceiveDataOnServerInitiatedStreamId) {
 
     EXPECT_TRUE(endpoint.has_failed());
     EXPECT_TRUE(update.terminal_failure);
+}
+
+TEST(QuicHttp09ServerTest, RejectsReceiveDataOnReadOnlyOrUnexpectedStreamClass) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello");
+
+    QuicHttp09ServerEndpoint peer_unidirectional_endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+    const auto peer_unidirectional = peer_unidirectional_endpoint.on_core_result(
+        single_receive_result(2, "GET /hello.txt\r\n", true), coquic::quic::test::test_time(2));
+    EXPECT_TRUE(peer_unidirectional_endpoint.has_failed());
+    EXPECT_TRUE(peer_unidirectional.terminal_failure);
+
+    QuicHttp09ServerEndpoint server_unidirectional_endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+    const auto server_unidirectional = server_unidirectional_endpoint.on_core_result(
+        single_receive_result(3, "GET /hello.txt\r\n", true), coquic::quic::test::test_time(3));
+    EXPECT_TRUE(server_unidirectional_endpoint.has_failed());
+    EXPECT_TRUE(server_unidirectional.terminal_failure);
+}
+
+TEST(QuicHttp09ServerTest, RejectsReceiveDataAfterResponseIsAlreadyPending) {
+    coquic::quic::test::ScopedTempDir document_root;
+    std::string body;
+    body.append(static_cast<std::string::size_type>(20u * 1024u), 'x');
+    document_root.write_file("large.bin", body);
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    const auto first = endpoint.on_core_result(single_receive_result(0, "GET /large.bin\r\n", true),
+                                               coquic::quic::test::test_time(1));
+    ASSERT_FALSE(endpoint.has_failed());
+    EXPECT_TRUE(first.has_pending_work);
+    EXPECT_EQ(
+        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
+
+    const auto duplicate = endpoint.on_core_result(
+        single_receive_result(0, "GET /large.bin\r\n", true), coquic::quic::test::test_time(2));
+    EXPECT_TRUE(duplicate.terminal_failure);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ServerTest, SendsFinForEmptyFileResponses) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("empty.txt", "");
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    const auto update = endpoint.on_core_result(
+        single_receive_result(0, "GET /empty.txt\r\n", true), coquic::quic::test::test_time(1));
+    const auto sends = send_stream_inputs_from(update);
+
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends[0].stream_id, 0u);
+    EXPECT_TRUE(sends[0].bytes.empty());
+    EXPECT_TRUE(sends[0].fin);
+    EXPECT_FALSE(update.has_pending_work);
+}
+
+TEST(QuicHttp09ServerTest, PollReportsPendingWorkWhileResponsesRemainQueued) {
+    coquic::quic::test::ScopedTempDir document_root;
+    std::string body;
+    body.append(static_cast<std::string::size_type>(20u * 1024u), 'x');
+    document_root.write_file("large.bin", body);
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    auto update = endpoint.on_core_result(single_receive_result(0, "GET /large.bin\r\n", true),
+                                          coquic::quic::test::test_time(1));
+    auto sends = send_stream_inputs_from(update);
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_FALSE(sends[0].fin);
+    EXPECT_TRUE(update.has_pending_work);
+    EXPECT_EQ(
+        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
+
+    update = endpoint.poll(coquic::quic::test::test_time(2));
+    sends = send_stream_inputs_from(update);
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_TRUE(sends[0].fin);
+    EXPECT_FALSE(update.has_pending_work);
+    EXPECT_EQ(
+        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 0u);
 }
 
 TEST(QuicHttp09ServerTest, StreamsLargeFileIncrementallyAcrossPollCalls) {

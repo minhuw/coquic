@@ -1,4 +1,5 @@
 #include <limits>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -171,10 +172,13 @@ TEST(QuicCryptoStreamTest, MarkLostOnlyRetiresSentSegmentsInsideRange) {
 
 TEST(QuicCryptoStreamTest, AcknowledgeClampsOverflowingRangeEndToUint64Max) {
     ReliableSendBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcd"));
     buffer.segments_.emplace(std::numeric_limits<std::uint64_t>::max() - 2,
                              ReliableSendBuffer::Segment{
                                  .state = ReliableSendBuffer::SegmentState::sent,
-                                 .bytes = bytes_from_string("abcd"),
+                                 .storage = std::move(storage),
+                                 .begin = 0,
+                                 .end = 4,
                              });
 
     buffer.acknowledge(std::numeric_limits<std::uint64_t>::max() - 2, 8);
@@ -217,6 +221,17 @@ TEST(QuicCryptoStreamTest, ReceiveBufferReleasesReorderedApplicationBytesContigu
     const auto released = buffer.push(6, bytes_from_string("gh"));
     ASSERT_TRUE(released.has_value());
     EXPECT_EQ(released.value(), bytes_from_string("gh"));
+}
+
+TEST(QuicCryptoStreamTest, ReceiveBufferReturnsOnlyUndeliveredTailOfOverlappingWrite) {
+    ReliableReceiveBuffer buffer;
+    const auto first = buffer.push(0, bytes_from_string("abcd"));
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first.value(), bytes_from_string("abcd"));
+
+    const auto second = buffer.push(2, bytes_from_string("cdef"));
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(second.value(), bytes_from_string("ef"));
 }
 
 TEST(QuicCryptoStreamTest, ReceiveBufferReleasesOnlyContiguousBytes) {

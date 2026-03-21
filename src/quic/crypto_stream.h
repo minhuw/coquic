@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -28,6 +29,7 @@ class ReliableSendBuffer {
                        std::optional<std::uint64_t> max_offset = std::nullopt);
     void acknowledge(std::uint64_t offset, std::size_t length);
     void mark_lost(std::uint64_t offset, std::size_t length);
+    void mark_unsent(std::uint64_t offset, std::size_t length);
     bool has_pending_data() const;
     bool has_outstanding_data() const;
     bool has_lost_data() const;
@@ -41,7 +43,9 @@ class ReliableSendBuffer {
 
     struct Segment {
         SegmentState state = SegmentState::unsent;
-        std::vector<std::byte> bytes;
+        std::shared_ptr<std::vector<std::byte>> storage;
+        std::size_t begin = 0;
+        std::size_t end = 0;
     };
 
     std::vector<ByteRange>

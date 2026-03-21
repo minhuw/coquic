@@ -200,6 +200,26 @@ TEST(QuicStreamsTest, TakeSendFragmentsSupportsFinOnlySend) {
     EXPECT_TRUE(fragments[0].fin);
 }
 
+TEST(QuicStreamsTest, RestoreSendFragmentReturnsNewDataToUnsentState) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    state.send_buffer.append(bytes_from_string("hello"));
+    state.send_flow_control_committed = 5;
+
+    const auto fragments = state.take_send_fragments(/*max_bytes=*/16);
+    ASSERT_EQ(fragments.size(), 1u);
+    EXPECT_FALSE(state.has_pending_send());
+
+    state.restore_send_fragment(fragments[0]);
+
+    EXPECT_TRUE(state.has_pending_send());
+    EXPECT_FALSE(state.send_buffer.has_lost_data());
+
+    const auto resent = state.take_send_fragments(/*max_bytes=*/16);
+    ASSERT_EQ(resent.size(), 1u);
+    EXPECT_EQ(resent[0].bytes, bytes_from_string("hello"));
+    EXPECT_TRUE(resent[0].consumes_flow_control);
+}
+
 TEST(QuicStreamsTest, SendAndReceiveValidationCoverClosedAndOverflowPaths) {
     StreamState send_state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
     ASSERT_TRUE(send_state.validate_local_send(/*fin=*/true).has_value());

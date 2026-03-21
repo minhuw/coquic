@@ -104,7 +104,6 @@ QuicHttp09EndpointUpdate QuicHttp09ServerEndpoint::on_core_result(const QuicCore
         }
     }
 
-    pump_response_chunks(1);
     return drain_pending_inputs();
 }
 
@@ -218,7 +217,16 @@ bool QuicHttp09ServerEndpoint::process_receive_stream_data(
         return true;
     }
 
-    pending_responses_.insert_or_assign(received.stream_id, std::move(response));
+    if (!queue_one_response_chunk(received.stream_id, response.file, pending_core_inputs_)) {
+        queue_stream_local_file_error(received.stream_id, pending_core_inputs_);
+        pending_requests_.erase(received.stream_id);
+        return true;
+    }
+
+    const auto *send = std::get_if<QuicCoreSendStreamData>(&pending_core_inputs_.back());
+    if (send == nullptr || !send->fin) {
+        pending_responses_.insert_or_assign(received.stream_id, std::move(response));
+    }
     pending_requests_.erase(received.stream_id);
     return true;
 }

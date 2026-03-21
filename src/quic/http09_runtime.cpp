@@ -439,6 +439,58 @@ struct RuntimeWaitConfig {
     std::string_view role_name;
 };
 
+enum class ReceiveDatagramStatus : std::uint8_t {
+    ok,
+    would_block,
+    error,
+};
+
+struct ReceiveDatagramResult {
+    ReceiveDatagramStatus status = ReceiveDatagramStatus::would_block;
+    RuntimeWaitStep step;
+};
+
+ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name, int flags) {
+    std::vector<std::byte> inbound(kMaxDatagramBytes);
+    sockaddr_storage source{};
+    socklen_t source_len = sizeof(source);
+    ssize_t bytes_read = 0;
+    do {
+        bytes_read = ::recvfrom(socket_fd, inbound.data(), inbound.size(), flags,
+                                reinterpret_cast<sockaddr *>(&source), &source_len);
+    } while (bytes_read < 0 && errno == EINTR);
+
+    if (bytes_read < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return ReceiveDatagramResult{
+                .status = ReceiveDatagramStatus::would_block,
+            };
+        }
+
+        std::cerr << "http09-" << role_name << " failed: recvfrom error: " << std::strerror(errno)
+                  << '\n';
+        return ReceiveDatagramResult{
+            .status = ReceiveDatagramStatus::error,
+        };
+    }
+
+    inbound.resize(static_cast<std::size_t>(bytes_read));
+    return ReceiveDatagramResult{
+        .status = ReceiveDatagramStatus::ok,
+        .step =
+            RuntimeWaitStep{
+                .input =
+                    QuicCoreInboundDatagram{
+                        .bytes = std::move(inbound),
+                    },
+                .input_time = now(),
+                .source = source,
+                .source_len = source_len,
+                .has_source = true,
+            },
+    };
+}
+
 std::optional<RuntimeWaitStep>
 wait_for_socket_or_deadline(const RuntimeWaitConfig &config,
                             const std::optional<QuicCoreTimePoint> &next_wakeup) {
@@ -494,32 +546,11 @@ wait_for_socket_or_deadline(const RuntimeWaitConfig &config,
         return std::nullopt;
     }
 
-    std::vector<std::byte> inbound(kMaxDatagramBytes);
-    sockaddr_storage source{};
-    socklen_t source_len = sizeof(source);
-    ssize_t bytes_read = 0;
-    do {
-        bytes_read = ::recvfrom(config.socket_fd, inbound.data(), inbound.size(), 0,
-                                reinterpret_cast<sockaddr *>(&source), &source_len);
-    } while (bytes_read < 0 && errno == EINTR);
-
-    if (bytes_read < 0) {
-        std::cerr << "http09-" << config.role_name
-                  << " failed: recvfrom error: " << std::strerror(errno) << '\n';
+    const auto receive = receive_datagram(config.socket_fd, config.role_name, /*flags=*/0);
+    if (receive.status != ReceiveDatagramStatus::ok) {
         return std::nullopt;
     }
-
-    inbound.resize(static_cast<std::size_t>(bytes_read));
-    return RuntimeWaitStep{
-        .input =
-            QuicCoreInboundDatagram{
-                .bytes = std::move(inbound),
-            },
-        .input_time = now(),
-        .source = source,
-        .source_len = source_len,
-        .has_source = true,
-    };
+    return receive.step;
 }
 
 bool handle_core_effects(int fd, const QuicCoreResult &result, const sockaddr_storage *peer,
@@ -601,11 +632,18 @@ std::optional<QuicCoreTimePoint> earliest_server_session_wakeup(
     std::optional<QuicCoreTimePoint> next_wakeup;
     for (const auto &[key, session] : sessions) {
         (void)key;
-        if (!session->state.next_wakeup.has_value()) {
+        const auto session_next_wakeup = session->state.next_wakeup;
+        if (!session_next_wakeup.has_value()) {
             continue;
         }
-        if (!next_wakeup.has_value() || session->state.next_wakeup.value() < next_wakeup.value()) {
-            next_wakeup = session->state.next_wakeup;
+
+        const auto session_wakeup = session_next_wakeup.value();
+        if (!next_wakeup.has_value()) {
+            next_wakeup = session_wakeup;
+            continue;
+        }
+        if (session_wakeup < next_wakeup.value()) {
+            next_wakeup = session_wakeup;
         }
     }
     return next_wakeup;
@@ -708,7 +746,40 @@ int run_http09_client_connection(const Http09RuntimeConfig &config,
         return 0;
     }
 
+    const auto drain_ready_datagrams = [&]() -> bool {
+        while (true) {
+            auto receive =
+                receive_datagram(socket_fd, /*role_name=*/"client", /*flags=*/MSG_DONTWAIT);
+            if (receive.status == ReceiveDatagramStatus::would_block) {
+                return true;
+            }
+            if (receive.status == ReceiveDatagramStatus::error) {
+                return false;
+            }
+
+            auto step_result =
+                core.advance(std::move(*receive.step.input), receive.step.input_time);
+            if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len,
+                                              step_result, state, "client")) {
+                return false;
+            }
+            if (state.terminal_success || state.terminal_failure) {
+                return true;
+            }
+        }
+    };
+
     for (;;) {
+        if (!drain_ready_datagrams()) {
+            return 1;
+        }
+        if (state.terminal_success) {
+            return 0;
+        }
+        if (state.terminal_failure) {
+            return 1;
+        }
+
         auto step = wait_for_socket_or_deadline(
             RuntimeWaitConfig{
                 .socket_fd = socket_fd,
@@ -835,7 +906,81 @@ int run_http09_server(const Http09RuntimeConfig &config) {
         return *session_ptr;
     };
 
+    const auto process_server_datagram = [&](RuntimeWaitStep step) -> bool {
+        if (!step.has_source || !step.input.has_value()) {
+            return true;
+        }
+
+        const auto *inbound = std::get_if<QuicCoreInboundDatagram>(&*step.input);
+        if (inbound == nullptr) {
+            return true;
+        }
+
+        const auto parsed = parse_server_datagram_for_routing(inbound->bytes);
+        if (!parsed.has_value()) {
+            return true;
+        }
+
+        const auto destination_connection_id_key =
+            connection_id_key(parsed->destination_connection_id);
+        auto session_it = sessions.find(destination_connection_id_key);
+        if (session_it == sessions.end() &&
+            parsed->kind == ParsedServerDatagram::Kind::supported_initial) {
+            const auto initial_it = initial_destination_routes.find(destination_connection_id_key);
+            if (initial_it != initial_destination_routes.end()) {
+                session_it = sessions.find(initial_it->second);
+            }
+        }
+
+        if (session_it != sessions.end()) {
+            auto &session = *session_it->second;
+            session.peer = step.source;
+            session.peer_len = step.source_len;
+            const auto session_result =
+                session.core.advance(std::move(*step.input), step.input_time);
+            if (!drive_endpoint_until_blocked(session.endpoint, session.core, socket_fd,
+                                              &session.peer, session.peer_len, session_result,
+                                              session.state, "server")) {
+                erase_session(session_it->first);
+            }
+            return true;
+        }
+
+        if (parsed->kind == ParsedServerDatagram::Kind::unsupported_version_long_header) {
+            return send_version_negotiation_for_probe(socket_fd, inbound->bytes, step.source,
+                                                      step.source_len);
+        }
+
+        if (parsed->kind != ParsedServerDatagram::Kind::supported_initial) {
+            return true;
+        }
+
+        auto &session =
+            create_session(parsed->destination_connection_id, step.source, step.source_len);
+        const auto session_result = session.core.advance(std::move(*step.input), step.input_time);
+        if (!drive_endpoint_until_blocked(session.endpoint, session.core, socket_fd, &session.peer,
+                                          session.peer_len, session_result, session.state,
+                                          "server")) {
+            erase_session(session.local_connection_id_key);
+        }
+        return true;
+    };
+
     for (;;) {
+        while (true) {
+            auto receive =
+                receive_datagram(socket_fd, /*role_name=*/"server", /*flags=*/MSG_DONTWAIT);
+            if (receive.status == ReceiveDatagramStatus::would_block) {
+                break;
+            }
+            if (receive.status == ReceiveDatagramStatus::error) {
+                return 1;
+            }
+            if (!process_server_datagram(std::move(receive.step))) {
+                return 1;
+            }
+        }
+
         auto step = wait_for_socket_or_deadline(
             RuntimeWaitConfig{
                 .socket_fd = socket_fd,
@@ -856,8 +1001,13 @@ int run_http09_server(const Http09RuntimeConfig &config) {
         if (std::holds_alternative<QuicCoreTimerExpired>(*step->input)) {
             std::vector<std::string> failed_sessions;
             for (const auto &[local_connection_id_key, session] : sessions) {
-                if (!session->state.next_wakeup.has_value() ||
-                    session->state.next_wakeup.value() > step->input_time) {
+                const auto session_next_wakeup = session->state.next_wakeup;
+                if (!session_next_wakeup.has_value()) {
+                    continue;
+                }
+
+                const auto session_wakeup = session_next_wakeup.value();
+                if (session_wakeup > step->input_time) {
                     continue;
                 }
 
@@ -875,64 +1025,8 @@ int run_http09_server(const Http09RuntimeConfig &config) {
             continue;
         }
 
-        if (!step->has_source) {
-            continue;
-        }
-
-        const auto *inbound = std::get_if<QuicCoreInboundDatagram>(&*step->input);
-        if (inbound == nullptr) {
-            continue;
-        }
-
-        const auto parsed = parse_server_datagram_for_routing(inbound->bytes);
-        if (!parsed.has_value()) {
-            continue;
-        }
-
-        const auto destination_connection_id_key =
-            connection_id_key(parsed->destination_connection_id);
-        auto session_it = sessions.find(destination_connection_id_key);
-        if (session_it == sessions.end() &&
-            parsed->kind == ParsedServerDatagram::Kind::supported_initial) {
-            const auto initial_it = initial_destination_routes.find(destination_connection_id_key);
-            if (initial_it != initial_destination_routes.end()) {
-                session_it = sessions.find(initial_it->second);
-            }
-        }
-
-        if (session_it != sessions.end()) {
-            auto &session = *session_it->second;
-            session.peer = step->source;
-            session.peer_len = step->source_len;
-            const auto session_result =
-                session.core.advance(std::move(*step->input), step->input_time);
-            if (!drive_endpoint_until_blocked(session.endpoint, session.core, socket_fd,
-                                              &session.peer, session.peer_len, session_result,
-                                              session.state, "server")) {
-                erase_session(session_it->first);
-            }
-            continue;
-        }
-
-        if (parsed->kind == ParsedServerDatagram::Kind::unsupported_version_long_header) {
-            if (!send_version_negotiation_for_probe(socket_fd, inbound->bytes, step->source,
-                                                    step->source_len)) {
-                return 1;
-            }
-            continue;
-        }
-
-        if (parsed->kind != ParsedServerDatagram::Kind::supported_initial) {
-            continue;
-        }
-
-        auto &session =
-            create_session(parsed->destination_connection_id, step->source, step->source_len);
-        const auto session_result = session.core.advance(std::move(*step->input), step->input_time);
-        if (!drive_endpoint_until_blocked(session.endpoint, session.core, socket_fd, &session.peer,
-                                          session.peer_len, session_result, session.state,
-                                          "server")) {
-            erase_session(session.local_connection_id_key);
+        if (!process_server_datagram(std::move(*step))) {
+            return 1;
         }
     }
 }

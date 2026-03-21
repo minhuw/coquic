@@ -9,6 +9,16 @@
 #include "src/quic/recovery.h"
 #include "tests/quic_test_utils.h"
 
+namespace coquic::quic::test {
+
+struct ReceivedPacketHistoryTestPeer {
+    static std::size_t range_count(const ReceivedPacketHistory &history) {
+        return history.ranges_.size();
+    }
+};
+
+} // namespace coquic::quic::test
+
 namespace {
 
 using coquic::quic::AckFrame;
@@ -86,6 +96,31 @@ TEST(QuicRecoveryTest, AckHistoryBuildsMultipleAckRanges) {
     EXPECT_EQ(ack_frame.first_ack_range, 0u);
     EXPECT_EQ(ack_frame.additional_ranges[0].gap, 1u);
     EXPECT_EQ(ack_frame.additional_ranges[0].range_length, 1u);
+}
+
+TEST(QuicRecoveryTest, AckHistoryCoalescesContiguousPacketsIntoSingleRange) {
+    ReceivedPacketHistory history;
+    for (std::uint64_t packet_number = 0; packet_number < 4096; ++packet_number) {
+        history.record_received(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+    }
+
+    EXPECT_EQ(coquic::quic::test::ReceivedPacketHistoryTestPeer::range_count(history), 1u);
+}
+
+TEST(QuicRecoveryTest, AckHistoryMergesBridgedRanges) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/0, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1));
+    history.record_received(/*packet_number=*/2, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(2));
+    ASSERT_EQ(coquic::quic::test::ReceivedPacketHistoryTestPeer::range_count(history), 2u);
+
+    history.record_received(/*packet_number=*/1, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(3));
+
+    EXPECT_EQ(coquic::quic::test::ReceivedPacketHistoryTestPeer::range_count(history), 1u);
 }
 
 TEST(QuicRecoveryTest, AckHistoryMeasuresAckDelayFromLargestAcknowledgedPacket) {

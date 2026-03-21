@@ -66,14 +66,51 @@ std::chrono::milliseconds latest_loss_delay(const RecoveryRttState &rtt) {
 
 void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ack_eliciting,
                                             QuicCoreTimePoint received_time) {
-    packets_[packet_number] = ReceivedPacketRecord{
-        .ack_eliciting = ack_eliciting,
-        .received_time = received_time,
-    };
+    const auto next = ranges_.upper_bound(packet_number);
+    if (next != ranges_.begin()) {
+        auto previous = std::prev(next);
+        if (packet_number <= previous->second.largest_packet_number) {
+            if (ack_eliciting) {
+                ack_pending_ = true;
+            }
+            return;
+        }
+    }
+
+    const auto extends_previous =
+        next != ranges_.begin() &&
+        std::prev(next)->second.largest_packet_number + 1 == packet_number;
+    const auto extends_next = next != ranges_.end() && packet_number + 1 == next->first;
+
+    if (extends_previous && extends_next) {
+        auto previous = std::prev(next);
+        previous->second.largest_packet_number = next->second.largest_packet_number;
+        ranges_.erase(next);
+    } else if (extends_previous) {
+        std::prev(next)->second.largest_packet_number = packet_number;
+    } else if (extends_next) {
+        const auto largest_packet_number = next->second.largest_packet_number;
+        ranges_.erase(next);
+        ranges_.emplace(packet_number, ReceivedPacketRange{
+                                           .largest_packet_number = largest_packet_number,
+                                       });
+    } else {
+        ranges_.emplace(packet_number, ReceivedPacketRange{
+                                           .largest_packet_number = packet_number,
+                                       });
+    }
+
+    if (!largest_received_packet_number_.has_value() ||
+        packet_number > *largest_received_packet_number_) {
+        largest_received_packet_number_ = packet_number;
+        largest_received_packet_record_ = ReceivedPacketRecord{
+            .ack_eliciting = ack_eliciting,
+            .received_time = received_time,
+        };
+    }
 
     if (ack_eliciting) {
         ack_pending_ = true;
-        latest_ack_eliciting_received_time_ = received_time;
     }
 }
 
@@ -83,43 +120,31 @@ bool ReceivedPacketHistory::has_ack_to_send() const {
 
 std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack_delay_exponent,
                                                                QuicCoreTimePoint now) const {
-    if (packets_.empty()) {
+    if (ranges_.empty()) {
         return std::nullopt;
     }
     if (!ack_pending_) {
         return std::nullopt;
     }
 
-    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
-    auto it = packets_.rbegin();
-    while (it != packets_.rend()) {
-        const auto range_end = it->first;
-        auto range_start = range_end;
-        auto previous_packet_number = range_end;
-        ++it;
-        while (it != packets_.rend() && it->first + 1 == previous_packet_number) {
-            range_start = it->first;
-            previous_packet_number = it->first;
-            ++it;
-        }
-        ranges.emplace_back(range_start, range_end);
-    }
+    const auto largest_range = ranges_.rbegin();
 
     AckFrame ack{
-        .largest_acknowledged = ranges.front().second,
-        .first_ack_range = ranges.front().second - ranges.front().first,
+        .largest_acknowledged = largest_range->second.largest_packet_number,
+        .first_ack_range = largest_range->second.largest_packet_number - largest_range->first,
     };
 
-    const auto largest_acknowledged_it = packets_.find(ack.largest_acknowledged);
-    if (now >= largest_acknowledged_it->second.received_time) {
+    if (largest_received_packet_record_.has_value() &&
+        now >= largest_received_packet_record_->received_time) {
         const auto ack_delay = std::chrono::duration_cast<std::chrono::microseconds>(
-            now - largest_acknowledged_it->second.received_time);
+            now - largest_received_packet_record_->received_time);
         ack.ack_delay = encode_ack_delay(ack_delay, ack_delay_exponent);
     }
 
-    auto previous_smallest = ranges.front().first;
-    for (std::size_t index = 1; index < ranges.size(); ++index) {
-        const auto [range_start, range_end] = ranges[index];
+    auto previous_smallest = largest_range->first;
+    for (auto it = std::next(ranges_.rbegin()); it != ranges_.rend(); ++it) {
+        const auto range_start = it->first;
+        const auto range_end = it->second.largest_packet_number;
         ack.additional_ranges.push_back(AckRange{
             .gap = previous_smallest - range_end - 2,
             .range_length = range_end - range_start,

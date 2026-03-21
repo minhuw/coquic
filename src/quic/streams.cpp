@@ -559,6 +559,22 @@ void StreamState::mark_send_fragment_lost(const StreamFrameSendFragment &fragmen
     }
 }
 
+void StreamState::restore_send_fragment(const StreamFrameSendFragment &fragment) {
+    if (reset_state != StreamControlFrameState::none) {
+        return;
+    }
+
+    if (fragment.consumes_flow_control) {
+        flow_control.highest_sent -= static_cast<std::uint64_t>(fragment.bytes.size());
+        send_buffer.mark_unsent(fragment.offset, fragment.bytes.size());
+    } else {
+        send_buffer.mark_lost(fragment.offset, fragment.bytes.size());
+    }
+    if (fragment.fin) {
+        send_fin_state = StreamSendFinState::pending;
+    }
+}
+
 StreamState make_implicit_stream_state(std::uint64_t stream_id, EndpointRole local_role) {
     const auto id_info = classify_stream_id(stream_id, local_role);
     return StreamState{

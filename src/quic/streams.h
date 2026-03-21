@@ -197,6 +197,7 @@ struct StreamState {
     void mark_stop_sending_frame_lost(const StopSendingFrame &frame);
     void acknowledge_send_fragment(const StreamFrameSendFragment &fragment);
     void mark_send_fragment_lost(const StreamFrameSendFragment &fragment);
+    void restore_send_fragment(const StreamFrameSendFragment &fragment);
 };
 
 StreamState make_implicit_stream_state(std::uint64_t stream_id, EndpointRole local_role);

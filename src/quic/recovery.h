@@ -13,6 +13,10 @@
 
 namespace coquic::quic {
 
+namespace test {
+struct ReceivedPacketHistoryTestPeer;
+}
+
 inline constexpr std::uint64_t kPacketThreshold = 3;
 inline constexpr double kTimeThreshold = 9.0 / 8.0;
 inline constexpr std::chrono::milliseconds kGranularity{1};
@@ -54,14 +58,21 @@ class ReceivedPacketHistory {
     void on_ack_sent();
 
   private:
+    struct ReceivedPacketRange {
+        std::uint64_t largest_packet_number = 0;
+    };
+
     struct ReceivedPacketRecord {
         bool ack_eliciting = false;
         QuicCoreTimePoint received_time{};
     };
 
-    std::map<std::uint64_t, ReceivedPacketRecord> packets_;
+    std::map<std::uint64_t, ReceivedPacketRange> ranges_;
     bool ack_pending_ = false;
-    std::optional<QuicCoreTimePoint> latest_ack_eliciting_received_time_;
+    std::optional<std::uint64_t> largest_received_packet_number_;
+    std::optional<ReceivedPacketRecord> largest_received_packet_record_;
+
+    friend struct test::ReceivedPacketHistoryTestPeer;
 };
 
 struct AckProcessingResult {

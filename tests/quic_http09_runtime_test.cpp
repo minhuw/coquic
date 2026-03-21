@@ -359,12 +359,17 @@ struct InMemoryHttp09TransferResult {
     bool server_has_next_wakeup = false;
 };
 
+struct InMemoryHttp09TransferConfig {
+    coquic::quic::Http09RuntimeConfig client_config;
+    coquic::quic::Http09RuntimeConfig server_config;
+};
+
 InMemoryHttp09TransferResult
-run_in_memory_http09_transfer(const coquic::quic::Http09RuntimeConfig &client_config,
-                              const coquic::quic::Http09RuntimeConfig &server_config) {
+run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_config) {
     InMemoryHttp09TransferResult observed;
 
-    const auto requests = coquic::quic::parse_http09_requests_env(client_config.requests_env);
+    const auto requests =
+        coquic::quic::parse_http09_requests_env(transfer_config.client_config.requests_env);
     if (!requests.has_value()) {
         observed.client_failed = true;
         return observed;
@@ -388,17 +393,19 @@ run_in_memory_http09_transfer(const coquic::quic::Http09RuntimeConfig &client_co
     ClientSession client{
         .endpoint = coquic::quic::QuicHttp09ClientEndpoint(coquic::quic::QuicHttp09ClientConfig{
             .requests = requests.value(),
-            .download_root = client_config.download_root,
+            .download_root = transfer_config.client_config.download_root,
         }),
-        .core = coquic::quic::QuicCore(coquic::quic::make_http09_client_core_config(client_config)),
+        .core = coquic::quic::QuicCore(
+            coquic::quic::make_http09_client_core_config(transfer_config.client_config)),
         .next_wakeup = std::nullopt,
         .terminal_success = false,
         .terminal_failure = false,
     };
     ServerSession server{
-        .endpoint = coquic::quic::QuicHttp09ServerEndpoint(
-            coquic::quic::QuicHttp09ServerConfig{.document_root = server_config.document_root}),
-        .core = coquic::quic::QuicCore(coquic::quic::make_http09_server_core_config(server_config)),
+        .endpoint = coquic::quic::QuicHttp09ServerEndpoint(coquic::quic::QuicHttp09ServerConfig{
+            .document_root = transfer_config.server_config.document_root}),
+        .core = coquic::quic::QuicCore(
+            coquic::quic::make_http09_server_core_config(transfer_config.server_config)),
         .next_wakeup = std::nullopt,
         .terminal_failure = false,
     };
@@ -578,8 +585,8 @@ run_in_memory_http09_transfer(const coquic::quic::Http09RuntimeConfig &client_co
             break;
         }
 
-        now = *next_wakeup;
-        if (client.next_wakeup.has_value() && client.next_wakeup.value() == *next_wakeup) {
+        now = next_wakeup.value();
+        if (client.next_wakeup == next_wakeup) {
             if (!drive_client(client.core.advance(coquic::quic::QuicCoreTimerExpired{}, now),
                               now)) {
                 break;
@@ -587,7 +594,7 @@ run_in_memory_http09_transfer(const coquic::quic::Http09RuntimeConfig &client_co
             continue;
         }
 
-        if (server.next_wakeup.has_value() && server.next_wakeup.value() == *next_wakeup) {
+        if (server.next_wakeup == next_wakeup) {
             if (!drive_server(server.core.advance(coquic::quic::QuicCoreTimerExpired{}, now),
                               now)) {
                 break;
@@ -630,6 +637,7 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
         coquic::quic::QuicHttp09ServerEndpoint endpoint;
         coquic::quic::QuicCore core;
         std::optional<coquic::quic::QuicCoreTimePoint> next_wakeup;
+        bool endpoint_has_pending_work = false;
         sockaddr_storage peer{};
         socklen_t peer_len = 0;
         std::string local_connection_id_key;
@@ -652,11 +660,18 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
         std::optional<coquic::quic::QuicCoreTimePoint> next_wakeup;
         for (const auto &[key, session] : sessions) {
             (void)key;
-            if (!session->next_wakeup.has_value()) {
+            const auto session_next_wakeup = session->next_wakeup;
+            if (!session_next_wakeup.has_value()) {
                 continue;
             }
-            if (!next_wakeup.has_value() || session->next_wakeup.value() < next_wakeup.value()) {
-                next_wakeup = session->next_wakeup;
+
+            const auto session_wakeup = session_next_wakeup.value();
+            if (!next_wakeup.has_value()) {
+                next_wakeup = session_wakeup;
+                continue;
+            }
+            if (session_wakeup < next_wakeup.value()) {
+                next_wakeup = session_wakeup;
             }
         }
         return next_wakeup;
@@ -718,23 +733,14 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
             if (update.terminal_failure) {
                 return false;
             }
+            session.endpoint_has_pending_work = update.has_pending_work;
 
-            while (true) {
-                if (!update.core_inputs.empty()) {
-                    result = coquic::quic::test::advance_core_with_inputs(
-                        session.core, update.core_inputs, runtime_now());
-                    break;
-                }
-
-                if (!update.has_pending_work) {
-                    return true;
-                }
-
-                update = session.endpoint.poll(runtime_now());
-                if (update.terminal_failure) {
-                    return false;
-                }
+            if (update.core_inputs.empty()) {
+                return true;
             }
+
+            result = coquic::quic::test::advance_core_with_inputs(session.core, update.core_inputs,
+                                                                  runtime_now());
         }
     };
 
@@ -760,7 +766,108 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
         return *session_ptr;
     };
 
+    const auto process_inbound_datagram = [&](std::vector<std::byte> inbound,
+                                              const sockaddr_storage &source,
+                                              socklen_t source_len) -> bool {
+        saw_peer_activity = true;
+        ++observed.inbound_datagrams;
+
+        const auto parsed = parse_server_datagram_for_routing(inbound);
+        if (!parsed.has_value()) {
+            return true;
+        }
+
+        const auto destination_connection_id_key =
+            connection_id_key(parsed->destination_connection_id);
+        auto session_it = sessions.find(destination_connection_id_key);
+        if (session_it == sessions.end() &&
+            parsed->kind == ParsedServerDatagram::Kind::supported_initial) {
+            const auto initial_it = initial_routes.find(destination_connection_id_key);
+            if (initial_it != initial_routes.end()) {
+                session_it = sessions.find(initial_it->second);
+            }
+        }
+
+        if (session_it == sessions.end()) {
+            if (parsed->kind != ParsedServerDatagram::Kind::supported_initial) {
+                return true;
+            }
+            auto &session = create_session(parsed->destination_connection_id, source, source_len);
+            return drive(session, session.core.advance(
+                                      coquic::quic::QuicCoreInboundDatagram{
+                                          .bytes = std::move(inbound),
+                                      },
+                                      runtime_now()));
+        }
+
+        session_it->second->peer = source;
+        session_it->second->peer_len = source_len;
+        return drive(*session_it->second, session_it->second->core.advance(
+                                              coquic::quic::QuicCoreInboundDatagram{
+                                                  .bytes = std::move(inbound),
+                                              },
+                                              runtime_now()));
+    };
+
+    const auto drain_ready_datagrams = [&]() -> bool {
+        while (true) {
+            std::vector<std::byte> inbound(65535);
+            sockaddr_storage source{};
+            socklen_t source_len = sizeof(source);
+            ssize_t bytes_read = 0;
+            do {
+                bytes_read = ::recvfrom(socket_fd, inbound.data(), inbound.size(), MSG_DONTWAIT,
+                                        reinterpret_cast<sockaddr *>(&source), &source_len);
+            } while (bytes_read < 0 && errno == EINTR);
+
+            if (bytes_read < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    return true;
+                }
+                return false;
+            }
+
+            inbound.resize(static_cast<std::size_t>(bytes_read));
+            if (!process_inbound_datagram(std::move(inbound), source, source_len)) {
+                return false;
+            }
+        }
+    };
+
+    const auto pump_endpoint_work_once = [&]() -> bool {
+        for (const auto &[key, session] : sessions) {
+            (void)key;
+            if (!session->endpoint_has_pending_work) {
+                continue;
+            }
+
+            auto update = session->endpoint.poll(runtime_now());
+            if (update.terminal_failure) {
+                return false;
+            }
+
+            session->endpoint_has_pending_work = update.has_pending_work;
+            if (update.core_inputs.empty()) {
+                continue;
+            }
+
+            auto result = coquic::quic::test::advance_core_with_inputs(
+                session->core, update.core_inputs, runtime_now());
+            if (!drive(*session, std::move(result))) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     for (;;) {
+        if (!drain_ready_datagrams()) {
+            return observed;
+        }
+        if (!pump_endpoint_work_once()) {
+            return observed;
+        }
+
         int timeout_ms = 1000;
         const auto next_wakeup = earliest_wakeup();
         if (next_wakeup.has_value()) {
@@ -768,8 +875,12 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
             if (*next_wakeup <= current) {
                 for (const auto &[key, session] : sessions) {
                     (void)key;
-                    if (!session->next_wakeup.has_value() ||
-                        session->next_wakeup.value() > current) {
+                    const auto session_next_wakeup = session->next_wakeup;
+                    if (!session_next_wakeup.has_value()) {
+                        continue;
+                    }
+
+                    if (session_next_wakeup.value() > current) {
                         continue;
                     }
                     ++observed.timer_expirations;
@@ -811,8 +922,12 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
                 const auto current = runtime_now();
                 for (const auto &[key, session] : sessions) {
                     (void)key;
-                    if (!session->next_wakeup.has_value() ||
-                        session->next_wakeup.value() > current) {
+                    const auto session_next_wakeup = session->next_wakeup;
+                    if (!session_next_wakeup.has_value()) {
+                        continue;
+                    }
+
+                    if (session_next_wakeup.value() > current) {
                         continue;
                     }
                     ++observed.timer_expirations;
@@ -834,62 +949,7 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
         if ((descriptor.revents & POLLIN) == 0) {
             return observed;
         }
-
-        std::vector<std::byte> inbound(65535);
-        sockaddr_storage source{};
-        socklen_t source_len = sizeof(source);
-        ssize_t bytes_read = 0;
-        do {
-            bytes_read = ::recvfrom(socket_fd, inbound.data(), inbound.size(), 0,
-                                    reinterpret_cast<sockaddr *>(&source), &source_len);
-        } while (bytes_read < 0 && errno == EINTR);
-
-        if (bytes_read < 0) {
-            return observed;
-        }
-
-        inbound.resize(static_cast<std::size_t>(bytes_read));
-        saw_peer_activity = true;
-        ++observed.inbound_datagrams;
-
-        const auto parsed = parse_server_datagram_for_routing(inbound);
-        if (!parsed.has_value()) {
-            continue;
-        }
-
-        const auto destination_connection_id_key =
-            connection_id_key(parsed->destination_connection_id);
-        auto session_it = sessions.find(destination_connection_id_key);
-        if (session_it == sessions.end() &&
-            parsed->kind == ParsedServerDatagram::Kind::supported_initial) {
-            const auto initial_it = initial_routes.find(destination_connection_id_key);
-            if (initial_it != initial_routes.end()) {
-                session_it = sessions.find(initial_it->second);
-            }
-        }
-
-        if (session_it == sessions.end()) {
-            if (parsed->kind != ParsedServerDatagram::Kind::supported_initial) {
-                continue;
-            }
-            auto &session = create_session(parsed->destination_connection_id, source, source_len);
-            if (!drive(session, session.core.advance(
-                                    coquic::quic::QuicCoreInboundDatagram{
-                                        .bytes = std::move(inbound),
-                                    },
-                                    runtime_now()))) {
-                return observed;
-            }
-            continue;
-        }
-
-        session_it->second->peer = source;
-        session_it->second->peer_len = source_len;
-        if (!drive(*session_it->second, session_it->second->core.advance(
-                                            coquic::quic::QuicCoreInboundDatagram{
-                                                .bytes = std::move(inbound),
-                                            },
-                                            runtime_now()))) {
+        if (!drain_ready_datagrams()) {
             return observed;
         }
     }
@@ -932,7 +992,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
 TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferLargeFile) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
-    const std::string large_body(2u * 1024u * 1024u, 'L');
+    constexpr std::size_t kLargeBodyBytes = 2ULL * 1024ULL * 1024ULL;
+    const std::string large_body(kLargeBodyBytes, 'L');
     document_root.write_file("large.bin", large_body);
 
     const auto server = coquic::quic::Http09RuntimeConfig{
@@ -953,7 +1014,10 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferLargeFile) {
         .requests_env = "https://localhost/large.bin",
     };
 
-    const auto result = run_in_memory_http09_transfer(client, server);
+    const auto result = run_in_memory_http09_transfer({
+        .client_config = client,
+        .server_config = server,
+    });
 
     EXPECT_TRUE(result.client_complete)
         << "steps=" << result.steps << " hit_step_limit=" << result.hit_step_limit
@@ -978,7 +1042,8 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferLargeFile) {
 TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferMediumFile) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
-    const std::string body(256u * 1024u, 'M');
+    constexpr std::size_t kMediumBodyBytes = 256ULL * 1024ULL;
+    const std::string body(kMediumBodyBytes, 'M');
     document_root.write_file("medium.bin", body);
 
     const auto server = coquic::quic::Http09RuntimeConfig{
@@ -999,7 +1064,10 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferMediumFile) {
         .requests_env = "https://localhost/medium.bin",
     };
 
-    const auto result = run_in_memory_http09_transfer(client, server);
+    const auto result = run_in_memory_http09_transfer({
+        .client_config = client,
+        .server_config = server,
+    });
 
     EXPECT_TRUE(result.client_complete)
         << "steps=" << result.steps << " hit_step_limit=" << result.hit_step_limit
@@ -1024,7 +1092,8 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferMediumFile) {
 TEST(QuicHttp09RuntimeTest, ClientAndServerTransferLargeFileOverUdpSockets) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
-    const std::string large_body(2u * 1024u * 1024u, 'L');
+    constexpr std::size_t kLargeBodyBytes = 2ULL * 1024ULL * 1024ULL;
+    const std::string large_body(kLargeBodyBytes, 'L');
     document_root.write_file("large.bin", large_body);
 
     const auto port = allocate_udp_loopback_port();

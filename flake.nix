@@ -80,6 +80,44 @@
           runHook postInstall
         '';
       };
+      quictlsMuslStatic = staticLlvmPkgs.libcxxStdenv.mkDerivation {
+        pname = "quictls-musl-static";
+        version = quictlsVersion;
+        src = quictlsSrc;
+        outputs = [
+          "out"
+          "dev"
+        ];
+        setOutputFlags = false;
+        nativeBuildInputs = [ pkgs.perl ];
+        NIX_LDFLAGS = "-L${muslLibgccEh}/lib";
+        postPatch = ''
+          patchShebangs Configure config
+          substituteInPlace config --replace '/usr/bin/env' '${pkgs.coreutils}/bin/env'
+          substituteInPlace crypto/async/arch/async_posix.h \
+            --replace '!defined(__ANDROID__) && !defined(__OpenBSD__)' \
+                      '!defined(__ANDROID__) && !defined(__OpenBSD__) && 0'
+        '';
+        configurePhase = ''
+          runHook preConfigure
+          ./Configure linux-x86_64 \
+            no-shared \
+            no-tests \
+            --prefix=$out \
+            --libdir=lib \
+            --openssldir=$out/etc/ssl
+          runHook postConfigure
+        '';
+        enableParallelBuilding = true;
+        installPhase = ''
+          runHook preInstall
+          make install_sw
+          mkdir -p $out/etc/ssl
+          mkdir -p $dev
+          mv $out/include $dev/include
+          runHook postInstall
+        '';
+      };
       boringssl = pkgs.boringssl;
       fmt = (pkgs.fmt.override {
         stdenv = llvmPkgs.libcxxStdenv;
@@ -184,6 +222,17 @@
         tlsLinkage = "static";
         spdlogPackage = spdlogStatic;
         fmtPackage = fmtStatic;
+        spdlogShared = false;
+        pkgConfigAllStatic = true;
+      };
+      quictlsMuslProfile = mkProfile {
+        name = "quictls-musl";
+        tlsBackend = "quictls";
+        tlsPackage = quictlsMuslStatic;
+        tlsLinkage = "static";
+        spdlogPackage = muslSpdlogStatic;
+        fmtPackage = muslFmtStatic;
+        zigTarget = "x86_64-linux-musl";
         spdlogShared = false;
         pkgConfigAllStatic = true;
       };
@@ -417,11 +466,27 @@
             '';
       };
       quictlsPackage = mkCoquicPackage quictlsProfile;
+      quictlsMuslPackage = mkCoquicPackage quictlsMuslProfile;
       boringsslPackage = mkCoquicPackage boringsslProfile;
       boringsslMuslPackage = mkCoquicPackage boringsslMuslProfile;
       quictlsImage = mkInteropImage {
         profile = quictlsProfile;
         coquicPackage = quictlsPackage;
+      };
+      quictlsMuslImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-interop";
+        tag = "quictls";
+        fromImage = simulatorEndpointBase;
+        contents = [
+          (mkOfficialEndpointOverlay {
+            name = "coquic-interop-quictls-musl";
+            coquicPackage = quictlsMuslPackage;
+          })
+        ];
+        config = {
+          Entrypoint = [ "/run_endpoint.sh" ];
+          WorkingDir = "/";
+        };
       };
       boringsslImage = mkInteropImage {
         profile = boringsslProfile;
@@ -445,6 +510,10 @@
       quictlsShell = mkCoquicShell {
         profile = quictlsProfile;
         banner = "coquic quictls shell ready. Run: zig build -Dtls_backend=quictls";
+      };
+      quictlsMuslShell = mkCoquicShell {
+        profile = quictlsMuslProfile;
+        banner = "coquic quictls musl shell ready. Run: zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false";
       };
       boringsslShell = mkCoquicShell {
         profile = boringsslProfile;
@@ -521,8 +590,8 @@
         coquic-quictls = quictlsPackage;
         coquic-boringssl = boringsslPackage;
         coquic-boringssl-musl = boringsslMuslPackage;
-        interop-image = quictlsImage;
-        interop-image-quictls = quictlsImage;
+        interop-image = quictlsMuslImage;
+        interop-image-quictls = quictlsMuslImage;
         interop-image-boringssl = boringsslImage;
         interop-image-boringssl-musl = boringsslMuslImage;
       };
@@ -549,7 +618,7 @@
       devShells.${system} = {
         default = defaultShell;
         quictls = quictlsShell;
-        interop-image = quictlsShell;
+        interop-image = quictlsMuslShell;
         boringssl = boringsslShell;
         boringssl-musl = boringsslMuslShell;
       };

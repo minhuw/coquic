@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd)"
 cd "${repo_root}"
 
-script=tests/nix/official_interop_runner_test.sh
+script=tests/nix/interop_runner_test.sh
 
 if [ ! -f "${script}" ]; then
   echo "missing script: ${script}" >&2

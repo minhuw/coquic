@@ -21,7 +21,8 @@ required_fragments = [
     "pull_request:",
     "push:",
     "workflow_dispatch:",
-    "nix develop -c bash tests/nix/official_interop_runner_test.sh",
+    "INTEROP_TESTCASES: handshake,handshakeloss,transfer,transferloss",
+    "nix develop -c bash tests/nix/interop_runner_test.sh",
 ]
 
 missing = [fragment for fragment in required_fragments if fragment not in workflow]

@@ -133,6 +133,23 @@ TEST(QuicCryptoStreamTest, PartialAcksRetireOnlyAcknowledgedSubrange) {
     EXPECT_EQ(unsent[0].bytes, bytes_from_string("ef"));
 }
 
+TEST(QuicCryptoStreamTest, OutstandingRangeRequiresFullCoverageOfRequestedRange) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+
+    const auto sent = buffer.take_ranges(4);
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].offset, 0u);
+    EXPECT_EQ(sent[0].bytes, bytes_from_string("abcd"));
+
+    buffer.acknowledge(0, 2);
+
+    EXPECT_FALSE(buffer.has_outstanding_range(0, 4));
+    EXPECT_FALSE(buffer.has_outstanding_range(1, 3));
+    EXPECT_TRUE(buffer.has_outstanding_range(2, 2));
+    EXPECT_FALSE(buffer.has_outstanding_range(3, 3));
+}
+
 TEST(QuicCryptoStreamTest, ZeroLengthAcknowledgeLeavesOutstandingBytesUnchanged) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("ab"));

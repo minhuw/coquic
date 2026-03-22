@@ -481,6 +481,24 @@ TEST(QuicRecoveryTest, AckProcessingSkipsDeclaredLostAndNotInFlightPacketsIndepe
     EXPECT_TRUE(result.lost_packets.empty());
 }
 
+TEST(QuicRecoveryTest, AckProcessingCanStillAcknowledgeDeclaredLostPackets) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(SentPacketRecord{
+        .packet_number = 2,
+        .sent_time = coquic::quic::test::test_time(0),
+        .ack_eliciting = true,
+        .in_flight = false,
+        .declared_lost = true,
+        .bytes_in_flight = 0,
+    });
+
+    const auto result =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/2), coquic::quic::test::test_time(20));
+
+    EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{2}));
+    EXPECT_TRUE(result.lost_packets.empty());
+}
+
 TEST(QuicRecoveryTest, PtoDeadlineUsesInitialRttBeforeSamples) {
     RecoveryRttState rtt;
     const auto deadline = coquic::quic::compute_pto_deadline(

@@ -6,6 +6,7 @@ out/
 .worktrees/
 coverage/
 .rag/
+.interop-logs/
 tools/rag/.venv/
 tools/rag/**/__pycache__/
 tools/rag/**/*.egg-info/

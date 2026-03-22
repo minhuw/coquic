@@ -193,8 +193,7 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
         sent_packets_.erase(packet_number);
     }
 
-    std::vector<std::uint64_t> lost_packet_numbers;
-    for (const auto &[packet_number, packet] : sent_packets_) {
+    for (auto &[packet_number, packet] : sent_packets_) {
         if (packet.declared_lost || !packet.in_flight ||
             packet.packet_number >= effective_largest_acked) {
             continue;
@@ -205,12 +204,10 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
             continue;
         }
 
-        lost_packet_numbers.push_back(packet_number);
         result.lost_packets.push_back(packet);
-    }
-
-    for (const auto packet_number : lost_packet_numbers) {
-        sent_packets_.erase(packet_number);
+        packet.declared_lost = true;
+        packet.in_flight = false;
+        packet.bytes_in_flight = 0;
     }
 
     return result;

@@ -196,6 +196,7 @@ struct StreamState {
     void acknowledge_stop_sending_frame(const StopSendingFrame &frame);
     void mark_stop_sending_frame_lost(const StopSendingFrame &frame);
     void acknowledge_send_fragment(const StreamFrameSendFragment &fragment);
+    void mark_send_fragment_sent(const StreamFrameSendFragment &fragment);
     void mark_send_fragment_lost(const StreamFrameSendFragment &fragment);
     void restore_send_fragment(const StreamFrameSendFragment &fragment);
 };

@@ -22,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -362,6 +363,8 @@ struct InMemoryHttp09TransferResult {
 struct InMemoryHttp09TransferConfig {
     coquic::quic::Http09RuntimeConfig client_config;
     coquic::quic::Http09RuntimeConfig server_config;
+    std::unordered_set<std::size_t> dropped_client_datagrams;
+    std::unordered_set<std::size_t> dropped_server_datagrams;
 };
 
 InMemoryHttp09TransferResult
@@ -447,6 +450,10 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
 
                 ++observed.client_sent_datagrams;
                 observed.client_sent_bytes += send->bytes.size();
+                if (transfer_config.dropped_client_datagrams.contains(
+                        observed.client_sent_datagrams)) {
+                    continue;
+                }
                 to_server.push_back(send->bytes);
             }
 
@@ -507,6 +514,10 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
 
                 ++observed.server_sent_datagrams;
                 observed.server_sent_bytes += send->bytes.size();
+                if (transfer_config.dropped_server_datagrams.contains(
+                        observed.server_sent_datagrams)) {
+                    continue;
+                }
                 to_client.push_back(send->bytes);
             }
 
@@ -860,7 +871,39 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
         return true;
     };
 
+    const auto process_expired_timers = [&](coquic::quic::QuicCoreTimePoint current,
+                                            bool &processed_any) -> bool {
+        processed_any = false;
+        for (const auto &[key, session] : sessions) {
+            (void)key;
+            const auto session_next_wakeup = session->next_wakeup;
+            if (!session_next_wakeup.has_value() || session_next_wakeup.value() > current) {
+                continue;
+            }
+
+            processed_any = true;
+            ++observed.timer_expirations;
+            if (observed.timer_expirations >= kTimerSpinLimit) {
+                observed.exit_code = 2;
+                return false;
+            }
+            if (!drive(*session,
+                       session->core.advance(coquic::quic::QuicCoreTimerExpired{}, current))) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     for (;;) {
+        bool processed_timers = false;
+        if (!process_expired_timers(runtime_now(), processed_timers)) {
+            return observed;
+        }
+        if (processed_timers) {
+            continue;
+        }
+
         if (!drain_ready_datagrams()) {
             return observed;
         }
@@ -873,25 +916,8 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
         if (next_wakeup.has_value()) {
             const auto current = runtime_now();
             if (*next_wakeup <= current) {
-                for (const auto &[key, session] : sessions) {
-                    (void)key;
-                    const auto session_next_wakeup = session->next_wakeup;
-                    if (!session_next_wakeup.has_value()) {
-                        continue;
-                    }
-
-                    if (session_next_wakeup.value() > current) {
-                        continue;
-                    }
-                    ++observed.timer_expirations;
-                    if (observed.timer_expirations >= kTimerSpinLimit) {
-                        observed.exit_code = 2;
-                        return observed;
-                    }
-                    if (!drive(*session, session->core.advance(coquic::quic::QuicCoreTimerExpired{},
-                                                               current))) {
-                        return observed;
-                    }
+                if (!process_expired_timers(current, processed_timers)) {
+                    return observed;
                 }
                 continue;
             }
@@ -920,25 +946,8 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
         if (poll_result == 0) {
             if (next_wakeup.has_value()) {
                 const auto current = runtime_now();
-                for (const auto &[key, session] : sessions) {
-                    (void)key;
-                    const auto session_next_wakeup = session->next_wakeup;
-                    if (!session_next_wakeup.has_value()) {
-                        continue;
-                    }
-
-                    if (session_next_wakeup.value() > current) {
-                        continue;
-                    }
-                    ++observed.timer_expirations;
-                    if (observed.timer_expirations >= kTimerSpinLimit) {
-                        observed.exit_code = 2;
-                        return observed;
-                    }
-                    if (!drive(*session, session->core.advance(coquic::quic::QuicCoreTimerExpired{},
-                                                               current))) {
-                        return observed;
-                    }
+                if (!process_expired_timers(current, processed_timers)) {
+                    return observed;
                 }
                 continue;
             }
@@ -1017,6 +1026,59 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferLargeFile) {
     const auto result = run_in_memory_http09_transfer({
         .client_config = client,
         .server_config = server,
+    });
+
+    EXPECT_TRUE(result.client_complete)
+        << "steps=" << result.steps << " hit_step_limit=" << result.hit_step_limit
+        << " client_failed=" << result.client_failed << " server_failed=" << result.server_failed
+        << " client_sent_datagrams=" << result.client_sent_datagrams
+        << " client_sent_bytes=" << result.client_sent_bytes
+        << " server_sent_datagrams=" << result.server_sent_datagrams
+        << " server_sent_bytes=" << result.server_sent_bytes
+        << " client_bytes_in_flight=" << result.client_bytes_in_flight
+        << " server_bytes_in_flight=" << result.server_bytes_in_flight
+        << " client_cwnd=" << result.client_congestion_window
+        << " server_cwnd=" << result.server_congestion_window
+        << " client_queued_bytes=" << result.client_queued_stream_bytes
+        << " server_queued_bytes=" << result.server_queued_stream_bytes
+        << " client_next_wakeup=" << result.client_has_next_wakeup
+        << " server_next_wakeup=" << result.server_has_next_wakeup;
+    EXPECT_FALSE(result.client_failed);
+    EXPECT_FALSE(result.server_failed);
+    EXPECT_EQ(read_file_bytes(download_root.path() / "large.bin"), large_body);
+}
+
+TEST(QuicHttp09RuntimeTest,
+     InMemoryClientAndServerTransferLargeFileRecoversAfterTransferLossPattern) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+    constexpr std::size_t kLargeBodyBytes = 2ULL * 1024ULL * 1024ULL;
+    const std::string large_body(kLargeBodyBytes, 'L');
+    document_root.write_file("large.bin", large_body);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = 443,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .download_root = download_root.path(),
+        .requests_env = "https://localhost/large.bin",
+    };
+
+    const auto result = run_in_memory_http09_transfer({
+        .client_config = client,
+        .server_config = server,
+        .dropped_client_datagrams = {10},
+        .dropped_server_datagrams = {28, 58},
     });
 
     EXPECT_TRUE(result.client_complete)
@@ -1323,6 +1385,55 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseUsesSeparateConnectionPerRequest) {
                                                        server_result.request_stream_ids.end()),
                                            server_result.request_stream_ids.end());
     EXPECT_EQ(server_result.handshake_ready_events, 2u);
+    EXPECT_EQ(server_result.request_stream_ids, (std::vector<std::uint64_t>{0u}));
+}
+
+TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingCollisions) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+    document_root.write_file("alpha.txt", "alpha-bytes");
+    document_root.write_file("beta.txt", "beta-bytes");
+    document_root.write_file("gamma.txt", "gamma-bytes");
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::multiconnect,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::multiconnect,
+        .download_root = download_root.path(),
+        .requests_env =
+            "https://localhost/alpha.txt https://localhost/beta.txt https://localhost/gamma.txt",
+    };
+
+    auto server_future =
+        std::async(std::launch::async, [&server]() { return run_observing_http09_server(server); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    auto server_result = server_future.get();
+    EXPECT_EQ(server_result.exit_code, 0);
+    EXPECT_EQ(read_file_bytes(download_root.path() / "alpha.txt"), "alpha-bytes");
+    EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-bytes");
+    EXPECT_EQ(read_file_bytes(download_root.path() / "gamma.txt"), "gamma-bytes");
+
+    std::sort(server_result.request_stream_ids.begin(), server_result.request_stream_ids.end());
+    server_result.request_stream_ids.erase(std::unique(server_result.request_stream_ids.begin(),
+                                                       server_result.request_stream_ids.end()),
+                                           server_result.request_stream_ids.end());
+    EXPECT_EQ(server_result.handshake_ready_events, 3u);
     EXPECT_EQ(server_result.request_stream_ids, (std::vector<std::uint64_t>{0u}));
 }
 

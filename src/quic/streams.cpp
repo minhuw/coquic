@@ -549,6 +549,17 @@ void StreamState::acknowledge_send_fragment(const StreamFrameSendFragment &fragm
     }
 }
 
+void StreamState::mark_send_fragment_sent(const StreamFrameSendFragment &fragment) {
+    if (reset_state != StreamControlFrameState::none) {
+        return;
+    }
+
+    send_buffer.mark_sent(fragment.offset, fragment.bytes.size());
+    if (fragment.fin && send_fin_state != StreamSendFinState::acknowledged) {
+        send_fin_state = StreamSendFinState::sent;
+    }
+}
+
 void StreamState::mark_send_fragment_lost(const StreamFrameSendFragment &fragment) {
     if (reset_state != StreamControlFrameState::none) {
         return;

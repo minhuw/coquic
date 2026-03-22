@@ -10,9 +10,9 @@ permissions:
 
 jobs:
   interop-quicgo:
-    name: quic-go Handshake and Transfer
+    name: quic-go Official Runner
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -29,5 +29,13 @@ jobs:
       - name: Verify Workflow Contract
         run: bash tests/nix/github_interop_workflow_test.sh
 
-      - name: Run quic-go Interop Smoke Tests
-        run: bash tests/nix/quicgo_interop_smoke_test.sh
+      - name: Run Official quic-go Interop Tests
+        run: nix develop -c bash tests/nix/official_interop_runner_test.sh
+
+      - name: Upload Interop Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-logs
+          path: .interop-logs/official
+          if-no-files-found: warn

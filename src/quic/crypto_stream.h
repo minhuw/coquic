@@ -30,8 +30,10 @@ class ReliableSendBuffer {
     void acknowledge(std::uint64_t offset, std::size_t length);
     void mark_lost(std::uint64_t offset, std::size_t length);
     void mark_unsent(std::uint64_t offset, std::size_t length);
+    void mark_sent(std::uint64_t offset, std::size_t length);
     bool has_pending_data() const;
     bool has_outstanding_data() const;
+    bool has_outstanding_range(std::uint64_t offset, std::size_t length) const;
     bool has_lost_data() const;
 
   private:

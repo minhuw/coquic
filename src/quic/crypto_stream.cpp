@@ -247,6 +247,23 @@ void ReliableSendBuffer::mark_unsent(std::uint64_t offset, std::size_t length) {
     merge_adjacent_segments();
 }
 
+void ReliableSendBuffer::mark_sent(std::uint64_t offset, std::size_t length) {
+    if (length == 0) {
+        return;
+    }
+
+    const auto end = range_end(offset, length);
+    split_at(offset);
+    split_at(end);
+
+    for (auto it = segments_.lower_bound(offset); it != segments_.end() && it->first < end; ++it) {
+        if (it->second.state == SegmentState::lost) {
+            it->second.state = SegmentState::sent;
+        }
+    }
+    merge_adjacent_segments();
+}
+
 bool ReliableSendBuffer::has_pending_data() const {
     for (const auto &[offset, segment] : segments_) {
         static_cast<void>(offset);
@@ -267,6 +284,39 @@ bool ReliableSendBuffer::has_outstanding_data() const {
     }
 
     return false;
+}
+
+bool ReliableSendBuffer::has_outstanding_range(std::uint64_t offset, std::size_t length) const {
+    if (length == 0) {
+        return false;
+    }
+
+    const auto end = range_end(offset, length);
+    const auto segment_length = [](const Segment &segment) { return segment.end - segment.begin; };
+    auto it = segments_.upper_bound(offset);
+    if (it != segments_.begin()) {
+        --it;
+    }
+
+    auto covered_until = offset;
+    for (; it != segments_.end() && covered_until < end; ++it) {
+        const auto segment_offset = it->first;
+        const auto segment_end =
+            segment_offset + static_cast<std::uint64_t>(segment_length(it->second));
+        if (segment_end <= covered_until) {
+            continue;
+        }
+        if (segment_offset > covered_until) {
+            return false;
+        }
+        if (it->second.state != SegmentState::sent && it->second.state != SegmentState::lost) {
+            return false;
+        }
+
+        covered_until = std::min(end, segment_end);
+    }
+
+    return covered_until >= end;
 }
 
 bool ReliableSendBuffer::has_lost_data() const {

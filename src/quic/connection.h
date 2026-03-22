@@ -35,6 +35,7 @@ struct PacketSpaceState {
     PacketSpaceRecovery recovery;
     std::optional<SentPacketRecord> pending_probe_packet;
     std::optional<QuicCoreTimePoint> pending_ack_deadline;
+    bool force_ack_send = false;
 };
 
 struct LocalResetCommand {
@@ -117,6 +118,8 @@ class QuicConnection {
     void detect_lost_packets(PacketSpaceState &packet_space, QuicCoreTimePoint now);
     void arm_pto_probe(QuicCoreTimePoint now);
     std::optional<SentPacketRecord> select_pto_probe(const PacketSpaceState &packet_space) const;
+    const RecoveryRttState &shared_recovery_rtt_state() const;
+    void synchronize_recovery_rtt_state();
     void install_available_secrets();
     void collect_pending_tls_bytes();
     CodecResult<bool> sync_tls_state();
@@ -171,9 +174,11 @@ class QuicConnection {
     std::vector<QuicCoreStateChange> pending_state_changes_;
     std::optional<std::uint64_t> last_application_send_stream_id_;
     NewRenoCongestionController congestion_controller_;
+    RecoveryRttState recovery_rtt_state_;
     std::uint32_t pto_count_ = 0;
     bool application_read_key_phase_ = false;
     bool application_write_key_phase_ = false;
+    bool initial_packet_space_discarded_ = false;
     bool handshake_confirmed_ = false;
     StreamControlFrameState handshake_done_state_ = StreamControlFrameState::none;
     bool handshake_ready_emitted_ = false;

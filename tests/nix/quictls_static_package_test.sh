@@ -27,3 +27,14 @@ if grep -Eq 'lib(ssl|crypto|fmt|spdlog)\.so' <<<"${needed}"; then
   echo "${needed}" >&2
   exit 1
 fi
+
+if ! nix develop -c bash -lc '
+  tmpdir=$(mktemp -d)
+  trap "rm -rf \"${tmpdir}\"" EXIT
+  cd "${tmpdir}"
+  openssl ecparam -name prime256v1 -genkey -out ca.key >/dev/null 2>&1
+  openssl req -out cert.csr -new -key ca.key -nodes -subj "/O=coquic static package test/" >/dev/null 2>&1
+'; then
+  echo "expected nix develop openssl to generate a CSR without missing config files" >&2
+  exit 1
+fi

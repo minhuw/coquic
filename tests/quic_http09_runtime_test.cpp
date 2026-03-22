@@ -1498,6 +1498,36 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialMulticonnectTestcase) {
     ASSERT_TRUE(parsed.has_value());
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialChacha20TestcaseAndConstrainsCipherSuites) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar testcase("TESTCASE", "chacha20");
+    ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    if (!parsed.has_value()) {
+        FAIL() << "expected runtime config";
+    }
+    const auto &runtime = *parsed;
+    EXPECT_EQ(runtime.testcase, coquic::quic::QuicHttp09Testcase::chacha20);
+
+    const auto client_core = coquic::quic::make_http09_client_core_config(runtime);
+    EXPECT_EQ(client_core.allowed_tls_cipher_suites,
+              (std::vector<coquic::quic::CipherSuite>{
+                  coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+              }));
+
+    auto server_runtime = runtime;
+    server_runtime.mode = coquic::quic::Http09RuntimeMode::server;
+    server_runtime.certificate_chain_path = "tests/fixtures/quic-server-cert.pem";
+    server_runtime.private_key_path = "tests/fixtures/quic-server-key.pem";
+    const auto server_core = coquic::quic::make_http09_server_core_config(server_runtime);
+    EXPECT_EQ(server_core.allowed_tls_cipher_suites,
+              (std::vector<coquic::quic::CipherSuite>{
+                  coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+              }));
+}
+
 TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTransfersFile) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;

@@ -104,6 +104,31 @@ TEST(QuicTlsAdapterContractTest, ClientAndServerExchangeHandshakeBytesAndSecrets
     }));
 }
 
+TEST(QuicTlsAdapterContractTest, HandshakeCanBeConstrainedToChaCha20CipherSuite) {
+    auto client_config = make_client_config();
+    client_config.allowed_tls_cipher_suites = {
+        CipherSuite::tls_chacha20_poly1305_sha256,
+    };
+    auto server_config = make_server_config();
+    server_config.allowed_tls_cipher_suites = {
+        CipherSuite::tls_chacha20_poly1305_sha256,
+    };
+
+    TlsAdapter client(std::move(client_config));
+    TlsAdapter server(std::move(server_config));
+
+    drive_tls_handshake(client, server);
+
+    ASSERT_TRUE(client.handshake_complete());
+    ASSERT_TRUE(server.handshake_complete());
+    ASSERT_TRUE(TlsAdapterTestPeer::cipher_suite_for_ssl(client).has_value());
+    EXPECT_EQ(TlsAdapterTestPeer::cipher_suite_for_ssl(client).value(),
+              CipherSuite::tls_chacha20_poly1305_sha256);
+    ASSERT_TRUE(TlsAdapterTestPeer::cipher_suite_for_ssl(server).has_value());
+    EXPECT_EQ(TlsAdapterTestPeer::cipher_suite_for_ssl(server).value(),
+              CipherSuite::tls_chacha20_poly1305_sha256);
+}
+
 TEST(QuicTlsAdapterContractTest, AsTlsBytesReturnsStablePointers) {
     const auto empty_bytes = std::span<const std::byte>{};
     EXPECT_NE(TlsAdapterTestPeer::as_tls_bytes(empty_bytes), nullptr);

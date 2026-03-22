@@ -35,6 +35,7 @@ struct QuicCoreConfig {
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
     QuicTransportConfig transport;
+    std::vector<CipherSuite> allowed_tls_cipher_suites;
 };
 
 using QuicCoreClock = std::chrono::steady_clock;

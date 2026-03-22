@@ -17,6 +17,7 @@ enum class QuicHttp09Testcase : std::uint8_t {
     handshake,
     transfer,
     multiconnect,
+    chacha20,
 };
 
 struct QuicHttp09Request {
@@ -42,5 +43,6 @@ CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::fil
                                                                   std::string_view request_target);
 
 QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase);
+std::vector<CipherSuite> http09_tls_cipher_suites_for_testcase(QuicHttp09Testcase testcase);
 
 } // namespace coquic::quic

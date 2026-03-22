@@ -22,6 +22,13 @@ required_fragments = [
     '${direction_log_dir}/${server}_${client}/${testcase}',
     'official runner results file missing',
     'requested testcase did not succeed',
+    'if [[ ",${interop_testcases}," == *",chacha20,"* ]]; then',
+    'coquic_image_default="coquic-interop:quictls"',
+    'coquic_package_default="interop-image-quictls"',
+    'readonly coquic_image="${INTEROP_COQUIC_IMAGE:-${coquic_image_default}}"',
+    'readonly coquic_package="${INTEROP_COQUIC_PACKAGE:-${coquic_package_default}}"',
+    'nix --option eval-cache false build ".#${coquic_package}"',
+    'docker load -i "$(nix path-info ".#${coquic_package}")" >/dev/null',
 ]
 
 missing = [fragment for fragment in required_fragments if fragment not in script]

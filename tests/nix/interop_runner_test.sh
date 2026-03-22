@@ -6,7 +6,6 @@ cd "${repo_root}"
 
 readonly interop_runner_ref="${INTEROP_RUNNER_REF:-97319f8c0be2bc0be67b025522a64c9231018d37}"
 readonly network_simulator_ref="${INTEROP_NETWORK_SIMULATOR_REF:-e557a54510e3578868f8c14cf3aa37e0fc6c76d0}"
-readonly coquic_image="${INTEROP_COQUIC_IMAGE:-coquic-interop:boringssl-musl}"
 readonly quicgo_image="${INTEROP_QUICGO_IMAGE:-martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424}"
 readonly simulator_image="${INTEROP_SIMULATOR_IMAGE:-martenseemann/quic-network-simulator@sha256:c23d82a55caffe681b1bdae65d4d30d23e1283141a414a7f02ee56cf15f9c6b9}"
 readonly iperf_image="${INTEROP_IPERF_IMAGE:-martenseemann/quic-interop-iperf-endpoint@sha256:cb50cc8019d45d9cad5faecbe46a3c21dd5e871949819a5175423755a9045106}"
@@ -15,6 +14,16 @@ readonly log_root="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
 readonly runner_repo_url="https://github.com/quic-interop/quic-interop-runner"
 readonly runner_dir="$(mktemp -d "${TMPDIR:-/tmp}/coquic-interop-runner.XXXXXX")"
 readonly runner_network_pattern='interop-runner.*_(leftnet|rightnet)$'
+
+coquic_image_default="coquic-interop:boringssl-musl"
+coquic_package_default="interop-image-boringssl-musl"
+if [[ ",${interop_testcases}," == *",chacha20,"* ]]; then
+  coquic_image_default="coquic-interop:quictls"
+  coquic_package_default="interop-image-quictls"
+fi
+
+readonly coquic_image="${INTEROP_COQUIC_IMAGE:-${coquic_image_default}}"
+readonly coquic_package="${INTEROP_COQUIC_PACKAGE:-${coquic_package_default}}"
 
 cleanup() {
   cleanup_runner_state
@@ -87,8 +96,8 @@ source "${runner_dir}/.venv/bin/activate"
 python3 -m pip install --quiet --upgrade pip
 python3 -m pip install --quiet -r "${runner_dir}/requirements.txt"
 
-nix --option eval-cache false build .#interop-image-boringssl-musl
-docker load -i "$(nix path-info .#interop-image-boringssl-musl)" >/dev/null
+nix --option eval-cache false build ".#${coquic_package}"
+docker load -i "$(nix path-info ".#${coquic_package}")" >/dev/null
 docker pull "${quicgo_image}" >/dev/null
 docker pull "${simulator_image}" >/dev/null
 docker pull "${iperf_image}" >/dev/null

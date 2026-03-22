@@ -40,6 +40,7 @@ struct TlsAdapterConfig {
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
     std::vector<std::byte> local_transport_parameters;
+    std::vector<CipherSuite> allowed_tls_cipher_suites;
 };
 
 class TlsAdapter {

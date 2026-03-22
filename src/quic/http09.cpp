@@ -190,4 +190,14 @@ QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase test
     return config;
 }
 
+std::vector<CipherSuite> http09_tls_cipher_suites_for_testcase(QuicHttp09Testcase testcase) {
+    if (testcase == QuicHttp09Testcase::chacha20) {
+        return {
+            CipherSuite::tls_chacha20_poly1305_sha256,
+        };
+    }
+
+    return {};
+}
+
 } // namespace coquic::quic

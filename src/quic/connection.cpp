@@ -351,6 +351,40 @@ bool establishes_persistent_congestion(std::span<const SentPacketRecord> lost_pa
     return last_loss->sent_time - first_loss->sent_time >= persistent_congestion_duration;
 }
 
+bool ack_frame_acks_packet(const AckFrame &ack, std::uint64_t packet_number) {
+    if (packet_number > ack.largest_acknowledged) {
+        return false;
+    }
+    if (ack.largest_acknowledged < ack.first_ack_range) {
+        return false;
+    }
+
+    auto range_smallest = ack.largest_acknowledged - ack.first_ack_range;
+    if (packet_number >= range_smallest) {
+        return true;
+    }
+
+    auto previous_smallest = range_smallest;
+    for (const auto &range : ack.additional_ranges) {
+        if (previous_smallest < range.gap + 2) {
+            return false;
+        }
+
+        const auto range_largest = previous_smallest - range.gap - 2;
+        if (range_largest < range.range_length) {
+            return false;
+        }
+        range_smallest = range_largest - range.range_length;
+        if (packet_number >= range_smallest && packet_number <= range_largest) {
+            return true;
+        }
+
+        previous_smallest = range_smallest;
+    }
+
+    return false;
+}
+
 void discard_packet_space_state(PacketSpaceState &packet_space) {
     packet_space.largest_authenticated_packet_number = std::nullopt;
     packet_space.read_secret = std::nullopt;
@@ -359,6 +393,7 @@ void discard_packet_space_state(PacketSpaceState &packet_space) {
     packet_space.receive_crypto = ReliableReceiveBuffer{};
     packet_space.received_packets = ReceivedPacketHistory{};
     packet_space.sent_packets.clear();
+    packet_space.declared_lost_packets.clear();
     packet_space.recovery = PacketSpaceRecovery{};
     packet_space.pending_probe_packet = std::nullopt;
     packet_space.pending_ack_deadline = std::nullopt;
@@ -1043,10 +1078,20 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
 
 std::optional<SentPacketRecord>
 QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
+    std::optional<SentPacketRecord> ping_fallback;
     for (const auto &[packet_number, packet] : packet_space.sent_packets) {
         static_cast<void>(packet_number);
         if (!packet.ack_eliciting || !packet.in_flight) {
             continue;
+        }
+
+        if (!ping_fallback.has_value()) {
+            ping_fallback = SentPacketRecord{
+                .packet_number = packet.packet_number,
+                .ack_eliciting = true,
+                .in_flight = true,
+                .has_ping = true,
+            };
         }
 
         auto probe = packet;
@@ -1123,6 +1168,10 @@ QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
         if (retransmittable_probe_frame_count(probe) != 0 || probe.has_ping) {
             return probe;
         }
+    }
+
+    if (ping_fallback.has_value()) {
+        return ping_fallback;
     }
 
     return SentPacketRecord{
@@ -1218,6 +1267,7 @@ void QuicConnection::start_client_if_needed() {
         .application_protocol = config_.application_protocol,
         .identity = config_.identity,
         .local_transport_parameters = serialized_transport_parameters.value(),
+        .allowed_tls_cipher_suites = config_.allowed_tls_cipher_suites,
     });
     const auto tls_started = tls_->start();
     if (!tls_started.has_value()) {
@@ -1277,6 +1327,7 @@ void QuicConnection::start_server_if_needed(
         .application_protocol = config_.application_protocol,
         .identity = config_.identity,
         .local_transport_parameters = serialized_transport_parameters.value(),
+        .allowed_tls_cipher_suites = config_.allowed_tls_cipher_suites,
     });
     static_cast<void>(sync_tls_state().value());
 }
@@ -1556,9 +1607,26 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
                                                       std::uint64_t ack_delay_exponent,
                                                       std::uint64_t max_ack_delay_ms,
                                                       bool suppress_pto_reset) {
+    std::vector<SentPacketRecord> late_acked_packets;
+    std::vector<std::uint64_t> late_acked_packet_numbers;
+    for (const auto &[packet_number, packet] : packet_space.declared_lost_packets) {
+        if (!ack_frame_acks_packet(ack, packet_number)) {
+            continue;
+        }
+
+        late_acked_packets.push_back(packet);
+        late_acked_packet_numbers.push_back(packet_number);
+    }
+    for (const auto packet_number : late_acked_packet_numbers) {
+        packet_space.declared_lost_packets.erase(packet_number);
+    }
+
     packet_space.recovery.rtt_state() = shared_recovery_rtt_state();
     auto ack_result = packet_space.recovery.on_ack_received(ack, now);
     for (const auto &packet : ack_result.acked_packets) {
+        retire_acked_packet(packet_space, packet);
+    }
+    for (const auto &packet : late_acked_packets) {
         retire_acked_packet(packet_space, packet);
     }
     for (const auto &packet : ack_result.lost_packets) {
@@ -1662,6 +1730,7 @@ void QuicConnection::retire_acked_packet(PacketSpaceState &packet_space,
     }
 
     packet_space.sent_packets.erase(packet.packet_number);
+    packet_space.declared_lost_packets.erase(packet.packet_number);
 }
 
 void QuicConnection::mark_lost_packet(PacketSpaceState &packet_space,
@@ -1723,12 +1792,12 @@ void QuicConnection::mark_lost_packet(PacketSpaceState &packet_space,
         handshake_done_state_ = StreamControlFrameState::pending;
     }
 
-    const auto tracked = packet_space.sent_packets.find(packet.packet_number);
-    if (tracked != packet_space.sent_packets.end()) {
-        tracked->second.declared_lost = true;
-        tracked->second.in_flight = false;
-        tracked->second.bytes_in_flight = 0;
-    }
+    packet_space.sent_packets.erase(packet.packet_number);
+    auto declared_lost = packet;
+    declared_lost.declared_lost = true;
+    declared_lost.in_flight = false;
+    declared_lost.bytes_in_flight = 0;
+    packet_space.declared_lost_packets[packet.packet_number] = std::move(declared_lost);
 }
 
 void QuicConnection::rebuild_recovery(PacketSpaceState &packet_space) {
@@ -2978,6 +3047,24 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 mark_failed();
                 return {};
             }
+            if (ack_frame.has_value() && datagram.value().size() > kMaximumDatagramSize) {
+                auto no_ack_datagram = serialize_application_candidate(
+                    probe_packet.has_handshake_done, std::nullopt, probe_packet.max_data_frame,
+                    probe_packet.max_stream_data_frames, probe_packet.reset_stream_frames,
+                    probe_packet.stop_sending_frames, probe_packet.data_blocked_frame,
+                    probe_packet.stream_data_blocked_frames, probe_stream_fragments, include_ping);
+                if (!no_ack_datagram.has_value()) {
+                    std::cerr << "quic fail probe serialize_application_candidate_or_oversize "
+                                 "size="
+                              << 0 << '\n';
+                    mark_failed();
+                    return {};
+                }
+                if (no_ack_datagram.value().size() <= kMaximumDatagramSize) {
+                    ack_frame = std::nullopt;
+                    datagram = std::move(no_ack_datagram);
+                }
+            }
             const auto trim_probe_candidate_to_fit =
                 [&](const std::optional<AckFrame> &candidate_ack_frame,
                     std::vector<StreamFrameSendFragment> &fragments) -> bool {
@@ -3168,6 +3255,15 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 include_handshake_done, base_ack_frame, max_data_frame, max_stream_data_frames,
                 reset_stream_frames, stop_sending_frames, data_blocked_frame,
                 stream_data_blocked_frames, stream_fragments, /*include_ping=*/false);
+            if (selected_ack_frame.has_value()) {
+                const auto retransmitting_stream_data = std::ranges::any_of(
+                    stream_fragments, [](const StreamFrameSendFragment &fragment) {
+                        return !fragment.consumes_flow_control;
+                    });
+                if (retransmitting_stream_data) {
+                    selected_ack_frame = std::nullopt;
+                }
+            }
             if (has_failed()) {
                 return {};
             }
@@ -3180,6 +3276,22 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 std::cerr << "quic fail app final serialize_application_candidate initial\n";
                 mark_failed();
                 return {};
+            }
+            if (selected_ack_frame.has_value() &&
+                candidate_datagram.value().size() > kMaximumDatagramSize) {
+                auto no_ack_candidate = serialize_application_candidate(
+                    include_handshake_done, std::nullopt, max_data_frame, max_stream_data_frames,
+                    reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                    stream_data_blocked_frames, stream_fragments, /*include_ping=*/false);
+                if (!no_ack_candidate.has_value()) {
+                    std::cerr << "quic fail app final serialize_application_candidate no_ack\n";
+                    mark_failed();
+                    return {};
+                }
+                if (no_ack_candidate.value().size() <= kMaximumDatagramSize) {
+                    selected_ack_frame = std::nullopt;
+                    candidate_datagram = std::move(no_ack_candidate);
+                }
             }
 
             const auto trim_candidate_to_fit =

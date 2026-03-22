@@ -204,6 +204,49 @@ COQUIC_NO_PROFILE bool configure_ctx_failed(SSL_CTX *ctx, const SSL_QUIC_METHOD 
            SSL_CTX_set_quic_method(ctx, quic_method) != 1;
 }
 
+std::optional<std::string_view> tls13_cipher_suite_name(CipherSuite cipher_suite) {
+    switch (cipher_suite) {
+    case CipherSuite::tls_aes_128_gcm_sha256:
+        return "TLS_AES_128_GCM_SHA256";
+    case CipherSuite::tls_aes_256_gcm_sha384:
+        return "TLS_AES_256_GCM_SHA384";
+    case CipherSuite::tls_chacha20_poly1305_sha256:
+        return "TLS_CHACHA20_POLY1305_SHA256";
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::string>
+encode_tls13_cipher_suites(std::span<const CipherSuite> allowed_tls_cipher_suites) {
+    if (allowed_tls_cipher_suites.empty()) {
+        return std::string{};
+    }
+
+    std::string encoded;
+    for (const auto cipher_suite : allowed_tls_cipher_suites) {
+        const auto name = tls13_cipher_suite_name(cipher_suite);
+        if (!name.has_value()) {
+            return std::nullopt;
+        }
+        if (!encoded.empty()) {
+            encoded.push_back(':');
+        }
+        encoded.append(name->begin(), name->end());
+    }
+    return encoded;
+}
+
+COQUIC_NO_PROFILE bool
+tls13_cipher_suites_failed(SSL_CTX *ctx, std::span<const CipherSuite> allowed_tls_cipher_suites) {
+    if (allowed_tls_cipher_suites.empty()) {
+        return false;
+    }
+
+    const auto encoded = encode_tls13_cipher_suites(allowed_tls_cipher_suites);
+    return !encoded.has_value() || SSL_CTX_set_ciphersuites(ctx, encoded->c_str()) != 1;
+}
+
 COQUIC_NO_PROFILE bool verify_paths_failed(SSL_CTX *ctx) {
     return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_verify_paths) ||
            SSL_CTX_set_default_verify_paths(ctx) != 1;
@@ -456,6 +499,12 @@ class TlsAdapter::Impl {
         }
 
         if (configure_ctx_failed(ctx_.get(), &kQuicMethod)) {
+            sticky_error_ =
+                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
+            return;
+        }
+
+        if (tls13_cipher_suites_failed(ctx_.get(), config_.allowed_tls_cipher_suites)) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;

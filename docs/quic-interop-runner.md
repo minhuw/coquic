@@ -160,6 +160,10 @@ cases:
 - `quic-go` client -> `coquic` server: `handshake`, `transfer`
 - `coquic` client -> `quic-go` server: `handshake`, `transfer`
 
+When `INTEROP_TESTCASES` includes `chacha20`, the checked-in official runner
+wrapper switches to `coquic-interop:quictls` / `.#interop-image-quictls`
+automatically so the client can offer a ChaCha20-only TLS 1.3 cipher suite.
+
 The separate GitHub Actions workflow in `.github/workflows/interop.yml` calls
 the same script.
 

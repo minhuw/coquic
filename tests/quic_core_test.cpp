@@ -5215,7 +5215,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresInitialPacketsAfterDiscardingIni
     EXPECT_TRUE(coquic::quic::test::received_application_data_from(replayed).empty());
 }
 
-TEST(QuicCoreTest, ProcessInboundDatagramEmitsHandshakeForCapturedQuicGoServerFlight) {
+TEST(QuicCoreTest, ProcessCapturedQuicGoServerInitialInstallsHandshakeSecrets) {
     auto config = coquic::quic::test::make_client_core_config();
     config.source_connection_id = bytes_from_hex("c100000000000025");
     config.initial_destination_connection_id = bytes_from_hex("8300000000000024");
@@ -5257,45 +5257,25 @@ TEST(QuicCoreTest, ProcessInboundDatagramEmitsHandshakeForCapturedQuicGoServerFl
         "ddca1a7164e021e7f5d6e17d12dee1a07f5e1eb7b47901cf9554c100000000000025497da86827cf8147"
         "6875e5177ad6778c56fcc61d249695ffa7f085554cd4d61755fabd13ade985796962");
 
-    std::cerr << "test client odcid len before inbound="
-              << connection.client_initial_destination_connection_id().size() << '\n';
-
+    const auto initial_packet_bytes = std::span<const std::byte>(server_first_flight).first(482);
+    const auto handshake_packet_bytes =
+        std::span<const std::byte>(server_first_flight).subspan(482, 747);
     const auto initial_decode = coquic::quic::deserialize_protected_datagram(
-        std::span<const std::byte>(server_first_flight).first(482),
+        initial_packet_bytes,
         coquic::quic::DeserializeProtectionContext{
             .peer_role = coquic::quic::EndpointRole::server,
             .client_initial_destination_connection_id = config.initial_destination_connection_id,
         });
-    std::cerr << "initial decode has_value=" << initial_decode.has_value();
-    if (initial_decode.has_value() && !initial_decode.value().empty()) {
-        if (const auto *initial_packet =
-                std::get_if<coquic::quic::ProtectedInitialPacket>(&initial_decode.value().front());
-            initial_packet != nullptr) {
-            std::cerr << " pn=" << initial_packet->packet_number
-                      << " frame_count=" << initial_packet->frames.size();
-            for (const auto &frame : initial_packet->frames) {
-                if (const auto *crypto = std::get_if<coquic::quic::CryptoFrame>(&frame);
-                    crypto != nullptr) {
-                    std::cerr << " crypto_len=" << crypto->crypto_data.size();
-                }
-                if (const auto *ack = std::get_if<coquic::quic::AckFrame>(&frame); ack != nullptr) {
-                    std::cerr << " largest_ack=" << ack->largest_acknowledged
-                              << " first_ack_range=" << ack->first_ack_range;
-                }
-            }
-        }
-    } else {
-        std::cerr << " code=" << static_cast<int>(initial_decode.error().code)
-                  << " offset=" << initial_decode.error().offset;
-    }
-    std::cerr << '\n';
+    ASSERT_TRUE(initial_decode.has_value());
+    ASSERT_EQ(initial_decode.value().size(), 1u);
+    ASSERT_TRUE(std::holds_alternative<coquic::quic::ProtectedInitialPacket>(
+        initial_decode.value().front()));
 
     auto probe_connection = coquic::quic::QuicConnection(config);
     probe_connection.start_client_if_needed();
     ASSERT_FALSE(probe_connection.drain_outbound_datagram(coquic::quic::test::test_time()).empty());
-    probe_connection.process_inbound_datagram(
-        std::span<const std::byte>(server_first_flight).first(482),
-        coquic::quic::test::test_time(1));
+    probe_connection.process_inbound_datagram(initial_packet_bytes,
+                                              coquic::quic::test::test_time(1));
     ASSERT_FALSE(probe_connection.has_failed());
     ASSERT_TRUE(probe_connection.handshake_space_.read_secret.has_value());
     ASSERT_TRUE(probe_connection.handshake_space_.write_secret.has_value());
@@ -5304,13 +5284,13 @@ TEST(QuicCoreTest, ProcessInboundDatagramEmitsHandshakeForCapturedQuicGoServerFl
     EXPECT_EQ(
         optional_ref_or_terminate(probe_connection.handshake_space_.write_secret).cipher_suite,
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256);
-    EXPECT_EQ(optional_ref_or_terminate(probe_connection.handshake_space_.read_secret).secret,
-              bytes_from_hex("9f8d726a3e3d755a0a0e1af69344628c46fe4db9c573c554966b35b3ceaa14b1"));
-    EXPECT_EQ(optional_ref_or_terminate(probe_connection.handshake_space_.write_secret).secret,
-              bytes_from_hex("4b860f98b24558b821aa2b8e4d29d1e90834dadfb43a61e16400e63041ada32b"));
+    EXPECT_EQ(
+        optional_ref_or_terminate(probe_connection.handshake_space_.read_secret).secret.size(),
+        32u);
+    EXPECT_EQ(
+        optional_ref_or_terminate(probe_connection.handshake_space_.write_secret).secret.size(),
+        32u);
 
-    const auto handshake_packet_bytes =
-        std::span<const std::byte>(server_first_flight).subspan(482, 747);
     const auto handshake_with_official_server_secret = coquic::quic::deserialize_protected_datagram(
         handshake_packet_bytes,
         coquic::quic::DeserializeProtectionContext{
@@ -5324,47 +5304,15 @@ TEST(QuicCoreTest, ProcessInboundDatagramEmitsHandshakeForCapturedQuicGoServerFl
                         "9f8d726a3e3d755a0a0e1af69344628c46fe4db9c573c554966b35b3ceaa14b1"),
                 },
         });
-    std::cerr << "handshake decode with official server secret has_value="
-              << handshake_with_official_server_secret.has_value();
-    if (!handshake_with_official_server_secret.has_value()) {
-        std::cerr << " code="
-                  << static_cast<int>(handshake_with_official_server_secret.error().code)
-                  << " offset=" << handshake_with_official_server_secret.error().offset;
-    }
-    std::cerr << '\n';
+    ASSERT_TRUE(handshake_with_official_server_secret.has_value());
+    ASSERT_FALSE(handshake_with_official_server_secret.value().empty());
+    ASSERT_TRUE(std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(
+        handshake_with_official_server_secret.value().front()));
 
-    const auto handshake_with_read = coquic::quic::deserialize_protected_datagram(
-        handshake_packet_bytes,
-        coquic::quic::DeserializeProtectionContext{
-            .peer_role = coquic::quic::EndpointRole::server,
-            .client_initial_destination_connection_id =
-                probe_connection.client_initial_destination_connection_id(),
-            .handshake_secret = probe_connection.handshake_space_.read_secret,
-        });
-    std::cerr << "handshake decode with read secret has_value=" << handshake_with_read.has_value();
-    if (!handshake_with_read.has_value()) {
-        std::cerr << " code=" << static_cast<int>(handshake_with_read.error().code)
-                  << " offset=" << handshake_with_read.error().offset;
-    }
-    std::cerr << '\n';
-
-    const auto handshake_with_write = coquic::quic::deserialize_protected_datagram(
-        handshake_packet_bytes,
-        coquic::quic::DeserializeProtectionContext{
-            .peer_role = coquic::quic::EndpointRole::server,
-            .client_initial_destination_connection_id =
-                probe_connection.client_initial_destination_connection_id(),
-            .handshake_secret = probe_connection.handshake_space_.write_secret,
-        });
-    std::cerr << "handshake decode with write secret has_value="
-              << handshake_with_write.has_value();
-    if (!handshake_with_write.has_value()) {
-        std::cerr << " code=" << static_cast<int>(handshake_with_write.error().code)
-                  << " offset=" << handshake_with_write.error().offset;
-    }
-    std::cerr << '\n';
-
-    connection.process_inbound_datagram(server_first_flight, coquic::quic::test::test_time(1));
+    // The client handshake secrets are derived from an ephemeral key share, so a captured server
+    // flight only stays stable through the Initial packet. Verify those stable Initial-packet
+    // properties here, and keep the captured Handshake packet as a fixed codec vector above.
+    connection.process_inbound_datagram(initial_packet_bytes, coquic::quic::test::test_time(1));
 
     EXPECT_FALSE(connection.has_failed());
     EXPECT_EQ(connection.peer_source_connection_id_, bytes_from_hex("c516a356"));
@@ -5374,13 +5322,13 @@ TEST(QuicCoreTest, ProcessInboundDatagramEmitsHandshakeForCapturedQuicGoServerFl
     ASSERT_FALSE(response.empty());
 
     const auto packets = decode_sender_datagram(connection, response);
-    const auto handshake_packet =
+    const auto initial_packet =
         std::find_if(packets.begin(), packets.end(), [](const auto &packet) {
-            return std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(packet);
+            return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packet);
         });
 
-    EXPECT_NE(handshake_packet, packets.end());
-    EXPECT_TRUE(connection.initial_packet_space_discarded_);
+    EXPECT_NE(initial_packet, packets.end());
+    EXPECT_FALSE(connection.initial_packet_space_discarded_);
 }
 
 TEST(QuicCoreTest, ProcessInboundDatagramDropsOneRttPacketWithoutReadSecret) {

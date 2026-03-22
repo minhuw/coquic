@@ -85,6 +85,7 @@
           runHook preInstall
           make install_sw
           mkdir -p $out/etc/ssl
+          install -Dm644 apps/openssl.cnf $out/etc/ssl/openssl.cnf
           mkdir -p $dev
           mv $out/include $dev/include
           runHook postInstall
@@ -122,6 +123,7 @@
           runHook preInstall
           make install_sw
           mkdir -p $out/etc/ssl
+          install -Dm644 apps/openssl.cnf $out/etc/ssl/openssl.cnf
           mkdir -p $dev
           mv $out/include $dev/include
           runHook postInstall

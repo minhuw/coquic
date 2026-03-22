@@ -32,6 +32,7 @@ struct PacketSpaceState {
     ReliableReceiveBuffer receive_crypto;
     ReceivedPacketHistory received_packets;
     std::map<std::uint64_t, SentPacketRecord> sent_packets;
+    std::map<std::uint64_t, SentPacketRecord> declared_lost_packets;
     PacketSpaceRecovery recovery;
     std::optional<SentPacketRecord> pending_probe_packet;
     std::optional<QuicCoreTimePoint> pending_ack_deadline;

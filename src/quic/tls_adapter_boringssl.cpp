@@ -216,6 +216,11 @@ COQUIC_NO_PROFILE bool configure_ctx_failed(SSL_CTX *ctx, const SSL_QUIC_METHOD 
            SSL_CTX_set_quic_method(ctx, quic_method) != 1;
 }
 
+COQUIC_NO_PROFILE bool
+tls13_cipher_suites_failed(std::span<const CipherSuite> allowed_tls_cipher_suites) {
+    return !allowed_tls_cipher_suites.empty();
+}
+
 COQUIC_NO_PROFILE bool verify_paths_failed(SSL_CTX *ctx) {
     return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_verify_paths) ||
            SSL_CTX_set_default_verify_paths(ctx) != 1;
@@ -479,6 +484,12 @@ class TlsAdapter::Impl {
         }
 
         if (configure_ctx_failed(ctx_.get(), &kQuicMethod)) {
+            sticky_error_ =
+                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
+            return;
+        }
+
+        if (tls13_cipher_suites_failed(config_.allowed_tls_cipher_suites)) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;

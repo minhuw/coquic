@@ -41,7 +41,8 @@ constexpr std::uint32_t kVersionNegotiationVersion = 0;
 constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
-    "[--testcase handshake|transfer|multiconnect] [--requests URLS] [--document-root PATH] "
+    "[--testcase handshake|transfer|multiconnect|chacha20] [--requests URLS] "
+    "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
     "[--server-name NAME] [--verify-peer]";
 
@@ -143,6 +144,9 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
     }
     if (value == "multiconnect") {
         return QuicHttp09Testcase::multiconnect;
+    }
+    if (value == "chacha20") {
+        return QuicHttp09Testcase::chacha20;
     }
     return std::nullopt;
 }
@@ -294,6 +298,7 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
         .server_name = config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),
         .identity = std::move(identity),
+        .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(config.testcase),
     };
 }
 
@@ -1406,6 +1411,7 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
         .server_name = config.server_name.empty() ? "localhost" : config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),
         .transport = http09_client_transport_for_testcase(config.testcase),
+        .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(config.testcase),
     };
     return core;
 }

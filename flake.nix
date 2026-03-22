@@ -46,6 +46,16 @@
         rev = "openssl-${quictlsVersion}";
         hash = "sha256-kBPwldTJbJSuvBVylJNcLSJvF/Hbqh0mfT4Ub5Xc6dk=";
       };
+      quictlsMuslAsyncPatch = pkgs.writeText "quictls-musl-async-posix.patch" ''
+        diff --git a/crypto/async/arch/async_posix.h b/crypto/async/arch/async_posix.h
+        --- a/crypto/async/arch/async_posix.h
+        +++ b/crypto/async/arch/async_posix.h
+        @@ -13,4 +13,4 @@
+         #if defined(OPENSSL_SYS_UNIX) \
+             && defined(OPENSSL_THREADS) && !defined(OPENSSL_NO_ASYNC) \
+        -    && !defined(__ANDROID__) && !defined(__OpenBSD__)
+        +    && !defined(__ANDROID__) && !defined(__OpenBSD__) && 0
+      '';
       quictlsStatic = llvmPkgs.libcxxStdenv.mkDerivation {
         pname = "quictls-static";
         version = quictlsVersion;
@@ -84,6 +94,8 @@
         pname = "quictls-musl-static";
         version = quictlsVersion;
         src = quictlsSrc;
+        # Match the current nixpkgs musl quictls workaround with an explicit patch.
+        patches = [ quictlsMuslAsyncPatch ];
         outputs = [
           "out"
           "dev"
@@ -94,9 +106,6 @@
         postPatch = ''
           patchShebangs Configure config
           substituteInPlace config --replace '/usr/bin/env' '${pkgs.coreutils}/bin/env'
-          substituteInPlace crypto/async/arch/async_posix.h \
-            --replace '!defined(__ANDROID__) && !defined(__OpenBSD__)' \
-                      '!defined(__ANDROID__) && !defined(__OpenBSD__) && 0'
         '';
         configurePhase = ''
           runHook preConfigure

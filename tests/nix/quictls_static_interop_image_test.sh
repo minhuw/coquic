@@ -4,6 +4,18 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
+for tool in docker file nix; do
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    echo "error: required tool not found: ${tool}" >&2
+    exit 1
+  fi
+done
+
+if ! docker cp --help 2>&1 | grep -q -- '--follow-link'; then
+  echo "error: docker cp does not support -L/--follow-link" >&2
+  exit 1
+fi
+
 nix --option eval-cache false build .#interop-image-quictls >/dev/null
 
 image_tar="$(nix path-info .#interop-image-quictls)"

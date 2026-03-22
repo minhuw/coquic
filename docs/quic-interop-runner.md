@@ -87,21 +87,22 @@ Build the canonical quictls interop runner image tarball (musl-linked static
 `coquic` endpoint image on the simulator base):
 
 ```bash
-nix build .#interop-image-quictls
+nix build .#interop-image-quictls-musl
 ```
 
-`.#interop-image` is kept as a stable alias to the same image output.
+`.#interop-image` and `.#interop-image-quictls` are kept as aliases to the same
+image output.
 
 Load it into Docker:
 
 ```bash
-docker load -i "$(nix path-info .#interop-image-quictls)"
+docker load -i "$(nix path-info .#interop-image-quictls-musl)"
 ```
 
 The resulting image tag is:
 
 ```bash
-coquic-interop:quictls
+coquic-interop:quictls-musl
 ```
 
 Build and load the boringssl image the same way:
@@ -138,34 +139,24 @@ nix build .#coquic-boringssl-musl
 nix develop .#boringssl-musl
 ```
 
-`chacha20` continues to route through the `quictls` interop image
-(`.#interop-image-quictls`) in the checked-in official runner wrapper. Our
-current `coquic` BoringSSL backend/integration in
-`coquic-interop:boringssl-musl` does not expose TLS 1.3 cipher-suite
-selection controls, so it cannot reliably advertise a ChaCha20-only client
-offer.
+The checked-in official runner wrapper always builds and loads the musl-linked
+quictls image (`.#interop-image-quictls-musl` /
+`coquic-interop:quictls-musl`) for interop testing. That keeps the CI and local
+official-runner path on a single image regardless of testcase selection,
+including `chacha20`.
 
-## Local quic-go Smoke Matrix
+## Official Runner Smoke Matrix
 
-Run the checked-in mixed-image smoke matrix against `quic-go` with:
+Run the checked-in official runner wrapper against `quic-go` with:
 
 ```bash
-bash tests/nix/quicgo_interop_smoke_test.sh
+bash tests/nix/interop_runner_test.sh
 ```
 
-That script builds and loads `coquic-interop:boringssl-musl`, pulls
-`martenseemann/quic-go-interop:latest`, and runs the four currently supported
-cases:
-
-- `quic-go` client -> `coquic` server: `handshake`, `transfer`
-- `coquic` client -> `quic-go` server: `handshake`, `transfer`
-
-When `INTEROP_TESTCASES` includes `chacha20`, the checked-in official runner
-wrapper switches to `coquic-interop:quictls` / `.#interop-image-quictls`
-automatically so the client can offer a ChaCha20-only TLS 1.3 cipher suite.
-
-The separate GitHub Actions workflow in `.github/workflows/interop.yml` calls
-the same script.
+That script builds and loads `coquic-interop:quictls-musl`, pulls the pinned
+official `quic-go`, simulator, and iperf images, and runs the requested
+testcases in both directions. The separate GitHub Actions workflow in
+`.github/workflows/interop.yml` calls the same script.
 
 The Nix-native images are built with `dockerTools.buildLayeredImage`. They
 embed the `coquic` package closure plus the runner wrapper and vendored

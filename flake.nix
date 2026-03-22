@@ -482,7 +482,7 @@
       boringsslMuslPackage = mkCoquicPackage boringsslMuslProfile;
       quictlsMuslImage = pkgs.dockerTools.buildLayeredImage {
         name = "coquic-interop";
-        tag = "quictls";
+        tag = "quictls-musl";
         fromImage = simulatorEndpointBase;
         contents = [
           (mkOfficialEndpointOverlay {
@@ -598,6 +598,7 @@
         coquic-boringssl = boringsslPackage;
         coquic-boringssl-musl = boringsslMuslPackage;
         interop-image = quictlsMuslImage;
+        interop-image-quictls-musl = quictlsMuslImage;
         interop-image-quictls = quictlsMuslImage;
         interop-image-boringssl = boringsslImage;
         interop-image-boringssl-musl = boringsslMuslImage;

@@ -14,16 +14,8 @@ readonly log_root="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
 readonly runner_repo_url="https://github.com/quic-interop/quic-interop-runner"
 readonly runner_dir="$(mktemp -d "${TMPDIR:-/tmp}/coquic-interop-runner.XXXXXX")"
 readonly runner_network_pattern='interop-runner.*_(leftnet|rightnet)$'
-
-coquic_image_default="coquic-interop:boringssl-musl"
-coquic_package_default="interop-image-boringssl-musl"
-if [[ ",${interop_testcases}," == *",chacha20,"* ]]; then
-  coquic_image_default="coquic-interop:quictls"
-  coquic_package_default="interop-image-quictls"
-fi
-
-readonly coquic_image="${INTEROP_COQUIC_IMAGE:-${coquic_image_default}}"
-readonly coquic_package="${INTEROP_COQUIC_PACKAGE:-${coquic_package_default}}"
+readonly coquic_image="${INTEROP_COQUIC_IMAGE:-coquic-interop:quictls-musl}"
+readonly coquic_package="${INTEROP_COQUIC_PACKAGE:-interop-image-quictls-musl}"
 
 cleanup() {
   cleanup_runner_state

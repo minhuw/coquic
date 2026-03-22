@@ -22,11 +22,8 @@ required_fragments = [
     '${direction_log_dir}/${server}_${client}/${testcase}',
     'official runner results file missing',
     'requested testcase did not succeed',
-    'if [[ ",${interop_testcases}," == *",chacha20,"* ]]; then',
-    'coquic_image_default="coquic-interop:quictls"',
-    'coquic_package_default="interop-image-quictls"',
-    'readonly coquic_image="${INTEROP_COQUIC_IMAGE:-${coquic_image_default}}"',
-    'readonly coquic_package="${INTEROP_COQUIC_PACKAGE:-${coquic_package_default}}"',
+    'readonly coquic_image="${INTEROP_COQUIC_IMAGE:-coquic-interop:quictls-musl}"',
+    'readonly coquic_package="${INTEROP_COQUIC_PACKAGE:-interop-image-quictls-musl}"',
     'nix --option eval-cache false build ".#${coquic_package}"',
     'docker load -i "$(nix path-info ".#${coquic_package}")" >/dev/null',
 ]
@@ -34,4 +31,16 @@ required_fragments = [
 missing = [fragment for fragment in required_fragments if fragment not in script]
 if missing:
     raise SystemExit(f"official interop wrapper missing fragments: {missing!r}")
+
+forbidden_fragments = [
+    'if [[ ",${interop_testcases}," == *",chacha20,"* ]]; then',
+    'coquic-interop:boringssl-musl',
+    'interop-image-boringssl-musl',
+]
+
+present_forbidden = [fragment for fragment in forbidden_fragments if fragment in script]
+if present_forbidden:
+    raise SystemExit(
+        f"official interop wrapper still contains deprecated fragments: {present_forbidden!r}"
+    )
 PY

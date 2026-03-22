@@ -16,9 +16,9 @@ if ! docker cp --help 2>&1 | grep -q -- '--follow-link'; then
   exit 1
 fi
 
-nix --option eval-cache false build .#interop-image-quictls >/dev/null
+nix --option eval-cache false build .#interop-image-quictls-musl >/dev/null
 
-image_tar="$(nix path-info .#interop-image-quictls)"
+image_tar="$(nix path-info .#interop-image-quictls-musl)"
 tmpdir="$(mktemp -d)"
 cleanup() {
   rm -rf "${tmpdir}"
@@ -27,8 +27,8 @@ cleanup() {
 trap cleanup EXIT
 
 docker load -i "${image_tar}" >/dev/null
-binary_target="$(docker run --rm --entrypoint /bin/sh coquic-interop:quictls -lc 'readlink -f /usr/local/bin/coquic')"
-cid="$(docker create coquic-interop:quictls)"
+binary_target="$(docker run --rm --entrypoint /bin/sh coquic-interop:quictls-musl -lc 'readlink -f /usr/local/bin/coquic')"
+cid="$(docker create coquic-interop:quictls-musl)"
 docker cp -L "${cid}:/usr/local/bin/coquic" "${tmpdir}/coquic"
 
 echo "${binary_target}"

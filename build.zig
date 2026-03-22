@@ -86,6 +86,25 @@ fn tlsLinkage(b: *std.Build) []const u8 {
     return requireEnv(b, "COQUIC_TLS_LINKAGE");
 }
 
+fn validateTlsConfiguration(tls_backend: []const u8, tls_linkage: []const u8) void {
+    const backend_supported =
+        std.mem.eql(u8, tls_backend, "quictls") or std.mem.eql(u8, tls_backend, "boringssl");
+    if (!backend_supported)
+        std.debug.panic("unsupported tls_backend {s}", .{tls_backend});
+
+    const linkage_supported =
+        std.mem.eql(u8, tls_linkage, "static") or std.mem.eql(u8, tls_linkage, "shared");
+    if (!linkage_supported)
+        std.debug.panic("unsupported tls_linkage {s}", .{tls_linkage});
+
+    if (std.mem.eql(u8, tls_backend, "boringssl") and std.mem.eql(u8, tls_linkage, "shared")) {
+        std.debug.panic(
+            "unsupported TLS configuration: tls_backend=boringssl does not support tls_linkage=shared (use tls_linkage=static or tls_backend=quictls)",
+            .{},
+        );
+    }
+}
+
 fn addProjectLibrary(
     b: *std.Build,
     name: []const u8,
@@ -146,16 +165,13 @@ fn linkTlsBackend(
     tls_lib_dir: []const u8,
     tls_linkage: []const u8,
 ) void {
-    if (!std.mem.eql(u8, tls_backend, "quictls") and !std.mem.eql(u8, tls_backend, "boringssl"))
-        std.debug.panic("unsupported tls_backend {s}", .{tls_backend});
+    validateTlsConfiguration(tls_backend, tls_linkage);
 
     const lib_ext =
         if (std.mem.eql(u8, tls_linkage, "static"))
             "a"
-        else if (std.mem.eql(u8, tls_linkage, "shared"))
-            "so"
         else
-            std.debug.panic("unsupported tls_linkage {s}", .{tls_linkage});
+            "so";
 
     compile.addObjectFile(.{
         .cwd_relative = b.pathJoin(&.{ tls_lib_dir, b.fmt("libssl.{s}", .{lib_ext}) }),
@@ -228,9 +244,10 @@ pub fn build(b: *std.Build) void {
     const coverage_spdlog_cpp_flags =
         withSpdlogFlags(b, coverage_cpp_flags, spdlog_shared);
     const gtest_root = requireEnv(b, "GTEST_SOURCE_DIR");
+    const tls_linkage = tlsLinkage(b);
+    validateTlsConfiguration(tls_backend, tls_linkage);
     const tls_include_dir = tlsIncludeDir(b, tls_backend);
     const tls_lib_dir = tlsLibDir(b, tls_backend);
-    const tls_linkage = tlsLinkage(b);
     const spdlog_include_dir = requireEnv(b, "SPDLOG_INCLUDE_DIR");
     const fmt_include_dir = requireEnv(b, "FMT_INCLUDE_DIR");
     const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");

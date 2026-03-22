@@ -15,11 +15,18 @@ cleanup() {
 trap cleanup EXIT
 
 docker load -i "${image_tar}" >/dev/null
+binary_target="$(docker run --rm --entrypoint /bin/sh coquic-interop:quictls -lc 'readlink -f /usr/local/bin/coquic')"
 cid="$(docker create coquic-interop:quictls)"
 docker cp -L "${cid}:/usr/local/bin/coquic" "${tmpdir}/coquic"
 
+echo "${binary_target}"
 file_output="$(file "${tmpdir}/coquic")"
 echo "${file_output}"
+
+if [[ "${binary_target}" != *"coquic-quictls-musl"* ]]; then
+  echo "expected /usr/local/bin/coquic to resolve to the musl package, got: ${binary_target}" >&2
+  exit 1
+fi
 
 if ! grep -q "statically linked" <<<"${file_output}"; then
   echo "expected /usr/local/bin/coquic to be statically linked" >&2

@@ -8,7 +8,7 @@ The current slice targets:
 - `chacha20`
 
 It does not yet target lossy recovery, congestion-control competition, or full
-interop-runner scenario coverage beyond those two cases.
+interop-runner scenario coverage beyond those three cases.
 
 ## Runner Contract
 
@@ -83,7 +83,8 @@ nix develop .#boringssl
 
 ## Container Image
 
-Build the canonical quictls interop runner image tarball (musl static path):
+Build the canonical quictls interop runner image tarball (musl-linked static
+`coquic` endpoint image on the simulator base):
 
 ```bash
 nix build .#interop-image-quictls
@@ -138,10 +139,11 @@ nix develop .#boringssl-musl
 ```
 
 `chacha20` continues to route through the `quictls` interop image
-(`.#interop-image-quictls`) in the checked-in official runner wrapper. The
-BoringSSL toolchain used by `coquic-interop:boringssl-musl` does not expose
-public TLS 1.3 cipher-suite controls, so it cannot reliably advertise a
-ChaCha20-only client offer.
+(`.#interop-image-quictls`) in the checked-in official runner wrapper. Our
+current `coquic` BoringSSL backend/integration in
+`coquic-interop:boringssl-musl` does not expose TLS 1.3 cipher-suite
+selection controls, so it cannot reliably advertise a ChaCha20-only client
+offer.
 
 ## Local quic-go Smoke Matrix
 

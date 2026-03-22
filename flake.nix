@@ -478,10 +478,6 @@
       quictlsMuslPackage = mkCoquicPackage quictlsMuslProfile;
       boringsslPackage = mkCoquicPackage boringsslProfile;
       boringsslMuslPackage = mkCoquicPackage boringsslMuslProfile;
-      quictlsGlibcImage = mkInteropImage {
-        profile = quictlsProfile;
-        coquicPackage = quictlsPackage;
-      };
       quictlsMuslImage = pkgs.dockerTools.buildLayeredImage {
         name = "coquic-interop";
         tag = "quictls";

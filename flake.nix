@@ -39,7 +39,46 @@
         sha256 = "sha256-i2UnYhKaM4jn0Xnmnd6R7JAyXYc/88npPNBsON4of3w=";
       };
       projectSrc = lib.cleanSource ./.;
-      quictls = pkgs.quictls;
+      quictlsVersion = "3.3.0-quic1";
+      quictlsSrc = pkgs.fetchFromGitHub {
+        owner = "quictls";
+        repo = "openssl";
+        rev = "openssl-${quictlsVersion}";
+        hash = "sha256-kBPwldTJbJSuvBVylJNcLSJvF/Hbqh0mfT4Ub5Xc6dk=";
+      };
+      quictlsStatic = llvmPkgs.libcxxStdenv.mkDerivation {
+        pname = "quictls-static";
+        version = quictlsVersion;
+        src = quictlsSrc;
+        outputs = [
+          "out"
+          "dev"
+        ];
+        setOutputFlags = false;
+        nativeBuildInputs = [ pkgs.perl ];
+        postPatch = ''
+          patchShebangs Configure config
+          substituteInPlace config --replace '/usr/bin/env' '${pkgs.coreutils}/bin/env'
+        '';
+        configurePhase = ''
+          runHook preConfigure
+          ./Configure linux-x86_64 \
+            no-shared \
+            no-tests \
+            --prefix=$out \
+            --libdir=lib \
+            --openssldir=$out/etc/ssl
+          runHook postConfigure
+        '';
+        enableParallelBuilding = true;
+        installPhase = ''
+          runHook preInstall
+          make install_sw
+          mkdir -p $dev
+          mv $out/include $dev/include
+          runHook postInstall
+        '';
+      };
       boringssl = pkgs.boringssl;
       fmt = (pkgs.fmt.override {
         stdenv = llvmPkgs.libcxxStdenv;
@@ -111,6 +150,8 @@
           name,
           tlsBackend,
           tlsPackage,
+          tlsLinkage,
+          tlsExtraLinkFlags ? [ ],
           spdlogPackage,
           fmtPackage,
           zigTarget ? null,
@@ -122,6 +163,8 @@
             name
             tlsBackend
             tlsPackage
+            tlsLinkage
+            tlsExtraLinkFlags
             spdlogPackage
             fmtPackage
             zigTarget
@@ -136,14 +179,18 @@
       quictlsProfile = mkProfile {
         name = "quictls";
         tlsBackend = "quictls";
-        tlsPackage = quictls;
-        spdlogPackage = spdlog;
-        fmtPackage = fmt;
+        tlsPackage = quictlsStatic;
+        tlsLinkage = "static";
+        spdlogPackage = spdlogStatic;
+        fmtPackage = fmtStatic;
+        spdlogShared = false;
+        pkgConfigAllStatic = true;
       };
       boringsslProfile = mkProfile {
         name = "boringssl";
         tlsBackend = "boringssl";
         tlsPackage = boringssl;
+        tlsLinkage = "static";
         spdlogPackage = spdlogStatic;
         fmtPackage = fmtStatic;
         spdlogShared = false;
@@ -152,6 +199,7 @@
         name = "boringssl-musl";
         tlsBackend = "boringssl";
         tlsPackage = staticPkgs.boringssl;
+        tlsLinkage = "static";
         spdlogPackage = muslSpdlogStatic;
         fmtPackage = muslFmtStatic;
         zigTarget = "x86_64-linux-musl";
@@ -163,6 +211,7 @@
         export GTEST_SOURCE_DIR="${pkgs.gtest.src}"
         export GTEST_LIB_DIR="${pkgs.gtest}/lib"
         export COQUIC_TLS_BACKEND="${profile.tlsBackend}"
+        export COQUIC_TLS_LINKAGE="${profile.tlsLinkage}"
         ${
           if profile.tlsBackend == "quictls" then
             ''

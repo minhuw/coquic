@@ -82,6 +82,10 @@ fn tlsLibDir(b: *std.Build, tls_backend: []const u8) []const u8 {
     std.debug.panic("unsupported tls_backend {s}", .{tls_backend});
 }
 
+fn tlsLinkage(b: *std.Build) []const u8 {
+    return requireEnv(b, "COQUIC_TLS_LINKAGE");
+}
+
 fn addProjectLibrary(
     b: *std.Build,
     name: []const u8,
@@ -140,28 +144,25 @@ fn linkTlsBackend(
     compile: *std.Build.Step.Compile,
     tls_backend: []const u8,
     tls_lib_dir: []const u8,
+    tls_linkage: []const u8,
 ) void {
-    if (std.mem.eql(u8, tls_backend, "quictls")) {
-        compile.addObjectFile(.{
-            .cwd_relative = b.pathJoin(&.{ tls_lib_dir, "libssl.so" }),
-        });
-        compile.addObjectFile(.{
-            .cwd_relative = b.pathJoin(&.{ tls_lib_dir, "libcrypto.so" }),
-        });
-        return;
-    }
+    if (!std.mem.eql(u8, tls_backend, "quictls") and !std.mem.eql(u8, tls_backend, "boringssl"))
+        std.debug.panic("unsupported tls_backend {s}", .{tls_backend});
 
-    if (std.mem.eql(u8, tls_backend, "boringssl")) {
-        compile.addObjectFile(.{
-            .cwd_relative = b.pathJoin(&.{ tls_lib_dir, "libssl.a" }),
-        });
-        compile.addObjectFile(.{
-            .cwd_relative = b.pathJoin(&.{ tls_lib_dir, "libcrypto.a" }),
-        });
-        return;
-    }
+    const lib_ext =
+        if (std.mem.eql(u8, tls_linkage, "static"))
+            "a"
+        else if (std.mem.eql(u8, tls_linkage, "shared"))
+            "so"
+        else
+            std.debug.panic("unsupported tls_linkage {s}", .{tls_linkage});
 
-    std.debug.panic("unsupported tls_backend {s}", .{tls_backend});
+    compile.addObjectFile(.{
+        .cwd_relative = b.pathJoin(&.{ tls_lib_dir, b.fmt("libssl.{s}", .{lib_ext}) }),
+    });
+    compile.addObjectFile(.{
+        .cwd_relative = b.pathJoin(&.{ tls_lib_dir, b.fmt("libcrypto.{s}", .{lib_ext}) }),
+    });
 }
 
 fn linkSpdlog(compile: *std.Build.Step.Compile) void {
@@ -229,6 +230,7 @@ pub fn build(b: *std.Build) void {
     const gtest_root = requireEnv(b, "GTEST_SOURCE_DIR");
     const tls_include_dir = tlsIncludeDir(b, tls_backend);
     const tls_lib_dir = tlsLibDir(b, tls_backend);
+    const tls_linkage = tlsLinkage(b);
     const spdlog_include_dir = requireEnv(b, "SPDLOG_INCLUDE_DIR");
     const fmt_include_dir = requireEnv(b, "FMT_INCLUDE_DIR");
     const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");
@@ -277,7 +279,7 @@ pub fn build(b: *std.Build) void {
         .flags = cpp_flags,
     });
     exe.linkLibrary(project_lib);
-    linkTlsBackend(b, exe, tls_backend, tls_lib_dir);
+    linkTlsBackend(b, exe, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(exe);
     exe.linkLibCpp();
     b.installArtifact(exe);
@@ -300,7 +302,7 @@ pub fn build(b: *std.Build) void {
         gtest_root,
         default_test_files,
     );
-    linkTlsBackend(b, smoke, tls_backend, tls_lib_dir);
+    linkTlsBackend(b, smoke, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(smoke);
     const smoke_run = b.addRunArtifact(smoke);
     if (b.args) |args| {
@@ -330,7 +332,7 @@ pub fn build(b: *std.Build) void {
         gtest_root,
         default_test_files,
     );
-    linkTlsBackend(b, coverage_test, tls_backend, tls_lib_dir);
+    linkTlsBackend(b, coverage_test, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(coverage_test);
     coverage_test.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     coverage_test.forceUndefinedSymbol("__llvm_profile_runtime");

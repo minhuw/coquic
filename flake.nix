@@ -46,39 +46,11 @@
         rev = "openssl-${quictlsVersion}";
         hash = "sha256-kBPwldTJbJSuvBVylJNcLSJvF/Hbqh0mfT4Ub5Xc6dk=";
       };
-      quictlsStatic = llvmPkgs.libcxxStdenv.mkDerivation {
-        pname = "quictls-static";
+      quictlsStatic = (pkgs.quictls.override { static = true; }).overrideAttrs (old: {
         version = quictlsVersion;
         src = quictlsSrc;
-        outputs = [
-          "out"
-          "dev"
-        ];
-        setOutputFlags = false;
-        nativeBuildInputs = [ pkgs.perl ];
-        postPatch = ''
-          patchShebangs Configure config
-          substituteInPlace config --replace '/usr/bin/env' '${pkgs.coreutils}/bin/env'
-        '';
-        configurePhase = ''
-          runHook preConfigure
-          ./Configure linux-x86_64 \
-            no-shared \
-            no-tests \
-            --prefix=$out \
-            --libdir=lib \
-            --openssldir=$out/etc/ssl
-          runHook postConfigure
-        '';
-        enableParallelBuilding = true;
-        installPhase = ''
-          runHook preInstall
-          make install_sw
-          mkdir -p $dev
-          mv $out/include $dev/include
-          runHook postInstall
-        '';
-      };
+        configureFlags = (old.configureFlags or [ ]) ++ [ "no-tests" ];
+      });
       boringssl = pkgs.boringssl;
       fmt = (pkgs.fmt.override {
         stdenv = llvmPkgs.libcxxStdenv;
@@ -151,7 +123,6 @@
           tlsBackend,
           tlsPackage,
           tlsLinkage,
-          tlsExtraLinkFlags ? [ ],
           spdlogPackage,
           fmtPackage,
           zigTarget ? null,
@@ -164,7 +135,6 @@
             tlsBackend
             tlsPackage
             tlsLinkage
-            tlsExtraLinkFlags
             spdlogPackage
             fmtPackage
             zigTarget

@@ -1236,6 +1236,396 @@ TEST(QuicCoreTest, HandshakeRecoversWhenInitialFlightIsDropped) {
     EXPECT_TRUE(server.is_handshake_complete());
 }
 
+TEST(QuicCoreTest, ServerEmitsHandshakeCryptoAfterOutOfOrderClientInitialRecovery) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    const auto start =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto start_datagrams = coquic::quic::test::send_datagrams_from(start);
+    ASSERT_EQ(start_datagrams.size(), 1u);
+
+    const auto client_packets =
+        decode_sender_datagram(*client.connection_, start_datagrams.front());
+    ASSERT_EQ(client_packets.size(), 1u);
+    const auto *client_initial =
+        std::get_if<coquic::quic::ProtectedInitialPacket>(&client_packets.front());
+    ASSERT_NE(client_initial, nullptr);
+
+    std::size_t client_hello_size = 0;
+    for (const auto &frame : client_initial->frames) {
+        const auto *crypto = std::get_if<coquic::quic::CryptoFrame>(&frame);
+        if (crypto == nullptr) {
+            continue;
+        }
+
+        client_hello_size = std::max(client_hello_size, static_cast<std::size_t>(crypto->offset) +
+                                                            crypto->crypto_data.size());
+    }
+    ASSERT_GT(client_hello_size, 128u);
+
+    auto client_hello = std::vector<std::byte>(client_hello_size, std::byte{0x00});
+    for (const auto &frame : client_initial->frames) {
+        const auto *crypto = std::get_if<coquic::quic::CryptoFrame>(&frame);
+        if (crypto == nullptr) {
+            continue;
+        }
+
+        std::copy(crypto->crypto_data.begin(), crypto->crypto_data.end(),
+                  client_hello.begin() + static_cast<std::ptrdiff_t>(crypto->offset));
+    }
+
+    std::size_t prefix = 63u;
+    std::size_t gap = 4u;
+    std::size_t tail_offset = 1230u;
+    if (client_hello.size() <= tail_offset) {
+        prefix = std::min<std::size_t>(63u, client_hello.size() / 4u);
+        gap = 1u;
+        tail_offset = prefix + gap + ((client_hello.size() - (prefix + gap)) / 2u);
+    }
+    ASSERT_LT(prefix + gap, tail_offset);
+    ASSERT_LT(tail_offset, client_hello.size());
+
+    const auto slice_bytes = [&](std::size_t begin, std::size_t end) {
+        return std::vector<std::byte>(client_hello.begin() + static_cast<std::ptrdiff_t>(begin),
+                                      client_hello.begin() + static_cast<std::ptrdiff_t>(end));
+    };
+
+    coquic::quic::ProtectedInitialPacket first_initial{
+        .version = client_initial->version,
+        .destination_connection_id = client_initial->destination_connection_id,
+        .source_connection_id = client_initial->source_connection_id,
+        .token = client_initial->token,
+        .packet_number_length = client_initial->packet_number_length,
+        .packet_number = 0,
+        .frames =
+            {
+                coquic::quic::CryptoFrame{
+                    .offset = 0,
+                    .crypto_data = slice_bytes(0u, prefix),
+                },
+                coquic::quic::CryptoFrame{
+                    .offset = static_cast<std::uint64_t>(prefix + gap),
+                    .crypto_data = slice_bytes(prefix + gap, tail_offset),
+                },
+            },
+    };
+    coquic::quic::ProtectedInitialPacket second_initial{
+        .version = client_initial->version,
+        .destination_connection_id = client_initial->destination_connection_id,
+        .source_connection_id = client_initial->source_connection_id,
+        .token = client_initial->token,
+        .packet_number_length = client_initial->packet_number_length,
+        .packet_number = 1,
+        .frames =
+            {
+                coquic::quic::CryptoFrame{
+                    .offset = static_cast<std::uint64_t>(prefix),
+                    .crypto_data = slice_bytes(prefix, prefix + gap),
+                },
+                coquic::quic::CryptoFrame{
+                    .offset = static_cast<std::uint64_t>(tail_offset),
+                    .crypto_data = slice_bytes(tail_offset, client_hello.size()),
+                },
+            },
+    };
+
+    const auto pad_initial = [&](coquic::quic::ProtectedInitialPacket packet) {
+        auto encoded = coquic::quic::serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{packet},
+            coquic::quic::SerializeProtectionContext{
+                .local_role = client.connection_->config_.role,
+                .client_initial_destination_connection_id =
+                    client.connection_->client_initial_destination_connection_id(),
+                .handshake_secret = client.connection_->handshake_space_.write_secret,
+                .one_rtt_secret = client.connection_->application_space_.write_secret,
+                .one_rtt_key_phase = client.connection_->application_write_key_phase_,
+            });
+        EXPECT_TRUE(encoded.has_value());
+        if (!encoded.has_value()) {
+            return std::vector<std::byte>{};
+        }
+        if (encoded.value().size() < 1200u) {
+            packet.frames.emplace_back(coquic::quic::PaddingFrame{
+                .length = 1200u - encoded.value().size(),
+            });
+        }
+        auto padded = coquic::quic::serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{std::move(packet)},
+            coquic::quic::SerializeProtectionContext{
+                .local_role = client.connection_->config_.role,
+                .client_initial_destination_connection_id =
+                    client.connection_->client_initial_destination_connection_id(),
+                .handshake_secret = client.connection_->handshake_space_.write_secret,
+                .one_rtt_secret = client.connection_->application_space_.write_secret,
+                .one_rtt_key_phase = client.connection_->application_write_key_phase_,
+            });
+        EXPECT_TRUE(padded.has_value());
+        if (!padded.has_value()) {
+            return std::vector<std::byte>{};
+        }
+        return padded.value();
+    };
+
+    const auto second_initial_datagram = pad_initial(second_initial);
+    const auto server_after_second_initial =
+        server.advance(coquic::quic::QuicCoreInboundDatagram{second_initial_datagram},
+                       coquic::quic::test::test_time(1));
+    EXPECT_FALSE(server.has_failed());
+
+    const auto second_response_datagrams =
+        coquic::quic::test::send_datagrams_from(server_after_second_initial);
+    ASSERT_FALSE(second_response_datagrams.empty());
+    for (const auto &datagram : second_response_datagrams) {
+        const auto packets = decode_sender_datagram(*server.connection_, datagram);
+        for (const auto &packet : packets) {
+            const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packet);
+            if (initial == nullptr) {
+                continue;
+            }
+            for (const auto &frame : initial->frames) {
+                EXPECT_FALSE(std::holds_alternative<coquic::quic::CryptoFrame>(frame));
+            }
+        }
+    }
+
+    const auto first_initial_datagram = pad_initial(first_initial);
+    const auto server_after_first_initial =
+        server.advance(coquic::quic::QuicCoreInboundDatagram{first_initial_datagram},
+                       coquic::quic::test::test_time(2));
+    EXPECT_FALSE(server.has_failed());
+
+    const auto response_datagrams =
+        coquic::quic::test::send_datagrams_from(server_after_first_initial);
+    ASSERT_FALSE(response_datagrams.empty());
+
+    bool saw_initial_crypto = false;
+    bool saw_handshake_crypto = false;
+    for (const auto &datagram : response_datagrams) {
+        const auto packets = decode_sender_datagram(*server.connection_, datagram);
+        for (const auto &packet : packets) {
+            if (const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packet)) {
+                for (const auto &frame : initial->frames) {
+                    if (std::holds_alternative<coquic::quic::CryptoFrame>(frame)) {
+                        saw_initial_crypto = true;
+                    }
+                }
+                continue;
+            }
+
+            const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packet);
+            if (handshake == nullptr) {
+                continue;
+            }
+
+            for (const auto &frame : handshake->frames) {
+                if (std::holds_alternative<coquic::quic::CryptoFrame>(frame)) {
+                    saw_handshake_crypto = true;
+                }
+            }
+        }
+    }
+
+    EXPECT_TRUE(saw_initial_crypto);
+    EXPECT_TRUE(saw_handshake_crypto);
+}
+
+TEST(QuicCoreTest,
+     ServerEmitsHandshakeCryptoAfterOutOfOrderClientInitialRecoveryWithEmptyClientScid) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.source_connection_id = {};
+    client_config.server_name = "server4";
+
+    coquic::quic::QuicCore client(std::move(client_config));
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    const auto start =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto start_datagrams = coquic::quic::test::send_datagrams_from(start);
+    ASSERT_EQ(start_datagrams.size(), 1u);
+
+    const auto client_packets =
+        decode_sender_datagram(*client.connection_, start_datagrams.front());
+    ASSERT_EQ(client_packets.size(), 1u);
+    const auto *client_initial =
+        std::get_if<coquic::quic::ProtectedInitialPacket>(&client_packets.front());
+    ASSERT_NE(client_initial, nullptr);
+
+    std::size_t client_hello_size = 0;
+    for (const auto &frame : client_initial->frames) {
+        const auto *crypto = std::get_if<coquic::quic::CryptoFrame>(&frame);
+        if (crypto == nullptr) {
+            continue;
+        }
+
+        client_hello_size = std::max(client_hello_size, static_cast<std::size_t>(crypto->offset) +
+                                                            crypto->crypto_data.size());
+    }
+    ASSERT_GT(client_hello_size, 128u);
+
+    auto client_hello = std::vector<std::byte>(client_hello_size, std::byte{0x00});
+    for (const auto &frame : client_initial->frames) {
+        const auto *crypto = std::get_if<coquic::quic::CryptoFrame>(&frame);
+        if (crypto == nullptr) {
+            continue;
+        }
+
+        std::copy(crypto->crypto_data.begin(), crypto->crypto_data.end(),
+                  client_hello.begin() + static_cast<std::ptrdiff_t>(crypto->offset));
+    }
+
+    std::size_t prefix = 63u;
+    std::size_t gap = 4u;
+    std::size_t tail_offset = 1230u;
+    if (client_hello.size() <= tail_offset) {
+        prefix = std::min<std::size_t>(63u, client_hello.size() / 4u);
+        gap = 1u;
+        tail_offset = prefix + gap + ((client_hello.size() - (prefix + gap)) / 2u);
+    }
+    ASSERT_LT(prefix + gap, tail_offset);
+    ASSERT_LT(tail_offset, client_hello.size());
+
+    const auto slice_bytes = [&](std::size_t begin, std::size_t end) {
+        return std::vector<std::byte>(client_hello.begin() + static_cast<std::ptrdiff_t>(begin),
+                                      client_hello.begin() + static_cast<std::ptrdiff_t>(end));
+    };
+
+    coquic::quic::ProtectedInitialPacket delivered_packet_one{
+        .version = client_initial->version,
+        .destination_connection_id = client_initial->destination_connection_id,
+        .source_connection_id = client_initial->source_connection_id,
+        .token = client_initial->token,
+        .packet_number_length = client_initial->packet_number_length,
+        .packet_number = 1,
+        .frames =
+            {
+                coquic::quic::CryptoFrame{
+                    .offset = static_cast<std::uint64_t>(prefix),
+                    .crypto_data = slice_bytes(prefix, prefix + gap),
+                },
+                coquic::quic::CryptoFrame{
+                    .offset = static_cast<std::uint64_t>(tail_offset),
+                    .crypto_data = slice_bytes(tail_offset, client_hello.size()),
+                },
+            },
+    };
+    coquic::quic::ProtectedInitialPacket delivered_packet_two{
+        .version = client_initial->version,
+        .destination_connection_id = client_initial->destination_connection_id,
+        .source_connection_id = client_initial->source_connection_id,
+        .token = client_initial->token,
+        .packet_number_length = client_initial->packet_number_length,
+        .packet_number = 2,
+        .frames =
+            {
+                coquic::quic::CryptoFrame{
+                    .offset = static_cast<std::uint64_t>(prefix + gap),
+                    .crypto_data = slice_bytes(prefix + gap, tail_offset),
+                },
+                coquic::quic::CryptoFrame{
+                    .offset = 0,
+                    .crypto_data = slice_bytes(0u, prefix),
+                },
+            },
+    };
+
+    const auto pad_initial = [&](coquic::quic::ProtectedInitialPacket packet) {
+        auto encoded = coquic::quic::serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{packet},
+            coquic::quic::SerializeProtectionContext{
+                .local_role = client.connection_->config_.role,
+                .client_initial_destination_connection_id =
+                    client.connection_->client_initial_destination_connection_id(),
+                .handshake_secret = client.connection_->handshake_space_.write_secret,
+                .one_rtt_secret = client.connection_->application_space_.write_secret,
+                .one_rtt_key_phase = client.connection_->application_write_key_phase_,
+            });
+        EXPECT_TRUE(encoded.has_value());
+        if (!encoded.has_value()) {
+            return std::vector<std::byte>{};
+        }
+        if (encoded.value().size() < 1200u) {
+            packet.frames.emplace_back(coquic::quic::PaddingFrame{
+                .length = 1200u - encoded.value().size(),
+            });
+        }
+        auto padded = coquic::quic::serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{std::move(packet)},
+            coquic::quic::SerializeProtectionContext{
+                .local_role = client.connection_->config_.role,
+                .client_initial_destination_connection_id =
+                    client.connection_->client_initial_destination_connection_id(),
+                .handshake_secret = client.connection_->handshake_space_.write_secret,
+                .one_rtt_secret = client.connection_->application_space_.write_secret,
+                .one_rtt_key_phase = client.connection_->application_write_key_phase_,
+            });
+        EXPECT_TRUE(padded.has_value());
+        if (!padded.has_value()) {
+            return std::vector<std::byte>{};
+        }
+        return padded.value();
+    };
+
+    const auto first_datagram = pad_initial(delivered_packet_one);
+    const auto server_after_first = server.advance(
+        coquic::quic::QuicCoreInboundDatagram{first_datagram}, coquic::quic::test::test_time(1));
+    EXPECT_FALSE(server.has_failed());
+
+    const auto first_response_datagrams =
+        coquic::quic::test::send_datagrams_from(server_after_first);
+    ASSERT_FALSE(first_response_datagrams.empty());
+    for (const auto &datagram : first_response_datagrams) {
+        const auto packets = decode_sender_datagram(*server.connection_, datagram);
+        for (const auto &packet : packets) {
+            const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packet);
+            if (initial == nullptr) {
+                continue;
+            }
+            for (const auto &frame : initial->frames) {
+                EXPECT_FALSE(std::holds_alternative<coquic::quic::CryptoFrame>(frame));
+            }
+        }
+    }
+
+    const auto second_datagram = pad_initial(delivered_packet_two);
+    const auto server_after_second = server.advance(
+        coquic::quic::QuicCoreInboundDatagram{second_datagram}, coquic::quic::test::test_time(2));
+    EXPECT_FALSE(server.has_failed());
+
+    const auto response_datagrams = coquic::quic::test::send_datagrams_from(server_after_second);
+    ASSERT_FALSE(response_datagrams.empty());
+
+    bool saw_initial_crypto = false;
+    bool saw_handshake_crypto = false;
+    for (const auto &datagram : response_datagrams) {
+        const auto packets = decode_sender_datagram(*server.connection_, datagram);
+        for (const auto &packet : packets) {
+            if (const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packet)) {
+                for (const auto &frame : initial->frames) {
+                    if (std::holds_alternative<coquic::quic::CryptoFrame>(frame)) {
+                        saw_initial_crypto = true;
+                    }
+                }
+                continue;
+            }
+
+            const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packet);
+            if (handshake == nullptr) {
+                continue;
+            }
+
+            for (const auto &frame : handshake->frames) {
+                if (std::holds_alternative<coquic::quic::CryptoFrame>(frame)) {
+                    saw_handshake_crypto = true;
+                }
+            }
+        }
+    }
+
+    EXPECT_TRUE(saw_initial_crypto);
+    EXPECT_TRUE(saw_handshake_crypto);
+}
+
 TEST(QuicCoreTest, ApplicationDataIsRetransmittedAfterLoss) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
@@ -2220,6 +2610,206 @@ TEST(QuicCoreTest, ArmPtoProbeCoalescesHandshakeProbeWithInitialProbe) {
     EXPECT_TRUE(connection.handshake_space_.pending_probe_packet.has_value());
 }
 
+TEST(QuicCoreTest, ServerPtoProbeEmitsTwoDatagramsWhenInitialAndHandshakeAreInFlight) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.source_connection_id = {};
+    client_config.server_name = "server4";
+
+    coquic::quic::QuicCore client(std::move(client_config));
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    const auto start =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto start_datagrams = coquic::quic::test::send_datagrams_from(start);
+    ASSERT_EQ(start_datagrams.size(), 1u);
+
+    const auto client_packets =
+        decode_sender_datagram(*client.connection_, start_datagrams.front());
+    ASSERT_EQ(client_packets.size(), 1u);
+    const auto *client_initial =
+        std::get_if<coquic::quic::ProtectedInitialPacket>(&client_packets.front());
+    ASSERT_NE(client_initial, nullptr);
+
+    std::size_t client_hello_size = 0;
+    for (const auto &frame : client_initial->frames) {
+        const auto *crypto = std::get_if<coquic::quic::CryptoFrame>(&frame);
+        if (crypto == nullptr) {
+            continue;
+        }
+
+        client_hello_size = std::max(client_hello_size, static_cast<std::size_t>(crypto->offset) +
+                                                            crypto->crypto_data.size());
+    }
+    ASSERT_GT(client_hello_size, 128u);
+
+    auto client_hello = std::vector<std::byte>(client_hello_size, std::byte{0x00});
+    for (const auto &frame : client_initial->frames) {
+        const auto *crypto = std::get_if<coquic::quic::CryptoFrame>(&frame);
+        if (crypto == nullptr) {
+            continue;
+        }
+
+        std::copy(crypto->crypto_data.begin(), crypto->crypto_data.end(),
+                  client_hello.begin() + static_cast<std::ptrdiff_t>(crypto->offset));
+    }
+
+    std::size_t prefix = 63u;
+    std::size_t gap = 4u;
+    std::size_t tail_offset = 1230u;
+    if (client_hello.size() <= tail_offset) {
+        prefix = std::min<std::size_t>(63u, client_hello.size() / 4u);
+        gap = 1u;
+        tail_offset = prefix + gap + ((client_hello.size() - (prefix + gap)) / 2u);
+    }
+    ASSERT_LT(prefix + gap, tail_offset);
+    ASSERT_LT(tail_offset, client_hello.size());
+
+    const auto slice_bytes = [&](std::size_t begin, std::size_t end) {
+        return std::vector<std::byte>(client_hello.begin() + static_cast<std::ptrdiff_t>(begin),
+                                      client_hello.begin() + static_cast<std::ptrdiff_t>(end));
+    };
+
+    coquic::quic::ProtectedInitialPacket delivered_packet_one{
+        .version = client_initial->version,
+        .destination_connection_id = client_initial->destination_connection_id,
+        .source_connection_id = client_initial->source_connection_id,
+        .token = client_initial->token,
+        .packet_number_length = client_initial->packet_number_length,
+        .packet_number = 1,
+        .frames =
+            {
+                coquic::quic::CryptoFrame{
+                    .offset = static_cast<std::uint64_t>(prefix),
+                    .crypto_data = slice_bytes(prefix, prefix + gap),
+                },
+                coquic::quic::CryptoFrame{
+                    .offset = static_cast<std::uint64_t>(tail_offset),
+                    .crypto_data = slice_bytes(tail_offset, client_hello.size()),
+                },
+            },
+    };
+    coquic::quic::ProtectedInitialPacket delivered_packet_two{
+        .version = client_initial->version,
+        .destination_connection_id = client_initial->destination_connection_id,
+        .source_connection_id = client_initial->source_connection_id,
+        .token = client_initial->token,
+        .packet_number_length = client_initial->packet_number_length,
+        .packet_number = 2,
+        .frames =
+            {
+                coquic::quic::CryptoFrame{
+                    .offset = static_cast<std::uint64_t>(prefix + gap),
+                    .crypto_data = slice_bytes(prefix + gap, tail_offset),
+                },
+                coquic::quic::CryptoFrame{
+                    .offset = 0,
+                    .crypto_data = slice_bytes(0u, prefix),
+                },
+            },
+    };
+
+    const auto pad_initial = [&](coquic::quic::ProtectedInitialPacket packet) {
+        auto encoded = coquic::quic::serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{packet},
+            coquic::quic::SerializeProtectionContext{
+                .local_role = client.connection_->config_.role,
+                .client_initial_destination_connection_id =
+                    client.connection_->client_initial_destination_connection_id(),
+                .handshake_secret = client.connection_->handshake_space_.write_secret,
+                .one_rtt_secret = client.connection_->application_space_.write_secret,
+                .one_rtt_key_phase = client.connection_->application_write_key_phase_,
+            });
+        EXPECT_TRUE(encoded.has_value());
+        if (!encoded.has_value()) {
+            return std::vector<std::byte>{};
+        }
+        if (encoded.value().size() < 1200u) {
+            packet.frames.emplace_back(coquic::quic::PaddingFrame{
+                .length = 1200u - encoded.value().size(),
+            });
+        }
+        auto padded = coquic::quic::serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{std::move(packet)},
+            coquic::quic::SerializeProtectionContext{
+                .local_role = client.connection_->config_.role,
+                .client_initial_destination_connection_id =
+                    client.connection_->client_initial_destination_connection_id(),
+                .handshake_secret = client.connection_->handshake_space_.write_secret,
+                .one_rtt_secret = client.connection_->application_space_.write_secret,
+                .one_rtt_key_phase = client.connection_->application_write_key_phase_,
+            });
+        EXPECT_TRUE(padded.has_value());
+        if (!padded.has_value()) {
+            return std::vector<std::byte>{};
+        }
+        return padded.value();
+    };
+
+    const auto first_datagram = pad_initial(delivered_packet_one);
+    const auto server_after_first = server.advance(
+        coquic::quic::QuicCoreInboundDatagram{first_datagram}, coquic::quic::test::test_time(1));
+    EXPECT_FALSE(server.has_failed());
+    EXPECT_FALSE(coquic::quic::test::send_datagrams_from(server_after_first).empty());
+
+    const auto second_datagram = pad_initial(delivered_packet_two);
+    const auto server_after_second = server.advance(
+        coquic::quic::QuicCoreInboundDatagram{second_datagram}, coquic::quic::test::test_time(2));
+    EXPECT_FALSE(server.has_failed());
+    EXPECT_FALSE(coquic::quic::test::send_datagrams_from(server_after_second).empty());
+
+    const auto next_wakeup = server_after_second.next_wakeup;
+    ASSERT_TRUE(next_wakeup.has_value());
+    if (!next_wakeup.has_value()) {
+        return;
+    }
+    const auto probe = server.advance(coquic::quic::QuicCoreTimerExpired{}, next_wakeup.value());
+    const auto probe_datagrams = coquic::quic::test::send_datagrams_from(probe);
+    EXPECT_EQ(probe_datagrams.size(), 2u);
+}
+
+TEST(QuicCoreTest, ServerPtoProbeWithHandshakeAndApplicationInFlightBeforeConfirmationDoesNotFail) {
+    auto connection = make_connected_server_connection();
+    connection.handshake_confirmed_ = false;
+    connection.handshake_done_state_ = coquic::quic::StreamControlFrameState::sent;
+    connection.handshake_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+    connection.handshake_space_.next_send_packet_number = 1;
+
+    connection.track_sent_packet(connection.handshake_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 0,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .has_ping = true,
+                                     .bytes_in_flight = 60,
+                                 });
+    ASSERT_TRUE(
+        connection
+            .queue_stream_send(0, coquic::quic::test::bytes_from_string("server-probe"), false)
+            .has_value());
+
+    const auto first_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_datagram.empty());
+
+    const auto next_wakeup = connection.next_wakeup();
+    ASSERT_TRUE(next_wakeup.has_value());
+    if (!next_wakeup.has_value()) {
+        return;
+    }
+
+    connection.on_timeout(*next_wakeup);
+
+    const auto first_probe_datagram = connection.drain_outbound_datagram(*next_wakeup);
+    ASSERT_FALSE(first_probe_datagram.empty());
+    EXPECT_FALSE(connection.has_failed());
+
+    const auto second_probe_datagram = connection.drain_outbound_datagram(*next_wakeup);
+    ASSERT_FALSE(second_probe_datagram.empty());
+    EXPECT_FALSE(connection.has_failed());
+}
+
 TEST(QuicCoreTest, ArmPtoProbeCoalescesHandshakeProbeWhenInitialCryptoIsPending) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
     connection.started_ = true;
@@ -2752,7 +3342,7 @@ TEST(QuicCoreTest, InitialProbePacketCanFallbackToPing) {
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-    static_cast<void>(datagram);
+    ASSERT_FALSE(datagram.empty());
     ASSERT_EQ(connection.initial_space_.sent_packets.size(), 1u);
     EXPECT_TRUE(connection.initial_space_.sent_packets.begin()->second.has_ping);
     EXPECT_FALSE(connection.initial_space_.pending_probe_packet.has_value());
@@ -2831,7 +3421,7 @@ TEST(QuicCoreTest, HandshakeProbePacketCanFallbackToPing) {
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-    static_cast<void>(datagram);
+    ASSERT_FALSE(datagram.empty());
     ASSERT_EQ(connection.handshake_space_.sent_packets.size(), 1u);
     EXPECT_TRUE(connection.handshake_space_.sent_packets.begin()->second.has_ping);
     EXPECT_FALSE(connection.handshake_space_.pending_probe_packet.has_value());

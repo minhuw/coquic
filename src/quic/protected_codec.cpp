@@ -458,6 +458,16 @@ std::vector<std::byte> make_packet_protection_nonce_or_assert(std::span<const st
     return make_packet_protection_nonce(iv, packet_number).value();
 }
 
+void pad_long_header_plaintext_for_header_protection(std::vector<std::byte> &plaintext_image,
+                                                     LongHeaderPacketType packet_type) {
+    const auto layout = locate_long_header_or_assert(plaintext_image, packet_type);
+    const auto minimum_plaintext_size = layout.packet_number_offset + kHeaderProtectionSampleOffset;
+    if (plaintext_image.size() < minimum_plaintext_size) {
+        // Trailing zero bytes decode as PADDING frames and make the protected sample available.
+        plaintext_image.resize(minimum_plaintext_size, std::byte{0x00});
+    }
+}
+
 CodecResult<PacketDecodeResult>
 deserialize_plaintext_packet_image(std::span<const std::byte> plaintext_image,
                                    const DeserializeOptions &options) {
@@ -488,6 +498,7 @@ serialize_protected_initial_packet(const ProtectedInitialPacket &packet,
     }
 
     auto sealed_packet = plaintext_image.value();
+    pad_long_header_plaintext_for_header_protection(sealed_packet, LongHeaderPacketType::initial);
     const auto layout = locate_long_header_or_assert(sealed_packet, LongHeaderPacketType::initial);
 
     const auto plaintext_payload_offset = layout.packet_number_offset + packet.packet_number_length;
@@ -622,6 +633,7 @@ serialize_protected_handshake_packet(const ProtectedHandshakePacket &packet,
                                                             plaintext_image.error().offset);
 
     auto sealed_packet = plaintext_image.value();
+    pad_long_header_plaintext_for_header_protection(sealed_packet, LongHeaderPacketType::handshake);
     const auto layout =
         locate_long_header_or_assert(sealed_packet, LongHeaderPacketType::handshake);
 

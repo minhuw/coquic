@@ -177,6 +177,7 @@ class QuicConnection {
     NewRenoCongestionController congestion_controller_;
     RecoveryRttState recovery_rtt_state_;
     std::uint32_t pto_count_ = 0;
+    std::uint8_t remaining_pto_probe_datagrams_ = 0;
     bool application_read_key_phase_ = false;
     bool application_write_key_phase_ = false;
     bool initial_packet_space_discarded_ = false;

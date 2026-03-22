@@ -1047,6 +1047,8 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     }
 
     ++pto_count_;
+    remaining_pto_probe_datagrams_ = 0;
+    bool armed_pto_probe = false;
     const auto arm_packet_space_probe = [&](PacketSpaceState &packet_space) {
         if (!has_in_flight_ack_eliciting_packet(packet_space)) {
             return;
@@ -1057,6 +1059,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         }
 
         packet_space.pending_probe_packet = select_pto_probe(packet_space);
+        armed_pto_probe = armed_pto_probe || packet_space.pending_probe_packet.has_value();
     };
 
     arm_packet_space_probe(*selected_packet_space);
@@ -1073,6 +1076,10 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     arm_coalesced_probe(handshake_space_);
     if (allow_application_pto) {
         arm_coalesced_probe(application_space_);
+    }
+
+    if (armed_pto_probe) {
+        remaining_pto_probe_datagrams_ = 2;
     }
 }
 
@@ -2522,6 +2529,18 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
     const auto initial_destination_connection_id = config_.role == EndpointRole::client
                                                        ? client_initial_destination_connection_id()
                                                        : destination_connection_id;
+    const auto pto_probe_burst_active =
+        remaining_pto_probe_datagrams_ > 0 && (initial_space_.pending_probe_packet.has_value() ||
+                                               handshake_space_.pending_probe_packet.has_value() ||
+                                               application_space_.pending_probe_packet.has_value());
+    const auto preserve_pto_probe_packets =
+        pto_probe_burst_active && remaining_pto_probe_datagrams_ > 1;
+    const auto clear_probe_packet_after_send =
+        [&](std::optional<SentPacketRecord> &pending_probe_packet) {
+            if (pending_probe_packet.has_value() && !preserve_pto_probe_packets) {
+                pending_probe_packet = std::nullopt;
+            }
+        };
 
     std::vector<Frame> initial_frames;
     if (const auto ack_frame =
@@ -2582,9 +2601,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             initial_space_.pending_ack_deadline = std::nullopt;
             initial_space_.force_ack_send = false;
         }
-        if (initial_space_.pending_probe_packet.has_value()) {
-            initial_space_.pending_probe_packet = std::nullopt;
-        }
+        clear_probe_packet_after_send(initial_space_.pending_probe_packet);
     }
 
     std::vector<Frame> handshake_frames;
@@ -2651,9 +2668,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             handshake_space_.pending_ack_deadline = std::nullopt;
             handshake_space_.force_ack_send = false;
         }
-        if (handshake_space_.pending_probe_packet.has_value()) {
-            handshake_space_.pending_probe_packet = std::nullopt;
-        }
+        clear_probe_packet_after_send(handshake_space_.pending_probe_packet);
     }
 
     if (status_ == HandshakeStatus::connected && application_space_.write_secret.has_value() &&
@@ -3043,7 +3058,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 probe_packet.stream_data_blocked_frames, probe_stream_fragments, include_ping);
             if (!datagram.has_value()) {
                 std::cerr << "quic fail probe serialize_application_candidate_or_oversize size="
-                          << 0 << '\n';
+                          << 0 << " error=" << static_cast<int>(datagram.error().code)
+                          << " offset=" << datagram.error().offset << '\n';
                 mark_failed();
                 return {};
             }
@@ -3056,7 +3072,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 if (!no_ack_datagram.has_value()) {
                     std::cerr << "quic fail probe serialize_application_candidate_or_oversize "
                                  "size="
-                              << 0 << '\n';
+                              << 0 << " error=" << static_cast<int>(no_ack_datagram.error().code)
+                              << " offset=" << no_ack_datagram.error().offset << '\n';
                     mark_failed();
                     return {};
                 }
@@ -3108,7 +3125,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     if (!datagram.has_value()) {
                         std::cerr
                             << "quic fail probe serialize_application_candidate_or_oversize size="
-                            << 0 << '\n';
+                            << 0 << " error=" << static_cast<int>(datagram.error().code)
+                            << " offset=" << datagram.error().offset << '\n';
                         mark_failed();
                         return false;
                     }
@@ -3135,7 +3153,12 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                         !trim_probe_candidate_to_fit(ack_frame, probe_stream_fragments)) {
                         std::cerr << "quic fail probe serialize_application_candidate_or_oversize "
                                      "size="
-                                  << (datagram.has_value() ? datagram.value().size() : 0) << '\n';
+                                  << (datagram.has_value() ? datagram.value().size() : 0);
+                        if (!datagram.has_value()) {
+                            std::cerr << " error=" << static_cast<int>(datagram.error().code)
+                                      << " offset=" << datagram.error().offset;
+                        }
+                        std::cerr << '\n';
                         mark_failed();
                         return {};
                     }
@@ -3223,7 +3246,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 application_space_.pending_ack_deadline = std::nullopt;
                 application_space_.force_ack_send = false;
             }
-            application_space_.pending_probe_packet = std::nullopt;
+            clear_probe_packet_after_send(application_space_.pending_probe_packet);
         } else {
             const auto include_handshake_done =
                 config_.role == EndpointRole::server &&
@@ -3483,9 +3506,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 application_space_.pending_ack_deadline = std::nullopt;
                 application_space_.force_ack_send = false;
             }
-            if (application_space_.pending_probe_packet.has_value()) {
-                application_space_.pending_probe_packet = std::nullopt;
-            }
+            clear_probe_packet_after_send(application_space_.pending_probe_packet);
         }
     }
 
@@ -3532,6 +3553,15 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 return {};
             }
             break;
+        }
+    }
+
+    if (pto_probe_burst_active) {
+        --remaining_pto_probe_datagrams_;
+        if (remaining_pto_probe_datagrams_ == 0) {
+            initial_space_.pending_probe_packet = std::nullopt;
+            handshake_space_.pending_probe_packet = std::nullopt;
+            application_space_.pending_probe_packet = std::nullopt;
         }
     }
 

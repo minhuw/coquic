@@ -478,7 +478,7 @@
       quictlsMuslPackage = mkCoquicPackage quictlsMuslProfile;
       boringsslPackage = mkCoquicPackage boringsslProfile;
       boringsslMuslPackage = mkCoquicPackage boringsslMuslProfile;
-      quictlsImage = mkInteropImage {
+      quictlsGlibcImage = mkInteropImage {
         profile = quictlsProfile;
         coquicPackage = quictlsPackage;
       };
@@ -518,7 +518,7 @@
       };
       quictlsShell = mkCoquicShell {
         profile = quictlsProfile;
-        banner = "coquic quictls shell ready. Run: zig build -Dtls_backend=quictls";
+        banner = "coquic quictls shell ready (default package uses static non-system deps). Run: zig build -Dtls_backend=quictls";
       };
       quictlsMuslShell = mkCoquicShell {
         profile = quictlsMuslProfile;

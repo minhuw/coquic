@@ -5,6 +5,7 @@ The current slice targets:
 
 - `handshake`
 - ideal-case `transfer`
+- `chacha20`
 
 It does not yet target lossy recovery, congestion-control competition, or full
 interop-runner scenario coverage beyond those two cases.
@@ -45,6 +46,9 @@ Build the packaged binary with quictls:
 nix build .#coquic-quictls
 ```
 
+`coquic-quictls` is the default quictls package and statically links
+non-system dependencies (including the quictls TLS stack).
+
 Run a server directly from the package output:
 
 ```bash
@@ -79,11 +83,13 @@ nix develop .#boringssl
 
 ## Container Image
 
-Build the quictls runner image tarball:
+Build the canonical quictls interop runner image tarball (musl static path):
 
 ```bash
 nix build .#interop-image-quictls
 ```
+
+`.#interop-image` is kept as a stable alias to the same image output.
 
 Load it into Docker:
 
@@ -131,6 +137,12 @@ nix build .#coquic-boringssl-musl
 nix develop .#boringssl-musl
 ```
 
+`chacha20` continues to route through the `quictls` interop image
+(`.#interop-image-quictls`) in the checked-in official runner wrapper. The
+BoringSSL toolchain used by `coquic-interop:boringssl-musl` does not expose
+public TLS 1.3 cipher-suite controls, so it cannot reliably advertise a
+ChaCha20-only client offer.
+
 ## Local quic-go Smoke Matrix
 
 Run the checked-in mixed-image smoke matrix against `quic-go` with:
@@ -160,11 +172,11 @@ simulator helper scripts:
 ## quic-interop-runner Usage
 
 Point the runner at the built image in your local implementation entry, then
-run the `handshake` and `transfer` scenarios. The wrapper script expects the
-standard runner environment:
+run the `handshake`, `transfer`, or `chacha20` scenarios. The wrapper script
+expects the standard runner environment:
 
 - `ROLE=server` or `ROLE=client`
-- `TESTCASE=handshake` or `TESTCASE=transfer`
+- `TESTCASE=handshake`, `TESTCASE=transfer`, or `TESTCASE=chacha20`
 - `REQUESTS` for client-side transfer runs
 
 For client-side runner invocations, the default network target is `server` and

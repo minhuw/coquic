@@ -67,8 +67,8 @@ This design covers:
 
 The workflow will have two explicit jobs:
 
-- one for `quic-go`
-- one for `picoquic`
+- job id `interop-quicgo` for `quic-go`
+- job id `interop-picoquic` for `picoquic`
 
 Rationale:
 
@@ -81,8 +81,8 @@ Rationale:
 `tests/nix/interop_runner_test.sh` will remain the single repo-owned adapter
 between GitHub/Nix execution and the pinned official runner.
 
-It will be generalized with environment variables for the non-`coquic` peer,
-for example:
+It will be generalized with required environment variables for the non-`coquic`
+peer:
 
 - `INTEROP_PEER_IMPL`
 - `INTEROP_PEER_IMAGE`
@@ -133,6 +133,8 @@ This design changes only the peer-side implementation selection.
 The repo tests should prevent regressions by pinning:
 
 - the presence of both workflow jobs
+- the exact workflow job ids and human-facing job names
+- distinct artifact names per job
 - the exact shared testcase string in both jobs
 - the wrapper fragments that read peer implementation and peer image from env
 - the wrapper behavior that patches the chosen implementation entry instead of
@@ -148,12 +150,17 @@ Each job will:
 
 - verify the workflow contract
 - set the shared `INTEROP_TESTCASES` string
-- set peer-specific env such as:
+- set peer-specific env with exact values:
   - `INTEROP_PEER_IMPL=quic-go`
-  - `INTEROP_PEER_IMAGE=martenseemann/quic-go-interop@sha256:...`
+  - `INTEROP_PEER_IMAGE=martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424`
   - `INTEROP_PEER_IMPL=picoquic`
   - `INTEROP_PEER_IMAGE=privateoctopus/picoquic:latest`
 - invoke `nix develop -c bash tests/nix/interop_runner_test.sh`
+
+Each job will upload logs under a distinct artifact name:
+
+- `interop-logs-quicgo`
+- `interop-logs-picoquic`
 
 ### Wrapper Layer
 
@@ -169,6 +176,7 @@ Each job will:
 
 The wrapper should fail fast if:
 
+- `INTEROP_PEER_IMPL` is unset or empty
 - `INTEROP_PEER_IMPL` names an implementation absent from the pinned runner
   manifest
 - the selected peer image is empty
@@ -178,6 +186,7 @@ The wrapper should fail fast if:
 The workflow contract test should pin:
 
 - both job names
+- both artifact names
 - both peer env blocks
 - the shared testcase string
 

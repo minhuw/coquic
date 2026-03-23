@@ -110,7 +110,6 @@ run_direction() {
 
   cleanup_runner_state
   rm -rf "${direction_log_dir}"
-  mkdir -p "${direction_log_dir}"
 
   echo "== official interop: server=${server} client=${client} testcases=${interop_testcases} =="
   set +e

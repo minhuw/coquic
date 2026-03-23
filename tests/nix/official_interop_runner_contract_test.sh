@@ -19,7 +19,7 @@ script = pathlib.Path(sys.argv[1]).read_text()
 
 required_fragments = [
     '--json "${results_json}"',
-    'mkdir -p "${direction_log_dir}"',
+    'rm -rf "${direction_log_dir}"',
     '${direction_log_dir}/${server}_${client}/${testcase}',
     'official runner results file missing',
     'grep -E -- "${runner_network_pattern}"',
@@ -43,6 +43,7 @@ if missing:
     raise SystemExit(f"official interop wrapper missing fragments: {missing!r}")
 
 forbidden_fragments = [
+    'mkdir -p "${direction_log_dir}"',
     'if [[ ",${interop_testcases}," == *",chacha20,"* ]]; then',
     'coquic-interop:boringssl-musl',
     'interop-image-boringssl-musl',

@@ -18,12 +18,21 @@ import sys
 script = pathlib.Path(sys.argv[1]).read_text()
 
 required_fragments = [
+    'readonly quicgo_image="${INTEROP_QUICGO_IMAGE:-martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424}"',
+    'readonly interop_wait_for_server="${INTEROP_WAIT_FOR_SERVER:-193.167.100.100:443}"',
+    'echo "Using official quic-go image: ${quicgo_image}"',
+    'echo "Using warmup target: ${interop_wait_for_server}"',
+    'docker pull "${quicgo_image}" >/dev/null',
+    '"${runner_dir}/interop.py" "${interop_wait_for_server}"',
+    'text.replace("WAITFORSERVER=server:443 ",',
+    'f"WAITFORSERVER={interop_wait_for_server} ")',
+    'run_direction coquic quic-go',
+    'run_direction quic-go coquic',
     '--json "${results_json}"',
     'rm -rf "${direction_log_dir}"',
     '${direction_log_dir}/${server}_${client}/${testcase}',
     'official runner results file missing',
     'grep -E -- "${runner_network_pattern}"',
-    'if "interface_name:" not in line',
     'requested testcase did not succeed',
     'measurements = data.get("measurements", [])',
     'if len(measurements) not in (0, 1):',
@@ -49,6 +58,15 @@ forbidden_fragments = [
     'interop-image-boringssl-musl',
     'tests = data.get("tests", {})',
     'rg "${runner_network_pattern}"',
+    'cat > "${runner_dir}/sim-run.sh" <<\'EOF\'',
+    'normalize_simulator_interfaces() {',
+    'left_if="$(interface_for_ipv4 193.167.0.2 || true)"',
+    'right_if="$(interface_for_ipv4 193.167.100.2 || true)"',
+    'nameif tmp0 "${right_mac}"',
+    'nameif eth0 "${left_mac}"',
+    'nameif eth1 "${right_mac}"',
+    './sim-run.sh:/ns3/run.sh:ro',
+    'if "interface_name:" not in line',
 ]
 
 present_forbidden = [fragment for fragment in forbidden_fragments if fragment in script]

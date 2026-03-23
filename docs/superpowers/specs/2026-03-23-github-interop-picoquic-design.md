@@ -67,8 +67,8 @@ This design covers:
 
 The workflow will have two explicit jobs:
 
-- job id `interop-quicgo` for `quic-go`
-- job id `interop-picoquic` for `picoquic`
+- job id `interop-quicgo` with job name `quic-go Official Runner`
+- job id `interop-picoquic` with job name `picoquic Official Runner`
 
 Rationale:
 

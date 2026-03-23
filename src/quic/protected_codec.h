@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <variant>
@@ -48,6 +49,15 @@ struct ProtectedHandshakePacket {
     std::vector<Frame> frames;
 };
 
+struct StreamFrameView {
+    bool fin = false;
+    std::uint64_t stream_id = 0;
+    std::uint64_t offset = 0;
+    std::shared_ptr<std::vector<std::byte>> storage;
+    std::size_t begin = 0;
+    std::size_t end = 0;
+};
+
 struct ProtectedOneRttPacket {
     bool spin_bit = false;
     bool key_phase = false;
@@ -55,6 +65,7 @@ struct ProtectedOneRttPacket {
     std::uint8_t packet_number_length = 1;
     std::uint64_t packet_number = 0;
     std::vector<Frame> frames;
+    std::vector<StreamFrameView> stream_frame_views;
 };
 
 struct SerializeProtectionContext {

@@ -140,6 +140,24 @@ std::size_t stream_fragment_bytes(std::span<const StreamFrameSendFragment> fragm
     return total;
 }
 
+std::vector<StreamFrameView>
+make_stream_frame_views(std::span<const StreamFrameSendFragment> fragments) {
+    std::vector<StreamFrameView> views;
+    views.reserve(fragments.size());
+    for (const auto &fragment : fragments) {
+        views.push_back(StreamFrameView{
+            .fin = fragment.fin,
+            .stream_id = fragment.stream_id,
+            .offset = fragment.offset,
+            .storage = fragment.bytes.storage(),
+            .begin = fragment.bytes.begin_offset(),
+            .end = fragment.bytes.end_offset(),
+        });
+    }
+
+    return views;
+}
+
 CodecResult<std::vector<std::byte>> serialize_locally_validated_transport_parameters(
     EndpointRole local_role, const TransportParameters &parameters,
     const TransportParametersValidationContext &validation_context) {
@@ -2552,7 +2570,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
     for (const auto &range : initial_crypto_ranges) {
         initial_frames.emplace_back(CryptoFrame{
             .offset = range.offset,
-            .crypto_data = range.bytes,
+            .crypto_data = range.bytes.to_vector(),
         });
     }
     if (initial_space_.pending_probe_packet.has_value() &&
@@ -2560,7 +2578,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         for (const auto &range : initial_space_.pending_probe_packet->crypto_ranges) {
             initial_frames.emplace_back(CryptoFrame{
                 .offset = range.offset,
-                .crypto_data = range.bytes,
+                .crypto_data = range.bytes.to_vector(),
             });
         }
         if (!has_ack_eliciting_frame(initial_frames)) {
@@ -2614,7 +2632,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
     for (const auto &range : handshake_crypto_ranges) {
         handshake_frames.emplace_back(CryptoFrame{
             .offset = range.offset,
-            .crypto_data = range.bytes,
+            .crypto_data = range.bytes.to_vector(),
         });
     }
     if (handshake_space_.pending_probe_packet.has_value() &&
@@ -2622,7 +2640,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         for (const auto &range : handshake_space_.pending_probe_packet->crypto_ranges) {
             handshake_frames.emplace_back(CryptoFrame{
                 .offset = range.offset,
-                .crypto_data = range.bytes,
+                .crypto_data = range.bytes.to_vector(),
             });
         }
         if (!has_ack_eliciting_frame(handshake_frames)) {
@@ -2848,27 +2866,18 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             for (const auto &frame : stream_data_blocked_frames) {
                 candidate_frames.emplace_back(frame);
             }
-            for (const auto &fragment : stream_fragments) {
-                candidate_frames.emplace_back(StreamFrame{
-                    .fin = fragment.fin,
-                    .has_offset = true,
-                    .has_length = true,
-                    .stream_id = fragment.stream_id,
-                    .offset = fragment.offset,
-                    .stream_data = fragment.bytes,
-                });
-            }
             if (include_ping) {
                 candidate_frames.emplace_back(PingFrame{});
             }
 
             auto candidate_packets = packets;
             candidate_packets.emplace_back(ProtectedOneRttPacket{
-                .destination_connection_id = destination_connection_id,
                 .key_phase = application_write_key_phase_,
+                .destination_connection_id = destination_connection_id,
                 .packet_number_length = kDefaultInitialPacketNumberLength,
                 .packet_number = application_space_.next_send_packet_number,
                 .frames = std::move(candidate_frames),
+                .stream_frame_views = make_stream_frame_views(stream_fragments),
             });
 
             return serialize_protected_datagram(
@@ -3103,10 +3112,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                 .offset = last_fragment.offset +
                                           static_cast<std::uint64_t>(last_fragment.bytes.size() -
                                                                      trim_bytes),
-                                .bytes = std::vector<std::byte>(
-                                    last_fragment.bytes.end() -
-                                        static_cast<std::ptrdiff_t>(trim_bytes),
-                                    last_fragment.bytes.end()),
+                                .bytes = last_fragment.bytes.subspan(last_fragment.bytes.size() -
+                                                                     trim_bytes),
                                 .fin = last_fragment.fin,
                                 .consumes_flow_control = false,
                             };
@@ -3196,27 +3203,18 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             for (const auto &frame : probe_packet.stream_data_blocked_frames) {
                 frames.emplace_back(frame);
             }
-            for (const auto &fragment : probe_stream_fragments) {
-                frames.emplace_back(StreamFrame{
-                    .fin = fragment.fin,
-                    .has_offset = true,
-                    .has_length = true,
-                    .stream_id = fragment.stream_id,
-                    .offset = fragment.offset,
-                    .stream_data = fragment.bytes,
-                });
-            }
             if (include_ping) {
                 frames.emplace_back(PingFrame{});
             }
 
             const auto packet_number = application_space_.next_send_packet_number++;
             packets.emplace_back(ProtectedOneRttPacket{
-                .destination_connection_id = destination_connection_id,
                 .key_phase = application_write_key_phase_,
+                .destination_connection_id = destination_connection_id,
                 .packet_number_length = kDefaultInitialPacketNumberLength,
                 .packet_number = packet_number,
                 .frames = std::move(frames),
+                .stream_frame_views = make_stream_frame_views(probe_stream_fragments),
             });
 
             track_sent_packet(
@@ -3339,10 +3337,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                 .offset = last_fragment.offset +
                                           static_cast<std::uint64_t>(last_fragment.bytes.size() -
                                                                      trim_bytes),
-                                .bytes = std::vector<std::byte>(
-                                    last_fragment.bytes.end() -
-                                        static_cast<std::ptrdiff_t>(trim_bytes),
-                                    last_fragment.bytes.end()),
+                                .bytes = last_fragment.bytes.subspan(last_fragment.bytes.size() -
+                                                                     trim_bytes),
                                 .fin = last_fragment.fin,
                                 .consumes_flow_control = last_fragment.consumes_flow_control,
                             };
@@ -3459,24 +3455,15 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             for (const auto &frame : stream_data_blocked_frames) {
                 frames.emplace_back(frame);
             }
-            for (const auto &fragment : stream_fragments) {
-                frames.emplace_back(StreamFrame{
-                    .fin = fragment.fin,
-                    .has_offset = true,
-                    .has_length = true,
-                    .stream_id = fragment.stream_id,
-                    .offset = fragment.offset,
-                    .stream_data = fragment.bytes,
-                });
-            }
 
             const auto packet_number = application_space_.next_send_packet_number++;
             packets.emplace_back(ProtectedOneRttPacket{
-                .destination_connection_id = destination_connection_id,
                 .key_phase = application_write_key_phase_,
+                .destination_connection_id = destination_connection_id,
                 .packet_number_length = kDefaultInitialPacketNumberLength,
                 .packet_number = packet_number,
                 .frames = std::move(frames),
+                .stream_frame_views = make_stream_frame_views(stream_fragments),
             });
 
             if (ack_eliciting) {

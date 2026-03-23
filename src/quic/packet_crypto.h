@@ -15,6 +15,10 @@ struct PacketProtectionKeys {
     std::vector<std::byte> hp_key;
 };
 
+struct PlaintextChunk {
+    std::span<const std::byte> bytes;
+};
+
 CodecResult<PacketProtectionKeys>
 derive_initial_packet_keys(EndpointRole local_role, bool for_local_send,
                            const ConnectionId &client_initial_destination_connection_id);
@@ -24,6 +28,19 @@ CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secre
 
 CodecResult<std::vector<std::byte>> make_packet_protection_nonce(std::span<const std::byte> iv,
                                                                  std::uint64_t packet_number);
+
+CodecResult<std::size_t> seal_payload_into(CipherSuite cipher_suite, std::span<const std::byte> key,
+                                           std::span<const std::byte> nonce,
+                                           std::span<const std::byte> associated_data,
+                                           std::span<const std::byte> plaintext,
+                                           std::span<std::byte> ciphertext);
+
+CodecResult<std::size_t> seal_payload_chunks_into(CipherSuite cipher_suite,
+                                                  std::span<const std::byte> key,
+                                                  std::span<const std::byte> nonce,
+                                                  std::span<const std::byte> associated_data,
+                                                  std::span<const PlaintextChunk> plaintext_chunks,
+                                                  std::span<std::byte> ciphertext);
 
 CodecResult<std::vector<std::byte>> seal_payload(CipherSuite cipher_suite,
                                                  std::span<const std::byte> key,

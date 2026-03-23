@@ -86,7 +86,7 @@ template <typename T> struct StreamStateResult {
 struct StreamFrameSendFragment {
     std::uint64_t stream_id = 0;
     std::uint64_t offset = 0;
-    std::vector<std::byte> bytes;
+    SharedBytes bytes;
     bool fin = false;
     bool consumes_flow_control = false;
 };

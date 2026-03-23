@@ -21,7 +21,7 @@ required_fragments = [
     "pull_request:",
     "push:",
     "workflow_dispatch:",
-    "INTEROP_TESTCASES: handshake,handshakeloss,transfer,transferloss",
+    "INTEROP_TESTCASES: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,chacha20,longrtt",
     "nix develop -c bash tests/nix/interop_runner_test.sh",
 ]
 

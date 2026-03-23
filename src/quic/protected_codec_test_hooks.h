@@ -3,6 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
+
+#include "src/quic/protected_codec.h"
 
 namespace coquic::quic::test {
 
@@ -26,5 +29,10 @@ class ScopedProtectedCodecFaultInjector {
     std::optional<ProtectedCodecFaultPoint> previous_fault_point_;
     std::size_t previous_occurrence_ = 0;
 };
+
+CodecResult<std::size_t>
+append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
+                                            const ProtectedOneRttPacket &packet,
+                                            const SerializeProtectionContext &context);
 
 } // namespace coquic::quic::test

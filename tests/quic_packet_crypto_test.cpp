@@ -1,3 +1,4 @@
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -314,6 +315,67 @@ TEST(QuicPacketCryptoTest, SealsAndOpensPayloadWithAssociatedData) {
         nonce.value(), hex_bytes("4200bff4"), ciphertext.value());
     ASSERT_TRUE(plaintext.has_value());
     EXPECT_EQ(to_hex(plaintext.value()), "01");
+}
+
+TEST(QuicPacketCryptoTest, SealsPayloadDirectlyIntoCallerOwnedBuffer) {
+    const auto nonce = coquic::quic::make_packet_protection_nonce(
+        hex_bytes("e0459b3474bdd0e44a41c144"), 654360564ULL);
+    ASSERT_TRUE(nonce.has_value());
+
+    std::vector<std::byte> ciphertext(1u + 16u);
+    const auto written = coquic::quic::seal_payload_into(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), hex_bytes("01"), ciphertext);
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(written.value(), ciphertext.size());
+    EXPECT_EQ(to_hex(ciphertext), "655e5cd55c41f69080575d7999c25a5bfb");
+
+    const auto plaintext = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), ciphertext);
+    ASSERT_TRUE(plaintext.has_value());
+    EXPECT_EQ(to_hex(plaintext.value()), "01");
+}
+
+TEST(QuicPacketCryptoTest, SealsChunkedPayloadDirectlyIntoCallerOwnedBuffer) {
+    const auto nonce = coquic::quic::make_packet_protection_nonce(
+        hex_bytes("e0459b3474bdd0e44a41c144"), 654360564ULL);
+    ASSERT_TRUE(nonce.has_value());
+
+    const auto plaintext = hex_bytes("0102030405");
+    const auto expected = coquic::quic::seal_payload(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), plaintext);
+    ASSERT_TRUE(expected.has_value());
+
+    const auto plaintext_span = std::span<const std::byte>(plaintext);
+    const auto first = plaintext_span.first<1>();
+    const auto second = plaintext_span.subspan(1, 2);
+    const auto third = plaintext_span.subspan(3);
+    const std::array chunks{
+        coquic::quic::PlaintextChunk{.bytes = first},
+        coquic::quic::PlaintextChunk{.bytes = second},
+        coquic::quic::PlaintextChunk{.bytes = third},
+    };
+
+    std::vector<std::byte> ciphertext(expected.value().size());
+    const auto written = coquic::quic::seal_payload_chunks_into(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), chunks, ciphertext);
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(written.value(), expected.value().size());
+    EXPECT_EQ(ciphertext, expected.value());
+
+    const auto opened = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), ciphertext);
+    ASSERT_TRUE(opened.has_value());
+    EXPECT_EQ(opened.value(), plaintext);
 }
 
 TEST(QuicPacketCryptoTest, SealsAndOpensPayloadWithoutAssociatedData) {

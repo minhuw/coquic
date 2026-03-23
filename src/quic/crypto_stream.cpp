@@ -58,10 +58,6 @@ ReliableSendBuffer::take_ranges_by_state(SegmentState state, std::size_t &remain
     }
 
     const auto segment_length = [](const Segment &segment) { return segment.end - segment.begin; };
-    const auto copy_segment_bytes = [](const Segment &segment, std::size_t count) {
-        const auto begin = segment.storage->begin() + static_cast<std::ptrdiff_t>(segment.begin);
-        return std::vector<std::byte>(begin, begin + static_cast<std::ptrdiff_t>(count));
-    };
 
     for (auto it = segments_.begin(); it != segments_.end() && remaining_bytes > 0; ++it) {
         if (max_offset.has_value() && it->first >= *max_offset) {
@@ -75,7 +71,12 @@ ReliableSendBuffer::take_ranges_by_state(SegmentState state, std::size_t &remain
         const auto chunk_size = std::min(remaining_bytes, available_bytes);
         auto range = ByteRange{
             .offset = it->first,
-            .bytes = copy_segment_bytes(it->second, chunk_size),
+            .bytes =
+                SharedBytes{
+                    it->second.storage,
+                    it->second.begin,
+                    it->second.begin + chunk_size,
+                },
         };
         ranges.push_back(std::move(range));
 
@@ -347,7 +348,10 @@ std::vector<CryptoFrame> CryptoSendBuffer::take_frames(std::size_t max_frame_pay
         }
 
         for (const auto &range : ranges) {
-            frames.push_back(CryptoFrame{.offset = range.offset, .crypto_data = range.bytes});
+            frames.push_back(CryptoFrame{
+                .offset = range.offset,
+                .crypto_data = range.bytes.to_vector(),
+            });
         }
     }
 
@@ -367,37 +371,88 @@ CodecResult<std::vector<std::byte>> ReliableReceiveBuffer::push(std::uint64_t of
         return crypto_stream_failure();
     }
 
-    std::vector<std::byte> contiguous;
-    if (offset <= next_contiguous_offset_) {
-        const auto already_delivered = next_contiguous_offset_ - offset;
-        if (already_delivered < bytes.size()) {
-            const auto start = bytes.begin() + static_cast<std::ptrdiff_t>(already_delivered);
-            contiguous.insert(contiguous.end(), start, bytes.end());
+    const auto end = range_end(offset, bytes.size());
+    const auto start = std::max(offset, next_contiguous_offset_);
+    if (start < end) {
+        const auto buffer_offset = static_cast<std::size_t>(start - offset);
+        buffer_range(start, bytes.subspan(buffer_offset));
+    }
 
-            const auto previous_next_contiguous = next_contiguous_offset_;
-            next_contiguous_offset_ += static_cast<std::uint64_t>(bytes.size() - already_delivered);
-            buffered_bytes_.erase(buffered_bytes_.lower_bound(previous_next_contiguous),
-                                  buffered_bytes_.lower_bound(next_contiguous_offset_));
-        }
-    } else {
-        for (std::size_t i = 0; i < bytes.size(); ++i) {
-            const auto position = offset + i;
-            buffered_bytes_.try_emplace(position, bytes[i]);
+    return CodecResult<std::vector<std::byte>>::success(take_contiguous_buffered_bytes());
+}
+
+void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, std::span<const std::byte> bytes) {
+    if (bytes.empty()) {
+        return;
+    }
+
+    auto cursor = offset;
+    const auto end = range_end(offset, bytes.size());
+    auto next_buffered = buffered_bytes_.lower_bound(offset);
+    if (next_buffered != buffered_bytes_.begin()) {
+        auto previous = std::prev(next_buffered);
+        if (range_end(previous->first, previous->second.size()) > offset) {
+            next_buffered = previous;
         }
     }
 
     while (true) {
-        const auto next = buffered_bytes_.find(next_contiguous_offset_);
-        if (next == buffered_bytes_.end()) {
+        while (next_buffered != buffered_bytes_.end() &&
+               range_end(next_buffered->first, next_buffered->second.size()) <= cursor) {
+            ++next_buffered;
+        }
+
+        auto next_gap_end = end;
+        if (next_buffered != buffered_bytes_.end() && next_buffered->first < next_gap_end) {
+            next_gap_end = next_buffered->first;
+        }
+
+        if (cursor < next_gap_end) {
+            const auto begin_index = static_cast<std::size_t>(cursor - offset);
+            const auto byte_count = static_cast<std::size_t>(next_gap_end - cursor);
+            const auto begin = bytes.begin() + static_cast<std::ptrdiff_t>(begin_index);
+            const auto end_it = begin + static_cast<std::ptrdiff_t>(byte_count);
+            buffered_bytes_.emplace(cursor, std::vector<std::byte>(begin, end_it));
+            cursor = next_gap_end;
+            continue;
+        }
+
+        if (next_buffered == buffered_bytes_.end()) {
             break;
         }
 
-        contiguous.push_back(next->second);
+        cursor = std::max(cursor, range_end(next_buffered->first, next_buffered->second.size()));
+        if (cursor >= end) {
+            break;
+        }
+        ++next_buffered;
+    }
+}
+
+std::vector<std::byte> ReliableReceiveBuffer::take_contiguous_buffered_bytes() {
+    std::vector<std::byte> contiguous;
+
+    while (!buffered_bytes_.empty()) {
+        auto next = buffered_bytes_.begin();
+        const auto segment_offset = next->first;
+        const auto segment_end = range_end(segment_offset, next->second.size());
+        if (segment_offset > next_contiguous_offset_) {
+            break;
+        }
+
+        const auto already_delivered =
+            static_cast<std::size_t>(next_contiguous_offset_ - segment_offset);
+        if (already_delivered < next->second.size()) {
+            contiguous.insert(contiguous.end(),
+                              next->second.begin() + static_cast<std::ptrdiff_t>(already_delivered),
+                              next->second.end());
+            next_contiguous_offset_ = segment_end;
+        }
+
         buffered_bytes_.erase(next);
-        ++next_contiguous_offset_;
     }
 
-    return CodecResult<std::vector<std::byte>>::success(std::move(contiguous));
+    return contiguous;
 }
 
 CodecResult<std::vector<std::byte>> CryptoReceiveBuffer::push(std::uint64_t offset,

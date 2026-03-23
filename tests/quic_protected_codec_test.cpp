@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -302,6 +303,80 @@ coquic::quic::DeserializeProtectionContext make_one_rtt_deserialize_context(
 }
 
 class QuicProtectedCodecOneRttTest : public testing::TestWithParam<OneRttCipherSuiteCase> {};
+
+TEST(QuicProtectedCodecTest, OneRttPacketSerializesSharedStreamFrameViews) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames.clear();
+    auto shared_payload = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+        std::byte{0xdd},
+    });
+    packet.stream_frame_views = {
+        coquic::quic::StreamFrameView{
+            .fin = true,
+            .stream_id = 9,
+            .offset = 4,
+            .storage = shared_payload,
+            .begin = 1,
+            .end = 3,
+        },
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{packet},
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                       /*secret_size=*/16));
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                         /*secret_size=*/16));
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+
+    const auto *one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded.value().front());
+    ASSERT_NE(one_rtt, nullptr);
+    ASSERT_EQ(one_rtt->frames.size(), 1u);
+
+    const auto *stream = std::get_if<coquic::quic::StreamFrame>(&one_rtt->frames.front());
+    ASSERT_NE(stream, nullptr);
+    EXPECT_TRUE(stream->fin);
+    EXPECT_EQ(stream->stream_id, 9u);
+    EXPECT_EQ(stream->offset, std::optional<std::uint64_t>{4u});
+    EXPECT_EQ(stream->stream_data, (std::vector<std::byte>{std::byte{0xbb}, std::byte{0xcc}}));
+}
+
+TEST(QuicProtectedCodecTest, AppendsOneRttPacketIntoExistingDatagramBuffer) {
+    const auto packet = make_minimal_one_rtt_packet();
+    const auto context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+
+    const std::vector<std::byte> prefix{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+    };
+    auto datagram = prefix;
+
+    const auto appended =
+        coquic::quic::test::append_protected_one_rtt_packet_to_datagram(datagram, packet, context);
+    ASSERT_TRUE(appended.has_value());
+    EXPECT_EQ(datagram.size(), prefix.size() + appended.value());
+    EXPECT_EQ(std::vector<std::byte>(datagram.begin(),
+                                     datagram.begin() + static_cast<std::ptrdiff_t>(prefix.size())),
+              prefix);
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{packet}, context);
+    ASSERT_TRUE(encoded.has_value());
+    EXPECT_EQ(std::vector<std::byte>(datagram.begin() + static_cast<std::ptrdiff_t>(prefix.size()),
+                                     datagram.end()),
+              encoded.value());
+}
 
 coquic::quic::SerializeProtectionContext
 make_initial_and_handshake_serialize_context(coquic::quic::CipherSuite cipher_suite,

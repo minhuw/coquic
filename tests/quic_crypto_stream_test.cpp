@@ -84,6 +84,24 @@ TEST(QuicCryptoStreamTest, SendBufferRetainsBytesUntilAcknowledged) {
     EXPECT_TRUE(buffer.has_pending_data());
 }
 
+TEST(QuicCryptoStreamTest, TakeRangesReusesUnderlyingSegmentStorage) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+
+    ASSERT_EQ(buffer.segments_.size(), 1u);
+    const auto source_storage = buffer.segments_.begin()->second.storage;
+    ASSERT_NE(source_storage, nullptr);
+    const auto *source_bytes = source_storage->data();
+
+    const auto ranges = buffer.take_ranges(2);
+
+    ASSERT_EQ(ranges.size(), 1u);
+    EXPECT_EQ(ranges[0].offset, 0u);
+    EXPECT_EQ(ranges[0].bytes, bytes_from_string("ab"));
+    ASSERT_FALSE(ranges[0].bytes.empty());
+    EXPECT_EQ(ranges[0].bytes.data(), source_bytes);
+}
+
 TEST(QuicCryptoStreamTest, TakeRangesWithZeroBudgetPreservesPendingBytes) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("ab"));
@@ -304,6 +322,15 @@ TEST(QuicCryptoStreamTest, OverlappingReceiveBytesDoNotDuplicateOutput) {
 
     ASSERT_TRUE(overlapping.has_value());
     EXPECT_EQ(overlapping.value(), (std::vector<std::byte>{std::byte{0xcc}}));
+}
+
+TEST(QuicCryptoStreamTest, ReceiveBufferStoresOutOfOrderBufferedBytesByRangeInsteadOfByByte) {
+    ReliableReceiveBuffer buffer;
+
+    ASSERT_TRUE(buffer.push(8, bytes_from_string("ijkl")).has_value());
+    ASSERT_TRUE(buffer.push(4, bytes_from_string("efgh")).has_value());
+
+    EXPECT_LE(buffer.buffered_bytes_.size(), 2u);
 }
 
 } // namespace

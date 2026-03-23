@@ -26,7 +26,7 @@ trap cleanup EXIT
 cleanup_runner_state() {
   docker rm -f sim client server iperf_server iperf_client >/dev/null 2>&1 || true
   docker network ls --format '{{.Name}}' |
-    rg "${runner_network_pattern}" |
+    grep -E -- "${runner_network_pattern}" |
     xargs -r docker network rm >/dev/null 2>&1 || true
 }
 
@@ -80,7 +80,11 @@ iperf_image = sys.argv[3]
 text = path.read_text()
 text = text.replace("image: martenseemann/quic-network-simulator", f"image: {simulator_image}")
 text = text.replace("image: martenseemann/quic-interop-iperf-endpoint", f"image: {iperf_image}")
-path.write_text(text)
+text = "\n".join(
+    line for line in text.splitlines()
+    if "interface_name:" not in line
+)
+path.write_text(text + "\n")
 PY
 
 python3 -m venv "${runner_dir}/.venv"
@@ -106,6 +110,7 @@ run_direction() {
 
   cleanup_runner_state
   rm -rf "${direction_log_dir}"
+  mkdir -p "${direction_log_dir}"
 
   echo "== official interop: server=${server} client=${client} testcases=${interop_testcases} =="
   set +e
@@ -221,7 +226,7 @@ PY
 
 cleanup_runner_state
 docker network ls --format '{{.Name}}' |
-  rg "${runner_network_pattern}" |
+  grep -E -- "${runner_network_pattern}" |
   xargs -r docker network rm >/dev/null 2>&1 || true
 
 run_direction coquic quic-go

@@ -19,8 +19,11 @@ script = pathlib.Path(sys.argv[1]).read_text()
 
 required_fragments = [
     '--json "${results_json}"',
+    'mkdir -p "${direction_log_dir}"',
     '${direction_log_dir}/${server}_${client}/${testcase}',
     'official runner results file missing',
+    'grep -E -- "${runner_network_pattern}"',
+    'if "interface_name:" not in line',
     'requested testcase did not succeed',
     'measurements = data.get("measurements", [])',
     'if len(measurements) not in (0, 1):',
@@ -44,6 +47,7 @@ forbidden_fragments = [
     'coquic-interop:boringssl-musl',
     'interop-image-boringssl-musl',
     'tests = data.get("tests", {})',
+    'rg "${runner_network_pattern}"',
 ]
 
 present_forbidden = [fragment for fragment in forbidden_fragments if fragment in script]

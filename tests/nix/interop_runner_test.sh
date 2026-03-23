@@ -147,6 +147,7 @@ data = json.loads(results_path.read_text())
 servers = data.get("servers", [])
 clients = data.get("clients", [])
 results = data.get("results", [])
+measurements = data.get("measurements", [])
 tests = data.get("tests", {})
 
 if server not in servers:
@@ -163,27 +164,39 @@ if len(results) != 1:
         f"expected one result matrix cell in official runner results, got {len(results)}"
     )
 
-abbr_by_name = {meta.get("name"): abbr for abbr, meta in tests.items()}
-pair_results = {
+testcase_results = {
     entry.get("name"): entry.get("result")
     for entry in results[0]
 }
+measurement_results = {
+    entry.get("name"): entry.get("result")
+    for entry in (measurements[0] if measurements else [])
+}
 
-missing_tests = [test for test in requested_tests if test not in abbr_by_name]
-if missing_tests:
+missing = [
+    test for test in requested_tests
+    if test not in testcase_results and test not in measurement_results
+]
+if missing:
     raise SystemExit(
-        f"official runner results missing requested testcase metadata: {missing_tests!r}"
+        f"official runner results missing requested testcase results: {missing!r}"
     )
 
-failed_tests = [
-    f"{test}={pair_results.get(test)!r}"
-    for test in requested_tests
-    if pair_results.get(test) != "succeeded"
-]
-if failed_tests:
+failed = []
+for test in requested_tests:
+    if test in testcase_results:
+        result = testcase_results.get(test)
+    elif test in measurement_results:
+        result = measurement_results.get(test)
+    else:
+        result = None
+    if result != "succeeded":
+        failed.append(f"{test}={result!r}")
+
+if failed:
     raise SystemExit(
         "requested testcase did not succeed for "
-        f"{server}/{client}: {', '.join(failed_tests)}"
+        f"{server}/{client}: {', '.join(failed)}"
     )
 PY
 

@@ -6,7 +6,8 @@ cd "${repo_root}"
 
 readonly interop_runner_ref="${INTEROP_RUNNER_REF:-97319f8c0be2bc0be67b025522a64c9231018d37}"
 readonly network_simulator_ref="${INTEROP_NETWORK_SIMULATOR_REF:-e557a54510e3578868f8c14cf3aa37e0fc6c76d0}"
-readonly quicgo_image="${INTEROP_QUICGO_IMAGE:-martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424}"
+readonly interop_peer_impl="${INTEROP_PEER_IMPL:-}"
+readonly interop_peer_image="${INTEROP_PEER_IMAGE:-}"
 readonly simulator_image="${INTEROP_SIMULATOR_IMAGE:-martenseemann/quic-network-simulator@sha256:c23d82a55caffe681b1bdae65d4d30d23e1283141a414a7f02ee56cf15f9c6b9}"
 readonly iperf_image="${INTEROP_IPERF_IMAGE:-martenseemann/quic-interop-iperf-endpoint@sha256:cb50cc8019d45d9cad5faecbe46a3c21dd5e871949819a5175423755a9045106}"
 readonly interop_testcases="${INTEROP_TESTCASES:-handshake,transfer}"
@@ -35,9 +36,18 @@ if [ -z "${repo_url}" ]; then
   repo_url="https://github.com/minhu/coquic"
 fi
 
+if [ -z "${interop_peer_impl}" ]; then
+  echo "INTEROP_PEER_IMPL must be set" >&2
+  exit 1
+fi
+if [ -z "${interop_peer_image}" ]; then
+  echo "INTEROP_PEER_IMAGE must be set" >&2
+  exit 1
+fi
+
 echo "Using pinned official runner ref: ${interop_runner_ref}"
 echo "Using pinned simulator repo ref: ${network_simulator_ref}"
-echo "Using official quic-go image: ${quicgo_image}"
+echo "Using official ${interop_peer_impl} image: ${interop_peer_image}"
 echo "Using official simulator image: ${simulator_image}"
 echo "Using official iperf image: ${iperf_image}"
 echo "Running official testcases: ${interop_testcases}"
@@ -50,23 +60,25 @@ git -C "${runner_dir}" remote add origin "${runner_repo_url}"
 git -C "${runner_dir}" fetch --depth 1 origin "${interop_runner_ref}"
 git -C "${runner_dir}" checkout -q FETCH_HEAD
 
-python3 - "${runner_dir}/implementations_quic.json" "${coquic_image}" "${quicgo_image}" "${repo_url}" <<'PY'
+python3 - "${runner_dir}/implementations_quic.json" "${coquic_image}" "${interop_peer_impl}" "${interop_peer_image}" "${repo_url}" <<'PY'
 import json
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
 coquic_image = sys.argv[2]
-quicgo_image = sys.argv[3]
-repo_url = sys.argv[4]
+peer_impl = sys.argv[3]
+peer_image = sys.argv[4]
+repo_url = sys.argv[5]
 data = json.loads(path.read_text())
 data["coquic"] = {
     "image": coquic_image,
     "url": repo_url,
     "role": "both",
 }
-if "quic-go" in data:
-    data["quic-go"]["image"] = quicgo_image
+if peer_impl not in data:
+    raise SystemExit(f"official runner manifest missing peer implementation: {peer_impl}")
+data[peer_impl]["image"] = peer_image
 path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 PY
 
@@ -90,7 +102,7 @@ python3 -m pip install --quiet -r "${runner_dir}/requirements.txt"
 
 nix --option eval-cache false build ".#${coquic_package}"
 docker load -i "$(nix path-info ".#${coquic_package}")" >/dev/null
-docker pull "${quicgo_image}" >/dev/null
+docker pull "${interop_peer_image}" >/dev/null
 docker pull "${simulator_image}" >/dev/null
 docker pull "${iperf_image}" >/dev/null
 
@@ -224,7 +236,7 @@ docker network ls --format '{{.Name}}' |
   grep -E -- "${runner_network_pattern}" |
   xargs -r docker network rm >/dev/null 2>&1 || true
 
-run_direction coquic quic-go
-run_direction quic-go coquic
+run_direction coquic "${interop_peer_impl}"
+run_direction "${interop_peer_impl}" coquic
 
 echo "Pinned official interop runner cases passed."

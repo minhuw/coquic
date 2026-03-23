@@ -36,15 +36,12 @@ jobs:
           docker version
           docker compose version
 
-      - name: Verify Workflow Contract
-        run: bash tests/nix/github_interop_workflow_test.sh
-
       - name: Run Official quic-go Interop Tests
         env:
           INTEROP_TESTCASES: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,chacha20,longrtt,goodput,crosstraffic
           INTEROP_PEER_IMPL: quic-go
           INTEROP_PEER_IMAGE: martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424
-        run: nix develop -c bash tests/nix/interop_runner_test.sh
+        run: nix develop -c bash interop/run-official.sh
 
       - name: Upload Interop Logs
         if: always()
@@ -81,15 +78,12 @@ jobs:
           docker version
           docker compose version
 
-      - name: Verify Workflow Contract
-        run: bash tests/nix/github_interop_workflow_test.sh
-
       - name: Run Official picoquic Interop Tests
         env:
           INTEROP_TESTCASES: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,chacha20,longrtt,goodput,crosstraffic
           INTEROP_PEER_IMPL: picoquic
           INTEROP_PEER_IMAGE: privateoctopus/picoquic:latest
-        run: nix develop -c bash tests/nix/interop_runner_test.sh
+        run: nix develop -c bash interop/run-official.sh
 
       - name: Upload Interop Logs
         if: always()

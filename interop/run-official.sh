@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 cd "${repo_root}"
 
 readonly interop_runner_ref="${INTEROP_RUNNER_REF:-97319f8c0be2bc0be67b025522a64c9231018d37}"

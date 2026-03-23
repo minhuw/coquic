@@ -1,5 +1,8 @@
 # QUIC Interop Runner
 
+Interop-specific repo assets now live under [`interop/`](/home/minhu/projects/coquic/interop).
+The GitHub Actions workflow stays in [`.github/workflows/interop.yml`](/home/minhu/projects/coquic/.github/workflows/interop.yml) because GitHub requires that location.
+
 This repository now exposes a runner-oriented HTTP/0.9 surface above `QuicCore`.
 The current slice targets:
 
@@ -15,8 +18,8 @@ interop-runner scenario coverage beyond those three cases.
 The wrapper script mirrors the official runner environment contract:
 
 ```bash
-ROLE=server TESTCASE=handshake ./scripts/run_endpoint.sh
-ROLE=client TESTCASE=transfer REQUESTS="https://server/file1 https://server/file2" ./scripts/run_endpoint.sh
+ROLE=server TESTCASE=handshake ./interop/entrypoint.sh
+ROLE=client TESTCASE=transfer REQUESTS="https://server/file1 https://server/file2" ./interop/entrypoint.sh
 ```
 
 The script passes the runner-facing environment through to `coquic` and applies
@@ -90,9 +93,6 @@ Build the canonical quictls interop runner image tarball (musl-linked static
 nix build .#interop-image-quictls-musl
 ```
 
-`.#interop-image` and `.#interop-image-quictls` are kept as aliases to the same
-image output.
-
 Load it into Docker:
 
 ```bash
@@ -105,21 +105,8 @@ The resulting image tag is:
 coquic-interop:quictls-musl
 ```
 
-Build and load the boringssl image the same way:
-
-```bash
-nix build .#interop-image-boringssl
-docker load -i "$(nix path-info .#interop-image-boringssl)"
-```
-
-That image loads as:
-
-```bash
-coquic-interop:boringssl
-```
-
-For the boringssl musl image layered on top of the official simulator endpoint
-base image:
+Build and load the boringssl musl image layered on top of the official
+simulator endpoint base image:
 
 ```bash
 nix build .#interop-image-boringssl-musl
@@ -132,9 +119,11 @@ That image loads as:
 coquic-interop:boringssl-musl
 ```
 
-The corresponding static package and shell are:
+The corresponding static musl packages and shells are:
 
 ```bash
+nix build .#coquic-quictls-musl
+nix develop .#quictls-musl
 nix build .#coquic-boringssl-musl
 nix develop .#boringssl-musl
 ```
@@ -150,7 +139,9 @@ including `chacha20`.
 Run the checked-in official runner wrapper against `quic-go` with:
 
 ```bash
-bash tests/nix/interop_runner_test.sh
+INTEROP_PEER_IMPL=quic-go \
+INTEROP_PEER_IMAGE=martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424 \
+nix develop -c bash interop/run-official.sh
 ```
 
 That script builds and loads `coquic-interop:quictls-musl`, pulls the pinned
@@ -158,13 +149,17 @@ official `quic-go`, simulator, and iperf images, and runs the requested
 testcases in both directions. The separate GitHub Actions workflow in
 `.github/workflows/interop.yml` calls the same script.
 
-The Nix-native images are built with `dockerTools.buildLayeredImage`. They
-embed the `coquic` package closure plus the runner wrapper and vendored
-simulator helper scripts:
+The image verification scripts live under `interop/tests/`.
 
-- `/run_endpoint.sh`
-- `/setup.sh`
-- `/wait-for-it.sh`
+The Nix-native interop images are built with `dockerTools.buildLayeredImage`.
+Repo-owned interop assets provide the runner wrapper:
+
+- `/entrypoint.sh`
+
+The only checked-in interop images are the official-base musl variants. They
+are layered on top of
+`martenseemann/quic-network-simulator-endpoint`, so they inherit the
+simulator's own `/setup.sh` and `/wait-for-it.sh` instead of overriding them.
 
 ## quic-interop-runner Usage
 
@@ -182,8 +177,9 @@ used by the official HTTP/0.9 transfer cases.
 
 ## quic-network-simulator Usage
 
-The same image can be used directly with `quic-network-simulator`, because the
-wrapper script cooperates with the simulator endpoint hooks:
+The official-base musl images can be used directly with
+`quic-network-simulator`, because the wrapper script cooperates with the
+simulator endpoint hooks inherited from the official endpoint base image:
 
 - `/setup.sh`
 - `/wait-for-it.sh sim:57832`

@@ -377,63 +377,6 @@
             touch $out/passed
           '';
         };
-      interopRuntimeTools = pkgs.buildEnv {
-        name = "coquic-interop-runtime-tools";
-        paths = [
-          pkgs.bash
-          pkgs.coreutils
-          pkgs.ethtool
-          pkgs.gnugrep
-          pkgs.inetutils
-          pkgs.iproute2
-          pkgs.nettools
-        ];
-        pathsToLink = [ "/bin" ];
-      };
-      mkInteropRoot =
-        {
-          name,
-          coquicPackage,
-        }:
-        pkgs.runCommand "${name}-rootfs" { } ''
-          mkdir -p $out
-          mkdir -p $out/bin
-          cp -a ${interopRuntimeTools}/bin/. $out/bin/
-          chmod u+w $out/bin
-          rm -f $out/bin/sh
-          ln -s bash $out/bin/sh
-          mkdir -p $out/usr/bin $out/usr/local/bin
-          ln -s /bin/env $out/usr/bin/env
-          ln -s ${coquicPackage}/bin/coquic $out/usr/local/bin/coquic
-          cp ${./scripts/run_endpoint.sh} $out/run_endpoint.sh
-          cp ${./scripts/simulator_setup.sh} $out/setup.sh
-          cp ${./scripts/wait-for-it.sh} $out/wait-for-it.sh
-          chmod +x $out/run_endpoint.sh $out/setup.sh $out/wait-for-it.sh
-          ln -s /run_endpoint.sh $out/entrypoint.sh
-        '';
-      mkInteropImage =
-        {
-          profile,
-          coquicPackage,
-          fromImage ? null,
-          tag ? profile.name,
-          includeSimulatorScripts ? true,
-        }:
-        pkgs.dockerTools.buildLayeredImage {
-          name = "coquic-interop";
-          inherit fromImage tag;
-          contents = [
-            (mkInteropRoot {
-            name = "coquic-interop-${profile.name}";
-            inherit coquicPackage;
-            })
-          ];
-          config = {
-            Entrypoint = [ "/run_endpoint.sh" ];
-            Env = [ "PATH=/bin:/usr/bin:/usr/local/bin" ];
-            WorkingDir = "/";
-          };
-        };
       mkOfficialEndpointOverlay =
         {
           name,
@@ -442,9 +385,8 @@
         pkgs.runCommand "${name}-overlay" { } ''
           mkdir -p $out/usr/local/bin
           ln -s ${coquicPackage}/bin/coquic $out/usr/local/bin/coquic
-          cp ${./scripts/run_endpoint.sh} $out/run_endpoint.sh
-          chmod +x $out/run_endpoint.sh
-          ln -s /run_endpoint.sh $out/entrypoint.sh
+          cp ${./interop/entrypoint.sh} $out/entrypoint.sh
+          chmod +x $out/entrypoint.sh
         '';
       mkCoquicShell =
         {
@@ -491,13 +433,9 @@
           })
         ];
         config = {
-          Entrypoint = [ "/run_endpoint.sh" ];
+          Entrypoint = [ "/entrypoint.sh" ];
           WorkingDir = "/";
         };
-      };
-      boringsslImage = mkInteropImage {
-        profile = boringsslProfile;
-        coquicPackage = boringsslPackage;
       };
       boringsslMuslImage = pkgs.dockerTools.buildLayeredImage {
         name = "coquic-interop";
@@ -510,7 +448,7 @@
           })
         ];
         config = {
-          Entrypoint = [ "/run_endpoint.sh" ];
+          Entrypoint = [ "/entrypoint.sh" ];
           WorkingDir = "/";
         };
       };
@@ -586,6 +524,7 @@
       checks.${system} = {
         pre-commit-check = pre-commit-check;
         coquic-quictls = quictlsPackage;
+        coquic-quictls-musl = quictlsMuslPackage;
         coquic-boringssl = boringsslPackage;
         coquic-boringssl-musl = boringsslMuslPackage;
         coquic-tests-quictls = mkCoquicCheck quictlsProfile;
@@ -595,12 +534,10 @@
       packages.${system} = {
         default = quictlsPackage;
         coquic-quictls = quictlsPackage;
+        coquic-quictls-musl = quictlsMuslPackage;
         coquic-boringssl = boringsslPackage;
         coquic-boringssl-musl = boringsslMuslPackage;
-        interop-image = quictlsMuslImage;
         interop-image-quictls-musl = quictlsMuslImage;
-        interop-image-quictls = quictlsMuslImage;
-        interop-image-boringssl = boringsslImage;
         interop-image-boringssl-musl = boringsslMuslImage;
       };
 
@@ -612,6 +549,10 @@
         coquic-quictls = {
           type = "app";
           program = "${quictlsPackage}/bin/coquic";
+        };
+        coquic-quictls-musl = {
+          type = "app";
+          program = "${quictlsMuslPackage}/bin/coquic";
         };
         coquic-boringssl = {
           type = "app";
@@ -626,6 +567,7 @@
       devShells.${system} = {
         default = defaultShell;
         quictls = quictlsShell;
+        quictls-musl = quictlsMuslShell;
         interop-image = quictlsMuslShell;
         boringssl = boringsslShell;
         boringssl-musl = boringsslMuslShell;

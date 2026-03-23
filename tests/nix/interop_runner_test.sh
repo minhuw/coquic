@@ -148,7 +148,6 @@ servers = data.get("servers", [])
 clients = data.get("clients", [])
 results = data.get("results", [])
 measurements = data.get("measurements", [])
-tests = data.get("tests", {})
 
 if server not in servers:
     raise SystemExit(f"official runner results missing server entry: {server}")
@@ -162,6 +161,11 @@ if len(servers) != 1 or len(clients) != 1:
 if len(results) != 1:
     raise SystemExit(
         f"expected one result matrix cell in official runner results, got {len(results)}"
+    )
+if len(measurements) not in (0, 1):
+    raise SystemExit(
+        "expected zero or one measurement matrix cell in official runner results, "
+        f"got {len(measurements)}"
     )
 
 testcase_results = {
@@ -179,7 +183,7 @@ missing = [
 ]
 if missing:
     raise SystemExit(
-        f"official runner results missing requested testcase results: {missing!r}"
+        f"official runner results missing requested testcase or measurement results: {missing!r}"
     )
 
 failed = []

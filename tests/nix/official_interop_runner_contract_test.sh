@@ -23,9 +23,12 @@ required_fragments = [
     'official runner results file missing',
     'requested testcase did not succeed',
     'measurements = data.get("measurements", [])',
+    'if len(measurements) not in (0, 1):',
+    'expected zero or one measurement matrix cell in official runner results',
     'measurement_results = {',
     'if test in testcase_results:',
     'elif test in measurement_results:',
+    'official runner results missing requested testcase or measurement results',
     'readonly coquic_image="${INTEROP_COQUIC_IMAGE:-coquic-interop:quictls-musl}"',
     'readonly coquic_package="${INTEROP_COQUIC_PACKAGE:-interop-image-quictls-musl}"',
     'nix --option eval-cache false build ".#${coquic_package}"',
@@ -40,6 +43,7 @@ forbidden_fragments = [
     'if [[ ",${interop_testcases}," == *",chacha20,"* ]]; then',
     'coquic-interop:boringssl-musl',
     'interop-image-boringssl-musl',
+    'tests = data.get("tests", {})',
 ]
 
 present_forbidden = [fragment for fragment in forbidden_fragments if fragment in script]

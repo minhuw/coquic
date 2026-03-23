@@ -10,7 +10,6 @@ readonly quicgo_image="${INTEROP_QUICGO_IMAGE:-martenseemann/quic-go-interop@sha
 readonly simulator_image="${INTEROP_SIMULATOR_IMAGE:-martenseemann/quic-network-simulator@sha256:c23d82a55caffe681b1bdae65d4d30d23e1283141a414a7f02ee56cf15f9c6b9}"
 readonly iperf_image="${INTEROP_IPERF_IMAGE:-martenseemann/quic-interop-iperf-endpoint@sha256:cb50cc8019d45d9cad5faecbe46a3c21dd5e871949819a5175423755a9045106}"
 readonly interop_testcases="${INTEROP_TESTCASES:-handshake,transfer}"
-readonly interop_wait_for_server="${INTEROP_WAIT_FOR_SERVER:-193.167.100.100:443}"
 readonly log_root="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
 readonly runner_repo_url="https://github.com/quic-interop/quic-interop-runner"
 readonly runner_dir="$(mktemp -d "${TMPDIR:-/tmp}/coquic-interop-runner.XXXXXX")"
@@ -41,7 +40,6 @@ echo "Using pinned simulator repo ref: ${network_simulator_ref}"
 echo "Using official quic-go image: ${quicgo_image}"
 echo "Using official simulator image: ${simulator_image}"
 echo "Using official iperf image: ${iperf_image}"
-echo "Using warmup target: ${interop_wait_for_server}"
 echo "Running official testcases: ${interop_testcases}"
 
 mkdir -p "${log_root}"
@@ -83,18 +81,6 @@ text = path.read_text()
 text = text.replace("image: martenseemann/quic-network-simulator", f"image: {simulator_image}")
 text = text.replace("image: martenseemann/quic-interop-iperf-endpoint", f"image: {iperf_image}")
 path.write_text(text + "\n")
-PY
-
-python3 - "${runner_dir}/interop.py" "${interop_wait_for_server}" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-interop_wait_for_server = sys.argv[2]
-text = path.read_text()
-text = text.replace("WAITFORSERVER=server:443 ",
-                    f"WAITFORSERVER={interop_wait_for_server} ")
-path.write_text(text)
 PY
 
 python3 -m venv "${runner_dir}/.venv"

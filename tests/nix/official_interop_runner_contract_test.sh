@@ -19,13 +19,8 @@ script = pathlib.Path(sys.argv[1]).read_text()
 
 required_fragments = [
     'readonly quicgo_image="${INTEROP_QUICGO_IMAGE:-martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424}"',
-    'readonly interop_wait_for_server="${INTEROP_WAIT_FOR_SERVER:-193.167.100.100:443}"',
     'echo "Using official quic-go image: ${quicgo_image}"',
-    'echo "Using warmup target: ${interop_wait_for_server}"',
     'docker pull "${quicgo_image}" >/dev/null',
-    '"${runner_dir}/interop.py" "${interop_wait_for_server}"',
-    'text.replace("WAITFORSERVER=server:443 ",',
-    'f"WAITFORSERVER={interop_wait_for_server} ")',
     'run_direction coquic quic-go',
     'run_direction quic-go coquic',
     '--json "${results_json}"',
@@ -52,6 +47,11 @@ if missing:
     raise SystemExit(f"official interop wrapper missing fragments: {missing!r}")
 
 forbidden_fragments = [
+    'readonly interop_wait_for_server="${INTEROP_WAIT_FOR_SERVER:-193.167.100.100:443}"',
+    'echo "Using warmup target: ${interop_wait_for_server}"',
+    '"${runner_dir}/interop.py" "${interop_wait_for_server}"',
+    'text.replace("WAITFORSERVER=server:443 ",',
+    'f"WAITFORSERVER={interop_wait_for_server} ")',
     'mkdir -p "${direction_log_dir}"',
     'if [[ ",${interop_testcases}," == *",chacha20,"* ]]; then',
     'coquic-interop:boringssl-musl',

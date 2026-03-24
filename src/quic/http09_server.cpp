@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -65,9 +66,6 @@ bool queue_one_response_chunk(std::uint64_t stream_id, std::ifstream &input,
     }
 
     const bool fin = input.peek() == std::char_traits<char>::eof();
-    if (input.bad()) {
-        return false;
-    }
 
     out.emplace_back(QuicCoreSendStreamData{
         .stream_id = stream_id,
@@ -132,8 +130,25 @@ QuicHttp09EndpointUpdate QuicHttp09ServerEndpoint::drain_pending_inputs() {
         update.core_inputs.push_back(std::move(pending_core_inputs_.front()));
         pending_core_inputs_.pop_front();
     }
-    update.has_pending_work = !pending_responses_.empty() || !pending_core_inputs_.empty();
+    update.has_pending_work = !pending_responses_.empty();
     return update;
+}
+
+bool QuicHttp09ServerEndpoint::queue_response_chunk(std::uint64_t stream_id,
+                                                    PendingResponse &response) {
+    if (!queue_one_response_chunk(stream_id, response.file, pending_core_inputs_)) {
+        queue_stream_local_file_error(stream_id, pending_core_inputs_);
+        closed_streams_.insert(stream_id);
+        return false;
+    }
+
+    const auto &send = std::get<QuicCoreSendStreamData>(pending_core_inputs_.back());
+    if (send.fin) {
+        closed_streams_.insert(stream_id);
+        return false;
+    }
+
+    return true;
 }
 
 void QuicHttp09ServerEndpoint::pump_response_chunks(std::size_t max_chunks) {
@@ -142,15 +157,9 @@ void QuicHttp09ServerEndpoint::pump_response_chunks(std::size_t max_chunks) {
          it != pending_responses_.end() && emitted_chunks < max_chunks;) {
         const auto stream_id = it->first;
         auto current = it++;
-        if (!queue_one_response_chunk(stream_id, current->second.file, pending_core_inputs_)) {
-            queue_stream_local_file_error(stream_id, pending_core_inputs_);
+        if (!queue_response_chunk(stream_id, current->second)) {
             pending_responses_.erase(current);
             continue;
-        }
-
-        const auto *send = std::get_if<QuicCoreSendStreamData>(&pending_core_inputs_.back());
-        if (send != nullptr && send->fin) {
-            pending_responses_.erase(current);
         }
         ++emitted_chunks;
     }
@@ -161,6 +170,10 @@ bool QuicHttp09ServerEndpoint::process_receive_stream_data(
     const auto stream_info = classify_stream_id(received.stream_id, EndpointRole::server);
     if (stream_info.initiator != StreamInitiator::peer ||
         stream_info.direction != StreamDirection::bidirectional) {
+        pending_requests_.erase(received.stream_id);
+        return false;
+    }
+    if (closed_streams_.contains(received.stream_id)) {
         pending_requests_.erase(received.stream_id);
         return false;
     }
@@ -208,23 +221,25 @@ bool QuicHttp09ServerEndpoint::process_receive_stream_data(
         return false;
     }
 
+    const auto &resolved_path_value = resolved_path.value();
+    if (!std::filesystem::is_regular_file(resolved_path_value)) {
+        queue_stream_local_file_error(received.stream_id, pending_core_inputs_);
+        closed_streams_.insert(received.stream_id);
+        pending_requests_.erase(received.stream_id);
+        return true;
+    }
+
     PendingResponse response{
-        .file = std::ifstream(resolved_path.value(), std::ios::binary),
+        .file = std::ifstream(resolved_path_value, std::ios::binary),
     };
     if (!response.file.is_open()) {
         queue_stream_local_file_error(received.stream_id, pending_core_inputs_);
+        closed_streams_.insert(received.stream_id);
         pending_requests_.erase(received.stream_id);
         return true;
     }
 
-    if (!queue_one_response_chunk(received.stream_id, response.file, pending_core_inputs_)) {
-        queue_stream_local_file_error(received.stream_id, pending_core_inputs_);
-        pending_requests_.erase(received.stream_id);
-        return true;
-    }
-
-    const auto *send = std::get_if<QuicCoreSendStreamData>(&pending_core_inputs_.back());
-    if (send == nullptr || !send->fin) {
+    if (queue_response_chunk(received.stream_id, response)) {
         pending_responses_.insert_or_assign(received.stream_id, std::move(response));
     }
     pending_requests_.erase(received.stream_id);
@@ -234,6 +249,7 @@ bool QuicHttp09ServerEndpoint::process_receive_stream_data(
 void QuicHttp09ServerEndpoint::clear_state() {
     pending_requests_.clear();
     pending_responses_.clear();
+    closed_streams_.clear();
     pending_core_inputs_.clear();
 }
 

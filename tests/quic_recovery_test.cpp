@@ -123,6 +123,16 @@ TEST(QuicRecoveryTest, AckHistoryMergesBridgedRanges) {
     EXPECT_EQ(coquic::quic::test::ReceivedPacketHistoryTestPeer::range_count(history), 1u);
 }
 
+TEST(QuicRecoveryTest, AckHistoryKeepsSeparatedRangesWhenPacketDoesNotExtendNextRange) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/10, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1));
+    history.record_received(/*packet_number=*/5, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(2));
+
+    EXPECT_EQ(coquic::quic::test::ReceivedPacketHistoryTestPeer::range_count(history), 2u);
+}
+
 TEST(QuicRecoveryTest, AckHistoryMeasuresAckDelayFromLargestAcknowledgedPacket) {
     ReceivedPacketHistory history;
     history.record_received(/*packet_number=*/0, /*ack_eliciting=*/true,

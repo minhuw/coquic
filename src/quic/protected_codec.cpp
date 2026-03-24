@@ -153,89 +153,6 @@ void append_packet_number(BufferWriter &writer, TruncatedPacketNumberEncoding en
     }
 }
 
-CodecResult<std::vector<std::byte>>
-serialize_plaintext_one_rtt_packet_with_stream_views(const ProtectedOneRttPacket &packet) {
-    const auto truncated_packet_number =
-        truncate_packet_number(packet.packet_number, packet.packet_number_length);
-    if (!truncated_packet_number.has_value()) {
-        return CodecResult<std::vector<std::byte>>::failure(truncated_packet_number.error().code,
-                                                            truncated_packet_number.error().offset);
-    }
-
-    if (packet.frames.empty() && packet.stream_frame_views.empty()) {
-        return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::empty_packet_payload,
-                                                            0);
-    }
-
-    BufferWriter writer;
-    writer.write_byte(make_short_header_first_byte(packet.spin_bit, packet.key_phase,
-                                                   packet.packet_number_length));
-    writer.write_bytes(packet.destination_connection_id);
-    append_packet_number(writer, TruncatedPacketNumberEncoding{
-                                     .packet_number_length = packet.packet_number_length,
-                                     .truncated_packet_number = truncated_packet_number.value(),
-                                 });
-
-    const auto total_frame_count = packet.frames.size() + packet.stream_frame_views.size();
-    std::size_t frame_index = 0;
-    for (const auto &frame : packet.frames) {
-        if (const auto *stream = std::get_if<StreamFrame>(&frame);
-            stream != nullptr && !stream->has_length && frame_index + 1 != total_frame_count) {
-            return CodecResult<std::vector<std::byte>>::failure(
-                CodecErrorCode::packet_length_mismatch, frame_index);
-        }
-
-        const auto encoded = serialize_frame(frame);
-        if (!encoded.has_value()) {
-            return CodecResult<std::vector<std::byte>>::failure(encoded.error().code,
-                                                                encoded.error().offset);
-        }
-
-        writer.write_bytes(encoded.value());
-        ++frame_index;
-    }
-
-    for (const auto &stream_view : packet.stream_frame_views) {
-        if (stream_view.end < stream_view.begin) {
-            return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint,
-                                                                frame_index);
-        }
-
-        const auto payload_size = stream_view.end - stream_view.begin;
-        if (stream_view.offset > kMaxVarInt - payload_size) {
-            return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint,
-                                                                frame_index);
-        }
-        if (payload_size != 0 &&
-            (!stream_view.storage || stream_view.end > stream_view.storage->size())) {
-            return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint,
-                                                                frame_index);
-        }
-
-        std::byte type = std::byte{0x08};
-        type |= std::byte{0x04};
-        type |= std::byte{0x02};
-        if (stream_view.fin) {
-            type |= std::byte{0x01};
-        }
-
-        writer.write_byte(type);
-        if (const auto error = append_varint(writer, stream_view.stream_id)) {
-            return CodecResult<std::vector<std::byte>>::failure(error->code, error->offset);
-        }
-        append_varint_unchecked(writer, stream_view.offset);
-        append_varint_unchecked(writer, payload_size);
-        if (payload_size != 0) {
-            writer.write_bytes(std::span<const std::byte>(
-                stream_view.storage->data() + static_cast<std::ptrdiff_t>(stream_view.begin),
-                payload_size));
-        }
-        ++frame_index;
-    }
-
-    return CodecResult<std::vector<std::byte>>::success(writer.bytes());
-}
-
 struct SerializedOneRttPacketChunks {
     std::vector<std::byte> header;
     std::vector<std::vector<std::byte>> owned_payload_chunks;
@@ -245,10 +162,6 @@ struct SerializedOneRttPacketChunks {
 
 void append_owned_payload_chunk(SerializedOneRttPacketChunks &packet_chunks,
                                 std::vector<std::byte> bytes) {
-    if (bytes.empty()) {
-        return;
-    }
-
     packet_chunks.payload_size += bytes.size();
     packet_chunks.owned_payload_chunks.push_back(std::move(bytes));
     const auto &stored = packet_chunks.owned_payload_chunks.back();
@@ -259,10 +172,6 @@ void append_owned_payload_chunk(SerializedOneRttPacketChunks &packet_chunks,
 
 void append_payload_view_chunk(SerializedOneRttPacketChunks &packet_chunks,
                                std::span<const std::byte> bytes) {
-    if (bytes.empty()) {
-        return;
-    }
-
     packet_chunks.payload_size += bytes.size();
     packet_chunks.payload_chunks.push_back(PlaintextChunk{
         .bytes = bytes,
@@ -310,11 +219,6 @@ serialize_chunked_one_rtt_packet_with_stream_views(const ProtectedOneRttPacket &
             truncated_packet_number.error().code, truncated_packet_number.error().offset);
     }
 
-    if (packet.frames.empty() && packet.stream_frame_views.empty()) {
-        return CodecResult<SerializedOneRttPacketChunks>::failure(
-            CodecErrorCode::empty_packet_payload, 0);
-    }
-
     SerializedOneRttPacketChunks packet_chunks;
     BufferWriter writer;
     writer.write_byte(make_short_header_first_byte(packet.spin_bit, packet.key_phase,
@@ -326,11 +230,10 @@ serialize_chunked_one_rtt_packet_with_stream_views(const ProtectedOneRttPacket &
                                  });
     packet_chunks.header = writer.bytes();
 
-    const auto total_frame_count = packet.frames.size() + packet.stream_frame_views.size();
     std::size_t frame_index = 0;
     for (const auto &frame : packet.frames) {
         if (const auto *stream = std::get_if<StreamFrame>(&frame);
-            stream != nullptr && !stream->has_length && frame_index + 1 != total_frame_count) {
+            stream != nullptr && !stream->has_length) {
             return CodecResult<SerializedOneRttPacketChunks>::failure(
                 CodecErrorCode::packet_length_mismatch, frame_index);
         }
@@ -362,16 +265,6 @@ serialize_chunked_one_rtt_packet_with_stream_views(const ProtectedOneRttPacket &
                                            stream_view.end - stream_view.begin));
         }
         ++frame_index;
-    }
-
-    const auto minimum_payload_size =
-        packet.packet_number_length < kHeaderProtectionSampleOffset
-            ? kHeaderProtectionSampleOffset - packet.packet_number_length
-            : 0;
-    if (packet_chunks.payload_size < minimum_payload_size) {
-        append_owned_payload_chunk(
-            packet_chunks, std::vector<std::byte>(minimum_payload_size - packet_chunks.payload_size,
-                                                  std::byte{0x00}));
     }
 
     return CodecResult<SerializedOneRttPacketChunks>::success(std::move(packet_chunks));
@@ -638,32 +531,6 @@ remove_long_header_protection(std::span<const std::byte> bytes, const LongHeader
         .packet_number_length = packet_number_length,
         .truncated_packet_number = truncated_packet_number,
     });
-}
-
-CodecResult<std::vector<std::byte>>
-apply_short_header_protection(std::vector<std::byte> packet_bytes, PacketNumberSpan packet_number,
-                              CipherSuite cipher_suite, const PacketProtectionKeys &keys) {
-    const auto applied = [&]() -> CodecResult<bool> {
-        const auto mask = make_header_protection_mask(
-            cipher_suite, keys.hp_key,
-            std::span<const std::byte>(packet_bytes)
-                .subspan(packet_number.packet_number_offset + kHeaderProtectionSampleOffset));
-        if (!mask.has_value())
-            return CodecResult<bool>::failure(mask.error().code, mask.error().offset);
-
-        packet_bytes[0] ^=
-            static_cast<std::byte>(std::to_integer<std::uint8_t>(mask.value()[0]) & 0x1fu);
-        for (std::size_t index = 0; index < packet_number.packet_number_length; ++index) {
-            packet_bytes[packet_number.packet_number_offset + index] ^= mask.value()[index + 1];
-        }
-
-        return CodecResult<bool>::success(true);
-    }();
-    if (!applied.has_value())
-        return CodecResult<std::vector<std::byte>>::failure(applied.error().code,
-                                                            applied.error().offset);
-
-    return CodecResult<std::vector<std::byte>>::success(std::move(packet_bytes));
 }
 
 CodecResult<bool> apply_short_header_protection_in_place(std::span<std::byte> packet_bytes,
@@ -997,9 +864,8 @@ deserialize_protected_handshake_packet(std::span<const std::byte> bytes,
                          .subspan(header_end, layout.value().packet_end_offset - header_end));
     if (!plaintext.has_value()) {
         std::cerr << "quic handshake decrypt fail"
-                  << " secret_present=" << context.handshake_secret.has_value() << " secret_len="
-                  << (context.handshake_secret.has_value() ? context.handshake_secret->secret.size()
-                                                           : 0u)
+                  << " secret_present=" << context.handshake_secret.has_value()
+                  << " secret_len=" << context.handshake_secret->secret.size()
                   << " layout_len=" << layout.value().length_value
                   << " pn_len=" << static_cast<int>(unprotected.value().packet_number_length)
                   << " truncated_pn=" << unprotected.value().truncated_packet_number
@@ -1158,19 +1024,6 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
     }
 
     return CodecResult<std::size_t>::success(final_packet_size);
-}
-
-CodecResult<std::vector<std::byte>>
-serialize_protected_one_rtt_packet(const ProtectedOneRttPacket &packet,
-                                   const SerializeProtectionContext &context) {
-    std::vector<std::byte> packet_bytes;
-    const auto appended =
-        append_protected_one_rtt_packet_to_datagram_impl(packet_bytes, packet, context);
-    if (!appended.has_value())
-        return CodecResult<std::vector<std::byte>>::failure(appended.error().code,
-                                                            appended.error().offset);
-
-    return CodecResult<std::vector<std::byte>>::success(std::move(packet_bytes));
 }
 
 CodecResult<ProtectedPacketDecodeResult>

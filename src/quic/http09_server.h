@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "src/quic/http09.h"
@@ -41,6 +42,7 @@ class QuicHttp09ServerEndpoint {
     QuicHttp09EndpointUpdate make_failure_update() const;
     QuicHttp09EndpointUpdate drain_pending_inputs();
     void pump_response_chunks(std::size_t max_chunks);
+    bool queue_response_chunk(std::uint64_t stream_id, PendingResponse &response);
     bool process_receive_stream_data(const QuicCoreReceiveStreamData &received);
     void clear_state();
 
@@ -48,6 +50,7 @@ class QuicHttp09ServerEndpoint {
     bool failed_ = false;
     std::unordered_map<std::uint64_t, PendingRequest> pending_requests_;
     std::unordered_map<std::uint64_t, PendingResponse> pending_responses_;
+    std::unordered_set<std::uint64_t> closed_streams_;
     std::deque<QuicCoreInput> pending_core_inputs_;
 
     friend struct test::QuicHttp09ServerEndpointTestPeer;

@@ -128,18 +128,19 @@ std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack
     }
 
     const auto largest_range = ranges_.rbegin();
+    const auto largest_received_packet_record =
+        largest_received_packet_record_.value_or(ReceivedPacketRecord{
+            .received_time = now,
+        });
 
     AckFrame ack{
         .largest_acknowledged = largest_range->second.largest_packet_number,
         .first_ack_range = largest_range->second.largest_packet_number - largest_range->first,
     };
 
-    if (largest_received_packet_record_.has_value() &&
-        now >= largest_received_packet_record_->received_time) {
-        const auto ack_delay = std::chrono::duration_cast<std::chrono::microseconds>(
-            now - largest_received_packet_record_->received_time);
-        ack.ack_delay = encode_ack_delay(ack_delay, ack_delay_exponent);
-    }
+    const auto ack_delay = std::chrono::duration_cast<std::chrono::microseconds>(std::max(
+        now - largest_received_packet_record.received_time, QuicCoreClock::duration::zero()));
+    ack.ack_delay = encode_ack_delay(ack_delay, ack_delay_exponent);
 
     auto previous_smallest = largest_range->first;
     for (auto it = std::next(ranges_.rbegin()); it != ranges_.rend(); ++it) {

@@ -2,21 +2,25 @@
 #include <gtest/gtest.h>
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
-#include <csignal>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -30,6 +34,7 @@
 #define private public
 #include "src/quic/http09_runtime.h"
 #undef private
+#include "src/quic/http09_runtime_test_hooks.h"
 #include "tests/quic_test_utils.h"
 
 namespace {
@@ -89,9 +94,116 @@ class ScopedFd {
     int fd_ = -1;
 };
 
+template <typename T> T optional_value_or_terminate(const std::optional<T> &value) {
+    if (!value.has_value()) {
+        std::abort();
+    }
+    return *value;
+}
+
+template <typename T> const T &optional_ref_or_terminate(const std::optional<T> &value) {
+    if (!value.has_value()) {
+        std::abort();
+    }
+    return *value;
+}
+
+template <typename T> T &optional_ref_or_terminate(std::optional<T> &value) {
+    if (!value.has_value()) {
+        std::abort();
+    }
+    return *value;
+}
+
+coquic::quic::Http09RuntimeMode invalid_runtime_mode() {
+    constexpr std::uint8_t raw = 0xff;
+    coquic::quic::Http09RuntimeMode mode{};
+    std::memcpy(&mode, &raw, sizeof(raw));
+    return mode;
+}
+
+thread_local std::atomic<bool> *g_runtime_server_stop_requested = nullptr;
+
+class ScopedRuntimeServerStopFlag {
+  public:
+    explicit ScopedRuntimeServerStopFlag(std::atomic<bool> &stop_requested)
+        : previous_(g_runtime_server_stop_requested) {
+        g_runtime_server_stop_requested = &stop_requested;
+    }
+
+    ~ScopedRuntimeServerStopFlag() {
+        g_runtime_server_stop_requested = previous_;
+    }
+
+    ScopedRuntimeServerStopFlag(const ScopedRuntimeServerStopFlag &) = delete;
+    ScopedRuntimeServerStopFlag &operator=(const ScopedRuntimeServerStopFlag &) = delete;
+
+  private:
+    std::atomic<bool> *previous_ = nullptr;
+};
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+int stoppable_poll(pollfd *descriptors, nfds_t descriptor_count, int timeout_ms) {
+    if (g_runtime_server_stop_requested != nullptr && g_runtime_server_stop_requested->load()) {
+        errno = ECANCELED;
+        return -1;
+    }
+
+    int bounded_timeout_ms = timeout_ms;
+    if (bounded_timeout_ms < 0 || bounded_timeout_ms > 50) {
+        bounded_timeout_ms = 50;
+    }
+
+    int poll_result = 0;
+    do {
+        poll_result = ::poll(descriptors, descriptor_count, bounded_timeout_ms);
+    } while (
+        poll_result < 0 && errno == EINTR &&
+        (g_runtime_server_stop_requested == nullptr || !g_runtime_server_stop_requested->load()));
+
+    if (g_runtime_server_stop_requested != nullptr && g_runtime_server_stop_requested->load()) {
+        errno = ECANCELED;
+        return -1;
+    }
+    return poll_result;
+}
+
+void wake_runtime_server(std::string_view host, std::uint16_t port) {
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return;
+    }
+    ScopedFd socket_guard(fd);
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (::inet_pton(AF_INET, std::string(host).c_str(), &address.sin_addr) != 1) {
+        return;
+    }
+
+    const std::array<std::byte, 1> wakeup = {std::byte{0x00}};
+    ::sendto(fd, wakeup.data(), wakeup.size(), 0, reinterpret_cast<const sockaddr *>(&address),
+             sizeof(address));
+}
+
 class ScopedChildProcess {
   public:
-    explicit ScopedChildProcess(pid_t pid) : pid_(pid) {
+    explicit ScopedChildProcess(const coquic::quic::Http09RuntimeConfig &config,
+                                coquic::quic::test::Http09RuntimeOpsOverride override_ops = {})
+        : host_(config.host), port_(config.port),
+          stop_requested_(std::make_shared<std::atomic<bool>>(false)),
+          future_(std::async(std::launch::async, [config, stop_requested = stop_requested_,
+                                                  override_ops]() mutable {
+              ScopedRuntimeServerStopFlag stop_flag(*stop_requested);
+              if (override_ops.poll_fn == nullptr) {
+                  override_ops.poll_fn = &stoppable_poll;
+              }
+              const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+                  override_ops,
+              };
+              return coquic::quic::run_http09_runtime(config);
+          })) {
     }
 
     ~ScopedChildProcess() {
@@ -102,61 +214,223 @@ class ScopedChildProcess {
     ScopedChildProcess &operator=(const ScopedChildProcess &) = delete;
 
     std::optional<int> wait_for_exit(std::chrono::milliseconds timeout) {
-        if (pid_ <= 0) {
+        if (cached_status_.has_value()) {
             return cached_status_;
         }
-
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
-        for (;;) {
-            int status = 0;
-            const auto result = ::waitpid(pid_, &status, WNOHANG);
-            if (result == pid_) {
-                pid_ = -1;
-                cached_status_ = status;
-                return status;
-            }
-            if (result < 0) {
-                pid_ = -1;
-                return std::nullopt;
-            }
-            if (std::chrono::steady_clock::now() >= deadline) {
-                return std::nullopt;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (!future_.valid()) {
+            return std::nullopt;
         }
+        if (future_.wait_for(timeout) != std::future_status::ready) {
+            return std::nullopt;
+        }
+
+        cached_status_ = W_EXITCODE(future_.get(), 0);
+        return cached_status_;
     }
 
     void terminate() {
-        if (pid_ <= 0) {
+        if (cached_status_.has_value() || !future_.valid()) {
             return;
         }
 
-        int status = 0;
-        const auto waited = ::waitpid(pid_, &status, WNOHANG);
-        if (waited == pid_) {
-            pid_ = -1;
-            cached_status_ = status;
+        stop_requested_->store(true);
+        wake_runtime_server(host_, port_);
+        if (future_.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+            cached_status_ = W_EXITCODE(future_.get(), 0);
             return;
         }
-
-        ::kill(pid_, SIGTERM);
-        if (::waitpid(pid_, &status, 0) == pid_) {
-            cached_status_ = status;
-        }
-        pid_ = -1;
     }
 
   private:
-    pid_t pid_ = -1;
+    std::string host_;
+    std::uint16_t port_ = 0;
+    std::shared_ptr<std::atomic<bool>> stop_requested_;
+    std::future<int> future_;
     std::optional<int> cached_status_;
 };
 
-ScopedChildProcess launch_runtime_server_process(const coquic::quic::Http09RuntimeConfig &config) {
-    const auto pid = ::fork();
-    if (pid == 0) {
-        ::_exit(coquic::quic::run_http09_runtime(config));
+int fail_socket(int, int, int) {
+    errno = EMFILE;
+    return -1;
+}
+
+int fail_bind(int, const sockaddr *, socklen_t) {
+    errno = EADDRINUSE;
+    return -1;
+}
+
+int fail_getaddrinfo(const char *, const char *, const addrinfo *, addrinfo **results) {
+    if (results != nullptr) {
+        *results = nullptr;
     }
-    return ScopedChildProcess(pid);
+    return EAI_NONAME;
+}
+
+thread_local int g_freeaddrinfo_calls = 0;
+
+class ScopedFreeaddrinfoCounterReset {
+  public:
+    ScopedFreeaddrinfoCounterReset() {
+        g_freeaddrinfo_calls = 0;
+    }
+
+    ~ScopedFreeaddrinfoCounterReset() {
+        g_freeaddrinfo_calls = 0;
+    }
+
+    ScopedFreeaddrinfoCounterReset(const ScopedFreeaddrinfoCounterReset &) = delete;
+    ScopedFreeaddrinfoCounterReset &operator=(const ScopedFreeaddrinfoCounterReset &) = delete;
+};
+
+int fail_getaddrinfo_with_results(const char *, const char *, const addrinfo *,
+                                  addrinfo **results) {
+    if (results == nullptr) {
+        return EAI_FAIL;
+    }
+
+    auto *address = new sockaddr_in{};
+    address->sin_family = AF_INET;
+
+    auto *result = new addrinfo{};
+    result->ai_family = AF_INET;
+    result->ai_socktype = SOCK_DGRAM;
+    result->ai_protocol = IPPROTO_UDP;
+    result->ai_addrlen = sizeof(sockaddr_in);
+    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+
+    *results = result;
+    return EAI_FAIL;
+}
+
+void counting_freeaddrinfo(addrinfo *results) {
+    ++g_freeaddrinfo_calls;
+    while (results != nullptr) {
+        auto *next = results->ai_next;
+        delete reinterpret_cast<sockaddr_in *>(results->ai_addr);
+        delete results;
+        results = next;
+    }
+}
+
+ssize_t fail_sendto(int, const void *, size_t, int, const sockaddr *, socklen_t) {
+    errno = EIO;
+    return -1;
+}
+
+ssize_t fail_recvfrom(int, void *, size_t, int, sockaddr *, socklen_t *) {
+    errno = EIO;
+    return -1;
+}
+
+int fail_poll(pollfd *, nfds_t, int) {
+    errno = EIO;
+    return -1;
+}
+
+int readable_poll(pollfd *descriptors, nfds_t descriptor_count, int) {
+    if (descriptor_count > 0) {
+        descriptors[0].revents = POLLIN;
+    }
+    return 1;
+}
+
+int unreadable_poll(pollfd *descriptors, nfds_t descriptor_count, int) {
+    if (descriptor_count > 0) {
+        descriptors[0].revents = POLLERR;
+    }
+    return 1;
+}
+
+int timeout_poll(pollfd *descriptors, nfds_t descriptor_count, int) {
+    if (descriptor_count > 0) {
+        descriptors[0].revents = 0;
+    }
+    return 0;
+}
+
+thread_local int g_timeout_then_error_poll_calls = 0;
+thread_local int g_eintr_then_timeout_poll_calls = 0;
+thread_local int g_eintr_then_ewouldblock_recvfrom_calls = 0;
+std::atomic<int> g_fail_sendto_after_calls = -1;
+std::atomic<int> g_fail_sendto_call_count = 0;
+
+int eintr_then_timeout_poll(pollfd *descriptors, nfds_t descriptor_count, int timeout_ms) {
+    ++g_eintr_then_timeout_poll_calls;
+    if (g_eintr_then_timeout_poll_calls == 1) {
+        errno = EINTR;
+        return -1;
+    }
+    return timeout_poll(descriptors, descriptor_count, timeout_ms);
+}
+
+ssize_t eintr_then_ewouldblock_recvfrom(int, void *, size_t, int, sockaddr *, socklen_t *) {
+    ++g_eintr_then_ewouldblock_recvfrom_calls;
+    errno = g_eintr_then_ewouldblock_recvfrom_calls == 1 ? EINTR : EWOULDBLOCK;
+    return -1;
+}
+
+class ScopedTimeoutThenErrorPollReset {
+  public:
+    ScopedTimeoutThenErrorPollReset() {
+        g_timeout_then_error_poll_calls = 0;
+    }
+
+    ~ScopedTimeoutThenErrorPollReset() {
+        g_timeout_then_error_poll_calls = 0;
+    }
+
+    ScopedTimeoutThenErrorPollReset(const ScopedTimeoutThenErrorPollReset &) = delete;
+    ScopedTimeoutThenErrorPollReset &operator=(const ScopedTimeoutThenErrorPollReset &) = delete;
+};
+
+class ScopedFailSendtoAfterReset {
+  public:
+    ScopedFailSendtoAfterReset() {
+        g_fail_sendto_after_calls.store(-1);
+        g_fail_sendto_call_count.store(0);
+    }
+
+    ~ScopedFailSendtoAfterReset() {
+        g_fail_sendto_after_calls.store(-1);
+        g_fail_sendto_call_count.store(0);
+    }
+
+    ScopedFailSendtoAfterReset(const ScopedFailSendtoAfterReset &) = delete;
+    ScopedFailSendtoAfterReset &operator=(const ScopedFailSendtoAfterReset &) = delete;
+};
+
+int timeout_then_error_poll(pollfd *descriptors, nfds_t descriptor_count, int) {
+    if (descriptor_count > 0) {
+        descriptors[0].revents = 0;
+    }
+    if (g_timeout_then_error_poll_calls++ == 0) {
+        return 0;
+    }
+
+    errno = EIO;
+    return -1;
+}
+
+ssize_t fail_sendto_after_n_calls(int fd, const void *buffer, size_t length, int flags,
+                                  const sockaddr *destination, socklen_t destination_length) {
+    const int call_count = g_fail_sendto_call_count.fetch_add(1) + 1;
+    const int fail_after = g_fail_sendto_after_calls.load();
+    if (fail_after > 0 && call_count >= fail_after) {
+        errno = EIO;
+        return -1;
+    }
+
+    return ::sendto(fd, buffer, length, flags, destination, destination_length);
+}
+
+ScopedChildProcess launch_runtime_server_process(const coquic::quic::Http09RuntimeConfig &config) {
+    return ScopedChildProcess(config);
+}
+
+ScopedChildProcess
+launch_runtime_server_process(const coquic::quic::Http09RuntimeConfig &config,
+                              coquic::quic::test::Http09RuntimeOpsOverride override_ops) {
+    return ScopedChildProcess(config, override_ops);
 }
 
 std::uint16_t allocate_udp_loopback_port() {
@@ -1237,6 +1511,8 @@ TEST(QuicHttp09RuntimeTest, ClientDerivesPeerAddressAndServerNameFromRequests) {
 }
 
 TEST(QuicHttp09RuntimeTest, ServerDoesNotExitAfterMalformedTraffic) {
+    ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
@@ -1294,6 +1570,224 @@ TEST(QuicHttp09RuntimeTest, ServerFailsFastWhenTlsFilesMissing) {
     const auto process_status = *status;
     ASSERT_TRUE(WIFEXITED(process_status));
     EXPECT_EQ(WEXITSTATUS(process_status), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ServerFailsFastWhenPrivateKeyFileMissing) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "/no/such/key.pem",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ServerFailsWhenSocketCreationFails) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.socket_fn = &fail_socket},
+    };
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ServerFailsWhenSocketBindFails) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.bind_fn = &fail_bind},
+    };
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ServerFailsWhenConfiguredHostIsNotIpv4) {
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "not-an-ipv4-address",
+        .port = 443,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFailsWhenPeerResolutionFails) {
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.getaddrinfo_fn = &fail_getaddrinfo},
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientConnectionRejectsInvalidDerivedRequestAuthority) {
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "",
+        .server_name = "",
+    };
+    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+        {.url = "https://[::1/a.txt",
+         .authority = "[::1",
+         .request_target = "/a.txt",
+         .relative_output_path = "a.txt"},
+    };
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, requests, 1), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientConnectionFailsWhenSocketCreationFailsAfterRemoteDerivation) {
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.socket_fn = &fail_socket},
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "",
+        .server_name = "",
+    };
+    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+        {.url = "https://127.0.0.1:9443/a.txt",
+         .authority = "127.0.0.1:9443",
+         .request_target = "/a.txt",
+         .relative_output_path = "a.txt"},
+    };
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, requests, 1), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientConnectionFreesResolverResultsWhenResolutionFails) {
+    const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .getaddrinfo_fn = &fail_getaddrinfo_with_results,
+            .freeaddrinfo_fn = &counting_freeaddrinfo,
+        },
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .server_name = "localhost",
+    };
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(g_freeaddrinfo_calls, 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFailsWhenInitialSendFails) {
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.sendto_fn = &fail_sendto},
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFailsWhenPollErrors) {
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.poll_fn = &fail_poll},
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFailsWhenSocketBecomesUnreadable) {
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.poll_fn = &unreadable_poll},
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFailsWhenRecvfromFailsAfterReadablePoll) {
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .poll_fn = &readable_poll,
+            .recvfrom_fn = &fail_recvfrom,
+        },
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ServerContinuesAfterIdlePollTimeoutThenFailsOnPollError) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const ScopedTimeoutThenErrorPollReset poll_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.poll_fn = &timeout_then_error_poll},
+    };
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, TransferCaseUsesSingleConnectionAndMultipleStreams) {
@@ -1500,24 +1994,35 @@ TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidAndEmptyPortStringsFromEnvironm
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeRejectsUnknownTestcaseNamesFromEnvironmentAndCli) {
-    const char *env_argv[] = {"coquic"};
-    ScopedEnvVar role("ROLE", "client");
-    ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
-    ScopedEnvVar testcase("TESTCASE", "unknown-case");
-    EXPECT_FALSE(
-        coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(env_argv)).has_value());
+    {
+        const char *env_argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+        ScopedEnvVar testcase("TESTCASE", "unknown-case");
+        EXPECT_FALSE(
+            coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(env_argv)).has_value());
+    }
 
-    const char *cli_argv[] = {"coquic",       "interop-client", "--testcase",
-                              "unknown-case", "--requests",     "https://localhost/a.txt"};
-    EXPECT_FALSE(
-        coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(cli_argv)).has_value());
+    {
+        ScopedEnvVar role("ROLE", std::nullopt);
+        ScopedEnvVar requests("REQUESTS", std::nullopt);
+        ScopedEnvVar testcase("TESTCASE", std::nullopt);
+        const char *cli_argv[] = {"coquic",       "interop-client", "--testcase",
+                                  "unknown-case", "--requests",     "https://localhost/a.txt"};
+        EXPECT_FALSE(
+            coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(cli_argv)).has_value());
+    }
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidRoleAndUsageDispatchFailures) {
-    const char *role_argv[] = {"coquic"};
-    ScopedEnvVar role("ROLE", "invalid");
-    EXPECT_FALSE(
-        coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(role_argv)).has_value());
+    {
+        const char *role_argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "invalid");
+        EXPECT_FALSE(
+            coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(role_argv)).has_value());
+    }
+
+    ScopedEnvVar role("ROLE", std::nullopt);
 
     const char *bad_subcommand_argv[] = {"coquic", "interop-runner"};
     EXPECT_FALSE(
@@ -1563,9 +2068,50 @@ TEST(QuicHttp09RuntimeTest, RejectsMalformedBracketedAuthority) {
     EXPECT_FALSE(parsed.has_value());
 }
 
+TEST(QuicHttp09RuntimeTest, RejectsEmptyAndColonOnlyAuthorities) {
+    EXPECT_FALSE(coquic::quic::parse_http09_authority("").has_value());
+    EXPECT_FALSE(coquic::quic::parse_http09_authority(":443").has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, ParsesBracketedAuthoritiesWithAndWithoutPort) {
+    const auto without_port = coquic::quic::parse_http09_authority("[::1]");
+    ASSERT_TRUE(without_port.has_value());
+    const auto &without_port_authority = optional_ref_or_terminate(without_port);
+    EXPECT_EQ(without_port_authority.host, "::1");
+    EXPECT_FALSE(without_port_authority.port.has_value());
+
+    const auto with_port = coquic::quic::parse_http09_authority("[::1]:8443");
+    ASSERT_TRUE(with_port.has_value());
+    const auto &with_port_authority = optional_ref_or_terminate(with_port);
+    EXPECT_EQ(with_port_authority.host, "::1");
+    ASSERT_TRUE(with_port_authority.port.has_value());
+    EXPECT_EQ(optional_value_or_terminate(with_port_authority.port), 8443);
+}
+
+TEST(QuicHttp09RuntimeTest, RejectsBracketedAuthoritiesWithEmptyHostOrInvalidSuffix) {
+    EXPECT_FALSE(coquic::quic::parse_http09_authority("[]:443").has_value());
+    EXPECT_FALSE(coquic::quic::parse_http09_authority("[::1]extra").has_value());
+    EXPECT_FALSE(coquic::quic::parse_http09_authority("[::1]:bad").has_value());
+}
+
 TEST(QuicHttp09RuntimeTest, RejectsMalformedHostPortAuthority) {
     const auto parsed = coquic::quic::parse_http09_authority("localhost:bad");
     EXPECT_FALSE(parsed.has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, ParsesHostnamePortAndIpv6LiteralAuthorities) {
+    const auto host_port = coquic::quic::parse_http09_authority("localhost:9443");
+    ASSERT_TRUE(host_port.has_value());
+    const auto &host_port_authority = optional_ref_or_terminate(host_port);
+    EXPECT_EQ(host_port_authority.host, "localhost");
+    ASSERT_TRUE(host_port_authority.port.has_value());
+    EXPECT_EQ(optional_value_or_terminate(host_port_authority.port), 9443);
+
+    const auto ipv6_literal = coquic::quic::parse_http09_authority("2001:db8::1");
+    ASSERT_TRUE(ipv6_literal.has_value());
+    const auto &ipv6_literal_authority = optional_ref_or_terminate(ipv6_literal);
+    EXPECT_EQ(ipv6_literal_authority.host, "2001:db8::1");
+    EXPECT_FALSE(ipv6_literal_authority.port.has_value());
 }
 
 TEST(QuicHttp09RuntimeTest, DerivesHostPortAndServerNameFromRequestWhenUnset) {
@@ -1610,6 +2156,43 @@ TEST(QuicHttp09RuntimeTest, DerivesOnlyServerNameWhenHostAlreadySpecified) {
     EXPECT_EQ(remote.server_name, "localhost");
 }
 
+TEST(QuicHttp09RuntimeTest, DerivesOnlyHostWhenServerNameAlreadySpecified) {
+    const auto config = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "",
+        .port = 9443,
+        .server_name = "example.test",
+    };
+    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+        {.url = "https://localhost/a.txt",
+         .authority = "localhost",
+         .request_target = "/a.txt",
+         .relative_output_path = "a.txt"},
+    };
+    const auto derived = coquic::quic::derive_http09_client_remote(config, requests);
+    ASSERT_TRUE(derived.has_value());
+    const auto remote = derived.value_or(coquic::quic::Http09ClientRemote{});
+    EXPECT_EQ(remote.host, "localhost");
+    EXPECT_EQ(remote.port, 9443);
+    EXPECT_EQ(remote.server_name, "example.test");
+}
+
+TEST(QuicHttp09RuntimeTest, DerivationReturnsConfiguredRemoteWithoutRequestsWhenComplete) {
+    const auto config = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "203.0.113.10",
+        .port = 9443,
+        .server_name = "example.test",
+    };
+
+    const auto derived = coquic::quic::derive_http09_client_remote(config, {});
+    ASSERT_TRUE(derived.has_value());
+    const auto &derived_remote = optional_ref_or_terminate(derived);
+    EXPECT_EQ(derived_remote.host, "203.0.113.10");
+    EXPECT_EQ(derived_remote.port, 9443);
+    EXPECT_EQ(derived_remote.server_name, "example.test");
+}
+
 TEST(QuicHttp09RuntimeTest, DerivationFailsForEmptyRequestListWhenFallbackRequired) {
     const auto config = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
@@ -1644,6 +2227,109 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialMulticonnectTestcase) {
     ASSERT_TRUE(parsed.has_value());
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeReadsServerEnvironmentOverrides) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "server");
+    ScopedEnvVar testcase("TESTCASE", "handshake");
+    ScopedEnvVar requests("REQUESTS", std::nullopt);
+    ScopedEnvVar host("HOST", "0.0.0.0");
+    ScopedEnvVar port("PORT", "8443");
+    ScopedEnvVar document_root("DOCUMENT_ROOT", "/srv/http09");
+    ScopedEnvVar download_root("DOWNLOAD_ROOT", "/srv/downloads");
+    ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", "/tls/cert.pem");
+    ScopedEnvVar private_key("PRIVATE_KEY_PATH", "/tls/key.pem");
+    ScopedEnvVar server_name("SERVER_NAME", "interop.example");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    EXPECT_EQ(runtime.mode, coquic::quic::Http09RuntimeMode::server);
+    EXPECT_EQ(runtime.host, "0.0.0.0");
+    EXPECT_EQ(runtime.port, 8443);
+    EXPECT_EQ(runtime.testcase, coquic::quic::QuicHttp09Testcase::handshake);
+    EXPECT_EQ(runtime.document_root, std::filesystem::path("/srv/http09"));
+    EXPECT_EQ(runtime.download_root, std::filesystem::path("/srv/downloads"));
+    EXPECT_EQ(runtime.certificate_chain_path, std::filesystem::path("/tls/cert.pem"));
+    EXPECT_EQ(runtime.private_key_path, std::filesystem::path("/tls/key.pem"));
+    EXPECT_EQ(runtime.server_name, "interop.example");
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeParsesInteropServerSubcommandFlags) {
+    const char *argv[] = {"coquic",          "interop-server",  "--host",
+                          "0.0.0.0",         "--port",          "9443",
+                          "--document-root", "/srv/http09",     "--certificate-chain",
+                          "/tls/cert.pem",   "--private-key",   "/tls/key.pem",
+                          "--server-name",   "interop.example", "--verify-peer"};
+    const auto parsed = coquic::quic::parse_http09_runtime_args(static_cast<int>(std::size(argv)),
+                                                                const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    EXPECT_EQ(runtime.mode, coquic::quic::Http09RuntimeMode::server);
+    EXPECT_EQ(runtime.host, "0.0.0.0");
+    EXPECT_EQ(runtime.port, 9443);
+    EXPECT_EQ(runtime.document_root, std::filesystem::path("/srv/http09"));
+    EXPECT_EQ(runtime.certificate_chain_path, std::filesystem::path("/tls/cert.pem"));
+    EXPECT_EQ(runtime.private_key_path, std::filesystem::path("/tls/key.pem"));
+    EXPECT_EQ(runtime.server_name, "interop.example");
+    EXPECT_TRUE(runtime.verify_peer);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeCliFlagsOverrideEnvironmentAndKeepExplicitClientRemote) {
+    const char *argv[] = {"coquic",
+                          "interop-client",
+                          "--host",
+                          "198.51.100.20",
+                          "--port",
+                          "9443",
+                          "--testcase",
+                          "chacha20",
+                          "--requests",
+                          "https://cli.example/a.txt https://cli.example/b.txt",
+                          "--document-root",
+                          "/unused/server-root",
+                          "--download-root",
+                          "/cli/downloads",
+                          "--certificate-chain",
+                          "/cli/cert.pem",
+                          "--private-key",
+                          "/cli/key.pem",
+                          "--server-name",
+                          "cli.example",
+                          "--verify-peer"};
+    ScopedEnvVar role("ROLE", "server");
+    ScopedEnvVar testcase("TESTCASE", "handshake");
+    ScopedEnvVar requests("REQUESTS", "https://env.example/env.txt");
+    ScopedEnvVar host("HOST", "203.0.113.10");
+    ScopedEnvVar port("PORT", "443");
+    ScopedEnvVar document_root("DOCUMENT_ROOT", "/env/www");
+    ScopedEnvVar download_root("DOWNLOAD_ROOT", "/env/downloads");
+    ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", "/env/cert.pem");
+    ScopedEnvVar private_key("PRIVATE_KEY_PATH", "/env/key.pem");
+    ScopedEnvVar server_name("SERVER_NAME", "env.example");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(static_cast<int>(std::size(argv)),
+                                                                const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    EXPECT_EQ(runtime.mode, coquic::quic::Http09RuntimeMode::client);
+    EXPECT_EQ(runtime.host, "198.51.100.20");
+    EXPECT_EQ(runtime.port, 9443);
+    EXPECT_EQ(runtime.testcase, coquic::quic::QuicHttp09Testcase::chacha20);
+    EXPECT_EQ(runtime.requests_env, "https://cli.example/a.txt https://cli.example/b.txt");
+    EXPECT_EQ(runtime.document_root, std::filesystem::path("/unused/server-root"));
+    EXPECT_EQ(runtime.download_root, std::filesystem::path("/cli/downloads"));
+    EXPECT_EQ(runtime.certificate_chain_path, std::filesystem::path("/cli/cert.pem"));
+    EXPECT_EQ(runtime.private_key_path, std::filesystem::path("/cli/key.pem"));
+    EXPECT_EQ(runtime.server_name, "cli.example");
+    EXPECT_TRUE(runtime.verify_peer);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidCliPortString) {
+    const char *argv[] = {"coquic",      "interop-client", "--port",
+                          "forty-three", "--requests",     "https://localhost/a.txt"};
+    EXPECT_FALSE(coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(argv)).has_value());
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialChacha20TestcaseAndConstrainsCipherSuites) {
     const char *argv[] = {"coquic"};
     ScopedEnvVar role("ROLE", "client");
@@ -1672,6 +2358,566 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialChacha20TestcaseAndConstrainsC
               (std::vector<coquic::quic::CipherSuite>{
                   coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
               }));
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksExposeTraceAndConnectionIdFormatting) {
+    {
+        ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", std::nullopt);
+        EXPECT_FALSE(coquic::quic::test::runtime_trace_enabled_for_tests());
+    }
+    {
+        ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "");
+        EXPECT_FALSE(coquic::quic::test::runtime_trace_enabled_for_tests());
+    }
+    {
+        ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "0");
+        EXPECT_FALSE(coquic::quic::test::runtime_trace_enabled_for_tests());
+    }
+    {
+        ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "trace");
+        EXPECT_TRUE(coquic::quic::test::runtime_trace_enabled_for_tests());
+    }
+
+    const coquic::quic::ConnectionId connection_id = {
+        std::byte{0x00},
+        std::byte{0x1f},
+        std::byte{0xa0},
+        std::byte{0xff},
+    };
+    EXPECT_EQ(coquic::quic::test::format_connection_id_hex_for_tests(connection_id), "001fa0ff");
+
+    const auto key = coquic::quic::test::connection_id_key_for_tests(connection_id);
+    EXPECT_EQ(key.size(), connection_id.size());
+    EXPECT_EQ(coquic::quic::test::format_connection_id_key_hex_for_tests(key), "001fa0ff");
+    EXPECT_TRUE(coquic::quic::test::connection_id_key_for_tests({}).empty());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksParseServerDatagramRouting) {
+    EXPECT_FALSE(coquic::quic::test::parse_server_datagram_for_routing_for_tests({}).has_value());
+
+    const std::array<std::byte, 1> invalid_short_header = {
+        std::byte{0x00},
+    };
+    EXPECT_FALSE(
+        coquic::quic::test::parse_server_datagram_for_routing_for_tests(invalid_short_header)
+            .has_value());
+
+    std::vector<std::byte> truncated_short_header(kRuntimeConnectionIdLength, std::byte{0x00});
+    truncated_short_header.front() = std::byte{0x40};
+    EXPECT_FALSE(
+        coquic::quic::test::parse_server_datagram_for_routing_for_tests(truncated_short_header)
+            .has_value());
+
+    const std::array<std::byte, 1 + kRuntimeConnectionIdLength> short_header = {
+        std::byte{0x40}, std::byte{0x83}, std::byte{0x94}, std::byte{0xc8}, std::byte{0xf0},
+        std::byte{0x3e}, std::byte{0x51}, std::byte{0x57}, std::byte{0x08},
+    };
+    const auto parsed_short =
+        coquic::quic::test::parse_server_datagram_for_routing_for_tests(short_header);
+    ASSERT_TRUE(parsed_short.has_value());
+    const auto &parsed_short_datagram = optional_ref_or_terminate(parsed_short);
+    EXPECT_EQ(parsed_short_datagram.kind,
+              coquic::quic::test::ParsedServerDatagramKind::short_header);
+    EXPECT_EQ(parsed_short_datagram.destination_connection_id, (coquic::quic::ConnectionId{
+                                                                   std::byte{0x83},
+                                                                   std::byte{0x94},
+                                                                   std::byte{0xc8},
+                                                                   std::byte{0xf0},
+                                                                   std::byte{0x3e},
+                                                                   std::byte{0x51},
+                                                                   std::byte{0x57},
+                                                                   std::byte{0x08},
+                                                               }));
+    EXPECT_FALSE(parsed_short_datagram.source_connection_id.has_value());
+
+    auto unsupported_version = make_unsupported_version_probe();
+    auto invalid_long_header = unsupported_version;
+    invalid_long_header[0] = std::byte{0x80};
+    EXPECT_FALSE(
+        coquic::quic::test::parse_server_datagram_for_routing_for_tests(invalid_long_header)
+            .has_value());
+
+    const auto unsupported =
+        coquic::quic::test::parse_server_datagram_for_routing_for_tests(unsupported_version);
+    ASSERT_TRUE(unsupported.has_value());
+    const auto &unsupported_datagram = optional_ref_or_terminate(unsupported);
+    EXPECT_EQ(unsupported_datagram.kind,
+              coquic::quic::test::ParsedServerDatagramKind::unsupported_version_long_header);
+    EXPECT_EQ(unsupported_datagram.destination_connection_id, (coquic::quic::ConnectionId{
+                                                                  std::byte{0x83},
+                                                                  std::byte{0x94},
+                                                                  std::byte{0xc8},
+                                                                  std::byte{0xf0},
+                                                                  std::byte{0x3e},
+                                                                  std::byte{0x51},
+                                                                  std::byte{0x57},
+                                                                  std::byte{0x08},
+                                                              }));
+    ASSERT_TRUE(unsupported_datagram.source_connection_id.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(unsupported_datagram.source_connection_id),
+              (coquic::quic::ConnectionId{
+                  std::byte{0xc1},
+                  std::byte{0x01},
+                  std::byte{0x12},
+                  std::byte{0x23},
+                  std::byte{0x34},
+                  std::byte{0x45},
+                  std::byte{0x56},
+                  std::byte{0x67},
+              }));
+
+    auto supported_initial = unsupported_version;
+    supported_initial[1] = std::byte{0x00};
+    supported_initial[2] = std::byte{0x00};
+    supported_initial[3] = std::byte{0x00};
+    supported_initial[4] = std::byte{0x01};
+    const auto initial =
+        coquic::quic::test::parse_server_datagram_for_routing_for_tests(supported_initial);
+    ASSERT_TRUE(initial.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(initial).kind,
+              coquic::quic::test::ParsedServerDatagramKind::supported_initial);
+
+    auto supported_long_header = supported_initial;
+    supported_long_header[0] = std::byte{0xd0};
+    const auto long_header =
+        coquic::quic::test::parse_server_datagram_for_routing_for_tests(supported_long_header);
+    ASSERT_TRUE(long_header.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(long_header).kind,
+              coquic::quic::test::ParsedServerDatagramKind::supported_long_header);
+
+    auto version_negotiation = supported_initial;
+    version_negotiation[1] = std::byte{0x00};
+    version_negotiation[2] = std::byte{0x00};
+    version_negotiation[3] = std::byte{0x00};
+    version_negotiation[4] = std::byte{0x00};
+    EXPECT_FALSE(
+        coquic::quic::test::parse_server_datagram_for_routing_for_tests(version_negotiation)
+            .has_value());
+
+    auto truncated_dcid = supported_initial;
+    truncated_dcid.resize(14);
+    EXPECT_FALSE(coquic::quic::test::parse_server_datagram_for_routing_for_tests(truncated_dcid)
+                     .has_value());
+
+    auto truncated_scid = supported_initial;
+    truncated_scid.resize(22);
+    EXPECT_FALSE(coquic::quic::test::parse_server_datagram_for_routing_for_tests(truncated_scid)
+                     .has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeHealthCheckSucceedsWhenDependenciesAreAvailable) {
+    const auto runtime = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::health_check,
+    };
+    EXPECT_EQ(coquic::quic::run_http09_runtime(runtime), 0);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeReturnsFailureForUnknownMode) {
+    const auto runtime = coquic::quic::Http09RuntimeConfig{
+        .mode = invalid_runtime_mode(),
+    };
+
+    EXPECT_EXIT(std::exit(coquic::quic::run_http09_runtime(runtime)), ::testing::ExitedWithCode(1),
+                "");
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFailsWhenRequestsEnvIsInvalidAtRuntime) {
+    coquic::quic::test::ScopedTempDir download_root;
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .download_root = download_root.path(),
+        .requests_env = "definitely-not-a-url",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientMulticonnectStopsWhenAConnectionFails) {
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "invalid-host-name",
+        .port = 443,
+        .server_name = "localhost",
+        .testcase = coquic::quic::QuicHttp09Testcase::multiconnect,
+        .requests_env = "https://localhost/a.txt https://localhost/b.txt",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientConnectionWithoutRequestsCompletesAfterHandshake) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = port,
+        .server_name = "localhost",
+        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+    };
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperReturnsIdleTimeoutWithoutWakeup) {
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.poll_fn = &timeout_poll},
+    };
+
+    const auto step = coquic::quic::test::wait_for_socket_or_deadline_for_tests(
+        /*socket_fd=*/-1, /*idle_timeout_ms=*/5, "client", std::nullopt);
+
+    ASSERT_TRUE(step.has_value());
+    const auto &wait_step = optional_ref_or_terminate(step);
+    EXPECT_TRUE(wait_step.idle_timeout);
+    EXPECT_FALSE(wait_step.has_input);
+    EXPECT_FALSE(wait_step.has_source);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperReturnsTimerInputWhenWakeupIsDue) {
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.poll_fn = &timeout_poll},
+    };
+
+    const auto step = coquic::quic::test::wait_for_socket_or_deadline_for_tests(
+        /*socket_fd=*/-1, /*idle_timeout_ms=*/50, "client", runtime_now());
+
+    ASSERT_TRUE(step.has_value());
+    const auto &wait_step = optional_ref_or_terminate(step);
+    EXPECT_FALSE(wait_step.idle_timeout);
+    EXPECT_TRUE(wait_step.has_input);
+    EXPECT_TRUE(wait_step.input_is_timer_expired);
+    EXPECT_FALSE(wait_step.has_source);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksSelectEarliestWakeupAcrossEntries) {
+    const auto base = runtime_now();
+    const std::array<std::optional<coquic::quic::QuicCoreTimePoint>, 4> wakeups = {
+        std::nullopt,
+        base + std::chrono::milliseconds(30),
+        base + std::chrono::milliseconds(5),
+        base + std::chrono::milliseconds(15),
+    };
+
+    const auto earliest = coquic::quic::test::earliest_runtime_wakeup_for_tests(wakeups);
+    ASSERT_TRUE(earliest.has_value());
+    EXPECT_EQ(optional_value_or_terminate(earliest), optional_value_or_terminate(wakeups[2]));
+
+    const std::array<std::optional<coquic::quic::QuicCoreTimePoint>, 2> empty_wakeups = {
+        std::nullopt,
+        std::nullopt,
+    };
+    EXPECT_FALSE(coquic::quic::test::earliest_runtime_wakeup_for_tests(empty_wakeups).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveEndpointUntilBlockedFailureCases) {
+    const auto handle_core_effects_fail =
+        coquic::quic::test::drive_endpoint_until_blocked_case_for_tests(
+            coquic::quic::test::DriveEndpointUntilBlockedCaseForTests::handle_core_effects_fail);
+    EXPECT_FALSE(handle_core_effects_fail.returned);
+    EXPECT_TRUE(handle_core_effects_fail.terminal_failure);
+    EXPECT_FALSE(handle_core_effects_fail.terminal_success);
+
+    const auto initial_local_error =
+        coquic::quic::test::drive_endpoint_until_blocked_case_for_tests(
+            coquic::quic::test::DriveEndpointUntilBlockedCaseForTests::initial_local_error);
+    EXPECT_FALSE(initial_local_error.returned);
+    EXPECT_TRUE(initial_local_error.terminal_failure);
+    EXPECT_FALSE(initial_local_error.terminal_success);
+
+    const auto endpoint_failure = coquic::quic::test::drive_endpoint_until_blocked_case_for_tests(
+        coquic::quic::test::DriveEndpointUntilBlockedCaseForTests::endpoint_failure);
+    EXPECT_FALSE(endpoint_failure.returned);
+    EXPECT_TRUE(endpoint_failure.terminal_failure);
+    EXPECT_FALSE(endpoint_failure.terminal_success);
+
+    const auto endpoint_inputs_then_core_error =
+        coquic::quic::test::drive_endpoint_until_blocked_case_for_tests(
+            coquic::quic::test::DriveEndpointUntilBlockedCaseForTests::
+                endpoint_inputs_then_core_error);
+    EXPECT_FALSE(endpoint_inputs_then_core_error.returned);
+    EXPECT_TRUE(endpoint_inputs_then_core_error.terminal_failure);
+    EXPECT_FALSE(endpoint_inputs_then_core_error.terminal_success);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveEndpointUntilBlockedSuccessCase) {
+    const auto success = coquic::quic::test::drive_endpoint_until_blocked_case_for_tests(
+        coquic::quic::test::DriveEndpointUntilBlockedCaseForTests::endpoint_success);
+    EXPECT_TRUE(success.returned);
+    EXPECT_TRUE(success.terminal_success);
+    EXPECT_FALSE(success.terminal_failure);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionLoopCases) {
+    const auto initial_terminal_success =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::initial_terminal_success);
+    EXPECT_EQ(initial_terminal_success.exit_code, 0);
+    EXPECT_TRUE(initial_terminal_success.terminal_success);
+    EXPECT_FALSE(initial_terminal_success.terminal_failure);
+
+    const auto timer_due_then_wait_failure =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::timer_due_then_wait_failure);
+    EXPECT_EQ(timer_due_then_wait_failure.exit_code, 1);
+    EXPECT_FALSE(timer_due_then_wait_failure.terminal_success);
+    EXPECT_FALSE(timer_due_then_wait_failure.terminal_failure);
+
+    const auto timer_due_then_drive_failure =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::timer_due_then_drive_failure);
+    EXPECT_EQ(timer_due_then_drive_failure.exit_code, 1);
+    EXPECT_TRUE(timer_due_then_drive_failure.terminal_failure);
+
+    const auto outer_timer_then_wait_failure =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::outer_timer_then_wait_failure);
+    EXPECT_EQ(outer_timer_then_wait_failure.exit_code, 1);
+    EXPECT_FALSE(outer_timer_then_wait_failure.terminal_failure);
+
+    const auto outer_timer_then_drive_failure =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::outer_timer_then_drive_failure);
+    EXPECT_EQ(outer_timer_then_drive_failure.exit_code, 1);
+    EXPECT_TRUE(outer_timer_then_drive_failure.terminal_failure);
+
+    const auto pending_work_terminal_failure =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::pending_work_terminal_failure);
+    EXPECT_EQ(pending_work_terminal_failure.exit_code, 1);
+    EXPECT_TRUE(pending_work_terminal_failure.terminal_failure);
+
+    const auto pending_work_default_poll_then_wait_failure =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::
+                pending_work_default_poll_then_wait_failure);
+    EXPECT_EQ(pending_work_default_poll_then_wait_failure.exit_code, 1);
+    EXPECT_FALSE(pending_work_default_poll_then_wait_failure.terminal_failure);
+
+    const auto pending_work_no_inputs_then_idle_timeout =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::
+                pending_work_no_inputs_then_idle_timeout);
+    EXPECT_EQ(pending_work_no_inputs_then_idle_timeout.exit_code, 1);
+    EXPECT_FALSE(pending_work_no_inputs_then_idle_timeout.terminal_success);
+    EXPECT_FALSE(pending_work_no_inputs_then_idle_timeout.terminal_failure);
+
+    const auto receive_error_after_nonblocking_drain =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::
+                receive_error_after_nonblocking_drain);
+    EXPECT_EQ(receive_error_after_nonblocking_drain.exit_code, 1);
+
+    const auto receive_input_then_drive_failure =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::receive_input_then_drive_failure);
+    EXPECT_EQ(receive_input_then_drive_failure.exit_code, 1);
+    EXPECT_TRUE(receive_input_then_drive_failure.terminal_failure);
+
+    const auto wait_failure = coquic::quic::test::run_client_connection_loop_case_for_tests(
+        coquic::quic::test::ClientConnectionLoopCaseForTests::wait_failure);
+    EXPECT_EQ(wait_failure.exit_code, 1);
+    EXPECT_FALSE(wait_failure.terminal_success);
+    EXPECT_FALSE(wait_failure.terminal_failure);
+
+    const auto outer_pump_terminal_failure =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::outer_pump_terminal_failure);
+    EXPECT_EQ(outer_pump_terminal_failure.exit_code, 1);
+    EXPECT_TRUE(outer_pump_terminal_failure.terminal_failure);
+
+    const auto outer_pump_terminal_success =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::outer_pump_terminal_success);
+    EXPECT_EQ(outer_pump_terminal_success.exit_code, 0);
+    EXPECT_TRUE(outer_pump_terminal_success.terminal_success);
+
+    const auto wait_input_then_terminal_success =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::wait_input_then_terminal_success);
+    EXPECT_EQ(wait_input_then_terminal_success.exit_code, 0);
+    EXPECT_TRUE(wait_input_then_terminal_success.terminal_success);
+    EXPECT_FALSE(wait_input_then_terminal_success.terminal_failure);
+
+    const auto wait_input_then_drive_failure =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::wait_input_then_drive_failure);
+    EXPECT_EQ(wait_input_then_drive_failure.exit_code, 1);
+    EXPECT_TRUE(wait_input_then_drive_failure.terminal_failure);
+
+    const auto wait_input_missing_failure =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::wait_input_missing_failure);
+    EXPECT_EQ(wait_input_missing_failure.exit_code, 1);
+    EXPECT_FALSE(wait_input_missing_failure.terminal_success);
+    EXPECT_FALSE(wait_input_missing_failure.terminal_failure);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCases) {
+    {
+        ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "trace");
+        EXPECT_TRUE(coquic::quic::test::existing_server_session_failure_cleans_up_for_tests());
+    }
+
+    EXPECT_TRUE(coquic::quic::test::existing_server_session_failure_cleans_up_for_tests());
+    EXPECT_TRUE(coquic::quic::test::existing_server_session_missing_input_fails_for_tests());
+    EXPECT_TRUE(coquic::quic::test::expired_server_timer_failure_cleans_up_for_tests());
+    EXPECT_TRUE(coquic::quic::test::pending_server_work_failure_cleans_up_for_tests());
+    EXPECT_TRUE(
+        coquic::quic::test::version_negotiation_without_source_connection_id_fails_for_tests());
+
+    const auto nonblocking_processed_timers_then_receive_error =
+        coquic::quic::test::run_server_loop_case_for_tests(
+            coquic::quic::test::ServerLoopCaseForTests::
+                nonblocking_processed_timers_then_receive_error);
+    EXPECT_EQ(nonblocking_processed_timers_then_receive_error.exit_code, 1);
+    EXPECT_EQ(nonblocking_processed_timers_then_receive_error.receive_calls, 1U);
+    EXPECT_EQ(nonblocking_processed_timers_then_receive_error.wait_calls, 0U);
+    EXPECT_EQ(nonblocking_processed_timers_then_receive_error.process_expired_calls, 2U);
+
+    const auto nonblocking_process_datagram_failure =
+        coquic::quic::test::run_server_loop_case_for_tests(
+            coquic::quic::test::ServerLoopCaseForTests::nonblocking_process_datagram_failure);
+    EXPECT_EQ(nonblocking_process_datagram_failure.exit_code, 1);
+    EXPECT_EQ(nonblocking_process_datagram_failure.receive_calls, 1U);
+    EXPECT_EQ(nonblocking_process_datagram_failure.wait_calls, 0U);
+    EXPECT_EQ(nonblocking_process_datagram_failure.process_expired_calls, 1U);
+
+    const auto blocking_timer_then_receive_error =
+        coquic::quic::test::run_server_loop_case_for_tests(
+            coquic::quic::test::ServerLoopCaseForTests::blocking_timer_then_receive_error);
+    EXPECT_EQ(blocking_timer_then_receive_error.exit_code, 1);
+    EXPECT_EQ(blocking_timer_then_receive_error.receive_calls, 2U);
+    EXPECT_EQ(blocking_timer_then_receive_error.wait_calls, 1U);
+    EXPECT_EQ(blocking_timer_then_receive_error.process_expired_calls, 4U);
+
+    const auto blocking_processed_timers_then_receive_error =
+        coquic::quic::test::run_server_loop_case_for_tests(
+            coquic::quic::test::ServerLoopCaseForTests::
+                blocking_processed_timers_then_receive_error);
+    EXPECT_EQ(blocking_processed_timers_then_receive_error.exit_code, 1);
+    EXPECT_EQ(blocking_processed_timers_then_receive_error.receive_calls, 2U);
+    EXPECT_EQ(blocking_processed_timers_then_receive_error.wait_calls, 0U);
+    EXPECT_EQ(blocking_processed_timers_then_receive_error.process_expired_calls, 3U);
+
+    const auto blocking_wait_failure = coquic::quic::test::run_server_loop_case_for_tests(
+        coquic::quic::test::ServerLoopCaseForTests::blocking_wait_failure);
+    EXPECT_EQ(blocking_wait_failure.exit_code, 1);
+    EXPECT_EQ(blocking_wait_failure.receive_calls, 1U);
+    EXPECT_EQ(blocking_wait_failure.wait_calls, 1U);
+    EXPECT_EQ(blocking_wait_failure.process_expired_calls, 2U);
+
+    const auto blocking_wait_missing_input = coquic::quic::test::run_server_loop_case_for_tests(
+        coquic::quic::test::ServerLoopCaseForTests::blocking_wait_missing_input);
+    EXPECT_EQ(blocking_wait_missing_input.exit_code, 1);
+    EXPECT_EQ(blocking_wait_missing_input.receive_calls, 1U);
+    EXPECT_EQ(blocking_wait_missing_input.wait_calls, 1U);
+    EXPECT_EQ(blocking_wait_missing_input.process_expired_calls, 2U);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperFailsWhenReadableSocketRecvfromFails) {
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .poll_fn = &readable_poll,
+            .recvfrom_fn = &fail_recvfrom,
+        },
+    };
+
+    EXPECT_FALSE(coquic::quic::test::wait_for_socket_or_deadline_for_tests(
+                     /*socket_fd=*/-1, /*idle_timeout_ms=*/5, "client", std::nullopt)
+                     .has_value());
+}
+
+TEST(QuicHttp09RuntimeTest,
+     RuntimeWaitHelperRetriesRecvfromAfterEintrThenTreatsEwouldblockAsNoStep) {
+    g_eintr_then_ewouldblock_recvfrom_calls = 0;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .poll_fn = &readable_poll,
+            .recvfrom_fn = &eintr_then_ewouldblock_recvfrom,
+        },
+    };
+
+    EXPECT_FALSE(coquic::quic::test::wait_for_socket_or_deadline_for_tests(
+                     /*socket_fd=*/-1, /*idle_timeout_ms=*/5, "client", std::nullopt)
+                     .has_value());
+    EXPECT_EQ(g_eintr_then_ewouldblock_recvfrom_calls, 2);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperRetriesPollAfterEintrBeforeIdleTimeout) {
+    g_eintr_then_timeout_poll_calls = 0;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .poll_fn = &eintr_then_timeout_poll,
+        },
+    };
+
+    const auto step = coquic::quic::test::wait_for_socket_or_deadline_for_tests(
+        /*socket_fd=*/-1, /*idle_timeout_ms=*/5, "client", std::nullopt);
+    ASSERT_TRUE(step.has_value());
+    EXPECT_TRUE(optional_ref_or_terminate(step).idle_timeout);
+    EXPECT_EQ(g_eintr_then_timeout_poll_calls, 2);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperReceivesInboundDatagram) {
+    const int receiver_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(receiver_fd, 0);
+    ScopedFd receiver_socket(receiver_fd);
+
+    sockaddr_in receiver_address{};
+    receiver_address.sin_family = AF_INET;
+    receiver_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    receiver_address.sin_port = htons(0);
+    ASSERT_EQ(::bind(receiver_socket.get(), reinterpret_cast<const sockaddr *>(&receiver_address),
+                     sizeof(receiver_address)),
+              0);
+
+    sockaddr_in bound_address{};
+    socklen_t bound_length = sizeof(bound_address);
+    ASSERT_EQ(::getsockname(receiver_socket.get(), reinterpret_cast<sockaddr *>(&bound_address),
+                            &bound_length),
+              0);
+
+    const int sender_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(sender_fd, 0);
+    ScopedFd sender_socket(sender_fd);
+
+    const std::array<std::byte, 3> datagram = {
+        std::byte{0x01},
+        std::byte{0x02},
+        std::byte{0x03},
+    };
+    ASSERT_GE(::sendto(sender_socket.get(), datagram.data(), datagram.size(), 0,
+                       reinterpret_cast<const sockaddr *>(&bound_address), sizeof(bound_address)),
+              0);
+
+    const auto step = coquic::quic::test::wait_for_socket_or_deadline_for_tests(
+        receiver_socket.get(), /*idle_timeout_ms=*/100, "client", std::nullopt);
+
+    ASSERT_TRUE(step.has_value());
+    const auto &wait_step = optional_ref_or_terminate(step);
+    EXPECT_FALSE(wait_step.idle_timeout);
+    EXPECT_TRUE(wait_step.has_input);
+    EXPECT_FALSE(wait_step.input_is_timer_expired);
+    EXPECT_TRUE(wait_step.has_source);
+    EXPECT_EQ(wait_step.inbound_datagram_bytes, datagram.size());
+    EXPECT_GT(wait_step.source_len, 0u);
 }
 
 TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTransfersFile) {
@@ -1763,6 +3009,261 @@ TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTrans
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"),
               "hello-after-version-negotiation");
+}
+
+TEST(QuicHttp09RuntimeTest, ServerIgnoresUnsupportedVersionProbeBelowMinimumInitialSize) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    const int probe_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(probe_fd, 0);
+    ScopedFd probe_socket(probe_fd);
+
+    sockaddr_in server_address{};
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(port);
+    ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
+
+    auto probe = make_unsupported_version_probe();
+    probe.resize(64);
+    ASSERT_GE(::sendto(probe_socket.get(), probe.data(), probe.size(), 0,
+                       reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address)),
+              0);
+
+    pollfd descriptor{};
+    descriptor.fd = probe_socket.get();
+    descriptor.events = POLLIN;
+    EXPECT_EQ(::poll(&descriptor, 1, 200), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, ServerIgnoresSupportedLongHeaderWithoutSession) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    const int probe_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(probe_fd, 0);
+    ScopedFd probe_socket(probe_fd);
+
+    sockaddr_in server_address{};
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(port);
+    ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
+
+    auto datagram = make_unsupported_version_probe();
+    datagram[1] = std::byte{0x00};
+    datagram[2] = std::byte{0x00};
+    datagram[3] = std::byte{0x00};
+    datagram[4] = std::byte{0x01};
+    datagram[0] = std::byte{0xd0};
+    ASSERT_GE(::sendto(probe_socket.get(), datagram.data(), datagram.size(), 0,
+                       reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address)),
+              0);
+
+    pollfd descriptor{};
+    descriptor.fd = probe_socket.get();
+    descriptor.events = POLLIN;
+    EXPECT_EQ(::poll(&descriptor, 1, 200), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, ServerFailsWhenVersionNegotiationSendFails) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const ScopedFailSendtoAfterReset sendto_reset;
+    g_fail_sendto_after_calls.store(1);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    auto server_process =
+        launch_runtime_server_process(server, {
+                                                  .sendto_fn = &fail_sendto_after_n_calls,
+                                              });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    const int probe_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(probe_fd, 0);
+    ScopedFd probe_socket(probe_fd);
+
+    sockaddr_in server_address{};
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(port);
+    ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
+
+    const auto probe = make_unsupported_version_probe();
+    ASSERT_GE(::sendto(probe_socket.get(), probe.data(), probe.size(), 0,
+                       reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address)),
+              0);
+
+    const auto status = server_process.wait_for_exit(std::chrono::milliseconds(1000));
+    ASSERT_TRUE(status.has_value());
+    const auto exit_status = optional_value_or_terminate(status);
+    ASSERT_TRUE(WIFEXITED(exit_status));
+    EXPECT_EQ(WEXITSTATUS(exit_status), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerTransferLargeFileOverUdpSockets) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+    constexpr std::size_t kLargeBodyBytes = 2ULL * 1024ULL * 1024ULL;
+    const std::string large_body(kLargeBodyBytes, 'R');
+    document_root.write_file("runtime-large.bin", large_body);
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .download_root = download_root.path(),
+        .requests_env = "https://localhost/runtime-large.bin",
+    };
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
+    EXPECT_EQ(read_file_bytes(download_root.path() / "runtime-large.bin"), large_body);
+}
+
+TEST(QuicHttp09RuntimeTest, TraceEnabledServerDropsMalformedSupportedInitialAndStillTransfersFile) {
+    ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+    document_root.write_file("hello.txt", "hello-after-malformed-initial");
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .download_root = download_root.path(),
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    const int client_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(client_fd, 0);
+    ScopedFd client_socket(client_fd);
+
+    sockaddr_in server_address{};
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(port);
+    ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
+
+    auto malformed_initial = make_unsupported_version_probe();
+    malformed_initial[1] = std::byte{0x00};
+    malformed_initial[2] = std::byte{0x00};
+    malformed_initial[3] = std::byte{0x00};
+    malformed_initial[4] = std::byte{0x01};
+    ASSERT_GE(::sendto(client_socket.get(), malformed_initial.data(), malformed_initial.size(), 0,
+                       reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address)),
+              0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(100)).has_value());
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
+    EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-after-malformed-initial");
+}
+
+TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerMulticonnectThreeFilesOverUdpSockets) {
+    ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+    document_root.write_file("alpha.txt", "alpha-runtime");
+    document_root.write_file("beta.txt", "beta-runtime");
+    document_root.write_file("gamma.txt", "gamma-runtime");
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::multiconnect,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::multiconnect,
+        .download_root = download_root.path(),
+        .requests_env =
+            "https://localhost/alpha.txt https://localhost/beta.txt https://localhost/gamma.txt",
+    };
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
+    EXPECT_EQ(read_file_bytes(download_root.path() / "alpha.txt"), "alpha-runtime");
+    EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-runtime");
+    EXPECT_EQ(read_file_bytes(download_root.path() / "gamma.txt"), "gamma-runtime");
 }
 
 TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {

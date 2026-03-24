@@ -2,6 +2,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -48,6 +49,13 @@ TlsAdapterConfig make_server_config() {
             },
         .local_transport_parameters = coquic::quic::test::sample_transport_parameters(),
     };
+}
+
+CipherSuite invalid_cipher_suite() {
+    constexpr std::uint8_t raw = 0xff;
+    CipherSuite cipher_suite{};
+    std::memcpy(&cipher_suite, &raw, sizeof(cipher_suite));
+    return cipher_suite;
 }
 
 void drive_tls_handshake(TlsAdapter &client, TlsAdapter &server) {
@@ -127,6 +135,35 @@ TEST(QuicTlsAdapterContractTest, HandshakeCanBeConstrainedToChaCha20CipherSuite)
     ASSERT_TRUE(TlsAdapterTestPeer::cipher_suite_for_ssl(server).has_value());
     EXPECT_EQ(TlsAdapterTestPeer::cipher_suite_for_ssl(server).value(),
               CipherSuite::tls_chacha20_poly1305_sha256);
+}
+
+TEST(QuicTlsAdapterContractTest, HandshakeCanBeConstrainedToAesCipherSuites) {
+    auto client_config = make_client_config();
+    client_config.allowed_tls_cipher_suites = {
+        CipherSuite::tls_aes_128_gcm_sha256,
+        CipherSuite::tls_aes_256_gcm_sha384,
+    };
+    auto server_config = make_server_config();
+    server_config.allowed_tls_cipher_suites = {
+        CipherSuite::tls_aes_128_gcm_sha256,
+        CipherSuite::tls_aes_256_gcm_sha384,
+    };
+
+    TlsAdapter client(std::move(client_config));
+    TlsAdapter server(std::move(server_config));
+
+    drive_tls_handshake(client, server);
+
+    ASSERT_TRUE(client.handshake_complete());
+    ASSERT_TRUE(server.handshake_complete());
+    ASSERT_TRUE(TlsAdapterTestPeer::cipher_suite_for_ssl(client).has_value());
+    ASSERT_TRUE(TlsAdapterTestPeer::cipher_suite_for_ssl(server).has_value());
+    const auto client_cipher = TlsAdapterTestPeer::cipher_suite_for_ssl(client).value();
+    const auto server_cipher = TlsAdapterTestPeer::cipher_suite_for_ssl(server).value();
+    EXPECT_TRUE(client_cipher == CipherSuite::tls_aes_128_gcm_sha256 ||
+                client_cipher == CipherSuite::tls_aes_256_gcm_sha384);
+    EXPECT_TRUE(server_cipher == CipherSuite::tls_aes_128_gcm_sha256 ||
+                server_cipher == CipherSuite::tls_aes_256_gcm_sha384);
 }
 
 TEST(QuicTlsAdapterContractTest, AsTlsBytesReturnsStablePointers) {
@@ -216,6 +253,18 @@ TEST(QuicTlsAdapterContractTest, InvalidApplicationProtocolConfigProducesStickyE
     TlsAdapter oversized_protocol_adapter(std::move(oversized_application_protocol));
     EXPECT_FALSE(oversized_protocol_adapter.start().has_value());
     EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(oversized_protocol_adapter),
+              CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTlsAdapterContractTest, InvalidCipherSuiteConfigProducesStickyError) {
+    auto invalid_cipher_config = make_client_config();
+    invalid_cipher_config.allowed_tls_cipher_suites = {
+        invalid_cipher_suite(),
+    };
+
+    TlsAdapter invalid_cipher_adapter(std::move(invalid_cipher_config));
+    EXPECT_FALSE(invalid_cipher_adapter.start().has_value());
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(invalid_cipher_adapter),
               CodecErrorCode::invalid_packet_protection_state);
 }
 

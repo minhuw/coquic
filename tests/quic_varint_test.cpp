@@ -29,6 +29,24 @@ TEST(QuicVarIntTest, RoundTripsBoundaryValues) {
     }
 }
 
+TEST(QuicVarIntTest, ReportsEncodedSizesAcrossAllQuicVarIntWidths) {
+    EXPECT_EQ(coquic::quic::encoded_varint_size(63ull), 1u);
+    EXPECT_EQ(coquic::quic::encoded_varint_size(16383ull), 2u);
+    EXPECT_EQ(coquic::quic::encoded_varint_size(1073741823ull), 4u);
+    EXPECT_EQ(coquic::quic::encoded_varint_size(1073741824ull), 8u);
+}
+
+TEST(QuicVarIntTest, EncodesEightByteVarintsFromRuntimeValue) {
+    volatile std::uint64_t runtime_value = 1073741824ull;
+    const auto encoded_size = &coquic::quic::encoded_varint_size;
+
+    EXPECT_EQ(encoded_size(runtime_value), 8u);
+
+    const auto encoded = coquic::quic::encode_varint(runtime_value);
+    ASSERT_TRUE(encoded.has_value());
+    EXPECT_EQ(encoded.value().size(), 8u);
+}
+
 TEST(QuicVarIntTest, RejectsTruncatedEncoding) {
     std::array<std::byte, 1> bytes{std::byte{0x40}};
     auto decoded = coquic::quic::decode_varint_bytes(bytes);

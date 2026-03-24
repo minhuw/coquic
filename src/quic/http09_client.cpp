@@ -147,7 +147,8 @@ bool QuicHttp09ClientEndpoint::process_receive_stream_data(
                      static_cast<std::streamsize>(received.bytes.size()));
     }
 
-    if (!output.good()) {
+    output.close();
+    if (output.fail()) {
         return false;
     }
 
@@ -158,10 +159,6 @@ bool QuicHttp09ClientEndpoint::process_receive_stream_data(
 }
 
 bool QuicHttp09ClientEndpoint::all_streams_complete() const {
-    if (!requests_issued_) {
-        return false;
-    }
-
     for (const auto &[stream_id, state] : request_streams_) {
         (void)stream_id;
         if (!state.complete) {

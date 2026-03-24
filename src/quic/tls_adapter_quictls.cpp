@@ -219,10 +219,6 @@ std::optional<std::string_view> tls13_cipher_suite_name(CipherSuite cipher_suite
 
 std::optional<std::string>
 encode_tls13_cipher_suites(std::span<const CipherSuite> allowed_tls_cipher_suites) {
-    if (allowed_tls_cipher_suites.empty()) {
-        return std::string{};
-    }
-
     std::string encoded;
     for (const auto cipher_suite : allowed_tls_cipher_suites) {
         const auto name = tls13_cipher_suite_name(cipher_suite);

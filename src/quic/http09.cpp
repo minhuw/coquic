@@ -30,9 +30,6 @@ CodecResult<QuicHttp09Request> parse_absolute_https_request(std::string_view tok
 
     std::string_view request_target =
         slash == std::string_view::npos ? std::string_view{"/"} : remainder.substr(slash);
-    if (request_target.empty() || request_target.front() != '/') {
-        return CodecResult<QuicHttp09Request>::failure(kHttp09ParseError, 0);
-    }
 
     const auto resolved_target =
         resolve_http09_path_under_root(std::filesystem::path("/"), request_target);
@@ -52,7 +49,7 @@ bool path_has_prefix(const std::filesystem::path &path, const std::filesystem::p
     auto path_it = path.begin();
     auto prefix_it = prefix.begin();
     for (; prefix_it != prefix.end(); ++prefix_it, ++path_it) {
-        if (path_it == path.end() || *path_it != *prefix_it) {
+        if (*path_it != *prefix_it) {
             return false;
         }
     }

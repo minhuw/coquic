@@ -16,13 +16,14 @@ bool fits_openssl_int(std::size_t size) {
 }
 
 CodecResult<std::size_t> total_plaintext_length(std::span<const PlaintextChunk> plaintext_chunks) {
+    const auto max_openssl_size = static_cast<std::size_t>(std::numeric_limits<int>::max());
     std::size_t total = 0;
     for (const auto &chunk : plaintext_chunks) {
         if (!fits_openssl_int(chunk.bytes.size())) {
             return CodecResult<std::size_t>::failure(
                 CodecErrorCode::invalid_packet_protection_state, 0);
         }
-        if (chunk.bytes.size() > std::numeric_limits<std::size_t>::max() - total) {
+        if (chunk.bytes.size() > max_openssl_size - total) {
             return CodecResult<std::size_t>::failure(
                 CodecErrorCode::invalid_packet_protection_state, 0);
         }
@@ -155,13 +156,10 @@ CodecResult<std::vector<std::byte>> derive_header_protection_key(const TrafficSe
         return CodecResult<std::vector<std::byte>>::success(secret.header_protection_key.value());
     }
 
-    const auto parameters = cipher_suite_parameters(secret.cipher_suite);
-    if (!parameters.has_value()) {
-        return crypto_failure(parameters.error().code);
-    }
+    const auto parameters = cipher_suite_parameters(secret.cipher_suite).value();
 
-    auto hp_key = hkdf_expand_label(parameters.value().digest(), secret.secret, "quic hp",
-                                    parameters.value().hp_key_length);
+    auto hp_key =
+        hkdf_expand_label(parameters.digest(), secret.secret, "quic hp", parameters.hp_key_length);
     if (!hp_key.has_value()) {
         return crypto_failure(hp_key.error().code);
     }
@@ -189,8 +187,7 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
     }
     const auto invalid_lengths =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_length_guard) |
-        !fits_openssl_int(nonce.size()) | !fits_openssl_int(associated_data.size()) |
-        !fits_openssl_int(plaintext_length.value());
+        !fits_openssl_int(nonce.size()) | !fits_openssl_int(associated_data.size());
     if (invalid_lengths)
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
@@ -266,10 +263,6 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
     }
 
     const auto total_ciphertext_length = produced_total + static_cast<std::size_t>(final_length);
-    if (total_ciphertext_length + aead_tag_length > ciphertext.size()) {
-        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
-                                                 0);
-    }
 
     std::array<std::byte, aead_tag_length> tag{};
     const auto get_tag_failed =
@@ -294,27 +287,6 @@ CodecResult<std::size_t> seal_aead_into(const EVP_CIPHER *cipher, const SealAead
     };
     return seal_aead_chunks_into(cipher, request.key, request.nonce, request.associated_data,
                                  chunks, request.ciphertext);
-}
-
-CodecResult<std::vector<std::byte>> seal_aead(const EVP_CIPHER *cipher,
-                                              std::span<const std::byte> key,
-                                              std::span<const std::byte> nonce,
-                                              std::span<const std::byte> associated_data,
-                                              std::span<const std::byte> plaintext) {
-    std::vector<std::byte> ciphertext(plaintext.size() + aead_tag_length);
-    const auto written = seal_aead_into(cipher, SealAeadRequest{
-                                                    .key = key,
-                                                    .nonce = nonce,
-                                                    .associated_data = associated_data,
-                                                    .plaintext = plaintext,
-                                                    .ciphertext = std::span{ciphertext},
-                                                });
-    if (!written.has_value()) {
-        return crypto_failure(written.error().code);
-    }
-
-    ciphertext.resize(written.value());
-    return CodecResult<std::vector<std::byte>>::success(std::move(ciphertext));
 }
 
 CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *cipher,

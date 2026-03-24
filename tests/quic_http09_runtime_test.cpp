@@ -32,6 +32,26 @@
 #undef private
 #include "tests/quic_test_utils.h"
 
+namespace coquic::quic {
+
+struct ParsedHttp09Authority {
+    std::string host;
+    std::optional<std::uint16_t> port;
+};
+
+struct Http09ClientRemote {
+    std::string host;
+    std::uint16_t port = 443;
+    std::string server_name;
+};
+
+std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view authority);
+std::optional<Http09ClientRemote>
+derive_http09_client_remote(const Http09RuntimeConfig &config,
+                            const std::vector<QuicHttp09Request> &requests);
+
+} // namespace coquic::quic
+
 namespace {
 
 class ScopedEnvVar {
@@ -1486,6 +1506,152 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
               coquic::quic::test::read_text_file("tests/fixtures/quic-server-cert.pem"));
     EXPECT_EQ(identity.private_key_pem,
               coquic::quic::test::read_text_file("tests/fixtures/quic-server-key.pem"));
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidAndEmptyPortStringsFromEnvironment) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+    ScopedEnvVar invalid_port("PORT", "70000");
+    EXPECT_FALSE(coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv)).has_value());
+
+    ScopedEnvVar empty_port("PORT", "");
+    EXPECT_FALSE(coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv)).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeRejectsUnknownTestcaseNamesFromEnvironmentAndCli) {
+    const char *env_argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+    ScopedEnvVar testcase("TESTCASE", "unknown-case");
+    EXPECT_FALSE(
+        coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(env_argv)).has_value());
+
+    const char *cli_argv[] = {"coquic",       "interop-client", "--testcase",
+                              "unknown-case", "--requests",     "https://localhost/a.txt"};
+    EXPECT_FALSE(
+        coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(cli_argv)).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidRoleAndUsageDispatchFailures) {
+    const char *role_argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "invalid");
+    EXPECT_FALSE(
+        coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(role_argv)).has_value());
+
+    const char *bad_subcommand_argv[] = {"coquic", "interop-runner"};
+    EXPECT_FALSE(
+        coquic::quic::parse_http09_runtime_args(2, const_cast<char **>(bad_subcommand_argv))
+            .has_value());
+
+    const char *missing_value_argv[] = {"coquic", "interop-client", "--host"};
+    EXPECT_FALSE(coquic::quic::parse_http09_runtime_args(3, const_cast<char **>(missing_value_argv))
+                     .has_value());
+
+    const char *unknown_flag_argv[] = {"coquic", "interop-client", "--invalid"};
+    EXPECT_FALSE(coquic::quic::parse_http09_runtime_args(3, const_cast<char **>(unknown_flag_argv))
+                     .has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeRejectsClientStartupWithoutRequests) {
+    const char *argv[] = {"coquic", "interop-client"};
+    ScopedEnvVar role("ROLE", std::nullopt);
+    ScopedEnvVar requests("REQUESTS", std::nullopt);
+    EXPECT_FALSE(coquic::quic::parse_http09_runtime_args(2, const_cast<char **>(argv)).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialRunnerAliasesViaCliFlags) {
+    const char *multiconnect_argv[] = {"coquic",       "interop-client", "--testcase",
+                                       "multiconnect", "--requests",     "https://localhost/a.txt"};
+    const auto multiconnect =
+        coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(multiconnect_argv));
+    ASSERT_TRUE(multiconnect.has_value());
+    const auto multiconnect_runtime = multiconnect.value_or(coquic::quic::Http09RuntimeConfig{});
+    EXPECT_EQ(multiconnect_runtime.testcase, coquic::quic::QuicHttp09Testcase::multiconnect);
+
+    const char *chacha20_argv[] = {"coquic",   "interop-client", "--testcase",
+                                   "chacha20", "--requests",     "https://localhost/a.txt"};
+    const auto chacha20 =
+        coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(chacha20_argv));
+    ASSERT_TRUE(chacha20.has_value());
+    const auto chacha20_runtime = chacha20.value_or(coquic::quic::Http09RuntimeConfig{});
+    EXPECT_EQ(chacha20_runtime.testcase, coquic::quic::QuicHttp09Testcase::chacha20);
+}
+
+TEST(QuicHttp09RuntimeTest, RejectsMalformedBracketedAuthority) {
+    const auto parsed = coquic::quic::parse_http09_authority("[::1");
+    EXPECT_FALSE(parsed.has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, RejectsMalformedHostPortAuthority) {
+    const auto parsed = coquic::quic::parse_http09_authority("localhost:bad");
+    EXPECT_FALSE(parsed.has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, DerivesHostPortAndServerNameFromRequestWhenUnset) {
+    const auto config = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "",
+        .port = 443,
+        .server_name = "",
+    };
+    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+        {.url = "https://127.0.0.1:8443/a.txt",
+         .authority = "127.0.0.1:8443",
+         .request_target = "/a.txt",
+         .relative_output_path = "a.txt"},
+    };
+    const auto derived = coquic::quic::derive_http09_client_remote(config, requests);
+    ASSERT_TRUE(derived.has_value());
+    const auto remote = derived.value_or(coquic::quic::Http09ClientRemote{});
+    EXPECT_EQ(remote.host, "127.0.0.1");
+    EXPECT_EQ(remote.port, 8443);
+    EXPECT_EQ(remote.server_name, "127.0.0.1");
+}
+
+TEST(QuicHttp09RuntimeTest, DerivesOnlyServerNameWhenHostAlreadySpecified) {
+    const auto config = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 9443,
+        .server_name = "",
+    };
+    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+        {.url = "https://localhost/a.txt",
+         .authority = "localhost",
+         .request_target = "/a.txt",
+         .relative_output_path = "a.txt"},
+    };
+    const auto derived = coquic::quic::derive_http09_client_remote(config, requests);
+    ASSERT_TRUE(derived.has_value());
+    const auto remote = derived.value_or(coquic::quic::Http09ClientRemote{});
+    EXPECT_EQ(remote.host, "127.0.0.1");
+    EXPECT_EQ(remote.port, 9443);
+    EXPECT_EQ(remote.server_name, "localhost");
+}
+
+TEST(QuicHttp09RuntimeTest, DerivationFailsForEmptyRequestListWhenFallbackRequired) {
+    const auto config = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "",
+        .server_name = "",
+    };
+    EXPECT_FALSE(coquic::quic::derive_http09_client_remote(config, {}).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, DerivationFailsForInvalidRequestAuthority) {
+    const auto config = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "",
+        .server_name = "",
+    };
+    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+        {.url = "https://[::1/a.txt",
+         .authority = "[::1",
+         .request_target = "/a.txt",
+         .relative_output_path = "a.txt"},
+    };
+    EXPECT_FALSE(coquic::quic::derive_http09_client_remote(config, requests).has_value());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialMulticonnectTestcase) {

@@ -29,6 +29,18 @@
 #include <variant>
 
 namespace coquic::quic {
+
+struct ParsedHttp09Authority {
+    std::string host;
+    std::optional<std::uint16_t> port;
+};
+
+struct Http09ClientRemote {
+    std::string host;
+    std::uint16_t port = 443;
+    std::string server_name;
+};
+
 namespace {
 
 constexpr std::size_t kMaxDatagramBytes = 65535;
@@ -170,12 +182,7 @@ bool make_ipv4_address(std::string_view host, std::uint16_t port, sockaddr_in &a
     return ::inet_pton(AF_INET, std::string(host).c_str(), &address.sin_addr) == 1;
 }
 
-struct ParsedHttp09Authority {
-    std::string host;
-    std::optional<std::uint16_t> port;
-};
-
-std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view authority) {
+std::optional<ParsedHttp09Authority> parse_http09_authority_impl(std::string_view authority) {
     if (authority.empty()) {
         return std::nullopt;
     }
@@ -221,15 +228,9 @@ std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view aut
     return parsed;
 }
 
-struct Http09ClientRemote {
-    std::string host;
-    std::uint16_t port = 443;
-    std::string server_name;
-};
-
 std::optional<Http09ClientRemote>
-derive_http09_client_remote(const Http09RuntimeConfig &config,
-                            const std::vector<QuicHttp09Request> &requests) {
+derive_http09_client_remote_impl(const Http09RuntimeConfig &config,
+                                 const std::vector<QuicHttp09Request> &requests) {
     Http09ClientRemote remote{
         .host = config.host,
         .port = config.port,
@@ -244,7 +245,7 @@ derive_http09_client_remote(const Http09RuntimeConfig &config,
         return std::nullopt;
     }
 
-    const auto parsed_authority = parse_http09_authority(requests.front().authority);
+    const auto parsed_authority = parse_http09_authority_impl(requests.front().authority);
     if (!parsed_authority.has_value()) {
         return std::nullopt;
     }
@@ -716,7 +717,7 @@ bool drive_endpoint_until_blocked(Endpoint &endpoint, QuicCore &core, int fd,
 int run_http09_client_connection(const Http09RuntimeConfig &config,
                                  const std::vector<QuicHttp09Request> &requests,
                                  std::uint64_t connection_index) {
-    const auto remote = derive_http09_client_remote(config, requests);
+    const auto remote = derive_http09_client_remote_impl(config, requests);
     if (!remote.has_value()) {
         std::cerr << "http09-client failed: invalid request authority\n";
         return 1;
@@ -1219,6 +1220,16 @@ int run_http09_server(const Http09RuntimeConfig &config) {
 }
 
 } // namespace
+
+std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view authority) {
+    return parse_http09_authority_impl(authority);
+}
+
+std::optional<Http09ClientRemote>
+derive_http09_client_remote(const Http09RuntimeConfig &config,
+                            const std::vector<QuicHttp09Request> &requests) {
+    return derive_http09_client_remote_impl(config, requests);
+}
 
 std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **argv) {
     Http09RuntimeConfig config;

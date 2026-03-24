@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "src/quic/http09_client.h"
 #include "src/quic/http09_server.h"
@@ -27,6 +29,21 @@ struct Http09RuntimeConfig {
     std::string requests_env;
 };
 
+struct ParsedHttp09Authority {
+    std::string host;
+    std::optional<std::uint16_t> port;
+};
+
+struct Http09ClientRemote {
+    std::string host;
+    std::uint16_t port = 443;
+    std::string server_name;
+};
+
+std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view authority);
+std::optional<Http09ClientRemote>
+derive_http09_client_remote(const Http09RuntimeConfig &config,
+                            const std::vector<QuicHttp09Request> &requests);
 std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **argv);
 QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config);
 QuicCoreConfig make_http09_server_core_config(const Http09RuntimeConfig &config);

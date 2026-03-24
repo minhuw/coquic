@@ -30,17 +30,6 @@
 
 namespace coquic::quic {
 
-struct ParsedHttp09Authority {
-    std::string host;
-    std::optional<std::uint16_t> port;
-};
-
-struct Http09ClientRemote {
-    std::string host;
-    std::uint16_t port = 443;
-    std::string server_name;
-};
-
 namespace {
 
 constexpr std::size_t kMaxDatagramBytes = 65535;

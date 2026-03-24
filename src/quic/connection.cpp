@@ -598,6 +598,7 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
         deferred_protected_packets_.push_back(deferred);
     };
     std::size_t offset = 0;
+    bool processed_any_packet = false;
     const auto make_deserialize_context =
         [&](const std::optional<TrafficSecret> &application_secret,
             bool application_key_phase) -> DeserializeProtectionContext {
@@ -651,6 +652,9 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             }
         }
         if (!packets.has_value()) {
+            if (processed_any_packet) {
+                return true;
+            }
             if (allow_defer && packets.error().code == CodecErrorCode::missing_crypto_context &&
                 packet_is_bufferable(packet_bytes)) {
                 defer_packet(packet_bytes);
@@ -670,6 +674,9 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
 
             const auto processed = process_inbound_packet(packet, now);
             if (!processed.has_value()) {
+                if (processed_any_packet) {
+                    return true;
+                }
                 log_codec_failure("process_inbound_packet", processed.error());
                 mark_failed();
                 return false;
@@ -711,6 +718,9 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
     while (offset < bytes.size()) {
         const auto packet_length = peek_next_packet_length(bytes.subspan(offset));
         if (!packet_length.has_value()) {
+            if (processed_any_packet) {
+                return;
+            }
             log_codec_failure("peek_next_packet_length", packet_length.error());
             mark_failed();
             return;
@@ -720,6 +730,7 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
         if (!process_packet_bytes(packet_bytes, /*allow_defer=*/true)) {
             return;
         }
+        processed_any_packet = true;
         if (!replay_deferred_packets()) {
             return;
         }
@@ -1418,6 +1429,9 @@ QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const 
 
     const auto header_byte = std::to_integer<std::uint8_t>(first_byte.value());
     if ((header_byte & 0x80u) == 0) {
+        if ((header_byte & 0x40u) == 0) {
+            return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_fixed_bit, 0);
+        }
         return CodecResult<std::size_t>::success(bytes.size());
     }
     if ((header_byte & 0x40u) == 0) {

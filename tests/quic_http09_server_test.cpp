@@ -620,6 +620,30 @@ TEST(QuicHttp09ServerTest, RejectsMoreRequestDataWhileResponseRemainsPending) {
     EXPECT_TRUE(endpoint.has_failed());
 }
 
+TEST(QuicHttp09ServerTest, AcceptsFinOnlyChunkAfterResponseStartsStreaming) {
+    coquic::quic::test::ScopedTempDir document_root;
+    std::string body;
+    body.append(static_cast<std::string::size_type>(64u * 1024u), 'x');
+    document_root.write_file("large.bin", body);
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    const auto first = endpoint.on_core_result(
+        single_receive_result(0, "GET /large.bin\r\n", false), coquic::quic::test::test_time(1));
+    EXPECT_FALSE(first.terminal_failure);
+    EXPECT_EQ(
+        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
+
+    const auto second = endpoint.on_core_result(single_receive_result(0, "", true),
+                                                coquic::quic::test::test_time(2));
+    EXPECT_FALSE(second.terminal_failure);
+    EXPECT_FALSE(second.terminal_success);
+    EXPECT_FALSE(endpoint.has_failed());
+    EXPECT_EQ(
+        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
+}
+
 TEST(QuicHttp09ServerTest, PollQueuesStreamLocalErrorForBadPendingResponse) {
     coquic::quic::test::ScopedTempDir document_root;
     document_root.write_file("hello.txt", "hello");

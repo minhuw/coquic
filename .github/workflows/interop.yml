@@ -82,7 +82,7 @@ jobs:
         env:
           INTEROP_TESTCASES: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,chacha20,longrtt,goodput,crosstraffic
           INTEROP_PEER_IMPL: picoquic
-          INTEROP_PEER_IMAGE: privateoctopus/picoquic:latest
+          INTEROP_PEER_IMAGE: privateoctopus/picoquic@sha256:065707ed509ce25b3bb3be4816c924ac4fd6f603297e14a3ee34cb035c73f700
         run: nix develop -c bash interop/run-official.sh
 
       - name: Upload Interop Logs

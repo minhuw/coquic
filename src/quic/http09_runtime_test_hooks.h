@@ -121,6 +121,7 @@ bool runtime_trace_enabled_for_tests();
 std::string format_connection_id_hex_for_tests(std::span<const std::byte> connection_id);
 std::string format_connection_id_key_hex_for_tests(std::string_view connection_id_key);
 std::string connection_id_key_for_tests(std::span<const std::byte> connection_id);
+int client_receive_timeout_ms_for_tests(const Http09RuntimeConfig &config);
 int run_http09_client_connection_for_tests(const Http09RuntimeConfig &config,
                                            const std::vector<QuicHttp09Request> &requests,
                                            std::uint64_t connection_index);

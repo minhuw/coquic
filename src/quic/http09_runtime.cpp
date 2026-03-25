@@ -40,7 +40,8 @@ namespace {
 constexpr std::size_t kMaxDatagramBytes = 65535;
 constexpr std::size_t kMinimumClientInitialDatagramBytes = 1200;
 constexpr std::size_t kRuntimeConnectionIdLength = 8;
-constexpr int kClientReceiveTimeoutMs = 30000;
+constexpr int kDefaultClientReceiveTimeoutMs = 30000;
+constexpr int kMulticonnectClientReceiveTimeoutMs = 180000;
 constexpr int kServerIdleTimeoutMs = 1000;
 constexpr std::uint32_t kQuicVersion1 = 1;
 constexpr std::uint32_t kVersionNegotiationVersion = 0;
@@ -51,6 +52,13 @@ constexpr std::string_view kUsageLine =
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
     "[--server-name NAME] [--verify-peer]";
+
+int client_receive_timeout_ms(const Http09RuntimeConfig &config) {
+    if (config.testcase == QuicHttp09Testcase::multiconnect) {
+        return kMulticonnectClientReceiveTimeoutMs;
+    }
+    return kDefaultClientReceiveTimeoutMs;
+}
 
 test::Http09RuntimeOpsOverride make_default_runtime_ops() {
     return test::Http09RuntimeOpsOverride{
@@ -807,9 +815,9 @@ bool drive_endpoint_until_blocked(const EndpointDriver &endpoint, QuicCore &core
 }
 
 int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &core, int socket_fd,
-                                      const sockaddr_storage &peer, socklen_t peer_len,
-                                      EndpointDriveState &state, const ClientLoopIo &io,
-                                      const QuicCoreResult &start_result) {
+                                      int idle_timeout_ms, const sockaddr_storage &peer,
+                                      socklen_t peer_len, EndpointDriveState &state,
+                                      const ClientLoopIo &io, const QuicCoreResult &start_result) {
     if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, start_result,
                                       state, "client")) {
         return 1;
@@ -922,7 +930,7 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
         auto step = io.wait_for_socket_or_deadline(
             RuntimeWaitConfig{
                 .socket_fd = socket_fd,
-                .idle_timeout_ms = kClientReceiveTimeoutMs,
+                .idle_timeout_ms = idle_timeout_ms,
                 .role_name = "client",
             },
             state.next_wakeup);
@@ -986,9 +994,9 @@ int run_http09_client_connection(const Http09RuntimeConfig &config,
 
     EndpointDriveState state;
     const auto start_result = core.advance(QuicCoreStart{}, now());
-    return run_http09_client_connection_loop(make_endpoint_driver(endpoint), core, socket_fd, peer,
-                                             peer_len, state, make_runtime_client_loop_io(),
-                                             start_result);
+    return run_http09_client_connection_loop(make_endpoint_driver(endpoint), core, socket_fd,
+                                             client_receive_timeout_ms(config), peer, peer_len,
+                                             state, make_runtime_client_loop_io(), start_result);
 }
 
 int run_http09_client(const Http09RuntimeConfig &config) {
@@ -1653,6 +1661,10 @@ std::string connection_id_key_for_tests(std::span<const std::byte> connection_id
     return connection_id_key(connection_id);
 }
 
+int client_receive_timeout_ms_for_tests(const Http09RuntimeConfig &config) {
+    return client_receive_timeout_ms(config);
+}
+
 int run_http09_client_connection_for_tests(const Http09RuntimeConfig &config,
                                            const std::vector<QuicHttp09Request> &requests,
                                            std::uint64_t connection_index) {
@@ -1913,7 +1925,8 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
                                                              start_result, base_time);
 
     const int exit_code = run_http09_client_connection_loop(
-        make_endpoint_driver(endpoint), core, /*socket_fd=*/-1, peer, /*peer_len=*/0, state,
+        make_endpoint_driver(endpoint), core, /*socket_fd=*/-1,
+        /*idle_timeout_ms=*/kDefaultClientReceiveTimeoutMs, peer, /*peer_len=*/0, state,
         make_scripted_client_loop_io_for_tests(io_script), start_result);
     return ClientConnectionLoopResultForTests{
         .exit_code = exit_code,

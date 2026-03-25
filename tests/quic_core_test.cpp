@@ -423,6 +423,40 @@ TEST(QuicCoreTest, TwoPeersEmitHandshakeReadyExactlyOnce) {
               1u);
 }
 
+TEST(QuicCoreTest, ClientHandshakeReadyEmitsBeforeHandshakeConfirmation) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+
+    auto &connection = *client.connection_;
+    ASSERT_TRUE(connection.tls_.has_value());
+    if (!connection.tls_.has_value()) {
+        return;
+    }
+
+    ASSERT_TRUE(connection.tls_->handshake_complete());
+    ASSERT_TRUE(connection.peer_transport_parameters_validated_);
+    ASSERT_TRUE(connection.application_space_.read_secret.has_value());
+    ASSERT_TRUE(connection.application_space_.write_secret.has_value());
+
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.handshake_ready_emitted_ = false;
+    connection.pending_state_changes_.clear();
+
+    connection.update_handshake_status();
+
+    EXPECT_EQ(connection.status_, coquic::quic::HandshakeStatus::connected);
+    ASSERT_EQ(connection.pending_state_changes_.size(), 1u);
+    EXPECT_EQ(connection.pending_state_changes_.front(),
+              coquic::quic::QuicCoreStateChange::handshake_ready);
+
+    connection.pending_state_changes_.clear();
+    connection.confirm_handshake();
+
+    EXPECT_TRUE(connection.pending_state_changes_.empty());
+}
+
 TEST(QuicCoreTest, HandshakeExportsConfiguredTransportParametersToPeer) {
     auto client_config = coquic::quic::test::make_client_core_config();
     client_config.transport.initial_max_data = 7777;

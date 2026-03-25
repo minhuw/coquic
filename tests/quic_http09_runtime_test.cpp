@@ -2575,6 +2575,20 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionWithoutRequestsCompletesAfterHandsha
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeHelperExtendsClientReceiveTimeoutForMulticonnect) {
+    const auto transfer = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+    };
+    const auto multiconnect = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::multiconnect,
+    };
+
+    EXPECT_EQ(coquic::quic::test::client_receive_timeout_ms_for_tests(transfer), 30000);
+    EXPECT_EQ(coquic::quic::test::client_receive_timeout_ms_for_tests(multiconnect), 180000);
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperReturnsIdleTimeoutWithoutWakeup) {
     const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
         {.poll_fn = &timeout_poll},

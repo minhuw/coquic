@@ -99,6 +99,22 @@ TEST(QuicTransportParametersTest, RoundTripsAckDelayExponentAndMaxAckDelay) {
     EXPECT_EQ(decoded.value().max_ack_delay, 42u);
 }
 
+TEST(QuicTransportParametersTest, RoundTripsMaxIdleTimeout) {
+    const TransportParameters parameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .max_idle_timeout = 180000,
+        .initial_source_connection_id = ConnectionId{std::byte{0xc1}},
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_transport_parameters(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().max_idle_timeout, 180000u);
+}
+
 TEST(QuicTransportParametersTest, RoundTripsFlowControlAndStreamCountParameters) {
     const TransportParameters parameters{
         .max_udp_payload_size = 1200,
@@ -166,6 +182,24 @@ TEST(QuicTransportParametersTest, MissingAckTimingParametersUseRfcDefaults) {
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(decoded.value().ack_delay_exponent, 3u);
     EXPECT_EQ(decoded.value().max_ack_delay, 25u);
+}
+
+TEST(QuicTransportParametersTest, MissingMaxIdleTimeoutDefaultsToZero) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x03,
+        0x02,
+        0x44,
+        0xb0,
+        0x0e,
+        0x01,
+        0x02,
+        0x0f,
+        0x01,
+        0x11,
+    }));
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().max_idle_timeout, 0u);
 }
 
 TEST(QuicTransportParametersTest, RejectsInvalidAckTimingValues) {

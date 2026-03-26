@@ -12,6 +12,7 @@ namespace coquic::quic {
 
 struct TransportParameters {
     std::optional<ConnectionId> original_destination_connection_id;
+    std::uint64_t max_idle_timeout = 0;
     std::uint64_t max_udp_payload_size = 65527;
     std::uint64_t active_connection_id_limit = 2;
     std::uint64_t ack_delay_exponent = 3;

@@ -42,6 +42,7 @@ constexpr std::size_t kMinimumClientInitialDatagramBytes = 1200;
 constexpr std::size_t kRuntimeConnectionIdLength = 8;
 constexpr int kDefaultClientReceiveTimeoutMs = 30000;
 constexpr int kMulticonnectClientReceiveTimeoutMs = 180000;
+constexpr int kClientSuccessDrainWindowMs = 500;
 constexpr int kServerIdleTimeoutMs = 1000;
 constexpr std::uint32_t kQuicVersion1 = 1;
 constexpr std::uint32_t kVersionNegotiationVersion = 0;
@@ -220,11 +221,105 @@ bool parse_role_into(Http09RuntimeConfig &config, std::string_view role) {
     return false;
 }
 
-bool make_ipv4_address(std::string_view host, std::uint16_t port, sockaddr_in &address) {
-    address = {};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    return ::inet_pton(AF_INET, std::string(host).c_str(), &address.sin_addr) == 1;
+struct ResolvedUdpAddress {
+    sockaddr_storage address{};
+    socklen_t address_len = 0;
+    int family = AF_UNSPEC;
+};
+
+struct UdpAddressResolutionQuery {
+    std::string_view host;
+    std::uint16_t port = 0;
+    int extra_flags = 0;
+};
+
+int preferred_udp_address_family(std::string_view host) {
+    const auto host_string = std::string(host);
+
+    in_addr ipv4_address{};
+    if (::inet_pton(AF_INET, host_string.c_str(), &ipv4_address) == 1) {
+        return AF_INET;
+    }
+
+    in6_addr ipv6_address{};
+    if (::inet_pton(AF_INET6, host_string.c_str(), &ipv6_address) == 1) {
+        return AF_INET6;
+    }
+
+    return AF_UNSPEC;
+}
+
+bool copy_udp_address(const addrinfo &result, ResolvedUdpAddress &resolved) {
+    if (result.ai_addr == nullptr || result.ai_addrlen <= 0 ||
+        result.ai_addrlen > static_cast<socklen_t>(sizeof(sockaddr_storage))) {
+        return false;
+    }
+    if (result.ai_family != AF_INET && result.ai_family != AF_INET6) {
+        return false;
+    }
+
+    resolved = {};
+    std::memcpy(&resolved.address, result.ai_addr, static_cast<std::size_t>(result.ai_addrlen));
+    resolved.address_len = result.ai_addrlen;
+    resolved.family = result.ai_family;
+    return true;
+}
+
+bool resolve_udp_address(UdpAddressResolutionQuery query, ResolvedUdpAddress &resolved) {
+    const int preferred_family = preferred_udp_address_family(query.host);
+
+    addrinfo hints{};
+    hints.ai_family = preferred_family;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+    hints.ai_flags = AI_NUMERICSERV | query.extra_flags;
+
+    addrinfo *results = nullptr;
+    const auto service = std::to_string(query.port);
+    const auto host_string = std::string(query.host);
+    const char *node = query.host.empty() ? nullptr : host_string.c_str();
+    const int status = runtime_ops().getaddrinfo_fn(node, service.c_str(), &hints, &results);
+    const bool resolution_failed = status != 0;
+    const bool missing_results = results == nullptr;
+    if (resolution_failed || missing_results) {
+        if (results != nullptr) {
+            runtime_ops().freeaddrinfo_fn(results);
+        }
+        return false;
+    }
+
+    const bool prefer_ipv4_result = preferred_family == AF_UNSPEC;
+    addrinfo *selected = nullptr;
+    if (prefer_ipv4_result) {
+        for (auto *result = results; result != nullptr; result = result->ai_next) {
+            if (result->ai_family == AF_INET) {
+                selected = result;
+                break;
+            }
+        }
+    }
+    if (selected == nullptr) {
+        selected = results;
+    }
+
+    for (auto *result = selected; result != nullptr; result = result->ai_next) {
+        if (copy_udp_address(*result, resolved)) {
+            runtime_ops().freeaddrinfo_fn(results);
+            return true;
+        }
+    }
+
+    if (selected != results) {
+        for (auto *result = results; result != selected; result = result->ai_next) {
+            if (copy_udp_address(*result, resolved)) {
+                runtime_ops().freeaddrinfo_fn(results);
+                return true;
+            }
+        }
+    }
+
+    runtime_ops().freeaddrinfo_fn(results);
+    return false;
 }
 
 std::optional<ParsedHttp09Authority> parse_http09_authority_impl(std::string_view authority) {
@@ -304,33 +399,18 @@ derive_http09_client_remote_impl(const Http09RuntimeConfig &config,
     return remote;
 }
 
-bool resolve_udp_peer_ipv4(std::string_view host, std::uint16_t port, sockaddr_in &address) {
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_protocol = IPPROTO_UDP;
-    hints.ai_flags = AI_NUMERICSERV;
-
-    addrinfo *results = nullptr;
-    const auto service = std::to_string(port);
-    const int status =
-        runtime_ops().getaddrinfo_fn(std::string(host).c_str(), service.c_str(), &hints, &results);
-    const bool resolution_failed = status != 0;
-    const bool missing_results = results == nullptr;
-    if (resolution_failed | missing_results) {
-        if (results != nullptr) {
-            runtime_ops().freeaddrinfo_fn(results);
-        }
-        return false;
+int open_udp_socket(int family) {
+    const int fd = runtime_ops().socket_fn(family, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return fd;
     }
 
-    address = *reinterpret_cast<sockaddr_in *>(results->ai_addr);
-    runtime_ops().freeaddrinfo_fn(results);
-    return true;
-}
+    if (family == AF_INET6) {
+        const int disabled = 0;
+        (void)::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &disabled, sizeof(disabled));
+    }
 
-int open_udp_socket() {
-    return runtime_ops().socket_fn(AF_INET, SOCK_DGRAM, 0);
+    return fd;
 }
 
 QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeConfig &config,
@@ -342,6 +422,7 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
         .server_name = config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),
         .identity = std::move(identity),
+        .transport = http09_server_transport_for_testcase(config.testcase),
         .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(config.testcase),
     };
 }
@@ -818,12 +899,49 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
                                       int idle_timeout_ms, const sockaddr_storage &peer,
                                       socklen_t peer_len, EndpointDriveState &state,
                                       const ClientLoopIo &io, const QuicCoreResult &start_result) {
+    bool saw_peer_input = false;
+    std::optional<QuicCoreTimePoint> terminal_success_deadline;
+    const auto ensure_terminal_success_deadline = [&](QuicCoreTimePoint current) {
+        if (!state.terminal_success || !saw_peer_input || terminal_success_deadline.has_value()) {
+            return;
+        }
+
+        terminal_success_deadline =
+            current + std::chrono::milliseconds(kClientSuccessDrainWindowMs);
+    };
+    const auto refresh_terminal_success_deadline_from_peer_input = [&](QuicCoreTimePoint current) {
+        if (!state.terminal_success || !saw_peer_input) {
+            return;
+        }
+
+        terminal_success_deadline =
+            current + std::chrono::milliseconds(kClientSuccessDrainWindowMs);
+    };
+    const auto success_drain_complete = [&](QuicCoreTimePoint current) {
+        return state.terminal_success && terminal_success_deadline.has_value() &&
+               current >= *terminal_success_deadline;
+    };
+    const auto should_exit_after_terminal_success = [&](QuicCoreTimePoint current) {
+        if (!state.terminal_success) {
+            return false;
+        }
+
+        if (!saw_peer_input) {
+            return true;
+        }
+
+        return success_drain_complete(current);
+    };
     if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, start_result,
                                       state, "client")) {
         return 1;
     }
     if (state.terminal_success) {
-        return 0;
+        const auto current = io.current_time();
+        ensure_terminal_success_deadline(current);
+        if (should_exit_after_terminal_success(current)) {
+            return 0;
+        }
     }
 
     const auto process_expired_client_timer = [&](QuicCoreTimePoint current,
@@ -879,6 +997,7 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             }
             const bool terminal = state.terminal_success | state.terminal_failure;
             if (terminal) {
+                ensure_terminal_success_deadline(io.current_time());
                 return true;
             }
 
@@ -893,12 +1012,14 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
 
             auto step_result =
                 core.advance(std::move(*receive.step.input), receive.step.input_time);
+            saw_peer_input = true;
             if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len,
                                               step_result, state, "client")) {
                 return false;
             }
             const bool terminal_after_receive = state.terminal_success | state.terminal_failure;
             if (terminal_after_receive) {
+                refresh_terminal_success_deadline_from_peer_input(receive.step.input_time);
                 return true;
             }
         }
@@ -909,7 +1030,10 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             return 1;
         }
         if (state.terminal_success) {
-            return 0;
+            const auto current = io.current_time();
+            if (should_exit_after_terminal_success(current)) {
+                return 0;
+            }
         }
 
         bool processed_timers = false;
@@ -917,6 +1041,9 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             return 1;
         }
         if (processed_timers) {
+            if (state.terminal_success) {
+                ensure_terminal_success_deadline(io.current_time());
+            }
             continue;
         }
 
@@ -924,20 +1051,32 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             return 1;
         }
         if (state.terminal_success) {
-            return 0;
+            const auto current = io.current_time();
+            ensure_terminal_success_deadline(current);
+            if (should_exit_after_terminal_success(current)) {
+                return 0;
+            }
         }
 
+        auto wait_next_wakeup = state.next_wakeup;
+        if (terminal_success_deadline.has_value()) {
+            wait_next_wakeup = std::min(wait_next_wakeup.value_or(*terminal_success_deadline),
+                                        *terminal_success_deadline);
+        }
         auto step = io.wait_for_socket_or_deadline(
             RuntimeWaitConfig{
                 .socket_fd = socket_fd,
                 .idle_timeout_ms = idle_timeout_ms,
                 .role_name = "client",
             },
-            state.next_wakeup);
+            wait_next_wakeup);
         if (!step.has_value()) {
             return 1;
         }
         if (step->idle_timeout) {
+            if (state.terminal_success) {
+                return 0;
+            }
             std::cerr << "http09-client failed: timed out waiting for progress\n";
             return 1;
         }
@@ -946,13 +1085,23 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             return 1;
         }
         auto step_input = std::move(*step->input);
+        const bool step_has_peer_input =
+            std::holds_alternative<QuicCoreInboundDatagram>(step_input);
+        saw_peer_input = step_has_peer_input || saw_peer_input;
         auto step_result = core.advance(std::move(step_input), step->input_time);
         if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, step_result,
                                           state, "client")) {
             return 1;
         }
         if (state.terminal_success) {
-            return 0;
+            if (step_has_peer_input) {
+                refresh_terminal_success_deadline_from_peer_input(step->input_time);
+            } else {
+                ensure_terminal_success_deadline(step->input_time);
+            }
+            if (should_exit_after_terminal_success(io.current_time())) {
+                return 0;
+            }
         }
     }
 }
@@ -966,7 +1115,18 @@ int run_http09_client_connection(const Http09RuntimeConfig &config,
         return 1;
     }
 
-    const int socket_fd = open_udp_socket();
+    ResolvedUdpAddress peer_address{};
+    if (!resolve_udp_address(
+            UdpAddressResolutionQuery{
+                .host = remote->host,
+                .port = remote->port,
+            },
+            peer_address)) {
+        std::cerr << "http09-client failed: invalid host address\n";
+        return 1;
+    }
+
+    const int socket_fd = open_udp_socket(peer_address.family);
     if (socket_fd < 0) {
         std::cerr << "http09-client failed: unable to create UDP socket: " << std::strerror(errno)
                   << '\n';
@@ -974,15 +1134,8 @@ int run_http09_client_connection(const Http09RuntimeConfig &config,
     }
     ScopedFd socket_guard(socket_fd);
 
-    sockaddr_in server_address{};
-    if (!resolve_udp_peer_ipv4(remote->host, remote->port, server_address)) {
-        std::cerr << "http09-client failed: invalid host address\n";
-        return 1;
-    }
-
-    sockaddr_storage peer{};
-    std::memcpy(&peer, &server_address, sizeof(server_address));
-    const socklen_t peer_len = sizeof(server_address);
+    const sockaddr_storage peer = peer_address.address;
+    const socklen_t peer_len = peer_address.address_len;
 
     QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
         .requests = requests,
@@ -1200,7 +1353,19 @@ int run_http09_server_loop(int socket_fd, const ServerLoopIo &io, const ServerLo
 }
 
 int run_http09_server(const Http09RuntimeConfig &config) {
-    const int socket_fd = open_udp_socket();
+    ResolvedUdpAddress bind_address{};
+    if (!resolve_udp_address(
+            UdpAddressResolutionQuery{
+                .host = config.host,
+                .port = config.port,
+                .extra_flags = AI_PASSIVE,
+            },
+            bind_address)) {
+        std::cerr << "http09-server failed: invalid host address\n";
+        return 1;
+    }
+
+    const int socket_fd = open_udp_socket(bind_address.family);
     if (socket_fd < 0) {
         std::cerr << "http09-server failed: unable to create UDP socket: " << std::strerror(errno)
                   << '\n';
@@ -1208,13 +1373,8 @@ int run_http09_server(const Http09RuntimeConfig &config) {
     }
     ScopedFd socket_guard(socket_fd);
 
-    sockaddr_in bind_address{};
-    if (!make_ipv4_address(config.host, config.port, bind_address)) {
-        std::cerr << "http09-server failed: invalid host address\n";
-        return 1;
-    }
-    if (runtime_ops().bind_fn(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address),
-                              sizeof(bind_address)) != 0) {
+    if (runtime_ops().bind_fn(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address.address),
+                              bind_address.address_len) != 0) {
         std::cerr << "http09-server failed: unable to bind UDP socket: " << std::strerror(errno)
                   << '\n';
         return 1;
@@ -1909,6 +2069,24 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
            QuicCore &, QuicCoreResult &, QuicCoreTimePoint) {
             setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
             setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+                .terminal_success = true,
+            });
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+                .terminal_success = true,
+            });
+            setup_io.receive_results.push_back(make_would_block_receive_for_tests());
+            setup_io.wait_steps.push_back(make_input_wait_step_for_tests(QuicCoreInboundDatagram{
+                .bytes = {std::byte{0x01}},
+            }));
+            setup_io.wait_steps.push_back(make_input_wait_step_for_tests(QuicCoreInboundDatagram{
+                .bytes = {std::byte{0x02}},
+            }));
+            setup_io.wait_steps.push_back(make_idle_timeout_wait_step_for_tests());
+        },
+        [](ScriptedEndpointForTests &setup_endpoint, ScriptedClientLoopIoForTests &setup_io,
+           QuicCore &, QuicCoreResult &, QuicCoreTimePoint) {
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
                 .terminal_failure = true,
             });
             setup_io.receive_results.push_back(make_would_block_receive_for_tests());
@@ -1933,6 +2111,9 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
         .terminal_success = state.terminal_success,
         .terminal_failure = state.terminal_failure,
         .endpoint_has_pending_work = state.endpoint_has_pending_work,
+        .receive_calls = io_script.next_receive_index,
+        .wait_calls = io_script.next_wait_index,
+        .current_time_calls = io_script.next_now_index,
     };
 }
 

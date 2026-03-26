@@ -459,6 +459,7 @@ TEST(QuicCoreTest, ClientHandshakeReadyEmitsBeforeHandshakeConfirmation) {
 
 TEST(QuicCoreTest, HandshakeExportsConfiguredTransportParametersToPeer) {
     auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.transport.max_idle_timeout = 90000;
     client_config.transport.initial_max_data = 7777;
     client_config.transport.initial_max_stream_data_bidi_local = 1234;
     client_config.transport.initial_max_stream_data_bidi_remote = 2345;
@@ -475,6 +476,7 @@ TEST(QuicCoreTest, HandshakeExportsConfiguredTransportParametersToPeer) {
     if (!peer_transport_parameters.has_value()) {
         return;
     }
+    EXPECT_EQ(peer_transport_parameters.value().max_idle_timeout, 90000u);
     EXPECT_EQ(peer_transport_parameters.value().initial_max_data, 7777u);
     EXPECT_EQ(peer_transport_parameters.value().initial_max_stream_data_bidi_local, 1234u);
     EXPECT_EQ(peer_transport_parameters.value().initial_max_stream_data_bidi_remote, 2345u);
@@ -3166,6 +3168,127 @@ TEST(QuicCoreTest, ArmPtoProbeSkipsPacketSpacesWhoseDeadlineHasNotArrived) {
 
     EXPECT_EQ(connection.pto_count_, 0u);
     EXPECT_FALSE(connection.initial_space_.pending_probe_packet.has_value());
+}
+
+TEST(QuicCoreTest, ClientHandshakePtoBackoffCapsBeforeHandshakeConfirmation) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.track_sent_packet(connection.initial_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 1,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .has_ping = true,
+                                 });
+    connection.pto_count_ = 4;
+
+    connection.arm_pto_probe(coquic::quic::test::test_time(4000));
+
+    EXPECT_EQ(connection.pto_count_, 5u);
+    ASSERT_TRUE(connection.initial_space_.pending_probe_packet.has_value());
+}
+
+TEST(QuicCoreTest, ClientHandshakeKeepalivePtoUsesPeerActivityBeforeHandshakeKeysAreReady) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.last_peer_activity_time_ = coquic::quic::test::test_time(4);
+    connection.pto_count_ = 4;
+
+    EXPECT_EQ(connection.pto_deadline(), std::optional{coquic::quic::test::test_time(4000)});
+    EXPECT_EQ(connection.next_wakeup(), std::optional{coquic::quic::test::test_time(4000)});
+
+    connection.on_timeout(coquic::quic::test::test_time(4000));
+
+    EXPECT_EQ(connection.pto_count_, 5u);
+    EXPECT_TRUE(connection.initial_space_.pending_probe_packet.has_value() &&
+                connection.initial_space_.pending_probe_packet->has_ping);
+    EXPECT_FALSE(connection.handshake_space_.pending_probe_packet.has_value());
+    EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
+}
+
+TEST(QuicCoreTest, ClientHandshakeKeepaliveAckDoesNotResetPtoBackoff) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.last_peer_activity_time_ = coquic::quic::test::test_time(4);
+    connection.pto_count_ = 4;
+
+    ASSERT_EQ(connection.pto_deadline(), std::optional{coquic::quic::test::test_time(4000)});
+
+    connection.on_timeout(coquic::quic::test::test_time(4000));
+
+    ASSERT_EQ(connection.pto_count_, 5u);
+    EXPECT_TRUE(connection.initial_space_.pending_probe_packet.has_value() &&
+                connection.initial_space_.pending_probe_packet->has_ping);
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(4000));
+    ASSERT_FALSE(datagram.empty());
+    ASSERT_EQ(connection.initial_space_.sent_packets.size(), 1u);
+
+    const auto processed = connection.process_inbound_ack(
+        connection.initial_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 0,
+            .first_ack_range = 0,
+        },
+        coquic::quic::test::test_time(4100), /*ack_delay_exponent=*/0, /*max_ack_delay_ms=*/0,
+        /*suppress_pto_reset=*/false);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_EQ(connection.pto_count_, 5u);
+    const auto next_deadline = connection.pto_deadline();
+    EXPECT_TRUE(next_deadline.has_value() &&
+                next_deadline.value() > coquic::quic::test::test_time(5000));
+}
+
+TEST(QuicCoreTest, ClientHandshakeKeepaliveAckOnlyPacketDoesNotRefreshPeerActivity) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.last_peer_activity_time_ = coquic::quic::test::test_time(4);
+    connection.pto_count_ = 4;
+
+    connection.on_timeout(coquic::quic::test::test_time(4000));
+
+    ASSERT_EQ(connection.pto_count_, 5u);
+    ASSERT_TRUE(connection.initial_space_.pending_probe_packet.has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(4000));
+    ASSERT_FALSE(datagram.empty());
+    ASSERT_EQ(connection.initial_space_.sent_packets.size(), 1u);
+    ASSERT_EQ(connection.last_client_handshake_keepalive_probe_time_,
+              std::optional{coquic::quic::test::test_time(4000)});
+    ASSERT_EQ(connection.pto_count_, 5u);
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedInitialPacket{
+            .destination_connection_id = {},
+            .source_connection_id = {std::byte{0x01}},
+            .token = {},
+            .packet_number = 1,
+            .frames =
+                {
+                    coquic::quic::AckFrame{
+                        .largest_acknowledged = 0,
+                        .first_ack_range = 0,
+                    },
+                },
+        },
+        coquic::quic::test::test_time(4100));
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_EQ(connection.pto_count_, 5u);
+    EXPECT_EQ(connection.last_peer_activity_time_, std::optional{coquic::quic::test::test_time(4)});
+    const auto next_deadline = connection.pto_deadline();
+    EXPECT_TRUE(next_deadline.has_value() &&
+                next_deadline.value() > coquic::quic::test::test_time(5000));
 }
 
 TEST(QuicCoreTest, ReceivingAckElicitingPacketsSchedulesAckResponse) {
@@ -6081,6 +6204,60 @@ TEST(QuicCoreTest, ProcessInboundPacketLeavesInitialAndHandshakeStateUntouchedOn
     EXPECT_FALSE(connection.handshake_space_.received_packets.has_ack_to_send());
 }
 
+TEST(QuicCoreTest, ClientResetsInitialAckHistoryWhenPeerSourceConnectionIdChangesMidHandshake) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.start_client_if_needed();
+    ASSERT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time()).empty());
+
+    const auto first_packet = connection.process_inbound_packet(
+        coquic::quic::ProtectedInitialPacket{
+            .version = 1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id = {std::byte{0xaa}},
+            .packet_number_length = 2,
+            .packet_number = 2,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(first_packet.has_value());
+
+    const auto second_packet = connection.process_inbound_packet(
+        coquic::quic::ProtectedInitialPacket{
+            .version = 1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id = {std::byte{0xbb}},
+            .packet_number_length = 2,
+            .packet_number = 0,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(2));
+    ASSERT_TRUE(second_packet.has_value());
+
+    EXPECT_EQ(connection.peer_source_connection_id_, bytes_from_ints({0xbb}));
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(datagram.empty());
+
+    const auto packets = decode_sender_datagram(connection, datagram);
+    const auto initial = std::find_if(
+        packets.begin(), packets.end(), [](const coquic::quic::ProtectedPacket &packet) {
+            return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packet);
+        });
+    ASSERT_NE(initial, packets.end());
+
+    const auto &initial_packet = std::get<coquic::quic::ProtectedInitialPacket>(*initial);
+    const auto ack = std::find_if(initial_packet.frames.begin(), initial_packet.frames.end(),
+                                  [](const coquic::quic::Frame &frame) {
+                                      return std::holds_alternative<coquic::quic::AckFrame>(frame);
+                                  });
+    ASSERT_NE(ack, initial_packet.frames.end());
+
+    const auto &ack_frame = std::get<coquic::quic::AckFrame>(*ack);
+    EXPECT_EQ(ack_frame.largest_acknowledged, 0u);
+    EXPECT_EQ(ack_frame.first_ack_range, 0u);
+    EXPECT_TRUE(ack_frame.additional_ranges.empty());
+}
+
 TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversAckReorderAndErrorBranches) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
     coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
@@ -6338,16 +6515,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresInitialPacketsAfterDiscardingIni
     EXPECT_TRUE(coquic::quic::test::received_application_data_from(replayed).empty());
 }
 
-TEST(QuicCoreTest, ProcessCapturedQuicGoServerInitialInstallsHandshakeSecrets) {
-    auto config = coquic::quic::test::make_client_core_config();
-    config.source_connection_id = bytes_from_hex("c100000000000025");
-    config.initial_destination_connection_id = bytes_from_hex("8300000000000024");
-
-    coquic::quic::QuicConnection connection(config);
-    connection.start_client_if_needed();
-    ASSERT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time()).empty());
-
-    const auto server_first_flight = bytes_from_hex(
+std::vector<std::byte> captured_quic_go_server_first_flight() {
+    return bytes_from_hex(
         "c30000000108c10000000000002504c516a3560041cc1deadd79519b2fb4b57443729da026692a0dc7f"
         "4495ca82f945e2dc0ac9a1d8392619cf89b43a7142506dfb58efea1be1331363abac7357ea84a30941b"
         "ec1f9d1b8bd312eb7a2a42fe440a1ddc22c50ab227a566d5364c387804206ae94926141c11a1ecc4517"
@@ -6379,6 +6548,19 @@ TEST(QuicCoreTest, ProcessCapturedQuicGoServerInitialInstallsHandshakeSecrets) {
         "d3fc12d1e53c0bba977ee8ec08d27057fcf0cdd909b142a97ad547f3432785048cb646c78f5c945484e"
         "ddca1a7164e021e7f5d6e17d12dee1a07f5e1eb7b47901cf9554c100000000000025497da86827cf8147"
         "6875e5177ad6778c56fcc61d249695ffa7f085554cd4d61755fabd13ade985796962");
+}
+
+TEST(QuicCoreTest, ProcessCapturedQuicGoServerInitialInstallsHandshakeSecrets) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.source_connection_id = bytes_from_hex("c100000000000025");
+    config.initial_destination_connection_id = bytes_from_hex("8300000000000024");
+
+    coquic::quic::QuicConnection connection(config);
+    connection.start_client_if_needed();
+    connection.initial_space_.next_send_packet_number = 1;
+    ASSERT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time()).empty());
+
+    const auto server_first_flight = captured_quic_go_server_first_flight();
 
     const auto initial_packet_bytes = std::span<const std::byte>(server_first_flight).first(482);
     const auto handshake_packet_bytes =
@@ -6452,6 +6634,167 @@ TEST(QuicCoreTest, ProcessCapturedQuicGoServerInitialInstallsHandshakeSecrets) {
 
     EXPECT_NE(initial_packet, packets.end());
     EXPECT_FALSE(connection.initial_packet_space_discarded_);
+}
+
+TEST(QuicCoreTest, ClientKeepsPtoArmedAfterServerInitialAckWithoutHandshakeFlight) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.source_connection_id = bytes_from_hex("c100000000000025");
+    config.initial_destination_connection_id = bytes_from_hex("8300000000000024");
+
+    coquic::quic::QuicConnection connection(config);
+    connection.start_client_if_needed();
+    connection.initial_space_.next_send_packet_number = 1;
+    ASSERT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time()).empty());
+
+    const auto server_first_flight = captured_quic_go_server_first_flight();
+    const auto initial_packet_bytes = std::span<const std::byte>(server_first_flight).first(482);
+
+    connection.process_inbound_datagram(initial_packet_bytes, coquic::quic::test::test_time(1));
+    ASSERT_FALSE(connection.has_failed());
+    ASSERT_TRUE(connection.handshake_space_.read_secret.has_value());
+    ASSERT_TRUE(connection.handshake_space_.write_secret.has_value());
+
+    ASSERT_FALSE(connection.initial_space_.sent_packets.empty());
+    const auto initial_packet_number = connection.initial_space_.sent_packets.begin()->first;
+    ASSERT_TRUE(connection
+                    .process_inbound_ack(connection.initial_space_,
+                                         coquic::quic::AckFrame{
+                                             .largest_acknowledged = initial_packet_number,
+                                             .first_ack_range = 0,
+                                         },
+                                         coquic::quic::test::test_time(1),
+                                         /*ack_delay_exponent=*/0,
+                                         /*max_ack_delay_ms=*/0,
+                                         /*suppress_pto_reset=*/true)
+                    .has_value());
+    EXPECT_FALSE(std::ranges::any_of(connection.initial_space_.sent_packets, [](const auto &entry) {
+        return entry.second.ack_eliciting && entry.second.in_flight;
+    }));
+    EXPECT_TRUE(connection.handshake_space_.sent_packets.empty());
+
+    const auto response = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(response.empty());
+
+    const auto response_packets = decode_sender_datagram(connection, response);
+    EXPECT_NE(std::find_if(response_packets.begin(), response_packets.end(),
+                           [](const auto &packet) {
+                               return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(
+                                   packet);
+                           }),
+              response_packets.end());
+    EXPECT_EQ(std::count_if(
+                  response_packets.begin(), response_packets.end(),
+                  [](const auto &packet) {
+                      return std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(packet);
+                  }),
+              0);
+    EXPECT_FALSE(std::ranges::any_of(connection.initial_space_.sent_packets, [](const auto &entry) {
+        return entry.second.ack_eliciting && entry.second.in_flight;
+    }));
+    EXPECT_TRUE(connection.handshake_space_.sent_packets.empty());
+
+    const auto next_wakeup = connection.next_wakeup();
+    ASSERT_TRUE(next_wakeup.has_value());
+}
+
+TEST(QuicCoreTest,
+     ClientDoesNotArmHandshakeKeepaliveAfterSendingHandshakeAckWithoutHandshakeFlight) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.source_connection_id = bytes_from_hex("c100000000000025");
+    config.initial_destination_connection_id = bytes_from_hex("8300000000000024");
+
+    coquic::quic::QuicConnection connection(config);
+    connection.start_client_if_needed();
+    connection.initial_space_.next_send_packet_number = 1;
+    ASSERT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time()).empty());
+
+    const auto server_first_flight = captured_quic_go_server_first_flight();
+    const auto initial_packet_bytes = std::span<const std::byte>(server_first_flight).first(482);
+
+    connection.process_inbound_datagram(initial_packet_bytes, coquic::quic::test::test_time(1));
+    ASSERT_FALSE(connection.has_failed());
+    ASSERT_TRUE(connection.handshake_space_.read_secret.has_value());
+    ASSERT_TRUE(connection.handshake_space_.write_secret.has_value());
+
+    ASSERT_FALSE(connection.initial_space_.sent_packets.empty());
+    const auto initial_packet_number = connection.initial_space_.sent_packets.begin()->first;
+    ASSERT_TRUE(connection
+                    .process_inbound_ack(connection.initial_space_,
+                                         coquic::quic::AckFrame{
+                                             .largest_acknowledged = initial_packet_number,
+                                             .first_ack_range = 0,
+                                         },
+                                         coquic::quic::test::test_time(1),
+                                         /*ack_delay_exponent=*/0,
+                                         /*max_ack_delay_ms=*/0,
+                                         /*suppress_pto_reset=*/true)
+                    .has_value());
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedHandshakePacket{
+            .source_connection_id = bytes_from_hex("0011223344556677"),
+            .packet_number = 1,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(2));
+    ASSERT_TRUE(processed.has_value());
+
+    const auto response = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(response.empty());
+    EXPECT_TRUE(connection.initial_packet_space_discarded_);
+
+    connection.on_timeout(coquic::quic::test::test_time(1000));
+
+    EXPECT_FALSE(connection.handshake_space_.pending_probe_packet.has_value());
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1000)).empty());
+}
+
+TEST(QuicCoreTest, ProcessInboundDatagramDefersLaterMissingContextPacketAfterValidInitial) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.source_connection_id = bytes_from_hex("c100000000000025");
+    config.initial_destination_connection_id = bytes_from_hex("8300000000000024");
+
+    coquic::quic::QuicConnection connection(config);
+    connection.start_client_if_needed();
+    connection.initial_space_.next_send_packet_number = 1;
+    ASSERT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time()).empty());
+
+    const auto server_first_flight = captured_quic_go_server_first_flight();
+    const auto initial_packet_bytes = std::span<const std::byte>(server_first_flight).first(482);
+    const auto buffered_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 0,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = 0,
+                            .first_ack_range = 0,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = make_test_traffic_secret(
+                coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x51}),
+        });
+    ASSERT_TRUE(buffered_packet.has_value()) << static_cast<int>(buffered_packet.error().code);
+
+    std::vector<std::byte> datagram(initial_packet_bytes.begin(), initial_packet_bytes.end());
+    datagram.insert(datagram.end(), buffered_packet.value().begin(), buffered_packet.value().end());
+
+    connection.process_inbound_datagram(datagram, coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_EQ(connection.status_, coquic::quic::HandshakeStatus::in_progress);
+    EXPECT_TRUE(connection.handshake_space_.read_secret.has_value());
+    ASSERT_EQ(connection.deferred_protected_packets_.size(), 1u);
+    EXPECT_EQ(connection.deferred_protected_packets_.front(), buffered_packet.value());
 }
 
 std::vector<std::byte> captured_picoquic_client_initial_datagram() {
@@ -8433,7 +8776,44 @@ TEST(QuicCoreTest, ProcessInboundDatagramFailsWhenKeyUpdateCannotDeriveNextWrite
     EXPECT_TRUE(connection.has_failed());
 }
 
-TEST(QuicCoreTest, ProcessInboundDatagramFailsWhenKeyUpdateRetryCannotDecryptPacket) {
+TEST(QuicCoreTest,
+     ProcessInboundDatagramDiscardsCorruptedShortHeaderPacketWithoutFailingConnection) {
+    auto connection = make_connected_client_connection();
+    connection.handshake_confirmed_ = false;
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 79,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = 0,
+                            .first_ack_range = 0,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
+        coquic::quic::test::PacketCryptoFaultPoint::open_set_tag);
+    connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+}
+
+TEST(QuicCoreTest, ProcessInboundDatagramDiscardsWhenKeyUpdateRetryCannotDecryptPacket) {
     auto connection = make_connected_client_connection();
     ASSERT_TRUE(connection.application_space_.read_secret.has_value());
 
@@ -8464,7 +8844,9 @@ TEST(QuicCoreTest, ProcessInboundDatagramFailsWhenKeyUpdateRetryCannotDecryptPac
 
     connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
 
-    EXPECT_TRUE(connection.has_failed());
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
 }
 
 TEST(QuicCoreTest, ProcessInboundDatagramFailsWhenSyncTlsStateFailsAfterValidPacket) {

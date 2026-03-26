@@ -74,6 +74,12 @@ TEST(QuicHttp09Test, UsesGenerousTransferFlowControlProfileForTransferCase) {
     EXPECT_EQ(config.initial_max_stream_data_bidi_local, 16u * 1024u * 1024u);
 }
 
+TEST(QuicHttp09Test, UsesExtendedIdleTimeoutProfileForMulticonnectCase) {
+    const auto config = coquic::quic::http09_client_transport_for_testcase(
+        coquic::quic::QuicHttp09Testcase::multiconnect);
+    EXPECT_EQ(config.max_idle_timeout, 180000u);
+}
+
 TEST(QuicHttp09Test, ResolvesRequestTargetUnderRootWithoutDiscardingRoot) {
     const auto resolved =
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a/b.bin");

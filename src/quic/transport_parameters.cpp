@@ -18,6 +18,7 @@ using coquic::quic::TransportParametersValidationContext;
 using coquic::quic::TransportParametersValidationOk;
 
 constexpr std::uint64_t original_destination_connection_id_parameter_id = 0x00;
+constexpr std::uint64_t max_idle_timeout_parameter_id = 0x01;
 constexpr std::uint64_t max_udp_payload_size_parameter_id = 0x03;
 constexpr std::uint64_t initial_max_data_parameter_id = 0x04;
 constexpr std::uint64_t initial_max_stream_data_bidi_local_parameter_id = 0x05;
@@ -85,6 +86,14 @@ serialize_transport_parameters(const TransportParameters &parameters) {
 
     append_connection_id_parameter(output, original_destination_connection_id_parameter_id,
                                    parameters.original_destination_connection_id);
+
+    auto encoded_max_idle_timeout = encode_varint(parameters.max_idle_timeout);
+    if (!encoded_max_idle_timeout.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(
+            encoded_max_idle_timeout.error().code, encoded_max_idle_timeout.error().offset);
+    }
+
+    append_raw_parameter(output, max_idle_timeout_parameter_id, encoded_max_idle_timeout.value());
 
     auto encoded_max_udp_payload_size = encode_varint(parameters.max_udp_payload_size);
     if (!encoded_max_udp_payload_size.has_value()) {
@@ -223,6 +232,14 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             parameters.original_destination_connection_id =
                 ConnectionId(value.begin(), value.end());
             break;
+        case max_idle_timeout_parameter_id: {
+            const auto decoded = decode_integer_parameter(value);
+            if (!decoded.has_value()) {
+                return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
+            }
+            parameters.max_idle_timeout = decoded.value();
+            break;
+        }
         case max_udp_payload_size_parameter_id: {
             const auto decoded = decode_integer_parameter(value);
             if (!decoded.has_value()) {

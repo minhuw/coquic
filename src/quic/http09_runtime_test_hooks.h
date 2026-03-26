@@ -67,6 +67,7 @@ enum class ClientConnectionLoopCaseForTests : std::uint8_t {
     outer_pump_terminal_failure,
     outer_pump_terminal_success,
     wait_input_then_terminal_success,
+    wait_input_then_terminal_success_with_followup_input,
     wait_input_then_drive_failure,
     wait_input_missing_failure,
 };
@@ -76,6 +77,9 @@ struct ClientConnectionLoopResultForTests {
     bool terminal_success = false;
     bool terminal_failure = false;
     bool endpoint_has_pending_work = false;
+    std::size_t receive_calls = 0;
+    std::size_t wait_calls = 0;
+    std::size_t current_time_calls = 0;
 };
 
 enum class ServerLoopCaseForTests : std::uint8_t {

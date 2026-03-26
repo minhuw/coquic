@@ -267,6 +267,8 @@ int fail_getaddrinfo(const char *, const char *, const addrinfo *, addrinfo **re
 }
 
 thread_local int g_freeaddrinfo_calls = 0;
+thread_local int g_last_socket_family = AF_UNSPEC;
+thread_local int g_last_getaddrinfo_family = AF_UNSPEC;
 
 class ScopedFreeaddrinfoCounterReset {
   public:
@@ -280,6 +282,22 @@ class ScopedFreeaddrinfoCounterReset {
 
     ScopedFreeaddrinfoCounterReset(const ScopedFreeaddrinfoCounterReset &) = delete;
     ScopedFreeaddrinfoCounterReset &operator=(const ScopedFreeaddrinfoCounterReset &) = delete;
+};
+
+class ScopedRuntimeAddressFamilyReset {
+  public:
+    ScopedRuntimeAddressFamilyReset() {
+        g_last_socket_family = AF_UNSPEC;
+        g_last_getaddrinfo_family = AF_UNSPEC;
+    }
+
+    ~ScopedRuntimeAddressFamilyReset() {
+        g_last_socket_family = AF_UNSPEC;
+        g_last_getaddrinfo_family = AF_UNSPEC;
+    }
+
+    ScopedRuntimeAddressFamilyReset(const ScopedRuntimeAddressFamilyReset &) = delete;
+    ScopedRuntimeAddressFamilyReset &operator=(const ScopedRuntimeAddressFamilyReset &) = delete;
 };
 
 int fail_getaddrinfo_with_results(const char *, const char *, const addrinfo *,
@@ -302,11 +320,61 @@ int fail_getaddrinfo_with_results(const char *, const char *, const addrinfo *,
     return EAI_FAIL;
 }
 
+int record_socket_family_then_fail(int family, int, int) {
+    g_last_socket_family = family;
+    errno = EMFILE;
+    return -1;
+}
+
+int ipv6_only_getaddrinfo(const char *node, const char *service, const addrinfo *hints,
+                          addrinfo **results) {
+    if (results == nullptr) {
+        return EAI_FAIL;
+    }
+    *results = nullptr;
+    if (hints == nullptr) {
+        return EAI_FAIL;
+    }
+
+    g_last_getaddrinfo_family = hints->ai_family;
+    if (node == nullptr || std::string_view(node) != "::1" || service == nullptr ||
+        std::string_view(service) != "9443") {
+        return EAI_NONAME;
+    }
+    if (hints->ai_family != AF_UNSPEC && hints->ai_family != AF_INET6) {
+        return EAI_ADDRFAMILY;
+    }
+    if (hints->ai_socktype != SOCK_DGRAM || hints->ai_protocol != IPPROTO_UDP) {
+        return EAI_SOCKTYPE;
+    }
+
+    auto *address = new sockaddr_in6{};
+    address->sin6_family = AF_INET6;
+    address->sin6_port = htons(9443);
+    address->sin6_addr = in6addr_loopback;
+
+    auto *result = new addrinfo{};
+    result->ai_family = AF_INET6;
+    result->ai_socktype = SOCK_DGRAM;
+    result->ai_protocol = IPPROTO_UDP;
+    result->ai_addrlen = sizeof(sockaddr_in6);
+    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+
+    *results = result;
+    return 0;
+}
+
 void counting_freeaddrinfo(addrinfo *results) {
     ++g_freeaddrinfo_calls;
     while (results != nullptr) {
         auto *next = results->ai_next;
-        delete reinterpret_cast<sockaddr_in *>(results->ai_addr);
+        if (results->ai_addr != nullptr) {
+            if (results->ai_family == AF_INET6) {
+                delete reinterpret_cast<sockaddr_in6 *>(results->ai_addr);
+            } else {
+                delete reinterpret_cast<sockaddr_in *>(results->ai_addr);
+            }
+        }
         delete results;
         results = next;
     }
@@ -351,8 +419,10 @@ int timeout_poll(pollfd *descriptors, nfds_t descriptor_count, int) {
 thread_local int g_timeout_then_error_poll_calls = 0;
 thread_local int g_eintr_then_timeout_poll_calls = 0;
 thread_local int g_eintr_then_ewouldblock_recvfrom_calls = 0;
+thread_local bool g_seen_runtime_request_datagram = false;
 std::atomic<int> g_fail_sendto_after_calls = -1;
 std::atomic<int> g_fail_sendto_call_count = 0;
+std::atomic<int> g_small_ack_datagrams_to_drop_after_request = 0;
 
 int eintr_then_timeout_poll(pollfd *descriptors, nfds_t descriptor_count, int timeout_ms) {
     ++g_eintr_then_timeout_poll_calls;
@@ -399,6 +469,22 @@ class ScopedFailSendtoAfterReset {
     ScopedFailSendtoAfterReset &operator=(const ScopedFailSendtoAfterReset &) = delete;
 };
 
+class ScopedDropSmallAckDatagramReset {
+  public:
+    ScopedDropSmallAckDatagramReset() {
+        g_small_ack_datagrams_to_drop_after_request.store(0);
+        g_seen_runtime_request_datagram = false;
+    }
+
+    ~ScopedDropSmallAckDatagramReset() {
+        g_small_ack_datagrams_to_drop_after_request.store(0);
+        g_seen_runtime_request_datagram = false;
+    }
+
+    ScopedDropSmallAckDatagramReset(const ScopedDropSmallAckDatagramReset &) = delete;
+    ScopedDropSmallAckDatagramReset &operator=(const ScopedDropSmallAckDatagramReset &) = delete;
+};
+
 int timeout_then_error_poll(pollfd *descriptors, nfds_t descriptor_count, int) {
     if (descriptor_count > 0) {
         descriptors[0].revents = 0;
@@ -418,6 +504,24 @@ ssize_t fail_sendto_after_n_calls(int fd, const void *buffer, size_t length, int
     if (fail_after > 0 && call_count >= fail_after) {
         errno = EIO;
         return -1;
+    }
+
+    return ::sendto(fd, buffer, length, flags, destination, destination_length);
+}
+
+ssize_t drop_nth_small_ack_datagram_after_request(int fd, const void *buffer, size_t length,
+                                                  int flags, const sockaddr *destination,
+                                                  socklen_t destination_length) {
+    if (length >= 48 && length <= 96) {
+        g_seen_runtime_request_datagram = true;
+    }
+
+    if (g_seen_runtime_request_datagram && length <= 48) {
+        const int remaining_to_drop = g_small_ack_datagrams_to_drop_after_request.load();
+        if (remaining_to_drop > 0) {
+            g_small_ack_datagrams_to_drop_after_request.store(remaining_to_drop - 1);
+            return static_cast<ssize_t>(length);
+        }
     }
 
     return ::sendto(fd, buffer, length, flags, destination, destination_length);
@@ -612,6 +716,8 @@ struct ObservingServerResult {
     std::size_t congestion_window = 0;
     bool has_next_wakeup = false;
     std::uint64_t queued_stream_bytes = 0;
+    bool response_packet_observed = false;
+    bool response_packet_acked = false;
 };
 
 struct InMemoryHttp09TransferResult {
@@ -940,6 +1046,7 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
     std::unordered_map<std::string, std::string> initial_routes;
     std::uint64_t next_connection_index = 1;
     bool saw_peer_activity = false;
+    std::unordered_set<std::uint64_t> response_packet_numbers;
 
     auto earliest_wakeup = [&]() -> std::optional<coquic::quic::QuicCoreTimePoint> {
         std::optional<coquic::quic::QuicCoreTimePoint> next_wakeup;
@@ -975,10 +1082,48 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
             observed.has_next_wakeup = session.next_wakeup.has_value();
             observed.queued_stream_bytes = session.core.connection_->total_queued_stream_bytes();
         };
+        const auto packet_is_response = [](const coquic::quic::SentPacketRecord &packet) {
+            return std::ranges::any_of(packet.stream_fragments,
+                                       [](const coquic::quic::StreamFrameSendFragment &fragment) {
+                                           return fragment.stream_id == 0 && fragment.fin;
+                                       });
+        };
+        const auto track_response_packet_state = [&]() {
+            const auto &application_space = session.core.connection_->application_space_;
+            for (const auto &[packet_number, packet] : application_space.sent_packets) {
+                if (!packet_is_response(packet)) {
+                    continue;
+                }
+
+                observed.response_packet_observed = true;
+                response_packet_numbers.insert(packet_number);
+            }
+            for (const auto &[packet_number, packet] : application_space.declared_lost_packets) {
+                if (!packet_is_response(packet)) {
+                    continue;
+                }
+
+                observed.response_packet_observed = true;
+                response_packet_numbers.insert(packet_number);
+            }
+
+            for (auto it = response_packet_numbers.begin(); it != response_packet_numbers.end();) {
+                const bool still_tracked = application_space.sent_packets.contains(*it) ||
+                                           application_space.declared_lost_packets.contains(*it);
+                if (still_tracked) {
+                    ++it;
+                    continue;
+                }
+
+                observed.response_packet_acked = true;
+                it = response_packet_numbers.erase(it);
+            }
+        };
 
         for (;;) {
             session.next_wakeup = result.next_wakeup;
             capture_transport_state();
+            track_response_packet_state();
             if (result.local_error.has_value()) {
                 return false;
             }
@@ -1475,6 +1620,67 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferLargeFileOverUdpSockets) {
     EXPECT_EQ(read_file_bytes(download_root.path() / "large.bin"), large_body);
 }
 
+TEST(QuicHttp09RuntimeTest,
+     ClientRetriesResponseAckAfterDroppingInitialPostRequestAckOnlyDatagrams) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+    document_root.write_file("hello.txt", "ack-retry-body");
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .download_root = download_root.path(),
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    const ScopedDropSmallAckDatagramReset drop_reset;
+    g_small_ack_datagrams_to_drop_after_request.store(2);
+
+    auto server_future =
+        std::async(std::launch::async, [&server]() { return run_observing_http09_server(server); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    {
+        const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            {
+                .sendto_fn = &drop_nth_small_ack_datagram_after_request,
+            },
+        };
+        EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    }
+
+    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+    const auto server_result = server_future.get();
+
+    EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "ack-retry-body");
+    EXPECT_TRUE(server_result.response_packet_observed);
+    EXPECT_TRUE(server_result.response_packet_acked)
+        << "exit_code=" << server_result.exit_code
+        << " inbound_datagrams=" << server_result.inbound_datagrams
+        << " timer_expirations=" << server_result.timer_expirations
+        << " sent_datagrams=" << server_result.sent_datagrams
+        << " sent_bytes=" << server_result.sent_bytes
+        << " sent_packets=" << server_result.sent_packets
+        << " bytes_in_flight=" << server_result.bytes_in_flight
+        << " cwnd=" << server_result.congestion_window
+        << " next_wakeup=" << server_result.has_next_wakeup
+        << " queued_stream_bytes=" << server_result.queued_stream_bytes;
+}
+
 TEST(QuicHttp09RuntimeTest, ClientDerivesPeerAddressAndServerNameFromRequests) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
@@ -1637,6 +1843,24 @@ TEST(QuicHttp09RuntimeTest, ServerFailsWhenConfiguredHostIsNotIpv4) {
     EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
 }
 
+TEST(QuicHttp09RuntimeTest, ServerUsesIpv6SocketFamilyForIpv6Host) {
+    const ScopedRuntimeAddressFamilyReset address_family_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {.socket_fn = &record_socket_family_then_fail},
+    };
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "::1",
+        .port = 443,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+    EXPECT_EQ(g_last_socket_family, AF_INET6);
+}
+
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenPeerResolutionFails) {
     const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
         {.getaddrinfo_fn = &fail_getaddrinfo},
@@ -1650,6 +1874,35 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenPeerResolutionFails) {
     };
 
     EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientConnectionUsesIpv6ResolutionAndSocketFamilyForIpv6Remote) {
+    const ScopedRuntimeAddressFamilyReset address_family_reset;
+    const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .socket_fn = &record_socket_family_then_fail,
+            .getaddrinfo_fn = &ipv6_only_getaddrinfo,
+            .freeaddrinfo_fn = &counting_freeaddrinfo,
+        },
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "",
+        .server_name = "",
+    };
+    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+        {.url = "https://[::1]:9443/a.txt",
+         .authority = "[::1]:9443",
+         .request_target = "/a.txt",
+         .relative_output_path = "a.txt"},
+    };
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, requests, 1), 1);
+    EXPECT_EQ(g_last_getaddrinfo_family, AF_INET6);
+    EXPECT_EQ(g_last_socket_family, AF_INET6);
+    EXPECT_EQ(g_freeaddrinfo_calls, 1);
 }
 
 TEST(QuicHttp09RuntimeTest, ClientConnectionRejectsInvalidDerivedRequestAuthority) {
@@ -2360,6 +2613,18 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialChacha20TestcaseAndConstrainsC
               }));
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeBuildsServerCoreConfigWithExtendedIdleTimeoutForMulticonnect) {
+    const auto server_runtime = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .testcase = coquic::quic::QuicHttp09Testcase::multiconnect,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    const auto server_core = coquic::quic::make_http09_server_core_config(server_runtime);
+    EXPECT_EQ(server_core.transport.max_idle_timeout, 180000u);
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksExposeTraceAndConnectionIdFormatting) {
     {
         ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", std::nullopt);
@@ -2768,6 +3033,15 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionLoopCases) {
     EXPECT_EQ(wait_input_then_terminal_success.exit_code, 0);
     EXPECT_TRUE(wait_input_then_terminal_success.terminal_success);
     EXPECT_FALSE(wait_input_then_terminal_success.terminal_failure);
+
+    const auto wait_input_then_terminal_success_with_followup_input =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::
+                wait_input_then_terminal_success_with_followup_input);
+    EXPECT_EQ(wait_input_then_terminal_success_with_followup_input.exit_code, 0);
+    EXPECT_TRUE(wait_input_then_terminal_success_with_followup_input.terminal_success);
+    EXPECT_FALSE(wait_input_then_terminal_success_with_followup_input.terminal_failure);
+    EXPECT_GE(wait_input_then_terminal_success_with_followup_input.wait_calls, 2u);
 
     const auto wait_input_then_drive_failure =
         coquic::quic::test::run_client_connection_loop_case_for_tests(

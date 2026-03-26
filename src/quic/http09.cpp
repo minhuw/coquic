@@ -68,6 +68,14 @@ bool is_invalid_http09_target_char(char ch) {
     return value <= 0x20u || value == 0x7fu;
 }
 
+QuicTransportConfig http09_transport_for_testcase(QuicHttp09Testcase testcase) {
+    auto config = QuicTransportConfig{};
+    if (testcase == QuicHttp09Testcase::multiconnect) {
+        config.max_idle_timeout = 180000;
+    }
+    return config;
+}
+
 } // namespace
 
 CodecResult<std::vector<QuicHttp09Request>>
@@ -179,12 +187,16 @@ CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::fil
 }
 
 QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase) {
-    auto config = QuicTransportConfig{};
+    auto config = http09_transport_for_testcase(testcase);
     if (testcase == QuicHttp09Testcase::transfer) {
         config.initial_max_data = 32ull * 1024ull * 1024ull;
         config.initial_max_stream_data_bidi_local = 16ull * 1024ull * 1024ull;
     }
     return config;
+}
+
+QuicTransportConfig http09_server_transport_for_testcase(QuicHttp09Testcase testcase) {
+    return http09_transport_for_testcase(testcase);
 }
 
 std::vector<CipherSuite> http09_tls_cipher_suites_for_testcase(QuicHttp09Testcase testcase) {

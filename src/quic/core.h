@@ -15,6 +15,7 @@
 namespace coquic::quic {
 
 struct QuicTransportConfig {
+    std::uint64_t max_idle_timeout = 0;
     std::uint64_t max_udp_payload_size = 65527;
     std::uint64_t ack_delay_exponent = 3;
     std::uint64_t max_ack_delay = 25;

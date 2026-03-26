@@ -36,7 +36,7 @@ fi
 case "${role}" in
 server)
   run_setup
-  export HOST="${HOST:-0.0.0.0}"
+  export HOST="${HOST:-::}"
   export PORT="${PORT:-443}"
   export DOCUMENT_ROOT="${DOCUMENT_ROOT:-/www}"
   export CERTIFICATE_CHAIN_PATH="${CERTIFICATE_CHAIN_PATH:-/certs/cert.pem}"

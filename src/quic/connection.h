@@ -127,6 +127,8 @@ class QuicConnection {
     CodecResult<bool> validate_peer_transport_parameters_if_ready();
     void update_handshake_status();
     void confirm_handshake();
+    bool should_reset_client_handshake_peer_state(const ConnectionId &source_connection_id) const;
+    void reset_client_handshake_peer_state_for_new_source_connection_id();
     void discard_initial_packet_space();
     void discard_handshake_packet_space();
     std::optional<TransportParametersValidationContext>
@@ -186,6 +188,8 @@ class QuicConnection {
     bool handshake_ready_emitted_ = false;
     bool failed_emitted_ = false;
     std::vector<std::vector<std::byte>> deferred_protected_packets_;
+    std::optional<QuicCoreTimePoint> last_peer_activity_time_;
+    std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
 };
 
 } // namespace coquic::quic

@@ -40,6 +40,7 @@ struct RuntimeWaitStepForTests {
 enum class DriveEndpointUntilBlockedCaseForTests : std::uint8_t {
     handle_core_effects_fail,
     initial_local_error,
+    initial_local_error_handled,
     endpoint_failure,
     endpoint_success,
     endpoint_inputs_then_core_error,
@@ -70,6 +71,8 @@ enum class ClientConnectionLoopCaseForTests : std::uint8_t {
     wait_input_then_terminal_success_with_followup_input,
     wait_input_then_drive_failure,
     wait_input_missing_failure,
+    peer_input_then_outer_pump_terminal_success,
+    wait_input_then_terminal_success_exits_after_drain_window,
 };
 
 struct ClientConnectionLoopResultForTests {
@@ -142,6 +145,7 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
 bool existing_server_session_failure_cleans_up_for_tests();
 bool existing_server_session_missing_input_fails_for_tests();
 bool expired_server_timer_failure_cleans_up_for_tests();
+bool expired_server_timer_success_preserves_session_for_tests();
 bool pending_server_work_failure_cleans_up_for_tests();
 bool version_negotiation_without_source_connection_id_fails_for_tests();
 ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests case_id);

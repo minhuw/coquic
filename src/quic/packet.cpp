@@ -55,7 +55,7 @@ void write_u32_be(BufferWriter &writer, std::uint32_t value) {
 }
 
 bool valid_packet_number_length(std::uint8_t packet_number_length) {
-    return packet_number_length >= 1 && packet_number_length <= 4;
+    return (packet_number_length >= 1) & (packet_number_length <= 4);
 }
 
 struct PacketNumberEncoding {

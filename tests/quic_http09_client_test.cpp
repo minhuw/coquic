@@ -9,7 +9,9 @@
 #include <variant>
 #include <vector>
 
+#define private public
 #include "src/quic/http09_client.h"
+#undef private
 #include "tests/quic_test_utils.h"
 
 namespace {
@@ -179,6 +181,35 @@ TEST(QuicHttp09ClientTest, CompletesImmediatelyWhenNoRequestsAreConfigured) {
     EXPECT_FALSE(endpoint.has_failed());
 }
 
+TEST(QuicHttp09ClientTest, DrainPendingInputsReportsPendingWorkForEmptyRequestSetAfterHandshake) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    endpoint.handshake_ready_ = true;
+
+    const auto update = endpoint.drain_pending_inputs();
+
+    EXPECT_TRUE(update.has_pending_work);
+    EXPECT_FALSE(update.terminal_success);
+    EXPECT_FALSE(update.terminal_failure);
+}
+
+TEST(QuicHttp09ClientTest, PollMarksClientCompleteWhenHandshakeIsReadyAndNoRequestsExist) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    endpoint.handshake_ready_ = true;
+
+    const auto update = endpoint.poll(coquic::quic::test::test_time());
+
+    EXPECT_TRUE(update.terminal_success);
+    EXPECT_FALSE(update.terminal_failure);
+    EXPECT_TRUE(endpoint.complete_);
+    EXPECT_TRUE(endpoint.is_complete());
+}
+
 TEST(QuicHttp09ClientTest, IgnoresUnknownStateEventsAfterCompletion) {
     const auto now = coquic::quic::test::test_time();
     QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
@@ -259,6 +290,25 @@ TEST(QuicHttp09ClientTest, ReportsSuccessOnlyAfterAllStreamsFinishWithFin) {
     EXPECT_FALSE(third.terminal_failure);
 }
 
+TEST(QuicHttp09ClientTest, DoesNotReportSuccessWhileAnIssuedStreamRemainsIncomplete) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/still-open.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    endpoint.handshake_ready_ = true;
+    endpoint.next_request_index_ = endpoint.config_.requests.size();
+    endpoint.request_streams_.insert_or_assign(0, QuicHttp09ClientEndpoint::RequestState{
+                                                      .request_target = "/still-open.txt",
+                                                      .complete = false,
+                                                  });
+
+    const auto update = endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time());
+
+    EXPECT_FALSE(update.terminal_success);
+    EXPECT_FALSE(update.terminal_failure);
+    EXPECT_FALSE(endpoint.is_complete());
+}
+
 TEST(QuicHttp09ClientTest, RetriesOpeningRequestAfterStreamLimitBackpressure) {
     const auto now = coquic::quic::test::test_time();
     coquic::quic::test::ScopedTempDir download_root;
@@ -297,6 +347,136 @@ TEST(QuicHttp09ClientTest, RetriesOpeningRequestAfterStreamLimitBackpressure) {
     const auto retried_sends = send_stream_inputs_from(retried);
     ASSERT_EQ(retried_sends.size(), 1u);
     EXPECT_EQ(retried_sends[0].stream_id, 4u);
+}
+
+TEST(QuicHttp09ClientTest, LocalStreamLimitErrorWithoutActiveRequestsFailsHandling) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    endpoint.pending_open_request_ = QuicHttp09ClientEndpoint::PendingOpenRequest{
+        .request_index = 0,
+        .stream_id = 0,
+    };
+
+    EXPECT_FALSE(endpoint.handle_local_error(coquic::quic::QuicCoreLocalError{
+        .code = QuicCoreLocalErrorCode::invalid_stream_id,
+        .stream_id = 0,
+    }));
+    EXPECT_FALSE(endpoint.blocked_on_stream_limit_);
+    EXPECT_TRUE(endpoint.pending_open_request_.has_value());
+}
+
+TEST(QuicHttp09ClientTest, DoesNotCompleteWhileOpenRequestIsStillPendingActivation) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    endpoint.next_request_index_ = endpoint.config_.requests.size();
+    endpoint.pending_open_request_ = QuicHttp09ClientEndpoint::PendingOpenRequest{
+        .request_index = 0,
+        .stream_id = 0,
+    };
+
+    const auto update = endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time());
+
+    EXPECT_FALSE(update.terminal_success);
+    EXPECT_FALSE(update.terminal_failure);
+    EXPECT_FALSE(endpoint.complete_);
+}
+
+TEST(QuicHttp09ClientTest, DoesNotCompleteWhileBlockedRequestStillOwnsPendingOpenState) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    endpoint.blocked_on_stream_limit_ = true;
+    endpoint.next_request_index_ = endpoint.config_.requests.size();
+    endpoint.pending_open_request_ = QuicHttp09ClientEndpoint::PendingOpenRequest{
+        .request_index = 0,
+        .stream_id = 0,
+    };
+
+    const auto update = endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time());
+
+    EXPECT_FALSE(update.terminal_success);
+    EXPECT_FALSE(update.terminal_failure);
+    EXPECT_FALSE(endpoint.complete_);
+    EXPECT_FALSE(endpoint.blocked_on_stream_limit_);
+    EXPECT_TRUE(endpoint.pending_open_request_.has_value());
+}
+
+TEST(QuicHttp09ClientTest, HandleLocalErrorRejectsMissingStreamId) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    endpoint.pending_open_request_ = QuicHttp09ClientEndpoint::PendingOpenRequest{
+        .request_index = 0,
+        .stream_id = 0,
+    };
+
+    EXPECT_FALSE(endpoint.handle_local_error(coquic::quic::QuicCoreLocalError{
+        .code = QuicCoreLocalErrorCode::invalid_stream_id,
+        .stream_id = std::nullopt,
+    }));
+    EXPECT_TRUE(endpoint.pending_open_request_.has_value());
+    EXPECT_FALSE(endpoint.blocked_on_stream_limit_);
+}
+
+TEST(QuicHttp09ClientTest, HandleLocalErrorRejectsWhenNoPendingOpenRequestExists) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    EXPECT_FALSE(endpoint.handle_local_error(coquic::quic::QuicCoreLocalError{
+        .code = QuicCoreLocalErrorCode::invalid_stream_id,
+        .stream_id = 0,
+    }));
+    EXPECT_FALSE(endpoint.pending_open_request_.has_value());
+    EXPECT_FALSE(endpoint.blocked_on_stream_limit_);
+}
+
+TEST(QuicHttp09ClientTest, HandleLocalErrorRejectsMismatchedPendingOpenStreamId) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    endpoint.pending_open_request_ = QuicHttp09ClientEndpoint::PendingOpenRequest{
+        .request_index = 0,
+        .stream_id = 4,
+    };
+
+    EXPECT_FALSE(endpoint.handle_local_error(coquic::quic::QuicCoreLocalError{
+        .code = QuicCoreLocalErrorCode::invalid_stream_id,
+        .stream_id = 0,
+    }));
+    EXPECT_TRUE(endpoint.pending_open_request_.has_value());
+    EXPECT_FALSE(endpoint.blocked_on_stream_limit_);
+}
+
+TEST(QuicHttp09ClientTest, ActivatePendingRequestWithoutPendingOpenRequestIsNoOp) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+
+    endpoint.activate_pending_request();
+
+    EXPECT_TRUE(endpoint.request_streams_.empty());
+    EXPECT_EQ(endpoint.next_request_index_, 0u);
+}
+
+TEST(QuicHttp09ClientTest, FailedEndpointCannotIssueAnotherRequest) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    endpoint.handshake_ready_ = true;
+    endpoint.failed_ = true;
+
+    EXPECT_FALSE(endpoint.can_issue_next_request());
 }
 
 TEST(QuicHttp09ClientTest, AppendsMultipleReceiveChunksToSameOutputFile) {

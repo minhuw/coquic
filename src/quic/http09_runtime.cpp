@@ -789,6 +789,11 @@ struct ServerSession {
 using ServerSessionMap = std::unordered_map<std::string, std::unique_ptr<ServerSession>>;
 using EraseServerSessionFn = std::function<void(const std::string &)>;
 
+void erase_server_session_from_map(ServerSessionMap &sessions,
+                                   const std::string &local_connection_id_key) {
+    sessions.erase(local_connection_id_key);
+}
+
 struct EndpointDriver {
     void *context = nullptr;
     QuicHttp09EndpointUpdate (*on_core_result_fn)(void *, const QuicCoreResult &,
@@ -901,7 +906,7 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
     bool saw_peer_input = false;
     std::optional<QuicCoreTimePoint> terminal_success_deadline;
     const auto ensure_terminal_success_deadline = [&](QuicCoreTimePoint current) {
-        if (!state.terminal_success || !saw_peer_input || terminal_success_deadline.has_value()) {
+        if (!saw_peer_input || terminal_success_deadline.has_value()) {
             return;
         }
 
@@ -909,22 +914,13 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             current + std::chrono::milliseconds(kClientSuccessDrainWindowMs);
     };
     const auto refresh_terminal_success_deadline_from_peer_input = [&](QuicCoreTimePoint current) {
-        if (!state.terminal_success || !saw_peer_input) {
-            return;
-        }
-
         terminal_success_deadline =
             current + std::chrono::milliseconds(kClientSuccessDrainWindowMs);
     };
     const auto success_drain_complete = [&](QuicCoreTimePoint current) {
-        return state.terminal_success && terminal_success_deadline.has_value() &&
-               current >= *terminal_success_deadline;
+        return current >= terminal_success_deadline.value_or(QuicCoreTimePoint::max());
     };
     const auto should_exit_after_terminal_success = [&](QuicCoreTimePoint current) {
-        if (!state.terminal_success) {
-            return false;
-        }
-
         if (!saw_peer_input) {
             return true;
         }
@@ -936,11 +932,7 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
         return 1;
     }
     if (state.terminal_success) {
-        const auto current = io.current_time();
-        ensure_terminal_success_deadline(current);
-        if (should_exit_after_terminal_success(current)) {
-            return 0;
-        }
+        return 0;
     }
 
     const auto process_expired_client_timer = [&](QuicCoreTimePoint current,
@@ -1040,9 +1032,6 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             return 1;
         }
         if (processed_timers) {
-            if (state.terminal_success) {
-                ensure_terminal_success_deadline(io.current_time());
-            }
             continue;
         }
 
@@ -1891,6 +1880,15 @@ drive_endpoint_until_blocked_case_for_tests(DriveEndpointUntilBlockedCaseForTest
                 .stream_id = std::nullopt,
             };
         },
+        [](ScriptedEndpointForTests &setup_endpoint, QuicCore &, QuicCoreResult &setup_result) {
+            setup_result.local_error = QuicCoreLocalError{
+                .code = QuicCoreLocalErrorCode::unsupported_operation,
+                .stream_id = std::nullopt,
+            };
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+                .handled_local_error = true,
+            });
+        },
         [](ScriptedEndpointForTests &setup_endpoint, QuicCore &, QuicCoreResult &) {
             setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
                 .terminal_failure = true,
@@ -2097,6 +2095,61 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
                 .input_time = now(),
             });
         },
+        [](ScriptedEndpointForTests &setup_endpoint, ScriptedClientLoopIoForTests &setup_io,
+           QuicCore &, QuicCoreResult &, QuicCoreTimePoint setup_base_time) {
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+                .has_pending_work = true,
+            });
+            setup_endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+                .terminal_success = true,
+            });
+            setup_io.receive_results.push_back(ReceiveDatagramResult{
+                .status = ReceiveDatagramStatus::ok,
+                .step =
+                    RuntimeWaitStep{
+                        .input =
+                            QuicCoreInboundDatagram{
+                                .bytes = {std::byte{0x01}},
+                            },
+                        .input_time = setup_base_time + std::chrono::milliseconds(1),
+                    },
+            });
+            setup_io.now_values = {
+                setup_base_time,
+                setup_base_time + std::chrono::milliseconds(2),
+                setup_base_time + std::chrono::milliseconds(3),
+                setup_base_time + std::chrono::milliseconds(4),
+                setup_base_time + std::chrono::milliseconds(5),
+                setup_base_time + std::chrono::milliseconds(6),
+            };
+            setup_io.wait_steps.push_back(RuntimeWaitStep{
+                .input_time = setup_base_time + std::chrono::milliseconds(7),
+                .idle_timeout = true,
+            });
+        },
+        [](ScriptedEndpointForTests &setup_endpoint, ScriptedClientLoopIoForTests &setup_io,
+           QuicCore &, QuicCoreResult &, QuicCoreTimePoint setup_base_time) {
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+                .terminal_success = true,
+            });
+            setup_io.receive_results.push_back(ReceiveDatagramResult{
+                .status = ReceiveDatagramStatus::ok,
+                .step =
+                    RuntimeWaitStep{
+                        .input =
+                            QuicCoreInboundDatagram{
+                                .bytes = {std::byte{0x01}},
+                            },
+                        .input_time = setup_base_time + std::chrono::milliseconds(1),
+                    },
+            });
+            setup_io.now_values = {
+                setup_base_time,
+                setup_base_time + std::chrono::milliseconds(kClientSuccessDrainWindowMs + 2),
+            };
+        },
     });
     kClientLoopCaseSetups[static_cast<std::size_t>(case_id)](endpoint, io_script, core,
                                                              start_result, base_time);
@@ -2196,13 +2249,36 @@ bool expired_server_timer_failure_cleans_up_for_tests() {
                          .initial_destination_connection_id_key = "expired-route",
                      }));
     bool processed_any = false;
-    process_expired_server_sessions(
-        sessions, /*socket_fd=*/-1, now(),
-        [&](const std::string &local_connection_id_key) {
-            sessions.erase(local_connection_id_key);
-        },
-        processed_any);
+    const auto erase_session = std::bind_front(erase_server_session_from_map, std::ref(sessions));
+    process_expired_server_sessions(sessions, /*socket_fd=*/-1, now(), erase_session,
+                                    processed_any);
     return processed_any & sessions.empty();
+}
+
+bool expired_server_timer_success_preserves_session_for_tests() {
+    ServerSessionMap sessions;
+    sessions.emplace("expired-session",
+                     std::make_unique<ServerSession>(ServerSession{
+                         .core = QuicCore(make_http09_server_core_config(Http09RuntimeConfig{
+                             .mode = Http09RuntimeMode::server,
+                         })),
+                         .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                             .document_root = std::filesystem::temp_directory_path(),
+                         }),
+                         .state =
+                             EndpointDriveState{
+                                 .next_wakeup = now(),
+                             },
+                         .peer = {},
+                         .peer_len = 0,
+                         .local_connection_id_key = "expired-session",
+                         .initial_destination_connection_id_key = "expired-route",
+                     }));
+    bool processed_any = false;
+    const auto erase_session = std::bind_front(erase_server_session_from_map, std::ref(sessions));
+    process_expired_server_sessions(sessions, /*socket_fd=*/-1, now(), erase_session,
+                                    processed_any);
+    return processed_any & (sessions.size() == 1);
 }
 
 bool pending_server_work_failure_cleans_up_for_tests() {
@@ -2501,13 +2577,14 @@ QuicCoreConfig make_http09_server_core_config(const Http09RuntimeConfig &config)
 int run_http09_runtime(const Http09RuntimeConfig &config) {
     coquic::init_logging();
 
-    switch (config.mode) {
-    case Http09RuntimeMode::health_check:
+    if (config.mode == Http09RuntimeMode::health_check) {
         return coquic::project_name().empty() | !coquic::openssl_available() |
                !coquic::logging_ready();
-    case Http09RuntimeMode::client:
+    }
+    if (config.mode == Http09RuntimeMode::client) {
         return run_http09_client(config);
-    case Http09RuntimeMode::server:
+    }
+    if (config.mode == Http09RuntimeMode::server) {
         return run_http09_server(config);
     }
 

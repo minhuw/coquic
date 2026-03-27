@@ -271,6 +271,17 @@ thread_local int g_freeaddrinfo_calls = 0;
 thread_local int g_last_socket_family = AF_UNSPEC;
 thread_local int g_last_getaddrinfo_family = AF_UNSPEC;
 
+int missing_results_getaddrinfo(const char *, const char *, const addrinfo *hints,
+                                addrinfo **results) {
+    if (results == nullptr || hints == nullptr) {
+        return EAI_FAIL;
+    }
+
+    *results = nullptr;
+    g_last_getaddrinfo_family = hints->ai_family;
+    return 0;
+}
+
 class ScopedFreeaddrinfoCounterReset {
   public:
     ScopedFreeaddrinfoCounterReset() {
@@ -379,6 +390,166 @@ void counting_freeaddrinfo(addrinfo *results) {
         delete results;
         results = next;
     }
+}
+
+addrinfo *make_ipv4_addrinfo_result(std::string_view ip, std::uint16_t port) {
+    auto *address = new sockaddr_in{};
+    address->sin_family = AF_INET;
+    address->sin_port = htons(port);
+    if (::inet_pton(AF_INET, std::string(ip).c_str(), &address->sin_addr) != 1) {
+        delete address;
+        return nullptr;
+    }
+
+    auto *result = new addrinfo{};
+    result->ai_family = AF_INET;
+    result->ai_socktype = SOCK_DGRAM;
+    result->ai_protocol = IPPROTO_UDP;
+    result->ai_addrlen = sizeof(sockaddr_in);
+    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    return result;
+}
+
+addrinfo *make_ipv6_addrinfo_result(std::string_view ip, std::uint16_t port) {
+    auto *address = new sockaddr_in6{};
+    address->sin6_family = AF_INET6;
+    address->sin6_port = htons(port);
+    if (::inet_pton(AF_INET6, std::string(ip).c_str(), &address->sin6_addr) != 1) {
+        delete address;
+        return nullptr;
+    }
+
+    auto *result = new addrinfo{};
+    result->ai_family = AF_INET6;
+    result->ai_socktype = SOCK_DGRAM;
+    result->ai_protocol = IPPROTO_UDP;
+    result->ai_addrlen = sizeof(sockaddr_in6);
+    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    return result;
+}
+
+int prefer_ipv4_mixed_getaddrinfo(const char *node, const char *service, const addrinfo *hints,
+                                  addrinfo **results) {
+    if (results == nullptr || hints == nullptr || node == nullptr || service == nullptr) {
+        return EAI_FAIL;
+    }
+    *results = nullptr;
+
+    g_last_getaddrinfo_family = hints->ai_family;
+    if (std::string_view(node) != "localhost" || std::string_view(service) != "443") {
+        return EAI_NONAME;
+    }
+
+    auto *ipv6 = make_ipv6_addrinfo_result("::1", 443);
+    auto *ipv4 = make_ipv4_addrinfo_result("127.0.0.1", 443);
+    if (ipv6 == nullptr || ipv4 == nullptr) {
+        counting_freeaddrinfo(ipv6);
+        counting_freeaddrinfo(ipv4);
+        return EAI_FAIL;
+    }
+
+    ipv6->ai_next = ipv4;
+    *results = ipv6;
+    return 0;
+}
+
+int fallback_to_earlier_valid_result_getaddrinfo(const char *node, const char *service,
+                                                 const addrinfo *hints, addrinfo **results) {
+    if (results == nullptr || hints == nullptr || node == nullptr || service == nullptr) {
+        return EAI_FAIL;
+    }
+    *results = nullptr;
+
+    g_last_getaddrinfo_family = hints->ai_family;
+    if (std::string_view(node) != "localhost" || std::string_view(service) != "443") {
+        return EAI_NONAME;
+    }
+
+    auto *ipv6 = make_ipv6_addrinfo_result("::1", 443);
+    auto *ipv4 = make_ipv4_addrinfo_result("127.0.0.1", 443);
+    if (ipv6 == nullptr || ipv4 == nullptr) {
+        counting_freeaddrinfo(ipv6);
+        counting_freeaddrinfo(ipv4);
+        return EAI_FAIL;
+    }
+
+    ipv4->ai_addrlen = static_cast<socklen_t>(sizeof(sockaddr_storage) + 1);
+    ipv6->ai_next = ipv4;
+    *results = ipv6;
+    return 0;
+}
+
+int unsupported_family_getaddrinfo(const char *node, const char *service, const addrinfo *hints,
+                                   addrinfo **results) {
+    if (results == nullptr || hints == nullptr || node == nullptr || service == nullptr) {
+        return EAI_FAIL;
+    }
+    *results = nullptr;
+
+    if (std::string_view(node) != "localhost" || std::string_view(service) != "443") {
+        return EAI_NONAME;
+    }
+
+    auto *address = new sockaddr_in{};
+    address->sin_family = AF_INET;
+    address->sin_port = htons(443);
+    address->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    auto *result = new addrinfo{};
+    result->ai_family = AF_UNIX;
+    result->ai_socktype = SOCK_DGRAM;
+    result->ai_protocol = IPPROTO_UDP;
+    result->ai_addrlen = sizeof(sockaddr_in);
+    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    *results = result;
+    return 0;
+}
+
+int wildcard_ipv4_getaddrinfo(const char *node, const char *service, const addrinfo *hints,
+                              addrinfo **results) {
+    if (results == nullptr || hints == nullptr || service == nullptr) {
+        return EAI_FAIL;
+    }
+    *results = nullptr;
+
+    g_last_getaddrinfo_family = hints->ai_family;
+    if (node != nullptr || std::string_view(service) != "443") {
+        return EAI_NONAME;
+    }
+
+    auto *result = make_ipv4_addrinfo_result("127.0.0.1", 443);
+    if (result == nullptr) {
+        return EAI_FAIL;
+    }
+    *results = result;
+    return 0;
+}
+
+int no_valid_result_getaddrinfo(const char *node, const char *service, const addrinfo *hints,
+                                addrinfo **results) {
+    if (results == nullptr || hints == nullptr || node == nullptr || service == nullptr) {
+        return EAI_FAIL;
+    }
+    *results = nullptr;
+
+    g_last_getaddrinfo_family = hints->ai_family;
+    if (std::string_view(node) != "localhost" || std::string_view(service) != "443") {
+        return EAI_NONAME;
+    }
+
+    auto *ipv6 = make_ipv6_addrinfo_result("::1", 443);
+    auto *ipv4 = make_ipv4_addrinfo_result("127.0.0.1", 443);
+    if (ipv6 == nullptr || ipv4 == nullptr) {
+        counting_freeaddrinfo(ipv6);
+        counting_freeaddrinfo(ipv4);
+        return EAI_FAIL;
+    }
+
+    ipv6->ai_addr = nullptr;
+    ipv4->ai_addrlen = 0;
+    ipv6->ai_next = ipv4;
+    *results = ipv6;
+    return 0;
 }
 
 ssize_t fail_sendto(int, const void *, size_t, int, const sockaddr *, socklen_t) {
@@ -1938,6 +2109,72 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenPeerResolutionFails) {
     EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
 }
 
+TEST(QuicHttp09RuntimeTest, ClientFailsWhenResolutionSucceedsWithoutAnyAddrinfoResults) {
+    const ScopedRuntimeAddressFamilyReset address_family_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .socket_fn = &record_socket_family_then_fail,
+            .getaddrinfo_fn = &missing_results_getaddrinfo,
+        },
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "localhost",
+        .port = 443,
+        .server_name = "localhost",
+    };
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(g_last_getaddrinfo_family, AF_UNSPEC);
+    EXPECT_EQ(g_last_socket_family, AF_UNSPEC);
+}
+
+TEST(QuicHttp09RuntimeTest, ServerResolutionPassesNullNodeForWildcardHost) {
+    const ScopedRuntimeAddressFamilyReset address_family_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .socket_fn = &record_socket_family_then_fail,
+            .getaddrinfo_fn = &wildcard_ipv4_getaddrinfo,
+            .freeaddrinfo_fn = &counting_freeaddrinfo,
+        },
+    };
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "",
+        .port = 443,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+    EXPECT_EQ(g_last_getaddrinfo_family, AF_UNSPEC);
+    EXPECT_EQ(g_last_socket_family, AF_INET);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientPrefersIpv4AddrinfoWhenHostnameIsNonNumeric) {
+    const ScopedRuntimeAddressFamilyReset address_family_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .socket_fn = &record_socket_family_then_fail,
+            .getaddrinfo_fn = &prefer_ipv4_mixed_getaddrinfo,
+            .freeaddrinfo_fn = &counting_freeaddrinfo,
+        },
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "localhost",
+        .port = 443,
+        .server_name = "localhost",
+    };
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(g_last_getaddrinfo_family, AF_UNSPEC);
+    EXPECT_EQ(g_last_socket_family, AF_INET);
+}
+
 TEST(QuicHttp09RuntimeTest, ClientConnectionUsesIpv6ResolutionAndSocketFamilyForIpv6Remote) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
     const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
@@ -1964,6 +2201,99 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionUsesIpv6ResolutionAndSocketFamilyFor
     EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, requests, 1), 1);
     EXPECT_EQ(g_last_getaddrinfo_family, AF_INET6);
     EXPECT_EQ(g_last_socket_family, AF_INET6);
+    EXPECT_EQ(g_freeaddrinfo_calls, 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFallsBackToEarlierValidAddrinfoWhenPreferredResultIsInvalid) {
+    const ScopedRuntimeAddressFamilyReset address_family_reset;
+    const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .socket_fn = &record_socket_family_then_fail,
+            .getaddrinfo_fn = &fallback_to_earlier_valid_result_getaddrinfo,
+            .freeaddrinfo_fn = &counting_freeaddrinfo,
+        },
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "localhost",
+        .port = 443,
+        .server_name = "localhost",
+    };
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(g_last_socket_family, AF_INET6);
+    EXPECT_EQ(g_freeaddrinfo_calls, 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFailsWhenAllResolvedAddrinfoEntriesAreInvalid) {
+    const ScopedRuntimeAddressFamilyReset address_family_reset;
+    const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .socket_fn = &record_socket_family_then_fail,
+            .getaddrinfo_fn = &no_valid_result_getaddrinfo,
+            .freeaddrinfo_fn = &counting_freeaddrinfo,
+        },
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "localhost",
+        .port = 443,
+        .server_name = "localhost",
+    };
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(g_last_getaddrinfo_family, AF_UNSPEC);
+    EXPECT_EQ(g_last_socket_family, AF_UNSPEC);
+    EXPECT_EQ(g_freeaddrinfo_calls, 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFailsWhenAddrinfoFamilyIsUnsupported) {
+    const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .getaddrinfo_fn = &unsupported_family_getaddrinfo,
+            .freeaddrinfo_fn = &counting_freeaddrinfo,
+        },
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "localhost",
+        .port = 443,
+        .server_name = "localhost",
+    };
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(g_freeaddrinfo_calls, 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientUsesRealIpv6SocketSetupBeforeInitialSend) {
+    const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .sendto_fn = &fail_sendto,
+            .getaddrinfo_fn = &ipv6_only_getaddrinfo,
+            .freeaddrinfo_fn = &counting_freeaddrinfo,
+        },
+    };
+
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "",
+        .server_name = "",
+    };
+    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+        {.url = "https://[::1]:9443/a.txt",
+         .authority = "[::1]:9443",
+         .request_target = "/a.txt",
+         .relative_output_path = "a.txt"},
+    };
+
+    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, requests, 1), 1);
     EXPECT_EQ(g_freeaddrinfo_calls, 1);
 }
 
@@ -2982,6 +3312,13 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveEndpointUntilBlockedFailureCa
     EXPECT_TRUE(initial_local_error.terminal_failure);
     EXPECT_FALSE(initial_local_error.terminal_success);
 
+    const auto initial_local_error_handled =
+        coquic::quic::test::drive_endpoint_until_blocked_case_for_tests(
+            coquic::quic::test::DriveEndpointUntilBlockedCaseForTests::initial_local_error_handled);
+    EXPECT_TRUE(initial_local_error_handled.returned);
+    EXPECT_FALSE(initial_local_error_handled.terminal_failure);
+    EXPECT_FALSE(initial_local_error_handled.terminal_success);
+
     const auto endpoint_failure = coquic::quic::test::drive_endpoint_until_blocked_case_for_tests(
         coquic::quic::test::DriveEndpointUntilBlockedCaseForTests::endpoint_failure);
     EXPECT_FALSE(endpoint_failure.returned);
@@ -3117,6 +3454,21 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionLoopCases) {
     EXPECT_EQ(wait_input_missing_failure.exit_code, 1);
     EXPECT_FALSE(wait_input_missing_failure.terminal_success);
     EXPECT_FALSE(wait_input_missing_failure.terminal_failure);
+
+    const auto peer_input_then_outer_pump_terminal_success =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::
+                peer_input_then_outer_pump_terminal_success);
+    EXPECT_EQ(peer_input_then_outer_pump_terminal_success.exit_code, 0);
+    EXPECT_TRUE(peer_input_then_outer_pump_terminal_success.terminal_success);
+    EXPECT_GE(peer_input_then_outer_pump_terminal_success.current_time_calls, 4u);
+
+    const auto wait_input_then_terminal_success_exits_after_drain_window =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::
+                wait_input_then_terminal_success_exits_after_drain_window);
+    EXPECT_EQ(wait_input_then_terminal_success_exits_after_drain_window.exit_code, 0);
+    EXPECT_TRUE(wait_input_then_terminal_success_exits_after_drain_window.terminal_success);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCases) {
@@ -3128,6 +3480,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_TRUE(coquic::quic::test::existing_server_session_failure_cleans_up_for_tests());
     EXPECT_TRUE(coquic::quic::test::existing_server_session_missing_input_fails_for_tests());
     EXPECT_TRUE(coquic::quic::test::expired_server_timer_failure_cleans_up_for_tests());
+    EXPECT_TRUE(coquic::quic::test::expired_server_timer_success_preserves_session_for_tests());
     EXPECT_TRUE(coquic::quic::test::pending_server_work_failure_cleans_up_for_tests());
     EXPECT_TRUE(
         coquic::quic::test::version_negotiation_without_source_connection_id_fails_for_tests());

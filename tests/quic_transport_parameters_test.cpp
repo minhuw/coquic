@@ -239,6 +239,20 @@ TEST(QuicTransportParametersTest, RejectsMaxUdpPayloadSizeAboveVarintLimitDuring
     EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
 }
 
+TEST(QuicTransportParametersTest, RejectsMaxIdleTimeoutAboveVarintLimitDuringSerialization) {
+    const TransportParameters parameters{
+        .max_idle_timeout = (std::uint64_t{1} << 62),
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_source_connection_id = ConnectionId{std::byte{0x01}},
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicTransportParametersTest,
      RejectsActiveConnectionIdLimitAboveVarintLimitDuringSerialization) {
     const TransportParameters parameters{
@@ -366,6 +380,18 @@ TEST(QuicTransportParametersTest, RejectsTruncatedParameterValue) {
 TEST(QuicTransportParametersTest, RejectsInvalidMaxUdpPayloadSizeEncoding) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
         0x03,
+        0x02,
+        0x01,
+        0x00,
+    }));
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsInvalidMaxIdleTimeoutEncoding) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x01,
         0x02,
         0x01,
         0x00,

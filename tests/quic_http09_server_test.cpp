@@ -29,6 +29,16 @@ struct QuicHttp09ServerEndpointTestPeer {
         response.file = std::ifstream(path, std::ios::binary);
         response.file.setstate(std::ios::badbit);
     }
+
+    static void mark_closed_stream(QuicHttp09ServerEndpoint &endpoint, std::uint64_t stream_id) {
+        endpoint.closed_streams_.insert(stream_id);
+    }
+
+    static void create_pending_response(QuicHttp09ServerEndpoint &endpoint,
+                                        std::uint64_t stream_id) {
+        endpoint.pending_responses_.insert_or_assign(stream_id,
+                                                     QuicHttp09ServerEndpoint::PendingResponse{});
+    }
 };
 
 } // namespace coquic::quic::test
@@ -142,6 +152,54 @@ TEST(QuicHttp09ServerTest, AcceptsFinOnlyChunkAfterResponseFinIsQueued) {
     EXPECT_FALSE(endpoint.has_failed());
     EXPECT_FALSE(duplicate_update.terminal_failure);
     EXPECT_TRUE(duplicate_update.core_inputs.empty());
+}
+
+TEST(QuicHttp09ServerTest, RejectsAdditionalDataAfterClosedStreamWasFullyHandled) {
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = std::filesystem::temp_directory_path()});
+    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::mark_closed_stream(endpoint, 0);
+
+    const auto update = endpoint.on_core_result(single_receive_result(0, "extra", false),
+                                                coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(endpoint.has_failed());
+    EXPECT_TRUE(update.terminal_failure);
+}
+
+TEST(QuicHttp09ServerTest, RejectsNonFinChunkAfterClosedStreamWasFullyHandled) {
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = std::filesystem::temp_directory_path()});
+    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::mark_closed_stream(endpoint, 0);
+
+    const auto update = endpoint.on_core_result(single_receive_result(0, "", false),
+                                                coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(endpoint.has_failed());
+    EXPECT_TRUE(update.terminal_failure);
+}
+
+TEST(QuicHttp09ServerTest, RejectsAdditionalDataWhileResponseIsStillPending) {
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = std::filesystem::temp_directory_path()});
+    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::create_pending_response(endpoint, 0);
+
+    const auto update = endpoint.on_core_result(single_receive_result(0, "extra", false),
+                                                coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(endpoint.has_failed());
+    EXPECT_TRUE(update.terminal_failure);
+}
+
+TEST(QuicHttp09ServerTest, RejectsNonFinChunkWhileResponseIsStillPending) {
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = std::filesystem::temp_directory_path()});
+    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::create_pending_response(endpoint, 0);
+
+    const auto update = endpoint.on_core_result(single_receive_result(0, "", false),
+                                                coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(endpoint.has_failed());
+    EXPECT_TRUE(update.terminal_failure);
 }
 
 TEST(QuicHttp09ServerTest, RejectsPathTraversalRequest) {

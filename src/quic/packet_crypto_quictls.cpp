@@ -459,7 +459,8 @@ CodecResult<std::size_t> seal_payload_into(CipherSuite cipher_suite, std::span<c
     const auto parameters = cipher_suite_parameters(cipher_suite);
     if (!parameters.has_value())
         return CodecResult<std::size_t>::failure(parameters.error().code, 0);
-    if (key.size() != parameters.value().key_length || nonce.size() != parameters.value().iv_length)
+    if ((key.size() != parameters.value().key_length) |
+        (nonce.size() != parameters.value().iv_length))
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
 

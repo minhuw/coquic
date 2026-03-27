@@ -110,12 +110,22 @@ bool has_ack_eliciting_frame(std::span<const Frame> frames) {
 bool has_in_flight_ack_eliciting_packet(const PacketSpaceState &packet_space) {
     for (const auto &[packet_number, packet] : packet_space.sent_packets) {
         static_cast<void>(packet_number);
-        if (packet.ack_eliciting && packet.in_flight) {
+        if (packet.ack_eliciting & packet.in_flight) {
             return true;
         }
     }
 
     return false;
+}
+
+bool is_discardable_short_header_packet_error(CodecErrorCode code) {
+    static constexpr std::array kDiscardableErrors = {
+        CodecErrorCode::invalid_packet_protection_state,
+        CodecErrorCode::packet_decryption_failed,
+        CodecErrorCode::header_protection_failed,
+        CodecErrorCode::header_protection_sample_too_short,
+    };
+    return std::ranges::find(kDiscardableErrors, code) != kDiscardableErrors.end();
 }
 
 std::optional<QuicCoreTimePoint>
@@ -290,14 +300,14 @@ bool stream_fin_sendable(const StreamState &stream) {
 }
 
 bool stream_receive_terminal(const StreamState &stream) {
-    return !stream.id_info.local_can_receive || stream.peer_fin_delivered ||
+    return !stream.id_info.local_can_receive | stream.peer_fin_delivered |
            stream.peer_reset_received;
 }
 
 bool stream_send_terminal(const StreamState &stream) {
-    return !stream.id_info.local_can_send ||
-           stream.send_fin_state == StreamSendFinState::acknowledged ||
-           stream.reset_state == StreamControlFrameState::acknowledged;
+    return !stream.id_info.local_can_send |
+           (stream.send_fin_state == StreamSendFinState::acknowledged) |
+           (stream.reset_state == StreamControlFrameState::acknowledged);
 }
 
 std::vector<std::uint64_t>
@@ -601,30 +611,43 @@ std::vector<MaxStreamsFrame> LocalStreamLimitState::take_max_streams_frames() {
     return frames;
 }
 
+StreamControlFrameState *max_streams_state_for(LocalStreamLimitState &state,
+                                               StreamLimitType stream_type) {
+    return stream_type == StreamLimitType::bidirectional ? &state.max_streams_bidi_state
+                                                         : &state.max_streams_uni_state;
+}
+
+std::optional<MaxStreamsFrame> *pending_max_streams_frame_for(LocalStreamLimitState &state,
+                                                              StreamLimitType stream_type) {
+    return stream_type == StreamLimitType::bidirectional ? &state.pending_max_streams_bidi_frame
+                                                         : &state.pending_max_streams_uni_frame;
+}
+
 void LocalStreamLimitState::acknowledge_max_streams_frame(const MaxStreamsFrame &frame) {
-    if (frame.stream_type == StreamLimitType::bidirectional &&
-        max_streams_frame_matches(pending_max_streams_bidi_frame, frame)) {
-        max_streams_bidi_state = StreamControlFrameState::acknowledged;
+    auto *state = max_streams_state_for(*this, frame.stream_type);
+    if (*state == StreamControlFrameState::none) {
         return;
     }
-    if (frame.stream_type == StreamLimitType::unidirectional &&
-        max_streams_frame_matches(pending_max_streams_uni_frame, frame)) {
-        max_streams_uni_state = StreamControlFrameState::acknowledged;
+    const auto *pending_frame = pending_max_streams_frame_for(*this, frame.stream_type);
+    if (!max_streams_frame_matches(*pending_frame, frame)) {
+        return;
     }
+
+    *state = StreamControlFrameState::acknowledged;
 }
 
 void LocalStreamLimitState::mark_max_streams_frame_lost(const MaxStreamsFrame &frame) {
-    if (frame.stream_type == StreamLimitType::bidirectional &&
-        max_streams_bidi_state != StreamControlFrameState::acknowledged &&
-        max_streams_frame_matches(pending_max_streams_bidi_frame, frame)) {
-        max_streams_bidi_state = StreamControlFrameState::pending;
+    auto *state = max_streams_state_for(*this, frame.stream_type);
+    if (*state == StreamControlFrameState::none ||
+        *state == StreamControlFrameState::acknowledged) {
         return;
     }
-    if (frame.stream_type == StreamLimitType::unidirectional &&
-        max_streams_uni_state != StreamControlFrameState::acknowledged &&
-        max_streams_frame_matches(pending_max_streams_uni_frame, frame)) {
-        max_streams_uni_state = StreamControlFrameState::pending;
+    const auto *pending_frame = pending_max_streams_frame_for(*this, frame.stream_type);
+    if (!max_streams_frame_matches(*pending_frame, frame)) {
+        return;
     }
+
+    *state = StreamControlFrameState::pending;
 }
 
 QuicConnection::QuicConnection(QuicCoreConfig config)
@@ -774,11 +797,8 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                 return true;
             }
             const bool should_discard_short_header_packet =
-                short_header_packet &&
-                (packets.error().code == CodecErrorCode::invalid_packet_protection_state ||
-                 packets.error().code == CodecErrorCode::packet_decryption_failed ||
-                 packets.error().code == CodecErrorCode::header_protection_failed ||
-                 packets.error().code == CodecErrorCode::header_protection_sample_too_short);
+                short_header_packet &
+                is_discardable_short_header_packet_error(packets.error().code);
             if (should_discard_short_header_packet) {
                 return true;
             }
@@ -1102,21 +1122,21 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
 
     const auto client_handshake_keepalive_reference_time =
         [this]() -> std::optional<QuicCoreTimePoint> {
-        const bool eligible = config_.role == EndpointRole::client &&
-                              status_ == HandshakeStatus::in_progress && !handshake_confirmed_ &&
-                              last_peer_activity_time_.has_value() &&
-                              !has_in_flight_ack_eliciting_packet(initial_space_) &&
-                              !has_in_flight_ack_eliciting_packet(handshake_space_) &&
+        const bool eligible = (config_.role == EndpointRole::client) &
+                              (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
+                              last_peer_activity_time_.has_value() &
+                              !has_in_flight_ack_eliciting_packet(initial_space_) &
+                              !has_in_flight_ack_eliciting_packet(handshake_space_) &
                               !has_in_flight_ack_eliciting_packet(application_space_);
         if (!eligible) {
             return std::nullopt;
         }
 
         auto reference_time = last_peer_activity_time_;
-        if (last_client_handshake_keepalive_probe_time_.has_value() &&
-            (!reference_time.has_value() ||
-             *last_client_handshake_keepalive_probe_time_ > *reference_time)) {
-            reference_time = last_client_handshake_keepalive_probe_time_;
+        const auto probe_time =
+            last_client_handshake_keepalive_probe_time_.value_or(QuicCoreTimePoint::min());
+        if (probe_time > *reference_time) {
+            reference_time = probe_time;
         }
 
         return reference_time;
@@ -1132,7 +1152,7 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
     }
 
     return compute_pto_deadline(shared_rtt_state, std::chrono::milliseconds(0),
-                                client_handshake_keepalive_reference_time.value(),
+                                *client_handshake_keepalive_reference_time,
                                 std::min(pto_count_, 2u));
 }
 
@@ -1198,48 +1218,44 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
                                                : TransportParameters{}.max_ack_delay);
     const auto allow_application_pto = config_.role == EndpointRole::server || handshake_confirmed_;
     const auto &shared_rtt_state = shared_recovery_rtt_state();
-    const auto effective_pto_count = [&](const PacketSpaceState &packet_space) {
+    const auto effective_pto_count = [&](const PacketSpaceState & /*packet_space*/) {
         if (config_.role != EndpointRole::client || handshake_confirmed_) {
-            return pto_count_;
-        }
-        if (&packet_space != &initial_space_ && &packet_space != &handshake_space_) {
             return pto_count_;
         }
         return std::min(pto_count_, 2u);
     };
     const auto client_handshake_keepalive_reference_time =
         [this]() -> std::optional<QuicCoreTimePoint> {
-        const bool eligible = config_.role == EndpointRole::client &&
-                              status_ == HandshakeStatus::in_progress && !handshake_confirmed_ &&
-                              last_peer_activity_time_.has_value() &&
-                              !has_in_flight_ack_eliciting_packet(initial_space_) &&
-                              !has_in_flight_ack_eliciting_packet(handshake_space_) &&
+        const bool eligible = (config_.role == EndpointRole::client) &
+                              (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
+                              last_peer_activity_time_.has_value() &
+                              !has_in_flight_ack_eliciting_packet(initial_space_) &
+                              !has_in_flight_ack_eliciting_packet(handshake_space_) &
                               !has_in_flight_ack_eliciting_packet(application_space_);
         if (!eligible) {
             return std::nullopt;
         }
 
         auto reference_time = last_peer_activity_time_;
-        if (last_client_handshake_keepalive_probe_time_.has_value() &&
-            (!reference_time.has_value() ||
-             *last_client_handshake_keepalive_probe_time_ > *reference_time)) {
-            reference_time = last_client_handshake_keepalive_probe_time_;
+        const auto probe_time =
+            last_client_handshake_keepalive_probe_time_.value_or(QuicCoreTimePoint::min());
+        if (probe_time > *reference_time) {
+            reference_time = probe_time;
         }
 
         return reference_time;
     }();
     const bool client_handshake_keepalive_eligible =
-        client_handshake_keepalive_reference_time.has_value();
+        client_handshake_keepalive_reference_time.has_value() && !initial_packet_space_discarded_;
     PacketSpaceState *client_handshake_keepalive_space =
-        client_handshake_keepalive_eligible && !initial_packet_space_discarded_ ? &initial_space_
-                                                                                : nullptr;
-    const auto client_handshake_keepalive_deadline =
-        client_handshake_keepalive_space != nullptr &&
-                client_handshake_keepalive_reference_time.has_value()
-            ? std::optional<QuicCoreTimePoint>(compute_pto_deadline(
-                  shared_rtt_state, std::chrono::milliseconds(0),
-                  client_handshake_keepalive_reference_time.value(), std::min(pto_count_, 2u)))
-            : std::nullopt;
+        client_handshake_keepalive_eligible ? &initial_space_ : nullptr;
+    auto client_handshake_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
+    if (client_handshake_keepalive_space != nullptr &&
+        client_handshake_keepalive_reference_time.has_value()) {
+        client_handshake_keepalive_deadline = compute_pto_deadline(
+            shared_rtt_state, std::chrono::milliseconds(0),
+            *client_handshake_keepalive_reference_time, std::min(pto_count_, 2u));
+    }
     const bool client_handshake_keepalive_due = client_handshake_keepalive_deadline.has_value() &&
                                                 now >= *client_handshake_keepalive_deadline;
     const auto consider_packet_space = [&](PacketSpaceState &packet_space,
@@ -1393,12 +1409,13 @@ QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
                           StreamControlFrameState::acknowledged
                     : local_stream_limit_state_.max_streams_uni_state ==
                           StreamControlFrameState::acknowledged;
-            const bool frame_mismatch =
+            const auto &pending_frame =
                 frame.stream_type == StreamLimitType::bidirectional
-                    ? !max_streams_frame_matches(
-                          local_stream_limit_state_.pending_max_streams_bidi_frame, frame)
-                    : !max_streams_frame_matches(
-                          local_stream_limit_state_.pending_max_streams_uni_frame, frame);
+                    ? *local_stream_limit_state_.pending_max_streams_bidi_frame
+                    : *local_stream_limit_state_.pending_max_streams_uni_frame;
+            const bool frame_mismatch =
+                std::tie(pending_frame.stream_type, pending_frame.maximum_streams) !=
+                std::tie(frame.stream_type, frame.maximum_streams);
             return static_cast<bool>(frame_acknowledged | frame_mismatch);
         });
         std::erase_if(probe.stream_data_blocked_frames, [&](const StreamDataBlockedFrame &frame) {
@@ -1777,9 +1794,9 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                     initial_space_.received_packets.record_received(protected_packet.packet_number,
                                                                     ack_eliciting, now);
                     const bool suppress_keepalive_peer_activity =
-                        last_client_handshake_keepalive_probe_time_.has_value() &&
-                        config_.role == EndpointRole::client &&
-                        status_ == HandshakeStatus::in_progress && !handshake_confirmed_ &&
+                        last_client_handshake_keepalive_probe_time_.has_value() &
+                        (config_.role == EndpointRole::client) &
+                        (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
                         !ack_eliciting;
                     if (!suppress_keepalive_peer_activity) {
                         last_peer_activity_time_ = now;
@@ -1811,9 +1828,9 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                     handshake_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now);
                     const bool suppress_keepalive_peer_activity =
-                        last_client_handshake_keepalive_probe_time_.has_value() &&
-                        config_.role == EndpointRole::client &&
-                        status_ == HandshakeStatus::in_progress && !handshake_confirmed_ &&
+                        last_client_handshake_keepalive_probe_time_.has_value() &
+                        (config_.role == EndpointRole::client) &
+                        (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
                         !ack_eliciting;
                     if (!suppress_keepalive_peer_activity) {
                         last_peer_activity_time_ = now;
@@ -1961,12 +1978,13 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
                                                 !has_pending_application_send());
     }
     if (!ack_result.acked_packets.empty() && !suppress_pto_reset) {
+        const bool keepalive_probe_packet_space =
+            (&packet_space == &initial_space_) | (&packet_space == &handshake_space_);
         const bool client_handshake_keepalive_ack_only =
-            config_.role == EndpointRole::client && status_ == HandshakeStatus::in_progress &&
-            !handshake_confirmed_ &&
-            (&packet_space == &initial_space_ || &packet_space == &handshake_space_) &&
+            (config_.role == EndpointRole::client) & (status_ == HandshakeStatus::in_progress) &
+            !handshake_confirmed_ & keepalive_probe_packet_space &
             std::ranges::all_of(ack_result.acked_packets, [&](const SentPacketRecord &packet) {
-                return packet.has_ping && retransmittable_probe_frame_count(packet) == 0;
+                return packet.has_ping & (retransmittable_probe_frame_count(packet) == 0);
             });
         if (!client_handshake_keepalive_ack_only) {
             pto_count_ = 0;
@@ -2906,21 +2924,16 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         (initial_probe_pending | handshake_probe_pending | application_probe_pending);
     const auto preserve_pto_probe_packets =
         pto_probe_burst_active && remaining_pto_probe_datagrams_ > 1;
+    const bool track_client_handshake_keepalive_probes = (config_.role == EndpointRole::client) &
+                                                         (status_ == HandshakeStatus::in_progress) &
+                                                         !handshake_confirmed_;
     const auto clear_probe_packet_after_send =
         [&](std::optional<SentPacketRecord> &pending_probe_packet) {
             if (pending_probe_packet.has_value() && !preserve_pto_probe_packets) {
                 pending_probe_packet = std::nullopt;
             }
         };
-    const auto note_client_handshake_keepalive_probe = [&](const PacketSpaceState &packet_space,
-                                                           const SentPacketRecord &sent_packet) {
-        if (config_.role != EndpointRole::client || status_ != HandshakeStatus::in_progress ||
-            handshake_confirmed_) {
-            return;
-        }
-        if (&packet_space != &initial_space_ && &packet_space != &handshake_space_) {
-            return;
-        }
+    const auto note_client_handshake_keepalive_probe = [&](const SentPacketRecord &sent_packet) {
         if (!sent_packet.has_ping || retransmittable_probe_frame_count(sent_packet) != 0) {
             return;
         }
@@ -2982,7 +2995,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             sent_packet.has_ping = initial_space_.pending_probe_packet->has_ping;
         }
         track_sent_packet(initial_space_, sent_packet);
-        note_client_handshake_keepalive_probe(initial_space_, sent_packet);
+        if (track_client_handshake_keepalive_probes) {
+            note_client_handshake_keepalive_probe(sent_packet);
+        }
         if (initial_space_.received_packets.has_ack_to_send()) {
             initial_space_.received_packets.on_ack_sent();
             initial_space_.pending_ack_deadline = std::nullopt;
@@ -3050,7 +3065,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             sent_packet.has_ping = handshake_space_.pending_probe_packet->has_ping;
         }
         track_sent_packet(handshake_space_, sent_packet);
-        note_client_handshake_keepalive_probe(handshake_space_, sent_packet);
+        if (track_client_handshake_keepalive_probes) {
+            note_client_handshake_keepalive_probe(sent_packet);
+        }
         if (handshake_space_.received_packets.has_ack_to_send()) {
             handshake_space_.received_packets.on_ack_sent();
             handshake_space_.pending_ack_deadline = std::nullopt;

@@ -13,6 +13,8 @@
 - Enter the reproducible development environment with `nix develop`.
 - Build the project with `zig build`.
 - Run the main test suite with `zig build test`.
+- For daily interop validation, skip the long-running measurement cases
+  `goodput` and `crosstraffic`; reserve them for full verification runs and CI.
 - Generate coverage with `zig build coverage`.
 - Run formatting and lint checks with:
   - `pre-commit run clang-format --all-files --show-diff-on-failure`

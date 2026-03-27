@@ -881,6 +881,68 @@ TEST(QuicCoreTest, PeerDataBlockedTriggersMaxDataRefresh) {
     EXPECT_TRUE(saw_max_data);
 }
 
+TEST(QuicCoreTest, ClosedPeerInitiatedBidirectionalStreamRefreshesMaxStreams) {
+    auto connection = make_connected_server_connection();
+    connection.config_.transport.initial_max_streams_bidi = 1;
+    connection.local_transport_parameters_.initial_max_streams_bidi = 1;
+    connection.local_stream_limit_state_.initialize(coquic::quic::PeerStreamOpenLimits{
+        .bidirectional = 1,
+        .unidirectional = connection.local_stream_limit_state_.advertised_max_streams_uni,
+    });
+
+    ASSERT_TRUE(coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::test::make_inbound_application_stream_frame("GET /one\r\n",
+                                                                               /*offset=*/0,
+                                                                               /*stream_id=*/0,
+                                                                               /*fin=*/true)}));
+
+    auto received = connection.take_received_stream_data();
+    ASSERT_TRUE(received.has_value());
+    const auto received_data = received.value_or(coquic::quic::QuicCoreReceiveStreamData{});
+    EXPECT_EQ(received_data.stream_id, 0u);
+    EXPECT_TRUE(received_data.fin);
+
+    ASSERT_TRUE(connection.queue_stream_send(0, bytes_from_ints({0x6f, 0x6b}), true).has_value());
+
+    const auto response_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(response_datagram.empty());
+    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+
+    const auto response_packet_number = connection.application_space_.sent_packets.begin()->first;
+    ASSERT_TRUE(connection
+                    .process_inbound_ack(connection.application_space_,
+                                         coquic::quic::AckFrame{
+                                             .largest_acknowledged = response_packet_number,
+                                             .first_ack_range = 0,
+                                         },
+                                         coquic::quic::test::test_time(2),
+                                         /*ack_delay_exponent=*/3,
+                                         /*max_ack_delay_ms=*/25,
+                                         /*suppress_pto_reset=*/false)
+                    .has_value());
+
+    const auto refresh_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+    ASSERT_FALSE(refresh_datagram.empty());
+
+    const auto packets = decode_sender_datagram(connection, refresh_datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
+    ASSERT_NE(application, nullptr);
+
+    bool saw_max_streams = false;
+    for (const auto &frame : application->frames) {
+        if (const auto *max_streams = std::get_if<coquic::quic::MaxStreamsFrame>(&frame)) {
+            saw_max_streams = true;
+            EXPECT_EQ(max_streams->stream_type, coquic::quic::StreamLimitType::bidirectional);
+            EXPECT_EQ(max_streams->maximum_streams, 2u);
+        }
+    }
+
+    EXPECT_TRUE(saw_max_streams);
+}
+
 TEST(QuicCoreTest, ApplicationSendCanCarryBlockedControlFrames) {
     auto connection = make_connected_client_connection();
     connection.connection_flow_control_.pending_data_blocked_frame =
@@ -5452,6 +5514,7 @@ TEST(QuicCoreTest, ConnectionHelperMethodsCoverAdditionalPendingSendAndLimitBran
     connection.maybe_refresh_connection_receive_credit(/*force=*/false);
     EXPECT_FALSE(connection.connection_flow_control_.pending_max_data_frame.has_value());
 
+    connection.local_stream_limit_state_.advertised_max_streams_uni = 0;
     connection.local_transport_parameters_.initial_max_streams_uni = 7;
     EXPECT_EQ(connection.peer_stream_open_limits().unidirectional, 7u);
     connection.local_transport_parameters_.initial_max_streams_uni = 0;
@@ -7589,6 +7652,10 @@ TEST(QuicCoreTest, ConnectionHelperMethodsCoverRemainingStreamOpenAndFlowControl
     ASSERT_FALSE(send_only_receive.has_value());
     EXPECT_EQ(send_only_receive.error().code, coquic::quic::CodecErrorCode::invalid_varint);
 
+    stream_open.local_stream_limit_state_.initialize(coquic::quic::PeerStreamOpenLimits{
+        .bidirectional = 1,
+        .unidirectional = stream_open.local_stream_limit_state_.advertised_max_streams_uni,
+    });
     stream_open.local_transport_parameters_.initial_max_streams_bidi = 1;
     const auto over_limit_receive = stream_open.get_or_open_receive_stream(/*stream_id=*/9);
     ASSERT_FALSE(over_limit_receive.has_value());

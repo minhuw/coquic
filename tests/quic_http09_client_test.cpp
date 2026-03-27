@@ -15,6 +15,7 @@
 namespace {
 
 using coquic::quic::QuicCoreEffect;
+using coquic::quic::QuicCoreLocalErrorCode;
 using coquic::quic::QuicCoreReceiveStreamData;
 using coquic::quic::QuicCoreResult;
 using coquic::quic::QuicCoreSendStreamData;
@@ -64,6 +65,15 @@ QuicCoreResult receive_result(std::uint64_t stream_id, std::string_view text, bo
     return result;
 }
 
+QuicCoreResult local_error_result(QuicCoreLocalErrorCode code, std::uint64_t stream_id) {
+    QuicCoreResult result;
+    result.local_error = coquic::quic::QuicCoreLocalError{
+        .code = code,
+        .stream_id = stream_id,
+    };
+    return result;
+}
+
 std::vector<QuicCoreSendStreamData>
 send_stream_inputs_from(const QuicHttp09EndpointUpdate &update) {
     std::vector<QuicCoreSendStreamData> out;
@@ -103,7 +113,7 @@ TEST(QuicHttp09ClientTest, PollBeforeHandshakeHasNoPendingWork) {
     EXPECT_TRUE(update.core_inputs.empty());
 }
 
-TEST(QuicHttp09ClientTest, OpensOneBidirectionalStreamPerRequestAfterHandshake) {
+TEST(QuicHttp09ClientTest, OpensNextBidirectionalStreamAfterHandshake) {
     const auto now = coquic::quic::test::test_time();
     QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
         .requests =
@@ -117,16 +127,24 @@ TEST(QuicHttp09ClientTest, OpensOneBidirectionalStreamPerRequestAfterHandshake) 
     const auto on_handshake = endpoint.on_core_result(handshake_ready_result(), now);
     EXPECT_TRUE(on_handshake.has_pending_work);
 
-    const auto update = endpoint.poll(now);
-    const auto sends = send_stream_inputs_from(update);
+    const auto first_update = endpoint.poll(now);
+    const auto first_sends = send_stream_inputs_from(first_update);
 
-    ASSERT_EQ(sends.size(), 2u);
-    EXPECT_EQ(sends[0].stream_id, 0u);
-    EXPECT_EQ(sends[0].bytes, coquic::quic::test::bytes_from_string("GET /alpha.txt\r\n"));
-    EXPECT_TRUE(sends[0].fin);
-    EXPECT_EQ(sends[1].stream_id, 4u);
-    EXPECT_EQ(sends[1].bytes, coquic::quic::test::bytes_from_string("GET /beta.txt\r\n"));
-    EXPECT_TRUE(sends[1].fin);
+    ASSERT_EQ(first_sends.size(), 1u);
+    EXPECT_EQ(first_sends[0].stream_id, 0u);
+    EXPECT_EQ(first_sends[0].bytes, coquic::quic::test::bytes_from_string("GET /alpha.txt\r\n"));
+    EXPECT_TRUE(first_sends[0].fin);
+
+    const auto first_accepted =
+        endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
+    EXPECT_TRUE(first_accepted.has_pending_work);
+
+    const auto second_update = endpoint.poll(coquic::quic::test::test_time(1));
+    const auto second_sends = send_stream_inputs_from(second_update);
+    ASSERT_EQ(second_sends.size(), 1u);
+    EXPECT_EQ(second_sends[0].stream_id, 4u);
+    EXPECT_EQ(second_sends[0].bytes, coquic::quic::test::bytes_from_string("GET /beta.txt\r\n"));
+    EXPECT_TRUE(second_sends[0].fin);
 }
 
 TEST(QuicHttp09ClientTest, DoesNotReissueRequestsAfterInitialPoll) {
@@ -155,11 +173,8 @@ TEST(QuicHttp09ClientTest, CompletesImmediatelyWhenNoRequestsAreConfigured) {
     });
 
     const auto on_handshake = endpoint.on_core_result(handshake_ready_result(), now);
-    EXPECT_TRUE(on_handshake.has_pending_work);
-
-    const auto update = endpoint.poll(now);
-    EXPECT_TRUE(update.terminal_success);
-    EXPECT_FALSE(update.terminal_failure);
+    EXPECT_TRUE(on_handshake.terminal_success);
+    EXPECT_FALSE(on_handshake.terminal_failure);
     EXPECT_TRUE(endpoint.is_complete());
     EXPECT_FALSE(endpoint.has_failed());
 }
@@ -224,21 +239,64 @@ TEST(QuicHttp09ClientTest, ReportsSuccessOnlyAfterAllStreamsFinishWithFin) {
 
     endpoint.on_core_result(handshake_ready_result(), now);
     endpoint.poll(now);
+    endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
+    endpoint.poll(coquic::quic::test::test_time(1));
+    endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(2));
 
     const auto first = endpoint.on_core_result(receive_result(0, "partial", false),
-                                               coquic::quic::test::test_time(1));
+                                               coquic::quic::test::test_time(3));
     EXPECT_FALSE(first.terminal_success);
     EXPECT_FALSE(first.terminal_failure);
 
     const auto second =
-        endpoint.on_core_result(receive_result(4, "done", true), coquic::quic::test::test_time(2));
+        endpoint.on_core_result(receive_result(4, "done", true), coquic::quic::test::test_time(4));
     EXPECT_FALSE(second.terminal_success);
     EXPECT_FALSE(second.terminal_failure);
 
     const auto third =
-        endpoint.on_core_result(receive_result(0, "", true), coquic::quic::test::test_time(3));
+        endpoint.on_core_result(receive_result(0, "", true), coquic::quic::test::test_time(5));
     EXPECT_TRUE(third.terminal_success);
     EXPECT_FALSE(third.terminal_failure);
+}
+
+TEST(QuicHttp09ClientTest, RetriesOpeningRequestAfterStreamLimitBackpressure) {
+    const auto now = coquic::quic::test::test_time();
+    coquic::quic::test::ScopedTempDir download_root;
+
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests =
+            {
+                request_for_target("/alpha.txt"),
+                request_for_target("/beta.txt"),
+            },
+        .download_root = download_root.path(),
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+    endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
+
+    const auto blocked_send = endpoint.poll(coquic::quic::test::test_time(2));
+    const auto blocked_sends = send_stream_inputs_from(blocked_send);
+    ASSERT_EQ(blocked_sends.size(), 1u);
+    EXPECT_EQ(blocked_sends[0].stream_id, 4u);
+
+    const auto blocked =
+        endpoint.on_core_result(local_error_result(QuicCoreLocalErrorCode::invalid_stream_id, 4),
+                                coquic::quic::test::test_time(3));
+    EXPECT_TRUE(blocked.handled_local_error);
+    EXPECT_FALSE(blocked.terminal_failure);
+    EXPECT_FALSE(blocked.has_pending_work);
+
+    const auto completed =
+        endpoint.on_core_result(receive_result(0, "done", true), coquic::quic::test::test_time(4));
+    EXPECT_FALSE(completed.terminal_failure);
+    EXPECT_TRUE(completed.has_pending_work);
+
+    const auto retried = endpoint.poll(coquic::quic::test::test_time(5));
+    const auto retried_sends = send_stream_inputs_from(retried);
+    ASSERT_EQ(retried_sends.size(), 1u);
+    EXPECT_EQ(retried_sends[0].stream_id, 4u);
 }
 
 TEST(QuicHttp09ClientTest, AppendsMultipleReceiveChunksToSameOutputFile) {

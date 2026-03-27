@@ -32,6 +32,7 @@ struct QuicHttp09EndpointUpdate {
     bool has_pending_work = false;
     bool terminal_success = false;
     bool terminal_failure = false;
+    bool handled_local_error = false;
 };
 
 CodecResult<std::vector<QuicHttp09Request>>

@@ -175,7 +175,7 @@ bool QuicHttp09ServerEndpoint::process_receive_stream_data(
     }
     if (closed_streams_.contains(received.stream_id)) {
         pending_requests_.erase(received.stream_id);
-        return false;
+        return received.bytes.empty() && received.fin;
     }
     if (pending_responses_.contains(received.stream_id)) {
         return received.bytes.empty() && received.fin;

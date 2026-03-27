@@ -119,6 +119,31 @@ TEST(QuicHttp09ServerTest, ServesFileBodyOnRequestedBidirectionalStream) {
     EXPECT_TRUE(saw_fin);
 }
 
+TEST(QuicHttp09ServerTest, AcceptsFinOnlyChunkAfterResponseFinIsQueued) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello");
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    const auto first_update = endpoint.on_core_result(
+        single_receive_result(0, "GET /hello.txt\r\n", false), coquic::quic::test::test_time(2));
+    ASSERT_FALSE(endpoint.has_failed());
+    ASSERT_FALSE(first_update.terminal_failure);
+
+    const auto sends = send_stream_inputs_from(first_update);
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends.front().stream_id, 0u);
+    EXPECT_TRUE(sends.front().fin);
+
+    const auto duplicate_update = endpoint.on_core_result(single_receive_result(0, "", true),
+                                                          coquic::quic::test::test_time(3));
+
+    EXPECT_FALSE(endpoint.has_failed());
+    EXPECT_FALSE(duplicate_update.terminal_failure);
+    EXPECT_TRUE(duplicate_update.core_inputs.empty());
+}
+
 TEST(QuicHttp09ServerTest, RejectsPathTraversalRequest) {
     coquic::quic::test::ScopedTempDir document_root;
     document_root.write_file("hello.txt", "hello");

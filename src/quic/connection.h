@@ -74,6 +74,21 @@ struct ConnectionFlowControlState {
     void mark_data_blocked_frame_lost(const DataBlockedFrame &frame);
 };
 
+struct LocalStreamLimitState {
+    std::uint64_t advertised_max_streams_bidi = 0;
+    std::uint64_t advertised_max_streams_uni = 0;
+    std::optional<MaxStreamsFrame> pending_max_streams_bidi_frame;
+    StreamControlFrameState max_streams_bidi_state = StreamControlFrameState::none;
+    std::optional<MaxStreamsFrame> pending_max_streams_uni_frame;
+    StreamControlFrameState max_streams_uni_state = StreamControlFrameState::none;
+
+    void initialize(PeerStreamOpenLimits limits);
+    void queue_max_streams(StreamLimitType stream_type, std::uint64_t maximum_streams);
+    std::vector<MaxStreamsFrame> take_max_streams_frames();
+    void acknowledge_max_streams_frame(const MaxStreamsFrame &frame);
+    void mark_max_streams_frame_lost(const MaxStreamsFrame &frame);
+};
+
 class QuicConnection {
   public:
     explicit QuicConnection(QuicCoreConfig config);
@@ -150,6 +165,7 @@ class QuicConnection {
     void maybe_queue_stream_blocked_frame(StreamState &stream);
     void maybe_refresh_connection_receive_credit(bool force);
     void maybe_refresh_stream_receive_credit(StreamState &stream, bool force);
+    void maybe_refresh_peer_stream_limit(StreamState &stream);
     ConnectionId outbound_destination_connection_id() const;
     ConnectionId client_initial_destination_connection_id() const;
     std::vector<std::byte> flush_outbound_datagram(QuicCoreTimePoint now);
@@ -171,6 +187,7 @@ class QuicConnection {
     std::map<std::uint64_t, StreamState> streams_;
     ConnectionFlowControlState connection_flow_control_;
     StreamOpenLimits stream_open_limits_;
+    LocalStreamLimitState local_stream_limit_state_;
     std::vector<QuicCoreReceiveStreamData> pending_stream_receive_effects_;
     std::vector<QuicCorePeerResetStream> pending_peer_reset_effects_;
     std::vector<QuicCorePeerStopSending> pending_peer_stop_effects_;

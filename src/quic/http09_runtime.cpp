@@ -871,13 +871,12 @@ bool drive_endpoint_until_blocked(const EndpointDriver &endpoint, QuicCore &core
             return false;
         }
         state.next_wakeup = current_result.next_wakeup;
-        if (current_result.local_error.has_value()) {
+        auto update = endpoint.on_core_result(current_result, now());
+        state.endpoint_has_pending_work = update.has_pending_work;
+        if (current_result.local_error.has_value() && !update.handled_local_error) {
             state.terminal_failure = true;
             return false;
         }
-
-        auto update = endpoint.on_core_result(current_result, now());
-        state.endpoint_has_pending_work = update.has_pending_work;
         if (update.terminal_failure) {
             state.terminal_failure = true;
             return false;

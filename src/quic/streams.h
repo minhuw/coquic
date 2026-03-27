@@ -159,6 +159,7 @@ struct StreamState {
     std::optional<StopSendingFrame> pending_stop_sending_frame;
     StreamControlFrameState stop_sending_state = StreamControlFrameState::none;
     bool peer_reset_received = false;
+    bool peer_stream_limit_released = false;
     std::uint64_t send_flow_control_limit = 0;
     std::uint64_t send_flow_control_committed = 0;
     std::uint64_t receive_flow_control_limit = 0;

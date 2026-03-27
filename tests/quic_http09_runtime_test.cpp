@@ -22,6 +22,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <span>
 #include <string>
 #include <string_view>
@@ -816,12 +817,6 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
         for (;;) {
             client.next_wakeup = result.next_wakeup;
             capture_connection_state();
-            if (result.local_error.has_value()) {
-                client.terminal_failure = true;
-                observed.client_failed = true;
-                return false;
-            }
-
             for (const auto &effect : result.effects) {
                 const auto *send = std::get_if<coquic::quic::QuicCoreSendDatagram>(&effect);
                 if (send == nullptr) {
@@ -838,6 +833,11 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
             }
 
             auto update = client.endpoint.on_core_result(result, now);
+            if (result.local_error.has_value() && !update.handled_local_error) {
+                client.terminal_failure = true;
+                observed.client_failed = true;
+                return false;
+            }
             if (update.terminal_failure) {
                 client.terminal_failure = true;
                 observed.client_failed = true;
@@ -880,12 +880,6 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
         for (;;) {
             server.next_wakeup = result.next_wakeup;
             capture_connection_state();
-            if (result.local_error.has_value()) {
-                server.terminal_failure = true;
-                observed.server_failed = true;
-                return false;
-            }
-
             for (const auto &effect : result.effects) {
                 const auto *send = std::get_if<coquic::quic::QuicCoreSendDatagram>(&effect);
                 if (send == nullptr) {
@@ -902,6 +896,11 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
             }
 
             auto update = server.endpoint.on_core_result(result, now);
+            if (result.local_error.has_value() && !update.handled_local_error) {
+                server.terminal_failure = true;
+                observed.server_failed = true;
+                return false;
+            }
             if (update.terminal_failure) {
                 server.terminal_failure = true;
                 observed.server_failed = true;
@@ -1124,10 +1123,6 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
             session.next_wakeup = result.next_wakeup;
             capture_transport_state();
             track_response_packet_state();
-            if (result.local_error.has_value()) {
-                return false;
-            }
-
             for (const auto &effect : result.effects) {
                 if (const auto *event = std::get_if<coquic::quic::QuicCoreStateEvent>(&effect)) {
                     if (event->change == coquic::quic::QuicCoreStateChange::handshake_ready) {
@@ -1160,6 +1155,9 @@ ObservingServerResult run_observing_http09_server(const coquic::quic::Http09Runt
             }
 
             auto update = session.endpoint.on_core_result(result, runtime_now());
+            if (result.local_error.has_value() && !update.handled_local_error) {
+                return false;
+            }
             if (update.terminal_failure) {
                 return false;
             }
@@ -1568,6 +1566,70 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferMediumFile) {
     EXPECT_FALSE(result.client_failed);
     EXPECT_FALSE(result.server_failed);
     EXPECT_EQ(read_file_bytes(download_root.path() / "medium.bin"), body);
+}
+
+TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferManyFilesAcrossRefreshedStreamLimits) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+
+    std::ostringstream requests_env;
+    std::vector<std::string> file_names;
+    file_names.reserve(24);
+    for (std::size_t index = 0; index < 24; ++index) {
+        const auto file_name = "file-" + std::to_string(index) + ".txt";
+        const auto body = "body-" + std::to_string(index);
+        document_root.write_file(file_name, body);
+        if (index != 0) {
+            requests_env << ' ';
+        }
+        requests_env << "https://localhost/" << file_name;
+        file_names.push_back(file_name);
+    }
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = 443,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .download_root = download_root.path(),
+        .requests_env = requests_env.str(),
+    };
+
+    const auto result = run_in_memory_http09_transfer({
+        .client_config = client,
+        .server_config = server,
+    });
+
+    EXPECT_TRUE(result.client_complete)
+        << "steps=" << result.steps << " hit_step_limit=" << result.hit_step_limit
+        << " client_failed=" << result.client_failed << " server_failed=" << result.server_failed
+        << " client_sent_datagrams=" << result.client_sent_datagrams
+        << " client_sent_bytes=" << result.client_sent_bytes
+        << " server_sent_datagrams=" << result.server_sent_datagrams
+        << " server_sent_bytes=" << result.server_sent_bytes
+        << " client_bytes_in_flight=" << result.client_bytes_in_flight
+        << " server_bytes_in_flight=" << result.server_bytes_in_flight
+        << " client_cwnd=" << result.client_congestion_window
+        << " server_cwnd=" << result.server_congestion_window
+        << " client_queued_bytes=" << result.client_queued_stream_bytes
+        << " server_queued_bytes=" << result.server_queued_stream_bytes
+        << " client_next_wakeup=" << result.client_has_next_wakeup
+        << " server_next_wakeup=" << result.server_has_next_wakeup;
+    EXPECT_FALSE(result.client_failed);
+    EXPECT_FALSE(result.server_failed);
+    for (const auto &file_name : file_names) {
+        EXPECT_EQ(read_file_bytes(download_root.path() / file_name),
+                  read_file_bytes(document_root.path() / file_name));
+    }
 }
 
 TEST(QuicHttp09RuntimeTest, ClientAndServerTransferLargeFileOverUdpSockets) {

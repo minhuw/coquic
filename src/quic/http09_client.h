@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -32,18 +33,30 @@ class QuicHttp09ClientEndpoint {
         bool complete = false;
     };
 
+    struct PendingOpenRequest {
+        std::size_t request_index = 0;
+        std::uint64_t stream_id = 0;
+    };
+
     QuicHttp09EndpointUpdate make_failure_update() const;
     QuicHttp09EndpointUpdate fail_endpoint();
     QuicHttp09EndpointUpdate drain_pending_inputs();
+    bool handle_local_error(const QuicCoreLocalError &error);
+    void activate_pending_request();
+    bool can_issue_next_request() const;
+    std::size_t active_request_count() const;
     bool process_receive_stream_data(const QuicCoreReceiveStreamData &received);
     bool all_streams_complete() const;
     void clear_state();
 
     QuicHttp09ClientConfig config_;
     bool handshake_ready_ = false;
-    bool requests_issued_ = false;
     bool complete_ = false;
     bool failed_ = false;
+    bool blocked_on_stream_limit_ = false;
+    std::size_t next_request_index_ = 0;
+    std::optional<std::size_t> max_concurrent_requests_;
+    std::optional<PendingOpenRequest> pending_open_request_;
     std::unordered_map<std::uint64_t, RequestState> request_streams_;
     std::deque<QuicCoreInput> pending_core_inputs_;
 };

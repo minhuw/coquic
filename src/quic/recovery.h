@@ -34,6 +34,7 @@ struct SentPacketRecord {
     std::vector<StopSendingFrame> stop_sending_frames;
     std::optional<MaxDataFrame> max_data_frame;
     std::vector<MaxStreamDataFrame> max_stream_data_frames;
+    std::vector<MaxStreamsFrame> max_streams_frames;
     std::optional<DataBlockedFrame> data_blocked_frame;
     std::vector<StreamDataBlockedFrame> stream_data_blocked_frames;
     std::vector<StreamFrameSendFragment> stream_fragments;

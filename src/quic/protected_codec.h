@@ -51,6 +51,15 @@ struct ProtectedHandshakePacket {
     std::vector<Frame> frames;
 };
 
+struct ProtectedZeroRttPacket {
+    std::uint32_t version = 1;
+    ConnectionId destination_connection_id;
+    ConnectionId source_connection_id;
+    std::uint8_t packet_number_length = 1;
+    std::uint64_t packet_number = 0;
+    std::vector<Frame> frames;
+};
+
 struct StreamFrameView {
     bool fin = false;
     std::uint64_t stream_id = 0;
@@ -74,6 +83,7 @@ struct SerializeProtectionContext {
     EndpointRole local_role;
     ConnectionId client_initial_destination_connection_id;
     std::optional<TrafficSecret> handshake_secret;
+    std::optional<TrafficSecret> zero_rtt_secret;
     std::optional<TrafficSecret> one_rtt_secret;
     bool one_rtt_key_phase = false;
 };
@@ -82,16 +92,18 @@ struct DeserializeProtectionContext {
     EndpointRole peer_role;
     ConnectionId client_initial_destination_connection_id;
     std::optional<TrafficSecret> handshake_secret;
+    std::optional<TrafficSecret> zero_rtt_secret;
     std::optional<TrafficSecret> one_rtt_secret;
     bool one_rtt_key_phase = false;
     std::optional<std::uint64_t> largest_authenticated_initial_packet_number;
     std::optional<std::uint64_t> largest_authenticated_handshake_packet_number;
+    std::optional<std::uint64_t> largest_authenticated_zero_rtt_packet_number;
     std::optional<std::uint64_t> largest_authenticated_application_packet_number;
     std::size_t one_rtt_destination_connection_id_length = 0;
 };
 
-using ProtectedPacket =
-    std::variant<ProtectedInitialPacket, ProtectedHandshakePacket, ProtectedOneRttPacket>;
+using ProtectedPacket = std::variant<ProtectedInitialPacket, ProtectedHandshakePacket,
+                                     ProtectedZeroRttPacket, ProtectedOneRttPacket>;
 
 CodecResult<std::vector<std::byte>>
 serialize_protected_datagram(std::span<const ProtectedPacket> packets,

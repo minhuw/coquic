@@ -19,6 +19,7 @@ namespace coquic::quic {
 enum class EncryptionLevel : std::uint8_t {
     initial,
     handshake,
+    zero_rtt,
     application,
 };
 

@@ -108,6 +108,8 @@ std::optional<EncryptionLevel> to_encryption_level_value(int level_value) {
     switch (level_value) {
     case ssl_encryption_initial:
         return EncryptionLevel::initial;
+    case ssl_encryption_early_data:
+        return EncryptionLevel::zero_rtt;
     case ssl_encryption_handshake:
         return EncryptionLevel::handshake;
     case ssl_encryption_application:
@@ -125,6 +127,8 @@ OSSL_ENCRYPTION_LEVEL to_ossl_encryption_level_value(std::uint8_t level_value) {
     switch (level_value) {
     case static_cast<std::uint8_t>(EncryptionLevel::initial):
         return ssl_encryption_initial;
+    case static_cast<std::uint8_t>(EncryptionLevel::zero_rtt):
+        return ssl_encryption_early_data;
     case static_cast<std::uint8_t>(EncryptionLevel::handshake):
         return ssl_encryption_handshake;
     case static_cast<std::uint8_t>(EncryptionLevel::application):
@@ -761,7 +765,7 @@ class TlsAdapter::Impl {
     TlsAdapterConfig config_;
     std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> ctx_;
     std::unique_ptr<SSL, decltype(&SSL_free)> ssl_;
-    std::array<std::vector<std::byte>, 3> pending_;
+    std::array<std::vector<std::byte>, 4> pending_;
     std::vector<AvailableTrafficSecret> available_secrets_;
     std::optional<std::vector<std::byte>> peer_transport_parameters_;
     std::optional<CodecError> sticky_error_;

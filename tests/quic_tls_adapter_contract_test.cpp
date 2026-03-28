@@ -182,8 +182,12 @@ TEST(QuicTlsAdapterContractTest, MapsOsslEncryptionLevelsToInternalLevels) {
               EncryptionLevel::handshake);
     EXPECT_EQ(TlsAdapterTestPeer::to_encryption_level(ssl_encryption_application),
               EncryptionLevel::application);
-    EXPECT_EQ(TlsAdapterTestPeer::to_encryption_level(ssl_encryption_early_data), std::nullopt);
     EXPECT_EQ(TlsAdapterTestPeer::to_encryption_level_value(0xff), std::nullopt);
+}
+
+TEST(QuicTlsAdapterContractTest, MapsEarlyDataToZeroRttEncryptionLevel) {
+    EXPECT_EQ(TlsAdapterTestPeer::to_encryption_level(ssl_encryption_early_data),
+              std::optional<EncryptionLevel>(EncryptionLevel::zero_rtt));
 }
 
 TEST(QuicTlsAdapterContractTest, MapsInternalEncryptionLevelsToOsslLevels) {

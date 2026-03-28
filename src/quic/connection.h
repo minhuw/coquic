@@ -183,6 +183,7 @@ class QuicConnection {
     bool started_ = false;
     PacketSpaceState initial_space_;
     PacketSpaceState handshake_space_;
+    PacketSpaceState zero_rtt_space_;
     PacketSpaceState application_space_;
     std::optional<TlsAdapter> tls_;
     TransportParameters local_transport_parameters_;

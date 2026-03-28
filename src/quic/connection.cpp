@@ -116,12 +116,16 @@ std::uint32_t read_u32_be(std::span<const std::byte> bytes) {
 
 PacketSpaceState &packet_space_for_level(EncryptionLevel level, PacketSpaceState &initial_space,
                                          PacketSpaceState &handshake_space,
+                                         PacketSpaceState &zero_rtt_space,
                                          PacketSpaceState &application_space) {
     if (level == EncryptionLevel::initial) {
         return initial_space;
     }
     if (level == EncryptionLevel::handshake) {
         return handshake_space;
+    }
+    if (level == EncryptionLevel::zero_rtt) {
+        return zero_rtt_space;
     }
 
     return application_space;
@@ -813,12 +817,15 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             .peer_role = opposite_role(config_.role),
             .client_initial_destination_connection_id = client_initial_destination_connection_id(),
             .handshake_secret = handshake_space_.read_secret,
+            .zero_rtt_secret = zero_rtt_space_.read_secret,
             .one_rtt_secret = application_secret,
             .one_rtt_key_phase = application_key_phase,
             .largest_authenticated_initial_packet_number =
                 initial_space_.largest_authenticated_packet_number,
             .largest_authenticated_handshake_packet_number =
                 handshake_space_.largest_authenticated_packet_number,
+            .largest_authenticated_zero_rtt_packet_number =
+                zero_rtt_space_.largest_authenticated_packet_number,
             .largest_authenticated_application_packet_number =
                 application_space_.largest_authenticated_packet_number,
             .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
@@ -884,10 +891,12 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
         }
 
         for (const auto &packet : packets.value()) {
-            const bool defer_one_rtt_packet =
-                allow_defer & std::holds_alternative<ProtectedOneRttPacket>(packet) &
+            const bool defer_protected_app_packet =
+                allow_defer &
+                (std::holds_alternative<ProtectedZeroRttPacket>(packet) |
+                 std::holds_alternative<ProtectedOneRttPacket>(packet)) &
                 (status_ != HandshakeStatus::connected);
-            if (defer_one_rtt_packet) {
+            if (defer_protected_app_packet) {
                 defer_packet(packet_bytes);
                 return true;
             }
@@ -1955,6 +1964,19 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                     }
                 }
                 return processed;
+            } else if constexpr (std::is_same_v<PacketType, ProtectedZeroRttPacket>) {
+                zero_rtt_space_.largest_authenticated_packet_number =
+                    protected_packet.packet_number;
+                const auto processed = process_inbound_application(protected_packet.frames, now);
+                if (!processed.has_value()) {
+                    std::cerr << "quic zero-rtt packet reject: status=" << static_cast<int>(status_)
+                              << " frame_count=" << protected_packet.frames.size() << '\n';
+                }
+                if (processed.has_value()) {
+                    processed_peer_packet_ = true;
+                    last_peer_activity_time_ = now;
+                }
+                return processed;
             } else {
                 application_space_.largest_authenticated_packet_number =
                     protected_packet.packet_number;
@@ -1982,8 +2004,8 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
 CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
                                                          std::span<const Frame> frames,
                                                          QuicCoreTimePoint now) {
-    auto &packet_space =
-        packet_space_for_level(level, initial_space_, handshake_space_, application_space_);
+    auto &packet_space = packet_space_for_level(level, initial_space_, handshake_space_,
+                                                zero_rtt_space_, application_space_);
 
     for (const auto &frame : frames) {
         if (is_padding_frame(frame)) {
@@ -2513,8 +2535,9 @@ void QuicConnection::install_available_secrets() {
 
     for (auto &available_secret : tls_->take_available_secrets()) {
         available_secret.secret.quic_version = current_version_;
-        auto &packet_space = packet_space_for_level(available_secret.level, initial_space_,
-                                                    handshake_space_, application_space_);
+        auto &packet_space =
+            packet_space_for_level(available_secret.level, initial_space_, handshake_space_,
+                                   zero_rtt_space_, application_space_);
         if (available_secret.sender == config_.role) {
             packet_space.write_secret = std::move(available_secret.secret);
         } else {
@@ -2530,6 +2553,7 @@ void QuicConnection::collect_pending_tls_bytes() {
 
     initial_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::initial));
     handshake_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::handshake));
+    zero_rtt_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::zero_rtt));
     application_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::application));
 }
 
@@ -2630,6 +2654,7 @@ bool QuicConnection::should_reset_client_handshake_peer_state(
 void QuicConnection::reset_client_handshake_peer_state_for_new_source_connection_id() {
     reset_packet_space_receive_state(initial_space_);
     reset_packet_space_receive_state(handshake_space_);
+    reset_packet_space_receive_state(zero_rtt_space_);
     deferred_protected_packets_.clear();
     peer_transport_parameters_.reset();
     peer_transport_parameters_validated_ = false;
@@ -3463,6 +3488,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                        .client_initial_destination_connection_id =
                                            client_initial_destination_connection_id(),
                                        .handshake_secret = handshake_space_.write_secret,
+                                       .zero_rtt_secret = zero_rtt_space_.write_secret,
                                        .one_rtt_secret = application_space_.write_secret,
                                        .one_rtt_key_phase = application_write_key_phase_,
                                    });
@@ -4070,6 +4096,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                                   .client_initial_destination_connection_id =
                                                       client_initial_destination_connection_id(),
                                                   .handshake_secret = handshake_space_.write_secret,
+                                                  .zero_rtt_secret = zero_rtt_space_.write_secret,
                                                   .one_rtt_secret = application_space_.write_secret,
                                                   .one_rtt_key_phase = application_write_key_phase_,
                                               });
@@ -4095,6 +4122,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                              .client_initial_destination_connection_id =
                                  client_initial_destination_connection_id(),
                              .handshake_secret = handshake_space_.write_secret,
+                             .zero_rtt_secret = zero_rtt_space_.write_secret,
                              .one_rtt_secret = application_space_.write_secret,
                              .one_rtt_key_phase = application_write_key_phase_,
                          });

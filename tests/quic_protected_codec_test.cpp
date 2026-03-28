@@ -740,6 +740,40 @@ TEST(QuicProtectedCodecTest, RoundTripsQuicV2HandshakePacket) {
     EXPECT_EQ(handshake->packet_number, 0x1234u);
 }
 
+TEST(QuicProtectedCodecTest, RoundTripsProtectedZeroRttPacket) {
+    const auto packet = coquic::quic::ProtectedZeroRttPacket{
+        .version = coquic::quic::kQuicVersion1,
+        .destination_connection_id = {std::byte{0x83}, std::byte{0x94}},
+        .source_connection_id = {std::byte{0xc1}, std::byte{0x01}},
+        .packet_number_length = 2,
+        .packet_number = 7,
+        .frames = {coquic::quic::PingFrame{}},
+    };
+    const auto secret = coquic::quic::TrafficSecret{
+        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        .secret = std::vector<std::byte>(32, std::byte{0x11}),
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{packet},
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = {std::byte{0x83}, std::byte{0x94}},
+            .zero_rtt_secret = secret,
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        coquic::quic::DeserializeProtectionContext{
+            .peer_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = {std::byte{0x83}, std::byte{0x94}},
+            .zero_rtt_secret = secret,
+        });
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_NE(std::get_if<coquic::quic::ProtectedZeroRttPacket>(&decoded.value().front()), nullptr);
+}
+
 TEST(QuicProtectedCodecTest, RoundTripsPaddedQuicV2InitialAndHandshakeDatagramWithCryptoFrames) {
     coquic::quic::ProtectedInitialPacket initial{
         .version = coquic::quic::kQuicVersion2,

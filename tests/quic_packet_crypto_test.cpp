@@ -393,53 +393,57 @@ TEST(QuicPacketCryptoTest, DerivesDifferentInitialKeysForQuicV2) {
 
 TEST(QuicPacketCryptoTest, ComputesAndValidatesRetryIntegrityTagForQuicV1) {
     const auto original_destination_connection_id = hex_bytes("8394c8f03e515708");
-    // RetryPacket serialization in this codebase canonically encodes Retry unused bits.
-    const auto expected_retry_integrity_tag = hex_array16("3e1f4242960d20f9b13d9f4e00027741");
+    const auto retry_packet_bytes =
+        hex_bytes("ff000000010008f067a5502a4262b5746f6b656e04a265ba2eff4d829058fb3f0f2496ba");
+    const auto expected_retry_integrity_tag = hex_array16("04a265ba2eff4d829058fb3f0f2496ba");
 
-    auto retry_packet = coquic::quic::RetryPacket{
-        .version = coquic::quic::kQuicVersion1,
-        .destination_connection_id = {},
-        .source_connection_id = hex_bytes("f067a5502a4262b5"),
-        .retry_token = hex_bytes("746f6b656e"),
-    };
+    const auto decoded_retry_packet =
+        coquic::quic::deserialize_packet(retry_packet_bytes, coquic::quic::DeserializeOptions{});
+    ASSERT_TRUE(decoded_retry_packet.has_value());
+    const auto *retry_packet =
+        std::get_if<coquic::quic::RetryPacket>(&decoded_retry_packet.value().packet);
+    ASSERT_NE(retry_packet, nullptr);
+    EXPECT_EQ(retry_packet->retry_unused_bits, 0x0fu);
 
-    const auto computed_retry_integrity_tag =
-        coquic::quic::compute_retry_integrity_tag(retry_packet, original_destination_connection_id);
+    const auto computed_retry_integrity_tag = coquic::quic::compute_retry_integrity_tag(
+        *retry_packet, original_destination_connection_id);
     ASSERT_TRUE(computed_retry_integrity_tag.has_value());
     EXPECT_EQ(to_hex(std::vector<std::byte>(computed_retry_integrity_tag.value().begin(),
                                             computed_retry_integrity_tag.value().end())),
-              "3e1f4242960d20f9b13d9f4e00027741");
+              "04a265ba2eff4d829058fb3f0f2496ba");
 
-    retry_packet.retry_integrity_tag = expected_retry_integrity_tag;
     const auto valid = coquic::quic::validate_retry_integrity_tag(
-        retry_packet, original_destination_connection_id);
+        *retry_packet, original_destination_connection_id);
     ASSERT_TRUE(valid.has_value());
+    EXPECT_EQ(retry_packet->retry_integrity_tag, expected_retry_integrity_tag);
     EXPECT_TRUE(valid.value());
 }
 
 TEST(QuicPacketCryptoTest, ComputesAndValidatesRetryIntegrityTagForQuicV2) {
     const auto original_destination_connection_id = hex_bytes("8394c8f03e515708");
-    // RetryPacket serialization in this codebase canonically encodes Retry unused bits.
-    const auto expected_retry_integrity_tag = hex_array16("019c9fa8e7eea75a3d07c79d2dccaffa");
+    const auto retry_packet_bytes =
+        hex_bytes("cf6b3343cf0008f067a5502a4262b5746f6b656ec8646ce8bfe33952d955543665dcc7b6");
+    const auto expected_retry_integrity_tag = hex_array16("c8646ce8bfe33952d955543665dcc7b6");
 
-    auto retry_packet = coquic::quic::RetryPacket{
-        .version = coquic::quic::kQuicVersion2,
-        .destination_connection_id = {},
-        .source_connection_id = hex_bytes("f067a5502a4262b5"),
-        .retry_token = hex_bytes("746f6b656e"),
-    };
+    const auto decoded_retry_packet =
+        coquic::quic::deserialize_packet(retry_packet_bytes, coquic::quic::DeserializeOptions{});
+    ASSERT_TRUE(decoded_retry_packet.has_value());
+    const auto *retry_packet =
+        std::get_if<coquic::quic::RetryPacket>(&decoded_retry_packet.value().packet);
+    ASSERT_NE(retry_packet, nullptr);
+    EXPECT_EQ(retry_packet->retry_unused_bits, 0x0fu);
 
-    const auto computed_retry_integrity_tag =
-        coquic::quic::compute_retry_integrity_tag(retry_packet, original_destination_connection_id);
+    const auto computed_retry_integrity_tag = coquic::quic::compute_retry_integrity_tag(
+        *retry_packet, original_destination_connection_id);
     ASSERT_TRUE(computed_retry_integrity_tag.has_value());
     EXPECT_EQ(to_hex(std::vector<std::byte>(computed_retry_integrity_tag.value().begin(),
                                             computed_retry_integrity_tag.value().end())),
-              "019c9fa8e7eea75a3d07c79d2dccaffa");
+              "c8646ce8bfe33952d955543665dcc7b6");
 
-    retry_packet.retry_integrity_tag = expected_retry_integrity_tag;
     const auto valid = coquic::quic::validate_retry_integrity_tag(
-        retry_packet, original_destination_connection_id);
+        *retry_packet, original_destination_connection_id);
     ASSERT_TRUE(valid.has_value());
+    EXPECT_EQ(retry_packet->retry_integrity_tag, expected_retry_integrity_tag);
     EXPECT_TRUE(valid.value());
 }
 

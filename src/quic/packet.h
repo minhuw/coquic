@@ -26,6 +26,7 @@ struct VersionNegotiationPacket {
 
 struct RetryPacket {
     std::uint32_t version = 1;
+    std::uint8_t retry_unused_bits = 0;
     ConnectionId destination_connection_id;
     ConnectionId source_connection_id;
     std::vector<std::byte> retry_token;

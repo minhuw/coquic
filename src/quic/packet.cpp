@@ -263,6 +263,12 @@ std::byte make_long_header_first_byte(std::uint8_t encoded_type,
                                   ((packet_number_length - 1) & 0x03u));
 }
 
+std::byte make_retry_long_header_first_byte(std::uint32_t version, std::uint8_t retry_unused_bits) {
+    return static_cast<std::byte>(0x80u | 0x40u |
+                                  ((encode_retry_long_header_type(version) & 0x03u) << 4) |
+                                  (retry_unused_bits & 0x0fu));
+}
+
 std::byte make_short_header_first_byte(bool spin_bit, bool key_phase,
                                        std::uint8_t packet_number_length) {
     return static_cast<std::byte>(0x40u | (spin_bit ? 0x20u : 0u) | (key_phase ? 0x04u : 0u) |
@@ -443,7 +449,8 @@ decode_long_header_packet(BufferReader &reader, std::uint32_t version,
     }
 }
 
-CodecResult<PacketDecodeResult> decode_retry_packet(BufferReader &reader, std::uint32_t version) {
+CodecResult<PacketDecodeResult> decode_retry_packet(BufferReader &reader, std::uint32_t version,
+                                                    std::uint8_t first_byte) {
     const auto destination_connection_id = read_connection_id(reader, version == kQuicVersion1);
     if (!destination_connection_id.has_value()) {
         return CodecResult<PacketDecodeResult>::failure(destination_connection_id.error().code,
@@ -474,6 +481,7 @@ CodecResult<PacketDecodeResult> decode_retry_packet(BufferReader &reader, std::u
         .packet =
             RetryPacket{
                 .version = version,
+                .retry_unused_bits = static_cast<std::uint8_t>(first_byte & 0x0fu),
                 .destination_connection_id = destination_connection_id.value(),
                 .source_connection_id = source_connection_id.value(),
                 .retry_token = std::vector<std::byte>(token.begin(), token.end()),
@@ -637,6 +645,7 @@ CodecResult<std::vector<std::byte>> serialize_packet(const Packet &packet) {
 
     if (const auto *retry = std::get_if<RetryPacket>(&packet)) {
         const auto invalid_retry_packet = (retry->version == kVersionNegotiationVersion) |
+                                          (retry->retry_unused_bits > 0x0fu) |
                                           (retry->destination_connection_id.size() > 20) |
                                           (retry->source_connection_id.size() > 20);
         if (invalid_retry_packet) {
@@ -645,7 +654,7 @@ CodecResult<std::vector<std::byte>> serialize_packet(const Packet &packet) {
 
         BufferWriter writer;
         writer.write_byte(
-            make_long_header_first_byte(encode_retry_long_header_type(retry->version), 1));
+            make_retry_long_header_first_byte(retry->version, retry->retry_unused_bits));
         write_u32_be(writer, retry->version);
         append_connection_id(writer, retry->destination_connection_id, true);
         append_connection_id(writer, retry->source_connection_id, true);
@@ -735,7 +744,7 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
     }
 
     if (is_retry_long_header_type(version, type)) {
-        return decode_retry_packet(reader, version);
+        return decode_retry_packet(reader, version, first_byte);
     }
 
     const auto packet_number_length = static_cast<std::uint8_t>((first_byte & 0x03u) + 1);

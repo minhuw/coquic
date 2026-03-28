@@ -7143,6 +7143,30 @@ TEST(QuicCoreTest, ConnectionStartupHelpersCoverReentryAndTlsFailure) {
     EXPECT_EQ(second_server.client_initial_destination_connection_id_, initial_dcid);
 }
 
+TEST(QuicCoreTest, ServerCreatedFromRetriedInitialExportsRetryTransportParameters) {
+    auto server_config = coquic::quic::test::make_server_core_config();
+    const auto retry_source_connection_id = bytes_from_hex("5300000000000001");
+    const auto original_destination_connection_id = bytes_from_hex("8394c8f03e515708");
+    server_config.initial_destination_connection_id = retry_source_connection_id;
+    server_config.original_destination_connection_id = original_destination_connection_id;
+    server_config.retry_source_connection_id = retry_source_connection_id;
+
+    coquic::quic::QuicConnection server(std::move(server_config));
+    server.start_server_if_needed(retry_source_connection_id, coquic::quic::kQuicVersion1);
+
+    EXPECT_FALSE(server.has_failed());
+    ASSERT_TRUE(server.local_transport_parameters_.original_destination_connection_id.has_value());
+    ASSERT_TRUE(server.local_transport_parameters_.retry_source_connection_id.has_value());
+    const auto exported_original_destination_connection_id =
+        server.local_transport_parameters_.original_destination_connection_id.value_or(
+            coquic::quic::ConnectionId{});
+    const auto exported_retry_source_connection_id =
+        server.local_transport_parameters_.retry_source_connection_id.value_or(
+            coquic::quic::ConnectionId{});
+    EXPECT_EQ(exported_original_destination_connection_id, original_destination_connection_id);
+    EXPECT_EQ(exported_retry_source_connection_id, retry_source_connection_id);
+}
+
 TEST(QuicCoreTest, ConnectionStartupRejectsInvalidLocalTransportParameters) {
     auto bad_client_config = coquic::quic::test::make_client_core_config();
     bad_client_config.transport.ack_delay_exponent = 21;
@@ -8319,6 +8343,25 @@ TEST(QuicCoreTest, ConnectionFailureAndStateChangeGuardsAreEdgeTriggered) {
 TEST(QuicCoreTest, PeerTransportParametersValidationContextRequiresPeerConnectionId) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     EXPECT_EQ(connection.peer_transport_parameters_validation_context(), std::nullopt);
+}
+
+TEST(QuicCoreTest, ClientRequiresRetrySourceConnectionIdAfterRetry) {
+    coquic::quic::QuicConnection client(coquic::quic::test::make_client_core_config());
+    const auto original_destination_connection_id = bytes_from_hex("8394c8f03e515708");
+    const auto retry_source_connection_id = bytes_from_hex("5300000000000001");
+    client.config_.original_destination_connection_id = original_destination_connection_id;
+    client.config_.retry_source_connection_id = retry_source_connection_id;
+    client.peer_source_connection_id_ = retry_source_connection_id;
+    client.current_version_ = coquic::quic::kQuicVersion1;
+
+    const auto context = client.peer_transport_parameters_validation_context();
+    ASSERT_TRUE(context.has_value());
+    const auto context_value = context.value_or(coquic::quic::TransportParametersValidationContext{
+        .expected_initial_source_connection_id = {},
+    });
+    EXPECT_EQ(context_value.expected_original_destination_connection_id,
+              original_destination_connection_id);
+    EXPECT_EQ(context_value.expected_retry_source_connection_id, retry_source_connection_id);
 }
 
 TEST(QuicCoreTest, FlushOutboundDatagramMarksFailuresForSerializationErrors) {

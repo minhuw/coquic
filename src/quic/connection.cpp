@@ -1652,8 +1652,11 @@ void QuicConnection::start_server_if_needed(
     original_version_ = client_initial_version;
     current_version_ = select_server_version(config_.supported_versions, client_initial_version);
     client_initial_destination_connection_id_ = client_initial_destination_connection_id;
+    const auto original_destination_connection_id =
+        config_.original_destination_connection_id.value_or(
+            client_initial_destination_connection_id);
     local_transport_parameters_ = TransportParameters{
-        .original_destination_connection_id = client_initial_destination_connection_id_,
+        .original_destination_connection_id = original_destination_connection_id,
         .max_idle_timeout = config_.transport.max_idle_timeout,
         .max_udp_payload_size = config_.transport.max_udp_payload_size,
         .active_connection_id_limit = 2,
@@ -1667,6 +1670,7 @@ void QuicConnection::start_server_if_needed(
         .initial_max_streams_bidi = config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
+        .retry_source_connection_id = config_.retry_source_connection_id,
         .version_information =
             make_local_version_information(config_.supported_versions, current_version_),
     };
@@ -1676,9 +1680,8 @@ void QuicConnection::start_server_if_needed(
         config_.role, local_transport_parameters_,
         TransportParametersValidationContext{
             .expected_initial_source_connection_id = config_.source_connection_id,
-            .expected_original_destination_connection_id =
-                client_initial_destination_connection_id_,
-            .expected_retry_source_connection_id = std::nullopt,
+            .expected_original_destination_connection_id = original_destination_connection_id,
+            .expected_retry_source_connection_id = config_.retry_source_connection_id,
         });
     if (!serialized_transport_parameters.has_value()) {
         log_codec_failure("serialize_server_transport_parameters",
@@ -2669,8 +2672,9 @@ QuicConnection::peer_transport_parameters_validation_context() const {
         return TransportParametersValidationContext{
             .expected_initial_source_connection_id = peer_source_connection_id_.value(),
             .expected_original_destination_connection_id =
-                client_initial_destination_connection_id(),
-            .expected_retry_source_connection_id = std::nullopt,
+                config_.original_destination_connection_id.value_or(
+                    config_.initial_destination_connection_id),
+            .expected_retry_source_connection_id = config_.retry_source_connection_id,
             .expected_version_information = expected_version_information,
             .reacted_to_version_negotiation = config_.reacted_to_version_negotiation,
         };

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -30,6 +31,13 @@ CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secre
 
 CodecResult<std::vector<std::byte>> make_packet_protection_nonce(std::span<const std::byte> iv,
                                                                  std::uint64_t packet_number);
+
+CodecResult<std::array<std::byte, 16>>
+compute_retry_integrity_tag(const RetryPacket &packet,
+                            const ConnectionId &original_destination_connection_id);
+CodecResult<bool>
+validate_retry_integrity_tag(const RetryPacket &packet,
+                             const ConnectionId &original_destination_connection_id);
 
 CodecResult<std::size_t> seal_payload_into(CipherSuite cipher_suite, std::span<const std::byte> key,
                                            std::span<const std::byte> nonce,

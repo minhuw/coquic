@@ -185,6 +185,36 @@ struct SealAeadRequest {
     std::span<std::byte> ciphertext;
 };
 
+CodecResult<std::vector<std::byte>>
+serialize_retry_pseudo_packet(const RetryPacket &packet,
+                              const ConnectionId &original_destination_connection_id) {
+    if (original_destination_connection_id.size() >
+        static_cast<std::size_t>(std::numeric_limits<std::uint8_t>::max())) {
+        return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    const auto encoded_retry_packet = serialize_packet(Packet{packet});
+    if (!encoded_retry_packet.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(encoded_retry_packet.error().code,
+                                                            encoded_retry_packet.error().offset);
+    }
+    if (encoded_retry_packet.value().size() < aead_tag_length) {
+        return CodecResult<std::vector<std::byte>>::failure(
+            CodecErrorCode::invalid_packet_protection_state, 0);
+    }
+
+    std::vector<std::byte> pseudo_packet;
+    pseudo_packet.reserve(1 + original_destination_connection_id.size() +
+                          encoded_retry_packet.value().size() - aead_tag_length);
+    pseudo_packet.push_back(
+        static_cast<std::byte>(original_destination_connection_id.size() & 0xff));
+    pseudo_packet.insert(pseudo_packet.end(), original_destination_connection_id.begin(),
+                         original_destination_connection_id.end());
+    pseudo_packet.insert(pseudo_packet.end(), encoded_retry_packet.value().begin(),
+                         encoded_retry_packet.value().end() - aead_tag_length);
+    return CodecResult<std::vector<std::byte>>::success(std::move(pseudo_packet));
+}
+
 CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
                                                std::span<const std::byte> key,
                                                std::span<const std::byte> nonce,
@@ -471,6 +501,61 @@ CodecResult<std::vector<std::byte>> make_packet_protection_nonce(std::span<const
     }
 
     return CodecResult<std::vector<std::byte>>::success(std::move(nonce));
+}
+
+CodecResult<std::array<std::byte, 16>>
+compute_retry_integrity_tag(const RetryPacket &packet,
+                            const ConnectionId &original_destination_connection_id) {
+    const auto retry_material = retry_integrity_material_for_version(packet.version);
+    if (!retry_material.has_value()) {
+        return CodecResult<std::array<std::byte, 16>>::failure(retry_material.error().code,
+                                                               retry_material.error().offset);
+    }
+
+    const auto retry_pseudo_packet =
+        serialize_retry_pseudo_packet(packet, original_destination_connection_id);
+    if (!retry_pseudo_packet.has_value()) {
+        return CodecResult<std::array<std::byte, 16>>::failure(retry_pseudo_packet.error().code,
+                                                               retry_pseudo_packet.error().offset);
+    }
+
+    const auto integrity_tag_ciphertext =
+        seal_payload(CipherSuite::tls_aes_128_gcm_sha256, retry_material.value().key,
+                     retry_material.value().nonce, retry_pseudo_packet.value(), {});
+    if (!integrity_tag_ciphertext.has_value()) {
+        return CodecResult<std::array<std::byte, 16>>::failure(
+            integrity_tag_ciphertext.error().code, integrity_tag_ciphertext.error().offset);
+    }
+    if (integrity_tag_ciphertext.value().size() != aead_tag_length) {
+        return CodecResult<std::array<std::byte, 16>>::failure(
+            CodecErrorCode::invalid_packet_protection_state, 0);
+    }
+
+    std::array<std::byte, 16> retry_integrity_tag{};
+    for (std::size_t i = 0; i < retry_integrity_tag.size(); ++i) {
+        retry_integrity_tag[i] = integrity_tag_ciphertext.value()[i];
+    }
+
+    return CodecResult<std::array<std::byte, 16>>::success(retry_integrity_tag);
+}
+
+CodecResult<bool>
+validate_retry_integrity_tag(const RetryPacket &packet,
+                             const ConnectionId &original_destination_connection_id) {
+    const auto expected_retry_integrity_tag =
+        compute_retry_integrity_tag(packet, original_destination_connection_id);
+    if (!expected_retry_integrity_tag.has_value()) {
+        return CodecResult<bool>::failure(expected_retry_integrity_tag.error().code,
+                                          expected_retry_integrity_tag.error().offset);
+    }
+
+    bool valid = true;
+    for (std::size_t i = 0; i < expected_retry_integrity_tag.value().size(); ++i) {
+        if (expected_retry_integrity_tag.value()[i] != packet.retry_integrity_tag[i]) {
+            valid = false;
+        }
+    }
+    return CodecResult<bool>::success(valid);
 }
 
 CodecResult<std::size_t> seal_payload_into(CipherSuite cipher_suite, std::span<const std::byte> key,

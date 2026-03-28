@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "src/quic/connection.h"
+#include "src/quic/packet_crypto.h"
 #include "src/quic/streams.h"
 
 namespace coquic::quic {
@@ -64,6 +65,23 @@ parse_version_negotiation_packet(std::span<const std::byte> bytes) {
     return std::nullopt;
 }
 
+std::optional<RetryPacket> parse_retry_packet(std::span<const std::byte> bytes) {
+    if (bytes.size() < 5 || read_u32_be_at(bytes, 1) == kVersionNegotiationVersion) {
+        return std::nullopt;
+    }
+
+    const auto decoded = deserialize_packet(bytes, {});
+    if (!decoded.has_value() || decoded.value().bytes_consumed != bytes.size()) {
+        return std::nullopt;
+    }
+
+    if (const auto *retry = std::get_if<RetryPacket>(&decoded.value().packet)) {
+        return *retry;
+    }
+
+    return std::nullopt;
+}
+
 } // namespace
 
 QuicCore::QuicCore(QuicCoreConfig config)
@@ -82,30 +100,62 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         overloaded{
             [&](const QuicCoreStart &) { connection_->start(); },
             [&](const QuicCoreInboundDatagram &in) {
-                if (config_.role == EndpointRole::client && !connection_->is_handshake_complete()) {
-                    const auto version_negotiation = parse_version_negotiation_packet(in.bytes);
-                    if (version_negotiation.has_value()) {
-                        const bool valid_destination_connection_id =
-                            version_negotiation->destination_connection_id ==
-                            config_.source_connection_id;
-                        const bool valid_source_connection_id =
-                            version_negotiation->source_connection_id ==
-                            config_.initial_destination_connection_id;
-                        const bool echoes_original_version = contains_version(
-                            version_negotiation->supported_versions, config_.original_version);
-                        if (valid_destination_connection_id && valid_source_connection_id &&
-                            !echoes_original_version) {
-                            for (const auto supported_version : config_.supported_versions) {
-                                if (!contains_version(version_negotiation->supported_versions,
-                                                      supported_version)) {
-                                    continue;
+                if (config_.role == EndpointRole::client) {
+                    if (!connection_->is_handshake_complete()) {
+                        const auto version_negotiation = parse_version_negotiation_packet(in.bytes);
+                        if (version_negotiation.has_value()) {
+                            const bool valid_destination_connection_id =
+                                version_negotiation->destination_connection_id ==
+                                config_.source_connection_id;
+                            const bool valid_source_connection_id =
+                                version_negotiation->source_connection_id ==
+                                config_.initial_destination_connection_id;
+                            const bool echoes_original_version = contains_version(
+                                version_negotiation->supported_versions, config_.original_version);
+                            if (valid_destination_connection_id && valid_source_connection_id &&
+                                !echoes_original_version) {
+                                for (const auto supported_version : config_.supported_versions) {
+                                    if (!contains_version(version_negotiation->supported_versions,
+                                                          supported_version)) {
+                                        continue;
+                                    }
+                                    config_.initial_version = supported_version;
+                                    config_.reacted_to_version_negotiation = true;
+                                    connection_ = std::make_unique<QuicConnection>(config_);
+                                    connection_->start();
+                                    return;
                                 }
-                                config_.initial_version = supported_version;
-                                config_.reacted_to_version_negotiation = true;
-                                connection_ = std::make_unique<QuicConnection>(config_);
-                                connection_->start();
-                                return;
                             }
+                            return;
+                        }
+                    }
+
+                    const auto retry = parse_retry_packet(in.bytes);
+                    if (retry.has_value()) {
+                        const auto original_destination_connection_id =
+                            config_.original_destination_connection_id.value_or(
+                                config_.initial_destination_connection_id);
+                        const auto retry_integrity_valid = validate_retry_integrity_tag(
+                            *retry, original_destination_connection_id);
+                        const bool can_process_retry =
+                            !connection_->is_handshake_complete() &&
+                            !connection_->has_processed_peer_packet() &&
+                            !config_.retry_source_connection_id.has_value();
+                        const bool valid_integrity =
+                            retry_integrity_valid.has_value() && retry_integrity_valid.value();
+                        const bool valid_destination_connection_id =
+                            retry->destination_connection_id == config_.source_connection_id;
+                        const bool valid_version = retry->version == config_.original_version;
+                        const bool valid_retry_token = !retry->retry_token.empty();
+                        if (can_process_retry && valid_integrity &&
+                            valid_destination_connection_id && valid_version && valid_retry_token) {
+                            config_.original_destination_connection_id =
+                                original_destination_connection_id;
+                            config_.retry_source_connection_id = retry->source_connection_id;
+                            config_.retry_token = retry->retry_token;
+                            config_.initial_destination_connection_id = retry->source_connection_id;
+                            connection_ = std::make_unique<QuicConnection>(config_);
+                            connection_->start();
                         }
                         return;
                     }

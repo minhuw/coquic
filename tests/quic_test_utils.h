@@ -23,6 +23,8 @@
 #define private public
 #include "src/quic/connection.h"
 #undef private
+#include "src/quic/buffer.h"
+#include "src/quic/packet_crypto.h"
 
 namespace coquic::quic::test {
 
@@ -440,6 +442,118 @@ inline std::string string_from_bytes(std::span<const std::byte> bytes) {
         text.push_back(static_cast<char>(std::to_integer<unsigned char>(byte)));
     }
     return text;
+}
+
+inline CodecResult<std::vector<std::byte>> make_valid_retry_datagram(
+    const ConnectionId &destination_connection_id, const ConnectionId &source_connection_id,
+    std::span<const std::byte> retry_token, const ConnectionId &original_destination_connection_id,
+    std::uint32_t version = kQuicVersion1, std::uint8_t retry_unused_bits = 0) {
+    RetryPacket retry_packet{
+        .version = version,
+        .retry_unused_bits = retry_unused_bits,
+        .destination_connection_id = destination_connection_id,
+        .source_connection_id = source_connection_id,
+        .retry_token = std::vector<std::byte>(retry_token.begin(), retry_token.end()),
+    };
+    const auto integrity_tag =
+        compute_retry_integrity_tag(retry_packet, original_destination_connection_id);
+    if (!integrity_tag.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(integrity_tag.error().code,
+                                                            integrity_tag.error().offset);
+    }
+    retry_packet.retry_integrity_tag = integrity_tag.value();
+    return serialize_packet(retry_packet);
+}
+
+inline std::optional<ConnectionId>
+long_header_destination_connection_id(std::span<const std::byte> datagram) {
+    BufferReader reader(datagram);
+    const auto first_byte = reader.read_byte();
+    if (!first_byte.has_value() ||
+        (std::to_integer<std::uint8_t>(first_byte.value()) & 0x80u) == 0) {
+        return std::nullopt;
+    }
+
+    const auto version = reader.read_exact(4);
+    if (!version.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto destination_connection_id_length = reader.read_byte();
+    if (!destination_connection_id_length.has_value()) {
+        return std::nullopt;
+    }
+    const auto destination_connection_id =
+        reader.read_exact(std::to_integer<std::uint8_t>(destination_connection_id_length.value()));
+    if (!destination_connection_id.has_value()) {
+        return std::nullopt;
+    }
+
+    return ConnectionId(destination_connection_id.value().begin(),
+                        destination_connection_id.value().end());
+}
+
+inline std::optional<std::vector<std::byte>>
+client_initial_datagram_token(std::span<const std::byte> datagram) {
+    BufferReader reader(datagram);
+    const auto first_byte = reader.read_byte();
+    if (!first_byte.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto header_byte = std::to_integer<std::uint8_t>(first_byte.value());
+    if ((header_byte & 0x80u) == 0 || (header_byte & 0x40u) == 0) {
+        return std::nullopt;
+    }
+
+    const auto version_bytes = reader.read_exact(4);
+    if (!version_bytes.has_value()) {
+        return std::nullopt;
+    }
+    const auto version =
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(version_bytes.value()[0]))
+         << 24) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(version_bytes.value()[1]))
+         << 16) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(version_bytes.value()[2])) << 8) |
+        static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(version_bytes.value()[3]));
+
+    const auto packet_type = static_cast<std::uint8_t>((header_byte >> 4) & 0x03u);
+    const bool is_initial = version == kQuicVersion2 ? packet_type == 0x01u : packet_type == 0x00u;
+    if (!is_initial) {
+        return std::nullopt;
+    }
+
+    const auto destination_connection_id_length = reader.read_byte();
+    if (!destination_connection_id_length.has_value()) {
+        return std::nullopt;
+    }
+    const auto destination_connection_id =
+        reader.read_exact(std::to_integer<std::uint8_t>(destination_connection_id_length.value()));
+    if (!destination_connection_id.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto source_connection_id_length = reader.read_byte();
+    if (!source_connection_id_length.has_value()) {
+        return std::nullopt;
+    }
+    const auto source_connection_id =
+        reader.read_exact(std::to_integer<std::uint8_t>(source_connection_id_length.value()));
+    if (!source_connection_id.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto token_length = decode_varint(reader);
+    if (!token_length.has_value() || token_length.value().value > reader.remaining()) {
+        return std::nullopt;
+    }
+    const auto token = reader.read_exact(static_cast<std::size_t>(token_length.value().value));
+    if (!token.has_value()) {
+        return std::nullopt;
+    }
+
+    return std::vector<std::byte>(token.value().begin(), token.value().end());
 }
 
 inline StreamFrame make_inbound_application_stream_frame(std::string_view text,

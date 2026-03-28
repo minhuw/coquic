@@ -32,6 +32,9 @@ struct QuicCoreConfig {
     EndpointRole role = EndpointRole::client;
     ConnectionId source_connection_id;
     ConnectionId initial_destination_connection_id;
+    std::optional<ConnectionId> original_destination_connection_id;
+    std::optional<ConnectionId> retry_source_connection_id;
+    std::vector<std::byte> retry_token;
     std::uint32_t original_version = kQuicVersion1;
     std::uint32_t initial_version = kQuicVersion1;
     std::vector<std::uint32_t> supported_versions = {kQuicVersion1};

@@ -1573,6 +1573,10 @@ bool QuicConnection::is_handshake_complete() const {
     return status_ == HandshakeStatus::connected;
 }
 
+bool QuicConnection::has_processed_peer_packet() const {
+    return processed_peer_packet_;
+}
+
 bool QuicConnection::has_failed() const {
     return status_ == HandshakeStatus::failed;
 }
@@ -1872,6 +1876,7 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                               << protected_packet.frames.size() << '\n';
                 }
                 if (processed.has_value()) {
+                    processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
                     initial_space_.received_packets.record_received(protected_packet.packet_number,
                                                                     ack_eliciting, now);
@@ -1908,6 +1913,7 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                               << protected_packet.frames.size() << '\n';
                 }
                 if (processed.has_value()) {
+                    processed_peer_packet_ = true;
                     if (config_.role == EndpointRole::server) {
                         discard_initial_packet_space();
                     }
@@ -1936,6 +1942,7 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                               << " frame_count=" << protected_packet.frames.size() << '\n';
                 }
                 if (processed.has_value()) {
+                    processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
                     application_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now);
@@ -3035,6 +3042,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         !peer_transport_parameters_validated_;
     const auto initial_packet_version =
         defer_server_compatible_negotiation_crypto ? original_version_ : current_version_;
+    static const std::vector<std::byte> kEmptyInitialToken;
+    const std::vector<std::byte> &initial_token =
+        config_.role == EndpointRole::client ? config_.retry_token : kEmptyInitialToken;
 
     std::vector<Frame> initial_frames;
     const auto initial_ack_frame =
@@ -3086,7 +3096,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             .version = initial_packet_version,
             .destination_connection_id = initial_destination_connection_id,
             .source_connection_id = config_.source_connection_id,
-            .token = {},
+            .token = initial_token,
             .packet_number_length = kDefaultInitialPacketNumberLength,
             .packet_number = packet_number,
             .frames = build_initial_frames(),
@@ -3124,7 +3134,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 .version = initial_packet_version,
                 .destination_connection_id = initial_destination_connection_id,
                 .source_connection_id = config_.source_connection_id,
-                .token = {},
+                .token = initial_token,
                 .packet_number_length = kDefaultInitialPacketNumberLength,
                 .packet_number = duplicate_packet_number,
                 .frames = build_initial_frames(),

@@ -107,6 +107,7 @@ class QuicConnection {
     std::optional<QuicCoreStateChange> take_state_change();
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     bool is_handshake_complete() const;
+    bool has_processed_peer_packet() const;
     bool has_failed() const;
 
   private:
@@ -207,6 +208,7 @@ class QuicConnection {
     StreamControlFrameState handshake_done_state_ = StreamControlFrameState::none;
     bool handshake_ready_emitted_ = false;
     bool failed_emitted_ = false;
+    bool processed_peer_packet_ = false;
     std::vector<std::vector<std::byte>> deferred_protected_packets_;
     std::optional<QuicCoreTimePoint> last_peer_activity_time_;
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;

@@ -111,6 +111,8 @@ class QuicConnection {
     bool has_failed() const;
 
   private:
+    friend class QuicCore;
+
     void start_client_if_needed();
     void start_server_if_needed(const ConnectionId &client_initial_destination_connection_id,
                                 std::uint32_t client_initial_version = kQuicVersion1);

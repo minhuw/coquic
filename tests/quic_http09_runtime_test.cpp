@@ -3025,6 +3025,32 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesRetryFlagFromEnvironmentAndCli) {
     EXPECT_TRUE(runtime.retry_enabled);
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeTreatsRetryTestcaseAliasAsHandshakeWithRetryEnabled) {
+    {
+        const char *env_argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "server");
+        ScopedEnvVar testcase("TESTCASE", "retry");
+
+        const auto parsed =
+            coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(env_argv));
+        ASSERT_TRUE(parsed.has_value());
+        const auto &runtime = optional_ref_or_terminate(parsed);
+        EXPECT_EQ(runtime.testcase, coquic::quic::QuicHttp09Testcase::handshake);
+        EXPECT_TRUE(runtime.retry_enabled);
+    }
+
+    {
+        const char *cli_argv[] = {"coquic", "interop-client", "--testcase",
+                                  "retry",  "--requests",     "https://localhost/a.txt"};
+        const auto parsed =
+            coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(cli_argv));
+        ASSERT_TRUE(parsed.has_value());
+        const auto &runtime = optional_ref_or_terminate(parsed);
+        EXPECT_EQ(runtime.testcase, coquic::quic::QuicHttp09Testcase::handshake);
+        EXPECT_TRUE(runtime.retry_enabled);
+    }
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeCliFlagsOverrideEnvironmentAndKeepExplicitClientRemote) {
     const char *argv[] = {"coquic",
                           "interop-client",

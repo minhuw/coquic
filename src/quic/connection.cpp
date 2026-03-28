@@ -67,6 +67,18 @@ make_local_version_information(std::span<const std::uint32_t> supported_versions
     };
 }
 
+std::optional<VersionInformation>
+version_information_for_handshake(std::span<const std::uint32_t> supported_versions,
+                                  std::uint32_t chosen_version,
+                                  const std::optional<ConnectionId> &retry_source_connection_id,
+                                  std::uint32_t original_version, std::uint32_t current_version) {
+    if (retry_source_connection_id.has_value() && current_version == original_version) {
+        return std::nullopt;
+    }
+
+    return make_local_version_information(supported_versions, chosen_version);
+}
+
 std::uint32_t select_server_version(std::span<const std::uint32_t> supported_versions,
                                     std::uint32_t client_initial_version) {
     if (client_initial_version == kQuicVersion1 && supports_quic_v2(supported_versions)) {
@@ -1602,8 +1614,9 @@ void QuicConnection::start_client_if_needed() {
         .initial_max_streams_bidi = config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
-        .version_information =
-            make_local_version_information(config_.supported_versions, current_version_),
+        .version_information = version_information_for_handshake(
+            config_.supported_versions, current_version_, config_.retry_source_connection_id,
+            original_version_, current_version_),
     };
     initialize_local_flow_control();
 
@@ -1650,7 +1663,12 @@ void QuicConnection::start_server_if_needed(
     started_ = true;
     status_ = HandshakeStatus::in_progress;
     original_version_ = client_initial_version;
-    current_version_ = select_server_version(config_.supported_versions, client_initial_version);
+    if (config_.retry_source_connection_id.has_value()) {
+        current_version_ = client_initial_version;
+    } else {
+        current_version_ =
+            select_server_version(config_.supported_versions, client_initial_version);
+    }
     client_initial_destination_connection_id_ = client_initial_destination_connection_id;
     const auto original_destination_connection_id =
         config_.original_destination_connection_id.value_or(
@@ -1671,8 +1689,9 @@ void QuicConnection::start_server_if_needed(
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
         .retry_source_connection_id = config_.retry_source_connection_id,
-        .version_information =
-            make_local_version_information(config_.supported_versions, current_version_),
+        .version_information = version_information_for_handshake(
+            config_.supported_versions, current_version_, config_.retry_source_connection_id,
+            original_version_, current_version_),
     };
     initialize_local_flow_control();
 
@@ -2667,8 +2686,9 @@ QuicConnection::peer_transport_parameters_validation_context() const {
     }
 
     if (config_.role == EndpointRole::client) {
-        const auto expected_version_information =
-            make_local_version_information(config_.supported_versions, current_version_);
+        const auto expected_version_information = version_information_for_handshake(
+            config_.supported_versions, current_version_, config_.retry_source_connection_id,
+            original_version_, current_version_);
         return TransportParametersValidationContext{
             .expected_initial_source_connection_id = peer_source_connection_id_.value(),
             .expected_original_destination_connection_id =
@@ -2680,8 +2700,9 @@ QuicConnection::peer_transport_parameters_validation_context() const {
         };
     }
 
-    const auto expected_version_information =
-        make_local_version_information(config_.supported_versions, original_version_);
+    const auto expected_version_information = version_information_for_handshake(
+        config_.supported_versions, original_version_, config_.retry_source_connection_id,
+        original_version_, current_version_);
     return TransportParametersValidationContext{
         .expected_initial_source_connection_id = peer_source_connection_id_.value(),
         .expected_original_destination_connection_id = std::nullopt,

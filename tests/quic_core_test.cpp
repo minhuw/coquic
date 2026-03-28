@@ -6494,6 +6494,9 @@ TEST(QuicCoreTest, ClientRestartsHandshakeAfterValidRetry) {
     ASSERT_TRUE(original_destination_connection_id.has_value());
     const auto original_destination_connection_id_value =
         original_destination_connection_id.value_or(coquic::quic::ConnectionId{});
+    const auto next_initial_send_packet_number =
+        client.connection_->initial_space_.next_send_packet_number;
+    ASSERT_GT(next_initial_send_packet_number, 0u);
 
     const auto retry_source_connection_id = bytes_from_ints({0x55, 0x66, 0x77, 0x88});
     const auto retry_token = bytes_from_ints({0xaa, 0xbb, 0xcc});
@@ -6520,6 +6523,10 @@ TEST(QuicCoreTest, ClientRestartsHandshakeAfterValidRetry) {
     const auto restarted_initial_token_value =
         restarted_initial_token.value_or(std::vector<std::byte>{});
     EXPECT_EQ(restarted_initial_token_value, retry_token);
+    EXPECT_TRUE(
+        client.connection_->initial_space_.sent_packets.contains(next_initial_send_packet_number));
+    EXPECT_EQ(client.connection_->initial_space_.next_send_packet_number,
+              next_initial_send_packet_number + 1);
     EXPECT_FALSE(client.has_failed());
 }
 
@@ -7165,6 +7172,40 @@ TEST(QuicCoreTest, ServerCreatedFromRetriedInitialExportsRetryTransportParameter
             coquic::quic::ConnectionId{});
     EXPECT_EQ(exported_original_destination_connection_id, original_destination_connection_id);
     EXPECT_EQ(exported_retry_source_connection_id, retry_source_connection_id);
+}
+
+TEST(QuicCoreTest, ServerCreatedFromRetriedInitialKeepsOriginalVersionValidationContext) {
+    auto server_config = coquic::quic::test::make_server_core_config();
+    const auto retry_source_connection_id = bytes_from_hex("5300000000000001");
+    const auto original_destination_connection_id = bytes_from_hex("8394c8f03e515708");
+    const auto client_source_connection_id = bytes_from_hex("1d84ffd8036c94a5");
+    server_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    server_config.initial_destination_connection_id = retry_source_connection_id;
+    server_config.original_destination_connection_id = original_destination_connection_id;
+    server_config.retry_source_connection_id = retry_source_connection_id;
+
+    coquic::quic::QuicConnection server(std::move(server_config));
+    server.start_server_if_needed(retry_source_connection_id, coquic::quic::kQuicVersion1);
+
+    EXPECT_EQ(server.original_version_, coquic::quic::kQuicVersion1);
+    EXPECT_EQ(server.current_version_, coquic::quic::kQuicVersion1);
+    EXPECT_FALSE(server.local_transport_parameters_.version_information.has_value());
+
+    server.peer_source_connection_id_ = client_source_connection_id;
+    const auto context = server.peer_transport_parameters_validation_context();
+    ASSERT_TRUE(context.has_value());
+    const auto &context_value = optional_ref_or_terminate(context);
+    EXPECT_FALSE(context_value.expected_version_information.has_value());
+
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        coquic::quic::EndpointRole::client,
+        coquic::quic::TransportParameters{
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 8,
+            .initial_source_connection_id = client_source_connection_id,
+        },
+        context_value);
+    EXPECT_TRUE(validation.has_value());
 }
 
 TEST(QuicCoreTest, ConnectionStartupRejectsInvalidLocalTransportParameters) {
@@ -8362,6 +8403,36 @@ TEST(QuicCoreTest, ClientRequiresRetrySourceConnectionIdAfterRetry) {
     EXPECT_EQ(context_value.expected_original_destination_connection_id,
               original_destination_connection_id);
     EXPECT_EQ(context_value.expected_retry_source_connection_id, retry_source_connection_id);
+}
+
+TEST(QuicCoreTest, ClientRetryOnOriginalVersionDoesNotRequireVersionInformation) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicConnection client(std::move(client_config));
+    const auto original_destination_connection_id = bytes_from_hex("8394c8f03e515708");
+    const auto retry_source_connection_id = bytes_from_hex("5300000000000001");
+    client.config_.original_destination_connection_id = original_destination_connection_id;
+    client.config_.retry_source_connection_id = retry_source_connection_id;
+    client.peer_source_connection_id_ = retry_source_connection_id;
+    client.original_version_ = coquic::quic::kQuicVersion1;
+    client.current_version_ = coquic::quic::kQuicVersion1;
+
+    const auto context = client.peer_transport_parameters_validation_context();
+    ASSERT_TRUE(context.has_value());
+    const auto &context_value = optional_ref_or_terminate(context);
+    EXPECT_FALSE(context_value.expected_version_information.has_value());
+
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        coquic::quic::EndpointRole::server,
+        coquic::quic::TransportParameters{
+            .original_destination_connection_id = original_destination_connection_id,
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = retry_source_connection_id,
+            .retry_source_connection_id = retry_source_connection_id,
+        },
+        context_value);
+    EXPECT_TRUE(validation.has_value());
 }
 
 TEST(QuicCoreTest, FlushOutboundDatagramMarksFailuresForSerializationErrors) {

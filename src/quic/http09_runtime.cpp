@@ -50,7 +50,7 @@ constexpr int kServerIdleTimeoutMs = 1000;
 constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
-    "[--testcase handshake|transfer|multiconnect|chacha20|v2] [--requests URLS] "
+    "[--testcase handshake|transfer|multiconnect|chacha20|retry|v2] [--requests URLS] "
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
     "[--server-name NAME] [--verify-peer] [--retry]";
@@ -216,6 +216,22 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
         return QuicHttp09Testcase::v2;
     }
     return std::nullopt;
+}
+
+bool apply_testcase_name(Http09RuntimeConfig &config, std::string_view value) {
+    if (value == "retry") {
+        config.testcase = QuicHttp09Testcase::handshake;
+        config.retry_enabled = true;
+        return true;
+    }
+
+    const auto parsed = parse_testcase(value);
+    if (!parsed.has_value()) {
+        return false;
+    }
+
+    config.testcase = *parsed;
+    return true;
 }
 
 bool parse_role_into(Http09RuntimeConfig &config, std::string_view role) {
@@ -2592,12 +2608,10 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
         }
     }
     if (const auto testcase = getenv_string("TESTCASE"); testcase.has_value()) {
-        const auto parsed = parse_testcase(*testcase);
-        if (!parsed.has_value()) {
+        if (!apply_testcase_name(config, *testcase)) {
             std::cerr << kUsageLine << '\n';
             return std::nullopt;
         }
-        config.testcase = *parsed;
     }
     if (const auto requests = getenv_string("REQUESTS"); requests.has_value()) {
         config.requests_env = *requests;
@@ -2693,12 +2707,10 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
             continue;
         }
         if (arg == "--testcase") {
-            const auto parsed = parse_testcase(*value);
-            if (!parsed.has_value()) {
+            if (!apply_testcase_name(config, *value)) {
                 std::cerr << kUsageLine << '\n';
                 return std::nullopt;
             }
-            config.testcase = *parsed;
             continue;
         }
         if (arg == "--requests") {

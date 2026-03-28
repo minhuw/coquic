@@ -149,12 +149,16 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                         const bool valid_retry_token = !retry->retry_token.empty();
                         if (can_process_retry && valid_integrity &&
                             valid_destination_connection_id && valid_version && valid_retry_token) {
+                            const auto next_initial_send_packet_number =
+                                connection_->initial_space_.next_send_packet_number;
                             config_.original_destination_connection_id =
                                 original_destination_connection_id;
                             config_.retry_source_connection_id = retry->source_connection_id;
                             config_.retry_token = retry->retry_token;
                             config_.initial_destination_connection_id = retry->source_connection_id;
                             connection_ = std::make_unique<QuicConnection>(config_);
+                            connection_->initial_space_.next_send_packet_number =
+                                next_initial_send_packet_number;
                             connection_->start();
                         }
                         return;

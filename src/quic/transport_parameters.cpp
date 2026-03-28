@@ -1,5 +1,6 @@
 #include "src/quic/transport_parameters.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -16,6 +17,7 @@ using coquic::quic::EndpointRole;
 using coquic::quic::TransportParameters;
 using coquic::quic::TransportParametersValidationContext;
 using coquic::quic::TransportParametersValidationOk;
+using coquic::quic::VersionInformation;
 
 constexpr std::uint64_t original_destination_connection_id_parameter_id = 0x00;
 constexpr std::uint64_t max_idle_timeout_parameter_id = 0x01;
@@ -31,6 +33,7 @@ constexpr std::uint64_t max_ack_delay_parameter_id = 0x0b;
 constexpr std::uint64_t active_connection_id_limit_parameter_id = 0x0e;
 constexpr std::uint64_t initial_source_connection_id_parameter_id = 0x0f;
 constexpr std::uint64_t retry_source_connection_id_parameter_id = 0x10;
+constexpr std::uint64_t version_information_parameter_id = 0x11;
 constexpr std::uint64_t minimum_max_udp_payload_size = 1200;
 constexpr std::uint64_t minimum_active_connection_id_limit = 2;
 constexpr std::uint64_t maximum_ack_delay_exponent = 20;
@@ -59,6 +62,37 @@ void append_connection_id_parameter(std::vector<std::byte> &output, std::uint64_
     append_raw_parameter(output, id, *connection_id);
 }
 
+void append_u32_be(std::vector<std::byte> &output, std::uint32_t value) {
+    output.push_back(static_cast<std::byte>((value >> 24) & 0xffu));
+    output.push_back(static_cast<std::byte>((value >> 16) & 0xffu));
+    output.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
+    output.push_back(static_cast<std::byte>(value & 0xffu));
+}
+
+std::uint32_t read_u32_be(std::span<const std::byte> bytes) {
+    std::uint32_t value = 0;
+    for (const auto byte : bytes) {
+        value = (value << 8) | std::to_integer<std::uint8_t>(byte);
+    }
+
+    return value;
+}
+
+void append_version_information_parameter(std::vector<std::byte> &output,
+                                          const std::optional<VersionInformation> &value) {
+    if (!value.has_value()) {
+        return;
+    }
+
+    std::vector<std::byte> encoded;
+    encoded.reserve((1 + value->available_versions.size()) * sizeof(std::uint32_t));
+    append_u32_be(encoded, value->chosen_version);
+    for (const auto version : value->available_versions) {
+        append_u32_be(encoded, version);
+    }
+    append_raw_parameter(output, version_information_parameter_id, encoded);
+}
+
 CodecResult<std::uint64_t> decode_integer_parameter(std::span<const std::byte> bytes) {
     const auto decoded = coquic::quic::decode_varint_bytes(bytes);
     if (!decoded.has_value()) {
@@ -74,6 +108,23 @@ CodecResult<std::uint64_t> decode_integer_parameter(std::span<const std::byte> b
 CodecResult<TransportParametersValidationOk> validation_failure() {
     return CodecResult<TransportParametersValidationOk>::failure(
         CodecErrorCode::invalid_packet_protection_state, 0);
+}
+
+bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t version) {
+    return std::find(versions.begin(), versions.end(), version) != versions.end();
+}
+
+std::optional<std::uint32_t>
+select_preferred_version(std::span<const std::uint32_t> preferred_versions,
+                         const VersionInformation &version_information) {
+    for (const auto preferred_version : preferred_versions) {
+        if (preferred_version == version_information.chosen_version ||
+            contains_version(version_information.available_versions, preferred_version)) {
+            return preferred_version;
+        }
+    }
+
+    return std::nullopt;
 }
 
 } // namespace
@@ -197,6 +248,7 @@ serialize_transport_parameters(const TransportParameters &parameters) {
 
     append_connection_id_parameter(output, retry_source_connection_id_parameter_id,
                                    parameters.retry_source_connection_id);
+    append_version_information_parameter(output, parameters.version_information);
 
     return CodecResult<std::vector<std::byte>>::success(std::move(output));
 }
@@ -310,6 +362,24 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
         case retry_source_connection_id_parameter_id:
             parameters.retry_source_connection_id = ConnectionId(value.begin(), value.end());
             break;
+        case version_information_parameter_id: {
+            if (value.size() < sizeof(std::uint32_t) ||
+                (value.size() % sizeof(std::uint32_t)) != 0) {
+                return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                                 offset);
+            }
+
+            VersionInformation version_information{
+                .chosen_version = read_u32_be(value.first(sizeof(std::uint32_t))),
+            };
+            for (std::size_t version_offset = sizeof(std::uint32_t); version_offset < value.size();
+                 version_offset += sizeof(std::uint32_t)) {
+                version_information.available_versions.push_back(
+                    read_u32_be(value.subspan(version_offset, sizeof(std::uint32_t))));
+            }
+            parameters.version_information = std::move(version_information);
+            break;
+        }
         case ack_delay_exponent_parameter_id: {
             const auto decoded = decode_integer_parameter(value);
             if (!decoded.has_value()) {
@@ -363,6 +433,16 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
             return validation_failure();
         }
 
+        if (context.expected_version_information.has_value()) {
+            if (!parameters.version_information.has_value() ||
+                parameters.version_information->chosen_version !=
+                    context.expected_version_information->chosen_version ||
+                !contains_version(parameters.version_information->available_versions,
+                                  parameters.version_information->chosen_version)) {
+                return validation_failure();
+            }
+        }
+
         return CodecResult<TransportParametersValidationOk>::success({});
     }
 
@@ -381,6 +461,30 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
         }
     } else if (parameters.retry_source_connection_id.has_value()) {
         return validation_failure();
+    }
+
+    if (context.expected_version_information.has_value()) {
+        if (!parameters.version_information.has_value() ||
+            parameters.version_information->chosen_version !=
+                context.expected_version_information->chosen_version ||
+            !contains_version(context.expected_version_information->available_versions,
+                              parameters.version_information->chosen_version)) {
+            return validation_failure();
+        }
+
+        if (context.reacted_to_version_negotiation) {
+            if (parameters.version_information->available_versions.empty()) {
+                return validation_failure();
+            }
+
+            const auto selected_version =
+                select_preferred_version(context.expected_version_information->available_versions,
+                                         parameters.version_information.value());
+            if (!selected_version.has_value() ||
+                selected_version.value() != parameters.version_information->chosen_version) {
+                return validation_failure();
+            }
+        }
     }
 
     return CodecResult<TransportParametersValidationOk>::success({});

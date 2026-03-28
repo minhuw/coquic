@@ -122,6 +122,61 @@ TEST(QuicPacketTest, RoundTripsRetryPacket) {
     EXPECT_EQ(retry->retry_integrity_tag[15], std::byte{0x0f});
 }
 
+TEST(QuicPacketTest, SerializesQuicV2LongHeaderTypeBitsPerRfc9369) {
+    const auto initial = coquic::quic::serialize_packet(InitialPacket{
+        .version = 0x6b3343cfu,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .token = {},
+        .packet_number_length = 1,
+        .truncated_packet_number = 1,
+        .frames = {CryptoFrame{
+            .offset = 0,
+            .crypto_data = {std::byte{0x01}},
+        }},
+    });
+    ASSERT_TRUE(initial.has_value());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(initial.value().front()) & 0xf0u, 0xd0u);
+
+    const auto zero_rtt = coquic::quic::serialize_packet(ZeroRttPacket{
+        .version = 0x6b3343cfu,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 2,
+        .frames = {PingFrame{}},
+    });
+    ASSERT_TRUE(zero_rtt.has_value());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(zero_rtt.value().front()) & 0xf0u, 0xe0u);
+
+    const auto handshake = coquic::quic::serialize_packet(HandshakePacket{
+        .version = 0x6b3343cfu,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 3,
+        .frames = {CryptoFrame{
+            .offset = 0,
+            .crypto_data = {std::byte{0x02}},
+        }},
+    });
+    ASSERT_TRUE(handshake.has_value());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(handshake.value().front()) & 0xf0u, 0xf0u);
+
+    const auto retry = coquic::quic::serialize_packet(RetryPacket{
+        .version = 0x6b3343cfu,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .retry_token = {std::byte{0x10}},
+        .retry_integrity_tag = {std::byte{0x00}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                                std::byte{0x04}, std::byte{0x05}, std::byte{0x06}, std::byte{0x07},
+                                std::byte{0x08}, std::byte{0x09}, std::byte{0x0a}, std::byte{0x0b},
+                                std::byte{0x0c}, std::byte{0x0d}, std::byte{0x0e}, std::byte{0x0f}},
+    });
+    ASSERT_TRUE(retry.has_value());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(retry.value().front()) & 0xf0u, 0xc0u);
+}
+
 TEST(QuicPacketTest, RejectsAckFrameInZeroRttPacket) {
     ZeroRttPacket packet{
         .version = 1,

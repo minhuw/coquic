@@ -10,6 +10,13 @@
 
 namespace coquic::quic {
 
+struct VersionInformation {
+    std::uint32_t chosen_version = 0;
+    std::vector<std::uint32_t> available_versions;
+
+    bool operator==(const VersionInformation &) const = default;
+};
+
 struct TransportParameters {
     std::optional<ConnectionId> original_destination_connection_id;
     std::uint64_t max_idle_timeout = 0;
@@ -25,12 +32,15 @@ struct TransportParameters {
     std::uint64_t initial_max_streams_uni = 0;
     std::optional<ConnectionId> initial_source_connection_id;
     std::optional<ConnectionId> retry_source_connection_id;
+    std::optional<VersionInformation> version_information;
 };
 
 struct TransportParametersValidationContext {
     ConnectionId expected_initial_source_connection_id;
     std::optional<ConnectionId> expected_original_destination_connection_id;
     std::optional<ConnectionId> expected_retry_source_connection_id;
+    std::optional<VersionInformation> expected_version_information;
+    bool reacted_to_version_negotiation = false;
 };
 
 struct TransportParametersValidationOk {};

@@ -1,6 +1,7 @@
 #include "src/quic/http09_runtime.h"
 #include "src/quic/http09_runtime_test_hooks.h"
 #include "src/quic/packet.h"
+#include "src/quic/version.h"
 
 #include "src/coquic.h"
 
@@ -44,12 +45,10 @@ constexpr int kDefaultClientReceiveTimeoutMs = 30000;
 constexpr int kMulticonnectClientReceiveTimeoutMs = 180000;
 constexpr int kClientSuccessDrainWindowMs = 500;
 constexpr int kServerIdleTimeoutMs = 1000;
-constexpr std::uint32_t kQuicVersion1 = 1;
-constexpr std::uint32_t kVersionNegotiationVersion = 0;
 constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
-    "[--testcase handshake|transfer|multiconnect|chacha20] [--requests URLS] "
+    "[--testcase handshake|transfer|multiconnect|chacha20|v2] [--requests URLS] "
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
     "[--server-name NAME] [--verify-peer]";
@@ -205,6 +204,9 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
     }
     if (value == "chacha20") {
         return QuicHttp09Testcase::chacha20;
+    }
+    if (value == "v2") {
+        return QuicHttp09Testcase::v2;
     }
     return std::nullopt;
 }
@@ -418,6 +420,9 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
     return QuicCoreConfig{
         .role = EndpointRole::server,
         .source_connection_id = {std::byte{0x53}, std::byte{0x01}},
+        .original_version = kQuicVersion1,
+        .initial_version = kQuicVersion1,
+        .supported_versions = {kQuicVersion2, kQuicVersion1},
         .verify_peer = config.verify_peer,
         .server_name = config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),
@@ -466,6 +471,14 @@ struct ParsedServerDatagram {
     ConnectionId destination_connection_id;
     std::optional<ConnectionId> source_connection_id;
 };
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+bool is_initial_long_header_type(std::uint32_t version, std::uint8_t type) {
+    if (version == kQuicVersion2) {
+        return type == 0x01u;
+    }
+    return type == 0x00u;
+}
 
 std::optional<ParsedServerDatagram>
 parse_server_datagram_for_routing(std::span<const std::byte> bytes) {
@@ -516,7 +529,7 @@ parse_server_datagram_for_routing(std::span<const std::byte> bytes) {
         bytes.begin() + static_cast<std::ptrdiff_t>(offset),
         bytes.begin() + static_cast<std::ptrdiff_t>(offset + source_connection_id_length));
 
-    if (version != kQuicVersion1) {
+    if (!is_supported_quic_version(version)) {
         return ParsedServerDatagram{
             .kind = ParsedServerDatagram::Kind::unsupported_version_long_header,
             .destination_connection_id = std::move(destination_connection_id),
@@ -526,8 +539,9 @@ parse_server_datagram_for_routing(std::span<const std::byte> bytes) {
 
     const auto type = static_cast<std::uint8_t>((first_byte >> 4) & 0x03u);
     return ParsedServerDatagram{
-        .kind = type == 0x00 ? ParsedServerDatagram::Kind::supported_initial
-                             : ParsedServerDatagram::Kind::supported_long_header,
+        .kind = is_initial_long_header_type(version, type)
+                    ? ParsedServerDatagram::Kind::supported_initial
+                    : ParsedServerDatagram::Kind::supported_long_header,
         .destination_connection_id = std::move(destination_connection_id),
         .source_connection_id = std::move(source_connection_id),
     };
@@ -547,7 +561,8 @@ bool send_version_negotiation_for_probe(int fd, std::span<const std::byte> datag
     const auto packet = VersionNegotiationPacket{
         .destination_connection_id = *parsed.source_connection_id,
         .source_connection_id = parsed.destination_connection_id,
-        .supported_versions = {kQuicVersion1},
+        .supported_versions = std::vector<std::uint32_t>(supported_quic_versions().begin(),
+                                                         supported_quic_versions().end()),
     };
     const auto encoded = serialize_packet(packet).value();
 
@@ -2557,6 +2572,9 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
         .initial_destination_connection_id = {std::byte{0x83}, std::byte{0x94}, std::byte{0xc8},
                                               std::byte{0xf0}, std::byte{0x3e}, std::byte{0x51},
                                               std::byte{0x57}, std::byte{0x08}},
+        .original_version = kQuicVersion1,
+        .initial_version = kQuicVersion1,
+        .supported_versions = {kQuicVersion2, kQuicVersion1},
         .verify_peer = config.verify_peer,
         .server_name = config.server_name.empty() ? "localhost" : config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),

@@ -14,12 +14,12 @@
 #include "src/quic/packet_crypto.h"
 #include "src/quic/packet_number.h"
 #include "src/quic/protected_codec_test_hooks.h"
+#include "src/quic/version.h"
 
 namespace coquic::quic {
 
 namespace {
 
-constexpr std::uint32_t kQuicV1 = 1;
 constexpr CipherSuite kInitialCipherSuite = CipherSuite::tls_aes_128_gcm_sha256;
 constexpr std::size_t kPacketProtectionTagLength = 16;
 constexpr std::size_t kHeaderProtectionSampleOffset = 4;
@@ -29,6 +29,19 @@ enum class LongHeaderPacketType : std::uint8_t {
     initial = 0x00,
     handshake = 0x02,
 };
+
+std::uint8_t encoded_long_header_type(LongHeaderPacketType packet_type, std::uint32_t version) {
+    if (version == kQuicVersion2) {
+        switch (packet_type) {
+        case LongHeaderPacketType::initial:
+            return 0x01u;
+        case LongHeaderPacketType::handshake:
+            return 0x03u;
+        }
+    }
+
+    return static_cast<std::uint8_t>(packet_type);
+}
 
 struct LongHeaderLayout {
     std::size_t length_offset = 0;
@@ -274,12 +287,26 @@ bool long_header_has_token(LongHeaderPacketType packet_type) {
     return packet_type == LongHeaderPacketType::initial;
 }
 
-CodecResult<std::uint8_t> read_long_header_type(std::span<const std::byte> bytes) {
+CodecResult<LongHeaderPacketType> read_long_header_type(std::span<const std::byte> bytes) {
+    if (bytes.size() < 5) {
+        return CodecResult<LongHeaderPacketType>::failure(CodecErrorCode::truncated_input,
+                                                          bytes.size());
+    }
+
     const auto first_byte = std::to_integer<std::uint8_t>(bytes.front());
     if ((first_byte & 0x40u) == 0)
-        return CodecResult<std::uint8_t>::failure(CodecErrorCode::invalid_fixed_bit, 0);
+        return CodecResult<LongHeaderPacketType>::failure(CodecErrorCode::invalid_fixed_bit, 0);
 
-    return CodecResult<std::uint8_t>::success(static_cast<std::uint8_t>((first_byte >> 4) & 0x03u));
+    const auto version = read_u32_be(bytes.subspan(1, 4));
+    const auto encoded_type = static_cast<std::uint8_t>((first_byte >> 4) & 0x03u);
+    if (encoded_type == encoded_long_header_type(LongHeaderPacketType::initial, version)) {
+        return CodecResult<LongHeaderPacketType>::success(LongHeaderPacketType::initial);
+    }
+    if (encoded_type == encoded_long_header_type(LongHeaderPacketType::handshake, version)) {
+        return CodecResult<LongHeaderPacketType>::success(LongHeaderPacketType::handshake);
+    }
+
+    return CodecResult<LongHeaderPacketType>::failure(CodecErrorCode::unsupported_packet_type, 0);
 }
 
 CodecResult<LongHeaderLayout> locate_long_header(std::span<const std::byte> bytes,
@@ -291,7 +318,7 @@ CodecResult<LongHeaderLayout> locate_long_header(std::span<const std::byte> byte
     if (!version_bytes.has_value())
         return CodecResult<LongHeaderLayout>::failure(version_bytes.error().code,
                                                       version_bytes.error().offset);
-    if (read_u32_be(version_bytes.value()) != kQuicV1)
+    if (!is_supported_quic_version(read_u32_be(version_bytes.value())))
         return CodecResult<LongHeaderLayout>::failure(CodecErrorCode::unsupported_packet_type, 0);
 
     const auto destination_connection_id_length = read_u8(reader);
@@ -382,29 +409,29 @@ EndpointRole opposite_endpoint_role(EndpointRole role) {
 }
 
 CodecResult<PacketProtectionKeys>
-derive_send_initial_keys(const SerializeProtectionContext &context) {
+derive_send_initial_keys(const SerializeProtectionContext &context, std::uint32_t version) {
     if (context.client_initial_destination_connection_id.empty()) {
         return CodecResult<PacketProtectionKeys>::failure(CodecErrorCode::missing_crypto_context,
                                                           0);
     }
 
     return derive_initial_packet_keys(context.local_role, true,
-                                      context.client_initial_destination_connection_id);
+                                      context.client_initial_destination_connection_id, version);
 }
 
 CodecResult<PacketProtectionKeys>
-derive_receive_initial_keys(const DeserializeProtectionContext &context) {
+derive_receive_initial_keys(const DeserializeProtectionContext &context, std::uint32_t version) {
     if (context.client_initial_destination_connection_id.empty()) {
         return CodecResult<PacketProtectionKeys>::failure(CodecErrorCode::missing_crypto_context,
                                                           0);
     }
 
     return derive_initial_packet_keys(opposite_endpoint_role(context.peer_role), false,
-                                      context.client_initial_destination_connection_id);
+                                      context.client_initial_destination_connection_id, version);
 }
 
 CodecResult<InitialPacket> to_plaintext_initial(const ProtectedInitialPacket &packet) {
-    if (packet.version != kQuicV1) {
+    if (!is_supported_quic_version(packet.version)) {
         return CodecResult<InitialPacket>::failure(CodecErrorCode::unsupported_packet_type, 0);
     }
 
@@ -427,7 +454,7 @@ CodecResult<InitialPacket> to_plaintext_initial(const ProtectedInitialPacket &pa
 }
 
 CodecResult<HandshakePacket> to_plaintext_handshake(const ProtectedHandshakePacket &packet) {
-    if (packet.version != kQuicV1) {
+    if (!is_supported_quic_version(packet.version)) {
         return CodecResult<HandshakePacket>::failure(CodecErrorCode::unsupported_packet_type, 0);
     }
 
@@ -634,7 +661,7 @@ deserialize_plaintext_packet_image(std::span<const std::byte> plaintext_image,
 CodecResult<std::vector<std::byte>>
 serialize_protected_initial_packet(const ProtectedInitialPacket &packet,
                                    const SerializeProtectionContext &context) {
-    const auto keys = derive_send_initial_keys(context);
+    const auto keys = derive_send_initial_keys(context, packet.version);
     if (!keys.has_value()) {
         return CodecResult<std::vector<std::byte>>::failure(keys.error().code, keys.error().offset);
     }
@@ -692,7 +719,8 @@ deserialize_protected_initial_packet(std::span<const std::byte> bytes,
         return CodecResult<ProtectedPacketDecodeResult>::failure(layout.error().code,
                                                                  layout.error().offset);
 
-    const auto keys = derive_receive_initial_keys(context);
+    const auto version = read_u32_be(bytes.subspan(1, 4));
+    const auto keys = derive_receive_initial_keys(context, version);
     if (!keys.has_value())
         return CodecResult<ProtectedPacketDecodeResult>::failure(keys.error().code,
                                                                  keys.error().offset);
@@ -1166,9 +1194,9 @@ deserialize_protected_datagram(std::span<const std::byte> bytes,
                 return CodecResult<std::vector<ProtectedPacket>>::failure(
                     type.error().code, offset + type.error().offset);
 
-            if (type.value() == static_cast<std::uint8_t>(LongHeaderPacketType::initial)) {
+            if (type.value() == LongHeaderPacketType::initial) {
                 decoded = deserialize_protected_initial_packet(bytes.subspan(offset), context);
-            } else if (type.value() == static_cast<std::uint8_t>(LongHeaderPacketType::handshake)) {
+            } else if (type.value() == LongHeaderPacketType::handshake) {
                 decoded = deserialize_protected_handshake_packet(bytes.subspan(offset), context);
             }
         }

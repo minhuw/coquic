@@ -24,10 +24,60 @@ namespace {
 constexpr std::size_t kMinimumInitialDatagramSize = 1200;
 constexpr std::size_t kMaximumDatagramSize = 1200;
 constexpr std::size_t kMaximumDeferredProtectedPackets = 32;
-constexpr std::uint32_t kQuicVersion1 = 1;
 constexpr std::uint8_t kDefaultInitialPacketNumberLength = 2;
 constexpr std::uint64_t kCompatibilityStreamId = 0;
 constexpr std::uint32_t kPersistentCongestionThreshold = 3;
+
+bool supports_version(std::span<const std::uint32_t> supported_versions, std::uint32_t version) {
+    return std::find(supported_versions.begin(), supported_versions.end(), version) !=
+           supported_versions.end();
+}
+
+bool supports_quic_v2(std::span<const std::uint32_t> supported_versions) {
+    return supports_version(supported_versions, kQuicVersion2);
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+bool is_initial_long_header_type(std::uint32_t version, std::uint8_t packet_type) {
+    if (version == kQuicVersion2) {
+        return packet_type == 0x01u;
+    }
+    return packet_type == 0x00u;
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+bool is_handshake_long_header_type(std::uint32_t version, std::uint8_t packet_type) {
+    if (version == kQuicVersion2) {
+        return packet_type == 0x03u;
+    }
+    return packet_type == 0x02u;
+}
+
+std::optional<VersionInformation>
+make_local_version_information(std::span<const std::uint32_t> supported_versions,
+                               std::uint32_t chosen_version) {
+    if (!supports_quic_v2(supported_versions)) {
+        return std::nullopt;
+    }
+
+    return VersionInformation{
+        .chosen_version = chosen_version,
+        .available_versions =
+            std::vector<std::uint32_t>(supported_versions.begin(), supported_versions.end()),
+    };
+}
+
+std::uint32_t select_server_version(std::span<const std::uint32_t> supported_versions,
+                                    std::uint32_t client_initial_version) {
+    if (client_initial_version == kQuicVersion1 && supports_quic_v2(supported_versions)) {
+        return kQuicVersion2;
+    }
+    if (supports_version(supported_versions, client_initial_version)) {
+        return client_initial_version;
+    }
+
+    return client_initial_version;
+}
 
 EndpointRole opposite_role(EndpointRole role) {
     return role == EndpointRole::client ? EndpointRole::server : EndpointRole::client;
@@ -651,7 +701,11 @@ void LocalStreamLimitState::mark_max_streams_frame_lost(const MaxStreamsFrame &f
 }
 
 QuicConnection::QuicConnection(QuicCoreConfig config)
-    : config_(std::move(config)), congestion_controller_(kMaximumDatagramSize) {
+    : config_(std::move(config)), original_version_(config_.original_version),
+      current_version_(config_.initial_version), congestion_controller_(kMaximumDatagramSize) {
+    if (config_.supported_versions.empty()) {
+        config_.supported_versions.push_back(current_version_);
+    }
     local_transport_parameters_ = TransportParameters{
         .max_idle_timeout = config_.transport.max_idle_timeout,
         .max_udp_payload_size = config_.transport.max_udp_payload_size,
@@ -699,7 +753,8 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             return;
         }
 
-        start_server_if_needed(initial_destination_connection_id.value());
+        start_server_if_needed(initial_destination_connection_id.value(),
+                               read_u32_be(bytes.subspan(1, 4)));
     }
 
     auto synced = sync_tls_state();
@@ -715,7 +770,13 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             return true;
         }
 
-        return ((first_byte >> 4) & 0x03u) == 0x02u;
+        if (packet_bytes.size() < 5) {
+            return false;
+        }
+
+        const auto version = read_u32_be(packet_bytes.subspan(1, 4));
+        return is_handshake_long_header_type(version,
+                                             static_cast<std::uint8_t>((first_byte >> 4) & 0x03u));
     };
     const auto packet_requires_connected_state = [](std::span<const std::byte> packet_bytes) {
         return (std::to_integer<std::uint8_t>(packet_bytes.front()) & 0x80u) == 0;
@@ -1537,6 +1598,8 @@ void QuicConnection::start_client_if_needed() {
         .initial_max_streams_bidi = config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
+        .version_information =
+            make_local_version_information(config_.supported_versions, current_version_),
     };
     initialize_local_flow_control();
 
@@ -1574,13 +1637,16 @@ void QuicConnection::start_client_if_needed() {
 }
 
 void QuicConnection::start_server_if_needed(
-    const ConnectionId &client_initial_destination_connection_id) {
+    const ConnectionId &client_initial_destination_connection_id,
+    std::uint32_t client_initial_version) {
     if (started_) {
         return;
     }
 
     started_ = true;
     status_ = HandshakeStatus::in_progress;
+    original_version_ = client_initial_version;
+    current_version_ = select_server_version(config_.supported_versions, client_initial_version);
     client_initial_destination_connection_id_ = client_initial_destination_connection_id;
     local_transport_parameters_ = TransportParameters{
         .original_destination_connection_id = client_initial_destination_connection_id_,
@@ -1597,6 +1663,8 @@ void QuicConnection::start_server_if_needed(
         .initial_max_streams_bidi = config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
+        .version_information =
+            make_local_version_information(config_.supported_versions, current_version_),
     };
     initialize_local_flow_control();
 
@@ -1624,6 +1692,12 @@ void QuicConnection::start_server_if_needed(
         .local_transport_parameters = serialized_transport_parameters.value(),
         .allowed_tls_cipher_suites = config_.allowed_tls_cipher_suites,
     });
+    const auto tls_started = tls_->start();
+    if (!tls_started.has_value()) {
+        log_codec_failure("tls_start", tls_started.error());
+        mark_failed();
+        return;
+    }
     static_cast<void>(sync_tls_state().value());
 }
 
@@ -1643,15 +1717,17 @@ CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connec
     if ((header_byte & 0x40u) == 0) {
         return CodecResult<ConnectionId>::failure(CodecErrorCode::invalid_fixed_bit, 0);
     }
-    if (((header_byte >> 4) & 0x03u) != 0x00u) {
-        return CodecResult<ConnectionId>::failure(CodecErrorCode::unsupported_packet_type, 0);
-    }
 
     const auto version = reader.read_exact(4);
     if (!version.has_value()) {
         return CodecResult<ConnectionId>::failure(version.error().code, version.error().offset);
     }
-    if (read_u32_be(version.value()) != kQuicVersion1) {
+    const auto version_value = read_u32_be(version.value());
+    if (!is_supported_quic_version(version_value)) {
+        return CodecResult<ConnectionId>::failure(CodecErrorCode::unsupported_packet_type, 0);
+    }
+    if (!is_initial_long_header_type(version_value,
+                                     static_cast<std::uint8_t>((header_byte >> 4) & 0x03u))) {
         return CodecResult<ConnectionId>::failure(CodecErrorCode::unsupported_packet_type, 0);
     }
 
@@ -1701,7 +1777,8 @@ QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const 
     if (!version.has_value()) {
         return CodecResult<std::size_t>::failure(version.error().code, version.error().offset);
     }
-    if (read_u32_be(version.value()) != kQuicVersion1) {
+    const auto version_value = read_u32_be(version.value());
+    if (!is_supported_quic_version(version_value)) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::unsupported_packet_type, 0);
     }
 
@@ -1739,7 +1816,7 @@ QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const 
     }
 
     const auto packet_type = static_cast<std::uint8_t>((header_byte >> 4) & 0x03u);
-    if (packet_type == 0x00u) {
+    if (is_initial_long_header_type(version_value, packet_type)) {
         const auto token_length = decode_varint(reader);
         if (!token_length.has_value()) {
             return CodecResult<std::size_t>::failure(token_length.error().code,
@@ -1750,7 +1827,7 @@ QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const 
                                                      reader.offset());
         }
         static_cast<void>(reader.read_exact(static_cast<std::size_t>(token_length.value().value)));
-    } else if (packet_type != 0x02u) {
+    } else if (!is_handshake_long_header_type(version_value, packet_type)) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::unsupported_packet_type, 0);
     }
 
@@ -1774,6 +1851,11 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
         [&](const auto &protected_packet) -> CodecResult<bool> {
             using PacketType = std::decay_t<decltype(protected_packet)>;
             if constexpr (std::is_same_v<PacketType, ProtectedInitialPacket>) {
+                if (config_.role == EndpointRole::client &&
+                    is_supported_quic_version(protected_packet.version) &&
+                    protected_packet.version != current_version_) {
+                    current_version_ = protected_packet.version;
+                }
                 if (initial_packet_space_discarded_) {
                     return CodecResult<bool>::success(true);
                 }
@@ -1807,6 +1889,11 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                 }
                 return processed;
             } else if constexpr (std::is_same_v<PacketType, ProtectedHandshakePacket>) {
+                if (config_.role == EndpointRole::client &&
+                    is_supported_quic_version(protected_packet.version) &&
+                    protected_packet.version != current_version_) {
+                    current_version_ = protected_packet.version;
+                }
                 if (should_reset_client_handshake_peer_state(
                         protected_packet.source_connection_id)) {
                     reset_client_handshake_peer_state_for_new_source_connection_id();
@@ -2396,6 +2483,7 @@ void QuicConnection::install_available_secrets() {
     }
 
     for (auto &available_secret : tls_->take_available_secrets()) {
+        available_secret.secret.quic_version = current_version_;
         auto &packet_space = packet_space_for_level(available_secret.level, initial_space_,
                                                     handshake_space_, application_space_);
         if (available_secret.sender == config_.role) {
@@ -2536,15 +2624,6 @@ void QuicConnection::mark_failed() {
         return;
     }
 
-    std::cerr << "quic mark_failed role=" << static_cast<int>(config_.role)
-              << " started=" << started_ << " handshake_confirmed=" << handshake_confirmed_
-              << " handshake_status=" << static_cast<int>(status_)
-              << " pending_send=" << has_pending_application_send()
-              << " bif=" << congestion_controller_.bytes_in_flight()
-              << " cwnd=" << congestion_controller_.congestion_window()
-              << " sent_packets=" << application_space_.sent_packets.size()
-              << " next_pn=" << application_space_.next_send_packet_number << '\n';
-
     status_ = HandshakeStatus::failed;
     streams_.clear();
     deferred_protected_packets_.clear();
@@ -2578,18 +2657,25 @@ QuicConnection::peer_transport_parameters_validation_context() const {
     }
 
     if (config_.role == EndpointRole::client) {
+        const auto expected_version_information =
+            make_local_version_information(config_.supported_versions, current_version_);
         return TransportParametersValidationContext{
             .expected_initial_source_connection_id = peer_source_connection_id_.value(),
             .expected_original_destination_connection_id =
                 client_initial_destination_connection_id(),
             .expected_retry_source_connection_id = std::nullopt,
+            .expected_version_information = expected_version_information,
+            .reacted_to_version_negotiation = config_.reacted_to_version_negotiation,
         };
     }
 
+    const auto expected_version_information =
+        make_local_version_information(config_.supported_versions, original_version_);
     return TransportParametersValidationContext{
         .expected_initial_source_connection_id = peer_source_connection_id_.value(),
         .expected_original_destination_connection_id = std::nullopt,
         .expected_retry_source_connection_id = std::nullopt,
+        .expected_version_information = expected_version_information,
     };
 }
 
@@ -2916,6 +3002,10 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
     const auto initial_destination_connection_id = config_.role == EndpointRole::client
                                                        ? client_initial_destination_connection_id()
                                                        : destination_connection_id;
+    const bool duplicate_first_compatible_server_initial_crypto =
+        (config_.role == EndpointRole::server) && (original_version_ != current_version_) &&
+        (initial_space_.next_send_packet_number == 0) &&
+        (handshake_space_.next_send_packet_number == 0);
     const bool initial_probe_pending = initial_space_.pending_probe_packet.has_value();
     const bool handshake_probe_pending = handshake_space_.pending_probe_packet.has_value();
     const bool application_probe_pending = application_space_.pending_probe_packet.has_value();
@@ -2940,21 +3030,36 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
         last_client_handshake_keepalive_probe_time_ = now;
     };
+    const bool defer_server_compatible_negotiation_crypto =
+        (config_.role == EndpointRole::server) && (original_version_ != current_version_) &&
+        !peer_transport_parameters_validated_;
+    const auto initial_packet_version =
+        defer_server_compatible_negotiation_crypto ? original_version_ : current_version_;
 
     std::vector<Frame> initial_frames;
-    if (const auto ack_frame =
-            initial_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now)) {
-        initial_frames.emplace_back(*ack_frame);
+    const auto initial_ack_frame =
+        initial_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now);
+    auto initial_crypto_ranges = std::vector<ByteRange>{};
+    if (!defer_server_compatible_negotiation_crypto) {
+        initial_crypto_ranges =
+            initial_space_.send_crypto.take_ranges(std::numeric_limits<std::size_t>::max());
     }
-    const auto initial_crypto_ranges =
-        initial_space_.send_crypto.take_ranges(std::numeric_limits<std::size_t>::max());
+    initial_frames.reserve(initial_crypto_ranges.size() +
+                           (initial_ack_frame.has_value() ? 1u : 0u) +
+                           (initial_space_.pending_probe_packet.has_value()
+                                ? initial_space_.pending_probe_packet->crypto_ranges.size() + 1u
+                                : 0u));
     for (const auto &range : initial_crypto_ranges) {
         initial_frames.emplace_back(CryptoFrame{
             .offset = range.offset,
             .crypto_data = range.bytes.to_vector(),
         });
     }
-    if (initial_space_.pending_probe_packet.has_value() &&
+    if (initial_ack_frame.has_value() && initial_crypto_ranges.empty()) {
+        initial_frames.emplace_back(*initial_ack_frame);
+    }
+    if (!defer_server_compatible_negotiation_crypto &&
+        initial_space_.pending_probe_packet.has_value() &&
         !has_ack_eliciting_frame(initial_frames)) {
         for (const auto &range : initial_space_.pending_probe_packet->crypto_ranges) {
             initial_frames.emplace_back(CryptoFrame{
@@ -2967,19 +3072,24 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         }
     }
     if (!initial_frames.empty()) {
+        const bool duplicate_compatible_negotiation_initial_crypto =
+            duplicate_first_compatible_server_initial_crypto && !initial_crypto_ranges.empty();
+        const auto build_initial_frames = [&]() {
+            std::vector<Frame> frames;
+            frames.reserve(initial_frames.size());
+            frames.insert(frames.end(), initial_frames.begin(), initial_frames.end());
+            return frames;
+        };
         const auto packet_number = initial_space_.next_send_packet_number++;
-        std::vector<Frame> frames;
-        frames.reserve(initial_frames.size());
-        frames.insert(frames.end(), initial_frames.begin(), initial_frames.end());
 
         packets.emplace_back(ProtectedInitialPacket{
-            .version = kQuicVersion1,
+            .version = initial_packet_version,
             .destination_connection_id = initial_destination_connection_id,
             .source_connection_id = config_.source_connection_id,
             .token = {},
             .packet_number_length = kDefaultInitialPacketNumberLength,
             .packet_number = packet_number,
-            .frames = std::move(frames),
+            .frames = build_initial_frames(),
         });
 
         SentPacketRecord sent_packet{
@@ -2990,7 +3100,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             .declared_lost = false,
             .crypto_ranges = initial_crypto_ranges,
         };
-        if (initial_space_.pending_probe_packet.has_value() && sent_packet.crypto_ranges.empty()) {
+        if (!defer_server_compatible_negotiation_crypto &&
+            initial_space_.pending_probe_packet.has_value() && sent_packet.crypto_ranges.empty()) {
             sent_packet.crypto_ranges = initial_space_.pending_probe_packet->crypto_ranges;
             sent_packet.has_ping = initial_space_.pending_probe_packet->has_ping;
         }
@@ -3003,32 +3114,60 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             initial_space_.pending_ack_deadline = std::nullopt;
             initial_space_.force_ack_send = false;
         }
-        clear_probe_packet_after_send(initial_space_.pending_probe_packet);
+        if (!defer_server_compatible_negotiation_crypto) {
+            clear_probe_packet_after_send(initial_space_.pending_probe_packet);
+        }
+
+        if (duplicate_compatible_negotiation_initial_crypto) {
+            const auto duplicate_packet_number = initial_space_.next_send_packet_number++;
+            packets.emplace_back(ProtectedInitialPacket{
+                .version = initial_packet_version,
+                .destination_connection_id = initial_destination_connection_id,
+                .source_connection_id = config_.source_connection_id,
+                .token = {},
+                .packet_number_length = kDefaultInitialPacketNumberLength,
+                .packet_number = duplicate_packet_number,
+                .frames = build_initial_frames(),
+            });
+
+            track_sent_packet(initial_space_,
+                              SentPacketRecord{
+                                  .packet_number = duplicate_packet_number,
+                                  .sent_time = now,
+                                  .ack_eliciting = has_ack_eliciting_frame(initial_frames),
+                                  .in_flight = has_ack_eliciting_frame(initial_frames),
+                                  .declared_lost = false,
+                                  .crypto_ranges = initial_crypto_ranges,
+                              });
+        }
     }
 
     std::vector<Frame> handshake_frames;
-    if (const auto ack_frame =
-            handshake_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now)) {
-        handshake_frames.emplace_back(*ack_frame);
-    }
-    const auto handshake_crypto_ranges =
-        handshake_space_.send_crypto.take_ranges(std::numeric_limits<std::size_t>::max());
-    for (const auto &range : handshake_crypto_ranges) {
-        handshake_frames.emplace_back(CryptoFrame{
-            .offset = range.offset,
-            .crypto_data = range.bytes.to_vector(),
-        });
-    }
-    if (handshake_space_.pending_probe_packet.has_value() &&
-        !has_ack_eliciting_frame(handshake_frames)) {
-        for (const auto &range : handshake_space_.pending_probe_packet->crypto_ranges) {
+    auto handshake_crypto_ranges = std::vector<ByteRange>{};
+    if (!defer_server_compatible_negotiation_crypto) {
+        if (const auto ack_frame =
+                handshake_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now)) {
+            handshake_frames.emplace_back(*ack_frame);
+        }
+        handshake_crypto_ranges =
+            handshake_space_.send_crypto.take_ranges(std::numeric_limits<std::size_t>::max());
+        for (const auto &range : handshake_crypto_ranges) {
             handshake_frames.emplace_back(CryptoFrame{
                 .offset = range.offset,
                 .crypto_data = range.bytes.to_vector(),
             });
         }
-        if (!has_ack_eliciting_frame(handshake_frames)) {
-            handshake_frames.emplace_back(PingFrame{});
+        if (handshake_space_.pending_probe_packet.has_value() &&
+            !has_ack_eliciting_frame(handshake_frames)) {
+            for (const auto &range : handshake_space_.pending_probe_packet->crypto_ranges) {
+                handshake_frames.emplace_back(CryptoFrame{
+                    .offset = range.offset,
+                    .crypto_data = range.bytes.to_vector(),
+                });
+            }
+            if (!has_ack_eliciting_frame(handshake_frames)) {
+                handshake_frames.emplace_back(PingFrame{});
+            }
         }
     }
     if (!handshake_frames.empty()) {
@@ -3043,7 +3182,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         frames.insert(frames.end(), handshake_frames.begin(), handshake_frames.end());
 
         packets.emplace_back(ProtectedHandshakePacket{
-            .version = kQuicVersion1,
+            .version = current_version_,
             .destination_connection_id = destination_connection_id,
             .source_connection_id = config_.source_connection_id,
             .packet_number_length = kDefaultInitialPacketNumberLength,

@@ -344,6 +344,38 @@ TEST(QuicPacketCryptoTest, DerivesClientInitialKeysForServerReceiveFromRfc9001Ap
     EXPECT_EQ(to_hex(keys.value().hp_key), "9f50449e04a0e810283a1e9933adedd2");
 }
 
+TEST(QuicPacketCryptoTest, DerivesClientInitialKeysFromRfc9369AppendixA1) {
+    const auto keys = coquic::quic::derive_initial_packet_keys(
+        coquic::quic::EndpointRole::client, true, hex_bytes("8394c8f03e515708"), 0x6b3343cfu);
+    ASSERT_TRUE(keys.has_value());
+    EXPECT_EQ(to_hex(keys.value().key), "8b1a0bc121284290a29e0971b5cd045d");
+    EXPECT_EQ(to_hex(keys.value().iv), "91f73e2351d8fa91660e909f");
+    EXPECT_EQ(to_hex(keys.value().hp_key), "45b95e15235d6f45a6b19cbcb0294ba9");
+}
+
+TEST(QuicPacketCryptoTest, DerivesServerInitialKeysFromRfc9369AppendixA1) {
+    const auto keys = coquic::quic::derive_initial_packet_keys(
+        coquic::quic::EndpointRole::server, true, hex_bytes("8394c8f03e515708"), 0x6b3343cfu);
+    ASSERT_TRUE(keys.has_value());
+    EXPECT_EQ(to_hex(keys.value().key), "82db637861d55e1d011f19ea71d5d2a7");
+    EXPECT_EQ(to_hex(keys.value().iv), "dd13c276499c0249d3310652");
+    EXPECT_EQ(to_hex(keys.value().hp_key), "edf6d05c83121201b436e16877593c3a");
+}
+
+TEST(QuicPacketCryptoTest, DerivesDifferentInitialKeysForQuicV2) {
+    const auto v1_keys = coquic::quic::derive_initial_packet_keys(
+        coquic::quic::EndpointRole::client, true, hex_bytes("8394c8f03e515708"), 0x00000001u);
+    ASSERT_TRUE(v1_keys.has_value());
+
+    const auto v2_keys = coquic::quic::derive_initial_packet_keys(
+        coquic::quic::EndpointRole::client, true, hex_bytes("8394c8f03e515708"), 0x6b3343cfu);
+    ASSERT_TRUE(v2_keys.has_value());
+
+    EXPECT_NE(to_hex(v1_keys.value().key), to_hex(v2_keys.value().key));
+    EXPECT_NE(to_hex(v1_keys.value().iv), to_hex(v2_keys.value().iv));
+    EXPECT_NE(to_hex(v1_keys.value().hp_key), to_hex(v2_keys.value().hp_key));
+}
+
 TEST(QuicPacketCryptoTest, DerivesInitialKeysForEmptyDestinationConnectionId) {
     const auto client_keys =
         coquic::quic::derive_initial_packet_keys(coquic::quic::EndpointRole::client, true, {});

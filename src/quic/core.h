@@ -11,6 +11,7 @@
 
 #include "src/quic/packet.h"
 #include "src/quic/tls_adapter.h"
+#include "src/quic/version.h"
 
 namespace coquic::quic {
 
@@ -31,6 +32,10 @@ struct QuicCoreConfig {
     EndpointRole role = EndpointRole::client;
     ConnectionId source_connection_id;
     ConnectionId initial_destination_connection_id;
+    std::uint32_t original_version = kQuicVersion1;
+    std::uint32_t initial_version = kQuicVersion1;
+    std::vector<std::uint32_t> supported_versions = {kQuicVersion1};
+    bool reacted_to_version_negotiation = false;
     bool verify_peer = false;
     std::string server_name = "localhost";
     std::string application_protocol = "coquic";
@@ -140,6 +145,7 @@ class QuicCore {
     bool has_failed() const;
 
   private:
+    QuicCoreConfig config_;
     std::unique_ptr<QuicConnection> connection_;
 };
 

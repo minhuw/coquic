@@ -369,6 +369,61 @@ inline void drive_quic_handshake(QuicCore &client, QuicCore &server, QuicCoreTim
     }
 }
 
+inline void
+drive_quic_handshake_from_results(QuicCore &client, QuicCore &server, QuicCoreResult to_server,
+                                  QuicCoreResult to_client, QuicCoreTimePoint now,
+                                  std::vector<QuicCoreStateChange> *client_events = nullptr,
+                                  std::vector<QuicCoreStateChange> *server_events = nullptr) {
+    const auto append_state_changes = [](const QuicCoreResult &result,
+                                         std::vector<QuicCoreStateChange> *events) {
+        if (events == nullptr) {
+            return;
+        }
+        auto changes = state_changes_from(result);
+        events->insert(events->end(), changes.begin(), changes.end());
+    };
+
+    auto step_to_server = std::move(to_server);
+    auto step_to_client = std::move(to_client);
+    auto step_now = now;
+
+    for (int i = 0; i < 32; ++i) {
+        if (!send_datagrams_from(step_to_server).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            step_to_client = relay_send_datagrams_to_peer(step_to_server, server, step_now);
+            append_state_changes(step_to_client, server_events);
+            step_to_server.effects.clear();
+            continue;
+        }
+
+        if (!send_datagrams_from(step_to_client).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            step_to_server = relay_send_datagrams_to_peer(step_to_client, client, step_now);
+            append_state_changes(step_to_server, client_events);
+            step_to_client.effects.clear();
+            continue;
+        }
+
+        const auto next =
+            earliest_next_wakeup({step_to_server.next_wakeup, step_to_client.next_wakeup});
+        if (!next.has_value()) {
+            break;
+        }
+
+        if (step_to_server.next_wakeup.has_value() && *step_to_server.next_wakeup == *next) {
+            step_to_server = client.advance(QuicCoreTimerExpired{}, *next);
+            append_state_changes(step_to_server, client_events);
+            continue;
+        }
+
+        if (step_to_client.next_wakeup.has_value() && *step_to_client.next_wakeup == *next) {
+            step_to_client = server.advance(QuicCoreTimerExpired{}, *next);
+            append_state_changes(step_to_client, server_events);
+            continue;
+        }
+    }
+}
+
 inline std::vector<std::byte> bytes_from_string(std::string_view text) {
     std::vector<std::byte> bytes;
     bytes.reserve(text.size());

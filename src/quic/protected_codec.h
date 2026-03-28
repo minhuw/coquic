@@ -10,6 +10,7 @@
 
 #include "src/quic/packet.h"
 #include "src/quic/varint.h"
+#include "src/quic/version.h"
 
 namespace coquic::quic {
 
@@ -28,6 +29,7 @@ struct TrafficSecret {
     CipherSuite cipher_suite;
     std::vector<std::byte> secret;
     std::optional<std::vector<std::byte>> header_protection_key;
+    std::uint32_t quic_version = kQuicVersion1;
 };
 
 struct ProtectedInitialPacket {

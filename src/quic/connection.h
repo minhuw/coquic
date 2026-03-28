@@ -111,7 +111,8 @@ class QuicConnection {
 
   private:
     void start_client_if_needed();
-    void start_server_if_needed(const ConnectionId &client_initial_destination_connection_id);
+    void start_server_if_needed(const ConnectionId &client_initial_destination_connection_id,
+                                std::uint32_t client_initial_version = kQuicVersion1);
     CodecResult<ConnectionId>
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
@@ -173,6 +174,8 @@ class QuicConnection {
     void queue_state_change(QuicCoreStateChange change);
 
     QuicCoreConfig config_;
+    std::uint32_t original_version_;
+    std::uint32_t current_version_;
     HandshakeStatus status_ = HandshakeStatus::idle;
     bool started_ = false;
     PacketSpaceState initial_space_;

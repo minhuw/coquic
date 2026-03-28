@@ -12,6 +12,7 @@
 
 #include "src/quic/packet_crypto.h"
 #include "src/quic/packet_crypto_test_hooks.h"
+#include "src/quic/version.h"
 
 namespace coquic::quic::detail {
 
@@ -24,6 +25,13 @@ constexpr std::array<std::byte, 20> quic_v1_initial_salt{
     std::byte{0xad}, std::byte{0xcc}, std::byte{0xbb}, std::byte{0x7f}, std::byte{0x0a},
 };
 
+constexpr std::array<std::byte, 20> quic_v2_initial_salt{
+    std::byte{0x0d}, std::byte{0xed}, std::byte{0xe3}, std::byte{0xde}, std::byte{0xf7},
+    std::byte{0x00}, std::byte{0xa6}, std::byte{0xdb}, std::byte{0x81}, std::byte{0x93},
+    std::byte{0x81}, std::byte{0xbe}, std::byte{0x6e}, std::byte{0x26}, std::byte{0x9d},
+    std::byte{0xcb}, std::byte{0xf9}, std::byte{0xbd}, std::byte{0x2e}, std::byte{0xd9},
+};
+
 constexpr std::string_view tls13_label_prefix = "tls13 ";
 constexpr std::size_t aead_tag_length = 16;
 constexpr std::size_t header_protection_sample_length = 16;
@@ -34,6 +42,13 @@ struct CipherSuiteParameters {
     std::size_t key_length;
     std::size_t iv_length;
     std::size_t hp_key_length;
+};
+
+struct PacketProtectionLabels {
+    std::string_view key;
+    std::string_view iv;
+    std::string_view hp;
+    std::string_view ku;
 };
 
 struct PacketCryptoFaultState {
@@ -76,6 +91,42 @@ inline CodecResult<std::vector<std::byte>> crypto_failure(CodecErrorCode code) {
 
 inline CodecResult<PacketProtectionKeys> packet_key_failure(CodecErrorCode code) {
     return CodecResult<PacketProtectionKeys>::failure(code, 0);
+}
+
+inline CodecResult<std::span<const std::byte>> initial_salt_for_version(std::uint32_t version) {
+    if (version == kQuicVersion1) {
+        return CodecResult<std::span<const std::byte>>::success(
+            std::span<const std::byte>(quic_v1_initial_salt));
+    }
+    if (version == kQuicVersion2) {
+        return CodecResult<std::span<const std::byte>>::success(
+            std::span<const std::byte>(quic_v2_initial_salt));
+    }
+
+    return CodecResult<std::span<const std::byte>>::failure(CodecErrorCode::unsupported_packet_type,
+                                                            0);
+}
+
+inline CodecResult<PacketProtectionLabels>
+packet_protection_labels_for_version(std::uint32_t version) {
+    if (version == kQuicVersion1) {
+        return CodecResult<PacketProtectionLabels>::success(PacketProtectionLabels{
+            .key = "quic key",
+            .iv = "quic iv",
+            .hp = "quic hp",
+            .ku = "quic ku",
+        });
+    }
+    if (version == kQuicVersion2) {
+        return CodecResult<PacketProtectionLabels>::success(PacketProtectionLabels{
+            .key = "quicv2 key",
+            .iv = "quicv2 iv",
+            .hp = "quicv2 hp",
+            .ku = "quicv2 ku",
+        });
+    }
+
+    return CodecResult<PacketProtectionLabels>::failure(CodecErrorCode::unsupported_packet_type, 0);
 }
 
 inline const unsigned char *openssl_data(std::span<const std::byte> bytes) {

@@ -18,6 +18,7 @@ enum class QuicHttp09Testcase : std::uint8_t {
     transfer,
     multiconnect,
     chacha20,
+    v2,
 };
 
 struct QuicHttp09Request {

@@ -696,6 +696,123 @@ TEST(QuicProtectedCodecTest, RejectsInitialWithoutClientInitialDestinationConnec
     EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
 }
 
+TEST(QuicProtectedCodecTest, RoundTripsQuicV2InitialPacket) {
+    auto packet = make_minimal_initial_packet();
+    packet.version = 0x6b3343cfu;
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(encoded.value().front()) & 0xf0u, 0xd0u);
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(), make_rfc9001_client_initial_deserialize_context());
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&decoded.value()[0]);
+    ASSERT_NE(initial, nullptr);
+    EXPECT_EQ(initial->version, 0x6b3343cfu);
+    EXPECT_EQ(initial->packet_number, 0u);
+}
+
+TEST(QuicProtectedCodecTest, RoundTripsQuicV2HandshakePacket) {
+    auto packet = make_minimal_handshake_packet();
+    packet.version = coquic::quic::kQuicVersion2;
+    const auto context = make_handshake_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/32);
+    const auto decode_context = make_handshake_deserialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/32);
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(packets, context);
+    ASSERT_TRUE(encoded.has_value());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(encoded.value().front()) & 0xf0u, 0xf0u);
+
+    const auto decoded =
+        coquic::quic::deserialize_protected_datagram(encoded.value(), decode_context);
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+    const auto *handshake =
+        std::get_if<coquic::quic::ProtectedHandshakePacket>(&decoded.value()[0]);
+    ASSERT_NE(handshake, nullptr);
+    EXPECT_EQ(handshake->version, coquic::quic::kQuicVersion2);
+    EXPECT_EQ(handshake->packet_number, 0x1234u);
+}
+
+TEST(QuicProtectedCodecTest, RoundTripsPaddedQuicV2InitialAndHandshakeDatagramWithCryptoFrames) {
+    coquic::quic::ProtectedInitialPacket initial{
+        .version = coquic::quic::kQuicVersion2,
+        .destination_connection_id = hex_bytes("8394c8f03e515708"),
+        .source_connection_id = hex_bytes("c101"),
+        .packet_number_length = 2,
+        .packet_number = 0,
+        .frames =
+            {
+                coquic::quic::CryptoFrame{
+                    .offset = 0,
+                    .crypto_data = hex_bytes("0102030405060708"),
+                },
+            },
+    };
+    coquic::quic::ProtectedHandshakePacket handshake{
+        .version = coquic::quic::kQuicVersion2,
+        .destination_connection_id = hex_bytes("8394c8f03e515708"),
+        .source_connection_id = hex_bytes("c101"),
+        .packet_number_length = 2,
+        .packet_number = 0x1234u,
+        .frames =
+            {
+                coquic::quic::CryptoFrame{
+                    .offset = 0,
+                    .crypto_data = hex_bytes("1112131415161718"),
+                },
+            },
+    };
+    auto packets = std::vector<coquic::quic::ProtectedPacket>{
+        initial,
+        handshake,
+    };
+    const auto context = make_initial_and_handshake_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/32);
+    const auto decode_context = make_initial_and_handshake_deserialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/32);
+
+    auto encoded = coquic::quic::serialize_protected_datagram(packets, context);
+    ASSERT_TRUE(encoded.has_value());
+    if (encoded.value().size() < 1200u) {
+        auto *initial_packet = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets.front());
+        ASSERT_NE(initial_packet, nullptr);
+        initial_packet->frames.emplace_back(coquic::quic::PaddingFrame{
+            .length = 1200u - encoded.value().size(),
+        });
+        encoded = coquic::quic::serialize_protected_datagram(packets, context);
+        ASSERT_TRUE(encoded.has_value());
+    }
+
+    const auto decoded =
+        coquic::quic::deserialize_protected_datagram(encoded.value(), decode_context);
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 2u);
+
+    const auto *decoded_initial =
+        std::get_if<coquic::quic::ProtectedInitialPacket>(&decoded.value()[0]);
+    ASSERT_NE(decoded_initial, nullptr);
+    ASSERT_FALSE(decoded_initial->frames.empty());
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::CryptoFrame>(decoded_initial->frames.front()));
+    if (const auto *crypto =
+            std::get_if<coquic::quic::CryptoFrame>(&decoded_initial->frames.front())) {
+        EXPECT_EQ(crypto->crypto_data, hex_bytes("0102030405060708"));
+    }
+
+    const auto *decoded_handshake =
+        std::get_if<coquic::quic::ProtectedHandshakePacket>(&decoded.value()[1]);
+    ASSERT_NE(decoded_handshake, nullptr);
+    ASSERT_FALSE(decoded_handshake->frames.empty());
+    EXPECT_TRUE(
+        std::holds_alternative<coquic::quic::CryptoFrame>(decoded_handshake->frames.front()));
+}
+
 TEST(QuicProtectedCodecTest, RejectsInitialPacketWithUnsupportedVersion) {
     auto packet = make_minimal_initial_packet();
     packet.version = 2;

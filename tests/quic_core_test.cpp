@@ -27,6 +27,13 @@ std::vector<std::byte> bytes_from_ints(std::initializer_list<std::uint8_t> value
     return bytes;
 }
 
+std::uint32_t read_u32_be_at(std::span<const std::byte> bytes, std::size_t offset) {
+    return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset])) << 24) |
+           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 1])) << 16) |
+           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 2])) << 8) |
+           static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 3]));
+}
+
 std::uint8_t hex_nibble_or_terminate(char value) {
     if (value >= '0' && value <= '9') {
         return static_cast<std::uint8_t>(value - '0');
@@ -2071,6 +2078,37 @@ TEST(QuicCoreTest, OneRttPacketTerminatesOnConnectionCloseFrames) {
     EXPECT_EQ(connection.next_wakeup(), std::nullopt);
 }
 
+TEST(QuicCoreTest, ConnectionCloseFramesDoNotEmitInternalFailureDebugLog) {
+    auto connection = make_connected_client_connection();
+
+    testing::internal::CaptureStderr();
+    EXPECT_TRUE(coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection,
+        {coquic::quic::TransportConnectionCloseFrame{
+            .error_code = 0,
+            .frame_type = 0,
+        }},
+        /*packet_number=*/1));
+    const auto transport_close_stderr = testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(connection.has_failed());
+    EXPECT_TRUE(transport_close_stderr.empty());
+
+    connection = make_connected_client_connection();
+
+    testing::internal::CaptureStderr();
+    EXPECT_TRUE(coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection,
+        {coquic::quic::ApplicationConnectionCloseFrame{
+            .error_code = 0,
+        }},
+        /*packet_number=*/2));
+    const auto application_close_stderr = testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(connection.has_failed());
+    EXPECT_TRUE(application_close_stderr.empty());
+}
+
 TEST(QuicCoreTest, AckProcessingClearsOutstandingDataAndRemovesWakeup) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
@@ -3451,7 +3489,6 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveTrackingIgnoresRetransmittableProbePa
         .packet_number = 1,
         .ack_eliciting = true,
         .in_flight = true,
-        .has_ping = true,
         .crypto_ranges =
             {
                 coquic::quic::ByteRange{
@@ -3459,6 +3496,7 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveTrackingIgnoresRetransmittableProbePa
                     .bytes = {std::byte{0x01}},
                 },
             },
+        .has_ping = true,
     };
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
@@ -3541,7 +3579,6 @@ TEST(QuicCoreTest, ClientHandshakeAckOfRetransmittableProbeResetsPtoBackoff) {
             .sent_time = coquic::quic::test::test_time(1),
             .ack_eliciting = true,
             .in_flight = true,
-            .has_ping = true,
             .max_streams_frames =
                 {
                     coquic::quic::MaxStreamsFrame{
@@ -3549,6 +3586,7 @@ TEST(QuicCoreTest, ClientHandshakeAckOfRetransmittableProbeResetsPtoBackoff) {
                         .maximum_streams = 1,
                     },
                 },
+            .has_ping = true,
             .bytes_in_flight = 1,
         });
 
@@ -6362,6 +6400,225 @@ TEST(QuicCoreTest, ConnectionParserHelpersRejectMalformedPacketLengths) {
     EXPECT_EQ(payload_too_long.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
 }
 
+TEST(QuicCoreTest, ConnectionParserHelpersAcceptQuicV2InitialHeaders) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
+
+    const auto destination_connection_id = connection.peek_client_initial_destination_connection_id(
+        bytes_from_ints({0xd0, 0x6b, 0x33, 0x43, 0xcf, 0x04, 0x01, 0x02, 0x03, 0x04}));
+    ASSERT_TRUE(destination_connection_id.has_value());
+    EXPECT_EQ(destination_connection_id.value(), (coquic::quic::ConnectionId{
+                                                     std::byte{0x01},
+                                                     std::byte{0x02},
+                                                     std::byte{0x03},
+                                                     std::byte{0x04},
+                                                 }));
+
+    const auto packet_length = connection.peek_next_packet_length(bytes_from_ints(
+        {0xd0, 0x6b, 0x33, 0x43, 0xcf, 0x01, 0xaa, 0x01, 0xbb, 0x00, 0x02, 0x01, 0x02}));
+    ASSERT_TRUE(packet_length.has_value());
+    EXPECT_EQ(packet_length.value(), 13u);
+}
+
+TEST(QuicCoreTest, ClientRestartsHandshakeAfterValidVersionNegotiation) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.original_version = 0x00000001u;
+    client_config.initial_version = 0x00000001u;
+    client_config.supported_versions = {0x6b3343cfu, 0x00000001u};
+    coquic::quic::QuicCore client(std::move(client_config));
+
+    const auto start =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
+
+    const auto version_negotiation =
+        coquic::quic::serialize_packet(coquic::quic::VersionNegotiationPacket{
+            .destination_connection_id = {std::byte{0xc1}, std::byte{0x01}},
+            .source_connection_id = {std::byte{0x83}, std::byte{0x94}, std::byte{0xc8},
+                                     std::byte{0xf0}, std::byte{0x3e}, std::byte{0x51},
+                                     std::byte{0x57}, std::byte{0x08}},
+            .supported_versions = {0x6b3343cfu},
+        });
+    ASSERT_TRUE(version_negotiation.has_value());
+
+    const auto after_version_negotiation =
+        client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = version_negotiation.value()},
+                       coquic::quic::test::test_time(1));
+    const auto restart_datagrams =
+        coquic::quic::test::send_datagrams_from(after_version_negotiation);
+    ASSERT_FALSE(restart_datagrams.empty());
+    EXPECT_EQ(read_u32_be_at(restart_datagrams.front(), 1), 0x6b3343cfu);
+    EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicCoreTest, ClientIgnoresVersionNegotiationThatEchoesOriginalVersion) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.original_version = 0x00000001u;
+    client_config.initial_version = 0x00000001u;
+    client_config.supported_versions = {0x6b3343cfu, 0x00000001u};
+    coquic::quic::QuicCore client(std::move(client_config));
+
+    const auto start =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
+
+    const auto version_negotiation =
+        coquic::quic::serialize_packet(coquic::quic::VersionNegotiationPacket{
+            .destination_connection_id = {std::byte{0xc1}, std::byte{0x01}},
+            .source_connection_id = {std::byte{0x83}, std::byte{0x94}, std::byte{0xc8},
+                                     std::byte{0xf0}, std::byte{0x3e}, std::byte{0x51},
+                                     std::byte{0x57}, std::byte{0x08}},
+            .supported_versions = {0x00000001u, 0x6b3343cfu},
+        });
+    ASSERT_TRUE(version_negotiation.has_value());
+
+    const auto after_version_negotiation =
+        client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = version_negotiation.value()},
+                       coquic::quic::test::test_time(1));
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_version_negotiation).empty());
+    EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicCoreTest, NativeQuicV2HandshakeCompletes) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.original_version = coquic::quic::kQuicVersion2;
+    client_config.initial_version = coquic::quic::kQuicVersion2;
+    client_config.supported_versions = {coquic::quic::kQuicVersion2};
+    coquic::quic::QuicCore client(std::move(client_config));
+
+    auto server_config = coquic::quic::test::make_server_core_config();
+    server_config.original_version = coquic::quic::kQuicVersion2;
+    server_config.initial_version = coquic::quic::kQuicVersion2;
+    server_config.supported_versions = {coquic::quic::kQuicVersion2};
+    coquic::quic::QuicCore server(std::move(server_config));
+
+    const auto start =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto start_datagrams = coquic::quic::test::send_datagrams_from(start);
+    ASSERT_FALSE(start_datagrams.empty());
+    EXPECT_EQ(read_u32_be_at(start_datagrams.front(), 1), coquic::quic::kQuicVersion2);
+
+    coquic::quic::test::drive_quic_handshake_from_results(client, server, start, {},
+                                                          coquic::quic::test::test_time());
+
+    EXPECT_TRUE(client.is_handshake_complete());
+    EXPECT_TRUE(server.is_handshake_complete());
+    EXPECT_FALSE(client.has_failed());
+    EXPECT_FALSE(server.has_failed());
+}
+
+TEST(QuicCoreTest,
+     CompatibleNegotiationServerDefersNegotiatedVersionCryptoUntilPeerTransportParametersValidate) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.original_version = coquic::quic::kQuicVersion1;
+    config.initial_version = coquic::quic::kQuicVersion1;
+    config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.original_version_ = coquic::quic::kQuicVersion1;
+    connection.current_version_ = coquic::quic::kQuicVersion2;
+    connection.client_initial_destination_connection_id_ = bytes_from_hex("8394c8f03e515708");
+    connection.peer_source_connection_id_ = bytes_from_hex("c101");
+    connection.initial_space_.send_crypto.append(
+        coquic::quic::test::bytes_from_string("serverhello"));
+    connection.handshake_space_.send_crypto.append(
+        coquic::quic::test::bytes_from_string("encryptedextensions"));
+    connection.handshake_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x61});
+    connection.initial_space_.received_packets.record_received(
+        /*packet_number=*/0, /*ack_eliciting=*/true, coquic::quic::test::test_time(1));
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets.front());
+    ASSERT_NE(initial, nullptr);
+    EXPECT_EQ(initial->version, coquic::quic::kQuicVersion1);
+    EXPECT_TRUE(std::ranges::none_of(initial->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::CryptoFrame>(frame);
+    }));
+
+    EXPECT_TRUE(connection.initial_space_.send_crypto.has_pending_data());
+    EXPECT_TRUE(connection.handshake_space_.send_crypto.has_pending_data());
+}
+
+TEST(QuicCoreTest, CompatibleNegotiationUpgradesV1HandshakeToV2) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.source_connection_id = bytes_from_hex("c100000000000001");
+    client_config.initial_destination_connection_id = bytes_from_hex("8300000000000000");
+    client_config.original_version = coquic::quic::kQuicVersion1;
+    client_config.initial_version = coquic::quic::kQuicVersion1;
+    client_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicCore client(std::move(client_config));
+
+    auto server_config = coquic::quic::test::make_server_core_config();
+    server_config.source_connection_id = bytes_from_hex("5300000000000001");
+    server_config.original_version = coquic::quic::kQuicVersion1;
+    server_config.initial_version = coquic::quic::kQuicVersion1;
+    server_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicCore server(std::move(server_config));
+
+    const auto assert_long_header_version = [](const coquic::quic::QuicConnection &connection,
+                                               std::span<const std::vector<std::byte>> datagrams,
+                                               std::uint32_t expected_version) {
+        bool saw_long_header = false;
+        for (const auto &datagram : datagrams) {
+            for (const auto &packet : decode_sender_datagram(connection, datagram)) {
+                if (const auto *initial =
+                        std::get_if<coquic::quic::ProtectedInitialPacket>(&packet)) {
+                    saw_long_header = true;
+                    EXPECT_EQ(initial->version, expected_version);
+                    continue;
+                }
+                if (const auto *handshake =
+                        std::get_if<coquic::quic::ProtectedHandshakePacket>(&packet)) {
+                    saw_long_header = true;
+                    EXPECT_EQ(handshake->version, expected_version);
+                }
+            }
+        }
+        EXPECT_TRUE(saw_long_header);
+    };
+
+    const auto start =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto client_start_datagrams = coquic::quic::test::send_datagrams_from(start);
+    ASSERT_FALSE(client_start_datagrams.empty());
+    EXPECT_EQ(read_u32_be_at(client_start_datagrams.front(), 1), coquic::quic::kQuicVersion1);
+
+    const auto server_first_flight = coquic::quic::test::relay_send_datagrams_to_peer(
+        start, server, coquic::quic::test::test_time(1));
+    const auto server_first_flight_datagrams =
+        coquic::quic::test::send_datagrams_from(server_first_flight);
+    ASSERT_FALSE(server_first_flight_datagrams.empty());
+    ASSERT_NE(server.connection_, nullptr);
+    EXPECT_EQ(server.connection_->original_version_, coquic::quic::kQuicVersion1);
+    EXPECT_EQ(server.connection_->current_version_, coquic::quic::kQuicVersion2);
+    assert_long_header_version(*server.connection_, server_first_flight_datagrams,
+                               coquic::quic::kQuicVersion2);
+
+    const auto client_handshake = coquic::quic::test::relay_send_datagrams_to_peer(
+        server_first_flight, client, coquic::quic::test::test_time(2));
+    ASSERT_NE(client.connection_, nullptr);
+    EXPECT_EQ(client.connection_->current_version_, coquic::quic::kQuicVersion2);
+    const auto client_handshake_datagrams =
+        coquic::quic::test::send_datagrams_from(client_handshake);
+    ASSERT_FALSE(client_handshake_datagrams.empty());
+    assert_long_header_version(*client.connection_, client_handshake_datagrams,
+                               coquic::quic::kQuicVersion2);
+
+    coquic::quic::test::drive_quic_handshake_from_results(client, server, client_handshake, {},
+                                                          coquic::quic::test::test_time(2));
+
+    EXPECT_TRUE(client.is_handshake_complete());
+    EXPECT_TRUE(server.is_handshake_complete());
+    EXPECT_FALSE(client.has_failed());
+    EXPECT_FALSE(server.has_failed());
+}
+
 TEST(QuicCoreTest, UnexpectedFirstInboundDatagramsFailAndLaterCallsAreInert) {
     coquic::quic::QuicConnection client(coquic::quic::test::make_client_core_config());
     client.process_inbound_datagram(bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00}),
@@ -7153,6 +7410,110 @@ TEST(QuicCoreTest, ProcessCapturedPicoquicClientInitialPacketStartsServerHandsha
               bytes_from_hex("5398e92f19c36598"));
     EXPECT_EQ(connection.peer_source_connection_id_, bytes_from_hex("825ff16a7a5d8b9f"));
     EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
+}
+
+TEST(QuicCoreTest, ProcessCapturedPicoquicClientInitialPacketEmitsInitialCrypto) {
+    auto datagram = captured_picoquic_client_initial_datagram();
+    const auto initial_packet_bytes = std::span<const std::byte>(datagram).first(346);
+
+    auto config = coquic::quic::test::make_server_core_config();
+    config.application_protocol = "hq-interop";
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.process_inbound_datagram(initial_packet_bytes, coquic::quic::test::test_time(1));
+
+    const auto outbound = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(outbound.empty());
+    ASSERT_FALSE(connection.initial_space_.sent_packets.empty());
+    EXPECT_FALSE(connection.initial_space_.sent_packets.begin()->second.crypto_ranges.empty());
+}
+
+TEST(QuicCoreTest, CompatibleNegotiationServerFirstFlightEmitsV2InitialCrypto) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.original_version = coquic::quic::kQuicVersion1;
+    client_config.initial_version = coquic::quic::kQuicVersion1;
+    client_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicCore client(std::move(client_config));
+
+    auto server_config = coquic::quic::test::make_server_core_config();
+    server_config.original_version = coquic::quic::kQuicVersion1;
+    server_config.initial_version = coquic::quic::kQuicVersion1;
+    server_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicCore server(std::move(server_config));
+
+    const auto start =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto server_first_flight = coquic::quic::test::relay_send_datagrams_to_peer(
+        start, server, coquic::quic::test::test_time(1));
+    const auto server_first_flight_datagrams =
+        coquic::quic::test::send_datagrams_from(server_first_flight);
+    ASSERT_NE(server.connection_, nullptr);
+    ASSERT_FALSE(server_first_flight_datagrams.empty());
+
+    const auto packets =
+        decode_sender_datagram(*server.connection_, server_first_flight_datagrams.front());
+    const auto initial_packet =
+        std::find_if(packets.begin(), packets.end(), [](const auto &packet) {
+            return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packet);
+        });
+    ASSERT_NE(initial_packet, packets.end());
+
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&*initial_packet);
+    ASSERT_NE(initial, nullptr);
+    EXPECT_EQ(initial->version, coquic::quic::kQuicVersion2);
+    EXPECT_TRUE(std::ranges::any_of(initial->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::CryptoFrame>(frame);
+    }));
+    ASSERT_FALSE(initial->frames.empty());
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::CryptoFrame>(initial->frames.front()));
+    EXPECT_FALSE(std::ranges::any_of(initial->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::AckFrame>(frame);
+    }));
+}
+
+TEST(QuicCoreTest, CompatibleNegotiationServerFirstFlightDuplicatesV2InitialCrypto) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.original_version = coquic::quic::kQuicVersion1;
+    client_config.initial_version = coquic::quic::kQuicVersion1;
+    client_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicCore client(std::move(client_config));
+
+    auto server_config = coquic::quic::test::make_server_core_config();
+    server_config.original_version = coquic::quic::kQuicVersion1;
+    server_config.initial_version = coquic::quic::kQuicVersion1;
+    server_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicCore server(std::move(server_config));
+
+    const auto start =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto server_first_flight = coquic::quic::test::relay_send_datagrams_to_peer(
+        start, server, coquic::quic::test::test_time(1));
+    const auto server_first_flight_datagrams =
+        coquic::quic::test::send_datagrams_from(server_first_flight);
+    ASSERT_NE(server.connection_, nullptr);
+    ASSERT_FALSE(server_first_flight_datagrams.empty());
+
+    const auto packets =
+        decode_sender_datagram(*server.connection_, server_first_flight_datagrams.front());
+    std::vector<const coquic::quic::ProtectedInitialPacket *> initial_packets;
+    for (const auto &packet : packets) {
+        if (const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packet)) {
+            initial_packets.push_back(initial);
+        }
+    }
+
+    ASSERT_GE(initial_packets.size(), 2u);
+
+    const auto first_crypto =
+        std::get_if<coquic::quic::CryptoFrame>(&initial_packets[0]->frames.front());
+    const auto second_crypto =
+        std::get_if<coquic::quic::CryptoFrame>(&initial_packets[1]->frames.front());
+    ASSERT_NE(first_crypto, nullptr);
+    ASSERT_NE(second_crypto, nullptr);
+
+    EXPECT_EQ(initial_packets[0]->version, coquic::quic::kQuicVersion2);
+    EXPECT_EQ(initial_packets[1]->version, coquic::quic::kQuicVersion2);
+    EXPECT_EQ(first_crypto->offset, second_crypto->offset);
+    EXPECT_EQ(first_crypto->crypto_data, second_crypto->crypto_data);
 }
 
 TEST(QuicCoreTest, ProcessCapturedPicoquicClientInitialIgnoresTrailingDatagramPadding) {

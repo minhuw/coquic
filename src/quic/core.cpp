@@ -34,10 +34,40 @@ QuicCoreLocalError stream_state_error_to_local_error(const StreamStateError &err
     };
 }
 
+std::uint32_t read_u32_be_at(std::span<const std::byte> bytes, std::size_t offset) {
+    return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset])) << 24) |
+           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 1])) << 16) |
+           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 2])) << 8) |
+           static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 3]));
+}
+
+bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t version) {
+    return std::find(versions.begin(), versions.end(), version) != versions.end();
+}
+
+std::optional<VersionNegotiationPacket>
+parse_version_negotiation_packet(std::span<const std::byte> bytes) {
+    if (bytes.size() < 5 || read_u32_be_at(bytes, 1) != kVersionNegotiationVersion) {
+        return std::nullopt;
+    }
+
+    const auto decoded = deserialize_packet(bytes, {});
+    if (!decoded.has_value()) {
+        return std::nullopt;
+    }
+
+    if (const auto *version_negotiation =
+            std::get_if<VersionNegotiationPacket>(&decoded.value().packet)) {
+        return *version_negotiation;
+    }
+
+    return std::nullopt;
+}
+
 } // namespace
 
 QuicCore::QuicCore(QuicCoreConfig config)
-    : connection_(std::make_unique<QuicConnection>(std::move(config))) {
+    : config_(std::move(config)), connection_(std::make_unique<QuicConnection>(config_)) {
 }
 
 QuicCore::~QuicCore() = default;
@@ -48,39 +78,67 @@ QuicCore &QuicCore::operator=(QuicCore &&) noexcept = default;
 
 QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     QuicCoreResult result;
-    std::visit(overloaded{
-                   [&](const QuicCoreStart &) { connection_->start(); },
-                   [&](const QuicCoreInboundDatagram &in) {
-                       connection_->process_inbound_datagram(in.bytes, now);
-                   },
-                   [&](const QuicCoreSendStreamData &in) {
-                       const auto queued =
-                           connection_->queue_stream_send(in.stream_id, in.bytes, in.fin);
-                       if (!queued.has_value()) {
-                           result.local_error = stream_state_error_to_local_error(queued.error());
-                       }
-                   },
-                   [&](const QuicCoreResetStream &in) {
-                       const auto queued = connection_->queue_stream_reset(LocalResetCommand{
-                           .stream_id = in.stream_id,
-                           .application_error_code = in.application_error_code,
-                       });
-                       if (!queued.has_value()) {
-                           result.local_error = stream_state_error_to_local_error(queued.error());
-                       }
-                   },
-                   [&](const QuicCoreStopSending &in) {
-                       const auto queued = connection_->queue_stop_sending(LocalStopSendingCommand{
-                           .stream_id = in.stream_id,
-                           .application_error_code = in.application_error_code,
-                       });
-                       if (!queued.has_value()) {
-                           result.local_error = stream_state_error_to_local_error(queued.error());
-                       }
-                   },
-                   [&](const QuicCoreTimerExpired &) { connection_->on_timeout(now); },
-               },
-               input);
+    std::visit(
+        overloaded{
+            [&](const QuicCoreStart &) { connection_->start(); },
+            [&](const QuicCoreInboundDatagram &in) {
+                if (config_.role == EndpointRole::client && !connection_->is_handshake_complete()) {
+                    const auto version_negotiation = parse_version_negotiation_packet(in.bytes);
+                    if (version_negotiation.has_value()) {
+                        const bool valid_destination_connection_id =
+                            version_negotiation->destination_connection_id ==
+                            config_.source_connection_id;
+                        const bool valid_source_connection_id =
+                            version_negotiation->source_connection_id ==
+                            config_.initial_destination_connection_id;
+                        const bool echoes_original_version = contains_version(
+                            version_negotiation->supported_versions, config_.original_version);
+                        if (valid_destination_connection_id && valid_source_connection_id &&
+                            !echoes_original_version) {
+                            for (const auto supported_version : config_.supported_versions) {
+                                if (!contains_version(version_negotiation->supported_versions,
+                                                      supported_version)) {
+                                    continue;
+                                }
+                                config_.initial_version = supported_version;
+                                config_.reacted_to_version_negotiation = true;
+                                connection_ = std::make_unique<QuicConnection>(config_);
+                                connection_->start();
+                                return;
+                            }
+                        }
+                        return;
+                    }
+                }
+                connection_->process_inbound_datagram(in.bytes, now);
+            },
+            [&](const QuicCoreSendStreamData &in) {
+                const auto queued = connection_->queue_stream_send(in.stream_id, in.bytes, in.fin);
+                if (!queued.has_value()) {
+                    result.local_error = stream_state_error_to_local_error(queued.error());
+                }
+            },
+            [&](const QuicCoreResetStream &in) {
+                const auto queued = connection_->queue_stream_reset(LocalResetCommand{
+                    .stream_id = in.stream_id,
+                    .application_error_code = in.application_error_code,
+                });
+                if (!queued.has_value()) {
+                    result.local_error = stream_state_error_to_local_error(queued.error());
+                }
+            },
+            [&](const QuicCoreStopSending &in) {
+                const auto queued = connection_->queue_stop_sending(LocalStopSendingCommand{
+                    .stream_id = in.stream_id,
+                    .application_error_code = in.application_error_code,
+                });
+                if (!queued.has_value()) {
+                    result.local_error = stream_state_error_to_local_error(queued.error());
+                }
+            },
+            [&](const QuicCoreTimerExpired &) { connection_->on_timeout(now); },
+        },
+        input);
 
     while (true) {
         auto datagram = connection_->drain_outbound_datagram(now);

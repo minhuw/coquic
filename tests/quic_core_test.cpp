@@ -387,6 +387,48 @@ void expect_local_error(const coquic::quic::QuicCoreResult &result,
     EXPECT_EQ(*local_error->stream_id, stream_id);
 }
 
+TEST(QuicCoreTest, PublicConfigAcceptsOpaqueResumptionStateAndZeroRttConfig) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.resumption_state = coquic::quic::QuicResumptionState{
+        .serialized = {std::byte{0x01}, std::byte{0x02}},
+    };
+    config.zero_rtt = coquic::quic::QuicZeroRttConfig{
+        .attempt = true,
+        .allow = false,
+        .application_context = {std::byte{0xa0}},
+    };
+
+    ASSERT_TRUE(config.resumption_state.has_value());
+    EXPECT_EQ(config.resumption_state->serialized.size(), 2u);
+    EXPECT_TRUE(config.zero_rtt.attempt);
+    EXPECT_FALSE(config.zero_rtt.allow);
+    EXPECT_EQ(config.zero_rtt.application_context, std::vector{std::byte{0xa0}});
+}
+
+TEST(QuicCoreTest, TestUtilsExtractResumptionAndZeroRttEffects) {
+    const auto result = coquic::quic::QuicCoreResult{
+        .effects =
+            {
+                coquic::quic::QuicCoreResumptionStateAvailable{
+                    .state =
+                        coquic::quic::QuicResumptionState{
+                            .serialized = {std::byte{0x05}},
+                        },
+                },
+                coquic::quic::QuicCoreZeroRttStatusEvent{
+                    .status = coquic::quic::QuicZeroRttStatus::rejected,
+                },
+            },
+    };
+
+    const auto states = coquic::quic::test::resumption_states_from(result);
+    const auto statuses = coquic::quic::test::zero_rtt_statuses_from(result);
+
+    ASSERT_EQ(states.size(), 1u);
+    EXPECT_EQ(states[0].serialized, std::vector{std::byte{0x05}});
+    EXPECT_EQ(statuses, std::vector{coquic::quic::QuicZeroRttStatus::rejected});
+}
+
 TEST(QuicCoreTest, ClientStartProducesSendEffect) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     const auto config = coquic::quic::test::make_client_core_config();

@@ -81,6 +81,28 @@ inline std::vector<std::vector<std::byte>> send_datagrams_from(const QuicCoreRes
     return out;
 }
 
+inline std::vector<QuicResumptionState> resumption_states_from(const QuicCoreResult &result) {
+    std::vector<QuicResumptionState> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *available = std::get_if<QuicCoreResumptionStateAvailable>(&effect)) {
+            out.push_back(available->state);
+        }
+    }
+
+    return out;
+}
+
+inline std::vector<QuicZeroRttStatus> zero_rtt_statuses_from(const QuicCoreResult &result) {
+    std::vector<QuicZeroRttStatus> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *status = std::get_if<QuicCoreZeroRttStatusEvent>(&effect)) {
+            out.push_back(status->status);
+        }
+    }
+
+    return out;
+}
+
 inline std::vector<QuicCoreStateChange> state_changes_from(const QuicCoreResult &result) {
     std::vector<QuicCoreStateChange> out;
     for (const auto &effect : result.effects) {

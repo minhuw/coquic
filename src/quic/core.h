@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/quic/packet.h"
+#include "src/quic/resumption.h"
 #include "src/quic/tls_adapter.h"
 #include "src/quic/version.h"
 
@@ -45,6 +46,8 @@ struct QuicCoreConfig {
     std::optional<TlsIdentity> identity;
     QuicTransportConfig transport;
     std::vector<CipherSuite> allowed_tls_cipher_suites;
+    std::optional<QuicResumptionState> resumption_state;
+    QuicZeroRttConfig zero_rtt;
 };
 
 using QuicCoreClock = std::chrono::steady_clock;
@@ -123,7 +126,8 @@ struct QuicCoreStateEvent {
 
 using QuicCoreEffect =
     std::variant<QuicCoreSendDatagram, QuicCoreReceiveStreamData, QuicCorePeerResetStream,
-                 QuicCorePeerStopSending, QuicCoreStateEvent>;
+                 QuicCorePeerStopSending, QuicCoreStateEvent, QuicCoreResumptionStateAvailable,
+                 QuicCoreZeroRttStatusEvent>;
 
 struct QuicCoreResult {
     std::vector<QuicCoreEffect> effects;

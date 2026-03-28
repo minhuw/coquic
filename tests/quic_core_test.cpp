@@ -195,12 +195,15 @@ decode_sender_datagram(const coquic::quic::QuicConnection &connection,
                       .client_initial_destination_connection_id =
                           connection.client_initial_destination_connection_id(),
                       .handshake_secret = connection.handshake_space_.write_secret,
+                      .zero_rtt_secret = connection.zero_rtt_space_.write_secret,
                       .one_rtt_secret = connection.application_space_.write_secret,
                       .one_rtt_key_phase = connection.application_write_key_phase_,
                       .largest_authenticated_initial_packet_number =
                           connection.initial_space_.largest_authenticated_packet_number,
                       .largest_authenticated_handshake_packet_number =
                           connection.handshake_space_.largest_authenticated_packet_number,
+                      .largest_authenticated_zero_rtt_packet_number =
+                          connection.zero_rtt_space_.largest_authenticated_packet_number,
                       .largest_authenticated_application_packet_number =
                           connection.application_space_.largest_authenticated_packet_number,
                       .one_rtt_destination_connection_id_length =
@@ -834,6 +837,42 @@ TEST(QuicCoreTest, KeyUpdatedMaxDataAndAckUnblockLostApplicationSend) {
         }
     }
     EXPECT_TRUE(saw_remaining_suffix);
+}
+
+TEST(QuicCoreTest, ClientUsesProtectedZeroRttPacketForEarlyApplicationSend) {
+    auto connection = make_connected_client_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.application_space_.read_secret.reset();
+    connection.application_space_.write_secret.reset();
+    connection.zero_rtt_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("early-data"), false)
+            .has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(0));
+
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *zero_rtt = std::get_if<coquic::quic::ProtectedZeroRttPacket>(&packets.front());
+    ASSERT_NE(zero_rtt, nullptr);
+
+    bool saw_stream = false;
+    for (const auto &frame : zero_rtt->frames) {
+        const auto *stream = std::get_if<coquic::quic::StreamFrame>(&frame);
+        if (stream == nullptr) {
+            continue;
+        }
+
+        saw_stream = true;
+        EXPECT_EQ(stream->stream_id, 0u);
+        EXPECT_EQ(stream->stream_data, coquic::quic::test::bytes_from_string("early-data"));
+    }
+
+    EXPECT_TRUE(saw_stream);
 }
 
 TEST(QuicCoreTest, SendStreamLocalErrorsCoverInvalidIdAndClosedSendSide) {

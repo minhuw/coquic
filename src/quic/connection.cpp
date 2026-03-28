@@ -250,6 +250,47 @@ make_stream_frame_views(std::span<const StreamFrameSendFragment> fragments) {
     return views;
 }
 
+void append_stream_fragments_to_frames(std::vector<Frame> &frames,
+                                       std::span<const StreamFrameSendFragment> fragments) {
+    for (const auto &fragment : fragments) {
+        frames.emplace_back(StreamFrame{
+            .fin = fragment.fin,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = fragment.stream_id,
+            .offset = fragment.offset,
+            .stream_data = fragment.bytes.to_vector(),
+        });
+    }
+}
+
+ProtectedPacket make_application_protected_packet(
+    bool use_zero_rtt_packet_protection, std::uint32_t version,
+    const ConnectionId &destination_connection_id, const ConnectionId &source_connection_id,
+    bool one_rtt_key_phase, std::uint8_t packet_number_length, std::uint64_t packet_number,
+    std::vector<Frame> frames, std::span<const StreamFrameSendFragment> stream_fragments) {
+    if (use_zero_rtt_packet_protection) {
+        append_stream_fragments_to_frames(frames, stream_fragments);
+        return ProtectedZeroRttPacket{
+            .version = version,
+            .destination_connection_id = destination_connection_id,
+            .source_connection_id = source_connection_id,
+            .packet_number_length = packet_number_length,
+            .packet_number = packet_number,
+            .frames = std::move(frames),
+        };
+    }
+
+    return ProtectedOneRttPacket{
+        .key_phase = one_rtt_key_phase,
+        .destination_connection_id = destination_connection_id,
+        .packet_number_length = packet_number_length,
+        .packet_number = packet_number,
+        .frames = std::move(frames),
+        .stream_frame_views = make_stream_frame_views(stream_fragments),
+    };
+}
+
 CodecResult<std::vector<std::byte>> serialize_locally_validated_transport_parameters(
     EndpointRole local_role, const TransportParameters &parameters,
     const TransportParametersValidationContext &validation_context) {
@@ -3275,11 +3316,17 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         clear_probe_packet_after_send(handshake_space_.pending_probe_packet);
     }
 
-    if (status_ == HandshakeStatus::connected && application_space_.write_secret.has_value() &&
+    const bool use_zero_rtt_packet_protection = config_.role == EndpointRole::client &&
+                                                status_ != HandshakeStatus::connected &&
+                                                zero_rtt_space_.write_secret.has_value();
+    if (((status_ == HandshakeStatus::connected && application_space_.write_secret.has_value()) ||
+         use_zero_rtt_packet_protection) &&
         (application_space_.received_packets.has_ack_to_send() || has_pending_application_send() ||
          application_space_.pending_probe_packet.has_value())) {
-        const auto base_ack_frame = application_space_.received_packets.build_ack_frame(
-            local_transport_parameters_.ack_delay_exponent, now);
+        const auto base_ack_frame = use_zero_rtt_packet_protection
+                                        ? std::optional<AckFrame>{}
+                                        : application_space_.received_packets.build_ack_frame(
+                                              local_transport_parameters_.ack_delay_exponent, now);
         for (auto &[stream_id, stream] : streams_) {
             static_cast<void>(stream_id);
             maybe_queue_stream_blocked_frame(stream);
@@ -3473,14 +3520,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
 
             auto candidate_packets = packets;
-            candidate_packets.emplace_back(ProtectedOneRttPacket{
-                .key_phase = application_write_key_phase_,
-                .destination_connection_id = destination_connection_id,
-                .packet_number_length = kDefaultInitialPacketNumberLength,
-                .packet_number = application_space_.next_send_packet_number,
-                .frames = std::move(candidate_frames),
-                .stream_frame_views = make_stream_frame_views(stream_fragments),
-            });
+            candidate_packets.emplace_back(make_application_protected_packet(
+                use_zero_rtt_packet_protection, current_version_, destination_connection_id,
+                config_.source_connection_id, application_write_key_phase_,
+                kDefaultInitialPacketNumberLength, application_space_.next_send_packet_number,
+                std::move(candidate_frames), stream_fragments));
 
             return serialize_protected_datagram(
                 candidate_packets, SerializeProtectionContext{
@@ -3797,14 +3841,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
 
             const auto packet_number = application_space_.next_send_packet_number++;
-            packets.emplace_back(ProtectedOneRttPacket{
-                .key_phase = application_write_key_phase_,
-                .destination_connection_id = destination_connection_id,
-                .packet_number_length = kDefaultInitialPacketNumberLength,
-                .packet_number = packet_number,
-                .frames = std::move(frames),
-                .stream_frame_views = make_stream_frame_views(probe_stream_fragments),
-            });
+            packets.emplace_back(make_application_protected_packet(
+                use_zero_rtt_packet_protection, current_version_, destination_connection_id,
+                config_.source_connection_id, application_write_key_phase_,
+                kDefaultInitialPacketNumberLength, packet_number, std::move(frames),
+                probe_stream_fragments));
 
             track_sent_packet(
                 application_space_,
@@ -3837,7 +3878,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             clear_probe_packet_after_send(application_space_.pending_probe_packet);
         } else {
             const auto include_handshake_done =
-                config_.role == EndpointRole::server &&
+                !use_zero_rtt_packet_protection && config_.role == EndpointRole::server &&
                 handshake_done_state_ == StreamControlFrameState::pending;
             std::vector<Frame> frames;
             const auto force_ack_only =
@@ -4045,14 +4086,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
 
             const auto packet_number = application_space_.next_send_packet_number++;
-            packets.emplace_back(ProtectedOneRttPacket{
-                .key_phase = application_write_key_phase_,
-                .destination_connection_id = destination_connection_id,
-                .packet_number_length = kDefaultInitialPacketNumberLength,
-                .packet_number = packet_number,
-                .frames = std::move(frames),
-                .stream_frame_views = make_stream_frame_views(stream_fragments),
-            });
+            packets.emplace_back(make_application_protected_packet(
+                use_zero_rtt_packet_protection, current_version_, destination_connection_id,
+                config_.source_connection_id, application_write_key_phase_,
+                kDefaultInitialPacketNumberLength, packet_number, std::move(frames),
+                stream_fragments));
 
             if (ack_eliciting) {
                 track_sent_packet(application_space_,

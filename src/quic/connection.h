@@ -123,7 +123,8 @@ class QuicConnection {
     CodecResult<bool> process_inbound_crypto(EncryptionLevel level, std::span<const Frame> frames,
                                              QuicCoreTimePoint now);
     CodecResult<bool> process_inbound_application(std::span<const Frame> frames,
-                                                  QuicCoreTimePoint now);
+                                                  QuicCoreTimePoint now,
+                                                  bool allow_preconnected_frames = false);
     CodecResult<bool> process_inbound_ack(PacketSpaceState &packet_space, const AckFrame &ack,
                                           QuicCoreTimePoint now, std::uint64_t ack_delay_exponent,
                                           std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);

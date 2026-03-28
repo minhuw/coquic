@@ -919,6 +919,44 @@ TEST(QuicCoreTest, AcceptedZeroRttPacketsScheduleApplicationAck) {
     EXPECT_TRUE(saw_ack);
 }
 
+TEST(QuicCoreTest, ServerProcessesZeroRttStreamBeforeHandshakeCompletes) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
+            .packet_number_length = 1,
+            .packet_number = 7,
+            .frames =
+                {
+                    coquic::quic::StreamFrame{
+                        .fin = true,
+                        .has_offset = true,
+                        .has_length = true,
+                        .stream_id = 0,
+                        .offset = 0,
+                        .stream_data = coquic::quic::test::bytes_from_string("early-data"),
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(processed.has_value());
+
+    const auto received = connection.take_received_stream_data();
+    ASSERT_TRUE(received.has_value());
+    EXPECT_EQ(received->stream_id, 0u);
+    EXPECT_EQ(received->bytes, coquic::quic::test::bytes_from_string("early-data"));
+    EXPECT_TRUE(received->fin);
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+}
+
 TEST(QuicCoreTest, ClientStopsUsingZeroRttWhenApplicationWriteKeysExist) {
     auto connection = make_connected_client_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;

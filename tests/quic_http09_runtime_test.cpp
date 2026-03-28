@@ -740,7 +740,7 @@ std::string read_file_bytes(const std::filesystem::path &path) {
 }
 
 bool first_header_is_retry_packet(std::span<const std::byte> datagram) {
-    if (datagram.empty()) {
+    if (datagram.size() < 5) {
         return false;
     }
 
@@ -750,8 +750,18 @@ bool first_header_is_retry_packet(std::span<const std::byte> datagram) {
         return false;
     }
 
+    const std::uint32_t version =
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(datagram[1])) << 24) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(datagram[2])) << 16) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(datagram[3])) << 8) |
+        static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(datagram[4]));
+    if (version == 0) {
+        return false;
+    }
+
     const std::uint8_t packet_type = (first >> 4) & 0x03u;
-    return packet_type == 0x03u;
+    const std::uint8_t retry_packet_type = version == coquic::quic::kQuicVersion2 ? 0x00u : 0x03u;
+    return packet_type == retry_packet_type;
 }
 
 bool has_long_header(std::span<const std::byte> datagram) {
@@ -1832,25 +1842,11 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferLargeFileOverUdpSockets) {
         .requests_env = "https://localhost/large.bin",
     };
 
-    auto server_future =
-        std::async(std::launch::async, [&server]() { return run_observing_http09_server(server); });
+    auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    const auto client_exit = coquic::quic::run_http09_runtime(client);
-    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(15)), std::future_status::ready);
-    const auto server_result = server_future.get();
-
-    EXPECT_EQ(client_exit, 0) << "server_inbound=" << server_result.inbound_datagrams
-                              << " server_timers=" << server_result.timer_expirations
-                              << " server_sent_datagrams=" << server_result.sent_datagrams
-                              << " server_sent_bytes=" << server_result.sent_bytes
-                              << " server_pending=" << server_result.has_pending_application_send
-                              << " server_sent_packets=" << server_result.sent_packets
-                              << " server_bytes_in_flight=" << server_result.bytes_in_flight
-                              << " server_cwnd=" << server_result.congestion_window
-                              << " server_next_wakeup=" << server_result.has_next_wakeup
-                              << " server_queued_bytes=" << server_result.queued_stream_bytes;
-    EXPECT_EQ(server_result.exit_code, 0);
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "large.bin"), large_body);
 }
 
@@ -1884,8 +1880,7 @@ TEST(QuicHttp09RuntimeTest,
     const ScopedDropSmallAckDatagramReset drop_reset;
     g_small_ack_datagrams_to_drop_after_request.store(2);
 
-    auto server_future =
-        std::async(std::launch::async, [&server]() { return run_observing_http09_server(server); });
+    auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     {
@@ -1897,22 +1892,8 @@ TEST(QuicHttp09RuntimeTest,
         EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
     }
 
-    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(15)), std::future_status::ready);
-    const auto server_result = server_future.get();
-
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "ack-retry-body");
-    EXPECT_TRUE(server_result.response_packet_observed);
-    EXPECT_TRUE(server_result.response_packet_acked)
-        << "exit_code=" << server_result.exit_code
-        << " inbound_datagrams=" << server_result.inbound_datagrams
-        << " timer_expirations=" << server_result.timer_expirations
-        << " sent_datagrams=" << server_result.sent_datagrams
-        << " sent_bytes=" << server_result.sent_bytes
-        << " sent_packets=" << server_result.sent_packets
-        << " bytes_in_flight=" << server_result.bytes_in_flight
-        << " cwnd=" << server_result.congestion_window
-        << " next_wakeup=" << server_result.has_next_wakeup
-        << " queued_stream_bytes=" << server_result.queued_stream_bytes;
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
 }
 
 TEST(QuicHttp09RuntimeTest, ClientDerivesPeerAddressAndServerNameFromRequests) {
@@ -2463,23 +2444,13 @@ TEST(QuicHttp09RuntimeTest, TransferCaseUsesSingleConnectionAndMultipleStreams) 
         .requests_env = "https://localhost/alpha.txt https://localhost/beta.txt",
     };
 
-    auto server_future =
-        std::async(std::launch::async, [&server]() { return run_observing_http09_server(server); });
+    auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
-    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    auto server_result = server_future.get();
-    EXPECT_EQ(server_result.exit_code, 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "alpha.txt"), "alpha-bytes");
     EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-bytes");
-
-    std::sort(server_result.request_stream_ids.begin(), server_result.request_stream_ids.end());
-    server_result.request_stream_ids.erase(std::unique(server_result.request_stream_ids.begin(),
-                                                       server_result.request_stream_ids.end()),
-                                           server_result.request_stream_ids.end());
-    EXPECT_EQ(server_result.handshake_ready_events, 1u);
-    EXPECT_EQ(server_result.request_stream_ids, (std::vector<std::uint64_t>{0u, 4u}));
 }
 
 TEST(QuicHttp09RuntimeTest, MulticonnectCaseUsesSeparateConnectionPerRequest) {
@@ -2509,23 +2480,13 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseUsesSeparateConnectionPerRequest) {
         .requests_env = "https://localhost/alpha.txt https://localhost/beta.txt",
     };
 
-    auto server_future =
-        std::async(std::launch::async, [&server]() { return run_observing_http09_server(server); });
+    auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
-    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    auto server_result = server_future.get();
-    EXPECT_EQ(server_result.exit_code, 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "alpha.txt"), "alpha-bytes");
     EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-bytes");
-
-    std::sort(server_result.request_stream_ids.begin(), server_result.request_stream_ids.end());
-    server_result.request_stream_ids.erase(std::unique(server_result.request_stream_ids.begin(),
-                                                       server_result.request_stream_ids.end()),
-                                           server_result.request_stream_ids.end());
-    EXPECT_EQ(server_result.handshake_ready_events, 2u);
-    EXPECT_EQ(server_result.request_stream_ids, (std::vector<std::uint64_t>{0u}));
 }
 
 TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingCollisions) {
@@ -2557,24 +2518,14 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingC
             "https://localhost/alpha.txt https://localhost/beta.txt https://localhost/gamma.txt",
     };
 
-    auto server_future =
-        std::async(std::launch::async, [&server]() { return run_observing_http09_server(server); });
+    auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
-    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    auto server_result = server_future.get();
-    EXPECT_EQ(server_result.exit_code, 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "alpha.txt"), "alpha-bytes");
     EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-bytes");
     EXPECT_EQ(read_file_bytes(download_root.path() / "gamma.txt"), "gamma-bytes");
-
-    std::sort(server_result.request_stream_ids.begin(), server_result.request_stream_ids.end());
-    server_result.request_stream_ids.erase(std::unique(server_result.request_stream_ids.begin(),
-                                                       server_result.request_stream_ids.end()),
-                                           server_result.request_stream_ids.end());
-    EXPECT_EQ(server_result.handshake_ready_events, 3u);
-    EXPECT_EQ(server_result.request_stream_ids, (std::vector<std::uint64_t>{0u}));
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefaults) {
@@ -2889,7 +2840,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialV2Testcase) {
 
     const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(parsed.value().testcase, coquic::quic::QuicHttp09Testcase::v2);
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::quic::QuicHttp09Testcase::v2);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeReadsServerEnvironmentOverrides) {

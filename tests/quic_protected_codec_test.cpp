@@ -1501,7 +1501,9 @@ TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithTruncatedPayloadLengthV
 }
 
 TEST(QuicProtectedCodecTest, RejectsUnsupportedProtectedPacketTypes) {
-    const std::vector<std::byte> bytes{std::byte{0xd0}};
+    const std::vector<std::byte> bytes{
+        std::byte{0xd0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
+    };
     const auto decoded = coquic::quic::deserialize_protected_datagram(bytes, {});
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
@@ -1509,7 +1511,9 @@ TEST(QuicProtectedCodecTest, RejectsUnsupportedProtectedPacketTypes) {
 }
 
 TEST(QuicProtectedCodecTest, RejectsUnsupportedLongHeaderTypeAfterParsingHeaderTypeField) {
-    const std::vector<std::byte> bytes{std::byte{0xf0}};
+    const std::vector<std::byte> bytes{
+        std::byte{0xc0}, std::byte{0x6b}, std::byte{0x33}, std::byte{0x43}, std::byte{0xcf},
+    };
     const auto decoded = coquic::quic::deserialize_protected_datagram(bytes, {});
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
@@ -1517,7 +1521,9 @@ TEST(QuicProtectedCodecTest, RejectsUnsupportedLongHeaderTypeAfterParsingHeaderT
 }
 
 TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithoutFixedBit) {
-    const std::vector<std::byte> bytes{std::byte{0x80}};
+    const std::vector<std::byte> bytes{
+        std::byte{0x80}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
+    };
     const auto decoded = coquic::quic::deserialize_protected_datagram(bytes, {});
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::invalid_fixed_bit);

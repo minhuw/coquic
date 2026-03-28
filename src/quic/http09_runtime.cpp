@@ -438,14 +438,30 @@ int open_udp_socket(int family) {
     return fd;
 }
 
+std::uint32_t runtime_original_quic_version_for_testcase(QuicHttp09Testcase testcase) {
+    if (testcase == QuicHttp09Testcase::v2) {
+        return kQuicVersion2;
+    }
+    return kQuicVersion1;
+}
+
+std::vector<std::uint32_t>
+runtime_supported_quic_versions_for_testcase(QuicHttp09Testcase testcase) {
+    if (testcase == QuicHttp09Testcase::v2) {
+        return {kQuicVersion2, kQuicVersion1};
+    }
+    return {kQuicVersion1};
+}
+
 QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeConfig &config,
                                                             TlsIdentity identity) {
+    const auto original_version = runtime_original_quic_version_for_testcase(config.testcase);
     return QuicCoreConfig{
         .role = EndpointRole::server,
         .source_connection_id = {std::byte{0x53}, std::byte{0x01}},
-        .original_version = kQuicVersion1,
-        .initial_version = kQuicVersion1,
-        .supported_versions = {kQuicVersion2, kQuicVersion1},
+        .original_version = original_version,
+        .initial_version = original_version,
+        .supported_versions = runtime_supported_quic_versions_for_testcase(config.testcase),
         .verify_peer = config.verify_peer,
         .server_name = config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),
@@ -2754,15 +2770,16 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
 }
 
 QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config) {
+    const auto original_version = runtime_original_quic_version_for_testcase(config.testcase);
     auto core = QuicCoreConfig{
         .role = EndpointRole::client,
         .source_connection_id = {std::byte{0xc1}, std::byte{0x01}},
         .initial_destination_connection_id = {std::byte{0x83}, std::byte{0x94}, std::byte{0xc8},
                                               std::byte{0xf0}, std::byte{0x3e}, std::byte{0x51},
                                               std::byte{0x57}, std::byte{0x08}},
-        .original_version = kQuicVersion1,
-        .initial_version = kQuicVersion1,
-        .supported_versions = {kQuicVersion2, kQuicVersion1},
+        .original_version = original_version,
+        .initial_version = original_version,
+        .supported_versions = runtime_supported_quic_versions_for_testcase(config.testcase),
         .verify_peer = config.verify_peer,
         .server_name = config.server_name.empty() ? "localhost" : config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),

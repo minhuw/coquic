@@ -2687,8 +2687,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
     EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_remote, 256u * 1024u);
     EXPECT_EQ(client_core.original_version, 0x00000001u);
     EXPECT_EQ(client_core.initial_version, 0x00000001u);
-    EXPECT_EQ(client_core.supported_versions,
-              (std::vector<std::uint32_t>{0x6b3343cfu, 0x00000001u}));
+    EXPECT_EQ(client_core.supported_versions, (std::vector<std::uint32_t>{0x00000001u}));
 
     auto server_runtime = overridden_runtime;
     server_runtime.mode = coquic::quic::Http09RuntimeMode::server;
@@ -2698,8 +2697,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
     EXPECT_EQ(server_core.application_protocol, "hq-interop");
     EXPECT_EQ(server_core.original_version, 0x00000001u);
     EXPECT_EQ(server_core.initial_version, 0x00000001u);
-    EXPECT_EQ(server_core.supported_versions,
-              (std::vector<std::uint32_t>{0x6b3343cfu, 0x00000001u}));
+    EXPECT_EQ(server_core.supported_versions, (std::vector<std::uint32_t>{0x00000001u}));
     if (!server_core.identity.has_value()) {
         FAIL() << "expected server identity";
     }
@@ -3135,6 +3133,30 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialChacha20TestcaseAndConstrainsC
               (std::vector<coquic::quic::CipherSuite>{
                   coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
               }));
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeBuildsV2CoreConfigsWithCompatibleVersionSupport) {
+    const auto runtime = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::v2,
+        .requests_env = "https://localhost/a.txt",
+    };
+
+    const auto client_core = coquic::quic::make_http09_client_core_config(runtime);
+    EXPECT_EQ(client_core.original_version, 0x6b3343cfu);
+    EXPECT_EQ(client_core.initial_version, 0x6b3343cfu);
+    EXPECT_EQ(client_core.supported_versions,
+              (std::vector<std::uint32_t>{0x6b3343cfu, 0x00000001u}));
+
+    auto server_runtime = runtime;
+    server_runtime.mode = coquic::quic::Http09RuntimeMode::server;
+    server_runtime.certificate_chain_path = "tests/fixtures/quic-server-cert.pem";
+    server_runtime.private_key_path = "tests/fixtures/quic-server-key.pem";
+    const auto server_core = coquic::quic::make_http09_server_core_config(server_runtime);
+    EXPECT_EQ(server_core.original_version, 0x6b3343cfu);
+    EXPECT_EQ(server_core.initial_version, 0x6b3343cfu);
+    EXPECT_EQ(server_core.supported_versions,
+              (std::vector<std::uint32_t>{0x6b3343cfu, 0x00000001u}));
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeBuildsServerCoreConfigWithExtendedIdleTimeoutForMulticonnect) {

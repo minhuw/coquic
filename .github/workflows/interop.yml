@@ -38,7 +38,7 @@ jobs:
 
       - name: Run Official quic-go Interop Tests
         env:
-          INTEROP_TESTCASES: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry
+          INTEROP_TESTCASES: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry
           INTEROP_PEER_IMPL: quic-go
           INTEROP_PEER_IMAGE: martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424
         run: nix develop -c bash interop/run-official.sh
@@ -80,7 +80,7 @@ jobs:
 
       - name: Run Official picoquic Interop Tests
         env:
-          INTEROP_TESTCASES: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,v2
+          INTEROP_TESTCASES: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,v2
           INTEROP_PEER_IMPL: picoquic
           INTEROP_PEER_IMAGE: privateoctopus/picoquic@sha256:065707ed509ce25b3bb3be4816c924ac4fd6f603297e14a3ee34cb035c73f700
         run: nix develop -c bash interop/run-official.sh

@@ -433,9 +433,13 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
             return validation_failure();
         }
 
-        if (context.expected_version_information.has_value()) {
-            if (!parameters.version_information.has_value() ||
-                parameters.version_information->chosen_version !=
+        if (context.expected_version_information.has_value() &&
+            parameters.version_information.has_value()) {
+            // RFC 9368 allows servers to complete the handshake even if the
+            // client's Version Information is missing. If the client does send
+            // it, it still needs to be internally consistent and match the
+            // negotiated version context we established locally.
+            if (parameters.version_information->chosen_version !=
                     context.expected_version_information->chosen_version ||
                 !contains_version(parameters.version_information->available_versions,
                                   parameters.version_information->chosen_version)) {

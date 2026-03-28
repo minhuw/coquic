@@ -122,6 +122,31 @@ TEST(QuicPacketTest, RoundTripsRetryPacket) {
     EXPECT_EQ(retry->retry_integrity_tag[15], std::byte{0x0f});
 }
 
+TEST(QuicPacketTest, RoundTripsRetryPacketWithNonZeroUnusedBits) {
+    RetryPacket packet{
+        .version = 1,
+        .retry_unused_bits = 0x0bu,
+        .destination_connection_id = {std::byte{0xaa}, std::byte{0xbb}},
+        .source_connection_id = {std::byte{0xcc}},
+        .retry_token = {std::byte{0x10}, std::byte{0x11}},
+        .retry_integrity_tag = {std::byte{0x00}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                                std::byte{0x04}, std::byte{0x05}, std::byte{0x06}, std::byte{0x07},
+                                std::byte{0x08}, std::byte{0x09}, std::byte{0x0a}, std::byte{0x0b},
+                                std::byte{0x0c}, std::byte{0x0d}, std::byte{0x0e}, std::byte{0x0f}},
+    };
+
+    auto encoded = coquic::quic::serialize_packet(packet);
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_FALSE(encoded.value().empty());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(encoded.value()[0]) & 0x0fu, 0x0bu);
+
+    auto decoded = coquic::quic::deserialize_packet(encoded.value(), {});
+    ASSERT_TRUE(decoded.has_value());
+    const auto *retry = std::get_if<RetryPacket>(&decoded.value().packet);
+    ASSERT_NE(retry, nullptr);
+    EXPECT_EQ(retry->retry_unused_bits, 0x0bu);
+}
+
 TEST(QuicPacketTest, SerializesQuicV2LongHeaderTypeBitsPerRfc9369) {
     const auto initial = coquic::quic::serialize_packet(InitialPacket{
         .version = 0x6b3343cfu,

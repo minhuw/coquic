@@ -419,6 +419,45 @@ TEST(QuicPacketCryptoTest, ComputesAndValidatesRetryIntegrityTagForQuicV1) {
     EXPECT_TRUE(valid.value());
 }
 
+TEST(QuicPacketCryptoTest, ComputesAndValidatesRetryIntegrityTagForQuicV1RejectsMismatches) {
+    const auto original_destination_connection_id = hex_bytes("8394c8f03e515708");
+    const auto retry_packet_bytes =
+        hex_bytes("ff000000010008f067a5502a4262b5746f6b656e04a265ba2eff4d829058fb3f0f2496ba");
+
+    const auto decoded_retry_packet =
+        coquic::quic::deserialize_packet(retry_packet_bytes, coquic::quic::DeserializeOptions{});
+    ASSERT_TRUE(decoded_retry_packet.has_value());
+    const auto *retry_packet =
+        std::get_if<coquic::quic::RetryPacket>(&decoded_retry_packet.value().packet);
+    ASSERT_NE(retry_packet, nullptr);
+
+    const auto baseline_valid = coquic::quic::validate_retry_integrity_tag(
+        *retry_packet, original_destination_connection_id);
+    ASSERT_TRUE(baseline_valid.has_value());
+    EXPECT_TRUE(baseline_valid.value());
+
+    auto modified_tag_packet = *retry_packet;
+    modified_tag_packet.retry_integrity_tag[0] ^= std::byte{0x01};
+    const auto modified_tag_valid = coquic::quic::validate_retry_integrity_tag(
+        modified_tag_packet, original_destination_connection_id);
+    ASSERT_TRUE(modified_tag_valid.has_value());
+    EXPECT_FALSE(modified_tag_valid.value());
+
+    auto modified_unused_bits_packet = *retry_packet;
+    modified_unused_bits_packet.retry_unused_bits ^= 0x01u;
+    const auto modified_unused_bits_valid = coquic::quic::validate_retry_integrity_tag(
+        modified_unused_bits_packet, original_destination_connection_id);
+    ASSERT_TRUE(modified_unused_bits_valid.has_value());
+    EXPECT_FALSE(modified_unused_bits_valid.value());
+
+    auto wrong_original_destination_connection_id = original_destination_connection_id;
+    wrong_original_destination_connection_id[0] ^= std::byte{0x01};
+    const auto wrong_odcid_valid = coquic::quic::validate_retry_integrity_tag(
+        *retry_packet, wrong_original_destination_connection_id);
+    ASSERT_TRUE(wrong_odcid_valid.has_value());
+    EXPECT_FALSE(wrong_odcid_valid.value());
+}
+
 TEST(QuicPacketCryptoTest, ComputesAndValidatesRetryIntegrityTagForQuicV2) {
     const auto original_destination_connection_id = hex_bytes("8394c8f03e515708");
     const auto retry_packet_bytes =
@@ -445,6 +484,45 @@ TEST(QuicPacketCryptoTest, ComputesAndValidatesRetryIntegrityTagForQuicV2) {
     ASSERT_TRUE(valid.has_value());
     EXPECT_EQ(retry_packet->retry_integrity_tag, expected_retry_integrity_tag);
     EXPECT_TRUE(valid.value());
+}
+
+TEST(QuicPacketCryptoTest, ComputesAndValidatesRetryIntegrityTagForQuicV2RejectsMismatches) {
+    const auto original_destination_connection_id = hex_bytes("8394c8f03e515708");
+    const auto retry_packet_bytes =
+        hex_bytes("cf6b3343cf0008f067a5502a4262b5746f6b656ec8646ce8bfe33952d955543665dcc7b6");
+
+    const auto decoded_retry_packet =
+        coquic::quic::deserialize_packet(retry_packet_bytes, coquic::quic::DeserializeOptions{});
+    ASSERT_TRUE(decoded_retry_packet.has_value());
+    const auto *retry_packet =
+        std::get_if<coquic::quic::RetryPacket>(&decoded_retry_packet.value().packet);
+    ASSERT_NE(retry_packet, nullptr);
+
+    const auto baseline_valid = coquic::quic::validate_retry_integrity_tag(
+        *retry_packet, original_destination_connection_id);
+    ASSERT_TRUE(baseline_valid.has_value());
+    EXPECT_TRUE(baseline_valid.value());
+
+    auto modified_tag_packet = *retry_packet;
+    modified_tag_packet.retry_integrity_tag[0] ^= std::byte{0x01};
+    const auto modified_tag_valid = coquic::quic::validate_retry_integrity_tag(
+        modified_tag_packet, original_destination_connection_id);
+    ASSERT_TRUE(modified_tag_valid.has_value());
+    EXPECT_FALSE(modified_tag_valid.value());
+
+    auto modified_unused_bits_packet = *retry_packet;
+    modified_unused_bits_packet.retry_unused_bits ^= 0x01u;
+    const auto modified_unused_bits_valid = coquic::quic::validate_retry_integrity_tag(
+        modified_unused_bits_packet, original_destination_connection_id);
+    ASSERT_TRUE(modified_unused_bits_valid.has_value());
+    EXPECT_FALSE(modified_unused_bits_valid.value());
+
+    auto wrong_original_destination_connection_id = original_destination_connection_id;
+    wrong_original_destination_connection_id[0] ^= std::byte{0x01};
+    const auto wrong_odcid_valid = coquic::quic::validate_retry_integrity_tag(
+        *retry_packet, wrong_original_destination_connection_id);
+    ASSERT_TRUE(wrong_odcid_valid.has_value());
+    EXPECT_FALSE(wrong_odcid_valid.value());
 }
 
 TEST(QuicPacketCryptoTest, DerivesInitialKeysForEmptyDestinationConnectionId) {

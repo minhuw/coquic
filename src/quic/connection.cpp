@@ -865,8 +865,6 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                 initial_space_.largest_authenticated_packet_number,
             .largest_authenticated_handshake_packet_number =
                 handshake_space_.largest_authenticated_packet_number,
-            .largest_authenticated_zero_rtt_packet_number =
-                zero_rtt_space_.largest_authenticated_packet_number,
             .largest_authenticated_application_packet_number =
                 application_space_.largest_authenticated_packet_number,
             .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
@@ -2006,7 +2004,7 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                 }
                 return processed;
             } else if constexpr (std::is_same_v<PacketType, ProtectedZeroRttPacket>) {
-                zero_rtt_space_.largest_authenticated_packet_number =
+                application_space_.largest_authenticated_packet_number =
                     protected_packet.packet_number;
                 const auto processed = process_inbound_application(protected_packet.frames, now);
                 if (!processed.has_value()) {
@@ -2015,7 +2013,13 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                 }
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
+                    const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
+                    application_space_.received_packets.record_received(
+                        protected_packet.packet_number, ack_eliciting, now);
                     last_peer_activity_time_ = now;
+                    if (ack_eliciting) {
+                        application_space_.pending_ack_deadline = now;
+                    }
                 }
                 return processed;
             } else {
@@ -2034,6 +2038,10 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                     last_peer_activity_time_ = now;
                     if (ack_eliciting) {
                         application_space_.pending_ack_deadline = now;
+                    }
+                    if (zero_rtt_space_.read_secret.has_value() ||
+                        zero_rtt_space_.write_secret.has_value()) {
+                        discard_packet_space_state(zero_rtt_space_);
                     }
                 }
                 return processed;
@@ -2574,6 +2582,7 @@ void QuicConnection::install_available_secrets() {
         return;
     }
 
+    bool installed_client_application_keys = false;
     for (auto &available_secret : tls_->take_available_secrets()) {
         available_secret.secret.quic_version = current_version_;
         auto &packet_space =
@@ -2584,6 +2593,12 @@ void QuicConnection::install_available_secrets() {
         } else {
             packet_space.read_secret = std::move(available_secret.secret);
         }
+        installed_client_application_keys |= config_.role == EndpointRole::client &&
+                                             available_secret.level == EncryptionLevel::application;
+    }
+
+    if (installed_client_application_keys && zero_rtt_space_.write_secret.has_value()) {
+        discard_packet_space_state(zero_rtt_space_);
     }
 }
 
@@ -3095,6 +3110,11 @@ ConnectionId QuicConnection::client_initial_destination_connection_id() const {
 }
 
 std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
+    if (config_.role == EndpointRole::client && application_space_.write_secret.has_value() &&
+        zero_rtt_space_.write_secret.has_value()) {
+        discard_packet_space_state(zero_rtt_space_);
+    }
+
     auto packets = std::vector<ProtectedPacket>{};
     const auto destination_connection_id = outbound_destination_connection_id();
     const auto initial_destination_connection_id = config_.role == EndpointRole::client

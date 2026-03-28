@@ -1050,7 +1050,7 @@ deserialize_protected_zero_rtt_packet(std::span<const std::byte> bytes,
     }
 
     const auto packet_number = recover_packet_number(
-        context.largest_authenticated_zero_rtt_packet_number,
+        context.largest_authenticated_application_packet_number,
         unprotected.value().truncated_packet_number, unprotected.value().packet_number_length);
     if (!packet_number.has_value()) {
         return CodecResult<ProtectedPacketDecodeResult>::failure(packet_number.error().code,

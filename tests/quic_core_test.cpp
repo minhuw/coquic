@@ -202,8 +202,6 @@ decode_sender_datagram(const coquic::quic::QuicConnection &connection,
                           connection.initial_space_.largest_authenticated_packet_number,
                       .largest_authenticated_handshake_packet_number =
                           connection.handshake_space_.largest_authenticated_packet_number,
-                      .largest_authenticated_zero_rtt_packet_number =
-                          connection.zero_rtt_space_.largest_authenticated_packet_number,
                       .largest_authenticated_application_packet_number =
                           connection.application_space_.largest_authenticated_packet_number,
                       .one_rtt_destination_connection_id_length =
@@ -873,6 +871,92 @@ TEST(QuicCoreTest, ClientUsesProtectedZeroRttPacketForEarlyApplicationSend) {
     }
 
     EXPECT_TRUE(saw_stream);
+}
+
+TEST(QuicCoreTest, AcceptedZeroRttPacketsScheduleApplicationAck) {
+    auto connection = make_connected_server_connection();
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
+            .packet_number_length = 1,
+            .packet_number = 7,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(processed.has_value());
+
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 7u);
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+    ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+    EXPECT_EQ(optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
+              coquic::quic::test::test_time(1));
+
+    const auto ack_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(ack_datagram.empty());
+    const auto packets = decode_sender_datagram(connection, ack_datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+
+    bool saw_ack = false;
+    for (const auto &frame : application->frames) {
+        const auto *ack = std::get_if<coquic::quic::AckFrame>(&frame);
+        if (ack == nullptr) {
+            continue;
+        }
+
+        saw_ack = true;
+        EXPECT_EQ(ack->largest_acknowledged, 7u);
+    }
+
+    EXPECT_TRUE(saw_ack);
+}
+
+TEST(QuicCoreTest, ClientStopsUsingZeroRttWhenApplicationWriteKeysExist) {
+    auto connection = make_connected_client_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.zero_rtt_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+
+    ASSERT_TRUE(connection.application_space_.write_secret.has_value());
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("late-early"), false)
+            .has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(0));
+
+    EXPECT_FALSE(connection.zero_rtt_space_.write_secret.has_value());
+    if (!datagram.empty()) {
+        const auto packets = decode_sender_datagram(connection, datagram);
+        ASSERT_EQ(packets.size(), 1u);
+        EXPECT_EQ(std::get_if<coquic::quic::ProtectedZeroRttPacket>(&packets.front()), nullptr);
+    }
+}
+
+TEST(QuicCoreTest, ServerDiscardsZeroRttReadSecretAfterProcessingOneRttPacket) {
+    auto connection = make_connected_server_connection();
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 1,
+            .packet_number = 3,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(processed.has_value());
+
+    EXPECT_FALSE(connection.zero_rtt_space_.read_secret.has_value());
 }
 
 TEST(QuicCoreTest, SendStreamLocalErrorsCoverInvalidIdAndClosedSendSide) {

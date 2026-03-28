@@ -97,7 +97,6 @@ struct DeserializeProtectionContext {
     bool one_rtt_key_phase = false;
     std::optional<std::uint64_t> largest_authenticated_initial_packet_number;
     std::optional<std::uint64_t> largest_authenticated_handshake_packet_number;
-    std::optional<std::uint64_t> largest_authenticated_zero_rtt_packet_number;
     std::optional<std::uint64_t> largest_authenticated_application_packet_number;
     std::size_t one_rtt_destination_connection_id_length = 0;
 };

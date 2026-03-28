@@ -764,11 +764,134 @@ bool first_header_is_retry_packet(std::span<const std::byte> datagram) {
     return packet_type == retry_packet_type;
 }
 
+struct RuntimeHandshakeObservation {
+    bool client_handshake_complete = false;
+    bool saw_retry = false;
+    std::vector<std::vector<std::byte>> server_datagrams;
+    std::vector<std::vector<std::byte>> client_followup_datagrams;
+};
+
 bool has_long_header(std::span<const std::byte> datagram) {
     if (datagram.empty()) {
         return false;
     }
     return (std::to_integer<std::uint8_t>(datagram.front()) & 0x80u) != 0;
+}
+
+RuntimeHandshakeObservation run_retry_enabled_runtime_handshake_observation() {
+    RuntimeHandshakeObservation observed;
+
+    const auto port = allocate_udp_loopback_port();
+    if (port == 0) {
+        return observed;
+    }
+
+    const auto server_runtime = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .retry_enabled = true,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    auto server_process = launch_runtime_server_process(server_runtime);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    const int client_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (client_fd < 0) {
+        return observed;
+    }
+    ScopedFd client_socket_guard(client_fd);
+
+    sockaddr_in server_address{};
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(port);
+    if (::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr) != 1) {
+        return observed;
+    }
+
+    auto client_runtime = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .requests_env = "https://localhost/hello.txt",
+    };
+    coquic::quic::QuicCore client(coquic::quic::make_http09_client_core_config(client_runtime));
+
+    const auto start =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto client_start_datagrams = coquic::quic::test::send_datagrams_from(start);
+    if (client_start_datagrams.empty()) {
+        return observed;
+    }
+
+    for (const auto &datagram : client_start_datagrams) {
+        if (::sendto(client_fd, datagram.data(), datagram.size(), 0,
+                     reinterpret_cast<const sockaddr *>(&server_address),
+                     sizeof(server_address)) < 0) {
+            return observed;
+        }
+    }
+
+    for (int i = 0; i < 64; ++i) {
+        pollfd descriptor{};
+        descriptor.fd = client_fd;
+        descriptor.events = POLLIN;
+        const int poll_result = ::poll(&descriptor, 1, 250);
+        if (poll_result < 0) {
+            return observed;
+        }
+        if (poll_result == 0) {
+            if (client.is_handshake_complete()) {
+                break;
+            }
+            continue;
+        }
+        if ((descriptor.revents & POLLIN) == 0) {
+            return observed;
+        }
+
+        std::vector<std::byte> buffer(65535);
+        const auto bytes_read =
+            ::recvfrom(client_fd, buffer.data(), buffer.size(), 0, nullptr, nullptr);
+        if (bytes_read <= 0) {
+            return observed;
+        }
+        buffer.resize(static_cast<std::size_t>(bytes_read));
+        observed.saw_retry = observed.saw_retry || first_header_is_retry_packet(buffer);
+        observed.server_datagrams.push_back(std::move(buffer));
+
+        auto step = client.advance(
+            coquic::quic::QuicCoreInboundDatagram{.bytes = observed.server_datagrams.back()},
+            coquic::quic::test::test_time(i + 1));
+        const auto response_datagrams = coquic::quic::test::send_datagrams_from(step);
+        observed.client_followup_datagrams.insert(observed.client_followup_datagrams.end(),
+                                                  response_datagrams.begin(),
+                                                  response_datagrams.end());
+        for (const auto &datagram : response_datagrams) {
+            if (::sendto(client_fd, datagram.data(), datagram.size(), 0,
+                         reinterpret_cast<const sockaddr *>(&server_address),
+                         sizeof(server_address)) < 0) {
+                return observed;
+            }
+        }
+    }
+
+    observed.client_handshake_complete = client.is_handshake_complete();
+    return observed;
+}
+
+bool run_retry_enabled_server_retry_smoke() {
+    const auto observed = run_retry_enabled_runtime_handshake_observation();
+    return observed.saw_retry;
+}
+
+int run_retry_enabled_runtime_handshake() {
+    const auto observed = run_retry_enabled_runtime_handshake_observation();
+    return observed.saw_retry && observed.client_handshake_complete ? 0 : 1;
 }
 
 std::vector<std::byte> make_unsupported_version_probe() {
@@ -2890,6 +3013,18 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesInteropServerSubcommandFlags) {
     EXPECT_TRUE(runtime.verify_peer);
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeParsesRetryFlagFromEnvironmentAndCli) {
+    const char *argv[] = {"coquic", "interop-server", "--retry"};
+    ScopedEnvVar role("ROLE", "server");
+    ScopedEnvVar retry("RETRY", "1");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(static_cast<int>(std::size(argv)),
+                                                                const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    EXPECT_TRUE(runtime.retry_enabled);
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeCliFlagsOverrideEnvironmentAndKeepExplicitClientRemote) {
     const char *argv[] = {"coquic",
                           "interop-client",
@@ -4049,6 +4184,14 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {
 
     EXPECT_TRUE(client.is_handshake_complete());
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, RetryEnabledServerSendsRetryBeforeCreatingSession) {
+    EXPECT_TRUE(run_retry_enabled_server_retry_smoke());
+}
+
+TEST(QuicHttp09RuntimeTest, RetryEnabledServerCompletesHandshakeAfterRetriedInitial) {
+    EXPECT_EQ(run_retry_enabled_runtime_handshake(), 0);
 }
 
 TEST(QuicHttp09RuntimeTest, HandshakeCaseNegotiatesQuicV2LongHeaders) {

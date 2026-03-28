@@ -19,6 +19,7 @@ struct Http09RuntimeConfig {
     std::string host = "127.0.0.1";
     std::uint16_t port = 443;
     QuicHttp09Testcase testcase = QuicHttp09Testcase::handshake;
+    bool retry_enabled = false;
     std::filesystem::path document_root = "/www";
     std::filesystem::path download_root = "/downloads";
     std::filesystem::path certificate_chain_path = "/certs/cert.pem";

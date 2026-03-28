@@ -1,6 +1,8 @@
 #include "src/quic/http09_runtime.h"
 #include "src/quic/http09_runtime_test_hooks.h"
+#include "src/quic/buffer.h"
 #include "src/quic/packet.h"
+#include "src/quic/packet_crypto.h"
 #include "src/quic/version.h"
 
 #include "src/coquic.h"
@@ -51,7 +53,7 @@ constexpr std::string_view kUsageLine =
     "[--testcase handshake|transfer|multiconnect|chacha20|v2] [--requests URLS] "
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
-    "[--server-name NAME] [--verify-peer]";
+    "[--server-name NAME] [--verify-peer] [--retry]";
 
 int client_receive_timeout_ms(const Http09RuntimeConfig &config) {
     if (config.testcase == QuicHttp09Testcase::multiconnect) {
@@ -128,6 +130,11 @@ std::optional<std::string> getenv_string(const char *name) {
         return std::nullopt;
     }
     return std::string(value);
+}
+
+bool env_flag_enabled(const char *name) {
+    const auto value = getenv_string(name);
+    return value.has_value() && !value->empty() && *value != "0";
 }
 
 bool runtime_trace_enabled() {
@@ -468,9 +475,21 @@ struct ParsedServerDatagram {
     };
 
     Kind kind;
+    std::uint32_t version = 0;
     ConnectionId destination_connection_id;
     std::optional<ConnectionId> source_connection_id;
+    std::vector<std::byte> token;
 };
+
+struct PendingRetryToken {
+    ConnectionId original_destination_connection_id;
+    ConnectionId retry_source_connection_id;
+    std::uint32_t original_version = kQuicVersion1;
+    sockaddr_storage peer{};
+    socklen_t peer_len = 0;
+};
+
+using RetryTokenStore = std::unordered_map<std::string, PendingRetryToken>;
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 bool is_initial_long_header_type(std::uint32_t version, std::uint8_t type) {
@@ -494,9 +513,11 @@ parse_server_datagram_for_routing(std::span<const std::byte> bytes) {
 
         return ParsedServerDatagram{
             .kind = ParsedServerDatagram::Kind::short_header,
+            .version = 0,
             .destination_connection_id =
                 ConnectionId(bytes.begin() + 1, bytes.begin() + 1 + kRuntimeConnectionIdLength),
             .source_connection_id = std::nullopt,
+            .token = {},
         };
     }
 
@@ -528,23 +549,128 @@ parse_server_datagram_for_routing(std::span<const std::byte> bytes) {
     ConnectionId source_connection_id(
         bytes.begin() + static_cast<std::ptrdiff_t>(offset),
         bytes.begin() + static_cast<std::ptrdiff_t>(offset + source_connection_id_length));
+    offset += source_connection_id_length;
 
     if (!is_supported_quic_version(version)) {
         return ParsedServerDatagram{
             .kind = ParsedServerDatagram::Kind::unsupported_version_long_header,
+            .version = version,
             .destination_connection_id = std::move(destination_connection_id),
             .source_connection_id = std::move(source_connection_id),
+            .token = {},
         };
     }
 
     const auto type = static_cast<std::uint8_t>((first_byte >> 4) & 0x03u);
+    std::vector<std::byte> token;
+    if (is_initial_long_header_type(version, type)) {
+        BufferReader reader(bytes.subspan(offset));
+        const auto token_length = decode_varint(reader);
+        if (!token_length.has_value()) {
+            return std::nullopt;
+        }
+        if (token_length.value().value > static_cast<std::uint64_t>(reader.remaining())) {
+            return std::nullopt;
+        }
+        const auto token_bytes =
+            reader.read_exact(static_cast<std::size_t>(token_length.value().value));
+        if (!token_bytes.has_value()) {
+            return std::nullopt;
+        }
+        token.assign(token_bytes.value().begin(), token_bytes.value().end());
+    }
     return ParsedServerDatagram{
         .kind = is_initial_long_header_type(version, type)
                     ? ParsedServerDatagram::Kind::supported_initial
                     : ParsedServerDatagram::Kind::supported_long_header,
+        .version = version,
         .destination_connection_id = std::move(destination_connection_id),
         .source_connection_id = std::move(source_connection_id),
+        .token = std::move(token),
     };
+}
+
+std::vector<std::byte> make_runtime_retry_token(std::uint64_t sequence) {
+    std::vector<std::byte> token(16, std::byte{0x00});
+    token[0] = std::byte{0x72};
+    token[1] = std::byte{0x74};
+    token[2] = std::byte{0x72};
+    token[3] = std::byte{0x79};
+    for (std::size_t index = 0; index < sizeof(sequence); ++index) {
+        const auto shift = static_cast<unsigned>((sizeof(sequence) - 1 - index) * 8);
+        token[8 + index] = static_cast<std::byte>((sequence >> shift) & 0xffu);
+    }
+    return token;
+}
+
+bool peer_matches_pending_retry(const PendingRetryToken &pending, const sockaddr_storage &peer,
+                                socklen_t peer_len) {
+    return pending.peer_len == peer_len && pending.peer.ss_family == peer.ss_family &&
+           std::memcmp(&pending.peer, &peer, static_cast<std::size_t>(peer_len)) == 0;
+}
+
+std::optional<PendingRetryToken> lookup_retry_context(const ParsedServerDatagram &parsed,
+                                                      const sockaddr_storage &peer,
+                                                      socklen_t peer_len,
+                                                      RetryTokenStore &retry_tokens) {
+    const auto it = retry_tokens.find(connection_id_key(parsed.token));
+    if (it == retry_tokens.end()) {
+        return std::nullopt;
+    }
+
+    const auto &pending = it->second;
+    const bool valid = peer_matches_pending_retry(pending, peer, peer_len) &&
+                       parsed.destination_connection_id == pending.retry_source_connection_id &&
+                       parsed.version == pending.original_version;
+    if (!valid) {
+        return std::nullopt;
+    }
+
+    auto retry_context = pending;
+    retry_tokens.erase(it);
+    return retry_context;
+}
+
+bool send_retry_for_initial(int fd, const ParsedServerDatagram &parsed,
+                            const sockaddr_storage &peer, socklen_t peer_len,
+                            RetryTokenStore &retry_tokens, std::uint64_t connection_index) {
+    if (!parsed.source_connection_id.has_value()) {
+        std::cerr << "http09-server failed: missing source connection id for retry\n";
+        return false;
+    }
+
+    const auto retry_source_connection_id =
+        make_runtime_connection_id(std::byte{0x73}, connection_index);
+    const auto token = make_runtime_retry_token(connection_index);
+    retry_tokens.emplace(connection_id_key(token),
+                         PendingRetryToken{
+                             .original_destination_connection_id = parsed.destination_connection_id,
+                             .retry_source_connection_id = retry_source_connection_id,
+                             .original_version = parsed.version,
+                             .peer = peer,
+                             .peer_len = peer_len,
+                         });
+
+    RetryPacket packet{
+        .version = parsed.version,
+        .retry_unused_bits = 0,
+        .destination_connection_id = *parsed.source_connection_id,
+        .source_connection_id = retry_source_connection_id,
+        .retry_token = token,
+    };
+    const auto integrity_tag =
+        compute_retry_integrity_tag(packet, parsed.destination_connection_id);
+    if (!integrity_tag.has_value()) {
+        return false;
+    }
+    packet.retry_integrity_tag = integrity_tag.value();
+
+    const auto encoded = serialize_packet(packet);
+    if (!encoded.has_value()) {
+        return false;
+    }
+
+    return send_datagram(fd, encoded.value(), peer, peer_len, "server");
 }
 
 bool send_version_negotiation_for_probe(int fd, std::span<const std::byte> datagram,
@@ -708,6 +834,9 @@ wait_for_socket_or_deadline(const RuntimeWaitConfig &config,
     } while (poll_result < 0 && errno == EINTR);
 
     if (poll_result < 0) {
+        if (errno == ECANCELED) {
+            return std::nullopt;
+        }
         std::cerr << "http09-" << config.role_name
                   << " failed: poll error: " << std::strerror(errno) << '\n';
         return std::nullopt;
@@ -1400,6 +1529,7 @@ int run_http09_server(const Http09RuntimeConfig &config) {
 
     ServerSessionMap sessions;
     std::unordered_map<std::string, std::string> initial_destination_routes;
+    RetryTokenStore retry_tokens;
     std::uint64_t next_connection_index = 1;
 
     const EraseServerSessionFn erase_session = [&](const std::string &local_connection_id_key) {
@@ -1408,16 +1538,30 @@ int run_http09_server(const Http09RuntimeConfig &config) {
         sessions.erase(local_connection_id_key);
     };
 
-    auto create_session = [&](const ConnectionId &initial_destination_connection_id,
-                              const sockaddr_storage &peer, socklen_t peer_len) -> ServerSession & {
+    auto create_session =
+        [&](const ConnectionId &initial_destination_connection_id, const sockaddr_storage &peer,
+            socklen_t peer_len,
+            const std::optional<PendingRetryToken> &retry_context) -> ServerSession & {
         auto core_config =
             make_runtime_server_core_config(config, identity, next_connection_index++);
+        if (retry_context.has_value()) {
+            core_config.source_connection_id = retry_context->retry_source_connection_id;
+            core_config.initial_destination_connection_id =
+                retry_context->retry_source_connection_id;
+            core_config.original_destination_connection_id =
+                retry_context->original_destination_connection_id;
+            core_config.retry_source_connection_id = retry_context->retry_source_connection_id;
+            core_config.original_version = retry_context->original_version;
+            core_config.initial_version = retry_context->original_version;
+        }
         const auto local_connection_id_key = connection_id_key(core_config.source_connection_id);
+        const auto &trace_original_destination_connection_id =
+            retry_context.has_value() ? retry_context->original_destination_connection_id
+                                      : initial_destination_connection_id;
         if (runtime_trace_enabled()) {
             std::cerr << "http09-server trace: create-session scid="
-                      << format_connection_id_hex(core_config.source_connection_id)
-                      << " odcid=" << format_connection_id_hex(initial_destination_connection_id)
-                      << '\n';
+                      << format_connection_id_hex(core_config.source_connection_id) << " odcid="
+                      << format_connection_id_hex(trace_original_destination_connection_id) << '\n';
         }
         auto session = std::make_unique<ServerSession>(ServerSession{
             .core = QuicCore(std::move(core_config)),
@@ -1474,14 +1618,39 @@ int run_http09_server(const Http09RuntimeConfig &config) {
             return true;
         }
 
+        if (config.retry_enabled && parsed->token.empty()) {
+            with_runtime_trace([&](std::ostream &stream) {
+                stream << "http09-server trace: retry-initial odcid="
+                       << format_connection_id_hex(parsed->destination_connection_id) << '\n';
+            });
+            return send_retry_for_initial(socket_fd, *parsed, step.source, step.source_len,
+                                          retry_tokens, next_connection_index++);
+        }
+
+        std::optional<PendingRetryToken> retry_context = std::nullopt;
+        if (config.retry_enabled) {
+            retry_context =
+                lookup_retry_context(*parsed, step.source, step.source_len, retry_tokens);
+            if (!retry_context.has_value()) {
+                with_runtime_trace([&](std::ostream &stream) {
+                    stream << "http09-server trace: ignored-invalid-retry-token dcid="
+                           << format_connection_id_hex(parsed->destination_connection_id) << '\n';
+                });
+                return true;
+            }
+        }
+
+        const auto &trace_original_destination_connection_id =
+            retry_context.has_value() ? retry_context->original_destination_connection_id
+                                      : parsed->destination_connection_id;
         with_runtime_trace([&](std::ostream &stream) {
             stream << "http09-server trace: new-initial odcid="
-                   << format_connection_id_hex(parsed->destination_connection_id)
+                   << format_connection_id_hex(trace_original_destination_connection_id)
                    << " len=" << parsed->destination_connection_id.size() << '\n';
         });
 
-        auto &session =
-            create_session(parsed->destination_connection_id, step.source, step.source_len);
+        auto &session = create_session(parsed->destination_connection_id, step.source,
+                                       step.source_len, retry_context);
         auto session_input = std::move(*step.input);
         const auto session_result = session.core.advance(std::move(session_input), step.input_time);
         const bool endpoint_failed = !drive_endpoint_until_blocked(
@@ -2461,6 +2630,9 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
         config.server_name = *server_name;
         server_name_specified = true;
     }
+    if (env_flag_enabled("RETRY")) {
+        config.retry_enabled = true;
+    }
 
     int index = 1;
     if (index < argc) {
@@ -2486,6 +2658,10 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
 
         if (arg == "--verify-peer") {
             config.verify_peer = true;
+            continue;
+        }
+        if (arg == "--retry") {
+            config.retry_enabled = true;
             continue;
         }
 

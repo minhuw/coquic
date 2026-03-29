@@ -4,6 +4,7 @@
 #include <map>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "src/quic/congestion.h"
@@ -89,6 +90,14 @@ struct LocalStreamLimitState {
     void mark_max_streams_frame_lost(const MaxStreamsFrame &frame);
 };
 
+struct StoredClientResumptionState {
+    std::vector<std::byte> tls_state;
+    std::uint32_t quic_version = kQuicVersion1;
+    std::string application_protocol;
+    TransportParameters peer_transport_parameters;
+    std::vector<std::byte> application_context;
+};
+
 class QuicConnection {
   public:
     explicit QuicConnection(QuicCoreConfig config);
@@ -105,6 +114,8 @@ class QuicConnection {
     std::optional<QuicCorePeerResetStream> take_peer_reset_stream();
     std::optional<QuicCorePeerStopSending> take_peer_stop_sending();
     std::optional<QuicCoreStateChange> take_state_change();
+    std::optional<QuicCoreResumptionStateAvailable> take_resumption_state_available();
+    std::optional<QuicCoreZeroRttStatusEvent> take_zero_rtt_status_event();
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     bool is_handshake_complete() const;
     bool has_processed_peer_packet() const;
@@ -140,15 +151,20 @@ class QuicConnection {
     void arm_pto_probe(QuicCoreTimePoint now);
     std::optional<SentPacketRecord> select_pto_probe(const PacketSpaceState &packet_space) const;
     const RecoveryRttState &shared_recovery_rtt_state() const;
+    std::optional<QuicCoreTimePoint> zero_rtt_discard_deadline() const;
+    void arm_server_zero_rtt_discard_deadline(QuicCoreTimePoint now);
+    void maybe_discard_server_zero_rtt_packet_space(QuicCoreTimePoint now);
     void synchronize_recovery_rtt_state();
     void install_available_secrets();
     void collect_pending_tls_bytes();
     CodecResult<bool> sync_tls_state();
+    void replay_deferred_protected_packets(QuicCoreTimePoint now);
     CodecResult<bool> validate_peer_transport_parameters_if_ready();
     void update_handshake_status();
     void confirm_handshake();
     bool should_reset_client_handshake_peer_state(const ConnectionId &source_connection_id) const;
     void reset_client_handshake_peer_state_for_new_source_connection_id();
+    bool packet_targets_discarded_long_header_space(std::span<const std::byte> packet_bytes) const;
     void discard_initial_packet_space();
     void discard_handshake_packet_space();
     std::optional<TransportParametersValidationContext>
@@ -200,6 +216,9 @@ class QuicConnection {
     std::vector<QuicCorePeerResetStream> pending_peer_reset_effects_;
     std::vector<QuicCorePeerStopSending> pending_peer_stop_effects_;
     std::vector<QuicCoreStateChange> pending_state_changes_;
+    std::optional<QuicCoreResumptionStateAvailable> pending_resumption_state_effect_;
+    std::optional<QuicCoreZeroRttStatusEvent> pending_zero_rtt_status_event_;
+    std::optional<StoredClientResumptionState> decoded_resumption_state_;
     std::optional<std::uint64_t> last_application_send_stream_id_;
     NewRenoCongestionController congestion_controller_;
     RecoveryRttState recovery_rtt_state_;
@@ -208,14 +227,18 @@ class QuicConnection {
     bool application_read_key_phase_ = false;
     bool application_write_key_phase_ = false;
     bool initial_packet_space_discarded_ = false;
+    bool handshake_packet_space_discarded_ = false;
     bool handshake_confirmed_ = false;
     StreamControlFrameState handshake_done_state_ = StreamControlFrameState::none;
     bool handshake_ready_emitted_ = false;
     bool failed_emitted_ = false;
+    bool resumption_state_emitted_ = false;
+    bool zero_rtt_attempted_event_emitted_ = false;
     bool processed_peer_packet_ = false;
     std::vector<std::vector<std::byte>> deferred_protected_packets_;
     std::optional<QuicCoreTimePoint> last_peer_activity_time_;
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
+    std::optional<QuicCoreTimePoint> server_zero_rtt_discard_deadline_;
 };
 
 } // namespace coquic::quic

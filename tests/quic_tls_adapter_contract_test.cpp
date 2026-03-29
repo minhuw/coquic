@@ -90,6 +90,29 @@ void drive_tls_handshake(TlsAdapter &client, TlsAdapter &server) {
     }
 }
 
+std::optional<std::vector<std::byte>> drive_tls_until_resumption_state(TlsAdapter &client,
+                                                                       TlsAdapter &server) {
+    drive_tls_handshake(client, server);
+
+    for (int i = 0; i < 16; ++i) {
+        const auto server_application = server.take_pending(EncryptionLevel::application);
+        if (!server_application.empty()) {
+            EXPECT_TRUE(
+                client.provide(EncryptionLevel::application, server_application).has_value());
+        }
+
+        client.poll();
+        server.poll();
+
+        auto state = client.take_resumption_state();
+        if (state.has_value()) {
+            return state;
+        }
+    }
+
+    return std::nullopt;
+}
+
 TEST(QuicTlsAdapterContractTest, ClientAndServerExchangeHandshakeBytesAndSecrets) {
     TlsAdapter client(make_client_config());
     TlsAdapter server(make_server_config());
@@ -188,6 +211,133 @@ TEST(QuicTlsAdapterContractTest, MapsOsslEncryptionLevelsToInternalLevels) {
 TEST(QuicTlsAdapterContractTest, MapsEarlyDataToZeroRttEncryptionLevel) {
     EXPECT_EQ(TlsAdapterTestPeer::to_encryption_level(ssl_encryption_early_data),
               std::optional<EncryptionLevel>(EncryptionLevel::zero_rtt));
+}
+
+TEST(QuicTlsAdapterContractTest, ClientExportsOpaqueResumptionStateAfterReceivingTicket) {
+    TlsAdapter client(make_client_config());
+    TlsAdapter server(make_server_config());
+
+    const auto exported = drive_tls_until_resumption_state(client, server);
+    ASSERT_TRUE(exported.has_value());
+    EXPECT_FALSE(exported.value().empty());
+}
+
+TEST(QuicTlsAdapterContractTest, ClientRestoresResumptionStateAndMarksEarlyDataAttempted) {
+    TlsAdapter first_client(make_client_config());
+    TlsAdapter first_server(make_server_config());
+
+    const auto exported = drive_tls_until_resumption_state(first_client, first_server);
+    ASSERT_TRUE(exported.has_value());
+
+    auto resumed_client_config = make_client_config();
+    resumed_client_config.resumption_state = exported.value();
+    resumed_client_config.attempt_zero_rtt = true;
+
+    TlsAdapter resumed_client(std::move(resumed_client_config));
+    ASSERT_TRUE(resumed_client.start().has_value());
+    EXPECT_TRUE(resumed_client.early_data_attempted());
+}
+
+TEST(QuicTlsAdapterContractTest,
+     ClientAttemptingZeroRttEmitsZeroRttWriteSecretWhenSessionAllowsEarlyData) {
+    auto first_client_config = make_client_config();
+    auto first_server_config = make_server_config();
+    first_server_config.accept_zero_rtt = true;
+    first_server_config.zero_rtt_context = {std::byte{0x10}};
+
+    TlsAdapter first_client(std::move(first_client_config));
+    TlsAdapter first_server(std::move(first_server_config));
+
+    const auto exported = drive_tls_until_resumption_state(first_client, first_server);
+    ASSERT_TRUE(exported.has_value());
+
+    auto resumed_client_config = make_client_config();
+    resumed_client_config.resumption_state = exported.value();
+    resumed_client_config.attempt_zero_rtt = true;
+    resumed_client_config.zero_rtt_context = {std::byte{0x10}};
+
+    TlsAdapter resumed_client(std::move(resumed_client_config));
+    ASSERT_TRUE(resumed_client.start().has_value());
+
+    const auto secrets = resumed_client.take_available_secrets();
+    EXPECT_TRUE(std::any_of(secrets.begin(), secrets.end(), [](const auto &secret) {
+        return secret.level == EncryptionLevel::zero_rtt && secret.sender == EndpointRole::client;
+    }));
+}
+
+TEST(QuicTlsAdapterContractTest,
+     ResumedServerAcceptingZeroRttInstallsZeroRttReadSecretAndReusesSession) {
+    auto first_client_config = make_client_config();
+    auto first_server_config = make_server_config();
+    first_server_config.accept_zero_rtt = true;
+    first_server_config.zero_rtt_context = {std::byte{0x10}};
+
+    TlsAdapter first_client(std::move(first_client_config));
+    TlsAdapter first_server(std::move(first_server_config));
+
+    const auto exported = drive_tls_until_resumption_state(first_client, first_server);
+    ASSERT_TRUE(exported.has_value());
+
+    auto resumed_client_config = make_client_config();
+    resumed_client_config.resumption_state = exported.value();
+    resumed_client_config.attempt_zero_rtt = true;
+    resumed_client_config.zero_rtt_context = {std::byte{0x10}};
+
+    auto resumed_server_config = make_server_config();
+    resumed_server_config.accept_zero_rtt = true;
+    resumed_server_config.zero_rtt_context = {std::byte{0x10}};
+
+    TlsAdapter resumed_client(std::move(resumed_client_config));
+    TlsAdapter resumed_server(std::move(resumed_server_config));
+
+    ASSERT_TRUE(resumed_client.start().has_value());
+    const auto resumed_client_initial = resumed_client.take_pending(EncryptionLevel::initial);
+    ASSERT_FALSE(resumed_client_initial.empty());
+    ASSERT_TRUE(
+        resumed_server.provide(EncryptionLevel::initial, resumed_client_initial).has_value());
+
+    const auto early_server_secrets = resumed_server.take_available_secrets();
+    EXPECT_TRUE(std::any_of(early_server_secrets.begin(), early_server_secrets.end(),
+                            [](const auto &secret) {
+                                return secret.level == EncryptionLevel::zero_rtt &&
+                                       secret.sender == EndpointRole::client;
+                            }));
+
+    for (int i = 0;
+         i < 32 && !(resumed_client.handshake_complete() && resumed_server.handshake_complete());
+         ++i) {
+        const auto client_initial = resumed_client.take_pending(EncryptionLevel::initial);
+        if (!client_initial.empty()) {
+            ASSERT_TRUE(
+                resumed_server.provide(EncryptionLevel::initial, client_initial).has_value());
+        }
+
+        const auto server_initial = resumed_server.take_pending(EncryptionLevel::initial);
+        if (!server_initial.empty()) {
+            ASSERT_TRUE(
+                resumed_client.provide(EncryptionLevel::initial, server_initial).has_value());
+        }
+
+        const auto server_handshake = resumed_server.take_pending(EncryptionLevel::handshake);
+        if (!server_handshake.empty()) {
+            ASSERT_TRUE(
+                resumed_client.provide(EncryptionLevel::handshake, server_handshake).has_value());
+        }
+
+        const auto client_handshake = resumed_client.take_pending(EncryptionLevel::handshake);
+        if (!client_handshake.empty()) {
+            ASSERT_TRUE(
+                resumed_server.provide(EncryptionLevel::handshake, client_handshake).has_value());
+        }
+
+        resumed_client.poll();
+        resumed_server.poll();
+    }
+
+    EXPECT_TRUE(resumed_client.handshake_complete());
+    EXPECT_TRUE(resumed_server.handshake_complete());
+    EXPECT_TRUE(resumed_server.resumed_resumption_state().has_value());
+    EXPECT_EQ(resumed_server.early_data_accepted(), std::optional<bool>(true));
 }
 
 TEST(QuicTlsAdapterContractTest, MapsInternalEncryptionLevelsToOsslLevels) {

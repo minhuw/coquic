@@ -80,6 +80,32 @@ TEST(QuicHttp09Test, UsesExtendedIdleTimeoutProfileForMulticonnectCase) {
     EXPECT_EQ(config.max_idle_timeout, 180000u);
 }
 
+TEST(QuicHttp09Test, UsesExpandedServerStreamProfileForResumptionAndZeroRttCases) {
+    const auto resumption = coquic::quic::http09_server_transport_for_testcase(
+        coquic::quic::QuicHttp09Testcase::resumption);
+    EXPECT_EQ(resumption.initial_max_streams_bidi, 64u);
+
+    const auto zero_rtt = coquic::quic::http09_server_transport_for_testcase(
+        coquic::quic::QuicHttp09Testcase::zerortt);
+    EXPECT_EQ(zero_rtt.initial_max_streams_bidi, 64u);
+}
+
+TEST(QuicHttp09Test, UsesStableZeroRttContextAcrossDifferentGetRequestSets) {
+    const auto warmup =
+        coquic::quic::parse_http09_requests_env("https://example.test/warmup-only.txt");
+    ASSERT_TRUE(warmup.has_value());
+
+    const auto transfer = coquic::quic::parse_http09_requests_env(
+        "https://example.test/warmup-only.txt https://example.test/final.txt");
+    ASSERT_TRUE(transfer.has_value());
+
+    const auto warmup_context = coquic::quic::http09_zero_rtt_application_context(warmup.value());
+    const auto transfer_context =
+        coquic::quic::http09_zero_rtt_application_context(transfer.value());
+    EXPECT_FALSE(warmup_context.empty());
+    EXPECT_EQ(warmup_context, transfer_context);
+}
+
 TEST(QuicHttp09Test, ResolvesRequestTargetUnderRootWithoutDiscardingRoot) {
     const auto resolved =
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a/b.bin");

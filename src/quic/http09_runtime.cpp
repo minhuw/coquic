@@ -50,7 +50,8 @@ constexpr int kServerIdleTimeoutMs = 1000;
 constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
-    "[--testcase handshake|transfer|multiconnect|chacha20|retry|v2] [--requests URLS] "
+    "[--testcase handshake|transfer|multiconnect|chacha20|retry|resumption|zerortt|v2] "
+    "[--requests URLS] "
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
     "[--server-name NAME] [--verify-peer] [--retry]";
@@ -211,6 +212,12 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
     }
     if (value == "chacha20") {
         return QuicHttp09Testcase::chacha20;
+    }
+    if (value == "resumption") {
+        return QuicHttp09Testcase::resumption;
+    }
+    if (value == "zerortt") {
+        return QuicHttp09Testcase::zerortt;
     }
     if (value == "v2") {
         return QuicHttp09Testcase::v2;
@@ -468,6 +475,10 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
         .identity = std::move(identity),
         .transport = http09_server_transport_for_testcase(config.testcase),
         .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(config.testcase),
+        .zero_rtt =
+            QuicZeroRttConfig{
+                .allow = config.testcase == QuicHttp09Testcase::zerortt,
+            },
     };
 }
 
@@ -950,6 +961,36 @@ struct EndpointDriveState {
     bool endpoint_has_pending_work = false;
     bool terminal_success = false;
     bool terminal_failure = false;
+    std::optional<QuicResumptionState> last_resumption_state;
+};
+
+void record_resumption_state(EndpointDriveState &state, const QuicCoreResult &result) {
+    for (const auto &effect : result.effects) {
+        const auto *available = std::get_if<QuicCoreResumptionStateAvailable>(&effect);
+        if (available != nullptr) {
+            state.last_resumption_state = available->state;
+        }
+    }
+}
+
+bool zero_rtt_definitely_unavailable(const QuicCoreResult &result) {
+    for (const auto &effect : result.effects) {
+        const auto *status = std::get_if<QuicCoreZeroRttStatusEvent>(&effect);
+        if (status == nullptr) {
+            continue;
+        }
+        if (status->status == QuicZeroRttStatus::unavailable ||
+            status->status == QuicZeroRttStatus::not_attempted ||
+            status->status == QuicZeroRttStatus::rejected) {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct ClientConnectionRunResult {
+    int exit_code = 0;
+    std::optional<QuicResumptionState> resumption_state;
 };
 
 struct ServerSession {
@@ -968,6 +1009,29 @@ using EraseServerSessionFn = std::function<void(const std::string &)>;
 void erase_server_session_from_map(ServerSessionMap &sessions,
                                    const std::string &local_connection_id_key) {
     sessions.erase(local_connection_id_key);
+}
+
+bool datagram_routes_via_initial_destination(const ParsedServerDatagram &parsed) {
+    return parsed.kind == ParsedServerDatagram::Kind::supported_initial ||
+           parsed.kind == ParsedServerDatagram::Kind::supported_long_header;
+}
+
+ServerSessionMap::iterator find_server_session_for_datagram(
+    ServerSessionMap &sessions,
+    const std::unordered_map<std::string, std::string> &initial_destination_routes,
+    const ParsedServerDatagram &parsed) {
+    const auto destination_connection_id_key = connection_id_key(parsed.destination_connection_id);
+    auto session_it = sessions.find(destination_connection_id_key);
+    if (session_it != sessions.end() || !datagram_routes_via_initial_destination(parsed)) {
+        return session_it;
+    }
+
+    const auto initial_it = initial_destination_routes.find(destination_connection_id_key);
+    if (initial_it == initial_destination_routes.end()) {
+        return sessions.end();
+    }
+
+    return sessions.find(initial_it->second);
 }
 
 struct EndpointDriver {
@@ -1000,13 +1064,18 @@ template <typename Endpoint> EndpointDriver make_endpoint_driver(Endpoint &endpo
     };
 }
 
-QuicCoreConfig make_runtime_client_core_config(const Http09RuntimeConfig &config,
-                                               std::uint64_t connection_index) {
-    auto core_config = make_http09_client_core_config(config);
+void assign_runtime_client_connection_ids(QuicCoreConfig &core_config,
+                                          std::uint64_t connection_index) {
     core_config.source_connection_id =
         make_runtime_connection_id(std::byte{0xc1}, (connection_index << 1u) | 0x01u);
     core_config.initial_destination_connection_id =
         make_runtime_connection_id(std::byte{0x83}, connection_index << 1u);
+}
+
+QuicCoreConfig make_runtime_client_core_config(const Http09RuntimeConfig &config,
+                                               std::uint64_t connection_index) {
+    auto core_config = make_http09_client_core_config(config);
+    assign_runtime_client_connection_ids(core_config, connection_index);
     return core_config;
 }
 
@@ -1047,6 +1116,7 @@ bool drive_endpoint_until_blocked(const EndpointDriver &endpoint, QuicCore &core
     QuicCoreResult current_result = initial_result;
 
     for (;;) {
+        record_resumption_state(state, current_result);
         if (!handle_core_effects(fd, current_result, peer, peer_len, role_name)) {
             state.terminal_failure = true;
             return false;
@@ -1079,6 +1149,11 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
                                       int idle_timeout_ms, const sockaddr_storage &peer,
                                       socklen_t peer_len, EndpointDriveState &state,
                                       const ClientLoopIo &io, const QuicCoreResult &start_result) {
+    struct PumpEndpointWorkResult {
+        bool ok = true;
+        bool advanced_core = false;
+    };
+
     bool saw_peer_input = false;
     std::optional<QuicCoreTimePoint> terminal_success_deadline;
     const auto ensure_terminal_success_deadline = [&](QuicCoreTimePoint current) {
@@ -1125,28 +1200,33 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
                                             timer_result, state, "client");
     };
 
-    const auto pump_client_endpoint_work_once = [&]() -> bool {
+    const auto pump_client_endpoint_work_once = [&]() -> PumpEndpointWorkResult {
         if (!state.endpoint_has_pending_work) {
-            return true;
+            return {};
         }
 
         auto update = endpoint.poll(now());
         state.endpoint_has_pending_work = update.has_pending_work;
         if (update.terminal_failure) {
             state.terminal_failure = true;
-            return false;
+            return PumpEndpointWorkResult{
+                .ok = false,
+            };
         }
         if (update.terminal_success) {
             state.terminal_success = true;
-            return true;
+            return {};
         }
         if (update.core_inputs.empty()) {
-            return true;
+            return {};
         }
 
         auto result = advance_core_with_inputs(core, update.core_inputs, now());
-        return drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, result,
-                                            state, "client");
+        return PumpEndpointWorkResult{
+            .ok = drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, result,
+                                               state, "client"),
+            .advanced_core = true,
+        };
     };
 
     const auto drain_ready_datagrams = [&]() -> bool {
@@ -1159,7 +1239,8 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
                 continue;
             }
 
-            if (!pump_client_endpoint_work_once()) {
+            const auto pump_result = pump_client_endpoint_work_once();
+            if (!pump_result.ok) {
                 return false;
             }
             const bool terminal = state.terminal_success | state.terminal_failure;
@@ -1171,6 +1252,9 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             auto receive = io.receive_datagram(socket_fd, /*flags=*/MSG_DONTWAIT,
                                                /*role_name=*/"client");
             if (receive.status == ReceiveDatagramStatus::would_block) {
+                if (pump_result.advanced_core && state.endpoint_has_pending_work) {
+                    continue;
+                }
                 return true;
             }
             if (receive.status == ReceiveDatagramStatus::error) {
@@ -1211,7 +1295,7 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             continue;
         }
 
-        if (!pump_client_endpoint_work_once()) {
+        if (!pump_client_endpoint_work_once().ok) {
             return 1;
         }
         if (state.terminal_success) {
@@ -1270,13 +1354,15 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
     }
 }
 
-int run_http09_client_connection(const Http09RuntimeConfig &config,
-                                 const std::vector<QuicHttp09Request> &requests,
-                                 std::uint64_t connection_index) {
+ClientConnectionRunResult run_http09_client_connection_with_core_config(
+    const Http09RuntimeConfig &config, const std::vector<QuicHttp09Request> &requests,
+    QuicCoreConfig core_config, std::uint64_t connection_index) {
     const auto remote = derive_http09_client_remote_impl(config, requests);
     if (!remote.has_value()) {
         std::cerr << "http09-client failed: invalid request authority\n";
-        return 1;
+        return ClientConnectionRunResult{
+            .exit_code = 1,
+        };
     }
 
     ResolvedUdpAddress peer_address{};
@@ -1287,33 +1373,53 @@ int run_http09_client_connection(const Http09RuntimeConfig &config,
             },
             peer_address)) {
         std::cerr << "http09-client failed: invalid host address\n";
-        return 1;
+        return ClientConnectionRunResult{
+            .exit_code = 1,
+        };
     }
 
     const int socket_fd = open_udp_socket(peer_address.family);
     if (socket_fd < 0) {
         std::cerr << "http09-client failed: unable to create UDP socket: " << std::strerror(errno)
                   << '\n';
-        return 1;
+        return ClientConnectionRunResult{
+            .exit_code = 1,
+        };
     }
     ScopedFd socket_guard(socket_fd);
 
     const sockaddr_storage peer = peer_address.address;
     const socklen_t peer_len = peer_address.address_len;
 
+    const bool attempt_zero_rtt_requests = core_config.zero_rtt.attempt;
+    core_config.server_name = remote->server_name;
+    assign_runtime_client_connection_ids(core_config, connection_index);
+    QuicCore core(std::move(core_config));
+    EndpointDriveState state;
+    const auto start_result = core.advance(QuicCoreStart{}, now());
+    record_resumption_state(state, start_result);
+
     QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
         .requests = requests,
         .download_root = config.download_root,
+        .allow_requests_before_handshake_ready =
+            attempt_zero_rtt_requests && !zero_rtt_definitely_unavailable(start_result),
     });
-    auto client_config = config;
-    client_config.server_name = remote->server_name;
-    QuicCore core(make_runtime_client_core_config(client_config, connection_index));
+    return ClientConnectionRunResult{
+        .exit_code = run_http09_client_connection_loop(
+            make_endpoint_driver(endpoint), core, socket_fd, client_receive_timeout_ms(config),
+            peer, peer_len, state, make_runtime_client_loop_io(), start_result),
+        .resumption_state = state.last_resumption_state,
+    };
+}
 
-    EndpointDriveState state;
-    const auto start_result = core.advance(QuicCoreStart{}, now());
-    return run_http09_client_connection_loop(make_endpoint_driver(endpoint), core, socket_fd,
-                                             client_receive_timeout_ms(config), peer, peer_len,
-                                             state, make_runtime_client_loop_io(), start_result);
+int run_http09_client_connection(const Http09RuntimeConfig &config,
+                                 const std::vector<QuicHttp09Request> &requests,
+                                 std::uint64_t connection_index) {
+    return run_http09_client_connection_with_core_config(
+               config, requests, make_runtime_client_core_config(config, connection_index),
+               connection_index)
+        .exit_code;
 }
 
 int run_http09_client(const Http09RuntimeConfig &config) {
@@ -1323,6 +1429,8 @@ int run_http09_client(const Http09RuntimeConfig &config) {
         return 1;
     }
 
+    const bool resumed_case = config.testcase == QuicHttp09Testcase::resumption ||
+                              config.testcase == QuicHttp09Testcase::zerortt;
     if (config.testcase == QuicHttp09Testcase::multiconnect) {
         for (std::size_t index = 0; index < requests.value().size(); ++index) {
             if (run_http09_client_connection(
@@ -1334,7 +1442,35 @@ int run_http09_client(const Http09RuntimeConfig &config) {
         return 0;
     }
 
-    return run_http09_client_connection(config, requests.value(), 1);
+    if (!resumed_case) {
+        return run_http09_client_connection(config, requests.value(), 1);
+    }
+
+    Http09RuntimeConfig warmup_config = config;
+    warmup_config.download_root = config.download_root / ".coquic-warmup";
+    std::error_code warmup_cleanup_error;
+    std::filesystem::remove_all(warmup_config.download_root, warmup_cleanup_error);
+
+    const std::vector<QuicHttp09Request> warmup_requests = {requests.value().front()};
+    auto warmup_core_config = make_runtime_client_core_config(config, 1);
+    warmup_core_config.zero_rtt.application_context =
+        http09_zero_rtt_application_context(warmup_requests);
+    const auto warmup = run_http09_client_connection_with_core_config(
+        warmup_config, warmup_requests, std::move(warmup_core_config), 1);
+    std::filesystem::remove_all(warmup_config.download_root, warmup_cleanup_error);
+    if (warmup.exit_code != 0) {
+        return warmup.exit_code;
+    }
+
+    auto resumed_core_config = make_runtime_client_core_config(config, 2);
+    resumed_core_config.resumption_state = warmup.resumption_state;
+    resumed_core_config.zero_rtt = QuicZeroRttConfig{
+        .attempt = config.testcase == QuicHttp09Testcase::zerortt,
+        .application_context = http09_zero_rtt_application_context(requests.value()),
+    };
+    return run_http09_client_connection_with_core_config(config, requests.value(),
+                                                         std::move(resumed_core_config), 2)
+        .exit_code;
 }
 
 bool process_existing_server_session_datagram(ServerSession &session, RuntimeWaitStep &step,
@@ -1625,16 +1761,8 @@ int run_http09_server(const Http09RuntimeConfig &config) {
             return true;
         }
 
-        const auto destination_connection_id_key =
-            connection_id_key(parsed->destination_connection_id);
-        auto session_it = sessions.find(destination_connection_id_key);
-        if (session_it == sessions.end() &&
-            parsed->kind == ParsedServerDatagram::Kind::supported_initial) {
-            const auto initial_it = initial_destination_routes.find(destination_connection_id_key);
-            if (initial_it != initial_destination_routes.end()) {
-                session_it = sessions.find(initial_it->second);
-            }
-        }
+        auto session_it =
+            find_server_session_for_datagram(sessions, initial_destination_routes, *parsed);
 
         if (session_it != sessions.end()) {
             return process_existing_server_session_datagram(*session_it->second, step, *parsed,
@@ -2366,6 +2494,35 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
                 setup_base_time + std::chrono::milliseconds(kClientSuccessDrainWindowMs + 2),
             };
         },
+        [](ScriptedEndpointForTests &setup_endpoint, ScriptedClientLoopIoForTests &setup_io,
+           QuicCore &, QuicCoreResult &, QuicCoreTimePoint) {
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+                .has_pending_work = true,
+            });
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+                .has_pending_work = true,
+            });
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+                .has_pending_work = true,
+            });
+            setup_endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+                .core_inputs =
+                    {
+                        QuicCoreTimerExpired{},
+                    },
+            });
+            setup_endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+                .core_inputs =
+                    {
+                        QuicCoreTimerExpired{},
+                    },
+            });
+            setup_endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+                .terminal_success = true,
+            });
+            setup_io.receive_results.push_back(make_would_block_receive_for_tests());
+            setup_io.receive_results.push_back(make_would_block_receive_for_tests());
+        },
     });
     kClientLoopCaseSetups[static_cast<std::size_t>(case_id)](endpoint, io_script, core,
                                                              start_result, base_time);
@@ -2445,6 +2602,38 @@ bool existing_server_session_missing_input_fails_for_tests() {
         *session, step, parsed, /*socket_fd=*/-1,
         std::bind_front(&record_erased_server_session_key_for_tests, &erased_key));
     return !processed & erased_key.empty();
+}
+
+bool supported_long_header_routes_via_initial_destination_for_tests() {
+    const ConnectionId initial_destination_connection_id = {std::byte{0x69}};
+    const auto initial_destination_connection_id_key =
+        connection_id_key(initial_destination_connection_id);
+
+    ServerSessionMap sessions;
+    sessions.emplace(
+        "existing-session",
+        std::make_unique<ServerSession>(ServerSession{
+            .core = make_failed_server_core_for_tests(),
+            .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                .document_root = std::filesystem::temp_directory_path(),
+            }),
+            .state = EndpointDriveState{},
+            .peer = {},
+            .peer_len = 0,
+            .local_connection_id_key = "existing-session",
+            .initial_destination_connection_id_key = initial_destination_connection_id_key,
+        }));
+
+    std::unordered_map<std::string, std::string> initial_destination_routes;
+    initial_destination_routes.emplace(initial_destination_connection_id_key, "existing-session");
+
+    const ParsedServerDatagram parsed{
+        .kind = ParsedServerDatagram::Kind::supported_long_header,
+        .destination_connection_id = initial_destination_connection_id,
+    };
+
+    return find_server_session_for_datagram(sessions, initial_destination_routes, parsed) !=
+           sessions.end();
 }
 
 bool expired_server_timer_failure_cleans_up_for_tests() {

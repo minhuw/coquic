@@ -15,6 +15,7 @@ namespace coquic::quic {
 struct QuicHttp09ClientConfig {
     std::vector<QuicHttp09Request> requests;
     std::filesystem::path download_root;
+    bool allow_requests_before_handshake_ready = false;
 };
 
 class QuicHttp09ClientEndpoint {
@@ -43,6 +44,7 @@ class QuicHttp09ClientEndpoint {
     QuicHttp09EndpointUpdate drain_pending_inputs();
     bool handle_local_error(const QuicCoreLocalError &error);
     void activate_pending_request();
+    bool requests_may_be_issued() const;
     bool can_issue_next_request() const;
     std::size_t active_request_count() const;
     bool process_receive_stream_data(const QuicCoreReceiveStreamData &received);

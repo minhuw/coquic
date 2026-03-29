@@ -42,6 +42,10 @@ struct TlsAdapterConfig {
     std::optional<TlsIdentity> identity;
     std::vector<std::byte> local_transport_parameters;
     std::vector<CipherSuite> allowed_tls_cipher_suites;
+    std::optional<std::vector<std::byte>> resumption_state;
+    bool attempt_zero_rtt = false;
+    bool accept_zero_rtt = false;
+    std::vector<std::byte> zero_rtt_context;
 };
 
 class TlsAdapter {
@@ -59,7 +63,11 @@ class TlsAdapter {
     void poll();
     std::vector<std::byte> take_pending(EncryptionLevel level);
     std::vector<AvailableTrafficSecret> take_available_secrets();
+    std::optional<std::vector<std::byte>> take_resumption_state();
+    const std::optional<std::vector<std::byte>> &resumed_resumption_state() const;
     const std::optional<std::vector<std::byte>> &peer_transport_parameters() const;
+    bool early_data_attempted() const;
+    std::optional<bool> early_data_accepted() const;
     bool handshake_complete() const;
 
   private:

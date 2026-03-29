@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <openssl/bio.h>
+#include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
@@ -38,6 +39,7 @@ using coquic::quic::test::TlsAdapterFaultPoint;
 using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
 using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
 using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
+using SslSessionPtr = std::unique_ptr<SSL_SESSION, decltype(&SSL_SESSION_free)>;
 
 #if defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
@@ -332,6 +334,33 @@ COQUIC_NO_PROFILE bool should_process_post_handshake(EncryptionLevel level,
     return level == EncryptionLevel::application && handshake_complete;
 }
 
+std::optional<std::vector<std::byte>> serialize_session_bytes(const SSL_SESSION *session) {
+    if (session == nullptr) {
+        return std::nullopt;
+    }
+
+    uint8_t *encoded = nullptr;
+    size_t encoded_len = 0;
+    if (SSL_SESSION_to_bytes(session, &encoded, &encoded_len) != 1 || encoded == nullptr) {
+        return std::nullopt;
+    }
+
+    auto free_openssl_bytes = [](uint8_t *ptr) { OPENSSL_free(ptr); };
+    std::unique_ptr<uint8_t, decltype(free_openssl_bytes)> owned(encoded, free_openssl_bytes);
+    const auto bytes = as_bytes(encoded, encoded_len);
+    return std::vector<std::byte>(bytes.begin(), bytes.end());
+}
+
+SslSessionPtr deserialize_session_bytes(const std::span<const std::byte> bytes, SSL_CTX *ctx) {
+    if (ctx == nullptr) {
+        return SslSessionPtr(nullptr, &SSL_SESSION_free);
+    }
+
+    SSL_SESSION *session =
+        SSL_SESSION_from_bytes(reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size(), ctx);
+    return SslSessionPtr(session, &SSL_SESSION_free);
+}
+
 } // namespace
 
 namespace coquic::quic {
@@ -374,6 +403,7 @@ class TlsAdapter::Impl {
                 return tls_failure();
             }
             capture_peer_transport_parameters();
+            update_runtime_status();
             return CodecResult<bool>::success(true);
         }
 
@@ -401,8 +431,26 @@ class TlsAdapter::Impl {
         return result;
     }
 
+    std::optional<std::vector<std::byte>> take_resumption_state() {
+        auto result = std::move(pending_resumption_state_);
+        pending_resumption_state_.reset();
+        return result;
+    }
+
+    const std::optional<std::vector<std::byte>> &resumed_resumption_state() const {
+        return resumed_resumption_state_;
+    }
+
     const std::optional<std::vector<std::byte>> &peer_transport_parameters() const {
         return peer_transport_parameters_;
+    }
+
+    bool early_data_attempted() const {
+        return early_data_attempted_;
+    }
+
+    std::optional<bool> early_data_accepted() const {
+        return early_data_accepted_;
     }
 
     bool handshake_complete() const {
@@ -477,6 +525,16 @@ class TlsAdapter::Impl {
         return SSL_TLSEXT_ERR_OK;
     }
 
+    static int on_new_session(SSL *ssl, SSL_SESSION *session) {
+        auto *impl = static_cast<Impl *>(SSL_get_app_data(ssl));
+        if (impl == nullptr || impl->config_.role != EndpointRole::client) {
+            return 0;
+        }
+
+        impl->pending_resumption_state_ = serialize_session_bytes(session);
+        return 0;
+    }
+
   private:
     void initialize() {
         ERR_clear_error();
@@ -505,6 +563,14 @@ class TlsAdapter::Impl {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;
+        }
+
+        if (config_.role == EndpointRole::client) {
+            SSL_CTX_set_session_cache_mode(ctx_.get(), SSL_SESS_CACHE_CLIENT);
+        }
+        SSL_CTX_sess_set_new_cb(ctx_.get(), &Impl::on_new_session);
+        if (config_.attempt_zero_rtt || config_.accept_zero_rtt) {
+            SSL_CTX_set_early_data_enabled(ctx_.get(), 1);
         }
 
         if (!load_identity()) {
@@ -554,6 +620,20 @@ class TlsAdapter::Impl {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;
+        }
+
+        if (config_.attempt_zero_rtt || config_.accept_zero_rtt) {
+            SSL_set_early_data_enabled(ssl_.get(), 1);
+        }
+
+        if (config_.resumption_state.has_value()) {
+            auto session = deserialize_session_bytes(*config_.resumption_state, ctx_.get());
+            if (session != nullptr && SSL_set_session(ssl_.get(), session.get()) == 1) {
+                resumed_resumption_state_ = *config_.resumption_state;
+                if (config_.attempt_zero_rtt) {
+                    early_data_attempted_ = true;
+                }
+            }
         }
 
         if (config_.role == EndpointRole::client) {
@@ -622,6 +702,7 @@ class TlsAdapter::Impl {
             ERR_clear_error();
             const int result = SSL_do_handshake(ssl_.get());
             capture_peer_transport_parameters();
+            update_runtime_status();
 
             if (result == 1) {
                 return CodecResult<bool>::success(true);
@@ -725,6 +806,41 @@ class TlsAdapter::Impl {
         peer_transport_parameters_ = std::vector<std::byte>(bytes.begin(), bytes.end());
     }
 
+    void update_runtime_status() {
+        update_early_data_status();
+        update_resumed_resumption_state();
+    }
+
+    void update_early_data_status() {
+        if (ssl_ == nullptr) {
+            return;
+        }
+
+        if (SSL_early_data_accepted(ssl_.get()) == 1) {
+            early_data_attempted_ = true;
+            early_data_accepted_ = true;
+            return;
+        }
+
+        const auto reason = SSL_get_early_data_reason(ssl_.get());
+        if (reason == ssl_early_data_unknown || reason == ssl_early_data_disabled ||
+            reason == ssl_early_data_no_session_offered) {
+            return;
+        }
+
+        early_data_attempted_ = true;
+        early_data_accepted_ = false;
+    }
+
+    void update_resumed_resumption_state() {
+        if (ssl_ == nullptr || resumed_resumption_state_.has_value() ||
+            SSL_session_reused(ssl_.get()) != 1) {
+            return;
+        }
+
+        resumed_resumption_state_ = serialize_session_bytes(SSL_get_session(ssl_.get()));
+    }
+
     std::size_t total_pending_bytes() const {
         std::size_t total = 0;
         for (const auto &bytes : pending_) {
@@ -755,7 +871,11 @@ class TlsAdapter::Impl {
     std::unique_ptr<SSL, decltype(&SSL_free)> ssl_;
     std::array<std::vector<std::byte>, 4> pending_;
     std::vector<AvailableTrafficSecret> available_secrets_;
+    std::optional<std::vector<std::byte>> pending_resumption_state_;
+    std::optional<std::vector<std::byte>> resumed_resumption_state_;
     std::optional<std::vector<std::byte>> peer_transport_parameters_;
+    bool early_data_attempted_ = false;
+    std::optional<bool> early_data_accepted_;
     std::optional<CodecError> sticky_error_;
 };
 
@@ -788,8 +908,24 @@ std::vector<AvailableTrafficSecret> TlsAdapter::take_available_secrets() {
     return impl_->take_available_secrets();
 }
 
+std::optional<std::vector<std::byte>> TlsAdapter::take_resumption_state() {
+    return impl_->take_resumption_state();
+}
+
+const std::optional<std::vector<std::byte>> &TlsAdapter::resumed_resumption_state() const {
+    return impl_->resumed_resumption_state();
+}
+
 const std::optional<std::vector<std::byte>> &TlsAdapter::peer_transport_parameters() const {
     return impl_->peer_transport_parameters();
+}
+
+bool TlsAdapter::early_data_attempted() const {
+    return impl_->early_data_attempted();
+}
+
+std::optional<bool> TlsAdapter::early_data_accepted() const {
+    return impl_->early_data_accepted();
 }
 
 bool TlsAdapter::handshake_complete() const {

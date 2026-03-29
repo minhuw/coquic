@@ -73,6 +73,7 @@ enum class ClientConnectionLoopCaseForTests : std::uint8_t {
     wait_input_missing_failure,
     peer_input_then_outer_pump_terminal_success,
     wait_input_then_terminal_success_exits_after_drain_window,
+    nonblocking_drain_repeats_pending_endpoint_progress,
 };
 
 struct ClientConnectionLoopResultForTests {
@@ -144,6 +145,7 @@ ClientConnectionLoopResultForTests
 run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_id);
 bool existing_server_session_failure_cleans_up_for_tests();
 bool existing_server_session_missing_input_fails_for_tests();
+bool supported_long_header_routes_via_initial_destination_for_tests();
 bool expired_server_timer_failure_cleans_up_for_tests();
 bool expired_server_timer_success_preserves_session_for_tests();
 bool pending_server_work_failure_cleans_up_for_tests();

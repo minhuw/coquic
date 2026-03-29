@@ -1227,9 +1227,6 @@ deserialize_protected_one_rtt_packet(std::span<const std::byte> bytes,
     if (!context.one_rtt_secret.has_value())
         return CodecResult<ProtectedPacketDecodeResult>::failure(
             CodecErrorCode::missing_crypto_context, 0);
-    if (context.one_rtt_destination_connection_id_length == 0)
-        return CodecResult<ProtectedPacketDecodeResult>::failure(
-            CodecErrorCode::malformed_short_header_context, 0);
 
     const auto packet_number_offset = 1 + context.one_rtt_destination_connection_id_length;
     if (packet_number_offset > bytes.size())

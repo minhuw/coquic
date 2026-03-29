@@ -213,6 +213,12 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     while (const auto event = connection_->take_state_change()) {
         result.effects.emplace_back(QuicCoreStateEvent{*event});
     }
+    while (const auto state = connection_->take_resumption_state_available()) {
+        result.effects.emplace_back(*state);
+    }
+    while (const auto status = connection_->take_zero_rtt_status_event()) {
+        result.effects.emplace_back(*status);
+    }
     result.next_wakeup = connection_->next_wakeup();
     return result;
 }

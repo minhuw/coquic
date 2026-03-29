@@ -2651,6 +2651,99 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingC
     EXPECT_EQ(read_file_bytes(download_root.path() / "gamma.txt"), "gamma-bytes");
 }
 
+TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionTestcase) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+    document_root.write_file("hello.txt", "hello-after-resumption");
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    coquic::quic::Http09RuntimeConfig server;
+    {
+        const char *argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "server");
+        ScopedEnvVar testcase("TESTCASE", "resumption");
+        ScopedEnvVar host("HOST", "127.0.0.1");
+        ScopedEnvVar port_env("PORT", std::to_string(port));
+        ScopedEnvVar document_root_env("DOCUMENT_ROOT", document_root.path().string());
+        ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", "tests/fixtures/quic-server-cert.pem");
+        ScopedEnvVar private_key("PRIVATE_KEY_PATH", "tests/fixtures/quic-server-key.pem");
+
+        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        server = optional_value_or_terminate(parsed);
+    }
+
+    coquic::quic::Http09RuntimeConfig client;
+    {
+        const char *argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar testcase("TESTCASE", "resumption");
+        ScopedEnvVar host("HOST", "127.0.0.1");
+        ScopedEnvVar port_env("PORT", std::to_string(port));
+        ScopedEnvVar download_root_env("DOWNLOAD_ROOT", download_root.path().string());
+        ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
+
+        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        client = optional_value_or_terminate(parsed);
+    }
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-after-resumption");
+}
+
+TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeFallsBackWhenWarmupAndTransferContextsDiffer) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+    document_root.write_file("seed.txt", "seed-body");
+    document_root.write_file("final.txt", "final-body");
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    coquic::quic::Http09RuntimeConfig server;
+    {
+        const char *argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "server");
+        ScopedEnvVar testcase("TESTCASE", "zerortt");
+        ScopedEnvVar host("HOST", "127.0.0.1");
+        ScopedEnvVar port_env("PORT", std::to_string(port));
+        ScopedEnvVar document_root_env("DOCUMENT_ROOT", document_root.path().string());
+        ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", "tests/fixtures/quic-server-cert.pem");
+        ScopedEnvVar private_key("PRIVATE_KEY_PATH", "tests/fixtures/quic-server-key.pem");
+
+        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        server = optional_value_or_terminate(parsed);
+    }
+
+    coquic::quic::Http09RuntimeConfig client;
+    {
+        const char *argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar testcase("TESTCASE", "zerortt");
+        ScopedEnvVar host("HOST", "127.0.0.1");
+        ScopedEnvVar port_env("PORT", std::to_string(port));
+        ScopedEnvVar download_root_env("DOWNLOAD_ROOT", download_root.path().string());
+        ScopedEnvVar requests("REQUESTS", "https://localhost/seed.txt https://localhost/final.txt");
+
+        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        client = optional_value_or_terminate(parsed);
+    }
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(read_file_bytes(download_root.path() / "final.txt"), "final-body");
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefaults) {
     const char *argv[] = {"coquic"};
     ScopedEnvVar role("ROLE", "client");
@@ -2962,6 +3055,32 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialV2Testcase) {
     const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::quic::QuicHttp09Testcase::v2);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases) {
+    {
+        const char *argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar testcase("TESTCASE", "resumption");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
+
+        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
+                  coquic::quic::QuicHttp09Testcase::resumption);
+    }
+
+    {
+        const char *argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar testcase("TESTCASE", "zerortt");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
+
+        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
+                  coquic::quic::QuicHttp09Testcase::zerortt);
+    }
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeReadsServerEnvironmentOverrides) {
@@ -3635,6 +3754,15 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionLoopCases) {
                 wait_input_then_terminal_success_exits_after_drain_window);
     EXPECT_EQ(wait_input_then_terminal_success_exits_after_drain_window.exit_code, 0);
     EXPECT_TRUE(wait_input_then_terminal_success_exits_after_drain_window.terminal_success);
+
+    const auto nonblocking_drain_repeats_pending_endpoint_progress =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::
+                nonblocking_drain_repeats_pending_endpoint_progress);
+    EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.exit_code, 0);
+    EXPECT_TRUE(nonblocking_drain_repeats_pending_endpoint_progress.terminal_success);
+    EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.wait_calls, 0u);
+    EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.receive_calls, 2u);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCases) {
@@ -3645,6 +3773,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
 
     EXPECT_TRUE(coquic::quic::test::existing_server_session_failure_cleans_up_for_tests());
     EXPECT_TRUE(coquic::quic::test::existing_server_session_missing_input_fails_for_tests());
+    EXPECT_TRUE(
+        coquic::quic::test::supported_long_header_routes_via_initial_destination_for_tests());
     EXPECT_TRUE(coquic::quic::test::expired_server_timer_failure_cleans_up_for_tests());
     EXPECT_TRUE(coquic::quic::test::expired_server_timer_success_preserves_session_for_tests());
     EXPECT_TRUE(coquic::quic::test::pending_server_work_failure_cleans_up_for_tests());

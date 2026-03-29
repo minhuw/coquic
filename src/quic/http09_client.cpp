@@ -65,7 +65,7 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::poll(QuicCoreTimePoint /*now*
         return make_failure_update();
     }
 
-    if (handshake_ready_ && !complete_) {
+    if (requests_may_be_issued() && !complete_) {
         if (config_.requests.empty()) {
             complete_ = true;
         } else if (can_issue_next_request()) {
@@ -121,8 +121,8 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::drain_pending_inputs() {
         pending_core_inputs_.pop_front();
     }
 
-    update.has_pending_work =
-        can_issue_next_request() || (handshake_ready_ && !complete_ && config_.requests.empty());
+    update.has_pending_work = can_issue_next_request() ||
+                              (requests_may_be_issued() && !complete_ && config_.requests.empty());
     return update;
 }
 
@@ -161,8 +161,12 @@ void QuicHttp09ClientEndpoint::activate_pending_request() {
     pending_open_request_.reset();
 }
 
+bool QuicHttp09ClientEndpoint::requests_may_be_issued() const {
+    return handshake_ready_ || config_.allow_requests_before_handshake_ready;
+}
+
 bool QuicHttp09ClientEndpoint::can_issue_next_request() const {
-    if (!handshake_ready_ || failed_ || complete_ || blocked_on_stream_limit_ ||
+    if (!requests_may_be_issued() || failed_ || complete_ || blocked_on_stream_limit_ ||
         pending_open_request_.has_value() || next_request_index_ >= config_.requests.size()) {
         return false;
     }

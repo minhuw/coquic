@@ -18,6 +18,8 @@ enum class QuicHttp09Testcase : std::uint8_t {
     transfer,
     multiconnect,
     chacha20,
+    resumption,
+    zerortt,
     v2,
 };
 
@@ -43,6 +45,9 @@ CodecResult<std::string> parse_http09_request_target(std::span<const std::byte> 
 
 CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::filesystem::path &root,
                                                                   std::string_view request_target);
+
+std::vector<std::byte>
+http09_zero_rtt_application_context(std::span<const QuicHttp09Request> requests);
 
 QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase);
 QuicTransportConfig http09_server_transport_for_testcase(QuicHttp09Testcase testcase);

@@ -186,6 +186,25 @@ CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::fil
     return CodecResult<std::filesystem::path>::success(candidate);
 }
 
+std::vector<std::byte>
+http09_zero_rtt_application_context(std::span<const QuicHttp09Request> requests) {
+    if (requests.empty()) {
+        return {};
+    }
+
+    constexpr std::string_view marker = "http09-get";
+    std::vector<std::byte> context;
+    context.reserve(marker.size() + 1u + requests.front().authority.size());
+    for (const char ch : marker) {
+        context.push_back(static_cast<std::byte>(static_cast<unsigned char>(ch)));
+    }
+    context.push_back(std::byte{0x00});
+    for (const char ch : requests.front().authority) {
+        context.push_back(static_cast<std::byte>(static_cast<unsigned char>(ch)));
+    }
+    return context;
+}
+
 QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase) {
     auto config = http09_transport_for_testcase(testcase);
     if (testcase == QuicHttp09Testcase::transfer) {
@@ -196,7 +215,13 @@ QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase test
 }
 
 QuicTransportConfig http09_server_transport_for_testcase(QuicHttp09Testcase testcase) {
-    return http09_transport_for_testcase(testcase);
+    auto config = http09_transport_for_testcase(testcase);
+    if (testcase == QuicHttp09Testcase::resumption || testcase == QuicHttp09Testcase::zerortt) {
+        // Official resumed interop cases fan out enough request streams that the
+        // default limit of 16 forces extra 1-RTT churn after warmup.
+        config.initial_max_streams_bidi = 64;
+    }
+    return config;
 }
 
 std::vector<CipherSuite> http09_tls_cipher_suites_for_testcase(QuicHttp09Testcase testcase) {

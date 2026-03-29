@@ -211,6 +211,14 @@ inline QuicCoreResult relay_send_datagrams_to_peer(const QuicCoreResult &result,
     return combined;
 }
 
+struct QuicHandshakeTranscript {
+    std::vector<QuicCoreResult> client_results;
+    std::vector<QuicCoreResult> server_results;
+};
+
+inline std::optional<QuicResumptionState>
+last_resumption_state_from(std::span<const QuicCoreResult> results);
+
 inline QuicCoreResult relay_datagrams_to_peer(std::span<const std::vector<std::byte>> datagrams,
                                               std::span<const std::size_t> delivery_order,
                                               QuicCore &peer, QuicCoreTimePoint now);
@@ -393,6 +401,78 @@ inline void drive_quic_handshake(QuicCore &client, QuicCore &server, QuicCoreTim
     }
 }
 
+inline QuicHandshakeTranscript drive_quic_handshake_with_results(QuicCore &client, QuicCore &server,
+                                                                 QuicCoreTimePoint now) {
+    QuicHandshakeTranscript transcript;
+    auto to_server = client.advance(QuicCoreStart{}, now);
+    transcript.client_results.push_back(to_server);
+    auto to_client = QuicCoreResult{};
+    auto step_now = now;
+
+    for (int i = 0; i < 32; ++i) {
+        if (!send_datagrams_from(to_server).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            to_client = relay_send_datagrams_to_peer(to_server, server, step_now);
+            transcript.server_results.push_back(to_client);
+            to_server.effects.clear();
+            continue;
+        }
+
+        if (!send_datagrams_from(to_client).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            to_server = relay_send_datagrams_to_peer(to_client, client, step_now);
+            transcript.client_results.push_back(to_server);
+            to_client.effects.clear();
+            continue;
+        }
+
+        const auto next = earliest_next_wakeup({to_server.next_wakeup, to_client.next_wakeup});
+        if (!next.has_value()) {
+            break;
+        }
+
+        if (to_server.next_wakeup.has_value() && *to_server.next_wakeup == *next) {
+            to_server = client.advance(QuicCoreTimerExpired{}, *next);
+            transcript.client_results.push_back(to_server);
+            continue;
+        }
+
+        if (to_client.next_wakeup.has_value() && *to_client.next_wakeup == *next) {
+            to_client = server.advance(QuicCoreTimerExpired{}, *next);
+            transcript.server_results.push_back(to_client);
+            continue;
+        }
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        step_now += std::chrono::milliseconds(1);
+        auto server_tick = server.advance(QuicCoreTimerExpired{}, step_now);
+        transcript.server_results.push_back(server_tick);
+        if (!send_datagrams_from(server_tick).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            transcript.client_results.push_back(
+                relay_send_datagrams_to_peer(server_tick, client, step_now));
+        }
+        if (last_resumption_state_from(transcript.client_results).has_value()) {
+            break;
+        }
+
+        step_now += std::chrono::milliseconds(1);
+        auto client_tick = client.advance(QuicCoreTimerExpired{}, step_now);
+        transcript.client_results.push_back(client_tick);
+        if (!send_datagrams_from(client_tick).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            transcript.server_results.push_back(
+                relay_send_datagrams_to_peer(client_tick, server, step_now));
+        }
+        if (last_resumption_state_from(transcript.client_results).has_value()) {
+            break;
+        }
+    }
+
+    return transcript;
+}
+
 inline void
 drive_quic_handshake_from_results(QuicCore &client, QuicCore &server, QuicCoreResult to_server,
                                   QuicCoreResult to_client, QuicCoreTimePoint now,
@@ -446,6 +526,74 @@ drive_quic_handshake_from_results(QuicCore &client, QuicCore &server, QuicCoreRe
             continue;
         }
     }
+}
+
+inline QuicHandshakeTranscript
+drive_quic_handshake_from_results_with_results(QuicCore &client, QuicCore &server,
+                                               QuicCoreResult to_server, QuicCoreResult to_client,
+                                               QuicCoreTimePoint now) {
+    QuicHandshakeTranscript transcript;
+    auto step_to_server = std::move(to_server);
+    if (!step_to_server.effects.empty() || step_to_server.next_wakeup.has_value() ||
+        step_to_server.local_error.has_value()) {
+        transcript.client_results.push_back(step_to_server);
+    }
+    auto step_to_client = std::move(to_client);
+    if (!step_to_client.effects.empty() || step_to_client.next_wakeup.has_value() ||
+        step_to_client.local_error.has_value()) {
+        transcript.server_results.push_back(step_to_client);
+    }
+    auto step_now = now;
+
+    for (int i = 0; i < 32; ++i) {
+        if (!send_datagrams_from(step_to_server).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            step_to_client = relay_send_datagrams_to_peer(step_to_server, server, step_now);
+            transcript.server_results.push_back(step_to_client);
+            step_to_server.effects.clear();
+            continue;
+        }
+
+        if (!send_datagrams_from(step_to_client).empty()) {
+            step_now += std::chrono::milliseconds(1);
+            step_to_server = relay_send_datagrams_to_peer(step_to_client, client, step_now);
+            transcript.client_results.push_back(step_to_server);
+            step_to_client.effects.clear();
+            continue;
+        }
+
+        const auto next =
+            earliest_next_wakeup({step_to_server.next_wakeup, step_to_client.next_wakeup});
+        if (!next.has_value()) {
+            break;
+        }
+
+        if (step_to_server.next_wakeup.has_value() && *step_to_server.next_wakeup == *next) {
+            step_to_server = client.advance(QuicCoreTimerExpired{}, *next);
+            transcript.client_results.push_back(step_to_server);
+            continue;
+        }
+
+        if (step_to_client.next_wakeup.has_value() && *step_to_client.next_wakeup == *next) {
+            step_to_client = server.advance(QuicCoreTimerExpired{}, *next);
+            transcript.server_results.push_back(step_to_client);
+            continue;
+        }
+    }
+
+    return transcript;
+}
+
+inline std::optional<QuicResumptionState>
+last_resumption_state_from(std::span<const QuicCoreResult> results) {
+    std::optional<QuicResumptionState> latest;
+    for (const auto &result : results) {
+        const auto states = resumption_states_from(result);
+        if (!states.empty()) {
+            latest = states.back();
+        }
+    }
+    return latest;
 }
 
 inline std::vector<std::byte> bytes_from_string(std::string_view text) {

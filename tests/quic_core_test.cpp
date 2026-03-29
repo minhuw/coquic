@@ -680,7 +680,11 @@ TEST(QuicCoreTest, CompletedHandshakeEmitsResumptionStateEffect) {
     const auto state = coquic::quic::test::last_resumption_state_from(transcript.client_results);
 
     ASSERT_TRUE(state.has_value());
-    EXPECT_FALSE(state.value().serialized.empty());
+    if (!state.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *state;
+    EXPECT_FALSE(resumption_state.serialized.empty());
 }
 
 TEST(QuicCoreTest, ClientUsesResumptionStateToEmitZeroRttDatagramBeforeHandshakeReady) {
@@ -697,9 +701,13 @@ TEST(QuicCoreTest, ClientUsesResumptionStateToEmitZeroRttDatagramBeforeHandshake
     const auto state =
         coquic::quic::test::last_resumption_state_from(first_transcript.client_results);
     ASSERT_TRUE(state.has_value());
+    if (!state.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *state;
 
     auto resumed_client_config = coquic::quic::test::make_client_core_config();
-    resumed_client_config.resumption_state = state.value();
+    resumed_client_config.resumption_state = resumption_state;
     resumed_client_config.zero_rtt = coquic::quic::QuicZeroRttConfig{
         .attempt = true,
         .allow = false,
@@ -737,11 +745,15 @@ TEST(QuicCoreTest, EmptySourceCidClientCompletesResumedZeroRttHandshake) {
     const auto state =
         coquic::quic::test::last_resumption_state_from(warmup_transcript.client_results);
     ASSERT_TRUE(state.has_value());
+    if (!state.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *state;
 
     auto client_config = coquic::quic::test::make_client_core_config();
     auto server_config = coquic::quic::test::make_server_core_config();
     client_config.source_connection_id = {};
-    client_config.resumption_state = state.value();
+    client_config.resumption_state = resumption_state;
     client_config.zero_rtt = coquic::quic::QuicZeroRttConfig{
         .attempt = true,
         .allow = false,
@@ -789,11 +801,15 @@ TEST(QuicCoreTest, EmptySourceCidClientCompletesResumedZeroRttHandshakeWithManyS
     const auto state =
         coquic::quic::test::last_resumption_state_from(warmup_transcript.client_results);
     ASSERT_TRUE(state.has_value());
+    if (!state.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *state;
 
     auto client_config = coquic::quic::test::make_client_core_config();
     auto server_config = coquic::quic::test::make_server_core_config();
     client_config.source_connection_id = {};
-    client_config.resumption_state = state.value();
+    client_config.resumption_state = resumption_state;
     client_config.zero_rtt = coquic::quic::QuicZeroRttConfig{
         .attempt = true,
         .allow = false,
@@ -841,10 +857,14 @@ TEST(QuicCoreTest, ResumedClientDoesNotCoalescePacketsWithDifferentDestinationCo
     const auto state =
         coquic::quic::test::last_resumption_state_from(warmup_transcript.client_results);
     ASSERT_TRUE(state.has_value());
+    if (!state.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *state;
 
     auto client_config = coquic::quic::test::make_client_core_config();
     auto server_config = coquic::quic::test::make_server_core_config();
-    client_config.resumption_state = state.value();
+    client_config.resumption_state = resumption_state;
     client_config.zero_rtt = coquic::quic::QuicZeroRttConfig{
         .attempt = true,
         .allow = false,
@@ -924,10 +944,14 @@ TEST(QuicCoreTest, ResumedClientStillEmitsHandshakePacketWhenAppSendIsCwndBlocke
     const auto state =
         coquic::quic::test::last_resumption_state_from(warmup_transcript.client_results);
     ASSERT_TRUE(state.has_value());
+    if (!state.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *state;
 
     auto client_config = coquic::quic::test::make_client_core_config();
     auto server_config = coquic::quic::test::make_server_core_config();
-    client_config.resumption_state = state.value();
+    client_config.resumption_state = resumption_state;
     client_config.zero_rtt = coquic::quic::QuicZeroRttConfig{
         .attempt = true,
         .allow = false,
@@ -977,8 +1001,12 @@ TEST(QuicCoreTest, ResumedClientStillEmitsHandshakePacketWhenAppSendIsCwndBlocke
         client.connection_->drain_outbound_datagram(coquic::quic::test::test_time(103));
     const auto first_packet_kinds = protected_datagram_packet_kinds(first_reply);
     ASSERT_TRUE(first_packet_kinds.has_value());
-    ASSERT_EQ(first_packet_kinds.value().size(), 1u);
-    EXPECT_EQ(first_packet_kinds.value()[0], ProtectedPacketKind::initial);
+    if (!first_packet_kinds.has_value()) {
+        return;
+    }
+    const auto &first_kinds = *first_packet_kinds;
+    ASSERT_EQ(first_kinds.size(), 1u);
+    EXPECT_EQ(first_kinds[0], ProtectedPacketKind::initial);
 
     client.connection_->congestion_controller_.bytes_in_flight_ =
         client.connection_->congestion_controller_.congestion_window();
@@ -987,8 +1015,12 @@ TEST(QuicCoreTest, ResumedClientStillEmitsHandshakePacketWhenAppSendIsCwndBlocke
         client.connection_->drain_outbound_datagram(coquic::quic::test::test_time(103));
     const auto second_packet_kinds = protected_datagram_packet_kinds(second_reply);
     ASSERT_TRUE(second_packet_kinds.has_value());
-    ASSERT_FALSE(second_packet_kinds.value().empty());
-    EXPECT_EQ(second_packet_kinds.value()[0], ProtectedPacketKind::handshake);
+    if (!second_packet_kinds.has_value()) {
+        return;
+    }
+    const auto &second_kinds = *second_packet_kinds;
+    ASSERT_FALSE(second_kinds.empty());
+    EXPECT_EQ(second_kinds[0], ProtectedPacketKind::handshake);
 }
 
 TEST(QuicCoreTest, ResumedServerFirstApplicationAckCoversOriginalZeroRttPacketRange) {
@@ -1006,11 +1038,15 @@ TEST(QuicCoreTest, ResumedServerFirstApplicationAckCoversOriginalZeroRttPacketRa
     const auto state =
         coquic::quic::test::last_resumption_state_from(warmup_transcript.client_results);
     ASSERT_TRUE(state.has_value());
+    if (!state.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *state;
 
     auto client_config = coquic::quic::test::make_client_core_config();
     auto server_config = coquic::quic::test::make_server_core_config();
     client_config.source_connection_id = {};
-    client_config.resumption_state = state.value();
+    client_config.resumption_state = resumption_state;
     client_config.zero_rtt = coquic::quic::QuicZeroRttConfig{
         .attempt = true,
         .allow = false,
@@ -1140,7 +1176,11 @@ TEST(QuicCoreTest, EmptySourceCidClientCompletesHandshakeAndEmitsResumptionState
     EXPECT_TRUE(client.is_handshake_complete());
     EXPECT_TRUE(server.is_handshake_complete());
     ASSERT_TRUE(state.has_value());
-    EXPECT_FALSE(state.value().serialized.empty());
+    if (!state.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *state;
+    EXPECT_FALSE(resumption_state.serialized.empty());
 }
 
 TEST(QuicCoreTest, ClientStartProducesSendEffect) {
@@ -1664,9 +1704,13 @@ TEST(QuicCoreTest, ServerProcessesZeroRttStreamBeforeHandshakeCompletes) {
 
     const auto received = connection.take_received_stream_data();
     ASSERT_TRUE(received.has_value());
-    EXPECT_EQ(received.value().stream_id, 0u);
-    EXPECT_EQ(received.value().bytes, coquic::quic::test::bytes_from_string("early-data"));
-    EXPECT_TRUE(received.value().fin);
+    if (!received.has_value()) {
+        return;
+    }
+    const auto &received_stream = *received;
+    EXPECT_EQ(received_stream.stream_id, 0u);
+    EXPECT_EQ(received_stream.bytes, coquic::quic::test::bytes_from_string("early-data"));
+    EXPECT_TRUE(received_stream.fin);
     EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
 }
 
@@ -1711,9 +1755,13 @@ TEST(QuicCoreTest, ProcessInboundDatagramProcessesZeroRttStreamBeforeHandshakeCo
 
     const auto received = connection.take_received_stream_data();
     ASSERT_TRUE(received.has_value());
-    EXPECT_EQ(received.value().stream_id, 0u);
-    EXPECT_EQ(received.value().bytes, coquic::quic::test::bytes_from_string("early-data"));
-    EXPECT_TRUE(received.value().fin);
+    if (!received.has_value()) {
+        return;
+    }
+    const auto &received_stream = *received;
+    EXPECT_EQ(received_stream.stream_id, 0u);
+    EXPECT_EQ(received_stream.bytes, coquic::quic::test::bytes_from_string("early-data"));
+    EXPECT_TRUE(received_stream.fin);
     EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
     EXPECT_TRUE(connection.deferred_protected_packets_.empty());
 }
@@ -1837,13 +1885,21 @@ TEST(QuicCoreTest, ServerRetainsZeroRttReadSecretLongEnoughForReorderedZeroRttPa
 
     const auto first_received = connection.take_received_stream_data();
     ASSERT_TRUE(first_received.has_value());
-    EXPECT_EQ(first_received.value().stream_id, 0u);
-    EXPECT_EQ(first_received.value().bytes, coquic::quic::test::bytes_from_string("early"));
+    if (!first_received.has_value()) {
+        return;
+    }
+    const auto &first_stream = *first_received;
+    EXPECT_EQ(first_stream.stream_id, 0u);
+    EXPECT_EQ(first_stream.bytes, coquic::quic::test::bytes_from_string("early"));
 
     const auto second_received = connection.take_received_stream_data();
     ASSERT_TRUE(second_received.has_value());
-    EXPECT_EQ(second_received.value().stream_id, 4u);
-    EXPECT_EQ(second_received.value().bytes, coquic::quic::test::bytes_from_string("late"));
+    if (!second_received.has_value()) {
+        return;
+    }
+    const auto &second_stream = *second_received;
+    EXPECT_EQ(second_stream.stream_id, 4u);
+    EXPECT_EQ(second_stream.bytes, coquic::quic::test::bytes_from_string("late"));
 }
 
 TEST(QuicCoreTest, ServerDiscardsZeroRttReadSecretAfterShortRetentionWindowFollowingOneRtt) {
@@ -7371,7 +7427,8 @@ TEST(QuicCoreTest, InboundApplicationCryptoFrameIsIgnoredAfterHandshakeConnected
     if (!received.has_value()) {
         return;
     }
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(received.value().bytes), "pong");
+    const auto &received_stream = *received;
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_stream.bytes), "pong");
 }
 
 TEST(QuicCoreTest, InboundApplicationStreamFailsForNonZeroStreamId) {
@@ -7426,9 +7483,10 @@ TEST(QuicCoreTest, InboundApplicationStreamCarriesFinWhenFinalDataBecomesContigu
     if (!received.has_value()) {
         return;
     }
-    EXPECT_EQ(received.value().stream_id, 0u);
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(received.value().bytes), "hello");
-    EXPECT_TRUE(received.value().fin);
+    const auto &received_stream = *received;
+    EXPECT_EQ(received_stream.stream_id, 0u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_stream.bytes), "hello");
+    EXPECT_TRUE(received_stream.fin);
 }
 
 TEST(QuicCoreTest, ConnectionParserHelpersRejectMalformedClientInitialHeaders) {
@@ -8165,7 +8223,8 @@ TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversAckReorderAndErrorBr
     if (!first_received.has_value()) {
         return;
     }
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(first_received.value().bytes), "ok");
+    const auto &first_stream = *first_received;
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(first_stream.bytes), "ok");
 
     const auto reordered = connection.process_inbound_application(
         std::array<coquic::quic::Frame, 1>{
@@ -8186,7 +8245,8 @@ TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversAckReorderAndErrorBr
     if (!gap_filled_received.has_value()) {
         return;
     }
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(gap_filled_received.value().bytes), "yzx");
+    const auto &gap_filled_stream = *gap_filled_received;
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(gap_filled_stream.bytes), "yzx");
 
     const auto overflow = connection.process_inbound_application(
         std::array<coquic::quic::Frame, 1>{

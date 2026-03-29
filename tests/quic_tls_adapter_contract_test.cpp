@@ -219,7 +219,11 @@ TEST(QuicTlsAdapterContractTest, ClientExportsOpaqueResumptionStateAfterReceivin
 
     const auto exported = drive_tls_until_resumption_state(client, server);
     ASSERT_TRUE(exported.has_value());
-    EXPECT_FALSE(exported.value().empty());
+    if (!exported.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *exported;
+    EXPECT_FALSE(resumption_state.empty());
 }
 
 TEST(QuicTlsAdapterContractTest, ClientRestoresResumptionStateAndMarksEarlyDataAttempted) {
@@ -228,9 +232,13 @@ TEST(QuicTlsAdapterContractTest, ClientRestoresResumptionStateAndMarksEarlyDataA
 
     const auto exported = drive_tls_until_resumption_state(first_client, first_server);
     ASSERT_TRUE(exported.has_value());
+    if (!exported.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *exported;
 
     auto resumed_client_config = make_client_config();
-    resumed_client_config.resumption_state = exported.value();
+    resumed_client_config.resumption_state = resumption_state;
     resumed_client_config.attempt_zero_rtt = true;
 
     TlsAdapter resumed_client(std::move(resumed_client_config));
@@ -250,9 +258,13 @@ TEST(QuicTlsAdapterContractTest,
 
     const auto exported = drive_tls_until_resumption_state(first_client, first_server);
     ASSERT_TRUE(exported.has_value());
+    if (!exported.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *exported;
 
     auto resumed_client_config = make_client_config();
-    resumed_client_config.resumption_state = exported.value();
+    resumed_client_config.resumption_state = resumption_state;
     resumed_client_config.attempt_zero_rtt = true;
     resumed_client_config.zero_rtt_context = {std::byte{0x10}};
 
@@ -277,9 +289,13 @@ TEST(QuicTlsAdapterContractTest,
 
     const auto exported = drive_tls_until_resumption_state(first_client, first_server);
     ASSERT_TRUE(exported.has_value());
+    if (!exported.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *exported;
 
     auto resumed_client_config = make_client_config();
-    resumed_client_config.resumption_state = exported.value();
+    resumed_client_config.resumption_state = resumption_state;
     resumed_client_config.attempt_zero_rtt = true;
     resumed_client_config.zero_rtt_context = {std::byte{0x10}};
 

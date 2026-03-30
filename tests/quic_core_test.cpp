@@ -7565,7 +7565,7 @@ TEST(QuicCoreTest, ConnectionParserHelpersRejectMalformedPacketLengths) {
     EXPECT_EQ(oversized_scid.error().code, coquic::quic::CodecErrorCode::invalid_varint);
 
     const auto unsupported_type = connection.peek_next_packet_length(
-        bytes_from_ints({0xd0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00}));
+        bytes_from_ints({0xf0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00}));
     ASSERT_FALSE(unsupported_type.has_value());
     EXPECT_EQ(unsupported_type.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
 
@@ -9486,11 +9486,20 @@ TEST(QuicCoreTest, ConnectionTlsAndValidationHelpersCoverRemainingBranches) {
         .active_connection_id_limit = 2,
         .initial_source_connection_id = preloaded_parameters_connection.peer_source_connection_id_,
     };
+    preloaded_parameters_connection.decoded_resumption_state_ =
+        coquic::quic::StoredClientResumptionState{
+            .tls_state = {},
+            .quic_version = coquic::quic::kQuicVersion1,
+            .application_protocol = preloaded_parameters_connection.config_.application_protocol,
+            .peer_transport_parameters =
+                *preloaded_parameters_connection.peer_transport_parameters_,
+            .application_context = {},
+        };
     coquic::quic::test::TlsAdapterTestPeer::set_peer_transport_parameters(
         *preloaded_parameters_connection.tls_, coquic::quic::test::sample_transport_parameters());
     EXPECT_TRUE(
         preloaded_parameters_connection.validate_peer_transport_parameters_if_ready().has_value());
-    EXPECT_TRUE(preloaded_parameters_connection.peer_transport_parameters_validated_);
+    EXPECT_FALSE(preloaded_parameters_connection.peer_transport_parameters_validated_);
 
     coquic::quic::QuicConnection idle_connection(coquic::quic::test::make_client_core_config());
     idle_connection.update_handshake_status();

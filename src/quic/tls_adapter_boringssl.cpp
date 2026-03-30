@@ -791,7 +791,7 @@ class TlsAdapter::Impl {
     }
 
     void capture_peer_transport_parameters() {
-        if (ssl_ == nullptr || peer_transport_parameters_.has_value()) {
+        if (ssl_ == nullptr) {
             return;
         }
 

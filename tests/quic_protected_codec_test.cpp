@@ -1263,7 +1263,8 @@ TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenSerializeKeyPhaseDoesNotMatc
     EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_packet_protection_state);
 }
 
-TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithoutDestinationConnectionIdLength) {
+TEST(QuicProtectedCodecTest,
+     RejectsOneRttPacketWhenConfiguredDestinationConnectionIdLengthIsWrong) {
     const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
     const auto encoded = coquic::quic::serialize_protected_datagram(
         packets,
@@ -1274,7 +1275,7 @@ TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithoutDestinationConnectionIdLe
         encoded.value(), make_one_rtt_deserialize_context(
                              coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32, false, 0));
     ASSERT_FALSE(decoded.has_value());
-    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::malformed_short_header_context);
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_decryption_failed);
 }
 
 TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithInvalidPacketNumberLength) {
@@ -1574,7 +1575,7 @@ TEST(QuicProtectedCodecTest, RejectsLongHeaderPacketsWithTruncatedPayloadLengthV
 
 TEST(QuicProtectedCodecTest, RejectsUnsupportedProtectedPacketTypes) {
     const std::vector<std::byte> bytes{
-        std::byte{0xd0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
+        std::byte{0xf0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
     };
     const auto decoded = coquic::quic::deserialize_protected_datagram(bytes, {});
     ASSERT_FALSE(decoded.has_value());

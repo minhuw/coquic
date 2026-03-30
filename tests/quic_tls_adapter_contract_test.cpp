@@ -775,7 +775,18 @@ TEST(QuicTlsAdapterContractTest, CallbacksCaptureSecretsAndHandshakeData) {
                   client, ssl_encryption_early_data, read_secret.data(), write_secret.data(),
                   read_secret.size()),
               1);
-    EXPECT_TRUE(client.take_available_secrets().empty());
+    const auto early_data_secrets = client.take_available_secrets();
+    ASSERT_EQ(early_data_secrets.size(), 2u);
+    EXPECT_TRUE(
+        std::any_of(early_data_secrets.begin(), early_data_secrets.end(), [](const auto &secret) {
+            return secret.level == EncryptionLevel::zero_rtt &&
+                   secret.sender == EndpointRole::server;
+        }));
+    EXPECT_TRUE(
+        std::any_of(early_data_secrets.begin(), early_data_secrets.end(), [](const auto &secret) {
+            return secret.level == EncryptionLevel::zero_rtt &&
+                   secret.sender == EndpointRole::client;
+        }));
 
     EXPECT_EQ(TlsAdapterTestPeer::call_on_set_encryption_secrets(client, ssl_encryption_application,
                                                                  read_secret.data(), nullptr,
@@ -805,9 +816,9 @@ TEST(QuicTlsAdapterContractTest, CallbacksCaptureSecretsAndHandshakeData) {
         TlsAdapter early_data_adapter(make_client_config());
         EXPECT_EQ(TlsAdapterTestPeer::call_on_add_handshake_data(
                       early_data_adapter, ssl_encryption_early_data, data.data(), data.size()),
-                  0);
-        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(early_data_adapter),
-                  CodecErrorCode::invalid_packet_protection_state);
+                  1);
+        EXPECT_EQ(early_data_adapter.take_pending(EncryptionLevel::zero_rtt).size(), data.size());
+        EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(early_data_adapter), std::nullopt);
     }
 
     {
@@ -892,6 +903,25 @@ TEST(QuicTlsAdapterContractTest,
     TlsAdapterTestPeer::capture_peer_transport_parameters(cached_adapter);
     EXPECT_EQ(cached_adapter.peer_transport_parameters(),
               std::optional<std::vector<std::byte>>{{std::byte{0x42}}});
+}
+
+TEST(QuicTlsAdapterContractTest, CapturePeerTransportParametersRefreshesCachedValueAfterHandshake) {
+    TlsAdapter client(make_client_config());
+    TlsAdapter server(make_server_config());
+
+    drive_tls_handshake(client, server);
+
+    const auto peer_transport_parameters = client.peer_transport_parameters();
+    ASSERT_TRUE(peer_transport_parameters.has_value());
+    if (!peer_transport_parameters.has_value()) {
+        return;
+    }
+    const auto &expected = *peer_transport_parameters;
+
+    TlsAdapterTestPeer::set_peer_transport_parameters(client, {std::byte{0x42}});
+    TlsAdapterTestPeer::capture_peer_transport_parameters(client);
+
+    EXPECT_EQ(client.peer_transport_parameters(), std::optional<std::vector<std::byte>>(expected));
 }
 
 TEST(QuicTlsAdapterContractTest, DriveHandshakeFaultAndMoveAssignmentRemainUsable) {

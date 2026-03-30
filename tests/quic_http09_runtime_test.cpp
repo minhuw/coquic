@@ -2697,7 +2697,7 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionTestc
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-after-resumption");
 }
 
-TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeFallsBackWhenWarmupAndTransferContextsDiffer) {
+TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossResumedConnection) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
     document_root.write_file("seed.txt", "seed-body");
@@ -4372,7 +4372,7 @@ TEST(QuicHttp09RuntimeTest, RetryEnabledServerCompletesHandshakeAfterRetriedInit
     EXPECT_EQ(run_retry_enabled_runtime_handshake(), 0);
 }
 
-TEST(QuicHttp09RuntimeTest, HandshakeCaseNegotiatesQuicV2LongHeaders) {
+TEST(QuicHttp09RuntimeTest, V2CaseEmitsQuicV2LongHeaders) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
@@ -4380,7 +4380,7 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNegotiatesQuicV2LongHeaders) {
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::quic::QuicHttp09Testcase::v2,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -4401,7 +4401,7 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNegotiatesQuicV2LongHeaders) {
         .mode = coquic::quic::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::quic::QuicHttp09Testcase::v2,
         .requests_env = "https://localhost/hello.txt",
     };
     coquic::quic::QuicCore client(coquic::quic::make_http09_client_core_config(client_runtime));
@@ -4411,7 +4411,7 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNegotiatesQuicV2LongHeaders) {
     const auto client_start_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(client_start_datagrams.empty());
     EXPECT_TRUE(std::ranges::all_of(client_start_datagrams, [](const auto &datagram) {
-        return has_long_header(datagram) && read_u32_be_at(datagram, 1) == kQuicVersion1;
+        return has_long_header(datagram) && read_u32_be_at(datagram, 1) == kQuicVersion2;
     }));
     for (const auto &datagram : client_start_datagrams) {
         ASSERT_GE(::sendto(client_fd, datagram.data(), datagram.size(), 0,

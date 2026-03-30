@@ -2599,6 +2599,9 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
             if (contiguous_bytes.value().empty()) {
                 continue;
             }
+            if (status_ == HandshakeStatus::connected && !tls_.has_value()) {
+                continue;
+            }
 
             if (!tls_.has_value()) {
                 return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state,
@@ -2920,19 +2923,24 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
         return CodecResult<bool>::success(true);
     }
 
-    const auto &peer_transport_parameters_bytes = tls_->peer_transport_parameters();
-    if (!peer_transport_parameters_bytes.has_value()) {
+    if (config_.role == EndpointRole::client && decoded_resumption_state_.has_value() &&
+        peer_transport_parameters_.has_value() && !tls_->handshake_complete()) {
         return CodecResult<bool>::success(true);
     }
 
-    const auto parameters =
-        deserialize_transport_parameters(peer_transport_parameters_bytes.value());
-    if (!parameters.has_value()) {
-        log_codec_failure("deserialize_transport_parameters", parameters.error());
-        return CodecResult<bool>::failure(parameters.error().code, parameters.error().offset);
-    }
+    const auto &peer_transport_parameters_bytes = tls_->peer_transport_parameters();
+    if (peer_transport_parameters_bytes.has_value()) {
+        const auto parameters =
+            deserialize_transport_parameters(peer_transport_parameters_bytes.value());
+        if (!parameters.has_value()) {
+            log_codec_failure("deserialize_transport_parameters", parameters.error());
+            return CodecResult<bool>::failure(parameters.error().code, parameters.error().offset);
+        }
 
-    peer_transport_parameters_ = parameters.value();
+        peer_transport_parameters_ = parameters.value();
+    } else if (!peer_transport_parameters_.has_value()) {
+        return CodecResult<bool>::success(true);
+    }
 
     const auto validation_context = peer_transport_parameters_validation_context();
     if (!validation_context.has_value()) {
@@ -3131,6 +3139,16 @@ void QuicConnection::initialize_peer_flow_control_from_transport_parameters() {
         static_cast<void>(stream_id);
         stream.flow_control.peer_max_stream_data = initial_stream_send_limit(stream.stream_id);
         stream.send_flow_control_limit = stream.flow_control.peer_max_stream_data;
+        if (stream.receive_flow_control_limit == 0 &&
+            stream.flow_control.local_receive_window == 0 &&
+            stream.flow_control.advertised_max_stream_data ==
+                std::numeric_limits<std::uint64_t>::max()) {
+            stream.flow_control.local_receive_window =
+                initial_stream_receive_window(stream.stream_id);
+            stream.flow_control.advertised_max_stream_data =
+                stream.flow_control.local_receive_window;
+            stream.receive_flow_control_limit = stream.flow_control.advertised_max_stream_data;
+        }
     }
 }
 

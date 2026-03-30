@@ -5,7 +5,6 @@
 #include <cassert>
 #include <chrono>
 #include <cstddef>
-#include <iostream>
 #include <limits>
 #include <tuple>
 #include <type_traits>
@@ -111,8 +110,8 @@ EndpointRole opposite_role(EndpointRole role) {
 }
 
 void log_codec_failure(std::string_view where, const CodecError &error) {
-    std::cerr << "quic connection failure at " << where
-              << ": codec=" << static_cast<int>(error.code) << " offset=" << error.offset << '\n';
+    static_cast<void>(where);
+    static_cast<void>(error);
 }
 
 std::size_t datagram_size_or_zero(const CodecResult<std::vector<std::byte>> &datagram) {
@@ -1053,8 +1052,6 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                 allow_defer & std::holds_alternative<ProtectedOneRttPacket>(packet) &
                 (status_ != HandshakeStatus::connected);
             if (defer_protected_app_packet) {
-                std::cerr << "defer protected app packet status=" << static_cast<int>(status_)
-                          << " role=" << static_cast<int>(config_.role) << '\n';
                 defer_packet(packet_bytes);
                 return true;
             }
@@ -1062,11 +1059,6 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             const auto processed = process_inbound_packet(packet, now);
             if (!processed.has_value()) {
                 if (processed_any_packet) {
-                    std::cerr << "later packet process failure code="
-                              << static_cast<int>(processed.error().code)
-                              << " offset=" << processed.error().offset
-                              << " status=" << static_cast<int>(status_)
-                              << " role=" << static_cast<int>(config_.role) << '\n';
                     return true;
                 }
                 log_codec_failure("process_inbound_packet", processed.error());
@@ -1111,13 +1103,6 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
         const auto packet_length = peek_next_packet_length(bytes.subspan(offset));
         if (!packet_length.has_value()) {
             if (processed_any_packet) {
-                std::cerr << "later packet length failure code="
-                          << static_cast<int>(packet_length.error().code)
-                          << " offset=" << packet_length.error().offset
-                          << " datagram_offset=" << offset
-                          << " remaining=" << (bytes.size() - offset)
-                          << " status=" << static_cast<int>(status_)
-                          << " role=" << static_cast<int>(config_.role) << '\n';
                 return;
             }
             log_codec_failure("peek_next_packet_length", packet_length.error());
@@ -2176,10 +2161,6 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                 initial_space_.largest_authenticated_packet_number = protected_packet.packet_number;
                 const auto processed =
                     process_inbound_crypto(EncryptionLevel::initial, protected_packet.frames, now);
-                if (!processed.has_value()) {
-                    std::cerr << "quic initial packet reject: frame_count="
-                              << protected_packet.frames.size() << '\n';
-                }
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
@@ -2213,10 +2194,6 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                     protected_packet.packet_number;
                 const auto processed = process_inbound_crypto(EncryptionLevel::handshake,
                                                               protected_packet.frames, now);
-                if (!processed.has_value()) {
-                    std::cerr << "quic handshake packet reject: frame_count="
-                              << protected_packet.frames.size() << '\n';
-                }
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     if (config_.role == EndpointRole::server) {
@@ -2243,10 +2220,6 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                     protected_packet.packet_number;
                 const auto processed =
                     process_inbound_application(protected_packet.frames, now, true);
-                if (!processed.has_value()) {
-                    std::cerr << "quic zero-rtt packet reject: status=" << static_cast<int>(status_)
-                              << " frame_count=" << protected_packet.frames.size() << '\n';
-                }
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
@@ -2267,10 +2240,6 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                     });
                 const auto processed =
                     process_inbound_application(protected_packet.frames, now, has_crypto_frame);
-                if (!processed.has_value()) {
-                    std::cerr << "quic one-rtt packet reject: status=" << static_cast<int>(status_)
-                              << " frame_count=" << protected_packet.frames.size() << '\n';
-                }
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
@@ -2333,11 +2302,6 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
         if (crypto_frame == nullptr) {
             return CodecResult<bool>::failure(CodecErrorCode::frame_not_allowed_in_packet_type, 0);
         }
-        if (level == EncryptionLevel::application) {
-            std::cerr << "received application crypto bytes=" << crypto_frame->crypto_data.size()
-                      << " role=" << static_cast<int>(config_.role) << '\n';
-        }
-
         const auto contiguous_bytes =
             packet_space.receive_crypto.push(crypto_frame->offset, crypto_frame->crypto_data);
         if (!contiguous_bytes.has_value()) {
@@ -2641,8 +2605,6 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
                                                   0);
             }
 
-            std::cerr << "received application crypto bytes=" << crypto_frame->crypto_data.size()
-                      << " role=" << static_cast<int>(config_.role) << '\n';
             const auto provided =
                 tls_->provide(EncryptionLevel::application, contiguous_bytes.value());
             if (!provided.has_value()) {
@@ -2879,10 +2841,6 @@ void QuicConnection::install_available_secrets() {
 
     bool installed_client_application_keys = false;
     for (auto &available_secret : tls_->take_available_secrets()) {
-        std::cerr << "install secret level=" << static_cast<int>(available_secret.level)
-                  << " sender=" << static_cast<int>(available_secret.sender)
-                  << " role=" << static_cast<int>(config_.role)
-                  << " zero_rtt_attempt=" << config_.zero_rtt.attempt << '\n';
         available_secret.secret.quic_version = current_version_;
         auto &packet_space =
             packet_space_for_level(available_secret.level, initial_space_, handshake_space_,
@@ -2915,9 +2873,6 @@ void QuicConnection::collect_pending_tls_bytes() {
 void QuicConnection::replay_deferred_protected_packets(QuicCoreTimePoint now) {
     auto deferred_packets = std::move(deferred_protected_packets_);
     deferred_protected_packets_.clear();
-    std::cerr << "replay deferred packets count=" << deferred_packets.size()
-              << " status=" << static_cast<int>(status_)
-              << " role=" << static_cast<int>(config_.role) << '\n';
     for (const auto &packet_bytes : deferred_packets) {
         process_inbound_datagram(packet_bytes, now);
         if (status_ == HandshakeStatus::failed) {
@@ -2943,12 +2898,10 @@ CodecResult<bool> QuicConnection::sync_tls_state() {
     if (!resumption_state_emitted_ && tls_.has_value() && tls_->handshake_complete() &&
         peer_transport_parameters_.has_value()) {
         if (const auto ticket = tls_->take_resumption_state(); ticket.has_value()) {
-            std::cerr << "connection saw ticket bytes=" << ticket->size() << '\n';
             auto encoded = encode_resumption_state(
                 *ticket, current_version_, config_.application_protocol,
                 peer_transport_parameters_.value(), config_.zero_rtt.application_context);
             if (!encoded.empty()) {
-                std::cerr << "connection emitted resumption state bytes=" << encoded.size() << '\n';
                 pending_resumption_state_effect_ = QuicCoreResumptionStateAvailable{
                     .state =
                         QuicResumptionState{
@@ -3533,7 +3486,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                   .one_rtt_key_phase = application_write_key_phase_,
                               });
         if (!datagram.has_value()) {
-            std::cerr << "quic fail flush serialize_protected_datagram final\n";
             mark_failed();
             return std::vector<std::byte>{};
         }
@@ -3778,8 +3730,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             application_space_.send_crypto.take_ranges(std::numeric_limits<std::size_t>::max());
     }
     if (!application_crypto_ranges.empty()) {
-        std::cerr << "sending application crypto ranges=" << application_crypto_ranges.size()
-                  << " role=" << static_cast<int>(config_.role) << '\n';
         application_crypto_frames.reserve(application_crypto_ranges.size());
         for (const auto &range : application_crypto_ranges) {
             application_crypto_frames.emplace_back(CryptoFrame{
@@ -4087,7 +4037,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 max_streams_frames, reset_stream_frames, stop_sending_frames, data_blocked_frame,
                 stream_data_blocked_frames, stream_fragments, include_ping);
             if (!candidate_datagram.has_value()) {
-                std::cerr << "quic fail trim_application_ack_frame initial_serialize\n";
                 mark_failed();
                 return std::nullopt;
             }
@@ -4189,10 +4138,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
                 probe_stream_fragments, include_ping);
             if (!datagram.has_value()) {
-                std::cerr << "quic fail probe serialize_application_candidate_or_oversize size="
-                          << datagram_size_or_zero(datagram)
-                          << " error=" << static_cast<int>(datagram.error().code)
-                          << " offset=" << datagram.error().offset << '\n';
                 mark_failed();
                 return {};
             }
@@ -4204,10 +4149,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
                     probe_stream_fragments, include_ping);
                 if (!no_ack_datagram.has_value()) {
-                    std::cerr << "quic fail probe serialize_application_candidate_or_oversize "
-                                 "size="
-                              << 0 << " error=" << static_cast<int>(no_ack_datagram.error().code)
-                              << " offset=" << no_ack_datagram.error().offset << '\n';
                     mark_failed();
                     return {};
                 }
@@ -4278,8 +4219,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                         probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
                         probe_stream_fragments, include_ping);
                     if (!datagram.has_value()) {
-                        std::cerr
-                            << "quic fail probe serialize_application_candidate_or_oversize\n";
                         mark_failed();
                         return {};
                     }
@@ -4289,8 +4228,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
             const auto probe_datagram_size = datagram_size_or_zero(datagram);
             if (has_failed() | (probe_datagram_size > kMaximumDatagramSize)) {
-                std::cerr << "quic fail probe serialize_application_candidate_or_oversize size="
-                          << probe_datagram_size << '\n';
                 mark_failed();
                 return {};
             }
@@ -4426,7 +4363,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 max_streams_frames, reset_stream_frames, stop_sending_frames, data_blocked_frame,
                 stream_data_blocked_frames, stream_fragments, /*include_ping=*/false);
             if (!candidate_datagram.has_value()) {
-                std::cerr << "quic fail app final serialize_application_candidate initial\n";
                 mark_failed();
                 return {};
             }
@@ -4438,7 +4374,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     data_blocked_frame, stream_data_blocked_frames, stream_fragments,
                     /*include_ping=*/false);
                 if (!no_ack_candidate.has_value()) {
-                    std::cerr << "quic fail app final serialize_application_candidate no_ack\n";
                     mark_failed();
                     return {};
                 }
@@ -4523,7 +4458,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                         stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
                         stream_fragments, /*include_ping=*/false);
                     if (!candidate_datagram.has_value()) {
-                        std::cerr << "quic fail app final serialize_application_candidate no_ack\n";
                         mark_failed();
                         return {};
                     }
@@ -4533,9 +4467,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
             const auto candidate_datagram_size = datagram_size_or_zero(candidate_datagram);
             if (has_failed() | (candidate_datagram_size > kMaximumDatagramSize)) {
-                std::cerr << "quic fail app final candidate_datagram oversize size="
-                          << candidate_datagram_size << " fragments=" << stream_fragments.size()
-                          << '\n';
                 mark_failed();
                 return {};
             }
@@ -4640,29 +4571,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
     if (packets.empty()) {
         return {};
-    }
-
-    for (const auto &packet : packets) {
-        std::visit(
-            [&](const auto &protected_packet) {
-                using PacketType = std::decay_t<decltype(protected_packet)>;
-                if constexpr (std::is_same_v<PacketType, ProtectedOneRttPacket>) {
-                    std::size_t crypto_frames = 0;
-                    std::size_t handshake_done_frames = 0;
-                    for (const auto &frame : protected_packet.frames) {
-                        crypto_frames += std::holds_alternative<CryptoFrame>(frame);
-                        handshake_done_frames += std::holds_alternative<HandshakeDoneFrame>(frame);
-                    }
-                    std::cerr << "one-rtt packet send dcid_len="
-                              << protected_packet.destination_connection_id.size()
-                              << " packet_number=" << protected_packet.packet_number
-                              << " key_phase=" << protected_packet.key_phase
-                              << " crypto_frames=" << crypto_frames
-                              << " handshake_done_frames=" << handshake_done_frames
-                              << " role=" << static_cast<int>(config_.role) << '\n';
-                }
-            },
-            packet);
     }
 
     return finalize_datagram(std::move(packets));

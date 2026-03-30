@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <iostream>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -777,15 +776,6 @@ deserialize_protected_initial_packet(std::span<const std::byte> bytes,
                      std::span<const std::byte>(unprotected.value().packet_bytes)
                          .subspan(header_end, layout.value().packet_end_offset - header_end));
     if (!plaintext.has_value()) {
-        std::cerr << "quic initial decrypt fail"
-                  << " cid_len=" << context.client_initial_destination_connection_id.size()
-                  << " layout_len=" << layout.value().length_value
-                  << " pn_len=" << static_cast<int>(unprotected.value().packet_number_length)
-                  << " truncated_pn=" << unprotected.value().truncated_packet_number
-                  << " recovered_pn=" << packet_number.value() << " first_byte="
-                  << static_cast<int>(
-                         std::to_integer<std::uint8_t>(unprotected.value().packet_bytes.front()))
-                  << '\n';
         return CodecResult<ProtectedPacketDecodeResult>::failure(plaintext.error().code,
                                                                  plaintext.error().offset);
     }
@@ -919,16 +909,6 @@ deserialize_protected_handshake_packet(std::span<const std::byte> bytes,
                      std::span<const std::byte>(unprotected.value().packet_bytes)
                          .subspan(header_end, layout.value().packet_end_offset - header_end));
     if (!plaintext.has_value()) {
-        std::cerr << "quic handshake decrypt fail"
-                  << " secret_present=" << context.handshake_secret.has_value()
-                  << " secret_len=" << context.handshake_secret->secret.size()
-                  << " layout_len=" << layout.value().length_value
-                  << " pn_len=" << static_cast<int>(unprotected.value().packet_number_length)
-                  << " truncated_pn=" << unprotected.value().truncated_packet_number
-                  << " recovered_pn=" << packet_number.value() << " first_byte="
-                  << static_cast<int>(
-                         std::to_integer<std::uint8_t>(unprotected.value().packet_bytes.front()))
-                  << '\n';
         return CodecResult<ProtectedPacketDecodeResult>::failure(plaintext.error().code,
                                                                  plaintext.error().offset);
     }

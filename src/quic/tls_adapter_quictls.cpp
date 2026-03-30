@@ -608,11 +608,6 @@ class TlsAdapter::Impl {
         }
 
         impl->pending_resumption_state_ = serialize_session_bytes(session);
-        std::cerr << "quictls client new session callback bytes="
-                  << (impl->pending_resumption_state_.has_value()
-                          ? impl->pending_resumption_state_->size()
-                          : 0)
-                  << " max_early_data=" << SSL_SESSION_get_max_early_data(session) << '\n';
         return 1;
     }
 
@@ -719,9 +714,6 @@ class TlsAdapter::Impl {
 
         if (config_.resumption_state.has_value()) {
             auto session = deserialize_session_bytes(*config_.resumption_state);
-            std::cerr << "quictls restore session max_early_data="
-                      << (session != nullptr ? SSL_SESSION_get_max_early_data(session.get()) : 0)
-                      << " attempt_zero_rtt=" << config_.attempt_zero_rtt << '\n';
             if (session != nullptr && SSL_set_session(ssl_.get(), session.get()) == 1) {
                 resumed_resumption_state_ = *config_.resumption_state;
                 if (config_.attempt_zero_rtt) {

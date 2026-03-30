@@ -1766,6 +1766,70 @@ TEST(QuicCoreTest, ProcessInboundDatagramProcessesZeroRttStreamBeforeHandshakeCo
     EXPECT_TRUE(connection.deferred_protected_packets_.empty());
 }
 
+TEST(QuicCoreTest, ServerProcessesOneRttStreamBeforeHandshakeCompletesWhenApplicationKeysExist) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .key_phase = false,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 1,
+            .packet_number = 7,
+            .frames =
+                {
+                    coquic::quic::StreamFrame{
+                        .fin = true,
+                        .has_offset = true,
+                        .has_length = true,
+                        .stream_id = 0,
+                        .offset = 0,
+                        .stream_data = coquic::quic::test::bytes_from_string("late-handshake"),
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(processed.has_value());
+
+    const auto received = connection.take_received_stream_data();
+    ASSERT_TRUE(received.has_value());
+    if (!received.has_value()) {
+        return;
+    }
+    const auto &received_stream = *received;
+    EXPECT_EQ(received_stream.stream_id, 0u);
+    EXPECT_EQ(received_stream.bytes, coquic::quic::test::bytes_from_string("late-handshake"));
+    EXPECT_TRUE(received_stream.fin);
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+}
+
+TEST(QuicCoreTest,
+     ServerProcessesOneRttRetireConnectionIdBeforeHandshakeCompletesWhenApplicationKeysExist) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .key_phase = false,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 1,
+            .packet_number = 7,
+            .frames =
+                {
+                    coquic::quic::RetireConnectionIdFrame{
+                        .sequence_number = 1,
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(processed.has_value());
+
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 7u);
+    EXPECT_FALSE(connection.has_failed());
+}
+
 TEST(QuicCoreTest, ClientStopsUsingZeroRttWhenApplicationWriteKeysExist) {
     auto connection = make_connected_client_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;

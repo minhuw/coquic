@@ -2621,7 +2621,11 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
 
         const auto *stream_frame = std::get_if<StreamFrame>(&frame);
         if (stream_frame != nullptr) {
-            if (require_connected && status_ != HandshakeStatus::connected) {
+            const bool allow_preconnected_stream_frame =
+                application_space_.read_secret.has_value() &&
+                status_ == HandshakeStatus::in_progress;
+            if (require_connected && !allow_preconnected_stream_frame &&
+                status_ != HandshakeStatus::connected) {
                 return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
             }
             if (stream_frame->has_offset && !stream_frame->offset.has_value()) {
@@ -2829,7 +2833,11 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
             continue;
         }
 
-        if (require_connected && status_ != HandshakeStatus::connected) {
+        const bool allow_preconnected_retire_connection_id_frame =
+            application_space_.read_secret.has_value() && status_ == HandshakeStatus::in_progress &&
+            std::holds_alternative<RetireConnectionIdFrame>(frame);
+        if (require_connected && !allow_preconnected_retire_connection_id_frame &&
+            status_ != HandshakeStatus::connected) {
             return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
         }
     }

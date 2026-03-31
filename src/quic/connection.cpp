@@ -294,6 +294,28 @@ bool has_in_flight_ack_eliciting_packet(const PacketSpaceState &packet_space) {
     return false;
 }
 
+bool requires_connected_application_state_for_inbound_frame(const Frame &frame) {
+    return std::holds_alternative<ResetStreamFrame>(frame) |
+           std::holds_alternative<StopSendingFrame>(frame) |
+           std::holds_alternative<MaxDataFrame>(frame) |
+           std::holds_alternative<MaxStreamDataFrame>(frame) |
+           std::holds_alternative<MaxStreamsFrame>(frame) |
+           std::holds_alternative<DataBlockedFrame>(frame) |
+           std::holds_alternative<StreamDataBlockedFrame>(frame) |
+           std::holds_alternative<StreamsBlockedFrame>(frame);
+}
+
+bool should_defer_protected_one_rtt_packet(const ProtectedOneRttPacket &packet,
+                                           HandshakeStatus status) {
+    if (status != HandshakeStatus::in_progress) {
+        return false;
+    }
+
+    return std::ranges::any_of(packet.frames, [](const Frame &frame) {
+        return requires_connected_application_state_for_inbound_frame(frame);
+    });
+}
+
 bool is_discardable_short_header_packet_error(CodecErrorCode code) {
     static constexpr std::array kDiscardableErrors = {
         CodecErrorCode::invalid_packet_protection_state,
@@ -1049,8 +1071,9 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
 
         for (const auto &packet : packets.value()) {
             const bool defer_protected_app_packet =
-                allow_defer & std::holds_alternative<ProtectedOneRttPacket>(packet) &
-                (status_ != HandshakeStatus::connected);
+                allow_defer && std::holds_alternative<ProtectedOneRttPacket>(packet) &&
+                should_defer_protected_one_rtt_packet(std::get<ProtectedOneRttPacket>(packet),
+                                                      status_);
             if (defer_protected_app_packet) {
                 defer_packet(packet_bytes);
                 return true;

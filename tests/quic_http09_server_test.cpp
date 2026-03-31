@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -125,6 +126,111 @@ TEST(QuicHttp09ServerTest, ServesFileBodyOnRequestedBidirectionalStream) {
         saw_fin = saw_fin || chunk.fin;
     }
 
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(body), "hello");
+    EXPECT_TRUE(saw_fin);
+}
+
+TEST(QuicHttp09ServerTest, SendsResponseWhenRequestArrivesBeforeHandshakeCompletes) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello");
+
+    QuicCore client(coquic::quic::test::make_client_core_config());
+    QuicCore server(coquic::quic::test::make_server_core_config());
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    const auto to_server =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto to_client = coquic::quic::test::relay_send_datagrams_to_peer(
+        to_server, server, coquic::quic::test::test_time(1));
+    const auto client_handshake = coquic::quic::test::relay_send_datagrams_to_peer(
+        to_client, client, coquic::quic::test::test_time(2));
+
+    const auto request = client.advance(
+        QuicCoreSendStreamData{
+            .stream_id = 0,
+            .bytes = coquic::quic::test::bytes_from_string("GET /hello.txt\r\n"),
+            .fin = true,
+        },
+        coquic::quic::test::test_time(3));
+
+    const auto handshake_datagrams = coquic::quic::test::send_datagrams_from(client_handshake);
+    const auto request_datagrams = coquic::quic::test::send_datagrams_from(request);
+    ASSERT_FALSE(handshake_datagrams.empty());
+    ASSERT_FALSE(request_datagrams.empty());
+
+    const auto find_handshake_datagram_index =
+        [](std::span<const std::vector<std::byte>> datagrams) -> std::optional<std::size_t> {
+        for (std::size_t index = 0; index < datagrams.size(); ++index) {
+            if (datagrams[index].empty()) {
+                continue;
+            }
+            const auto first_byte = std::to_integer<std::uint8_t>(datagrams[index].front());
+            const bool long_header = (first_byte & 0x80u) != 0u;
+            const auto packet_type = static_cast<std::uint8_t>((first_byte >> 4) & 0x03u);
+            if (long_header && packet_type == 0x02u) {
+                return index;
+            }
+        }
+
+        return std::nullopt;
+    };
+
+    const auto find_one_rtt_datagram_index =
+        [](std::span<const std::vector<std::byte>> datagrams) -> std::optional<std::size_t> {
+        for (std::size_t index = 0; index < datagrams.size(); ++index) {
+            if (datagrams[index].empty()) {
+                continue;
+            }
+            const auto first_byte = std::to_integer<std::uint8_t>(datagrams[index].front());
+            if ((first_byte & 0x80u) == 0u) {
+                return index;
+            }
+        }
+
+        return std::nullopt;
+    };
+
+    const auto handshake_datagram_index = find_handshake_datagram_index(handshake_datagrams);
+    const auto one_rtt_datagram_index = find_one_rtt_datagram_index(request_datagrams);
+    ASSERT_TRUE(handshake_datagram_index.has_value());
+    ASSERT_TRUE(one_rtt_datagram_index.has_value());
+    if (!handshake_datagram_index.has_value() || !one_rtt_datagram_index.has_value()) {
+        return;
+    }
+
+    const auto request_on_server = coquic::quic::test::relay_nth_send_datagram_to_peer(
+        request, one_rtt_datagram_index.value(), server, coquic::quic::test::test_time(4));
+    const auto response_before_completion = drive_server_endpoint_on_result(
+        endpoint, server, request_on_server, coquic::quic::test::test_time(5));
+
+    const auto handshake_on_server = coquic::quic::test::relay_nth_send_datagram_to_peer(
+        client_handshake, handshake_datagram_index.value(), server,
+        coquic::quic::test::test_time(6));
+    const auto response_after_completion = drive_server_endpoint_on_result(
+        endpoint, server, handshake_on_server, coquic::quic::test::test_time(7));
+
+    const auto client_before_completion = coquic::quic::test::relay_send_datagrams_to_peer(
+        response_before_completion, client, coquic::quic::test::test_time(8));
+    const auto client_after_completion = coquic::quic::test::relay_send_datagrams_to_peer(
+        response_after_completion, client, coquic::quic::test::test_time(9));
+
+    std::vector<std::byte> body;
+    bool saw_fin = false;
+    for (const auto &chunk :
+         coquic::quic::test::received_stream_data_from(client_before_completion)) {
+        EXPECT_EQ(chunk.stream_id, 0u);
+        body.insert(body.end(), chunk.bytes.begin(), chunk.bytes.end());
+        saw_fin = saw_fin || chunk.fin;
+    }
+    for (const auto &chunk :
+         coquic::quic::test::received_stream_data_from(client_after_completion)) {
+        EXPECT_EQ(chunk.stream_id, 0u);
+        body.insert(body.end(), chunk.bytes.begin(), chunk.bytes.end());
+        saw_fin = saw_fin || chunk.fin;
+    }
+
+    EXPECT_FALSE(endpoint.has_failed());
     EXPECT_EQ(coquic::quic::test::string_from_bytes(body), "hello");
     EXPECT_TRUE(saw_fin);
 }

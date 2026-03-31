@@ -1805,6 +1805,109 @@ TEST(QuicCoreTest, ServerProcessesOneRttStreamBeforeHandshakeCompletesWhenApplic
 }
 
 TEST(QuicCoreTest,
+     ProcessInboundDatagramProcessesOneRttStreamBeforeHandshakeCompletesWhenApplicationKeysExist) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = false,
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 1,
+                .packet_number = 7,
+                .frames =
+                    {
+                        coquic::quic::StreamFrame{
+                            .fin = true,
+                            .has_offset = true,
+                            .has_length = true,
+                            .stream_id = 0,
+                            .offset = 0,
+                            .stream_data = coquic::quic::test::bytes_from_string("late-handshake"),
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = optional_ref_or_terminate(connection.application_space_.read_secret),
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
+
+    const auto received = connection.take_received_stream_data();
+    ASSERT_TRUE(received.has_value());
+    if (!received.has_value()) {
+        return;
+    }
+    const auto &received_stream = *received;
+    EXPECT_EQ(received_stream.stream_id, 0u);
+    EXPECT_EQ(received_stream.bytes, coquic::quic::test::bytes_from_string("late-handshake"));
+    EXPECT_TRUE(received_stream.fin);
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
+}
+
+TEST(
+    QuicCoreTest,
+    ProcessInboundDatagramProcessesOneRttAckAndStreamBeforeHandshakeCompletesWhenApplicationKeysExist) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = false,
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 1,
+                .packet_number = 8,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = 0,
+                            .first_ack_range = 0,
+                        },
+                        coquic::quic::StreamFrame{
+                            .fin = true,
+                            .has_offset = true,
+                            .has_length = true,
+                            .stream_id = 0,
+                            .offset = 0,
+                            .stream_data = coquic::quic::test::bytes_from_string("late-handshake"),
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = optional_ref_or_terminate(connection.application_space_.read_secret),
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
+
+    const auto received = connection.take_received_stream_data();
+    ASSERT_TRUE(received.has_value());
+    if (!received.has_value()) {
+        return;
+    }
+    const auto &received_stream = *received;
+    EXPECT_EQ(received_stream.stream_id, 0u);
+    EXPECT_EQ(received_stream.bytes, coquic::quic::test::bytes_from_string("late-handshake"));
+    EXPECT_TRUE(received_stream.fin);
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
+}
+
+TEST(QuicCoreTest,
      ServerProcessesOneRttRetireConnectionIdBeforeHandshakeCompletesWhenApplicationKeysExist) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
@@ -9143,7 +9246,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramDropsOneRttPacketWithoutReadSecret) {
     EXPECT_EQ(connection.status_, coquic::quic::HandshakeStatus::connected);
 }
 
-TEST(QuicCoreTest, ServerProcessesBufferedOneRttDataAfterHandshakeKeysArrive) {
+TEST(QuicCoreTest, ServerProcessesOneRttDataBeforeHandshakeCompletionWhenKeysAlreadyExist) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 
@@ -9194,16 +9297,20 @@ TEST(QuicCoreTest, ServerProcessesBufferedOneRttDataAfterHandshakeKeysArrive) {
     const auto handshake_index = optional_value_or_terminate(handshake_datagram_index);
     const auto one_rtt_index = optional_value_or_terminate(one_rtt_datagram_index);
 
-    const auto server_before_keys = coquic::quic::test::relay_nth_send_datagram_to_peer(
-        request, one_rtt_index, server, coquic::quic::test::test_time(4));
-    EXPECT_TRUE(coquic::quic::test::received_application_data_from(server_before_keys).empty());
-    EXPECT_FALSE(server.has_failed());
+    ASSERT_TRUE(server.connection_->application_space_.read_secret.has_value());
 
-    const auto server_after_keys = coquic::quic::test::relay_nth_send_datagram_to_peer(
-        client_handshake, handshake_index, server, coquic::quic::test::test_time(5));
+    const auto server_before_completion = coquic::quic::test::relay_nth_send_datagram_to_peer(
+        request, one_rtt_index, server, coquic::quic::test::test_time(4));
     EXPECT_EQ(coquic::quic::test::string_from_bytes(
-                  coquic::quic::test::received_application_data_from(server_after_keys)),
+                  coquic::quic::test::received_application_data_from(server_before_completion)),
               "buffer-me");
+    EXPECT_FALSE(server.has_failed());
+    EXPECT_TRUE(server.connection_->deferred_protected_packets_.empty());
+
+    const auto server_after_completion = coquic::quic::test::relay_nth_send_datagram_to_peer(
+        client_handshake, handshake_index, server, coquic::quic::test::test_time(5));
+    EXPECT_TRUE(
+        coquic::quic::test::received_application_data_from(server_after_completion).empty());
     EXPECT_FALSE(server.has_failed());
 }
 
@@ -10905,9 +11012,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramDeduplicatesAndEvictsDeferredProtectedP
                     .packet_number = packet_number,
                     .frames =
                         {
-                            coquic::quic::AckFrame{
-                                .largest_acknowledged = 0,
-                                .first_ack_range = 0,
+                            coquic::quic::MaxDataFrame{
+                                .maximum_data = 1,
                             },
                         },
                 },

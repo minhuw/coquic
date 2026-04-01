@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -246,6 +248,28 @@ TEST(QuicTlsAdapterContractTest, ClientRestoresResumptionStateAndMarksEarlyDataA
     EXPECT_TRUE(resumed_client.early_data_attempted());
 }
 
+TEST(QuicTlsAdapterContractTest, ClientIgnoresResumptionStateWhenSslSetSessionFails) {
+    TlsAdapter first_client(make_client_config());
+    TlsAdapter first_server(make_server_config());
+
+    const auto exported = drive_tls_until_resumption_state(first_client, first_server);
+    ASSERT_TRUE(exported.has_value());
+    if (!exported.has_value()) {
+        return;
+    }
+    const auto &resumption_state = *exported;
+
+    auto resumed_client_config = make_client_config();
+    resumed_client_config.resumption_state = resumption_state;
+    resumed_client_config.attempt_zero_rtt = true;
+
+    const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::initialize_set_session);
+    TlsAdapter resumed_client(std::move(resumed_client_config));
+    ASSERT_TRUE(resumed_client.start().has_value());
+    EXPECT_FALSE(resumed_client.resumed_resumption_state().has_value());
+    EXPECT_FALSE(resumed_client.early_data_attempted());
+}
+
 TEST(QuicTlsAdapterContractTest,
      ClientAttemptingZeroRttEmitsZeroRttWriteSecretWhenSessionAllowsEarlyData) {
     auto first_client_config = make_client_config();
@@ -359,6 +383,8 @@ TEST(QuicTlsAdapterContractTest,
 TEST(QuicTlsAdapterContractTest, MapsInternalEncryptionLevelsToOsslLevels) {
     EXPECT_EQ(TlsAdapterTestPeer::to_ossl_encryption_level(EncryptionLevel::initial),
               ssl_encryption_initial);
+    EXPECT_EQ(TlsAdapterTestPeer::to_ossl_encryption_level(EncryptionLevel::zero_rtt),
+              ssl_encryption_early_data);
     EXPECT_EQ(TlsAdapterTestPeer::to_ossl_encryption_level(EncryptionLevel::handshake),
               ssl_encryption_handshake);
     EXPECT_EQ(TlsAdapterTestPeer::to_ossl_encryption_level(EncryptionLevel::application),
@@ -408,6 +434,8 @@ TEST(QuicTlsAdapterContractTest, InitializationFaultsProduceStickyErrors) {
     expect_init_failure(TlsAdapterFaultPoint::initialize_ssl_set_quic_method, make_client_config());
     expect_init_failure(TlsAdapterFaultPoint::initialize_server_name, make_client_config());
     expect_init_failure(TlsAdapterFaultPoint::initialize_transport_params, make_client_config());
+    expect_init_failure(TlsAdapterFaultPoint::initialize_server_resumption_context,
+                        make_server_config());
 }
 
 TEST(QuicTlsAdapterContractTest, InvalidApplicationProtocolConfigProducesStickyError) {
@@ -482,6 +510,49 @@ TEST(QuicTlsAdapterContractTest, ClientAlpnInitializationFaultProducesStickyErro
     EXPECT_FALSE(adapter.start().has_value());
     EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
               CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTlsAdapterContractTest, InvalidResumptionStateBytesAreIgnoredDuringClientStart) {
+    auto client_config = make_client_config();
+    client_config.resumption_state = std::vector<std::byte>{std::byte{0x00}};
+    client_config.attempt_zero_rtt = true;
+
+    TlsAdapter client(std::move(client_config));
+    EXPECT_TRUE(client.start().has_value());
+    EXPECT_FALSE(client.resumed_resumption_state().has_value());
+    EXPECT_FALSE(client.early_data_attempted());
+}
+
+TEST(QuicTlsAdapterContractTest, NullSessionSerializationReturnsNullopt) {
+    EXPECT_EQ(TlsAdapterTestPeer::serialize_session_bytes(nullptr), std::nullopt);
+}
+
+TEST(QuicTlsAdapterContractTest, SessionDeserializationRejectsOversizedAndTrailingInputs) {
+    const std::byte dummy{0x00};
+    const auto huge_size = static_cast<std::size_t>(std::numeric_limits<long>::max()) + 1u;
+    const std::span huge_bytes(&dummy, huge_size);
+    EXPECT_FALSE(TlsAdapterTestPeer::deserialize_session_bytes(huge_bytes));
+
+    TlsAdapter client(make_client_config());
+    TlsAdapter server(make_server_config());
+    const auto exported = drive_tls_until_resumption_state(client, server);
+    ASSERT_TRUE(exported.has_value());
+    if (!exported.has_value()) {
+        return;
+    }
+
+    auto trailing_bytes = *exported;
+    trailing_bytes.push_back(std::byte{0x00});
+    EXPECT_FALSE(TlsAdapterTestPeer::deserialize_session_bytes(trailing_bytes));
+}
+
+TEST(QuicTlsAdapterContractTest, SessionSerializationFaultReturnsNullopt) {
+    const std::unique_ptr<SSL_SESSION, decltype(&SSL_SESSION_free)> session(SSL_SESSION_new(),
+                                                                            &SSL_SESSION_free);
+    ASSERT_NE(session, nullptr);
+
+    const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::serialize_session_bytes);
+    EXPECT_EQ(TlsAdapterTestPeer::serialize_session_bytes(session.get()), std::nullopt);
 }
 
 TEST(QuicTlsAdapterContractTest, SelectApplicationProtocolRejectsNullPointersAndInvalidConfig) {
@@ -658,6 +729,9 @@ TEST(QuicTlsAdapterContractTest,
     TlsAdapter adapter(make_client_config());
     const std::array<uint8_t, 32> secret{};
     const std::array<uint8_t, 3> data{1, 2, 3};
+    const std::unique_ptr<SSL_SESSION, decltype(&SSL_SESSION_free)> session(SSL_SESSION_new(),
+                                                                            &SSL_SESSION_free);
+    ASSERT_NE(session, nullptr);
 
     EXPECT_EQ(TlsAdapterTestPeer::call_static_set_read_secret_with_null_app_data(
                   adapter, ssl_encryption_initial, secret.data(), secret.size()),
@@ -672,6 +746,9 @@ TEST(QuicTlsAdapterContractTest,
     EXPECT_EQ(TlsAdapterTestPeer::call_static_send_alert_with_null_app_data(
                   adapter, ssl_encryption_initial, 1),
               0);
+    EXPECT_EQ(
+        TlsAdapterTestPeer::call_static_on_new_session_with_null_app_data(adapter, session.get()),
+        0);
 
     EXPECT_EQ(TlsAdapterTestPeer::call_static_send_alert(adapter, ssl_encryption_initial, 1), 0);
     EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
@@ -834,6 +911,30 @@ TEST(QuicTlsAdapterContractTest, CallbacksCaptureSecretsAndHandshakeData) {
     }
 }
 
+TEST(QuicTlsAdapterContractTest, UnknownEncryptionLevelValueIsIgnoredWhenSettingSecrets) {
+    TlsAdapter adapter(make_client_config());
+    ASSERT_TRUE(adapter.start().has_value());
+
+    const std::array<uint8_t, 32> secret{};
+    EXPECT_EQ(TlsAdapterTestPeer::call_on_set_encryption_secrets_value(
+                  adapter, 0xff, secret.data(), secret.data(), secret.size()),
+              1);
+    EXPECT_TRUE(adapter.take_available_secrets().empty());
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter), std::nullopt);
+}
+
+TEST(QuicTlsAdapterContractTest, UnknownEncryptionLevelValueFailsWhenAddingHandshakeData) {
+    TlsAdapter adapter(make_client_config());
+    ASSERT_TRUE(adapter.start().has_value());
+
+    const std::array<uint8_t, 4> data{9, 8, 7, 6};
+    EXPECT_EQ(TlsAdapterTestPeer::call_on_add_handshake_data_value(adapter, 0xff, data.data(),
+                                                                   data.size()),
+              0);
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+              CodecErrorCode::invalid_packet_protection_state);
+}
+
 TEST(QuicTlsAdapterContractTest, DirectOnSetSecretIgnoresNullSecretsAndMissingCipher) {
     const std::array<uint8_t, 32> secret{};
 
@@ -924,6 +1025,33 @@ TEST(QuicTlsAdapterContractTest, CapturePeerTransportParametersRefreshesCachedVa
     EXPECT_EQ(client.peer_transport_parameters(), std::optional<std::vector<std::byte>>(expected));
 }
 
+TEST(QuicTlsAdapterContractTest, RuntimeStatusUpdateReturnsWhenSslIsMissing) {
+    TlsAdapter adapter(make_client_config());
+    TlsAdapterTestPeer::reset_ssl(adapter);
+
+    TlsAdapterTestPeer::update_runtime_status(adapter);
+    EXPECT_EQ(adapter.early_data_accepted(), std::nullopt);
+}
+
+TEST(QuicTlsAdapterContractTest,
+     NotSentEarlyDataMarksAttemptedHandshakeAsRejectedWhenHandshakeCompletes) {
+    TlsAdapter adapter(make_client_config());
+    ASSERT_TRUE(adapter.start().has_value());
+
+    TlsAdapterTestPeer::set_early_data_attempted(adapter, true);
+    TlsAdapterTestPeer::apply_early_data_status(adapter, SSL_EARLY_DATA_NOT_SENT, true);
+
+    EXPECT_EQ(adapter.early_data_accepted(), std::optional<bool>(false));
+}
+
+TEST(QuicTlsAdapterContractTest, UnknownEarlyDataStatusLeavesStateUnchanged) {
+    TlsAdapter adapter(make_client_config());
+    ASSERT_TRUE(adapter.start().has_value());
+
+    TlsAdapterTestPeer::apply_early_data_status(adapter, 0xff, true);
+    EXPECT_EQ(adapter.early_data_accepted(), std::nullopt);
+}
+
 TEST(QuicTlsAdapterContractTest, DriveHandshakeFaultAndMoveAssignmentRemainUsable) {
     {
         TlsAdapter adapter(make_client_config());
@@ -939,6 +1067,16 @@ TEST(QuicTlsAdapterContractTest, DriveHandshakeFaultAndMoveAssignmentRemainUsabl
 
     EXPECT_FALSE(destination.handshake_complete());
     EXPECT_TRUE(destination.start().has_value());
+}
+
+TEST(QuicTlsAdapterContractTest, DriveHandshakeFaultAfterStartSetsStickyError) {
+    TlsAdapter adapter(make_client_config());
+    ASSERT_TRUE(adapter.start().has_value());
+
+    const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::drive_handshake);
+    EXPECT_FALSE(TlsAdapterTestPeer::drive_handshake(adapter).has_value());
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+              CodecErrorCode::invalid_packet_protection_state);
 }
 
 TEST(QuicTlsAdapterContractTest, MoveConstructionRetainsUsableAdapter) {

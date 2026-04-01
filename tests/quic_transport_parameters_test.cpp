@@ -121,6 +121,13 @@ TEST(QuicTransportParametersTest, RejectsMalformedVersionInformationEncoding) {
     EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
 }
 
+TEST(QuicTransportParametersTest, RejectsTooShortVersionInformationEncoding) {
+    const auto decoded =
+        coquic::quic::deserialize_transport_parameters(byte_vector({0x11, 0x03, 0x6b, 0x33, 0x43}));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicTransportParametersTest, RoundTripsAckDelayExponentAndMaxAckDelay) {
     const TransportParameters parameters{
         .max_udp_payload_size = 1200,
@@ -740,6 +747,53 @@ TEST(QuicTransportParametersTest, ServerAcceptsMissingPeerVersionInformation) {
     ASSERT_TRUE(validation.has_value());
 }
 
+TEST(QuicTransportParametersTest,
+     ServerRejectsPeerVersionInformationWhoseChosenVersionIsMissingFromItsAvailableVersions) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::client,
+        TransportParameters{
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .version_information =
+                VersionInformation{
+                    .chosen_version = 0x00000001u,
+                    .available_versions = {0x6b3343cfu},
+                },
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}}, std::nullopt, std::nullopt,
+                                VersionInformation{
+                                    .chosen_version = 0x00000001u,
+                                    .available_versions = {0x00000001u, 0x6b3343cfu},
+                                }));
+
+    ASSERT_FALSE(validation.has_value());
+    EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTransportParametersTest, ServerRejectsPeerVersionInformationWithMismatchedChosenVersion) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::client,
+        TransportParameters{
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .version_information =
+                VersionInformation{
+                    .chosen_version = 0x709a50c4u,
+                    .available_versions = {0x709a50c4u, 0x00000001u},
+                },
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}}, std::nullopt, std::nullopt,
+                                VersionInformation{
+                                    .chosen_version = 0x00000001u,
+                                    .available_versions = {0x00000001u, 0x709a50c4u},
+                                }));
+
+    ASSERT_FALSE(validation.has_value());
+    EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
 TEST(QuicTransportParametersTest, ClientRejectsMissingExpectedVersionInformation) {
     const auto validation = coquic::quic::validate_peer_transport_parameters(
         EndpointRole::server,
@@ -857,6 +911,112 @@ TEST(QuicTransportParametersTest,
                                 /*reacted_to_version_negotiation=*/true));
 
     ASSERT_FALSE(validation.has_value());
+}
+
+TEST(QuicTransportParametersTest,
+     ServerRejectsPeerVersionInformationWithoutAvailableVersionsAfterVersionNegotiation) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::server,
+        TransportParameters{
+            .original_destination_connection_id = ConnectionId{std::byte{0x83}, std::byte{0x94}},
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .version_information =
+                VersionInformation{
+                    .chosen_version = 0x00000001u,
+                    .available_versions = {},
+                },
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}},
+                                ConnectionId{std::byte{0x83}, std::byte{0x94}}, std::nullopt,
+                                VersionInformation{
+                                    .chosen_version = 0x00000001u,
+                                    .available_versions = {0x6b3343cfu, 0x00000001u},
+                                },
+                                /*reacted_to_version_negotiation=*/true));
+
+    ASSERT_FALSE(validation.has_value());
+    EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTransportParametersTest,
+     ServerRejectsPeerVersionInformationWhenNoPreferredVersionCanBeSelected) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::server,
+        TransportParameters{
+            .original_destination_connection_id = ConnectionId{std::byte{0x83}, std::byte{0x94}},
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .version_information =
+                VersionInformation{
+                    .chosen_version = 0xff000001u,
+                    .available_versions = {0xff000001u, 0xff000002u},
+                },
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}},
+                                ConnectionId{std::byte{0x83}, std::byte{0x94}}, std::nullopt,
+                                VersionInformation{
+                                    .chosen_version = 0x00000001u,
+                                    .available_versions = {0x6b3343cfu, 0x00000001u},
+                                },
+                                /*reacted_to_version_negotiation=*/true));
+
+    ASSERT_FALSE(validation.has_value());
+    EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTransportParametersTest,
+     ServerRejectsPeerVersionInformationWhoseChosenVersionIsMissingFromExpectedVersions) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::server,
+        TransportParameters{
+            .original_destination_connection_id = ConnectionId{std::byte{0x83}, std::byte{0x94}},
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .version_information =
+                VersionInformation{
+                    .chosen_version = 0x709a50c4u,
+                    .available_versions = {0x709a50c4u, 0x00000001u},
+                },
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}},
+                                ConnectionId{std::byte{0x83}, std::byte{0x94}}, std::nullopt,
+                                VersionInformation{
+                                    .chosen_version = 0x709a50c4u,
+                                    .available_versions = {0x00000001u},
+                                }));
+
+    ASSERT_FALSE(validation.has_value());
+    EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTransportParametersTest,
+     ServerAcceptsPeerVersionInformationAfterVersionNegotiationWhenLaterPreferredVersionMatches) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::server,
+        TransportParameters{
+            .original_destination_connection_id = ConnectionId{std::byte{0x83}, std::byte{0x94}},
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .version_information =
+                VersionInformation{
+                    .chosen_version = 0x00000001u,
+                    .available_versions = {0x00000001u, 0x709a50c4u},
+                },
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}},
+                                ConnectionId{std::byte{0x83}, std::byte{0x94}}, std::nullopt,
+                                VersionInformation{
+                                    .chosen_version = 0x00000001u,
+                                    .available_versions = {0xff000022u, 0x00000001u},
+                                },
+                                /*reacted_to_version_negotiation=*/true));
+
+    ASSERT_TRUE(validation.has_value());
 }
 
 } // namespace

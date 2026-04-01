@@ -149,6 +149,12 @@ bool supported_long_header_routes_via_initial_destination_for_tests();
 bool expired_server_timer_failure_cleans_up_for_tests();
 bool expired_server_timer_success_preserves_session_for_tests();
 bool pending_server_work_failure_cleans_up_for_tests();
+bool retry_context_lookup_for_tests();
+bool invalid_retry_token_server_datagram_path_for_tests();
+bool resumed_client_warmup_failure_exits_early_for_tests();
+bool retry_trace_paths_for_tests();
+bool send_retry_for_initial_failures_for_tests();
+bool zero_rtt_request_allowance_for_tests();
 bool version_negotiation_without_source_connection_id_fails_for_tests();
 ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests case_id);
 std::optional<ParsedServerDatagramForTests>

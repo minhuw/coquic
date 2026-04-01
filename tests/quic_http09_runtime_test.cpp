@@ -3445,6 +3445,18 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksParseServerDatagramRouting) {
     truncated_scid.resize(22);
     EXPECT_FALSE(coquic::quic::test::parse_server_datagram_for_routing_for_tests(truncated_scid)
                      .has_value());
+
+    auto missing_token_length = supported_initial;
+    missing_token_length.resize(23);
+    EXPECT_FALSE(
+        coquic::quic::test::parse_server_datagram_for_routing_for_tests(missing_token_length)
+            .has_value());
+
+    auto oversized_token = supported_initial;
+    oversized_token.resize(24);
+    oversized_token[23] = std::byte{0x02};
+    EXPECT_FALSE(coquic::quic::test::parse_server_datagram_for_routing_for_tests(oversized_token)
+                     .has_value());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHealthCheckSucceedsWhenDependenciesAreAvailable) {
@@ -3828,6 +3840,18 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(blocking_wait_missing_input.receive_calls, 1U);
     EXPECT_EQ(blocking_wait_missing_input.wait_calls, 1U);
     EXPECT_EQ(blocking_wait_missing_input.process_expired_calls, 2U);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverRetryAndZeroRttBranches) {
+    testing::internal::CaptureStderr();
+    EXPECT_TRUE(coquic::quic::test::retry_context_lookup_for_tests());
+    EXPECT_TRUE(coquic::quic::test::invalid_retry_token_server_datagram_path_for_tests());
+    EXPECT_TRUE(coquic::quic::test::resumed_client_warmup_failure_exits_early_for_tests());
+    ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+    EXPECT_TRUE(coquic::quic::test::retry_trace_paths_for_tests());
+    EXPECT_TRUE(coquic::quic::test::send_retry_for_initial_failures_for_tests());
+    EXPECT_TRUE(coquic::quic::test::zero_rtt_request_allowance_for_tests());
+    static_cast<void>(testing::internal::GetCapturedStderr());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperFailsWhenReadableSocketRecvfromFails) {

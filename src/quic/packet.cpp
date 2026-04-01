@@ -15,32 +15,15 @@ enum class ProtectedPacketType : std::uint8_t {
     one_rtt,
 };
 
-std::uint8_t encode_long_header_type(std::uint32_t version, ProtectedPacketType packet_type) {
-    if (version == kQuicVersion2) {
-        switch (packet_type) {
-        case ProtectedPacketType::initial:
-            return 0x01u;
-        case ProtectedPacketType::zero_rtt:
-            return 0x02u;
-        case ProtectedPacketType::handshake:
-            return 0x03u;
-        case ProtectedPacketType::one_rtt:
-            break;
-        }
-    }
+enum class LongHeaderPacketType : std::uint8_t {
+    initial,
+    zero_rtt,
+    handshake,
+};
 
-    switch (packet_type) {
-    case ProtectedPacketType::initial:
-        return 0x00u;
-    case ProtectedPacketType::zero_rtt:
-        return 0x01u;
-    case ProtectedPacketType::handshake:
-        return 0x02u;
-    case ProtectedPacketType::one_rtt:
-        break;
-    }
-
-    return 0x00u;
+std::uint8_t encode_long_header_type(std::uint32_t version, LongHeaderPacketType packet_type) {
+    const auto encoded_type = static_cast<std::uint8_t>(packet_type);
+    return version == kQuicVersion2 ? static_cast<std::uint8_t>(encoded_type + 1u) : encoded_type;
 }
 
 std::uint8_t encode_retry_long_header_type(std::uint32_t version) {
@@ -51,19 +34,14 @@ bool is_retry_long_header_type(std::uint32_t version, std::uint8_t encoded_type)
     return encoded_type == encode_retry_long_header_type(version);
 }
 
-std::optional<ProtectedPacketType> decode_long_header_type(std::uint32_t version,
-                                                           std::uint8_t encoded_type) {
-    if (encoded_type == encode_long_header_type(version, ProtectedPacketType::initial)) {
-        return ProtectedPacketType::initial;
+LongHeaderPacketType decode_long_header_type(std::uint32_t version, std::uint8_t encoded_type) {
+    if (encoded_type == encode_long_header_type(version, LongHeaderPacketType::initial)) {
+        return LongHeaderPacketType::initial;
     }
-    if (encoded_type == encode_long_header_type(version, ProtectedPacketType::zero_rtt)) {
-        return ProtectedPacketType::zero_rtt;
+    if (encoded_type == encode_long_header_type(version, LongHeaderPacketType::zero_rtt)) {
+        return LongHeaderPacketType::zero_rtt;
     }
-    if (encoded_type == encode_long_header_type(version, ProtectedPacketType::handshake)) {
-        return ProtectedPacketType::handshake;
-    }
-
-    return std::nullopt;
+    return LongHeaderPacketType::handshake;
 }
 
 void append_varint(BufferWriter &writer, std::uint64_t value) {
@@ -665,19 +643,20 @@ CodecResult<std::vector<std::byte>> serialize_packet(const Packet &packet) {
 
     if (const auto *initial = std::get_if<InitialPacket>(&packet)) {
         return serialize_long_header_packet<InitialPacket, true>(
-            *initial, encode_long_header_type(initial->version, ProtectedPacketType::initial),
+            *initial, encode_long_header_type(initial->version, LongHeaderPacketType::initial),
             ProtectedPacketType::initial);
     }
 
     if (const auto *zero_rtt = std::get_if<ZeroRttPacket>(&packet)) {
         return serialize_long_header_packet<ZeroRttPacket, false>(
-            *zero_rtt, encode_long_header_type(zero_rtt->version, ProtectedPacketType::zero_rtt),
+            *zero_rtt, encode_long_header_type(zero_rtt->version, LongHeaderPacketType::zero_rtt),
             ProtectedPacketType::zero_rtt);
     }
 
     if (const auto *handshake = std::get_if<HandshakePacket>(&packet)) {
         return serialize_long_header_packet<HandshakePacket, false>(
-            *handshake, encode_long_header_type(handshake->version, ProtectedPacketType::handshake),
+            *handshake,
+            encode_long_header_type(handshake->version, LongHeaderPacketType::handshake),
             ProtectedPacketType::handshake);
     }
 
@@ -749,15 +728,11 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
 
     const auto packet_number_length = static_cast<std::uint8_t>((first_byte & 0x03u) + 1);
     const auto packet_type = decode_long_header_type(version, type);
-    if (!packet_type.has_value()) {
-        return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::unsupported_packet_type, 0);
-    }
-
-    if (packet_type == ProtectedPacketType::initial) {
+    if (packet_type == LongHeaderPacketType::initial) {
         return decode_long_header_packet<InitialPacket>(reader, version, packet_number_length,
                                                         ProtectedPacketType::initial, true);
     }
-    if (packet_type == ProtectedPacketType::zero_rtt) {
+    if (packet_type == LongHeaderPacketType::zero_rtt) {
         return decode_long_header_packet<ZeroRttPacket>(reader, version, packet_number_length,
                                                         ProtectedPacketType::zero_rtt, false);
     }

@@ -106,6 +106,12 @@ TEST(QuicHttp09Test, UsesStableZeroRttContextAcrossDifferentGetRequestSets) {
     EXPECT_EQ(warmup_context, transfer_context);
 }
 
+TEST(QuicHttp09Test, EmptyRequestSetProducesEmptyZeroRttContext) {
+    const auto context = coquic::quic::http09_zero_rtt_application_context(
+        std::span<const coquic::quic::QuicHttp09Request>{});
+    EXPECT_TRUE(context.empty());
+}
+
 TEST(QuicHttp09Test, ResolvesRequestTargetUnderRootWithoutDiscardingRoot) {
     const auto resolved =
         coquic::quic::resolve_http09_path_under_root("/tmp/downloads", "/a/b.bin");

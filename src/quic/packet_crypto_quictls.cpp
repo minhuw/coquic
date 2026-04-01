@@ -163,13 +163,10 @@ CodecResult<std::vector<std::byte>> derive_header_protection_key(const TrafficSe
     }
 
     const auto parameters = cipher_suite_parameters(secret.cipher_suite).value();
-    const auto labels = packet_protection_labels_for_version(secret.quic_version);
-    if (!labels.has_value()) {
-        return crypto_failure(labels.error().code);
-    }
+    const auto labels = packet_protection_labels_for_version(secret.quic_version).value();
 
-    auto hp_key = hkdf_expand_label(parameters.digest(), secret.secret, labels.value().hp,
-                                    parameters.hp_key_length);
+    auto hp_key =
+        hkdf_expand_label(parameters.digest(), secret.secret, labels.hp, parameters.hp_key_length);
     if (!hp_key.has_value()) {
         return crypto_failure(hp_key.error().code);
     }
@@ -197,10 +194,6 @@ serialize_retry_pseudo_packet(const RetryPacket &packet,
     if (!encoded_retry_packet.has_value()) {
         return CodecResult<std::vector<std::byte>>::failure(encoded_retry_packet.error().code,
                                                             encoded_retry_packet.error().offset);
-    }
-    if (encoded_retry_packet.value().size() < aead_tag_length) {
-        return CodecResult<std::vector<std::byte>>::failure(
-            CodecErrorCode::invalid_packet_protection_state, 0);
     }
 
     std::vector<std::byte> pseudo_packet;
@@ -525,10 +518,6 @@ compute_retry_integrity_tag(const RetryPacket &packet,
     if (!integrity_tag_ciphertext.has_value()) {
         return CodecResult<std::array<std::byte, 16>>::failure(
             integrity_tag_ciphertext.error().code, integrity_tag_ciphertext.error().offset);
-    }
-    if (integrity_tag_ciphertext.value().size() != aead_tag_length) {
-        return CodecResult<std::array<std::byte, 16>>::failure(
-            CodecErrorCode::invalid_packet_protection_state, 0);
     }
 
     std::array<std::byte, 16> retry_integrity_tag{};

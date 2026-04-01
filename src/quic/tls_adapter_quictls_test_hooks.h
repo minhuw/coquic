@@ -30,10 +30,13 @@ enum class TlsAdapterFaultPoint : std::uint8_t {
     initialize_client_alpn_set_protos,
     initialize_server_name,
     initialize_transport_params,
+    initialize_server_resumption_context,
+    initialize_set_session,
     provide_quic_data,
     provide_post_handshake,
     drive_handshake,
     set_encryption_secrets_unsupported_cipher,
+    serialize_session_bytes,
 };
 
 class ScopedTlsAdapterFaultInjector {
@@ -78,14 +81,22 @@ class TlsAdapterTestPeer {
     static bool should_retry_handshake(bool handshake_fault, int error);
     static bool handshake_progressed(bool pending_changed, bool secrets_changed,
                                      bool peer_transport_parameters_changed);
+    static std::optional<std::vector<std::byte>>
+    serialize_session_bytes(const SSL_SESSION *session);
+    static bool deserialize_session_bytes(std::span<const std::byte> bytes);
 
     static int call_on_set_encryption_secrets(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
                                               const uint8_t *read_secret,
                                               const uint8_t *write_secret, size_t secret_len);
+    static int call_on_set_encryption_secrets_value(TlsAdapter &adapter, int level_value,
+                                                    const uint8_t *read_secret,
+                                                    const uint8_t *write_secret, size_t secret_len);
     static int call_on_set_secret(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
                                   EndpointRole sender, const uint8_t *secret, size_t secret_len);
     static int call_on_add_handshake_data(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
                                           const uint8_t *data, size_t len);
+    static int call_on_add_handshake_data_value(TlsAdapter &adapter, int level_value,
+                                                const uint8_t *data, size_t len);
     static int call_on_flush_flight(TlsAdapter &adapter);
     static int call_on_send_alert(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level, uint8_t alert);
     static int call_static_send_alert(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
@@ -110,10 +121,16 @@ class TlsAdapterTestPeer {
     static int call_static_send_alert_with_null_app_data(TlsAdapter &adapter,
                                                          OSSL_ENCRYPTION_LEVEL level,
                                                          uint8_t alert);
+    static int call_static_on_new_session_with_null_app_data(TlsAdapter &adapter,
+                                                             SSL_SESSION *session);
 
     static void capture_peer_transport_parameters(TlsAdapter &adapter);
     static void set_peer_transport_parameters(TlsAdapter &adapter, std::vector<std::byte> bytes);
     static void clear_peer_transport_parameters(TlsAdapter &adapter);
+    static void update_runtime_status(TlsAdapter &adapter);
+    static void set_early_data_attempted(TlsAdapter &adapter, bool attempted);
+    static void apply_early_data_status(TlsAdapter &adapter, int early_data_status,
+                                        bool handshake_complete);
 };
 
 } // namespace coquic::quic::test

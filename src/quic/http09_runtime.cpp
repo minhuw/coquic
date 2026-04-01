@@ -134,8 +134,8 @@ std::optional<std::string> getenv_string(const char *name) {
 }
 
 bool env_flag_enabled(const char *name) {
-    const auto value = getenv_string(name);
-    return value.has_value() && !value->empty() && *value != "0";
+    const std::string value = getenv_string(name).value_or("");
+    return !value.empty() & (value != "0");
 }
 
 bool runtime_trace_enabled() {
@@ -616,11 +616,8 @@ parse_server_datagram_for_routing(std::span<const std::byte> bytes) {
             return std::nullopt;
         }
         const auto token_bytes =
-            reader.read_exact(static_cast<std::size_t>(token_length.value().value));
-        if (!token_bytes.has_value()) {
-            return std::nullopt;
-        }
-        token.assign(token_bytes.value().begin(), token_bytes.value().end());
+            reader.read_exact(static_cast<std::size_t>(token_length.value().value)).value();
+        token.assign(token_bytes.begin(), token_bytes.end());
     }
     return ParsedServerDatagram{
         .kind = is_initial_long_header_type(version, type)
@@ -648,8 +645,8 @@ std::vector<std::byte> make_runtime_retry_token(std::uint64_t sequence) {
 
 bool peer_matches_pending_retry(const PendingRetryToken &pending, const sockaddr_storage &peer,
                                 socklen_t peer_len) {
-    return pending.peer_len == peer_len && pending.peer.ss_family == peer.ss_family &&
-           std::memcmp(&pending.peer, &peer, static_cast<std::size_t>(peer_len)) == 0;
+    return (pending.peer_len == peer_len) & (pending.peer.ss_family == peer.ss_family) &
+           (std::memcmp(&pending.peer, &peer, static_cast<std::size_t>(peer_len)) == 0);
 }
 
 std::optional<PendingRetryToken> lookup_retry_context(const ParsedServerDatagram &parsed,
@@ -662,10 +659,13 @@ std::optional<PendingRetryToken> lookup_retry_context(const ParsedServerDatagram
     }
 
     const auto &pending = it->second;
-    const bool valid = peer_matches_pending_retry(pending, peer, peer_len) &&
-                       parsed.destination_connection_id == pending.retry_source_connection_id &&
-                       parsed.version == pending.original_version;
-    if (!valid) {
+    if (!peer_matches_pending_retry(pending, peer, peer_len)) {
+        return std::nullopt;
+    }
+    if (parsed.destination_connection_id != pending.retry_source_connection_id) {
+        return std::nullopt;
+    }
+    if (parsed.version != pending.original_version) {
         return std::nullopt;
     }
 
@@ -708,12 +708,73 @@ bool send_retry_for_initial(int fd, const ParsedServerDatagram &parsed,
     }
     packet.retry_integrity_tag = integrity_tag.value();
 
-    const auto encoded = serialize_packet(packet);
-    if (!encoded.has_value()) {
-        return false;
+    // compute_retry_integrity_tag serializes the same validated RetryPacket image.
+    const auto encoded = serialize_packet(packet).value();
+    return send_datagram(fd, encoded, peer, peer_len, "server");
+}
+
+std::optional<bool> maybe_send_retry_for_supported_initial(bool retry_enabled, int socket_fd,
+                                                           const ParsedServerDatagram &parsed,
+                                                           const sockaddr_storage &peer,
+                                                           socklen_t peer_len,
+                                                           RetryTokenStore &retry_tokens,
+                                                           std::uint64_t &next_connection_index) {
+    if (!retry_enabled || !parsed.token.empty()) {
+        return std::nullopt;
     }
 
-    return send_datagram(fd, encoded.value(), peer, peer_len, "server");
+    with_runtime_trace([&](std::ostream &stream) {
+        stream << "http09-server trace: retry-initial odcid="
+               << format_connection_id_hex(parsed.destination_connection_id) << '\n';
+    });
+    return send_retry_for_initial(socket_fd, parsed, peer, peer_len, retry_tokens,
+                                  next_connection_index++);
+}
+
+bool populate_retry_context_if_required(bool retry_enabled, const ParsedServerDatagram &parsed,
+                                        const sockaddr_storage &peer, socklen_t peer_len,
+                                        RetryTokenStore &retry_tokens,
+                                        std::optional<PendingRetryToken> &retry_context) {
+    retry_context.reset();
+    if (!retry_enabled) {
+        return true;
+    }
+
+    retry_context = lookup_retry_context(parsed, peer, peer_len, retry_tokens);
+    if (retry_context.has_value()) {
+        return true;
+    }
+
+    with_runtime_trace([&](std::ostream &stream) {
+        stream << "http09-server trace: ignored-invalid-retry-token dcid="
+               << format_connection_id_hex(parsed.destination_connection_id) << '\n';
+    });
+    return false;
+}
+
+struct SupportedInitialRetryPreparation {
+    std::optional<bool> immediate_result;
+    std::optional<PendingRetryToken> retry_context;
+};
+
+SupportedInitialRetryPreparation prepare_supported_initial_retry_handling(
+    bool retry_enabled, int socket_fd, const ParsedServerDatagram &parsed,
+    const sockaddr_storage &peer, socklen_t peer_len, RetryTokenStore &retry_tokens,
+    std::uint64_t &next_connection_index) {
+    if (const auto retry_result = maybe_send_retry_for_supported_initial(
+            retry_enabled, socket_fd, parsed, peer, peer_len, retry_tokens, next_connection_index);
+        retry_result.has_value()) {
+        return SupportedInitialRetryPreparation{
+            .immediate_result = retry_result.value(),
+        };
+    }
+
+    SupportedInitialRetryPreparation result{};
+    if (!populate_retry_context_if_required(retry_enabled, parsed, peer, peer_len, retry_tokens,
+                                            result.retry_context)) {
+        result.immediate_result = true;
+    }
+    return result;
 }
 
 bool send_version_negotiation_for_probe(int fd, std::span<const std::byte> datagram,
@@ -986,6 +1047,11 @@ bool zero_rtt_definitely_unavailable(const QuicCoreResult &result) {
         }
     }
     return false;
+}
+
+bool allow_requests_before_handshake_ready(bool attempt_zero_rtt_requests,
+                                           const QuicCoreResult &start_result) {
+    return attempt_zero_rtt_requests && !zero_rtt_definitely_unavailable(start_result);
 }
 
 struct ClientConnectionRunResult {
@@ -1403,7 +1469,7 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
         .requests = requests,
         .download_root = config.download_root,
         .allow_requests_before_handshake_ready =
-            attempt_zero_rtt_requests && !zero_rtt_definitely_unavailable(start_result),
+            allow_requests_before_handshake_ready(attempt_zero_rtt_requests, start_result),
     });
     return ClientConnectionRunResult{
         .exit_code = run_http09_client_connection_loop(
@@ -1411,6 +1477,37 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
             peer, peer_len, state, make_runtime_client_loop_io(), start_result),
         .resumption_state = state.last_resumption_state,
     };
+}
+
+using ClientConnectionRunner = std::function<ClientConnectionRunResult(
+    const Http09RuntimeConfig &, const std::vector<QuicHttp09Request> &, QuicCoreConfig,
+    std::uint64_t)>;
+
+int run_http09_resumed_client_sequence(const Http09RuntimeConfig &config,
+                                       const std::vector<QuicHttp09Request> &requests,
+                                       const ClientConnectionRunner &runner) {
+    Http09RuntimeConfig warmup_config = config;
+    warmup_config.download_root = config.download_root / ".coquic-warmup";
+    std::error_code warmup_cleanup_error;
+    std::filesystem::remove_all(warmup_config.download_root, warmup_cleanup_error);
+
+    const std::vector<QuicHttp09Request> warmup_requests = {requests.front()};
+    auto warmup_core_config = make_runtime_client_core_config(config, 1);
+    warmup_core_config.zero_rtt.application_context =
+        http09_zero_rtt_application_context(warmup_requests);
+    const auto warmup = runner(warmup_config, warmup_requests, std::move(warmup_core_config), 1);
+    std::filesystem::remove_all(warmup_config.download_root, warmup_cleanup_error);
+    if (warmup.exit_code != 0) {
+        return warmup.exit_code;
+    }
+
+    auto resumed_core_config = make_runtime_client_core_config(config, 2);
+    resumed_core_config.resumption_state = warmup.resumption_state;
+    resumed_core_config.zero_rtt = QuicZeroRttConfig{
+        .attempt = config.testcase == QuicHttp09Testcase::zerortt,
+        .application_context = http09_zero_rtt_application_context(requests),
+    };
+    return runner(config, requests, std::move(resumed_core_config), 2).exit_code;
 }
 
 int run_http09_client_connection(const Http09RuntimeConfig &config,
@@ -1446,31 +1543,14 @@ int run_http09_client(const Http09RuntimeConfig &config) {
         return run_http09_client_connection(config, requests.value(), 1);
     }
 
-    Http09RuntimeConfig warmup_config = config;
-    warmup_config.download_root = config.download_root / ".coquic-warmup";
-    std::error_code warmup_cleanup_error;
-    std::filesystem::remove_all(warmup_config.download_root, warmup_cleanup_error);
-
-    const std::vector<QuicHttp09Request> warmup_requests = {requests.value().front()};
-    auto warmup_core_config = make_runtime_client_core_config(config, 1);
-    warmup_core_config.zero_rtt.application_context =
-        http09_zero_rtt_application_context(warmup_requests);
-    const auto warmup = run_http09_client_connection_with_core_config(
-        warmup_config, warmup_requests, std::move(warmup_core_config), 1);
-    std::filesystem::remove_all(warmup_config.download_root, warmup_cleanup_error);
-    if (warmup.exit_code != 0) {
-        return warmup.exit_code;
-    }
-
-    auto resumed_core_config = make_runtime_client_core_config(config, 2);
-    resumed_core_config.resumption_state = warmup.resumption_state;
-    resumed_core_config.zero_rtt = QuicZeroRttConfig{
-        .attempt = config.testcase == QuicHttp09Testcase::zerortt,
-        .application_context = http09_zero_rtt_application_context(requests.value()),
-    };
-    return run_http09_client_connection_with_core_config(config, requests.value(),
-                                                         std::move(resumed_core_config), 2)
-        .exit_code;
+    return run_http09_resumed_client_sequence(
+        config, requests.value(),
+        [](const Http09RuntimeConfig &runner_config,
+           const std::vector<QuicHttp09Request> &runner_requests, QuicCoreConfig core_config,
+           std::uint64_t connection_index) {
+            return run_http09_client_connection_with_core_config(
+                runner_config, runner_requests, std::move(core_config), connection_index);
+        });
 }
 
 bool process_existing_server_session_datagram(ServerSession &session, RuntimeWaitStep &step,
@@ -1778,27 +1858,13 @@ int run_http09_server(const Http09RuntimeConfig &config) {
             return true;
         }
 
-        if (config.retry_enabled && parsed->token.empty()) {
-            with_runtime_trace([&](std::ostream &stream) {
-                stream << "http09-server trace: retry-initial odcid="
-                       << format_connection_id_hex(parsed->destination_connection_id) << '\n';
-            });
-            return send_retry_for_initial(socket_fd, *parsed, step.source, step.source_len,
-                                          retry_tokens, next_connection_index++);
+        auto retry_preparation = prepare_supported_initial_retry_handling(
+            config.retry_enabled, socket_fd, *parsed, step.source, step.source_len, retry_tokens,
+            next_connection_index);
+        if (retry_preparation.immediate_result.has_value()) {
+            return *retry_preparation.immediate_result;
         }
-
-        std::optional<PendingRetryToken> retry_context = std::nullopt;
-        if (config.retry_enabled) {
-            retry_context =
-                lookup_retry_context(*parsed, step.source, step.source_len, retry_tokens);
-            if (!retry_context.has_value()) {
-                with_runtime_trace([&](std::ostream &stream) {
-                    stream << "http09-server trace: ignored-invalid-retry-token dcid="
-                           << format_connection_id_hex(parsed->destination_connection_id) << '\n';
-                });
-                return true;
-            }
-        }
+        auto retry_context = std::move(retry_preparation.retry_context);
 
         const auto &trace_original_destination_connection_id =
             retry_context.has_value() ? retry_context->original_destination_connection_id
@@ -2715,6 +2781,235 @@ bool pending_server_work_failure_cleans_up_for_tests() {
                                           sessions.erase(local_connection_id_key);
                                       });
     return update.has_pending_work & sessions.empty();
+}
+
+bool retry_context_lookup_for_tests() {
+    const auto make_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+
+    const auto peer = make_peer(4433);
+    const auto mismatched_peer = make_peer(4434);
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+    const auto token = make_runtime_retry_token(7);
+    const auto retry_source_connection_id = make_runtime_connection_id(std::byte{0x73}, 7);
+    const auto original_destination_connection_id = make_runtime_connection_id(std::byte{0x83}, 7);
+
+    const auto make_retry_tokens = [&] {
+        RetryTokenStore retry_tokens;
+        retry_tokens.emplace(
+            connection_id_key(token),
+            PendingRetryToken{
+                .original_destination_connection_id = original_destination_connection_id,
+                .retry_source_connection_id = retry_source_connection_id,
+                .original_version = kQuicVersion1,
+                .peer = peer,
+                .peer_len = peer_len,
+            });
+        return retry_tokens;
+    };
+
+    const ParsedServerDatagram matching{
+        .kind = ParsedServerDatagram::Kind::supported_initial,
+        .version = kQuicVersion1,
+        .destination_connection_id = retry_source_connection_id,
+        .source_connection_id = ConnectionId{std::byte{0x01}},
+        .token = token,
+    };
+
+    auto missing_token_store = make_retry_tokens();
+    auto missing_token = matching;
+    missing_token.token = {std::byte{0x00}};
+    const bool missing_token_rejected =
+        !lookup_retry_context(missing_token, peer, peer_len, missing_token_store).has_value() &
+        (missing_token_store.size() == 1);
+
+    auto mismatched_peer_store = make_retry_tokens();
+    const bool mismatched_peer_rejected =
+        !lookup_retry_context(matching, mismatched_peer, peer_len, mismatched_peer_store)
+             .has_value() &
+        (mismatched_peer_store.size() == 1);
+
+    auto mismatched_dcid_store = make_retry_tokens();
+    auto mismatched_dcid = matching;
+    mismatched_dcid.destination_connection_id = make_runtime_connection_id(std::byte{0x74}, 7);
+    const bool mismatched_dcid_rejected =
+        !lookup_retry_context(mismatched_dcid, peer, peer_len, mismatched_dcid_store).has_value() &
+        (mismatched_dcid_store.size() == 1);
+
+    auto mismatched_version_store = make_retry_tokens();
+    auto mismatched_version = matching;
+    mismatched_version.version = kQuicVersion2;
+    const bool mismatched_version_rejected =
+        !lookup_retry_context(mismatched_version, peer, peer_len, mismatched_version_store)
+             .has_value() &
+        (mismatched_version_store.size() == 1);
+
+    auto matched_store = make_retry_tokens();
+    const auto matched = lookup_retry_context(matching, peer, peer_len, matched_store);
+    const auto matched_value = matched.value_or(PendingRetryToken{});
+    const bool matched_and_erased =
+        matched.has_value() &
+        (matched_value.original_destination_connection_id == original_destination_connection_id) &
+        (matched_value.retry_source_connection_id == retry_source_connection_id) &
+        (matched_value.original_version == kQuicVersion1) & matched_store.empty();
+    return missing_token_rejected & mismatched_peer_rejected & mismatched_dcid_rejected &
+           mismatched_version_rejected & matched_and_erased;
+}
+
+bool invalid_retry_token_server_datagram_path_for_tests() {
+    sockaddr_storage peer{};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(4433);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+
+    RetryTokenStore retry_tokens;
+    std::uint64_t next_connection_index = 1;
+    const ParsedServerDatagram invalid_retry{
+        .kind = ParsedServerDatagram::Kind::supported_initial,
+        .version = kQuicVersion1,
+        .destination_connection_id = make_runtime_connection_id(std::byte{0x91}, 9),
+        .source_connection_id = ConnectionId{std::byte{0x02}},
+        .token = make_runtime_retry_token(9),
+    };
+
+    const auto preparation = prepare_supported_initial_retry_handling(
+        /*retry_enabled=*/true, /*socket_fd=*/-1, invalid_retry, peer, peer_len, retry_tokens,
+        next_connection_index);
+    return preparation.immediate_result.value_or(false) & !preparation.retry_context.has_value() &
+           retry_tokens.empty() & (next_connection_index == 1);
+}
+
+bool resumed_client_warmup_failure_exits_early_for_tests() {
+    const auto requests = parse_http09_requests_env("https://localhost/warmup.txt").value();
+    Http09RuntimeConfig config{
+        .mode = Http09RuntimeMode::client,
+        .testcase = QuicHttp09Testcase::zerortt,
+        .download_root = "downloads",
+    };
+
+    int calls = 0;
+    const int exit_code = run_http09_resumed_client_sequence(
+        config, requests,
+        [&](const Http09RuntimeConfig &, const std::vector<QuicHttp09Request> &runner_requests,
+            const QuicCoreConfig &core_config, std::uint64_t connection_index) {
+            ++calls;
+            const bool warmup_matches = (calls == 1) & (connection_index == 1) &
+                                        (runner_requests.size() == 1) &
+                                        (core_config.zero_rtt.application_context ==
+                                         http09_zero_rtt_application_context(runner_requests));
+            return ClientConnectionRunResult{
+                .exit_code = 98 - (static_cast<int>(warmup_matches) * 91),
+            };
+        });
+    return (exit_code == 7) & (calls == 1);
+}
+
+bool retry_trace_paths_for_tests() {
+    sockaddr_storage peer{};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(4433);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+
+    RetryTokenStore retry_tokens;
+    std::uint64_t next_connection_index = 1;
+    const ParsedServerDatagram retry_initial{
+        .kind = ParsedServerDatagram::Kind::supported_initial,
+        .version = kQuicVersion1,
+        .destination_connection_id = make_runtime_connection_id(std::byte{0x83}, 1),
+        .source_connection_id = ConnectionId{std::byte{0x01}},
+        .token = {},
+    };
+    const auto retry_result = maybe_send_retry_for_supported_initial(
+        true, /*socket_fd=*/-1, retry_initial, peer, peer_len, retry_tokens, next_connection_index);
+    const bool retry_send_failed = retry_result.has_value() & !retry_result.value_or(true) &
+                                   (retry_tokens.size() == 1) & (next_connection_index == 2);
+
+    std::optional<PendingRetryToken> retry_context;
+    const ParsedServerDatagram invalid_retry{
+        .kind = ParsedServerDatagram::Kind::supported_initial,
+        .version = kQuicVersion1,
+        .destination_connection_id = make_runtime_connection_id(std::byte{0x91}, 9),
+        .source_connection_id = ConnectionId{std::byte{0x02}},
+        .token = make_runtime_retry_token(9),
+    };
+    const bool invalid_retry_ignored =
+        !populate_retry_context_if_required(true, invalid_retry, peer, peer_len, retry_tokens,
+                                            retry_context) &
+        !retry_context.has_value();
+    return retry_send_failed & invalid_retry_ignored;
+}
+
+bool send_retry_for_initial_failures_for_tests() {
+    sockaddr_storage peer{};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(4433);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+
+    RetryTokenStore missing_source_tokens;
+    const ParsedServerDatagram missing_source_connection_id{
+        .kind = ParsedServerDatagram::Kind::supported_initial,
+        .version = kQuicVersion1,
+        .destination_connection_id = make_runtime_connection_id(std::byte{0x83}, 1),
+        .source_connection_id = std::nullopt,
+        .token = {},
+    };
+    const bool missing_source_rejected =
+        !send_retry_for_initial(/*fd=*/-1, missing_source_connection_id, peer, peer_len,
+                                missing_source_tokens, 1) &
+        missing_source_tokens.empty();
+
+    RetryTokenStore oversized_source_tokens;
+    const ParsedServerDatagram oversized_source_connection_id{
+        .kind = ParsedServerDatagram::Kind::supported_initial,
+        .version = kQuicVersion1,
+        .destination_connection_id = make_runtime_connection_id(std::byte{0x83}, 2),
+        .source_connection_id = ConnectionId(21, std::byte{0xaa}),
+        .token = {},
+    };
+    const bool oversized_source_rejected =
+        !send_retry_for_initial(/*fd=*/-1, oversized_source_connection_id, peer, peer_len,
+                                oversized_source_tokens, 2) &
+        (oversized_source_tokens.size() == 1);
+    return missing_source_rejected & oversized_source_rejected;
+}
+
+bool zero_rtt_request_allowance_for_tests() {
+    const auto make_result = [](std::optional<QuicZeroRttStatus> status) {
+        QuicCoreResult result;
+        if (status.has_value()) {
+            result.effects.emplace_back(QuicCoreZeroRttStatusEvent{.status = *status});
+        }
+        return result;
+    };
+
+    const bool unavailable_rejected =
+        !allow_requests_before_handshake_ready(true, make_result(QuicZeroRttStatus::unavailable));
+    const bool not_attempted_rejected =
+        !allow_requests_before_handshake_ready(true, make_result(QuicZeroRttStatus::not_attempted));
+    const bool rejected_rejected =
+        !allow_requests_before_handshake_ready(true, make_result(QuicZeroRttStatus::rejected));
+    const bool attempted_allowed =
+        allow_requests_before_handshake_ready(true, make_result(QuicZeroRttStatus::attempted));
+    const bool accepted_allowed =
+        allow_requests_before_handshake_ready(true, make_result(QuicZeroRttStatus::accepted));
+    const bool missing_status_allowed =
+        allow_requests_before_handshake_ready(true, make_result(std::nullopt));
+    const bool disabled_rejected =
+        !allow_requests_before_handshake_ready(false, make_result(QuicZeroRttStatus::accepted));
+    return unavailable_rejected & not_attempted_rejected & rejected_rejected & attempted_allowed &
+           accepted_allowed & missing_status_allowed & disabled_rejected;
 }
 
 bool version_negotiation_without_source_connection_id_fails_for_tests() {

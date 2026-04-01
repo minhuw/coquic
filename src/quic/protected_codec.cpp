@@ -31,18 +31,8 @@ enum class LongHeaderPacketType : std::uint8_t {
 };
 
 std::uint8_t encoded_long_header_type(LongHeaderPacketType packet_type, std::uint32_t version) {
-    if (version == kQuicVersion2) {
-        switch (packet_type) {
-        case LongHeaderPacketType::initial:
-            return 0x01u;
-        case LongHeaderPacketType::zero_rtt:
-            return 0x02u;
-        case LongHeaderPacketType::handshake:
-            return 0x03u;
-        }
-    }
-
-    return static_cast<std::uint8_t>(packet_type);
+    const auto encoded_type = static_cast<std::uint8_t>(packet_type);
+    return version == kQuicVersion2 ? static_cast<std::uint8_t>(encoded_type + 1u) : encoded_type;
 }
 
 struct LongHeaderLayout {
@@ -319,11 +309,8 @@ CodecResult<LongHeaderLayout> locate_long_header(std::span<const std::byte> byte
     BufferReader reader(bytes);
     reader.read_byte().value();
 
-    const auto version_bytes = reader.read_exact(4);
-    if (!version_bytes.has_value())
-        return CodecResult<LongHeaderLayout>::failure(version_bytes.error().code,
-                                                      version_bytes.error().offset);
-    if (!is_supported_quic_version(read_u32_be(version_bytes.value())))
+    const auto version_bytes = reader.read_exact(4).value();
+    if (!is_supported_quic_version(read_u32_be(version_bytes)))
         return CodecResult<LongHeaderLayout>::failure(CodecErrorCode::unsupported_packet_type, 0);
 
     const auto destination_connection_id_length = read_u8(reader);
@@ -436,10 +423,6 @@ derive_receive_initial_keys(const DeserializeProtectionContext &context, std::ui
 }
 
 CodecResult<InitialPacket> to_plaintext_initial(const ProtectedInitialPacket &packet) {
-    if (!is_supported_quic_version(packet.version)) {
-        return CodecResult<InitialPacket>::failure(CodecErrorCode::unsupported_packet_type, 0);
-    }
-
     const auto truncated_packet_number =
         truncate_packet_number(packet.packet_number, packet.packet_number_length);
     if (!truncated_packet_number.has_value()) {
@@ -1344,7 +1327,7 @@ deserialize_protected_datagram(std::span<const std::byte> bytes,
                 decoded = deserialize_protected_initial_packet(bytes.subspan(offset), context);
             } else if (type.value() == LongHeaderPacketType::zero_rtt) {
                 decoded = deserialize_protected_zero_rtt_packet(bytes.subspan(offset), context);
-            } else if (type.value() == LongHeaderPacketType::handshake) {
+            } else {
                 decoded = deserialize_protected_handshake_packet(bytes.subspan(offset), context);
             }
         }

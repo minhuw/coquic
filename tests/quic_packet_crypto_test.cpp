@@ -258,6 +258,18 @@ TEST(QuicPacketCryptoTest, ExpandTrafficSecretPropagatesDerivedHeaderProtectionK
     EXPECT_EQ(expanded.error().code, coquic::quic::CodecErrorCode::invalid_packet_protection_state);
 }
 
+TEST(QuicPacketCryptoTest, ExpandTrafficSecretRejectsUnsupportedQuicVersion) {
+    const coquic::quic::TrafficSecret secret{
+        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        .secret = make_secret(32),
+        .quic_version = 0,
+    };
+
+    const auto expanded = coquic::quic::expand_traffic_secret(secret);
+    ASSERT_FALSE(expanded.has_value());
+    EXPECT_EQ(expanded.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
+}
+
 TEST(QuicPacketCryptoTest, DeriveNextTrafficSecretReusesProvidedHeaderProtectionKey) {
     const auto header_protection_key = hex_bytes("00112233445566778899aabbccddeeff");
     const coquic::quic::TrafficSecret secret{
@@ -273,6 +285,18 @@ TEST(QuicPacketCryptoTest, DeriveNextTrafficSecretReusesProvidedHeaderProtection
     const auto &next_header_protection_key =
         optional_ref_or_terminate(next_secret_value.header_protection_key);
     EXPECT_EQ(next_header_protection_key, header_protection_key);
+}
+
+TEST(QuicPacketCryptoTest, DeriveNextTrafficSecretRejectsUnsupportedQuicVersion) {
+    const coquic::quic::TrafficSecret secret{
+        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        .secret = make_secret(32),
+        .quic_version = 0,
+    };
+
+    const auto next_secret = coquic::quic::derive_next_traffic_secret(secret);
+    ASSERT_FALSE(next_secret.has_value());
+    EXPECT_EQ(next_secret.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
 }
 
 TEST_P(QuicPacketCryptoSealFaultTest, RejectsSealingWhenFaultInjected) {
@@ -523,6 +547,58 @@ TEST(QuicPacketCryptoTest, ComputesAndValidatesRetryIntegrityTagForQuicV2Rejects
         *retry_packet, wrong_original_destination_connection_id);
     ASSERT_TRUE(wrong_odcid_valid.has_value());
     EXPECT_FALSE(wrong_odcid_valid.value());
+}
+
+TEST(QuicPacketCryptoTest,
+     ComputeRetryIntegrityTagRejectsOversizedOriginalDestinationConnectionId) {
+    const auto decoded_retry_packet = coquic::quic::deserialize_packet(
+        hex_bytes("ff000000010008f067a5502a4262b5746f6b656e04a265ba2eff4d829058fb3f0f2496ba"),
+        coquic::quic::DeserializeOptions{});
+    ASSERT_TRUE(decoded_retry_packet.has_value());
+    const auto *retry_packet =
+        std::get_if<coquic::quic::RetryPacket>(&decoded_retry_packet.value().packet);
+    ASSERT_NE(retry_packet, nullptr);
+
+    const std::vector<std::byte> oversized_original_destination_connection_id(256, std::byte{0x42});
+    const auto retry_integrity_tag = coquic::quic::compute_retry_integrity_tag(
+        *retry_packet, oversized_original_destination_connection_id);
+    ASSERT_FALSE(retry_integrity_tag.has_value());
+    EXPECT_EQ(retry_integrity_tag.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicPacketCryptoTest, ComputeRetryIntegrityTagRejectsInvalidRetryPacketEncoding) {
+    const auto decoded_retry_packet = coquic::quic::deserialize_packet(
+        hex_bytes("ff000000010008f067a5502a4262b5746f6b656e04a265ba2eff4d829058fb3f0f2496ba"),
+        coquic::quic::DeserializeOptions{});
+    ASSERT_TRUE(decoded_retry_packet.has_value());
+    const auto *retry_packet =
+        std::get_if<coquic::quic::RetryPacket>(&decoded_retry_packet.value().packet);
+    ASSERT_NE(retry_packet, nullptr);
+
+    auto invalid_retry_packet = *retry_packet;
+    invalid_retry_packet.retry_unused_bits = 0x10u;
+    const auto retry_integrity_tag = coquic::quic::compute_retry_integrity_tag(
+        invalid_retry_packet, hex_bytes("8394c8f03e515708"));
+    ASSERT_FALSE(retry_integrity_tag.has_value());
+    EXPECT_EQ(retry_integrity_tag.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicPacketCryptoTest, ComputeRetryIntegrityTagPropagatesSealFailure) {
+    const auto decoded_retry_packet = coquic::quic::deserialize_packet(
+        hex_bytes("ff000000010008f067a5502a4262b5746f6b656e04a265ba2eff4d829058fb3f0f2496ba"),
+        coquic::quic::DeserializeOptions{});
+    ASSERT_TRUE(decoded_retry_packet.has_value());
+    const auto *retry_packet =
+        std::get_if<coquic::quic::RetryPacket>(&decoded_retry_packet.value().packet);
+    ASSERT_NE(retry_packet, nullptr);
+
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
+        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new);
+    const auto retry_integrity_tag =
+        coquic::quic::compute_retry_integrity_tag(*retry_packet, hex_bytes("8394c8f03e515708"));
+    ASSERT_FALSE(retry_integrity_tag.has_value());
+    EXPECT_EQ(retry_integrity_tag.error().code,
+              coquic::quic::CodecErrorCode::invalid_packet_protection_state);
 }
 
 TEST(QuicPacketCryptoTest, DerivesInitialKeysForEmptyDestinationConnectionId) {

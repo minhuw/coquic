@@ -114,17 +114,15 @@ bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t ver
     return std::find(versions.begin(), versions.end(), version) != versions.end();
 }
 
-std::optional<std::uint32_t>
-select_preferred_version(std::span<const std::uint32_t> preferred_versions,
-                         const VersionInformation &version_information) {
-    for (const auto preferred_version : preferred_versions) {
-        if (preferred_version == version_information.chosen_version ||
-            contains_version(version_information.available_versions, preferred_version)) {
-            return preferred_version;
-        }
-    }
-
-    return std::nullopt;
+std::uint32_t select_preferred_version(std::span<const std::uint32_t> preferred_versions,
+                                       const VersionInformation &version_information) {
+    // The caller has already verified that chosen_version is present in preferred_versions.
+    const auto selected = std::find_if(
+        preferred_versions.begin(), preferred_versions.end(), [&](std::uint32_t preferred_version) {
+            return preferred_version == version_information.chosen_version ||
+                   contains_version(version_information.available_versions, preferred_version);
+        });
+    return *selected;
 }
 
 } // namespace
@@ -484,8 +482,7 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
             const auto selected_version =
                 select_preferred_version(context.expected_version_information->available_versions,
                                          parameters.version_information.value());
-            if (!selected_version.has_value() ||
-                selected_version.value() != parameters.version_information->chosen_version) {
+            if (selected_version != parameters.version_information->chosen_version) {
                 return validation_failure();
             }
         }

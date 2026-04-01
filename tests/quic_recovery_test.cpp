@@ -193,6 +193,17 @@ TEST(QuicRecoveryTest, HistoryWithoutPendingAckReturnsNulloptEvenWhenPacketsExis
               std::nullopt);
 }
 
+TEST(QuicRecoveryTest, DuplicateNonAckElicitingPacketKeepsAckPendingClear) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/1, /*ack_eliciting=*/false,
+                            coquic::quic::test::test_time(5));
+    history.record_received(/*packet_number=*/1, /*ack_eliciting=*/false,
+                            coquic::quic::test::test_time(6));
+
+    EXPECT_EQ(history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(7)),
+              std::nullopt);
+}
+
 TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(SentPacketRecord{

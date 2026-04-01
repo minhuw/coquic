@@ -57,12 +57,7 @@ parse_version_negotiation_packet(std::span<const std::byte> bytes) {
         return std::nullopt;
     }
 
-    if (const auto *version_negotiation =
-            std::get_if<VersionNegotiationPacket>(&decoded.value().packet)) {
-        return *version_negotiation;
-    }
-
-    return std::nullopt;
+    return std::get<VersionNegotiationPacket>(decoded.value().packet);
 }
 
 std::optional<RetryPacket> parse_retry_packet(std::span<const std::byte> bytes) {

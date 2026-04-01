@@ -226,6 +226,10 @@ ServerResumptionContextState &server_resumption_context_state() {
 }
 
 COQUIC_NO_PROFILE bool configure_server_resumption_context(SSL_CTX *ctx) {
+    if (consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_server_resumption_context)) {
+        return true;
+    }
+
     static constexpr unsigned char sid_ctx[] = "coquic server";
     if (SSL_CTX_set_session_id_context(ctx, sid_ctx, sizeof(sid_ctx) - 1) != 1) {
         std::cerr << "quictls server resumption context: set_session_id_context failed err="
@@ -418,8 +422,11 @@ std::optional<std::vector<std::byte>> serialize_session_bytes(const SSL_SESSION 
     }
 
     unsigned char *encoded = nullptr;
-    const int encoded_len = i2d_SSL_SESSION(session, &encoded);
-    if (encoded_len <= 0 || encoded == nullptr) {
+    const int encoded_len = consume_tls_adapter_fault(TlsAdapterFaultPoint::serialize_session_bytes)
+                                ? 0
+                                : i2d_SSL_SESSION(session, &encoded);
+    // OpenSSL allocates and returns encoded bytes whenever i2d_SSL_SESSION succeeds.
+    if (encoded_len <= 0) {
         return std::nullopt;
     }
 
@@ -445,6 +452,12 @@ SslSessionPtr deserialize_session_bytes(std::span<const std::byte> bytes) {
     }
 
     return SslSessionPtr(session, &SSL_SESSION_free);
+}
+
+int set_session(SSL *ssl, SSL_SESSION *session) {
+    return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_set_session)
+               ? 0
+               : SSL_set_session(ssl, session);
 }
 
 } // namespace
@@ -714,7 +727,8 @@ class TlsAdapter::Impl {
 
         if (config_.resumption_state.has_value()) {
             auto session = deserialize_session_bytes(*config_.resumption_state);
-            if (session != nullptr && SSL_set_session(ssl_.get(), session.get()) == 1) {
+            const bool restored = session != nullptr && set_session(ssl_.get(), session.get()) == 1;
+            if (restored) {
                 resumed_resumption_state_ = *config_.resumption_state;
                 if (config_.attempt_zero_rtt) {
                     early_data_attempted_ = true;
@@ -816,7 +830,13 @@ class TlsAdapter::Impl {
 
     int on_set_encryption_secrets(SSL *ssl, OSSL_ENCRYPTION_LEVEL level, const uint8_t *read_secret,
                                   const uint8_t *write_secret, size_t secret_len) {
-        const auto mapped_level = to_encryption_level(level);
+        return on_set_encryption_secrets_value(ssl, static_cast<int>(level), read_secret,
+                                               write_secret, secret_len);
+    }
+
+    int on_set_encryption_secrets_value(SSL *ssl, int level_value, const uint8_t *read_secret,
+                                        const uint8_t *write_secret, size_t secret_len) {
+        const auto mapped_level = to_encryption_level_value(level_value);
         if (!mapped_level.has_value()) {
             return 1;
         }
@@ -862,7 +882,11 @@ class TlsAdapter::Impl {
     }
 
     int on_add_handshake_data(OSSL_ENCRYPTION_LEVEL level, const uint8_t *data, size_t len) {
-        const auto mapped_level = to_encryption_level(level);
+        return on_add_handshake_data_value(static_cast<int>(level), data, len);
+    }
+
+    int on_add_handshake_data_value(int level_value, const uint8_t *data, size_t len) {
+        const auto mapped_level = to_encryption_level_value(level_value);
         if (!mapped_level.has_value()) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
@@ -906,12 +930,8 @@ class TlsAdapter::Impl {
         update_resumed_resumption_state();
     }
 
-    void update_early_data_status() {
-        if (ssl_ == nullptr) {
-            return;
-        }
-
-        switch (SSL_get_early_data_status(ssl_.get())) {
+    void update_early_data_status_value(int early_data_status, bool handshake_complete) {
+        switch (early_data_status) {
         case SSL_EARLY_DATA_ACCEPTED:
             early_data_attempted_ = true;
             early_data_accepted_ = true;
@@ -921,13 +941,22 @@ class TlsAdapter::Impl {
             early_data_accepted_ = false;
             break;
         case SSL_EARLY_DATA_NOT_SENT:
-            if (early_data_attempted_ && SSL_is_init_finished(ssl_.get()) == 1) {
+            if (early_data_attempted_ && handshake_complete) {
                 early_data_accepted_ = false;
             }
             break;
         default:
             break;
         }
+    }
+
+    void update_early_data_status() {
+        if (ssl_ == nullptr) {
+            return;
+        }
+
+        update_early_data_status_value(static_cast<int>(SSL_get_early_data_status(ssl_.get())),
+                                       SSL_is_init_finished(ssl_.get()) == 1);
     }
 
     void update_resumed_resumption_state() {
@@ -1131,6 +1160,15 @@ bool TlsAdapterTestPeer::handshake_progressed(bool pending_changed, bool secrets
                                   peer_transport_parameters_changed);
 }
 
+std::optional<std::vector<std::byte>>
+TlsAdapterTestPeer::serialize_session_bytes(const SSL_SESSION *session) {
+    return ::serialize_session_bytes(session);
+}
+
+bool TlsAdapterTestPeer::deserialize_session_bytes(std::span<const std::byte> bytes) {
+    return ::deserialize_session_bytes(bytes) != nullptr;
+}
+
 int TlsAdapterTestPeer::call_on_set_encryption_secrets(TlsAdapter &adapter,
                                                        OSSL_ENCRYPTION_LEVEL level,
                                                        const uint8_t *read_secret,
@@ -1138,6 +1176,14 @@ int TlsAdapterTestPeer::call_on_set_encryption_secrets(TlsAdapter &adapter,
                                                        size_t secret_len) {
     return adapter.impl_->on_set_encryption_secrets(adapter.impl_->ssl_.get(), level, read_secret,
                                                     write_secret, secret_len);
+}
+
+int TlsAdapterTestPeer::call_on_set_encryption_secrets_value(TlsAdapter &adapter, int level_value,
+                                                             const uint8_t *read_secret,
+                                                             const uint8_t *write_secret,
+                                                             size_t secret_len) {
+    return adapter.impl_->on_set_encryption_secrets_value(adapter.impl_->ssl_.get(), level_value,
+                                                          read_secret, write_secret, secret_len);
 }
 
 int TlsAdapterTestPeer::call_on_set_secret(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
@@ -1162,6 +1208,11 @@ int TlsAdapterTestPeer::call_on_set_secret(TlsAdapter &adapter, OSSL_ENCRYPTION_
 int TlsAdapterTestPeer::call_on_add_handshake_data(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
                                                    const uint8_t *data, size_t len) {
     return adapter.impl_->on_add_handshake_data(level, data, len);
+}
+
+int TlsAdapterTestPeer::call_on_add_handshake_data_value(TlsAdapter &adapter, int level_value,
+                                                         const uint8_t *data, size_t len) {
+    return adapter.impl_->on_add_handshake_data_value(level_value, data, len);
 }
 
 int TlsAdapterTestPeer::call_on_flush_flight(TlsAdapter &adapter) {
@@ -1258,6 +1309,13 @@ int TlsAdapterTestPeer::call_static_send_alert_with_null_app_data(TlsAdapter &ad
     });
 }
 
+int TlsAdapterTestPeer::call_static_on_new_session_with_null_app_data(TlsAdapter &adapter,
+                                                                      SSL_SESSION *session) {
+    return call_with_null_app_data(adapter.impl_->ssl_.get(), [&](SSL *ssl) {
+        return TlsAdapter::Impl::on_new_session(ssl, session);
+    });
+}
+
 void TlsAdapterTestPeer::capture_peer_transport_parameters(TlsAdapter &adapter) {
     adapter.impl_->capture_peer_transport_parameters();
 }
@@ -1269,6 +1327,19 @@ void TlsAdapterTestPeer::set_peer_transport_parameters(TlsAdapter &adapter,
 
 void TlsAdapterTestPeer::clear_peer_transport_parameters(TlsAdapter &adapter) {
     adapter.impl_->peer_transport_parameters_.reset();
+}
+
+void TlsAdapterTestPeer::update_runtime_status(TlsAdapter &adapter) {
+    adapter.impl_->update_runtime_status();
+}
+
+void TlsAdapterTestPeer::set_early_data_attempted(TlsAdapter &adapter, bool attempted) {
+    adapter.impl_->early_data_attempted_ = attempted;
+}
+
+void TlsAdapterTestPeer::apply_early_data_status(TlsAdapter &adapter, int early_data_status,
+                                                 bool handshake_complete) {
+    adapter.impl_->update_early_data_status_value(early_data_status, handshake_complete);
 }
 
 } // namespace test

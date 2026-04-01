@@ -64,19 +64,28 @@ std::chrono::milliseconds latest_loss_delay(const RecoveryRttState &rtt) {
 
 } // namespace
 
-void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ack_eliciting,
-                                            QuicCoreTimePoint received_time) {
+bool ReceivedPacketHistory::contains(std::uint64_t packet_number) const {
     const auto next = ranges_.upper_bound(packet_number);
     if (next != ranges_.begin()) {
-        auto previous = std::prev(next);
+        const auto previous = std::prev(next);
         if (packet_number <= previous->second.largest_packet_number) {
-            if (ack_eliciting) {
-                ack_pending_ = true;
-            }
-            return;
+            return true;
         }
     }
 
+    return false;
+}
+
+void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ack_eliciting,
+                                            QuicCoreTimePoint received_time) {
+    if (contains(packet_number)) {
+        if (ack_eliciting) {
+            ack_pending_ = true;
+        }
+        return;
+    }
+
+    const auto next = ranges_.upper_bound(packet_number);
     const auto extends_previous =
         next != ranges_.begin() &&
         std::prev(next)->second.largest_packet_number + 1 == packet_number;

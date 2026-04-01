@@ -95,6 +95,24 @@ text = text.replace("image: martenseemann/quic-interop-iperf-endpoint", f"image:
 path.write_text(text + "\n")
 PY
 
+python3 - "${runner_dir}/docker-compose.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+server_env_anchor = "      - PROTOCOLS=$PROTOCOLS_SERVER\n"
+client_env_anchor = "      - PROTOCOLS=$PROTOCOLS_CLIENT\n"
+
+if "COQUIC_RUNTIME_TRACE" not in text:
+    text = text.replace(server_env_anchor,
+                        server_env_anchor + "      - COQUIC_RUNTIME_TRACE=$COQUIC_RUNTIME_TRACE\n")
+    text = text.replace(client_env_anchor,
+                        client_env_anchor + "      - COQUIC_RUNTIME_TRACE=$COQUIC_RUNTIME_TRACE\n")
+
+path.write_text(text)
+PY
+
 python3 -m venv "${runner_dir}/.venv"
 source "${runner_dir}/.venv/bin/activate"
 python3 -m pip install --quiet --upgrade pip

@@ -51,6 +51,7 @@ struct RecoveryRttState {
 
 class ReceivedPacketHistory {
   public:
+    bool contains(std::uint64_t packet_number) const;
     void record_received(std::uint64_t packet_number, bool ack_eliciting,
                          QuicCoreTimePoint received_time);
     bool has_ack_to_send() const;

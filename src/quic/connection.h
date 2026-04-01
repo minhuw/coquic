@@ -150,6 +150,7 @@ class QuicConnection {
     void detect_lost_packets(PacketSpaceState &packet_space, QuicCoreTimePoint now);
     void arm_pto_probe(QuicCoreTimePoint now);
     std::optional<SentPacketRecord> select_pto_probe(const PacketSpaceState &packet_space) const;
+    void queue_server_handshake_recovery_probes();
     const RecoveryRttState &shared_recovery_rtt_state() const;
     std::optional<QuicCoreTimePoint> zero_rtt_discard_deadline() const;
     void arm_server_zero_rtt_discard_deadline(QuicCoreTimePoint now);

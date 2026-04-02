@@ -93,6 +93,7 @@ enum class ServerLoopCaseForTests : std::uint8_t {
     blocking_processed_timers_then_receive_error,
     blocking_wait_failure,
     blocking_wait_missing_input,
+    nonblocking_drain_repeats_pending_endpoint_progress,
 };
 
 struct ServerLoopResultForTests {
@@ -101,6 +102,7 @@ struct ServerLoopResultForTests {
     std::size_t receive_calls = 0;
     std::size_t wait_calls = 0;
     std::size_t process_expired_calls = 0;
+    std::size_t pump_calls = 0;
 };
 
 struct Http09RuntimeOpsOverride {

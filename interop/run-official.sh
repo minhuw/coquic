@@ -110,6 +110,15 @@ if "COQUIC_RUNTIME_TRACE" not in text:
     text = text.replace(client_env_anchor,
                         client_env_anchor + "      - COQUIC_RUNTIME_TRACE=$COQUIC_RUNTIME_TRACE\n")
 
+if "COQUIC_PACKET_TRACE" not in text:
+    text = text.replace(server_env_anchor,
+                        server_env_anchor + "      - COQUIC_PACKET_TRACE=$COQUIC_PACKET_TRACE\n")
+
+if "COQUIC_PACKET_TRACE_SCID" not in text:
+    text = text.replace(server_env_anchor,
+                        server_env_anchor +
+                        "      - COQUIC_PACKET_TRACE_SCID=$COQUIC_PACKET_TRACE_SCID\n")
+
 path.write_text(text)
 PY
 

@@ -447,7 +447,9 @@ int open_udp_socket(int family) {
 
 std::uint32_t runtime_original_quic_version_for_testcase(QuicHttp09Testcase testcase) {
     if (testcase == QuicHttp09Testcase::v2) {
-        return kQuicVersion2;
+        // The interop v2 testcase uses compatible version negotiation:
+        // start in v1, advertise v2, then switch to v2 after the server selects it.
+        return kQuicVersion1;
     }
     return kQuicVersion1;
 }
@@ -1271,8 +1273,16 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             return {};
         }
 
+        const bool pending_before = state.endpoint_has_pending_work;
         auto update = endpoint.poll(now());
         state.endpoint_has_pending_work = update.has_pending_work;
+        with_runtime_trace([&](std::ostream &stream) {
+            stream << "http09-client trace: poll pending_before=" << pending_before
+                   << " pending_after=" << update.has_pending_work
+                   << " core_inputs=" << update.core_inputs.size()
+                   << " terminal_success=" << update.terminal_success
+                   << " terminal_failure=" << update.terminal_failure << '\n';
+        });
         if (update.terminal_failure) {
             state.terminal_failure = true;
             return PumpEndpointWorkResult{
@@ -1318,6 +1328,13 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             auto receive = io.receive_datagram(socket_fd, /*flags=*/MSG_DONTWAIT,
                                                /*role_name=*/"client");
             if (receive.status == ReceiveDatagramStatus::would_block) {
+                with_runtime_trace([&](std::ostream &stream) {
+                    stream << "http09-client trace: would-block pending="
+                           << state.endpoint_has_pending_work
+                           << " advanced_core=" << pump_result.advanced_core
+                           << " terminal_success=" << state.terminal_success
+                           << " terminal_failure=" << state.terminal_failure << '\n';
+                });
                 if (pump_result.advanced_core && state.endpoint_has_pending_work) {
                     continue;
                 }
@@ -1391,6 +1408,23 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             if (state.terminal_success) {
                 return 0;
             }
+            const auto current = io.current_time();
+            const auto next_wakeup_delay_ms =
+                state.next_wakeup.has_value()
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                          state.next_wakeup.value() > current ? state.next_wakeup.value() - current
+                                                              : current - state.next_wakeup.value())
+                          .count()
+                    : -1;
+            with_runtime_trace([&](std::ostream &stream) {
+                stream << "http09-client trace: idle-timeout pending="
+                       << state.endpoint_has_pending_work
+                       << " terminal_success=" << state.terminal_success
+                       << " terminal_failure=" << state.terminal_failure
+                       << " saw_peer_input=" << saw_peer_input
+                       << " has_next_wakeup=" << state.next_wakeup.has_value()
+                       << " next_wakeup_delta_ms=" << next_wakeup_delay_ms << '\n';
+            });
             std::cerr << "http09-client failed: timed out waiting for progress\n";
             return 1;
         }
@@ -1607,6 +1641,12 @@ void process_expired_server_sessions(ServerSessionMap &sessions, int socket_fd,
             session->peer_len, timer_result, session->state, "server");
         const bool core_failed = session->core.has_failed();
         if (endpoint_failed | core_failed) {
+            with_runtime_trace([&](std::ostream &stream) {
+                stream << "http09-server trace: timer-session-failed scid="
+                       << format_connection_id_key_hex(local_connection_id_key)
+                       << " endpoint_failed=" << endpoint_failed << " core_failed=" << core_failed
+                       << '\n';
+            });
             failed_sessions.push_back(local_connection_id_key);
         }
     }
@@ -1633,12 +1673,24 @@ void pump_server_pending_endpoint_work(ServerSessionMap &sessions, int socket_fd
                                           session->peer_len, result, session->state, "server");
         const bool core_failed = session->core.has_failed();
         if (endpoint_failed | core_failed) {
+            with_runtime_trace([&](std::ostream &stream) {
+                stream << "http09-server trace: pending-work-session-failed scid="
+                       << format_connection_id_key_hex(local_connection_id_key)
+                       << " endpoint_failed=" << endpoint_failed << " core_failed=" << core_failed
+                       << " terminal_failure=" << update.terminal_failure << '\n';
+            });
             failed_sessions.push_back(local_connection_id_key);
         }
     }
     for (const auto &local_connection_id_key : failed_sessions) {
         erase_session(local_connection_id_key);
     }
+}
+
+bool has_pending_server_endpoint_work(const ServerSessionMap &sessions) {
+    return std::any_of(sessions.begin(), sessions.end(), [](const auto &entry) {
+        return entry.second->state.endpoint_has_pending_work;
+    });
 }
 
 struct ServerLoopIo {
@@ -1653,6 +1705,7 @@ struct ServerLoopDriver {
     std::function<std::optional<QuicCoreTimePoint>()> earliest_wakeup;
     std::function<void(QuicCoreTimePoint, bool &)> process_expired_timers;
     std::function<void()> pump_endpoint_work;
+    std::function<bool()> has_pending_endpoint_work;
     std::function<bool(RuntimeWaitStep)> process_datagram;
 };
 
@@ -1685,6 +1738,9 @@ int run_http09_server_loop(int socket_fd, const ServerLoopIo &io, const ServerLo
             auto receive =
                 io.receive_datagram(socket_fd, /*flags=*/MSG_DONTWAIT, /*role_name=*/"server");
             if (receive.status == ReceiveDatagramStatus::would_block) {
+                if (driver.has_pending_endpoint_work()) {
+                    continue;
+                }
                 break;
             }
             if (receive.status == ReceiveDatagramStatus::error) {
@@ -1702,6 +1758,9 @@ int run_http09_server_loop(int socket_fd, const ServerLoopIo &io, const ServerLo
         }
 
         driver.pump_endpoint_work();
+        if (driver.has_pending_endpoint_work()) {
+            continue;
+        }
 
         auto step = io.wait_for_socket_or_deadline(
             RuntimeWaitConfig{
@@ -1906,6 +1965,7 @@ int run_http09_server(const Http09RuntimeConfig &config) {
                 },
             .pump_endpoint_work =
                 [&] { pump_server_pending_endpoint_work(sessions, socket_fd, erase_session); },
+            .has_pending_endpoint_work = [&] { return has_pending_server_endpoint_work(sessions); },
             .process_datagram =
                 [&](RuntimeWaitStep step) { return process_server_datagram(std::move(step)); },
         });
@@ -2040,6 +2100,7 @@ struct ScriptedServerLoopCaseForTests {
     std::vector<ReceiveDatagramResult> receive_results;
     std::vector<std::optional<RuntimeWaitStep>> wait_steps;
     std::vector<bool> processed_timers_results;
+    std::vector<bool> pending_work_after_pump;
     bool process_datagram_result = true;
 };
 
@@ -2121,6 +2182,24 @@ ScriptedServerLoopCaseForTests make_blocking_wait_missing_input_case_for_tests()
     };
 }
 
+ScriptedServerLoopCaseForTests
+make_nonblocking_drain_repeats_pending_endpoint_progress_case_for_tests() {
+    return ScriptedServerLoopCaseForTests{
+        .receive_results =
+            {
+                make_would_block_receive_for_tests(),
+                make_would_block_receive_for_tests(),
+                make_error_receive_for_tests(),
+            },
+        .wait_steps =
+            {
+                std::nullopt,
+            },
+        .processed_timers_results = {false, false, false},
+        .pending_work_after_pump = {true, true, false},
+    };
+}
+
 using ServerLoopCaseFactoryForTests = ScriptedServerLoopCaseForTests (*)();
 
 ServerLoopCaseFactoryForTests server_loop_case_factories_for_tests[] = {
@@ -2130,6 +2209,7 @@ ServerLoopCaseFactoryForTests server_loop_case_factories_for_tests[] = {
     &make_blocking_processed_timers_then_receive_error_case_for_tests,
     &make_blocking_wait_failure_case_for_tests,
     &make_blocking_wait_missing_input_case_for_tests,
+    &make_nonblocking_drain_repeats_pending_endpoint_progress_case_for_tests,
 };
 
 std::vector<std::byte> bytes_from_string_for_runtime_tests(std::string_view text) {
@@ -3031,6 +3111,8 @@ ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests c
     std::size_t receive_calls = 0;
     std::size_t wait_calls = 0;
     std::size_t process_expired_calls = 0;
+    std::size_t pump_calls = 0;
+    bool endpoint_has_pending_work = false;
 
     const auto io = ServerLoopIo{
         .current_time =
@@ -3051,7 +3133,14 @@ ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests c
             [&](QuicCoreTimePoint, bool &processed_any) {
                 processed_any = script.processed_timers_results[process_expired_calls++];
             },
-        .pump_endpoint_work = [] {},
+        .pump_endpoint_work =
+            [&] {
+                endpoint_has_pending_work = pump_calls < script.pending_work_after_pump.size()
+                                                ? script.pending_work_after_pump[pump_calls]
+                                                : false;
+                pump_calls += 1;
+            },
+        .has_pending_endpoint_work = [&] { return endpoint_has_pending_work; },
         .process_datagram = [&](const RuntimeWaitStep &) { return script.process_datagram_result; },
     };
 
@@ -3061,6 +3150,7 @@ ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests c
         .receive_calls = receive_calls,
         .wait_calls = wait_calls,
         .process_expired_calls = process_expired_calls,
+        .pump_calls = pump_calls,
     };
 }
 

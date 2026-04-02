@@ -3262,8 +3262,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsV2CoreConfigsWithCompatibleVersionSuppo
     };
 
     const auto client_core = coquic::quic::make_http09_client_core_config(runtime);
-    EXPECT_EQ(client_core.original_version, 0x6b3343cfu);
-    EXPECT_EQ(client_core.initial_version, 0x6b3343cfu);
+    EXPECT_EQ(client_core.original_version, 0x00000001u);
+    EXPECT_EQ(client_core.initial_version, 0x00000001u);
     EXPECT_EQ(client_core.supported_versions,
               (std::vector<std::uint32_t>{0x6b3343cfu, 0x00000001u}));
 
@@ -3272,8 +3272,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsV2CoreConfigsWithCompatibleVersionSuppo
     server_runtime.certificate_chain_path = "tests/fixtures/quic-server-cert.pem";
     server_runtime.private_key_path = "tests/fixtures/quic-server-key.pem";
     const auto server_core = coquic::quic::make_http09_server_core_config(server_runtime);
-    EXPECT_EQ(server_core.original_version, 0x6b3343cfu);
-    EXPECT_EQ(server_core.initial_version, 0x6b3343cfu);
+    EXPECT_EQ(server_core.original_version, 0x00000001u);
+    EXPECT_EQ(server_core.initial_version, 0x00000001u);
     EXPECT_EQ(server_core.supported_versions,
               (std::vector<std::uint32_t>{0x6b3343cfu, 0x00000001u}));
 }
@@ -3840,6 +3840,15 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(blocking_wait_missing_input.receive_calls, 1U);
     EXPECT_EQ(blocking_wait_missing_input.wait_calls, 1U);
     EXPECT_EQ(blocking_wait_missing_input.process_expired_calls, 2U);
+
+    const auto nonblocking_drain_repeats_pending_endpoint_progress =
+        coquic::quic::test::run_server_loop_case_for_tests(
+            coquic::quic::test::ServerLoopCaseForTests::
+                nonblocking_drain_repeats_pending_endpoint_progress);
+    EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.exit_code, 1);
+    EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.receive_calls, 3U);
+    EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.wait_calls, 0U);
+    EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.pump_calls, 3U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverRetryAndZeroRttBranches) {
@@ -4396,7 +4405,7 @@ TEST(QuicHttp09RuntimeTest, RetryEnabledServerCompletesHandshakeAfterRetriedInit
     EXPECT_EQ(run_retry_enabled_runtime_handshake(), 0);
 }
 
-TEST(QuicHttp09RuntimeTest, V2CaseEmitsQuicV2LongHeaders) {
+TEST(QuicHttp09RuntimeTest, V2CaseStartsInQuicV1AndNegotiatesQuicV2LongHeaders) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
@@ -4435,7 +4444,7 @@ TEST(QuicHttp09RuntimeTest, V2CaseEmitsQuicV2LongHeaders) {
     const auto client_start_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(client_start_datagrams.empty());
     EXPECT_TRUE(std::ranges::all_of(client_start_datagrams, [](const auto &datagram) {
-        return has_long_header(datagram) && read_u32_be_at(datagram, 1) == kQuicVersion2;
+        return has_long_header(datagram) && read_u32_be_at(datagram, 1) == kQuicVersion1;
     }));
     for (const auto &datagram : client_start_datagrams) {
         ASSERT_GE(::sendto(client_fd, datagram.data(), datagram.size(), 0,

@@ -235,6 +235,97 @@ TEST(QuicHttp09ServerTest, SendsResponseWhenRequestArrivesBeforeHandshakeComplet
     EXPECT_TRUE(saw_fin);
 }
 
+TEST(QuicHttp09ServerTest, ServesResponseAfterLostShortRequestPacketIsRetransmitted) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello");
+
+    QuicCore client(coquic::quic::test::make_client_core_config());
+    QuicCore server(coquic::quic::test::make_server_core_config());
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    const auto to_server =
+        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto to_client = coquic::quic::test::relay_send_datagrams_to_peer(
+        to_server, server, coquic::quic::test::test_time(1));
+    const auto client_handshake = coquic::quic::test::relay_send_datagrams_to_peer(
+        to_client, client, coquic::quic::test::test_time(2));
+
+    const auto request = client.advance(
+        QuicCoreSendStreamData{
+            .stream_id = 0,
+            .bytes = coquic::quic::test::bytes_from_string("GET /hello.txt\r\n"),
+            .fin = true,
+        },
+        coquic::quic::test::test_time(3));
+
+    const auto server_after_client_handshake = coquic::quic::test::relay_send_datagrams_to_peer(
+        client_handshake, server, coquic::quic::test::test_time(4));
+    const auto ignored_endpoint_result = drive_server_endpoint_on_result(
+        endpoint, server, server_after_client_handshake, coquic::quic::test::test_time(5));
+    static_cast<void>(ignored_endpoint_result);
+
+    const auto server_response_datagrams =
+        coquic::quic::test::send_datagrams_from(server_after_client_handshake);
+    ASSERT_FALSE(server_response_datagrams.empty());
+    std::optional<std::size_t> largest_server_datagram_index;
+    std::size_t largest_server_datagram_size = 0;
+    std::vector<std::size_t> delivered_server_datagrams;
+    for (std::size_t index = 0; index < server_response_datagrams.size(); ++index) {
+        const auto size = server_response_datagrams[index].size();
+        if (!largest_server_datagram_index.has_value() || size > largest_server_datagram_size) {
+            largest_server_datagram_index = index;
+            largest_server_datagram_size = size;
+        }
+    }
+    ASSERT_TRUE(largest_server_datagram_index.has_value());
+    for (std::size_t index = 0; index < server_response_datagrams.size(); ++index) {
+        if (server_response_datagrams.size() > 1 && index == *largest_server_datagram_index) {
+            continue;
+        }
+        delivered_server_datagrams.push_back(index);
+    }
+    ASSERT_FALSE(delivered_server_datagrams.empty());
+
+    const auto client_after_partial_server_response = coquic::quic::test::relay_datagrams_to_peer(
+        server_response_datagrams, delivered_server_datagrams, client,
+        coquic::quic::test::test_time(6));
+
+    const auto request_datagrams = coquic::quic::test::send_datagrams_from(request);
+    ASSERT_FALSE(request_datagrams.empty());
+
+    const auto server_after_client_ack = coquic::quic::test::relay_send_datagrams_to_peer(
+        client_after_partial_server_response, server, coquic::quic::test::test_time(7));
+    const auto ignored_server_followup = drive_server_endpoint_on_result(
+        endpoint, server, server_after_client_ack, coquic::quic::test::test_time(8));
+    static_cast<void>(ignored_server_followup);
+
+    const auto retransmission = coquic::quic::test::drive_earliest_next_wakeup(
+        client, {request.next_wakeup, client_after_partial_server_response.next_wakeup});
+    const auto retransmission_datagrams = coquic::quic::test::send_datagrams_from(retransmission);
+    ASSERT_FALSE(retransmission_datagrams.empty());
+
+    const auto server_after_retransmission = coquic::quic::test::relay_send_datagrams_to_peer(
+        retransmission, server, coquic::quic::test::test_time(9));
+    const auto response_after_retransmission = drive_server_endpoint_on_result(
+        endpoint, server, server_after_retransmission, coquic::quic::test::test_time(10));
+    const auto client_after_retransmission = coquic::quic::test::relay_send_datagrams_to_peer(
+        response_after_retransmission, client, coquic::quic::test::test_time(11));
+
+    std::vector<std::byte> body;
+    bool saw_fin = false;
+    for (const auto &chunk :
+         coquic::quic::test::received_stream_data_from(client_after_retransmission)) {
+        EXPECT_EQ(chunk.stream_id, 0u);
+        body.insert(body.end(), chunk.bytes.begin(), chunk.bytes.end());
+        saw_fin = saw_fin || chunk.fin;
+    }
+
+    EXPECT_FALSE(endpoint.has_failed());
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(body), "hello");
+    EXPECT_TRUE(saw_fin);
+}
+
 TEST(QuicHttp09ServerTest, AcceptsFinOnlyChunkAfterResponseFinIsQueued) {
     coquic::quic::test::ScopedTempDir document_root;
     document_root.write_file("hello.txt", "hello");

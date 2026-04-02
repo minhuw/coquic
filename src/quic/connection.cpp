@@ -1627,7 +1627,7 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
     const PacketSpaceState *client_handshake_keepalive_space =
         client_handshake_keepalive_eligible && !initial_packet_space_discarded_ ? &initial_space_
                                                                                 : nullptr;
-    if ((client_handshake_keepalive_space == nullptr) |
+    if ((client_handshake_keepalive_space == nullptr) ||
         !client_handshake_keepalive_reference_time.has_value()) {
         return std::nullopt;
     }
@@ -1707,11 +1707,11 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     };
     const auto client_handshake_keepalive_reference_time =
         [this]() -> std::optional<QuicCoreTimePoint> {
-        const bool eligible = (config_.role == EndpointRole::client) &
-                              (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
-                              last_peer_activity_time_.has_value() &
-                              !has_in_flight_ack_eliciting_packet(initial_space_) &
-                              !has_in_flight_ack_eliciting_packet(handshake_space_) &
+        const bool eligible = (config_.role == EndpointRole::client) &&
+                              (status_ == HandshakeStatus::in_progress) && !handshake_confirmed_ &&
+                              last_peer_activity_time_.has_value() &&
+                              !has_in_flight_ack_eliciting_packet(initial_space_) &&
+                              !has_in_flight_ack_eliciting_packet(handshake_space_) &&
                               !has_in_flight_ack_eliciting_packet(application_space_);
         if (!eligible) {
             return std::nullopt;
@@ -1731,7 +1731,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     PacketSpaceState *client_handshake_keepalive_space =
         client_handshake_keepalive_eligible ? &initial_space_ : nullptr;
     auto client_handshake_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
-    if ((client_handshake_keepalive_space != nullptr) &
+    if ((client_handshake_keepalive_space != nullptr) &&
         client_handshake_keepalive_reference_time.has_value()) {
         client_handshake_keepalive_deadline = compute_pto_deadline(
             shared_rtt_state, std::chrono::milliseconds(0),
@@ -3178,14 +3178,12 @@ CodecResult<bool> QuicConnection::sync_tls_state() {
     update_handshake_status();
     auto *tls = tls_.has_value() ? &*tls_ : nullptr;
     const bool tls_handshake_complete = tls != nullptr ? tls->handshake_complete() : false;
-    const bool should_emit_resumption_state = !resumption_state_emitted_ & (tls != nullptr) &
-                                              tls_handshake_complete &
-                                              peer_transport_parameters_.has_value();
-    if (should_emit_resumption_state) {
+    if (!resumption_state_emitted_ && (tls != nullptr) && tls_handshake_complete &&
+        peer_transport_parameters_.has_value()) {
         if (const auto ticket = tls->take_resumption_state(); ticket.has_value()) {
             auto encoded = encode_resumption_state(
                 *ticket, current_version_, config_.application_protocol,
-                peer_transport_parameters_.value(), config_.zero_rtt.application_context);
+                *peer_transport_parameters_, config_.zero_rtt.application_context);
             pending_resumption_state_effect_ = QuicCoreResumptionStateAvailable{
                 .state =
                     QuicResumptionState{

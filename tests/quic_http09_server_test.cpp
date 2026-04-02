@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -54,6 +55,13 @@ using coquic::quic::QuicCoreSendStreamData;
 using coquic::quic::QuicHttp09EndpointUpdate;
 using coquic::quic::QuicHttp09ServerConfig;
 using coquic::quic::QuicHttp09ServerEndpoint;
+
+template <typename T> T optional_value_or_terminate(const std::optional<T> &value) {
+    if (!value.has_value()) {
+        std::abort();
+    }
+    return *value;
+}
 
 QuicCoreResult drive_server_endpoint_on_result(QuicHttp09ServerEndpoint &endpoint, QuicCore &server,
                                                const QuicCoreResult &result,
@@ -279,8 +287,9 @@ TEST(QuicHttp09ServerTest, ServesResponseAfterLostShortRequestPacketIsRetransmit
         }
     }
     ASSERT_TRUE(largest_server_datagram_index.has_value());
+    const auto largest_server_datagram = optional_value_or_terminate(largest_server_datagram_index);
     for (std::size_t index = 0; index < server_response_datagrams.size(); ++index) {
-        if (server_response_datagrams.size() > 1 && index == *largest_server_datagram_index) {
+        if (server_response_datagrams.size() > 1 && index == largest_server_datagram) {
             continue;
         }
         delivered_server_datagrams.push_back(index);

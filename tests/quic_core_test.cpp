@@ -14131,9 +14131,10 @@ TEST(QuicCoreTest,
     EXPECT_FALSE(connection.has_failed());
     const auto received = connection.take_received_stream_data();
     ASSERT_TRUE(received.has_value());
-    EXPECT_EQ(received->stream_id, 0u);
-    EXPECT_EQ(received->bytes, coquic::quic::test::bytes_from_string("late-handshake"));
-    EXPECT_TRUE(received->fin);
+    EXPECT_EQ(optional_value_or_terminate(received).stream_id, 0u);
+    EXPECT_EQ(optional_value_or_terminate(received).bytes,
+              coquic::quic::test::bytes_from_string("late-handshake"));
+    EXPECT_TRUE(optional_value_or_terminate(received).fin);
 }
 
 TEST(QuicCoreTest, ProcessInboundDatagramIgnoresLaterHandshakeCryptoFailure) {

@@ -767,7 +767,7 @@ SupportedInitialRetryPreparation prepare_supported_initial_retry_handling(
             retry_enabled, socket_fd, parsed, peer, peer_len, retry_tokens, next_connection_index);
         retry_result.has_value()) {
         return SupportedInitialRetryPreparation{
-            .immediate_result = retry_result.value(),
+            .immediate_result = retry_result,
         };
     }
 

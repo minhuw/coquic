@@ -833,8 +833,7 @@ class TlsAdapter::Impl {
     }
 
     void update_resumed_resumption_state() {
-        if (ssl_ == nullptr || resumed_resumption_state_.has_value() ||
-            SSL_session_reused(ssl_.get()) != 1) {
+        if (resumed_resumption_state_.has_value() || SSL_session_reused(ssl_.get()) != 1) {
             return;
         }
 

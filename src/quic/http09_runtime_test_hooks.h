@@ -74,6 +74,8 @@ enum class ClientConnectionLoopCaseForTests : std::uint8_t {
     peer_input_then_outer_pump_terminal_success,
     wait_input_then_terminal_success_exits_after_drain_window,
     nonblocking_drain_repeats_pending_endpoint_progress,
+    idle_timeout_with_future_wakeup_trace,
+    idle_timeout_with_elapsed_wakeup_trace,
 };
 
 struct ClientConnectionLoopResultForTests {
@@ -94,6 +96,7 @@ enum class ServerLoopCaseForTests : std::uint8_t {
     blocking_wait_failure,
     blocking_wait_missing_input,
     nonblocking_drain_repeats_pending_endpoint_progress,
+    outer_pump_repeats_pending_endpoint_progress,
 };
 
 struct ServerLoopResultForTests {

@@ -1214,8 +1214,10 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                 coquic::quic::should_discard_corrupted_long_header_packet(short_header_packet,
                                                                           packets.error().code);
             if (should_discard_packet) {
-                if (short_header_packet &&
-                    packet_trace_matches_connection(config_.source_connection_id)) {
+                const bool should_trace_discarded_short_header_packet =
+                    short_header_packet &
+                    packet_trace_matches_connection(config_.source_connection_id);
+                if (should_trace_discarded_short_header_packet) {
                     std::cerr << "quic-packet-trace discard scid="
                               << format_connection_id_hex(config_.source_connection_id)
                               << " size=" << packet_bytes.size()
@@ -1622,13 +1624,7 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
 
         return reference_time;
     }();
-    const bool client_handshake_keepalive_eligible =
-        client_handshake_keepalive_reference_time.has_value();
-    const PacketSpaceState *client_handshake_keepalive_space =
-        client_handshake_keepalive_eligible && !initial_packet_space_discarded_ ? &initial_space_
-                                                                                : nullptr;
-    if ((client_handshake_keepalive_space == nullptr) ||
-        !client_handshake_keepalive_reference_time.has_value()) {
+    if (!client_handshake_keepalive_reference_time.has_value() || initial_packet_space_discarded_) {
         return std::nullopt;
     }
 
@@ -1707,11 +1703,11 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     };
     const auto client_handshake_keepalive_reference_time =
         [this]() -> std::optional<QuicCoreTimePoint> {
-        const bool eligible = (config_.role == EndpointRole::client) &&
-                              (status_ == HandshakeStatus::in_progress) && !handshake_confirmed_ &&
-                              last_peer_activity_time_.has_value() &&
-                              !has_in_flight_ack_eliciting_packet(initial_space_) &&
-                              !has_in_flight_ack_eliciting_packet(handshake_space_) &&
+        const bool eligible = (config_.role == EndpointRole::client) &
+                              (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
+                              last_peer_activity_time_.has_value() &
+                              !has_in_flight_ack_eliciting_packet(initial_space_) &
+                              !has_in_flight_ack_eliciting_packet(handshake_space_) &
                               !has_in_flight_ack_eliciting_packet(application_space_);
         if (!eligible) {
             return std::nullopt;
@@ -1727,12 +1723,11 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         return reference_time;
     }();
     const bool client_handshake_keepalive_eligible =
-        client_handshake_keepalive_reference_time.has_value() && !initial_packet_space_discarded_;
+        client_handshake_keepalive_reference_time.has_value() & !initial_packet_space_discarded_;
     PacketSpaceState *client_handshake_keepalive_space =
         client_handshake_keepalive_eligible ? &initial_space_ : nullptr;
     auto client_handshake_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
-    if ((client_handshake_keepalive_space != nullptr) &&
-        client_handshake_keepalive_reference_time.has_value()) {
+    if (client_handshake_keepalive_reference_time.has_value() && !initial_packet_space_discarded_) {
         client_handshake_keepalive_deadline = compute_pto_deadline(
             shared_rtt_state, std::chrono::milliseconds(0),
             *client_handshake_keepalive_reference_time, std::min(pto_count_, 2u));
@@ -3104,10 +3099,12 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
         }
 
         const bool allow_preconnected_retire_connection_id_frame =
-            application_space_.read_secret.has_value() && status_ == HandshakeStatus::in_progress &&
+            application_space_.read_secret.has_value() & (status_ == HandshakeStatus::in_progress) &
             std::holds_alternative<RetireConnectionIdFrame>(frame);
-        if (require_connected && !allow_preconnected_retire_connection_id_frame &&
-            status_ != HandshakeStatus::connected) {
+        const bool reject_preconnected_application_frame =
+            require_connected & !allow_preconnected_retire_connection_id_frame &
+            (status_ != HandshakeStatus::connected);
+        if (reject_preconnected_application_frame) {
             return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
         }
     }
@@ -4604,9 +4601,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
             const auto probe_datagram_size = datagram_size_or_zero(datagram);
             if (probe_datagram_size > kMaximumDatagramSize && !packets.empty()) {
-                for (const auto &fragment : probe_stream_fragments) {
-                    restore_probe_fragment(fragment);
-                }
                 return finalize_datagram(std::move(packets));
             }
             if (has_failed() | (probe_datagram_size > kMaximumDatagramSize)) {
@@ -4934,12 +4928,12 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             const auto packet_number = application_space_.next_send_packet_number++;
             const auto stream_bytes = stream_fragment_bytes(stream_fragments);
             if (packet_trace_matches_connection(config_.source_connection_id)) {
+                const auto ack_trace_value = static_cast<int>(selected_ack_frame.has_value());
+                const auto handshake_done_trace_value = static_cast<int>(include_handshake_done);
                 std::cerr << "quic-packet-trace send scid="
                           << format_connection_id_hex(config_.source_connection_id)
-                          << " pn=" << packet_number
-                          << " ack=" << (selected_ack_frame.has_value() ? 1 : 0)
-                          << " hsdone=" << (include_handshake_done ? 1 : 0)
-                          << " stream=" << stream_bytes
+                          << " pn=" << packet_number << " ack=" << ack_trace_value
+                          << " hsdone=" << handshake_done_trace_value << " stream=" << stream_bytes
                           << " bytes=" << candidate_datagram.value().size() << '\n';
             }
             packets.emplace_back(make_application_protected_packet(
@@ -4991,6 +4985,43 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 } // namespace coquic::quic
 
 namespace coquic::quic::test {
+
+namespace {
+
+class ScopedEnvVarForTests {
+  public:
+    ScopedEnvVarForTests(const char *name, std::optional<std::string_view> value) : name_(name) {
+        if (const char *existing = std::getenv(name_); existing != nullptr) {
+            previous_ = std::string(existing);
+            had_previous_ = true;
+        }
+
+        if (value.has_value()) {
+            static_cast<void>(::setenv(name_, std::string(*value).c_str(), 1));
+        } else {
+            static_cast<void>(::unsetenv(name_));
+        }
+    }
+
+    ~ScopedEnvVarForTests() {
+        if (had_previous_) {
+            static_cast<void>(::setenv(name_, previous_.c_str(), 1));
+            return;
+        }
+
+        static_cast<void>(::unsetenv(name_));
+    }
+
+    ScopedEnvVarForTests(const ScopedEnvVarForTests &) = delete;
+    ScopedEnvVarForTests &operator=(const ScopedEnvVarForTests &) = delete;
+
+  private:
+    const char *name_;
+    std::string previous_;
+    bool had_previous_ = false;
+};
+
+} // namespace
 
 bool connection_helper_edge_cases_for_tests() {
     constexpr std::array supported_versions = {kQuicVersion2, kQuicVersion1};
@@ -5104,6 +5135,140 @@ bool connection_helper_edge_cases_for_tests() {
     const bool short_header_not_discarded_as_corrupted_long_header =
         !should_discard_corrupted_long_header_packet(true, CodecErrorCode::invalid_fixed_bit);
 
+    const auto bytes_from_ints = [](std::initializer_list<std::uint8_t> values) {
+        std::vector<std::byte> bytes;
+        bytes.reserve(values.size());
+        for (const auto value : values) {
+            bytes.push_back(static_cast<std::byte>(value));
+        }
+        return bytes;
+    };
+
+    const std::string empty_connection_id_hex = format_connection_id_hex({});
+    const std::string retry_source_connection_id_hex =
+        format_connection_id_hex(retry_source_connection_id);
+    const bool empty_connection_id_formats_empty = empty_connection_id_hex.empty();
+    const bool connection_id_formats_lower_hex = retry_source_connection_id_hex == "5300";
+
+    bool trace_unset_disabled = false;
+    bool trace_empty_disabled = false;
+    bool trace_zero_disabled = false;
+    bool trace_matches_without_filter = false;
+    bool trace_matches_with_empty_filter = false;
+    bool trace_matches_with_exact_filter = false;
+    bool trace_rejects_mismatched_filter = false;
+    {
+        ScopedEnvVarForTests original_trace("COQUIC_PACKET_TRACE", "seed");
+        ScopedEnvVarForTests original_filter("COQUIC_PACKET_TRACE_SCID", "seed");
+
+        {
+            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", std::nullopt);
+            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", std::nullopt);
+            trace_unset_disabled = !packet_trace_enabled() &
+                                   !packet_trace_matches_connection(retry_source_connection_id);
+        }
+
+        {
+            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "");
+            trace_empty_disabled = !packet_trace_enabled();
+        }
+
+        {
+            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "0");
+            trace_zero_disabled = !packet_trace_enabled();
+        }
+
+        {
+            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
+            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", std::nullopt);
+            trace_matches_without_filter = packet_trace_enabled() & packet_trace_matches_connection(
+                                                                        retry_source_connection_id);
+        }
+
+        {
+            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
+            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", "");
+            trace_matches_with_empty_filter =
+                packet_trace_matches_connection(retry_source_connection_id);
+        }
+
+        {
+            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
+            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", retry_source_connection_id_hex);
+            trace_matches_with_exact_filter =
+                packet_trace_matches_connection(retry_source_connection_id);
+        }
+
+        {
+            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
+            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", "deadbeef");
+            trace_rejects_mismatched_filter =
+                !packet_trace_matches_connection(retry_source_connection_id);
+        }
+    }
+
+    const bool empty_long_header_rejected =
+        !peek_discardable_long_header_packet_length({}).has_value();
+    const bool short_header_rejected =
+        !peek_discardable_long_header_packet_length(bytes_from_ints({0x40})).has_value();
+    const bool truncated_version_rejected =
+        !peek_discardable_long_header_packet_length(bytes_from_ints({0xc0, 0x00, 0x00, 0x00}))
+             .has_value();
+    const bool unsupported_version_rejected =
+        !peek_discardable_long_header_packet_length(bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x00}))
+             .has_value();
+    const bool missing_destination_connection_id_length_rejected =
+        !peek_discardable_long_header_packet_length(bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01}))
+             .has_value();
+    const bool oversized_destination_connection_id_length_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x15}))
+             .has_value();
+    const bool truncated_destination_connection_id_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01}))
+             .has_value();
+    const bool missing_source_connection_id_length_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00}))
+             .has_value();
+    const bool oversized_source_connection_id_length_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x15}))
+             .has_value();
+    const bool truncated_source_connection_id_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01}))
+             .has_value();
+    const bool missing_initial_token_length_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
+             .has_value();
+    const bool oversized_initial_token_length_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01}))
+             .has_value();
+    const bool unsupported_retry_packet_type_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xf0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
+             .has_value();
+    const bool missing_payload_length_after_initial_token_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00}))
+             .has_value();
+    const bool missing_payload_length_for_handshake_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xe0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
+             .has_value();
+    const bool missing_payload_length_for_zero_rtt_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xd0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
+             .has_value();
+    const bool oversized_payload_length_rejected =
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xe0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01}))
+             .has_value();
+
     return retry_same_version_omits_version_information &
            retry_version_change_keeps_version_information & failed_datagram_reports_zero_size &
            encode_failure_returns_empty & wrong_magic_rejected & truncated_tls_state_rejected &
@@ -5113,7 +5278,21 @@ bool connection_helper_edge_cases_for_tests() {
            short_header_is_bufferable & truncated_long_header_is_not_bufferable &
            handshake_long_header_is_bufferable & protected_one_rtt_packet_deferred &
            connected_protected_one_rtt_packet_not_deferred & corrupted_long_header_discarded &
-           short_header_not_discarded_as_corrupted_long_header;
+           short_header_not_discarded_as_corrupted_long_header & empty_connection_id_formats_empty &
+           connection_id_formats_lower_hex & trace_unset_disabled & trace_empty_disabled &
+           trace_zero_disabled & trace_matches_without_filter & trace_matches_with_empty_filter &
+           trace_matches_with_exact_filter & trace_rejects_mismatched_filter &
+           empty_long_header_rejected & short_header_rejected & truncated_version_rejected &
+           unsupported_version_rejected & missing_destination_connection_id_length_rejected &
+           oversized_destination_connection_id_length_rejected &
+           truncated_destination_connection_id_rejected &
+           missing_source_connection_id_length_rejected &
+           oversized_source_connection_id_length_rejected &
+           truncated_source_connection_id_rejected & missing_initial_token_length_rejected &
+           oversized_initial_token_length_rejected & unsupported_retry_packet_type_rejected &
+           missing_payload_length_after_initial_token_rejected &
+           missing_payload_length_for_handshake_rejected &
+           missing_payload_length_for_zero_rtt_rejected & oversized_payload_length_rejected;
 }
 
 } // namespace coquic::quic::test

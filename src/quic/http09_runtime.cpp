@@ -2200,6 +2200,18 @@ make_nonblocking_drain_repeats_pending_endpoint_progress_case_for_tests() {
     };
 }
 
+ScriptedServerLoopCaseForTests make_outer_pump_repeats_pending_endpoint_progress_case_for_tests() {
+    return ScriptedServerLoopCaseForTests{
+        .receive_results =
+            {
+                make_would_block_receive_for_tests(),
+                make_error_receive_for_tests(),
+            },
+        .processed_timers_results = {false},
+        .pending_work_after_pump = {false, true, false},
+    };
+}
+
 using ServerLoopCaseFactoryForTests = ScriptedServerLoopCaseForTests (*)();
 
 ServerLoopCaseFactoryForTests server_loop_case_factories_for_tests[] = {
@@ -2210,6 +2222,7 @@ ServerLoopCaseFactoryForTests server_loop_case_factories_for_tests[] = {
     &make_blocking_wait_failure_case_for_tests,
     &make_blocking_wait_missing_input_case_for_tests,
     &make_nonblocking_drain_repeats_pending_endpoint_progress_case_for_tests,
+    &make_outer_pump_repeats_pending_endpoint_progress_case_for_tests,
 };
 
 std::vector<std::byte> bytes_from_string_for_runtime_tests(std::string_view text) {
@@ -2668,6 +2681,26 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
             });
             setup_io.receive_results.push_back(make_would_block_receive_for_tests());
             setup_io.receive_results.push_back(make_would_block_receive_for_tests());
+        },
+        [](ScriptedEndpointForTests &, ScriptedClientLoopIoForTests &setup_io, QuicCore &,
+           QuicCoreResult &setup_start_result, QuicCoreTimePoint setup_base_time) {
+            setup_start_result.next_wakeup = setup_base_time + std::chrono::milliseconds(5);
+            setup_io.wait_steps.push_back(make_idle_timeout_wait_step_for_tests());
+            setup_io.now_values = {
+                setup_base_time,
+                setup_base_time,
+                setup_base_time,
+            };
+        },
+        [](ScriptedEndpointForTests &, ScriptedClientLoopIoForTests &setup_io, QuicCore &,
+           QuicCoreResult &setup_start_result, QuicCoreTimePoint setup_base_time) {
+            setup_start_result.next_wakeup = setup_base_time + std::chrono::milliseconds(1);
+            setup_io.wait_steps.push_back(make_idle_timeout_wait_step_for_tests());
+            setup_io.now_values = {
+                setup_base_time,
+                setup_base_time,
+                setup_base_time + std::chrono::milliseconds(3),
+            };
         },
     });
     kClientLoopCaseSetups[static_cast<std::size_t>(case_id)](endpoint, io_script, core,

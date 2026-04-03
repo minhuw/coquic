@@ -3849,6 +3849,16 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.receive_calls, 3U);
     EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.wait_calls, 0U);
     EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.pump_calls, 3U);
+
+    const auto outer_pump_repeats_pending_endpoint_progress =
+        coquic::quic::test::run_server_loop_case_for_tests(
+            coquic::quic::test::ServerLoopCaseForTests::
+                outer_pump_repeats_pending_endpoint_progress);
+    EXPECT_EQ(outer_pump_repeats_pending_endpoint_progress.exit_code, 1);
+    EXPECT_EQ(outer_pump_repeats_pending_endpoint_progress.receive_calls, 2U);
+    EXPECT_EQ(outer_pump_repeats_pending_endpoint_progress.wait_calls, 0U);
+    EXPECT_EQ(outer_pump_repeats_pending_endpoint_progress.process_expired_calls, 3U);
+    EXPECT_EQ(outer_pump_repeats_pending_endpoint_progress.pump_calls, 3U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverRetryAndZeroRttBranches) {
@@ -3861,6 +3871,36 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverRetryAndZeroRttBranches) {
     EXPECT_TRUE(coquic::quic::test::send_retry_for_initial_failures_for_tests());
     EXPECT_TRUE(coquic::quic::test::zero_rtt_request_allowance_for_tests());
     static_cast<void>(testing::internal::GetCapturedStderr());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeTraceHooksCoverIdleTimeoutAndServerFailureBranches) {
+    ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+
+    testing::internal::CaptureStderr();
+
+    const auto future_wakeup_idle_timeout =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::
+                idle_timeout_with_future_wakeup_trace);
+    EXPECT_EQ(future_wakeup_idle_timeout.exit_code, 1);
+
+    const auto elapsed_wakeup_idle_timeout =
+        coquic::quic::test::run_client_connection_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionLoopCaseForTests::
+                idle_timeout_with_elapsed_wakeup_trace);
+    EXPECT_EQ(elapsed_wakeup_idle_timeout.exit_code, 1);
+
+    EXPECT_TRUE(coquic::quic::test::expired_server_timer_failure_cleans_up_for_tests());
+    EXPECT_TRUE(coquic::quic::test::pending_server_work_failure_cleans_up_for_tests());
+
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_NE(stderr_output.find("http09-client trace: idle-timeout"), std::string::npos);
+    EXPECT_NE(stderr_output.find("has_next_wakeup=1"), std::string::npos);
+    EXPECT_NE(stderr_output.find("next_wakeup_delta_ms=5"), std::string::npos);
+    EXPECT_NE(stderr_output.find("next_wakeup_delta_ms=2"), std::string::npos);
+    EXPECT_NE(stderr_output.find("http09-server trace: timer-session-failed"), std::string::npos);
+    EXPECT_NE(stderr_output.find("http09-server trace: pending-work-session-failed"),
+              std::string::npos);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperFailsWhenReadableSocketRecvfromFails) {

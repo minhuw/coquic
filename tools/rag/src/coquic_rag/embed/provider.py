@@ -26,6 +26,14 @@ _DEFAULT_KEYWORDS = (
     "tls",
     "frame",
     "error",
+    "structured",
+    "logging",
+    "network",
+    "protocol",
+    "qlog",
+    "event",
+    "schema",
+    "draft",
 )
 
 

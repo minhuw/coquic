@@ -125,14 +125,7 @@ class QdrantSectionStore:
                 PointStruct(
                     id=_point_id(str(record["node_id"])),
                     vector=embedding,
-                    payload={
-                        "node_id": str(record["node_id"]),
-                        "rfc": int(record["rfc"]),
-                        "section_id": str(record["section_id"]),
-                        "section_kind": _section_kind(str(record["section_id"])),
-                        "title": str(record["title"]),
-                        "text": str(record["text"]),
-                    },
+                    payload=_build_payload(record),
                 )
                 for record, embedding in zip(batch_records, embeddings, strict=True)
             ]
@@ -185,3 +178,22 @@ class QdrantSectionStore:
                 self._state_dir.mkdir(parents=True, exist_ok=True)
                 self._client = QdrantClient(path=str(self._state_dir))
         return self._client
+
+
+def _build_payload(record: dict[str, object]) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "node_id": str(record["node_id"]),
+        "doc_id": str(record["doc_id"]),
+        "doc_kind": str(record["doc_kind"]),
+        "section_id": str(record["section_id"]),
+        "section_kind": _section_kind(str(record["section_id"])),
+        "title": str(record["title"]),
+        "text": str(record["text"]),
+    }
+    rfc_number = record.get("rfc_number")
+    if rfc_number is not None:
+        payload["rfc_number"] = int(rfc_number)
+    draft_name = record.get("draft_name")
+    if draft_name is not None:
+        payload["draft_name"] = str(draft_name)
+    return payload

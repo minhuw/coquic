@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
-from coquic_rag.ingest.models import RfcDocument, RfcSection
+from coquic_rag.ingest.models import SourceDocument, SourceSection
 
 _TRANSPORT_PARAMETER_RE = re.compile(
     r"^\s*([a-z][a-z0-9_]+)\s+\(0x[0-9a-fA-F]+\):",
@@ -20,21 +20,28 @@ def _normalize_term(raw_name: str) -> str:
     return raw_name.strip().lower().replace(" ", "_")
 
 
-def _section_node_id(rfc_number: int, section_id: str) -> str:
-    return f"rfc{rfc_number}#{section_id}"
+def _document_node_id(doc_id: str) -> str:
+    return f"doc:{doc_id}"
 
 
-def _build_section_record(section: RfcSection) -> dict[str, object]:
+def _section_node_id(doc_id: str, section_id: str) -> str:
+    return f"{doc_id}#{section_id}"
+
+
+def _build_section_record(section: SourceSection) -> dict[str, object]:
     return {
-        "node_id": _section_node_id(section.rfc, section.section_id),
-        "rfc": section.rfc,
+        "node_id": _section_node_id(section.doc_id, section.section_id),
+        "doc_id": section.doc_id,
+        "doc_kind": section.doc_kind,
+        "rfc_number": section.rfc_number,
+        "draft_name": section.draft_name,
         "section_id": section.section_id,
         "title": section.title,
         "text": section.text,
     }
 
 
-def _extract_terms(section: RfcSection) -> Iterable[tuple[str, str]]:
+def _extract_terms(section: SourceSection) -> Iterable[tuple[str, str]]:
     seen_terms: set[tuple[str, str]] = set()
 
     frame_title_match = _FRAME_SECTION_TITLE_RE.match(section.title)
@@ -73,24 +80,27 @@ def _term_mention_pattern(term_name: str) -> re.Pattern[str]:
     return re.compile(pattern, re.IGNORECASE)
 
 
-def _section_mentions_term(section: RfcSection, term_name: str) -> bool:
+def _section_mentions_term(section: SourceSection, term_name: str) -> bool:
     haystack = f"{section.title}\n{section.text}"
     return bool(_term_mention_pattern(term_name).search(haystack))
 
 
 def build_graph_artifacts(
-    document: RfcDocument,
+    document: SourceDocument,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     section_records: list[dict[str, object]] = []
     graph_nodes: list[dict[str, object]] = []
     graph_edges: list[dict[str, object]] = []
 
-    rfc_node_id = f"rfc{document.rfc}"
+    document_id = _document_node_id(document.doc_id)
     graph_nodes.append(
         {
-            "id": rfc_node_id,
-            "node_type": "rfc",
-            "rfc": document.rfc,
+            "id": document_id,
+            "node_type": "document",
+            "doc_id": document.doc_id,
+            "doc_kind": document.doc_kind,
+            "rfc_number": document.rfc_number,
+            "draft_name": document.draft_name,
             "title": document.title,
         }
     )
@@ -100,7 +110,7 @@ def build_graph_artifacts(
 
     # First pass: collect deterministic term definitions per section.
     for section in document.sections:
-        section_id = _section_node_id(document.rfc, section.section_id)
+        section_id = _section_node_id(document.doc_id, section.section_id)
         for term_class, term_name in _extract_terms(section):
             term_key = (term_class, term_name)
             if term_key not in known_terms:
@@ -117,14 +127,17 @@ def build_graph_artifacts(
                 known_terms[term_key].add(section_id)
 
     for section in document.sections:
-        section_id = _section_node_id(document.rfc, section.section_id)
+        section_id = _section_node_id(document.doc_id, section.section_id)
         section_records.append(_build_section_record(section))
 
         graph_nodes.append(
             {
                 "id": section_id,
                 "node_type": "section",
-                "rfc": document.rfc,
+                "doc_id": section.doc_id,
+                "doc_kind": section.doc_kind,
+                "rfc_number": section.rfc_number,
+                "draft_name": section.draft_name,
                 "section_id": section.section_id,
                 "title": section.title,
             }
@@ -133,7 +146,7 @@ def build_graph_artifacts(
         graph_edges.append(
             {
                 "edge_type": "contains",
-                "source": rfc_node_id,
+                "source": document_id,
                 "target": section_id,
             }
         )
@@ -143,7 +156,7 @@ def build_graph_artifacts(
                 {
                     "edge_type": "cites",
                     "source": section_id,
-                    "target": _section_node_id(document.rfc, citation.target_start),
+                    "target": _section_node_id(document.doc_id, citation.target_start),
                 }
             )
             if citation.target_end:
@@ -151,7 +164,7 @@ def build_graph_artifacts(
                     {
                         "edge_type": "cites",
                         "source": section_id,
-                        "target": _section_node_id(document.rfc, citation.target_end),
+                        "target": _section_node_id(document.doc_id, citation.target_end),
                     }
                 )
 
@@ -174,9 +187,9 @@ def build_graph_artifacts(
                 {
                     "edge_type": "mentions",
                     "source": section_id,
-                        "target": term_id,
-                    }
-                )
+                    "target": term_id,
+                }
+            )
 
             if section_id in known_terms[(term_class, term_name)]:
                 graph_edges.append(

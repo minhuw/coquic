@@ -80,31 +80,23 @@ def test_qdrant_store_upserts_sections_and_filters_search_results(
     section_records = [
         {
             "node_id": "rfc9000#1",
-            "rfc": 9000,
+            "doc_id": "rfc9000",
+            "doc_kind": "rfc",
+            "rfc_number": 9000,
+            "draft_name": None,
             "section_id": "1",
             "title": "Overview",
             "text": "QUIC transport overview and connection setup.",
         },
         {
-            "node_id": "rfc9000#18.2",
-            "rfc": 9000,
-            "section_id": "18.2",
-            "title": "Transport Parameter Definitions",
-            "text": "Transport parameters define payload limits and endpoint behavior.",
-        },
-        {
-            "node_id": "rfc9000#A.1",
-            "rfc": 9000,
-            "section_id": "A.1",
-            "title": "Sample Appendix",
-            "text": "This appendix walks through a worked example.",
-        },
-        {
-            "node_id": "rfc9369#5",
-            "rfc": 9369,
-            "section_id": "5",
-            "title": "Compatible Version Negotiation",
-            "text": "Version negotiation keeps the transport extensible.",
+            "node_id": "draft-ietf-quic-qlog-main-schema-13#1",
+            "doc_id": "draft-ietf-quic-qlog-main-schema-13",
+            "doc_kind": "internet-draft",
+            "rfc_number": None,
+            "draft_name": "draft-ietf-quic-qlog-main-schema-13",
+            "section_id": "1",
+            "title": "Introduction",
+            "text": "Qlog defines structured logging for network protocol events.",
         },
     ]
 
@@ -115,15 +107,17 @@ def test_qdrant_store_upserts_sections_and_filters_search_results(
     assert store.collection_exists()
 
     hits = store.search_sections(
-        "transport parameter payload limits",
+        "structured logging network protocol",
         embedder,
         limit=3,
-        payload_filters={"rfc": 9000, "section_kind": "numbered"},
+        payload_filters={"doc_id": "draft-ietf-quic-qlog-main-schema-13"},
     )
 
-    assert len(hits) == 2
-    assert hits[0].payload["node_id"] == "rfc9000#18.2"
-    assert hits[0].payload["title"] == "Transport Parameter Definitions"
-    assert hits[0].payload["rfc"] == 9000
+    assert len(hits) == 1
+    assert hits[0].payload["node_id"] == "draft-ietf-quic-qlog-main-schema-13#1"
+    assert hits[0].payload["title"] == "Introduction"
+    assert hits[0].payload["doc_id"] == "draft-ietf-quic-qlog-main-schema-13"
+    assert hits[0].payload["doc_kind"] == "internet-draft"
+    assert hits[0].payload["draft_name"] == "draft-ietf-quic-qlog-main-schema-13"
     assert hits[0].payload["section_kind"] == "numbered"
     assert hits[0].text == section_records[1]["text"]

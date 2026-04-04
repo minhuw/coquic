@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from coquic_rag.graph.extractor import build_graph_artifacts
-from coquic_rag.ingest.rfc_parser import parse_rfc_document
+from coquic_rag.ingest.rfc_parser import parse_source_document
 from coquic_rag.store.artifacts import (
     read_graph_edges,
     read_graph_nodes,
@@ -15,9 +15,13 @@ from coquic_rag.store.artifacts import (
 
 
 def test_build_graph_artifacts_from_rfc9000() -> None:
-    doc = parse_rfc_document(Path("docs/rfc/rfc9000.txt"))
+    doc = parse_source_document(Path("docs/rfc/rfc9000.txt"))
 
     section_records, graph_nodes, graph_edges = build_graph_artifacts(doc)
+
+    document_nodes = [node for node in graph_nodes if node["id"] == "doc:rfc9000"]
+    assert document_nodes
+    assert document_nodes[0]["node_type"] == "document"
 
     section_node_ids = {
         node["id"] for node in graph_nodes if node["node_type"] == "section"
@@ -106,10 +110,46 @@ def test_build_graph_artifacts_from_rfc9000() -> None:
 
     section_record_ids = {record["node_id"] for record in section_records}
     assert "rfc9000#18.2" in section_record_ids
+    section_182 = next(record for record in section_records if record["node_id"] == "rfc9000#18.2")
+    assert section_182["doc_id"] == "rfc9000"
+    assert section_182["doc_kind"] == "rfc"
+    assert section_182["rfc_number"] == 9000
+
+
+def test_build_graph_artifacts_from_qlog_draft() -> None:
+    doc = parse_source_document(Path("docs/rfc/draft-ietf-quic-qlog-main-schema-13.txt"))
+
+    section_records, graph_nodes, graph_edges = build_graph_artifacts(doc)
+
+    document_nodes = [
+        node
+        for node in graph_nodes
+        if node["id"] == "doc:draft-ietf-quic-qlog-main-schema-13"
+    ]
+    assert document_nodes
+    assert document_nodes[0]["node_type"] == "document"
+    assert document_nodes[0]["doc_kind"] == "internet-draft"
+
+    section_1 = next(
+        record
+        for record in section_records
+        if record["node_id"] == "draft-ietf-quic-qlog-main-schema-13#1"
+    )
+    assert section_1["doc_id"] == "draft-ietf-quic-qlog-main-schema-13"
+    assert section_1["draft_name"] == "draft-ietf-quic-qlog-main-schema-13"
+
+    contains_edges = [
+        edge
+        for edge in graph_edges
+        if edge["edge_type"] == "contains"
+        and edge["source"] == "doc:draft-ietf-quic-qlog-main-schema-13"
+        and edge["target"] == "draft-ietf-quic-qlog-main-schema-13#1"
+    ]
+    assert contains_edges
 
 
 def test_artifact_jsonl_roundtrip(tmp_path: Path) -> None:
-    doc = parse_rfc_document(Path("docs/rfc/rfc9000.txt"))
+    doc = parse_source_document(Path("docs/rfc/rfc9000.txt"))
     section_records, graph_nodes, graph_edges = build_graph_artifacts(doc)
 
     sections_path = tmp_path / "sections.jsonl"

@@ -2801,6 +2801,46 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
               coquic::quic::test::read_text_file("tests/fixtures/quic-server-key.pem"));
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeLeavesQlogDisabledWhenQlogdirUnsetOrEmpty) {
+    const char *argv[] = {"coquic"};
+
+    {
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+        ScopedEnvVar qlogdir("QLOGDIR", std::nullopt);
+
+        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        const auto &runtime = optional_ref_or_terminate(parsed);
+        EXPECT_FALSE(runtime.qlog_directory.has_value());
+    }
+
+    {
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+        ScopedEnvVar qlogdir("QLOGDIR", "");
+
+        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        const auto &runtime = optional_ref_or_terminate(parsed);
+        EXPECT_FALSE(runtime.qlog_directory.has_value());
+    }
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeReadsQlogDirectoryFromEnvironment) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+    ScopedEnvVar qlogdir("QLOGDIR", "/logs/qlog");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    ASSERT_TRUE(runtime.qlog_directory.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(runtime.qlog_directory),
+              std::filesystem::path("/logs/qlog"));
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidAndEmptyPortStringsFromEnvironment) {
     const char *argv[] = {"coquic"};
     ScopedEnvVar role("ROLE", "client");

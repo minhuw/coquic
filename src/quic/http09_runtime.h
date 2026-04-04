@@ -28,6 +28,7 @@ struct Http09RuntimeConfig {
     std::string application_protocol = "hq-interop";
     std::string server_name = "localhost";
     std::string requests_env;
+    std::optional<std::filesystem::path> qlog_directory;
 };
 
 struct ParsedHttp09Authority {

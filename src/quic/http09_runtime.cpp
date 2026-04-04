@@ -3295,6 +3295,9 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
     if (const auto path = getenv_string("PRIVATE_KEY_PATH"); path.has_value()) {
         config.private_key_path = *path;
     }
+    if (const auto qlogdir = getenv_string("QLOGDIR"); qlogdir.has_value() && !qlogdir->empty()) {
+        config.qlog_directory = std::filesystem::path(*qlogdir);
+    }
     if (const auto server_name = getenv_string("SERVER_NAME"); server_name.has_value()) {
         config.server_name = *server_name;
         server_name_specified = true;

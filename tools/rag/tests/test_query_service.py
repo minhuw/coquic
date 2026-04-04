@@ -91,6 +91,18 @@ def test_query_service_get_section_accepts_legacy_rfc_number(tmp_path: Path) -> 
     assert section["citation"] == "RFC 9000 Section 18.2"
 
 
+def test_query_service_get_section_legacy_rfc_miss_keeps_rfc_field(
+    tmp_path: Path,
+) -> None:
+    service = _build_service(tmp_path)
+
+    section = service.get_section(9000, "999")
+
+    assert section["found"] is False
+    assert section["rfc"] == 9000
+    assert section["section_id"] == "999"
+
+
 def test_query_service_get_section_returns_draft_section(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
 
@@ -113,6 +125,15 @@ def test_query_service_render_section_resource_accepts_legacy_rfc_number(
     rendered = service.render_section_resource(9000, "18.2")
 
     assert rendered.startswith("RFC 9000 Section 18.2: ")
+
+
+def test_query_service_render_section_resource_legacy_rfc_miss_message(
+    tmp_path: Path,
+) -> None:
+    service = _build_service(tmp_path)
+
+    with pytest.raises(LookupError, match="RFC 9000 Section 999 not found"):
+        service.render_section_resource(9000, "999")
 
 
 def test_query_service_trace_term_returns_definitions_and_mentions(

@@ -210,17 +210,21 @@ class QueryService:
 
     def get_section(self, doc_id: str | int, section_id: str) -> dict[str, object]:
         self._ensure_loaded()
+        legacy_rfc = int(doc_id) if isinstance(doc_id, int) else None
         resolved_doc_id = _normalize_doc_selector(doc_id)
         if resolved_doc_id is None:
             raise ValueError("doc_id is required")
         key = (resolved_doc_id, str(section_id))
         record = self._sections_by_key.get(key)
         if record is None:
-            return {
+            miss_result: dict[str, object] = {
                 "found": False,
                 "doc_id": resolved_doc_id,
                 "section_id": str(section_id),
             }
+            if legacy_rfc is not None:
+                miss_result["rfc"] = legacy_rfc
+            return miss_result
         return self._section_result(record)
 
     def lookup_term(self, term_type: str, name: str) -> dict[str, object]:
@@ -350,12 +354,11 @@ class QueryService:
         return [self._search_hit_result(hit, relation="semantic") for hit in hits]
 
     def render_section_resource(self, doc_id: str | int, section_id: str) -> str:
-        resolved_doc_id = _normalize_doc_selector(doc_id)
-        if resolved_doc_id is None:
-            raise ValueError("doc_id is required")
-        section = self.get_section(resolved_doc_id, section_id)
+        section = self.get_section(doc_id, section_id)
         if not section.get("found"):
-            raise LookupError(f"{resolved_doc_id} Section {section_id} not found")
+            if isinstance(doc_id, int):
+                raise LookupError(f"RFC {doc_id} Section {section_id} not found")
+            raise LookupError(f"{section['doc_id']} Section {section_id} not found")
         return (
             f"{section['citation']}: {section['title']}\n\n"
             f"{section['text']}"

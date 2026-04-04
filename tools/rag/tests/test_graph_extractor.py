@@ -116,8 +116,29 @@ def test_build_graph_artifacts_from_rfc9000() -> None:
     assert section_182["rfc_number"] == 9000
 
 
-def test_build_graph_artifacts_from_qlog_draft() -> None:
-    doc = parse_source_document(Path("docs/rfc/draft-ietf-quic-qlog-main-schema-13.txt"))
+def test_build_graph_artifacts_from_qlog_draft(tmp_path: Path) -> None:
+    draft_path = tmp_path / "draft-ietf-quic-qlog-main-schema-13.txt"
+    draft_path.write_text(
+        "\n".join(
+            [
+                "Network Working Group",
+                "Internet-Draft",
+                "",
+                "qlog: Structured Logging Schema",
+                "",
+                "draft-ietf-quic-qlog-main-schema-13",
+                "",
+                "Abstract",
+                "",
+                "This memo defines a structured event logging format.",
+                "",
+                "1.  Introduction",
+                "This section introduces qlog event structures.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    doc = parse_source_document(draft_path)
 
     section_records, graph_nodes, graph_edges = build_graph_artifacts(doc)
 

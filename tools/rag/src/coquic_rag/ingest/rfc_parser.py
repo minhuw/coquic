@@ -3,10 +3,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from coquic_rag.ingest.models import RfcDocument, RfcSection, SectionCitation
+from coquic_rag.ingest.models import SourceDocument, SourceSection, SectionCitation
 
 _RFC_NUMBER_RE = re.compile(r"Request for Comments:\s*(\d+)\b")
-_TITLE_RE = re.compile(r"\n\s{2,}([^\n]+)\n\nAbstract\b")
+_DRAFT_NAME_RE = re.compile(r"^\s*(draft-[a-z0-9-]+-\d+)\s*$", re.MULTILINE)
 _SECTION_HEADING_RE = re.compile(
     r"^(?:(?:Appendix\s+(?P<appendix>[A-Z]))|(?P<section>\d+(?:\.\d+)*|[A-Z](?:\.\d+)*))\.\s{2,}(?P<title>.+?)\s*$",
     re.MULTILINE,
@@ -20,15 +20,24 @@ _CITATION_RE = re.compile(
 def _extract_rfc_number(text: str) -> int:
     match = _RFC_NUMBER_RE.search(text)
     if not match:
-        raise ValueError("Unable to parse RFC number")
+        raise ValueError("Unable to identify source document as RFC or Internet-Draft")
     return int(match.group(1))
 
 
-def _extract_title(text: str) -> str:
-    match = _TITLE_RE.search(text)
+def _extract_draft_name(front_matter: str) -> str:
+    match = _DRAFT_NAME_RE.search(front_matter)
     if not match:
-        raise ValueError("Unable to parse RFC title")
-    return match.group(1).strip()
+        raise ValueError("Unable to identify source document as RFC or Internet-Draft")
+    return match.group(1)
+
+
+def _extract_title(front_matter: str) -> str:
+    lines = [line.strip() for line in front_matter.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if _DRAFT_NAME_RE.fullmatch(line):
+            continue
+        return line
+    raise ValueError("Unable to parse source document title")
 
 
 def _extract_citations(section_text: str) -> tuple[SectionCitation, ...]:
@@ -44,10 +53,29 @@ def _extract_citations(section_text: str) -> tuple[SectionCitation, ...]:
     return tuple(citations)
 
 
-def parse_rfc_document(path: Path) -> RfcDocument:
+def parse_source_document(path: Path) -> SourceDocument:
     text = path.read_text(encoding="utf-8").lstrip("\ufeff")
-    rfc = _extract_rfc_number(text)
-    title = _extract_title(text)
+    front_matter, _, _ = text.partition("\n\nAbstract")
+    if not front_matter:
+        raise ValueError("Unable to identify source document as RFC or Internet-Draft")
+
+    rfc_match = _RFC_NUMBER_RE.search(front_matter)
+    draft_match = _DRAFT_NAME_RE.search(front_matter)
+
+    if rfc_match is not None:
+        doc_kind = "rfc"
+        rfc_number = _extract_rfc_number(front_matter)
+        draft_name = None
+        doc_id = f"rfc{rfc_number}"
+    elif draft_match is not None:
+        doc_kind = "internet-draft"
+        draft_name = _extract_draft_name(front_matter)
+        rfc_number = None
+        doc_id = draft_name
+    else:
+        raise ValueError("Unable to identify source document as RFC or Internet-Draft")
+
+    title = _extract_title(front_matter)
 
     headings = list(_SECTION_HEADING_RE.finditer(text))
     sections = []
@@ -58,13 +86,27 @@ def parse_rfc_document(path: Path) -> RfcDocument:
         end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
         section_text = text[start:end].strip()
         sections.append(
-            RfcSection(
-                rfc=rfc,
+            SourceSection(
+                doc_id=doc_id,
                 section_id=section_id,
                 title=section_title,
                 text=section_text,
                 citations=_extract_citations(section_text),
+                doc_kind=doc_kind,
+                rfc_number=rfc_number,
+                draft_name=draft_name,
             )
         )
 
-    return RfcDocument(rfc=rfc, title=title, sections=tuple(sections))
+    return SourceDocument(
+        doc_id=doc_id,
+        doc_kind=doc_kind,
+        title=title,
+        sections=tuple(sections),
+        rfc_number=rfc_number,
+        draft_name=draft_name,
+    )
+
+
+# Compatibility alias for existing call sites.
+parse_rfc_document = parse_source_document

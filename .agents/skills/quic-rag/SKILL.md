@@ -5,12 +5,13 @@ description: Use when answering QUIC protocol or RFC questions in this repositor
 
 # QUIC RAG
 
-Use the repo-local QUIC RFC knowledge base before answering protocol questions in `coquic`.
+Use the repo-local QUIC specification knowledge base before answering protocol
+questions in `coquic`.
 
 ## When to Use
 
-- QUIC RFC questions grounded in `docs/rfc/`
-- Requests for exact section lookups or RFC citations
+- QUIC RFC or Internet-Draft questions grounded in `docs/rfc/`
+- Requests for exact section lookups or document citations
 - Questions about frames, transport parameters, packet formats, recovery, congestion control, version negotiation, or error codes
 
 ## Workflow
@@ -20,13 +21,14 @@ Use the repo-local QUIC RFC knowledge base before answering protocol questions i
    - `tools/rag/scripts/query-rag doctor --source docs/rfc --state-dir .rag`
 2. If the shared backend is unavailable, run `nix run .#qdrant-dev -- start` and retry once.
 3. Use the smallest fitting query:
-   - `tools/rag/scripts/query-rag get-section --rfc 9000 --section-id 18.2`
+   - `tools/rag/scripts/query-rag get-section --doc rfc9000 --section-id 18.2`
+   - `tools/rag/scripts/query-rag get-section --doc draft-ietf-quic-qlog-main-schema-13 --section-id 1`
    - `tools/rag/scripts/query-rag trace-term max_udp_payload_size`
    - `tools/rag/scripts/query-rag lookup-term --term-type transport_parameter --name max_udp_payload_size`
-   - `tools/rag/scripts/query-rag related-sections --rfc 9369 --section-id 5`
+   - `tools/rag/scripts/query-rag related-sections --doc rfc9369 --section-id 5`
    - `tools/rag/scripts/query-rag search-sections "ACK frame behavior" --top-k 5`
-4. Cite the RFC and section IDs from command output in the final answer.
-5. If the index is not ready, rebuild it with `tools/rag/scripts/query-rag build-index --source docs/rfc --state-dir .rag`.
+4. Cite the document IDs and section IDs from command output in the final answer.
+5. If the index is not ready, rebuild it with `tools/rag/scripts/build-index --source docs/rfc --state-dir .rag`.
 
 ## Don't Use
 

@@ -31,9 +31,10 @@
   - `tools/rag/scripts/build-index --source docs/rfc --state-dir .rag`
 - Check index readiness with:
   - `tools/rag/scripts/query-rag doctor --source docs/rfc --state-dir .rag`
-- Query the local RFC knowledge base with:
+- Query the local QUIC specification knowledge base with:
   - `tools/rag/scripts/query-rag search-sections "ACK frame behavior" --top-k 5`
-  - `tools/rag/scripts/query-rag get-section --rfc 9000 --section-id 18.2`
+  - `tools/rag/scripts/query-rag get-section --doc rfc9000 --section-id 18.2`
+  - `tools/rag/scripts/query-rag get-section --doc draft-ietf-quic-qlog-main-schema-13 --section-id 1`
   - `tools/rag/scripts/query-rag trace-term max_udp_payload_size`
 - For QUIC protocol questions, use the repo-local `quic-rag` skill and the
   query wrapper above instead of the old MCP flow.
@@ -45,4 +46,4 @@
 - If worktrees are needed, keep them under `.worktrees/` inside the repo.
 - Do not commit generated local state such as `.rag/`.
 - When answering QUIC protocol questions, prefer grounded citations from the
-  RFC corpus or the local QUIC RAG.
+  specification corpus or the local QUIC RAG.

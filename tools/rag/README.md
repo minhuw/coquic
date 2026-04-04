@@ -1,9 +1,10 @@
 # QUIC RAG Tools
 
-This directory contains the local Python tooling for the QUIC RFC knowledge base.
+This directory contains the local Python tooling for the QUIC specification
+knowledge base.
 
 Current scope:
-- index RFC text from `docs/rfc`
+- index mixed RFC and Internet-Draft text from `docs/rfc`
 - store generated local state under `.rag`
 - expose query tooling through a repo-local Codex skill and CLI
 - share one localhost-only Qdrant dev backend across multiple Codex sessions
@@ -15,7 +16,7 @@ uv sync --project tools/rag
 uv run --project tools/rag pytest
 ```
 
-Build or rebuild the local index from the RFC corpus:
+Build or rebuild the local index from the mixed specification corpus:
 
 ```bash
 uv run --project tools/rag python -m coquic_rag.cli.main build-index --source docs/rfc --state-dir .rag
@@ -49,10 +50,11 @@ Common query commands:
 
 ```bash
 tools/rag/scripts/query-rag search-sections "ACK frame behavior" --top-k 5
-tools/rag/scripts/query-rag get-section --rfc 9000 --section-id 18.2
+tools/rag/scripts/query-rag get-section --doc rfc9000 --section-id 18.2
+tools/rag/scripts/query-rag get-section --doc draft-ietf-quic-qlog-main-schema-13 --section-id 1
 tools/rag/scripts/query-rag trace-term max_udp_payload_size
 tools/rag/scripts/query-rag lookup-term --term-type transport_parameter --name max_udp_payload_size
-tools/rag/scripts/query-rag related-sections --rfc 9369 --section-id 5
+tools/rag/scripts/query-rag related-sections --doc rfc9369 --section-id 5
 ```
 
 Codex integration is repo-local through `.agents/skills/quic-rag`. Codex can

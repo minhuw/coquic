@@ -3,88 +3,148 @@
   "fetched_at_utc": "2026-03-17T06:27:35Z",
   "entries": [
     {
-      "rfc": 8999,
+      "doc_id": "rfc8985",
+      "doc_kind": "rfc",
+      "rfc_number": 8985,
+      "title": "The RACK-TLP Loss Detection Algorithm for TCP",
+      "category": "reference",
+      "url": "https://www.rfc-editor.org/rfc/rfc8985.txt",
+      "local_path": "docs/rfc/rfc8985.txt"
+    },
+    {
+      "doc_id": "rfc8999",
+      "doc_kind": "rfc",
+      "rfc_number": 8999,
       "title": "Version-Independent Properties of QUIC",
       "category": "core",
       "url": "https://www.rfc-editor.org/rfc/rfc8999.txt",
       "local_path": "docs/rfc/rfc8999.txt"
     },
     {
-      "rfc": 9000,
+      "doc_id": "rfc9000",
+      "doc_kind": "rfc",
+      "rfc_number": 9000,
       "title": "QUIC: A UDP-Based Multiplexed and Secure Transport",
       "category": "core",
       "url": "https://www.rfc-editor.org/rfc/rfc9000.txt",
       "local_path": "docs/rfc/rfc9000.txt"
     },
     {
-      "rfc": 9001,
+      "doc_id": "rfc9001",
+      "doc_kind": "rfc",
+      "rfc_number": 9001,
       "title": "Using TLS to Secure QUIC",
       "category": "core",
       "url": "https://www.rfc-editor.org/rfc/rfc9001.txt",
       "local_path": "docs/rfc/rfc9001.txt"
     },
     {
-      "rfc": 9002,
+      "doc_id": "rfc9002",
+      "doc_kind": "rfc",
+      "rfc_number": 9002,
       "title": "QUIC Loss Detection and Congestion Control",
       "category": "core",
       "url": "https://www.rfc-editor.org/rfc/rfc9002.txt",
       "local_path": "docs/rfc/rfc9002.txt"
     },
     {
-      "rfc": 9114,
+      "doc_id": "rfc9114",
+      "doc_kind": "rfc",
+      "rfc_number": 9114,
       "title": "HTTP/3",
       "category": "http3",
       "url": "https://www.rfc-editor.org/rfc/rfc9114.txt",
       "local_path": "docs/rfc/rfc9114.txt"
     },
     {
-      "rfc": 9204,
+      "doc_id": "rfc9204",
+      "doc_kind": "rfc",
+      "rfc_number": 9204,
       "title": "QPACK: Field Compression for HTTP/3",
       "category": "http3",
       "url": "https://www.rfc-editor.org/rfc/rfc9204.txt",
       "local_path": "docs/rfc/rfc9204.txt"
     },
     {
-      "rfc": 9221,
+      "doc_id": "rfc9221",
+      "doc_kind": "rfc",
+      "rfc_number": 9221,
       "title": "An Unreliable Datagram Extension to QUIC",
       "category": "extension",
       "url": "https://www.rfc-editor.org/rfc/rfc9221.txt",
       "local_path": "docs/rfc/rfc9221.txt"
     },
     {
-      "rfc": 9287,
+      "doc_id": "rfc9287",
+      "doc_kind": "rfc",
+      "rfc_number": 9287,
       "title": "Greasing the QUIC Bit",
       "category": "extension",
       "url": "https://www.rfc-editor.org/rfc/rfc9287.txt",
       "local_path": "docs/rfc/rfc9287.txt"
     },
     {
-      "rfc": 9308,
+      "doc_id": "rfc9308",
+      "doc_kind": "rfc",
+      "rfc_number": 9308,
       "title": "Applicability of the QUIC Transport Protocol",
       "category": "ops",
       "url": "https://www.rfc-editor.org/rfc/rfc9308.txt",
       "local_path": "docs/rfc/rfc9308.txt"
     },
     {
-      "rfc": 9312,
+      "doc_id": "rfc9312",
+      "doc_kind": "rfc",
+      "rfc_number": 9312,
       "title": "Manageability of the QUIC Transport Protocol",
       "category": "ops",
       "url": "https://www.rfc-editor.org/rfc/rfc9312.txt",
       "local_path": "docs/rfc/rfc9312.txt"
     },
     {
-      "rfc": 9368,
+      "doc_id": "rfc9368",
+      "doc_kind": "rfc",
+      "rfc_number": 9368,
       "title": "Compatible Version Negotiation for QUIC",
       "category": "extension",
       "url": "https://www.rfc-editor.org/rfc/rfc9368.txt",
       "local_path": "docs/rfc/rfc9368.txt"
     },
     {
-      "rfc": 9369,
+      "doc_id": "rfc9369",
+      "doc_kind": "rfc",
+      "rfc_number": 9369,
       "title": "QUIC Version 2",
       "category": "extension",
       "url": "https://www.rfc-editor.org/rfc/rfc9369.txt",
       "local_path": "docs/rfc/rfc9369.txt"
+    },
+    {
+      "doc_id": "draft-ietf-quic-qlog-main-schema-13",
+      "doc_kind": "internet-draft",
+      "draft_name": "draft-ietf-quic-qlog-main-schema-13",
+      "title": "qlog: Structured Logging for Network Protocols",
+      "category": "qlog",
+      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-main-schema-13.txt",
+      "local_path": "docs/rfc/draft-ietf-quic-qlog-main-schema-13.txt"
+    },
+    {
+      "doc_id": "draft-ietf-quic-qlog-quic-events-12",
+      "doc_kind": "internet-draft",
+      "draft_name": "draft-ietf-quic-qlog-quic-events-12",
+      "title": "QUIC event definitions for qlog",
+      "category": "qlog",
+      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-quic-events-12.txt",
+      "local_path": "docs/rfc/draft-ietf-quic-qlog-quic-events-12.txt"
+    },
+    {
+      "doc_id": "draft-ietf-quic-qlog-h3-events-12",
+      "doc_kind": "internet-draft",
+      "draft_name": "draft-ietf-quic-qlog-h3-events-12",
+      "title": "HTTP/3 qlog event definitions",
+      "category": "qlog",
+      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-h3-events-12.txt",
+      "local_path": "docs/rfc/draft-ietf-quic-qlog-h3-events-12.txt"
     }
   ]
 }

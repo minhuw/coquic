@@ -3143,11 +3143,63 @@ TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfile) {
     const auto keyupdate_core = coquic::quic::make_http09_client_core_config(keyupdate);
     const auto transfer_core = coquic::quic::make_http09_client_core_config(transfer);
 
+    EXPECT_EQ(keyupdate_core.transport.max_idle_timeout, transfer_core.transport.max_idle_timeout);
+    EXPECT_EQ(keyupdate_core.transport.max_udp_payload_size,
+              transfer_core.transport.max_udp_payload_size);
+    EXPECT_EQ(keyupdate_core.transport.ack_delay_exponent,
+              transfer_core.transport.ack_delay_exponent);
+    EXPECT_EQ(keyupdate_core.transport.max_ack_delay, transfer_core.transport.max_ack_delay);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_data, transfer_core.transport.initial_max_data);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_bidi_local,
+              transfer_core.transport.initial_max_stream_data_bidi_local);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_bidi_remote,
+              transfer_core.transport.initial_max_stream_data_bidi_remote);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_uni,
+              transfer_core.transport.initial_max_stream_data_uni);
     EXPECT_EQ(keyupdate_core.transport.initial_max_streams_bidi,
               transfer_core.transport.initial_max_streams_bidi);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_streams_uni,
+              transfer_core.transport.initial_max_streams_uni);
     EXPECT_EQ(keyupdate_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
     EXPECT_EQ(coquic::quic::test::client_receive_timeout_ms_for_tests(keyupdate),
               coquic::quic::test::client_receive_timeout_ms_for_tests(transfer));
+}
+
+TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfileOnServerPath) {
+    const auto keyupdate = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .testcase = coquic::quic::QuicHttp09Testcase::keyupdate,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto transfer = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    const auto keyupdate_core = coquic::quic::make_http09_server_core_config(keyupdate);
+    const auto transfer_core = coquic::quic::make_http09_server_core_config(transfer);
+
+    EXPECT_EQ(keyupdate_core.transport.max_idle_timeout, transfer_core.transport.max_idle_timeout);
+    EXPECT_EQ(keyupdate_core.transport.max_udp_payload_size,
+              transfer_core.transport.max_udp_payload_size);
+    EXPECT_EQ(keyupdate_core.transport.ack_delay_exponent,
+              transfer_core.transport.ack_delay_exponent);
+    EXPECT_EQ(keyupdate_core.transport.max_ack_delay, transfer_core.transport.max_ack_delay);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_data, transfer_core.transport.initial_max_data);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_bidi_local,
+              transfer_core.transport.initial_max_stream_data_bidi_local);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_bidi_remote,
+              transfer_core.transport.initial_max_stream_data_bidi_remote);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_uni,
+              transfer_core.transport.initial_max_stream_data_uni);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_streams_bidi,
+              transfer_core.transport.initial_max_streams_bidi);
+    EXPECT_EQ(keyupdate_core.transport.initial_max_streams_uni,
+              transfer_core.transport.initial_max_streams_uni);
+    EXPECT_EQ(keyupdate_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeReadsServerEnvironmentOverrides) {

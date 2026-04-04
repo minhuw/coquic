@@ -234,6 +234,7 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
 }
 
 constexpr QuicHttp09Testcase transfer_semantics_testcase(QuicHttp09Testcase testcase) {
+    // keyupdate is a distinct runtime testcase name but uses transfer transport/TLS profile.
     if (testcase == QuicHttp09Testcase::keyupdate) {
         return QuicHttp09Testcase::transfer;
     }

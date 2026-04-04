@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,6 +30,10 @@ struct QuicTransportConfig {
     std::uint64_t initial_max_streams_uni = 16;
 };
 
+struct QuicQlogConfig {
+    std::filesystem::path directory;
+};
+
 struct QuicCoreConfig {
     EndpointRole role = EndpointRole::client;
     ConnectionId source_connection_id;
@@ -48,6 +53,7 @@ struct QuicCoreConfig {
     std::vector<CipherSuite> allowed_tls_cipher_suites;
     std::optional<QuicResumptionState> resumption_state;
     QuicZeroRttConfig zero_rtt;
+    std::optional<QuicQlogConfig> qlog;
 };
 
 using QuicCoreClock = std::chrono::steady_clock;

@@ -138,6 +138,9 @@ int client_receive_timeout_ms_for_tests(const Http09RuntimeConfig &config);
 QuicHttp09ClientConfig make_http09_client_endpoint_config_for_tests(
     const Http09RuntimeConfig &config, const std::vector<QuicHttp09Request> &requests,
     bool attempt_zero_rtt_requests, const QuicCoreResult &start_result);
+QuicCoreConfig
+make_http09_server_core_config_with_identity_for_tests(const Http09RuntimeConfig &config,
+                                                       TlsIdentity identity);
 int run_http09_client_connection_for_tests(const Http09RuntimeConfig &config,
                                            const std::vector<QuicHttp09Request> &requests,
                                            std::uint64_t connection_index);

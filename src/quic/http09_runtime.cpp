@@ -482,7 +482,7 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
                                                             TlsIdentity identity) {
     const auto original_version = runtime_original_quic_version_for_testcase(config.testcase);
     const auto transfer_like_testcase = transfer_semantics_testcase(config.testcase);
-    return QuicCoreConfig{
+    auto core = QuicCoreConfig{
         .role = EndpointRole::server,
         .source_connection_id = {std::byte{0x53}, std::byte{0x01}},
         .original_version = original_version,
@@ -499,6 +499,10 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
                 .allow = config.testcase == QuicHttp09Testcase::zerortt,
             },
     };
+    if (config.qlog_directory.has_value()) {
+        core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
+    }
+    return core;
 }
 
 bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer,
@@ -2348,6 +2352,12 @@ QuicHttp09ClientConfig make_http09_client_endpoint_config_for_tests(
                                               start_result);
 }
 
+QuicCoreConfig
+make_http09_server_core_config_with_identity_for_tests(const Http09RuntimeConfig &config,
+                                                       TlsIdentity identity) {
+    return make_http09_server_core_config_with_identity(config, std::move(identity));
+}
+
 int run_http09_client_connection_for_tests(const Http09RuntimeConfig &config,
                                            const std::vector<QuicHttp09Request> &requests,
                                            std::uint64_t connection_index) {
@@ -3429,6 +3439,9 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
         .transport = http09_client_transport_for_testcase(transfer_like_testcase),
         .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(transfer_like_testcase),
     };
+    if (config.qlog_directory.has_value()) {
+        core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
+    }
     return core;
 }
 

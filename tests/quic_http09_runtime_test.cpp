@@ -2841,6 +2841,32 @@ TEST(QuicHttp09RuntimeTest, RuntimeReadsQlogDirectoryFromEnvironment) {
               std::filesystem::path("/logs/qlog"));
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimePropagatesQlogDirectoryIntoClientAndServerCoreConfigs) {
+    const auto qlog_path = std::filesystem::path("/logs/qlog");
+
+    const auto client_runtime = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .requests_env = "https://localhost/a.txt",
+        .qlog_directory = qlog_path,
+    };
+    const auto client_core = coquic::quic::make_http09_client_core_config(client_runtime);
+    ASSERT_TRUE(client_core.qlog.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(client_core.qlog).directory, qlog_path);
+
+    const auto server_runtime = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .qlog_directory = qlog_path,
+    };
+    const auto server_core =
+        coquic::quic::test::make_http09_server_core_config_with_identity_for_tests(
+            server_runtime, coquic::quic::TlsIdentity{
+                                .certificate_pem = "test-certificate-pem",
+                                .private_key_pem = "test-private-key-pem",
+                            });
+    ASSERT_TRUE(server_core.qlog.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(server_core.qlog).directory, qlog_path);
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidAndEmptyPortStringsFromEnvironment) {
     const char *argv[] = {"coquic"};
     ScopedEnvVar role("ROLE", "client");

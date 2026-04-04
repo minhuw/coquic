@@ -51,7 +51,8 @@ constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
     "[--testcase "
-    "handshake|transfer|amplificationlimit|multiconnect|chacha20|retry|resumption|zerortt|v2] "
+    "handshake|transfer|keyupdate|amplificationlimit|multiconnect|chacha20|retry|resumption|"
+    "zerortt|v2] "
     "[--requests URLS] "
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
@@ -208,6 +209,9 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
     if (value == "transfer") {
         return QuicHttp09Testcase::transfer;
     }
+    if (value == "keyupdate") {
+        return QuicHttp09Testcase::keyupdate;
+    }
     if (value == "amplificationlimit") {
         return QuicHttp09Testcase::transfer;
     }
@@ -227,6 +231,13 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
         return QuicHttp09Testcase::v2;
     }
     return std::nullopt;
+}
+
+constexpr QuicHttp09Testcase transfer_semantics_testcase(QuicHttp09Testcase testcase) {
+    if (testcase == QuicHttp09Testcase::keyupdate) {
+        return QuicHttp09Testcase::transfer;
+    }
+    return testcase;
 }
 
 bool apply_testcase_name(Http09RuntimeConfig &config, std::string_view value) {
@@ -469,6 +480,7 @@ runtime_supported_quic_versions_for_testcase(QuicHttp09Testcase testcase) {
 QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeConfig &config,
                                                             TlsIdentity identity) {
     const auto original_version = runtime_original_quic_version_for_testcase(config.testcase);
+    const auto transfer_like_testcase = transfer_semantics_testcase(config.testcase);
     return QuicCoreConfig{
         .role = EndpointRole::server,
         .source_connection_id = {std::byte{0x53}, std::byte{0x01}},
@@ -479,8 +491,8 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
         .server_name = config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),
         .identity = std::move(identity),
-        .transport = http09_server_transport_for_testcase(config.testcase),
-        .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(config.testcase),
+        .transport = http09_server_transport_for_testcase(transfer_like_testcase),
+        .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(transfer_like_testcase),
         .zero_rtt =
             QuicZeroRttConfig{
                 .allow = config.testcase == QuicHttp09Testcase::zerortt,
@@ -3382,6 +3394,7 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
 
 QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config) {
     const auto original_version = runtime_original_quic_version_for_testcase(config.testcase);
+    const auto transfer_like_testcase = transfer_semantics_testcase(config.testcase);
     auto core = QuicCoreConfig{
         .role = EndpointRole::client,
         .source_connection_id = {std::byte{0xc1}, std::byte{0x01}},
@@ -3394,8 +3407,8 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
         .verify_peer = config.verify_peer,
         .server_name = config.server_name.empty() ? "localhost" : config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),
-        .transport = http09_client_transport_for_testcase(config.testcase),
-        .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(config.testcase),
+        .transport = http09_client_transport_for_testcase(transfer_like_testcase),
+        .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(transfer_like_testcase),
     };
     return core;
 }

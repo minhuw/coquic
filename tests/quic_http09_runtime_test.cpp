@@ -3106,6 +3106,50 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases)
     }
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialKeyUpdateTestcase) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar testcase("TESTCASE", "keyupdate");
+    ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
+              coquic::quic::QuicHttp09Testcase::keyupdate);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeAcceptsKeyUpdateCliFlag) {
+    const char *argv[] = {"coquic",    "interop-client", "--testcase",
+                          "keyupdate", "--requests",     "https://localhost/hello.txt"};
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
+              coquic::quic::QuicHttp09Testcase::keyupdate);
+}
+
+TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfile) {
+    const auto keyupdate = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::keyupdate,
+        .requests_env = "https://localhost/hello.txt",
+    };
+    const auto transfer = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    const auto keyupdate_core = coquic::quic::make_http09_client_core_config(keyupdate);
+    const auto transfer_core = coquic::quic::make_http09_client_core_config(transfer);
+
+    EXPECT_EQ(keyupdate_core.transport.initial_max_streams_bidi,
+              transfer_core.transport.initial_max_streams_bidi);
+    EXPECT_EQ(keyupdate_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
+    EXPECT_EQ(coquic::quic::test::client_receive_timeout_ms_for_tests(keyupdate),
+              coquic::quic::test::client_receive_timeout_ms_for_tests(transfer));
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeReadsServerEnvironmentOverrides) {
     const char *argv[] = {"coquic"};
     ScopedEnvVar role("ROLE", "server");

@@ -16,6 +16,7 @@ namespace coquic::quic {
 enum class QuicHttp09Testcase : std::uint8_t {
     handshake,
     transfer,
+    keyupdate,
     multiconnect,
     chacha20,
     resumption,

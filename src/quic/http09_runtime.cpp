@@ -50,7 +50,8 @@ constexpr int kServerIdleTimeoutMs = 1000;
 constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
-    "[--testcase handshake|transfer|multiconnect|chacha20|retry|resumption|zerortt|v2] "
+    "[--testcase "
+    "handshake|transfer|amplificationlimit|multiconnect|chacha20|retry|resumption|zerortt|v2] "
     "[--requests URLS] "
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
@@ -205,6 +206,9 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
         return QuicHttp09Testcase::handshake;
     }
     if (value == "transfer") {
+        return QuicHttp09Testcase::transfer;
+    }
+    if (value == "amplificationlimit") {
         return QuicHttp09Testcase::transfer;
     }
     if (value == "multiconnect") {

@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -113,6 +114,18 @@ std::optional<std::vector<std::byte>> drive_tls_until_resumption_state(TlsAdapte
     }
 
     return std::nullopt;
+}
+
+std::size_t server_handshake_flight_bytes(const TlsAdapterConfig &server_config) {
+    TlsAdapter client(make_client_config());
+    TlsAdapter server(server_config);
+
+    EXPECT_TRUE(client.start().has_value());
+    const auto initial_client_flight = client.take_pending(EncryptionLevel::initial);
+    EXPECT_FALSE(initial_client_flight.empty());
+    EXPECT_TRUE(server.provide(EncryptionLevel::initial, initial_client_flight).has_value());
+
+    return server.take_pending(EncryptionLevel::handshake).size();
 }
 
 TEST(QuicTlsAdapterContractTest, ClientAndServerExchangeHandshakeBytesAndSecrets) {
@@ -226,6 +239,47 @@ TEST(QuicTlsAdapterContractTest, ClientExportsOpaqueResumptionStateAfterReceivin
     }
     const auto &resumption_state = *exported;
     EXPECT_FALSE(resumption_state.empty());
+}
+
+TEST(QuicTlsAdapterContractTest, ServerHandshakeFlightGrowsWhenCertificatePemContainsChain) {
+    auto single_certificate_server_config = make_server_config();
+    auto chained_certificate_server_config = make_server_config();
+
+    ASSERT_TRUE(chained_certificate_server_config.identity.has_value());
+    if (!chained_certificate_server_config.identity.has_value()) {
+        return;
+    }
+    auto &identity = *chained_certificate_server_config.identity;
+    const std::string leaf_certificate = identity.certificate_pem;
+    identity.certificate_pem += leaf_certificate;
+    identity.certificate_pem += leaf_certificate;
+
+    const auto single_certificate_flight_bytes =
+        server_handshake_flight_bytes(single_certificate_server_config);
+    const auto chained_certificate_flight_bytes =
+        server_handshake_flight_bytes(chained_certificate_server_config);
+
+    EXPECT_GT(single_certificate_flight_bytes, 0u);
+    EXPECT_GT(chained_certificate_flight_bytes, single_certificate_flight_bytes);
+}
+
+TEST(QuicTlsAdapterContractTest, ServerIdentityRejectsTrailingGarbageAfterCertificateChain) {
+    auto server_config = make_server_config();
+    ASSERT_TRUE(server_config.identity.has_value());
+    if (!server_config.identity.has_value()) {
+        return;
+    }
+    const auto valid_identity = *server_config.identity;
+    server_config.identity = TlsIdentity{
+        .certificate_pem = valid_identity.certificate_pem + "-----BEGIN CERTIFICATE-----\nAAAA\n",
+        .private_key_pem = valid_identity.private_key_pem,
+    };
+
+    TlsAdapter adapter(std::move(server_config));
+
+    EXPECT_FALSE(adapter.start().has_value());
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
+              CodecErrorCode::invalid_packet_protection_state);
 }
 
 TEST(QuicTlsAdapterContractTest, ClientRestoresResumptionStateAndMarksEarlyDataAttempted) {
@@ -612,6 +666,18 @@ TEST(QuicTlsAdapterContractTest, ServerIdentityFailuresProduceStickyErrors) {
     TlsAdapter invalid_certificate_adapter(std::move(invalid_certificate));
     EXPECT_FALSE(invalid_certificate_adapter.start().has_value());
     EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(invalid_certificate_adapter),
+              CodecErrorCode::invalid_packet_protection_state);
+
+    auto malformed_certificate_chain = make_server_config();
+    const auto valid_chain_identity = malformed_certificate_chain.identity.value_or(TlsIdentity{});
+    malformed_certificate_chain.identity = TlsIdentity{
+        .certificate_pem = valid_chain_identity.certificate_pem +
+                           "-----BEGIN CERTIFICATE-----\nnot-base64\n-----END CERTIFICATE-----\n",
+        .private_key_pem = valid_chain_identity.private_key_pem,
+    };
+    TlsAdapter malformed_certificate_chain_adapter(std::move(malformed_certificate_chain));
+    EXPECT_FALSE(malformed_certificate_chain_adapter.start().has_value());
+    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(malformed_certificate_chain_adapter),
               CodecErrorCode::invalid_packet_protection_state);
 
     {

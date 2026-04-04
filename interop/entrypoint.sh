@@ -7,7 +7,7 @@ testcase="${TESTCASE:-}"
 
 supports_testcase() {
   case "$1" in
-    handshake | transfer | multiconnect | chacha20 | retry | resumption | zerortt | v2)
+    handshake | transfer | amplificationlimit | multiconnect | chacha20 | retry | resumption | zerortt | v2)
       return 0
       ;;
     *)
@@ -39,8 +39,9 @@ server)
   export HOST="${HOST:-::}"
   export PORT="${PORT:-443}"
   export DOCUMENT_ROOT="${DOCUMENT_ROOT:-/www}"
-  export CERTIFICATE_CHAIN_PATH="${CERTIFICATE_CHAIN_PATH:-/certs/cert.pem}"
-  export PRIVATE_KEY_PATH="${PRIVATE_KEY_PATH:-/certs/priv.key}"
+  cert_root="${CERTS:-/certs}"
+  export CERTIFICATE_CHAIN_PATH="${CERTIFICATE_CHAIN_PATH:-${cert_root}/cert.pem}"
+  export PRIVATE_KEY_PATH="${PRIVATE_KEY_PATH:-${cert_root}/priv.key}"
   exec "${binary}" interop-server
   ;;
 client)

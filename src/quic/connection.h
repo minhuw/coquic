@@ -166,6 +166,7 @@ class QuicConnection {
     bool should_reset_client_handshake_peer_state(const ConnectionId &source_connection_id) const;
     void reset_client_handshake_peer_state_for_new_source_connection_id();
     bool packet_targets_discarded_long_header_space(std::span<const std::byte> packet_bytes) const;
+    bool should_defer_client_standalone_handshake_ack() const;
     void discard_initial_packet_space();
     void discard_handshake_packet_space();
     std::optional<TransportParametersValidationContext>
@@ -188,6 +189,12 @@ class QuicConnection {
     void maybe_refresh_connection_receive_credit(bool force);
     void maybe_refresh_stream_receive_credit(StreamState &stream, bool force);
     void maybe_refresh_peer_stream_limit(StreamState &stream);
+    bool anti_amplification_applies() const;
+    std::uint64_t anti_amplification_send_budget() const;
+    std::size_t outbound_datagram_size_limit() const;
+    void note_inbound_datagram_bytes(std::size_t bytes);
+    void note_outbound_datagram_bytes(std::size_t bytes);
+    void mark_peer_address_validated();
     ConnectionId outbound_destination_connection_id() const;
     ConnectionId client_initial_destination_connection_id() const;
     std::vector<std::byte> flush_outbound_datagram(QuicCoreTimePoint now);
@@ -209,6 +216,9 @@ class QuicConnection {
     std::optional<ConnectionId> client_initial_destination_connection_id_;
     std::optional<TransportParameters> peer_transport_parameters_;
     bool peer_transport_parameters_validated_ = false;
+    bool peer_address_validated_ = false;
+    std::uint64_t anti_amplification_received_bytes_ = 0;
+    std::uint64_t anti_amplification_sent_bytes_ = 0;
     std::map<std::uint64_t, StreamState> streams_;
     ConnectionFlowControlState connection_flow_control_;
     StreamOpenLimits stream_open_limits_;

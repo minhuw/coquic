@@ -37,6 +37,7 @@ using coquic::quic::TlsAdapterConfig;
 using coquic::quic::TrafficSecret;
 using coquic::quic::test::TlsAdapterFaultPoint;
 using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
+using X509Chain = std::vector<X509Ptr>;
 using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
 using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
 using SslSessionPtr = std::unique_ptr<SSL_SESSION, decltype(&SSL_SESSION_free)>;
@@ -314,10 +315,46 @@ bool client_offered_application_protocol(std::span<const uint8_t> offered,
 }
 
 COQUIC_NO_PROFILE bool install_identity_failed(SSL_CTX *ctx, X509 *certificate,
+                                               const X509Chain &certificate_chain,
                                                EVP_PKEY *private_key) {
-    return consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_use_certificate) ||
-           SSL_CTX_use_certificate(ctx, certificate) != 1 ||
-           SSL_CTX_use_PrivateKey(ctx, private_key) != 1 || SSL_CTX_check_private_key(ctx) != 1;
+    if (consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_use_certificate) ||
+        SSL_CTX_use_certificate(ctx, certificate) != 1) {
+        return true;
+    }
+
+    for (const auto &chain_certificate : certificate_chain) {
+        if (consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_use_certificate) ||
+            SSL_CTX_add1_chain_cert(ctx, chain_certificate.get()) != 1) {
+            return true;
+        }
+    }
+
+    return SSL_CTX_use_PrivateKey(ctx, private_key) != 1 || SSL_CTX_check_private_key(ctx) != 1;
+}
+
+std::optional<X509Chain> load_certificate_chain(BIO *cert_bio) {
+    if (cert_bio == nullptr) {
+        return std::nullopt;
+    }
+
+    X509Chain certificates;
+    while (true) {
+        ERR_clear_error();
+        X509Ptr certificate(PEM_read_bio_X509(cert_bio, nullptr, nullptr, nullptr), &X509_free);
+        if (certificate == nullptr) {
+            const auto error = ERR_peek_last_error();
+            const bool reached_end_of_pem_chain = !certificates.empty() && error != 0 &&
+                                                  ERR_GET_LIB(error) == ERR_LIB_PEM &&
+                                                  ERR_GET_REASON(error) == PEM_R_NO_START_LINE;
+            ERR_clear_error();
+            if (reached_end_of_pem_chain) {
+                return certificates;
+            }
+            return std::nullopt;
+        }
+
+        certificates.push_back(std::move(certificate));
+    }
 }
 
 bool should_retry_handshake(bool handshake_fault, int error) {
@@ -661,9 +698,8 @@ class TlsAdapter::Impl {
             return false;
         }
 
-        X509Ptr certificate(PEM_read_bio_X509(cert_bio.get(), nullptr, nullptr, nullptr),
-                            &X509_free);
-        if (certificate == nullptr) {
+        auto certificate_chain = load_certificate_chain(cert_bio.get());
+        if (!certificate_chain.has_value() || certificate_chain->empty()) {
             return false;
         }
 
@@ -683,7 +719,16 @@ class TlsAdapter::Impl {
             return false;
         }
 
-        return !install_identity_failed(ctx_.get(), certificate.get(), private_key.get());
+        X509 *certificate = certificate_chain->front().get();
+        X509Chain extra_chain;
+        if (certificate_chain->size() > 1) {
+            extra_chain.reserve(certificate_chain->size() - 1);
+            for (std::size_t i = 1; i < certificate_chain->size(); ++i) {
+                extra_chain.push_back(std::move((*certificate_chain)[i]));
+            }
+        }
+
+        return !install_identity_failed(ctx_.get(), certificate, extra_chain, private_key.get());
     }
 
     CodecResult<bool> drive_handshake() {

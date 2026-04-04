@@ -3057,6 +3057,29 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialV2Testcase) {
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::quic::QuicHttp09Testcase::v2);
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeTreatsAmplificationLimitEnvironmentAliasAsTransfer) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar testcase("TESTCASE", "amplificationlimit");
+    ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
+              coquic::quic::QuicHttp09Testcase::transfer);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeTreatsAmplificationLimitCliAliasAsTransfer) {
+    const char *argv[] = {"coquic",     "interop-client",
+                          "--testcase", "amplificationlimit",
+                          "--requests", "https://localhost/a.txt"};
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
+              coquic::quic::QuicHttp09Testcase::transfer);
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases) {
     {
         const char *argv[] = {"coquic"};

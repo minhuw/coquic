@@ -75,6 +75,33 @@ def _section_citation(record: dict[str, object]) -> str:
     return f"{record['doc_id']} Section {record['section_id']}"
 
 
+def _rfc_doc_id(rfc: int) -> str:
+    return f"rfc{int(rfc)}"
+
+
+def _normalize_doc_selector(
+    doc_id: str | int | None = None,
+    *,
+    rfc: int | None = None,
+) -> str | None:
+    normalized_doc_id: str | None = None
+    if doc_id is not None:
+        if isinstance(doc_id, int):
+            normalized_doc_id = _rfc_doc_id(doc_id)
+        else:
+            normalized_doc_id = str(doc_id)
+
+    if rfc is None:
+        return normalized_doc_id
+
+    normalized_rfc_doc_id = _rfc_doc_id(rfc)
+    if normalized_doc_id is not None and normalized_doc_id != normalized_rfc_doc_id:
+        raise ValueError(
+            f"conflicting selectors: doc_id {normalized_doc_id} and rfc {int(rfc)}"
+        )
+    return normalized_rfc_doc_id
+
+
 def _required_artifact_paths(paths: ProjectPaths) -> tuple[Path, Path, Path]:
     return (
         paths.artifacts_dir / _SECTION_ARTIFACT,
@@ -181,12 +208,19 @@ class QueryService:
         self._edges_from: dict[str, list[dict[str, object]]] = defaultdict(list)
         self._edges_to: dict[str, list[dict[str, object]]] = defaultdict(list)
 
-    def get_section(self, doc_id: str, section_id: str) -> dict[str, object]:
+    def get_section(self, doc_id: str | int, section_id: str) -> dict[str, object]:
         self._ensure_loaded()
-        key = (str(doc_id), str(section_id))
+        resolved_doc_id = _normalize_doc_selector(doc_id)
+        if resolved_doc_id is None:
+            raise ValueError("doc_id is required")
+        key = (resolved_doc_id, str(section_id))
         record = self._sections_by_key.get(key)
         if record is None:
-            return {"found": False, "doc_id": str(doc_id), "section_id": str(section_id)}
+            return {
+                "found": False,
+                "doc_id": resolved_doc_id,
+                "section_id": str(section_id),
+            }
         return self._section_result(record)
 
     def lookup_term(self, term_type: str, name: str) -> dict[str, object]:
@@ -201,8 +235,15 @@ class QueryService:
             }
         return self._trace_term_node(node)
 
-    def trace_term(self, term: str, doc_id: str | None = None) -> dict[str, object]:
+    def trace_term(
+        self,
+        term: str,
+        doc_id: str | int | None = None,
+        *,
+        rfc: int | None = None,
+    ) -> dict[str, object]:
         self._ensure_loaded()
+        resolved_doc_id = _normalize_doc_selector(doc_id, rfc=rfc)
         normalized_term = _normalize_term_name(term)
         matches = [
             node
@@ -217,21 +258,24 @@ class QueryService:
                 "mentions": [],
                 "fallback_results": self.search_sections(
                     normalized_term,
-                    doc_id=doc_id,
+                    doc_id=resolved_doc_id,
                     top_k=5,
                 ),
             }
-        return self._trace_term_node(matches[0], doc_id=doc_id)
+        return self._trace_term_node(matches[0], doc_id=resolved_doc_id)
 
     def related_sections(
         self,
-        doc_id: str,
+        doc_id: str | int,
         section_id: str,
         edge_types: tuple[str, ...] = ("cites", "mentions", "defines"),
         top_k: int = 5,
     ) -> list[dict[str, object]]:
         self._ensure_loaded()
-        source = self._sections_by_key.get((str(doc_id), str(section_id)))
+        resolved_doc_id = _normalize_doc_selector(doc_id)
+        if resolved_doc_id is None:
+            raise ValueError("doc_id is required")
+        source = self._sections_by_key.get((resolved_doc_id, str(section_id)))
         if source is None:
             return []
 
@@ -269,7 +313,7 @@ class QueryService:
             query_text,
             self._embedder_or_create(),
             limit=top_k + 1,
-            payload_filters={"doc_id": str(doc_id)},
+            payload_filters={"doc_id": resolved_doc_id},
         )
         results = []
         for hit in hits:
@@ -284,14 +328,16 @@ class QueryService:
         self,
         query: str,
         *,
-        doc_id: str | None = None,
+        doc_id: str | int | None = None,
+        rfc: int | None = None,
         category: str | None = None,
         top_k: int = 5,
     ) -> list[dict[str, object]]:
         self._ensure_loaded()
+        resolved_doc_id = _normalize_doc_selector(doc_id, rfc=rfc)
         payload_filters: dict[str, object] = {}
-        if doc_id is not None:
-            payload_filters["doc_id"] = doc_id
+        if resolved_doc_id is not None:
+            payload_filters["doc_id"] = resolved_doc_id
         if category is not None:
             payload_filters["section_kind"] = category
 
@@ -303,10 +349,13 @@ class QueryService:
         )
         return [self._search_hit_result(hit, relation="semantic") for hit in hits]
 
-    def render_section_resource(self, doc_id: str, section_id: str) -> str:
-        section = self.get_section(doc_id, section_id)
+    def render_section_resource(self, doc_id: str | int, section_id: str) -> str:
+        resolved_doc_id = _normalize_doc_selector(doc_id)
+        if resolved_doc_id is None:
+            raise ValueError("doc_id is required")
+        section = self.get_section(resolved_doc_id, section_id)
         if not section.get("found"):
-            raise LookupError(f"{doc_id} Section {section_id} not found")
+            raise LookupError(f"{resolved_doc_id} Section {section_id} not found")
         return (
             f"{section['citation']}: {section['title']}\n\n"
             f"{section['text']}"
@@ -407,6 +456,8 @@ class QueryService:
             result["score"] = score
         if relation is not None:
             result["relation"] = relation
+        if result["rfc_number"] is not None:
+            result["rfc"] = result["rfc_number"]
         return result
 
     def _ensure_loaded(self) -> None:

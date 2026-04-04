@@ -81,6 +81,16 @@ def test_query_service_get_section_returns_exact_match(tmp_path: Path) -> None:
     assert section["title"] == "Transport Parameter Definitions"
 
 
+def test_query_service_get_section_accepts_legacy_rfc_number(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+
+    section = service.get_section(9000, "18.2")
+
+    assert section["found"] is True
+    assert section["doc_id"] == "rfc9000"
+    assert section["citation"] == "RFC 9000 Section 18.2"
+
+
 def test_query_service_get_section_returns_draft_section(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
 
@@ -93,6 +103,16 @@ def test_query_service_get_section_returns_draft_section(tmp_path: Path) -> None
     assert section["draft_name"] == "draft-ietf-quic-qlog-main-schema-13"
     assert section["citation"] == "draft-ietf-quic-qlog-main-schema-13 Section 1"
     assert section["title"] == "Introduction"
+
+
+def test_query_service_render_section_resource_accepts_legacy_rfc_number(
+    tmp_path: Path,
+) -> None:
+    service = _build_service(tmp_path)
+
+    rendered = service.render_section_resource(9000, "18.2")
+
+    assert rendered.startswith("RFC 9000 Section 18.2: ")
 
 
 def test_query_service_trace_term_returns_definitions_and_mentions(
@@ -110,6 +130,17 @@ def test_query_service_trace_term_returns_definitions_and_mentions(
     )
 
 
+def test_query_service_trace_term_accepts_legacy_rfc_filter(
+    tmp_path: Path,
+) -> None:
+    service = _build_service(tmp_path)
+
+    trace = service.trace_term("max_udp_payload_size", rfc=9000)
+
+    assert trace["definitions"]
+    assert all(item["doc_id"] == "rfc9000" for item in trace["definitions"])
+
+
 def test_query_service_related_sections_finds_semantic_neighbors(
     tmp_path: Path,
 ) -> None:
@@ -123,6 +154,16 @@ def test_query_service_related_sections_finds_semantic_neighbors(
     )
 
 
+def test_query_service_related_sections_accepts_legacy_rfc_number(
+    tmp_path: Path,
+) -> None:
+    service = _build_service(tmp_path)
+
+    related_sections = service.related_sections(9369, "5")
+
+    assert related_sections
+
+
 def test_query_service_search_sections_returns_cited_ack_hits(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
 
@@ -131,6 +172,21 @@ def test_query_service_search_sections_returns_cited_ack_hits(tmp_path: Path) ->
     assert results
     assert results[0]["doc_id"] == "rfc9000"
     assert results[0]["citations"]
+
+
+def test_query_service_search_sections_accepts_legacy_rfc_filter(
+    tmp_path: Path,
+) -> None:
+    service = _build_service(tmp_path)
+
+    results = service.search_sections(
+        "ACK frame behavior",
+        rfc=9000,
+        top_k=3,
+    )
+
+    assert results
+    assert all(result["doc_id"] == "rfc9000" for result in results)
 
 
 def test_query_service_search_sections_returns_mixed_corpus_hits(

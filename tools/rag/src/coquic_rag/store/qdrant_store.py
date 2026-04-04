@@ -193,6 +193,7 @@ def _build_payload(record: dict[str, object]) -> dict[str, object]:
     rfc_number = record.get("rfc_number")
     if rfc_number is not None:
         payload["rfc_number"] = int(rfc_number)
+        payload["rfc"] = int(rfc_number)
     draft_name = record.get("draft_name")
     if draft_name is not None:
         payload["draft_name"] = str(draft_name)

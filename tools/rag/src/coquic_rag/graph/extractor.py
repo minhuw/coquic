@@ -29,7 +29,7 @@ def _section_node_id(doc_id: str, section_id: str) -> str:
 
 
 def _build_section_record(section: SourceSection) -> dict[str, object]:
-    return {
+    record: dict[str, object] = {
         "node_id": _section_node_id(section.doc_id, section.section_id),
         "doc_id": section.doc_id,
         "doc_kind": section.doc_kind,
@@ -39,6 +39,9 @@ def _build_section_record(section: SourceSection) -> dict[str, object]:
         "title": section.title,
         "text": section.text,
     }
+    if section.rfc_number is not None:
+        record["rfc"] = int(section.rfc_number)
+    return record
 
 
 def _extract_terms(section: SourceSection) -> Iterable[tuple[str, str]]:

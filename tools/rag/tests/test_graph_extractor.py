@@ -114,6 +114,7 @@ def test_build_graph_artifacts_from_rfc9000() -> None:
     assert section_182["doc_id"] == "rfc9000"
     assert section_182["doc_kind"] == "rfc"
     assert section_182["rfc_number"] == 9000
+    assert section_182["rfc"] == 9000
 
 
 def test_build_graph_artifacts_from_qlog_draft(tmp_path: Path) -> None:
@@ -158,6 +159,7 @@ def test_build_graph_artifacts_from_qlog_draft(tmp_path: Path) -> None:
     )
     assert section_1["doc_id"] == "draft-ietf-quic-qlog-main-schema-13"
     assert section_1["draft_name"] == "draft-ietf-quic-qlog-main-schema-13"
+    assert "rfc" not in section_1
 
     contains_edges = [
         edge

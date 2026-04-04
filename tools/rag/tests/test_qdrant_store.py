@@ -120,4 +120,18 @@ def test_qdrant_store_upserts_sections_and_filters_search_results(
     assert hits[0].payload["doc_kind"] == "internet-draft"
     assert hits[0].payload["draft_name"] == "draft-ietf-quic-qlog-main-schema-13"
     assert hits[0].payload["section_kind"] == "numbered"
+    assert "rfc" not in hits[0].payload
     assert hits[0].text == section_records[1]["text"]
+
+    rfc_hits = store.search_sections(
+        "transport overview connection",
+        embedder,
+        limit=3,
+        payload_filters={"doc_id": "rfc9000"},
+    )
+    assert len(rfc_hits) == 1
+    assert rfc_hits[0].payload["node_id"] == "rfc9000#1"
+    assert rfc_hits[0].payload["doc_id"] == "rfc9000"
+    assert rfc_hits[0].payload["doc_kind"] == "rfc"
+    assert rfc_hits[0].payload["rfc_number"] == 9000
+    assert rfc_hits[0].payload["rfc"] == 9000

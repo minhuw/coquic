@@ -11,10 +11,33 @@ from coquic_rag.embed.provider import FakeEmbedder
 from coquic_rag.query.service import IndexNotBuiltError, QueryService
 
 
+_DRAFT_FIXTURE_TEXT = """Network Working Group
+Internet-Draft
+Intended status: Informational
+Expires: 4 April 2027
+
+draft-ietf-quic-qlog-main-schema-13
+
+qlog: Structured Logging for Network Protocols
+
+Abstract
+
+This is a minimal draft fixture for query tests.
+
+1.  Introduction
+
+This section describes structured logging for network protocol analysis.
+"""
+
+
 def _copy_query_fixtures(source_dir: Path) -> None:
     source_dir.mkdir(parents=True, exist_ok=True)
     for filename in ("rfc9000.txt", "rfc9369.txt"):
         shutil.copyfile(Path("docs/rfc") / filename, source_dir / filename)
+    (source_dir / "draft-ietf-quic-qlog-main-schema-13.txt").write_text(
+        _DRAFT_FIXTURE_TEXT,
+        encoding="utf-8",
+    )
 
 
 def _build_service(tmp_path: Path) -> QueryService:
@@ -47,11 +70,29 @@ def _build_service(tmp_path: Path) -> QueryService:
 def test_query_service_get_section_returns_exact_match(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
 
-    section = service.get_section(9000, "18.2")
+    section = service.get_section("rfc9000", "18.2")
 
     assert section["found"] is True
+    assert section["doc_id"] == "rfc9000"
+    assert section["doc_kind"] == "rfc"
+    assert section["rfc_number"] == 9000
+    assert section["draft_name"] is None
     assert section["citation"] == "RFC 9000 Section 18.2"
     assert section["title"] == "Transport Parameter Definitions"
+
+
+def test_query_service_get_section_returns_draft_section(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+
+    section = service.get_section("draft-ietf-quic-qlog-main-schema-13", "1")
+
+    assert section["found"] is True
+    assert section["doc_id"] == "draft-ietf-quic-qlog-main-schema-13"
+    assert section["doc_kind"] == "internet-draft"
+    assert section["rfc_number"] is None
+    assert section["draft_name"] == "draft-ietf-quic-qlog-main-schema-13"
+    assert section["citation"] == "draft-ietf-quic-qlog-main-schema-13 Section 1"
+    assert section["title"] == "Introduction"
 
 
 def test_query_service_trace_term_returns_definitions_and_mentions(
@@ -74,7 +115,7 @@ def test_query_service_related_sections_finds_semantic_neighbors(
 ) -> None:
     service = _build_service(tmp_path)
 
-    related_sections = service.related_sections(9369, "5")
+    related_sections = service.related_sections("rfc9369", "5")
 
     assert related_sections
     assert any(
@@ -88,8 +129,21 @@ def test_query_service_search_sections_returns_cited_ack_hits(tmp_path: Path) ->
     results = service.search_sections("ACK frame behavior", top_k=3)
 
     assert results
-    assert results[0]["rfc"] == 9000
+    assert results[0]["doc_id"] == "rfc9000"
     assert results[0]["citations"]
+
+
+def test_query_service_search_sections_returns_mixed_corpus_hits(
+    tmp_path: Path,
+) -> None:
+    service = _build_service(tmp_path)
+
+    results = service.search_sections("structured logging network protocol", top_k=5)
+
+    assert any(
+        result["doc_id"] == "draft-ietf-quic-qlog-main-schema-13"
+        for result in results
+    )
 
 
 def test_query_service_reports_missing_index(tmp_path: Path) -> None:

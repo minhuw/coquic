@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 from coquic_rag.cli.main import main
@@ -13,9 +12,57 @@ from coquic_rag.store.artifacts import (
 from coquic_rag.store.qdrant_store import QdrantSectionStore
 
 
-def _copy_fixture_rfc(source_dir: Path) -> None:
+_RFC_FIXTURE_TEXT = """Network Working Group
+Request for Comments: 9000
+
+QUIC: A UDP-Based Multiplexed and Secure Transport
+
+Abstract
+
+This is a minimal RFC fixture for build-index tests.
+
+18.2.  Transport Parameter Definitions
+
+max_udp_payload_size (0x03):
+The max_udp_payload_size transport parameter is defined.
+"""
+
+_DRAFT_FIXTURE_TEXT = """Network Working Group
+Internet-Draft
+Intended status: Informational
+Expires: 4 April 2027
+
+draft-ietf-quic-qlog-main-schema-13
+
+qlog: Structured Logging for Network Protocols
+
+Abstract
+
+This is a minimal draft fixture for build-index tests.
+
+1.  Introduction
+
+This section describes structured logging for network protocol analysis.
+"""
+
+
+def _write_fixture_rfc(source_dir: Path) -> None:
     source_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(Path("docs/rfc/rfc9000.txt"), source_dir / "rfc9000.txt")
+    (source_dir / "rfc9000.txt").write_text(_RFC_FIXTURE_TEXT, encoding="utf-8")
+
+
+def _write_fixture_draft(
+    source_dir: Path,
+    *,
+    filename: str = "draft-ietf-quic-qlog-main-schema-13.txt",
+    draft_name: str = "draft-ietf-quic-qlog-main-schema-13",
+) -> None:
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_text = _DRAFT_FIXTURE_TEXT.replace(
+        "draft-ietf-quic-qlog-main-schema-13",
+        draft_name,
+    )
+    (source_dir / filename).write_text(source_text, encoding="utf-8")
 
 
 def test_build_index_writes_artifacts_and_qdrant_state(
@@ -24,7 +71,8 @@ def test_build_index_writes_artifacts_and_qdrant_state(
 ) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_fixture_rfc(source_dir)
+    _write_fixture_rfc(source_dir)
+    _write_fixture_draft(source_dir)
 
     exit_code = main(
         [
@@ -46,13 +94,14 @@ def test_build_index_writes_artifacts_and_qdrant_state(
     assert QdrantSectionStore(state_dir / "qdrant").collection_exists()
 
     output = capsys.readouterr().out
-    assert "indexed 1 RFC" in output
+    assert "indexed 2 documents" in output
 
 
 def test_build_index_reports_progress_stages(tmp_path: Path, capsys) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_fixture_rfc(source_dir)
+    _write_fixture_rfc(source_dir)
+    _write_fixture_draft(source_dir)
 
     exit_code = main(
         [
@@ -68,9 +117,33 @@ def test_build_index_reports_progress_stages(tmp_path: Path, capsys) -> None:
 
     assert exit_code == 0
     output = capsys.readouterr().out
-    assert "parse RFCs" in output
+    assert "parse docs" in output
     assert "embed sections" in output
     assert "100%" in output
+
+
+def test_build_index_rejects_duplicate_doc_ids(tmp_path: Path, capsys) -> None:
+    source_dir = tmp_path / "source"
+    state_dir = tmp_path / ".rag"
+    _write_fixture_draft(source_dir, filename="draft-a.txt")
+    _write_fixture_draft(source_dir, filename="draft-b.txt")
+
+    exit_code = main(
+        [
+            "build-index",
+            "--source",
+            str(source_dir),
+            "--state-dir",
+            str(state_dir),
+            "--embedder",
+            "fake",
+        ]
+    )
+
+    assert exit_code == 1
+    output = capsys.readouterr()
+    assert "duplicate doc_id draft-ietf-quic-qlog-main-schema-13" in output.err
+    assert "Traceback" not in output.err
 
 
 def test_build_index_uses_remote_qdrant_url_from_env(
@@ -79,7 +152,7 @@ def test_build_index_uses_remote_qdrant_url_from_env(
 ) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_fixture_rfc(source_dir)
+    _write_fixture_rfc(source_dir)
     captured: dict[str, object] = {}
 
     class FakeStore:
@@ -126,7 +199,7 @@ def test_build_index_uses_remote_qdrant_url_from_env(
 def test_doctor_reports_ready_after_build_index(tmp_path: Path, capsys) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_fixture_rfc(source_dir)
+    _write_fixture_rfc(source_dir)
 
     build_exit_code = main(
         [
@@ -167,7 +240,7 @@ def test_doctor_reports_remote_backend_when_qdrant_url_is_configured(
 ) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_fixture_rfc(source_dir)
+    _write_fixture_rfc(source_dir)
     monkeypatch.setenv("COQUIC_QDRANT_URL", "http://127.0.0.1:6333")
     monkeypatch.setattr(QdrantSectionStore, "section_count", lambda self: None)
 
@@ -193,7 +266,7 @@ def test_doctor_reports_unreachable_remote_backend_without_crashing(
 ) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_fixture_rfc(source_dir)
+    _write_fixture_rfc(source_dir)
     monkeypatch.setenv("COQUIC_QDRANT_URL", "http://127.0.0.1:6333")
 
     def _raise_connection_error(_self: QdrantSectionStore) -> int | None:

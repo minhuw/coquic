@@ -69,7 +69,10 @@ def _normalize_term_name(term: str) -> str:
 
 
 def _section_citation(record: dict[str, object]) -> str:
-    return f"RFC {record['rfc']} Section {record['section_id']}"
+    rfc_number = record.get("rfc_number")
+    if rfc_number is not None:
+        return f"RFC {rfc_number} Section {record['section_id']}"
+    return f"{record['doc_id']} Section {record['section_id']}"
 
 
 def _required_artifact_paths(paths: ProjectPaths) -> tuple[Path, Path, Path]:
@@ -172,18 +175,18 @@ class QueryService:
             collection_name=collection_name,
         )
         self._loaded = False
-        self._sections_by_key: dict[tuple[int, str], dict[str, object]] = {}
+        self._sections_by_key: dict[tuple[str, str], dict[str, object]] = {}
         self._sections_by_node_id: dict[str, dict[str, object]] = {}
         self._nodes_by_id: dict[str, dict[str, object]] = {}
         self._edges_from: dict[str, list[dict[str, object]]] = defaultdict(list)
         self._edges_to: dict[str, list[dict[str, object]]] = defaultdict(list)
 
-    def get_section(self, rfc: int, section_id: str) -> dict[str, object]:
+    def get_section(self, doc_id: str, section_id: str) -> dict[str, object]:
         self._ensure_loaded()
-        key = (rfc, str(section_id))
+        key = (str(doc_id), str(section_id))
         record = self._sections_by_key.get(key)
         if record is None:
-            return {"found": False, "rfc": rfc, "section_id": str(section_id)}
+            return {"found": False, "doc_id": str(doc_id), "section_id": str(section_id)}
         return self._section_result(record)
 
     def lookup_term(self, term_type: str, name: str) -> dict[str, object]:
@@ -198,7 +201,7 @@ class QueryService:
             }
         return self._trace_term_node(node)
 
-    def trace_term(self, term: str, rfc: int | None = None) -> dict[str, object]:
+    def trace_term(self, term: str, doc_id: str | None = None) -> dict[str, object]:
         self._ensure_loaded()
         normalized_term = _normalize_term_name(term)
         matches = [
@@ -214,21 +217,21 @@ class QueryService:
                 "mentions": [],
                 "fallback_results": self.search_sections(
                     normalized_term,
-                    rfc=rfc,
+                    doc_id=doc_id,
                     top_k=5,
                 ),
             }
-        return self._trace_term_node(matches[0], rfc=rfc)
+        return self._trace_term_node(matches[0], doc_id=doc_id)
 
     def related_sections(
         self,
-        rfc: int,
+        doc_id: str,
         section_id: str,
         edge_types: tuple[str, ...] = ("cites", "mentions", "defines"),
         top_k: int = 5,
     ) -> list[dict[str, object]]:
         self._ensure_loaded()
-        source = self._sections_by_key.get((rfc, str(section_id)))
+        source = self._sections_by_key.get((str(doc_id), str(section_id)))
         if source is None:
             return []
 
@@ -266,7 +269,7 @@ class QueryService:
             query_text,
             self._embedder_or_create(),
             limit=top_k + 1,
-            payload_filters={"rfc": rfc},
+            payload_filters={"doc_id": str(doc_id)},
         )
         results = []
         for hit in hits:
@@ -281,14 +284,14 @@ class QueryService:
         self,
         query: str,
         *,
-        rfc: int | None = None,
+        doc_id: str | None = None,
         category: str | None = None,
         top_k: int = 5,
     ) -> list[dict[str, object]]:
         self._ensure_loaded()
         payload_filters: dict[str, object] = {}
-        if rfc is not None:
-            payload_filters["rfc"] = rfc
+        if doc_id is not None:
+            payload_filters["doc_id"] = doc_id
         if category is not None:
             payload_filters["section_kind"] = category
 
@@ -300,10 +303,10 @@ class QueryService:
         )
         return [self._search_hit_result(hit, relation="semantic") for hit in hits]
 
-    def render_section_resource(self, rfc: int, section_id: str) -> str:
-        section = self.get_section(rfc, section_id)
+    def render_section_resource(self, doc_id: str, section_id: str) -> str:
+        section = self.get_section(doc_id, section_id)
         if not section.get("found"):
-            raise LookupError(f"RFC {rfc} Section {section_id} not found")
+            raise LookupError(f"{doc_id} Section {section_id} not found")
         return (
             f"{section['citation']}: {section['title']}\n\n"
             f"{section['text']}"
@@ -312,7 +315,7 @@ class QueryService:
     def _trace_term_node(
         self,
         node: dict[str, object],
-        rfc: int | None = None,
+        doc_id: str | None = None,
     ) -> dict[str, object]:
         term_id = str(node["id"])
         definitions = []
@@ -322,7 +325,7 @@ class QueryService:
             source = self._sections_by_node_id.get(str(edge["source"]))
             if source is None:
                 continue
-            if rfc is not None and int(source["rfc"]) != rfc:
+            if doc_id is not None and str(source["doc_id"]) != doc_id:
                 continue
             rendered = self._section_result(source, relation=edge_type)
             if edge_type == "defines":
@@ -350,7 +353,10 @@ class QueryService:
             payload = hit.payload
             record = {
                 "node_id": hit.node_id,
-                "rfc": payload["rfc"],
+                "doc_id": payload["doc_id"],
+                "doc_kind": payload["doc_kind"],
+                "rfc_number": payload.get("rfc_number"),
+                "draft_name": payload.get("draft_name"),
                 "section_id": payload["section_id"],
                 "title": payload["title"],
                 "text": payload["text"],
@@ -379,7 +385,18 @@ class QueryService:
         result = {
             "found": True,
             "node_id": str(record["node_id"]),
-            "rfc": int(record["rfc"]),
+            "doc_id": str(record["doc_id"]),
+            "doc_kind": str(record["doc_kind"]),
+            "rfc_number": (
+                int(record["rfc_number"])
+                if record.get("rfc_number") is not None
+                else None
+            ),
+            "draft_name": (
+                str(record["draft_name"])
+                if record.get("draft_name") is not None
+                else None
+            ),
             "section_id": str(record["section_id"]),
             "title": str(record["title"]),
             "text": str(record["text"]),
@@ -405,7 +422,7 @@ class QueryService:
         edges = read_graph_edges(edges_path)
 
         self._sections_by_key = {
-            (int(record["rfc"]), str(record["section_id"])): record for record in sections
+            (str(record["doc_id"]), str(record["section_id"])): record for record in sections
         }
         self._sections_by_node_id = {
             str(record["node_id"]): record for record in sections

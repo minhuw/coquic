@@ -13,7 +13,7 @@ from coquic_rag.embed.provider import (
     SentenceTransformerEmbedder,
 )
 from coquic_rag.graph.extractor import build_graph_artifacts
-from coquic_rag.ingest.rfc_parser import parse_rfc_document
+from coquic_rag.ingest.rfc_parser import parse_source_document
 from coquic_rag.query.service import IndexNotBuiltError, QueryService, get_index_status
 from coquic_rag.store.artifacts import (
     write_graph_edges,
@@ -60,7 +60,7 @@ def _runtime_paths(source: Path, state_dir: Path) -> ProjectPaths:
     )
 
 
-def _iter_rfc_paths(source: Path) -> list[Path]:
+def _iter_source_paths(source: Path) -> list[Path]:
     return sorted(path for path in source.glob("*.txt") if path.is_file())
 
 
@@ -72,19 +72,22 @@ def _build_embedder(name: str, paths: ProjectPaths, model_name: str):
 
 def _build_index(args: argparse.Namespace) -> int:
     paths = _runtime_paths(Path(args.source), Path(args.state_dir))
-    rfc_paths = _iter_rfc_paths(paths.rfc_source)
-    if not paths.rfc_source.is_dir() or not rfc_paths:
-        print(f"no RFC sources found under {paths.rfc_source}")
-        return 1
+    source_paths = _iter_source_paths(paths.rfc_source)
+    if not paths.rfc_source.is_dir() or not source_paths:
+        raise ValueError(f"no source documents found under {paths.rfc_source}")
 
     section_records: list[dict[str, object]] = []
     graph_nodes: list[dict[str, object]] = []
     graph_edges: list[dict[str, object]] = []
+    parsed_doc_ids: set[str] = set()
 
-    parse_progress = _ProgressBar("parse RFCs", len(rfc_paths))
+    parse_progress = _ProgressBar("parse docs", len(source_paths))
     parse_progress.update(0)
-    for index, path in enumerate(rfc_paths, start=1):
-        document = parse_rfc_document(path)
+    for index, path in enumerate(source_paths, start=1):
+        document = parse_source_document(path)
+        if document.doc_id in parsed_doc_ids:
+            raise ValueError(f"duplicate doc_id {document.doc_id}")
+        parsed_doc_ids.add(document.doc_id)
         doc_section_records, doc_graph_nodes, doc_graph_edges = build_graph_artifacts(
             document
         )
@@ -111,7 +114,7 @@ def _build_index(args: argparse.Namespace) -> int:
     )
 
     print(
-        f"indexed {len(rfc_paths)} RFC{'s' if len(rfc_paths) != 1 else ''} "
+        f"indexed {len(source_paths)} documents "
         f"with {len(section_records)} sections"
     )
     return 0
@@ -144,7 +147,7 @@ def _search_sections(args: argparse.Namespace) -> int:
         {
             "results": _query_service(args).search_sections(
                 args.query,
-                rfc=args.rfc,
+                doc_id=args.doc,
                 category=args.category,
                 top_k=args.top_k,
             )
@@ -154,12 +157,12 @@ def _search_sections(args: argparse.Namespace) -> int:
 
 
 def _get_section(args: argparse.Namespace) -> int:
-    _write_json(_query_service(args).get_section(args.rfc, args.section_id))
+    _write_json(_query_service(args).get_section(args.doc, args.section_id))
     return 0
 
 
 def _trace_term(args: argparse.Namespace) -> int:
-    _write_json(_query_service(args).trace_term(args.term, rfc=args.rfc))
+    _write_json(_query_service(args).trace_term(args.term, doc_id=args.doc))
     return 0
 
 
@@ -167,7 +170,7 @@ def _related_sections(args: argparse.Namespace) -> int:
     _write_json(
         {
             "sections": _query_service(args).related_sections(
-                args.rfc,
+                args.doc,
                 args.section_id,
                 edge_types=tuple(args.edge_type) if args.edge_type else ("cites", "mentions", "defines"),
                 top_k=args.top_k,
@@ -214,26 +217,26 @@ def _build_parser() -> argparse.ArgumentParser:
     search_sections_parser = subparsers.add_parser("search-sections")
     _add_runtime_args(search_sections_parser, include_embedder=True)
     search_sections_parser.add_argument("query")
-    search_sections_parser.add_argument("--rfc", type=int)
+    search_sections_parser.add_argument("--doc")
     search_sections_parser.add_argument("--category")
     search_sections_parser.add_argument("--top-k", type=int, default=5)
     search_sections_parser.set_defaults(handler=_search_sections)
 
     get_section_parser = subparsers.add_parser("get-section")
     _add_runtime_args(get_section_parser, include_embedder=True)
-    get_section_parser.add_argument("--rfc", type=int, required=True)
+    get_section_parser.add_argument("--doc", required=True)
     get_section_parser.add_argument("--section-id", required=True)
     get_section_parser.set_defaults(handler=_get_section)
 
     trace_term_parser = subparsers.add_parser("trace-term")
     _add_runtime_args(trace_term_parser, include_embedder=True)
     trace_term_parser.add_argument("term")
-    trace_term_parser.add_argument("--rfc", type=int)
+    trace_term_parser.add_argument("--doc")
     trace_term_parser.set_defaults(handler=_trace_term)
 
     related_sections_parser = subparsers.add_parser("related-sections")
     _add_runtime_args(related_sections_parser, include_embedder=True)
-    related_sections_parser.add_argument("--rfc", type=int, required=True)
+    related_sections_parser.add_argument("--doc", required=True)
     related_sections_parser.add_argument("--section-id", required=True)
     related_sections_parser.add_argument("--edge-type", action="append")
     related_sections_parser.add_argument("--top-k", type=int, default=5)
@@ -253,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
-    except IndexNotBuiltError as error:
+    except (IndexNotBuiltError, ValueError) as error:
         print(error, file=sys.stderr)
         return 1
 

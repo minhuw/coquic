@@ -1154,8 +1154,9 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
     const auto packet_requires_connected_state = [](std::span<const std::byte> packet_bytes) {
         return (std::to_integer<std::uint8_t>(packet_bytes.front()) & 0x80u) == 0;
     };
-    const auto defer_packet = [&](std::span<const std::byte> packet_bytes) {
-        const auto deferred = std::vector<std::byte>(packet_bytes.begin(), packet_bytes.end());
+    const auto defer_packet = [&](std::span<const std::byte> packet_bytes,
+                                  QuicPathId deferred_path_id) {
+        auto deferred = std::vector<std::byte>(packet_bytes.begin(), packet_bytes.end());
         if (std::find(deferred_protected_packets_.begin(), deferred_protected_packets_.end(),
                       deferred) != deferred_protected_packets_.end()) {
             return;
@@ -1163,7 +1164,7 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
         if (deferred_protected_packets_.size() >= kMaximumDeferredProtectedPackets) {
             deferred_protected_packets_.erase(deferred_protected_packets_.begin());
         }
-        deferred_protected_packets_.push_back(deferred);
+        deferred_protected_packets_.emplace_back(std::move(deferred), deferred_path_id);
     };
     std::size_t offset = 0;
     bool processed_any_packet = false;
@@ -1186,8 +1187,8 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
         };
     };
-    const auto process_packet_bytes = [&](std::span<const std::byte> packet_bytes,
-                                          bool allow_defer) -> bool {
+    const auto process_packet_bytes = [&](std::span<const std::byte> packet_bytes, bool allow_defer,
+                                          QuicPathId packet_path_id) -> bool {
         auto packets = deserialize_protected_datagram(
             packet_bytes,
             make_deserialize_context(application_space_.read_secret, application_read_key_phase_));
@@ -1250,7 +1251,7 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             if (should_defer_packet) {
                 // Later packets in the same datagram can depend on keys unlocked by an earlier
                 // packet, so buffer them even after partial progress.
-                defer_packet(packet_bytes);
+                defer_packet(packet_bytes, packet_path_id);
                 return true;
             }
             const bool should_discard_short_header_packet =
@@ -1288,7 +1289,7 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                     : false;
             const bool defer_protected_app_packet = allow_defer & protected_one_rtt_requires_defer;
             if (defer_protected_app_packet) {
-                defer_packet(packet_bytes);
+                defer_packet(packet_bytes, packet_path_id);
                 return true;
             }
 
@@ -1333,13 +1334,14 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
 
         auto deferred_packets = std::move(deferred_protected_packets_);
         deferred_protected_packets_.clear();
-        for (const auto &packet_bytes : deferred_packets) {
-            if (packet_requires_connected_state(packet_bytes) &&
+        for (const auto &deferred_packet : deferred_packets) {
+            if (packet_requires_connected_state(deferred_packet.bytes) &&
                 status_ != HandshakeStatus::connected) {
-                defer_packet(packet_bytes);
+                defer_packet(deferred_packet.bytes, deferred_packet.path_id);
                 continue;
             }
-            if (!process_packet_bytes(packet_bytes, /*allow_defer=*/true)) {
+            if (!process_packet_bytes(deferred_packet.bytes, /*allow_defer=*/true,
+                                      deferred_packet.path_id)) {
                 return false;
             }
         }
@@ -1372,7 +1374,7 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
         }
 
         const auto packet_bytes = bytes.subspan(offset, packet_length.value());
-        if (!process_packet_bytes(packet_bytes, /*allow_defer=*/true)) {
+        if (!process_packet_bytes(packet_bytes, /*allow_defer=*/true, path_id)) {
             return;
         }
         processed_any_packet = true;
@@ -3233,8 +3235,8 @@ void QuicConnection::collect_pending_tls_bytes() {
 void QuicConnection::replay_deferred_protected_packets(QuicCoreTimePoint now) {
     auto deferred_packets = std::move(deferred_protected_packets_);
     deferred_protected_packets_.clear();
-    for (const auto &packet_bytes : deferred_packets) {
-        process_inbound_datagram(packet_bytes, now, last_inbound_path_id_);
+    for (const auto &deferred_packet : deferred_packets) {
+        process_inbound_datagram(deferred_packet.bytes, now, deferred_packet.path_id);
         if (status_ == HandshakeStatus::failed) {
             return;
         }

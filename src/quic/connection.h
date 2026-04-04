@@ -5,6 +5,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/quic/congestion.h"
@@ -97,6 +98,29 @@ struct StoredClientResumptionState {
     TransportParameters peer_transport_parameters;
     std::vector<std::byte> application_context;
 };
+
+struct DeferredProtectedDatagram {
+    std::vector<std::byte> bytes;
+    QuicPathId path_id = 0;
+
+    DeferredProtectedDatagram() = default;
+    DeferredProtectedDatagram(std::vector<std::byte> datagram_bytes)
+        : bytes(std::move(datagram_bytes)) {
+    }
+    DeferredProtectedDatagram(std::vector<std::byte> datagram_bytes, QuicPathId id)
+        : bytes(std::move(datagram_bytes)), path_id(id) {
+    }
+
+    bool operator==(const DeferredProtectedDatagram &) const = default;
+};
+
+inline bool operator==(const DeferredProtectedDatagram &lhs, const std::vector<std::byte> &rhs) {
+    return lhs.bytes == rhs;
+}
+
+inline bool operator==(const std::vector<std::byte> &lhs, const DeferredProtectedDatagram &rhs) {
+    return lhs == rhs.bytes;
+}
 
 class QuicConnection {
   public:
@@ -254,7 +278,7 @@ class QuicConnection {
     bool resumption_state_emitted_ = false;
     bool zero_rtt_attempted_event_emitted_ = false;
     bool processed_peer_packet_ = false;
-    std::vector<std::vector<std::byte>> deferred_protected_packets_;
+    std::vector<DeferredProtectedDatagram> deferred_protected_packets_;
     std::optional<QuicCoreTimePoint> last_peer_activity_time_;
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
     std::optional<QuicCoreTimePoint> server_zero_rtt_discard_deadline_;

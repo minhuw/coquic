@@ -34,6 +34,7 @@
 #include "src/quic/packet.h"
 #define private public
 #include "src/quic/http09_runtime.h"
+#include "src/quic/connection.h"
 #undef private
 #include "src/quic/http09_runtime_test_hooks.h"
 #include "tests/quic_test_utils.h"
@@ -4102,6 +4103,34 @@ TEST(QuicHttp09RuntimeTest, RuntimeAssignsStablePathIdsPerPeerTuple) {
 
 TEST(QuicHttp09RuntimeTest, DriveEndpointUsesTransportSelectedPathAndSocket) {
     EXPECT_TRUE(coquic::quic::test::drive_endpoint_uses_transport_selected_path_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, DeferredReplayPreservesIndividualBufferedPathIds) {
+    coquic::quic::QuicConnection connection(coquic::quic::QuicCoreConfig{
+        .role = coquic::quic::EndpointRole::client,
+        .source_connection_id = {std::byte{0x01}},
+        .initial_destination_connection_id = {std::byte{0x02}},
+    });
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+
+    const auto first_deferred = std::vector<std::byte>{
+        std::byte{0x40}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
+    };
+    const auto second_deferred = std::vector<std::byte>{
+        std::byte{0x40}, std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08},
+    };
+    connection.process_inbound_datagram(first_deferred, coquic::quic::test::test_time(1),
+                                        /*path_id=*/11);
+    connection.process_inbound_datagram(second_deferred, coquic::quic::test::test_time(2),
+                                        /*path_id=*/22);
+    ASSERT_GE(connection.deferred_protected_packets_.size(), 2u);
+
+    connection.current_send_path_id_.reset();
+    connection.replay_deferred_protected_packets(coquic::quic::test::test_time(3));
+
+    ASSERT_TRUE(connection.current_send_path_id_.has_value());
+    EXPECT_EQ(connection.current_send_path_id_.value_or(0), 11u);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeTraceHooksCoverIdleTimeoutAndServerFailureBranches) {

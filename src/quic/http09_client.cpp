@@ -158,6 +158,8 @@ void QuicHttp09ClientEndpoint::activate_pending_request() {
                        .complete = false,
                    });
     if (config_.request_key_update && !key_update_requested_ && request_index == 0) {
+        // Intentionally queued immediately after first request activation; transport-side legality
+        // for when the update is actually applied is deferred to later key-update tasks.
         pending_core_inputs_.emplace_back(QuicCoreRequestKeyUpdate{});
         key_update_requested_ = true;
     }

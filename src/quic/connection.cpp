@@ -1187,6 +1187,18 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             make_deserialize_context(application_space_.read_secret, application_read_key_phase_));
         const bool short_header_packet =
             (std::to_integer<std::uint8_t>(packet_bytes.front()) & 0x80u) == 0;
+        bool used_previous_application_read_secret = false;
+        bool processed_current_read_phase_packet = false;
+        if (!packets.has_value() && short_header_packet &&
+            previous_application_read_secret_.has_value()) {
+            auto previous_packets = deserialize_protected_datagram(
+                packet_bytes, make_deserialize_context(previous_application_read_secret_,
+                                                       previous_application_read_key_phase_));
+            if (previous_packets.has_value()) {
+                packets = std::move(previous_packets);
+                used_previous_application_read_secret = true;
+            }
+        }
         if (!packets.has_value()) {
             const bool retry_with_next_key_phase =
                 (packets.error().code == CodecErrorCode::invalid_packet_protection_state) &
@@ -1211,6 +1223,10 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                     application_space_.write_secret = next_write_secret.value();
                     application_read_key_phase_ = !application_read_key_phase_;
                     application_write_key_phase_ = !application_write_key_phase_;
+                    current_write_phase_first_packet_number_ = std::nullopt;
+                    if (!local_key_update_initiated_) {
+                        local_key_update_requested_ = false;
+                    }
                     packets = std::move(updated_packets);
                 }
             }
@@ -1286,6 +1302,9 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                 mark_failed();
                 return false;
             }
+            if (protected_one_rtt_packet != nullptr && !used_previous_application_read_secret) {
+                processed_current_read_phase_packet = true;
+            }
 
             synced = sync_tls_state();
             if (!synced.has_value()) {
@@ -1293,6 +1312,10 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                 mark_failed();
                 return false;
             }
+        }
+
+        if (processed_current_read_phase_packet) {
+            previous_application_read_secret_ = std::nullopt;
         }
 
         return true;
@@ -1440,6 +1463,10 @@ StreamStateResult<bool> QuicConnection::queue_stop_sending(LocalStopSendingComma
     }
 
     return StreamStateResult<bool>::success(true);
+}
+
+void QuicConnection::request_key_update() {
+    local_key_update_requested_ = true;
 }
 
 std::vector<std::byte> QuicConnection::drain_outbound_datagram(QuicCoreTimePoint now) {
@@ -4342,6 +4369,54 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             maybe_queue_stream_blocked_frame(stream);
         }
         maybe_queue_connection_blocked_frame();
+        const auto reserve_application_packet_number =
+            [&](bool using_one_rtt_packet_protection) -> std::optional<std::uint64_t> {
+            const auto packet_number = application_space_.next_send_packet_number;
+            if (using_one_rtt_packet_protection) {
+                const auto largest_acked =
+                    application_space_.recovery.largest_acked_packet_number();
+                const bool can_initiate_local_key_update =
+                    local_key_update_requested_ && handshake_confirmed_ &&
+                    application_space_.read_secret.has_value() &&
+                    application_space_.write_secret.has_value() && !local_key_update_initiated_ &&
+                    current_write_phase_first_packet_number_.has_value() &&
+                    largest_acked.has_value() &&
+                    *largest_acked >= *current_write_phase_first_packet_number_;
+                if (can_initiate_local_key_update) {
+                    const auto next_read_secret =
+                        derive_next_traffic_secret(*application_space_.read_secret);
+                    if (!next_read_secret.has_value()) {
+                        log_codec_failure("derive_next_traffic_secret", next_read_secret.error());
+                        mark_failed();
+                        return std::nullopt;
+                    }
+
+                    const auto next_write_secret =
+                        derive_next_traffic_secret(*application_space_.write_secret);
+                    if (!next_write_secret.has_value()) {
+                        log_codec_failure("derive_next_traffic_secret", next_write_secret.error());
+                        mark_failed();
+                        return std::nullopt;
+                    }
+
+                    previous_application_read_secret_ = application_space_.read_secret;
+                    previous_application_read_key_phase_ = application_read_key_phase_;
+                    application_space_.read_secret = next_read_secret.value();
+                    application_space_.write_secret = next_write_secret.value();
+                    application_read_key_phase_ = !application_read_key_phase_;
+                    application_write_key_phase_ = !application_write_key_phase_;
+                    local_key_update_requested_ = false;
+                    local_key_update_initiated_ = true;
+                    current_write_phase_first_packet_number_ = packet_number;
+                }
+                if (!current_write_phase_first_packet_number_.has_value()) {
+                    current_write_phase_first_packet_number_ = packet_number;
+                }
+            }
+
+            ++application_space_.next_send_packet_number;
+            return packet_number;
+        };
         const auto take_reset_stream_frames = [](auto &streams) -> std::vector<ResetStreamFrame> {
             std::vector<ResetStreamFrame> frames;
             for (auto &[stream_id, stream] : streams) {
@@ -4912,17 +4987,21 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 frames.emplace_back(PingFrame{});
             }
 
-            const auto packet_number = application_space_.next_send_packet_number++;
+            const auto packet_number =
+                reserve_application_packet_number(!use_zero_rtt_packet_protection);
+            if (!packet_number.has_value()) {
+                return {};
+            }
             packets.emplace_back(make_application_protected_packet(
                 use_zero_rtt_packet_protection, current_version_, destination_connection_id,
                 config_.source_connection_id, application_write_key_phase_,
-                kDefaultInitialPacketNumberLength, packet_number, std::move(frames),
+                kDefaultInitialPacketNumberLength, *packet_number, std::move(frames),
                 probe_stream_fragments));
 
             track_sent_packet(
                 application_space_,
                 SentPacketRecord{
-                    .packet_number = packet_number,
+                    .packet_number = *packet_number,
                     .sent_time = now,
                     .ack_eliciting = true,
                     .in_flight = true,
@@ -4965,11 +5044,16 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
                 std::vector<Frame> ack_only_frames;
                 ack_only_frames.emplace_back(ack_frame);
+                const auto packet_number =
+                    reserve_application_packet_number(!use_zero_rtt_packet_protection);
+                if (!packet_number.has_value()) {
+                    return {};
+                }
                 packets.emplace_back(make_application_protected_packet(
                     use_zero_rtt_packet_protection, current_version_, destination_connection_id,
                     config_.source_connection_id, application_write_key_phase_,
-                    kDefaultInitialPacketNumberLength, application_space_.next_send_packet_number++,
-                    std::move(ack_only_frames), {}));
+                    kDefaultInitialPacketNumberLength, *packet_number, std::move(ack_only_frames),
+                    {}));
                 application_space_.received_packets.on_ack_sent();
                 application_space_.pending_ack_deadline = std::nullopt;
                 application_space_.force_ack_send = false;
@@ -5196,27 +5280,31 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 frames.emplace_back(frame);
             }
 
-            const auto packet_number = application_space_.next_send_packet_number++;
+            const auto packet_number =
+                reserve_application_packet_number(!use_zero_rtt_packet_protection);
+            if (!packet_number.has_value()) {
+                return {};
+            }
             const auto stream_bytes = stream_fragment_bytes(stream_fragments);
             if (packet_trace_matches_connection(config_.source_connection_id)) {
                 const auto ack_trace_value = static_cast<int>(selected_ack_frame.has_value());
                 const auto handshake_done_trace_value = static_cast<int>(include_handshake_done);
                 std::cerr << "quic-packet-trace send scid="
                           << format_connection_id_hex(config_.source_connection_id)
-                          << " pn=" << packet_number << " ack=" << ack_trace_value
+                          << " pn=" << *packet_number << " ack=" << ack_trace_value
                           << " hsdone=" << handshake_done_trace_value << " stream=" << stream_bytes
                           << " bytes=" << candidate_datagram.value().size() << '\n';
             }
             packets.emplace_back(make_application_protected_packet(
                 use_zero_rtt_packet_protection, current_version_, destination_connection_id,
                 config_.source_connection_id, application_write_key_phase_,
-                kDefaultInitialPacketNumberLength, packet_number, std::move(frames),
+                kDefaultInitialPacketNumberLength, *packet_number, std::move(frames),
                 stream_fragments));
 
             if (ack_eliciting) {
                 track_sent_packet(application_space_,
                                   SentPacketRecord{
-                                      .packet_number = packet_number,
+                                      .packet_number = *packet_number,
                                       .sent_time = now,
                                       .ack_eliciting = ack_eliciting,
                                       .in_flight = ack_eliciting,

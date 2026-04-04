@@ -1471,6 +1471,18 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
     }
 }
 
+QuicHttp09ClientConfig make_http09_client_endpoint_config(
+    const Http09RuntimeConfig &config, const std::vector<QuicHttp09Request> &requests,
+    bool attempt_zero_rtt_requests, const QuicCoreResult &start_result) {
+    return QuicHttp09ClientConfig{
+        .requests = requests,
+        .download_root = config.download_root,
+        .allow_requests_before_handshake_ready =
+            allow_requests_before_handshake_ready(attempt_zero_rtt_requests, start_result),
+        .request_key_update = config.testcase == QuicHttp09Testcase::keyupdate,
+    };
+}
+
 ClientConnectionRunResult run_http09_client_connection_with_core_config(
     const Http09RuntimeConfig &config, const std::vector<QuicHttp09Request> &requests,
     QuicCoreConfig core_config, std::uint64_t connection_index) {
@@ -1516,13 +1528,8 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
     const auto start_result = core.advance(QuicCoreStart{}, now());
     record_resumption_state(state, start_result);
 
-    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
-        .requests = requests,
-        .download_root = config.download_root,
-        .allow_requests_before_handshake_ready =
-            allow_requests_before_handshake_ready(attempt_zero_rtt_requests, start_result),
-        .request_key_update = config.testcase == QuicHttp09Testcase::keyupdate,
-    });
+    QuicHttp09ClientEndpoint endpoint(make_http09_client_endpoint_config(
+        config, requests, attempt_zero_rtt_requests, start_result));
     return ClientConnectionRunResult{
         .exit_code = run_http09_client_connection_loop(
             make_endpoint_driver(endpoint), core, socket_fd, client_receive_timeout_ms(config),
@@ -2332,6 +2339,13 @@ std::string connection_id_key_for_tests(std::span<const std::byte> connection_id
 
 int client_receive_timeout_ms_for_tests(const Http09RuntimeConfig &config) {
     return client_receive_timeout_ms(config);
+}
+
+QuicHttp09ClientConfig make_http09_client_endpoint_config_for_tests(
+    const Http09RuntimeConfig &config, const std::vector<QuicHttp09Request> &requests,
+    bool attempt_zero_rtt_requests, const QuicCoreResult &start_result) {
+    return make_http09_client_endpoint_config(config, requests, attempt_zero_rtt_requests,
+                                              start_result);
 }
 
 int run_http09_client_connection_for_tests(const Http09RuntimeConfig &config,

@@ -108,6 +108,7 @@ class QuicConnection {
                                               std::span<const std::byte> bytes, bool fin);
     StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
     StreamStateResult<bool> queue_stop_sending(LocalStopSendingCommand command);
+    void request_key_update();
     std::vector<std::byte> drain_outbound_datagram(QuicCoreTimePoint now);
     void on_timeout(QuicCoreTimePoint now);
     std::optional<QuicCoreReceiveStreamData> take_received_stream_data();
@@ -237,6 +238,11 @@ class QuicConnection {
     std::uint8_t remaining_pto_probe_datagrams_ = 0;
     bool application_read_key_phase_ = false;
     bool application_write_key_phase_ = false;
+    bool local_key_update_requested_ = false;
+    bool local_key_update_initiated_ = false;
+    std::optional<std::uint64_t> current_write_phase_first_packet_number_;
+    std::optional<TrafficSecret> previous_application_read_secret_;
+    bool previous_application_read_key_phase_ = false;
     bool initial_packet_space_discarded_ = false;
     bool handshake_packet_space_discarded_ = false;
     bool handshake_confirmed_ = false;

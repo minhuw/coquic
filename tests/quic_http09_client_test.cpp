@@ -87,6 +87,16 @@ send_stream_inputs_from(const QuicHttp09EndpointUpdate &update) {
     return out;
 }
 
+std::size_t key_update_input_count(const QuicHttp09EndpointUpdate &update) {
+    std::size_t count = 0;
+    for (const auto &input : update.core_inputs) {
+        if (std::holds_alternative<coquic::quic::QuicCoreRequestKeyUpdate>(input)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 std::string read_file_bytes(const std::filesystem::path &path) {
     std::ifstream input(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
@@ -162,9 +172,37 @@ TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesSingleRequestAfterFirstRequestActi
     const auto accepted =
         endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
 
-    ASSERT_EQ(accepted.core_inputs.size(), 1u);
-    EXPECT_TRUE(std::holds_alternative<coquic::quic::QuicCoreRequestKeyUpdate>(
-        accepted.core_inputs.front()));
+    EXPECT_EQ(key_update_input_count(accepted), 1u);
+}
+
+TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesRequestOnlyOnceAcrossLaterActivity) {
+    const auto now = coquic::quic::test::test_time();
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests =
+            {
+                request_for_target("/alpha.txt"),
+                request_for_target("/beta.txt"),
+            },
+        .download_root = std::filesystem::path("/downloads"),
+        .request_key_update = true,
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+
+    const auto first_accepted =
+        endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
+    EXPECT_EQ(key_update_input_count(first_accepted), 1u);
+
+    const auto second_polled = endpoint.poll(coquic::quic::test::test_time(1));
+    EXPECT_EQ(key_update_input_count(second_polled), 0u);
+
+    const auto second_accepted =
+        endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(2));
+    EXPECT_EQ(key_update_input_count(second_accepted), 0u);
+
+    const auto third_polled = endpoint.poll(coquic::quic::test::test_time(2));
+    EXPECT_EQ(key_update_input_count(third_polled), 0u);
 }
 
 TEST(QuicHttp09ClientTest, TransferCaseDoesNotQueueLocalKeyUpdateRequest) {
@@ -180,7 +218,7 @@ TEST(QuicHttp09ClientTest, TransferCaseDoesNotQueueLocalKeyUpdateRequest) {
     const auto accepted =
         endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
 
-    EXPECT_TRUE(accepted.core_inputs.empty());
+    EXPECT_EQ(key_update_input_count(accepted), 0u);
 }
 
 TEST(QuicHttp09ClientTest, DoesNotReissueRequestsAfterInitialPoll) {

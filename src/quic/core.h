@@ -95,7 +95,11 @@ struct QuicCoreStopSending {
 };
 
 struct QuicCoreTimerExpired {};
-struct QuicCoreRequestKeyUpdate : QuicCoreTimerExpired {};
+struct QuicCoreRequestKeyUpdate {
+    constexpr operator QuicCoreTimerExpired() const {
+        return QuicCoreTimerExpired{};
+    }
+};
 
 using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
                                    QuicCoreResetStream, QuicCoreStopSending, QuicCoreTimerExpired,

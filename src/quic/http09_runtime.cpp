@@ -1023,6 +1023,9 @@ QuicCoreResult advance_core_with_inputs(QuicCore &core, std::span<const QuicCore
                                         QuicCoreTimePoint step_time) {
     QuicCoreResult combined;
     for (const auto &input : inputs) {
+        if (std::holds_alternative<QuicCoreRequestKeyUpdate>(input)) {
+            continue;
+        }
         auto step = core.advance(input, step_time);
         combined.effects.insert(combined.effects.end(),
                                 std::make_move_iterator(step.effects.begin()),

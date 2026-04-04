@@ -173,9 +173,7 @@ TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesSingleRequestAfterFirstRequestActi
     const auto accepted =
         endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
 
-    ASSERT_EQ(accepted.core_inputs.size(), 1u);
-    EXPECT_TRUE(std::holds_alternative<coquic::quic::QuicCoreRequestKeyUpdate>(
-        accepted.core_inputs.front()));
+    EXPECT_EQ(key_update_input_count(accepted), 1u);
 }
 
 TEST(QuicHttp09ClientTest, KeyUpdateInputTypeIsIndependentFromTimerExpiredInput) {

@@ -79,42 +79,42 @@ def create_mcp_server(
         )
     app = FastMCP(
         name="coquic-rag",
-        instructions="Local QUIC RFC knowledge base for Codex queries.",
+        instructions="Local QUIC RFC and Internet-Draft knowledge base for Codex queries.",
     )
 
     @app.tool(structured_output=True)
     def search_sections(
         query: str,
-        rfc: int | None = None,
+        doc_id: str | None = None,
         category: str | None = None,
         top_k: int = 5,
     ) -> dict[str, object]:
         return {
             "results": query_service.search_sections(
                 query,
-                rfc=rfc,
+                doc_id=doc_id,
                 category=category,
                 top_k=top_k,
             )
         }
 
     @app.tool(structured_output=True)
-    def get_section(rfc: int, section_id: str) -> dict[str, object]:
-        return query_service.get_section(rfc, section_id)
+    def get_section(doc_id: str, section_id: str) -> dict[str, object]:
+        return query_service.get_section(doc_id, section_id)
 
     @app.tool(structured_output=True)
-    def trace_term(term: str, rfc: int | None = None) -> dict[str, object]:
-        return query_service.trace_term(term, rfc=rfc)
+    def trace_term(term: str, doc_id: str | None = None) -> dict[str, object]:
+        return query_service.trace_term(term, doc_id=doc_id)
 
     @app.tool(structured_output=True)
     def related_sections(
-        rfc: int,
+        doc_id: str,
         section_id: str,
         edge_types: list[str] | None = None,
     ) -> dict[str, object]:
         return {
             "sections": query_service.related_sections(
-                rfc,
+                doc_id,
                 section_id,
                 edge_types=(
                     tuple(edge_types)
@@ -129,13 +129,13 @@ def create_mcp_server(
         return query_service.lookup_term(term_type, name)
 
     @app.resource(
-        "quic://rfc/{rfc}/section/{section_id}",
-        name="rfc_section",
-        description="Canonical QUIC RFC section text",
+        "quic://doc/{doc_id}/section/{section_id}",
+        name="document_section",
+        description="Canonical QUIC RFC or Internet-Draft section text",
         mime_type="text/plain",
     )
-    def rfc_section(rfc: int, section_id: str) -> str:
-        return query_service.render_section_resource(rfc, section_id)
+    def document_section(doc_id: str, section_id: str) -> str:
+        return query_service.render_section_resource(doc_id, section_id)
 
     return app
 

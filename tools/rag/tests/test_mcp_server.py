@@ -16,10 +16,33 @@ from coquic_rag.query.service import IndexNotBuiltError, IndexStatus, QueryServi
 from coquic_rag.store.qdrant_store import QdrantSectionStore
 
 
+_DRAFT_FIXTURE_TEXT = """Network Working Group
+Internet-Draft
+Intended status: Informational
+Expires: 4 April 2027
+
+draft-ietf-quic-qlog-main-schema-13
+
+qlog: Structured Logging for Network Protocols
+
+Abstract
+
+This is a minimal draft fixture for MCP tests.
+
+1.  Introduction
+
+This section describes structured logging for network protocol analysis.
+"""
+
+
 def _copy_query_fixtures(source_dir: Path) -> None:
     source_dir.mkdir(parents=True, exist_ok=True)
     for filename in ("rfc9000.txt", "rfc9369.txt"):
         shutil.copyfile(Path("docs/rfc") / filename, source_dir / filename)
+    (source_dir / "draft-ietf-quic-qlog-main-schema-13.txt").write_text(
+        _DRAFT_FIXTURE_TEXT,
+        encoding="utf-8",
+    )
 
 
 def _build_server(tmp_path: Path):
@@ -72,9 +95,9 @@ def test_mcp_server_exposes_query_tools(tmp_path: Path) -> None:
     _, get_section_result = anyio.run(
         server.call_tool,
         "get_section",
-        {"rfc": 9000, "section_id": "18.2"},
+        {"doc_id": "draft-ietf-quic-qlog-main-schema-13", "section_id": "1"},
     )
-    assert get_section_result["citation"] == "RFC 9000 Section 18.2"
+    assert get_section_result["citation"] == "draft-ietf-quic-qlog-main-schema-13 Section 1"
 
     _, trace_term_result = anyio.run(
         server.call_tool,
@@ -86,7 +109,7 @@ def test_mcp_server_exposes_query_tools(tmp_path: Path) -> None:
     _, related_sections_result = anyio.run(
         server.call_tool,
         "related_sections",
-        {"rfc": 9369, "section_id": "5"},
+        {"doc_id": "rfc9369", "section_id": "5"},
     )
     assert any(
         section["section_id"] in {"4", "4.1"}
@@ -113,15 +136,15 @@ def test_mcp_server_exposes_section_resource_template(tmp_path: Path) -> None:
 
     resource_templates = anyio.run(server.list_resource_templates)
     assert any(
-        template.uriTemplate == "quic://rfc/{rfc}/section/{section_id}"
+        template.uriTemplate == "quic://doc/{doc_id}/section/{section_id}"
         for template in resource_templates
     )
 
     contents = anyio.run(
         server.read_resource,
-        "quic://rfc/9000/section/18.2",
+        "quic://doc/draft-ietf-quic-qlog-main-schema-13/section/1",
     )
-    assert "Transport Parameter Definitions" in contents[0].content
+    assert "Introduction" in contents[0].content
 
 
 def test_create_mcp_server_fails_fast_when_index_is_incomplete(

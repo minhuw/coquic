@@ -1,3 +1,4 @@
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -13,6 +14,7 @@ namespace {
 using coquic::quic::CodecErrorCode;
 using coquic::quic::ConnectionId;
 using coquic::quic::EndpointRole;
+using coquic::quic::PreferredAddress;
 using coquic::quic::TransportParameters;
 using coquic::quic::TransportParametersValidationContext;
 using coquic::quic::VersionInformation;
@@ -40,6 +42,26 @@ TransportParametersValidationContext make_validation_context(
         .expected_retry_source_connection_id = std::move(expected_retry_source_connection_id),
         .expected_version_information = std::move(expected_version_information),
         .reacted_to_version_negotiation = reacted_to_version_negotiation,
+    };
+}
+
+PreferredAddress sample_preferred_address() {
+    return PreferredAddress{
+        .ipv4_address = {std::byte{0xc0}, std::byte{0x00}, std::byte{0x02}, std::byte{0x0a}},
+        .ipv4_port = 443,
+        .ipv6_address = {std::byte{0x20}, std::byte{0x01}, std::byte{0x0d}, std::byte{0xb8},
+                         std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+                         std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+                         std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x42}},
+        .ipv6_port = 8443,
+        .connection_id =
+            ConnectionId{std::byte{0xde}, std::byte{0xad}, std::byte{0xbe}, std::byte{0xef}},
+        .stateless_reset_token = {std::byte{0x00}, std::byte{0x01}, std::byte{0x02},
+                                  std::byte{0x03}, std::byte{0x04}, std::byte{0x05},
+                                  std::byte{0x06}, std::byte{0x07}, std::byte{0x08},
+                                  std::byte{0x09}, std::byte{0x0a}, std::byte{0x0b},
+                                  std::byte{0x0c}, std::byte{0x0d}, std::byte{0x0e},
+                                  std::byte{0x0f}},
     };
 }
 
@@ -84,6 +106,42 @@ TEST(QuicTransportParametersTest, RoundTripsRetrySourceConnectionId) {
     EXPECT_EQ(decoded.value().initial_source_connection_id,
               parameters.initial_source_connection_id);
     EXPECT_EQ(decoded.value().retry_source_connection_id, parameters.retry_source_connection_id);
+}
+
+TEST(QuicTransportParametersTest, RoundTripsDisableActiveMigration) {
+    const TransportParameters parameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .disable_active_migration = true,
+        .initial_source_connection_id = ConnectionId{std::byte{0xc1}, std::byte{0x01}},
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_transport_parameters(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_TRUE(decoded.value().disable_active_migration);
+}
+
+TEST(QuicTransportParametersTest, RoundTripsPreferredAddress) {
+    const TransportParameters parameters{
+        .original_destination_connection_id = ConnectionId{std::byte{0x83}, std::byte{0x94}},
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 4,
+        .initial_source_connection_id = ConnectionId{std::byte{0x53}, std::byte{0x01}},
+        .preferred_address = sample_preferred_address(),
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_transport_parameters(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+    const auto &decoded_preferred_address = decoded.value().preferred_address;
+    ASSERT_TRUE(decoded_preferred_address.has_value());
+    ASSERT_TRUE(parameters.preferred_address.has_value());
+    EXPECT_EQ(decoded_preferred_address, parameters.preferred_address);
 }
 
 TEST(QuicTransportParametersTest, RoundTripsVersionInformation) {
@@ -593,6 +651,39 @@ TEST(QuicTransportParametersTest, ClientRejectsRetrySourceConnectionId) {
             .retry_source_connection_id = ConnectionId{std::byte{0xbb}},
         },
         make_validation_context(ConnectionId{std::byte{0xaa}}));
+
+    ASSERT_FALSE(validation.has_value());
+    EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTransportParametersTest, ClientRejectsPreferredAddressFromPeer) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::client,
+        TransportParameters{
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .preferred_address = sample_preferred_address(),
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}}));
+
+    ASSERT_FALSE(validation.has_value());
+    EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTransportParametersTest, RejectsPreferredAddressWithEmptyConnectionId) {
+    auto preferred_address = sample_preferred_address();
+    preferred_address.connection_id.clear();
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::server,
+        TransportParameters{
+            .original_destination_connection_id = ConnectionId{std::byte{0x83}},
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .preferred_address = std::move(preferred_address),
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}}, ConnectionId{std::byte{0x83}}));
 
     ASSERT_FALSE(validation.has_value());
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);

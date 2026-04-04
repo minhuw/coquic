@@ -12,6 +12,7 @@
 #include "src/quic/packet.h"
 #include "src/quic/resumption.h"
 #include "src/quic/tls_adapter.h"
+#include "src/quic/transport_parameters.h"
 #include "src/quic/version.h"
 
 namespace coquic::quic {
@@ -19,6 +20,9 @@ namespace coquic::quic {
 struct QuicTransportConfig {
     std::uint64_t max_idle_timeout = 0;
     std::uint64_t max_udp_payload_size = 65527;
+    std::uint64_t active_connection_id_limit = 2;
+    bool disable_active_migration = false;
+    std::optional<PreferredAddress> preferred_address;
     std::uint64_t ack_delay_exponent = 3;
     std::uint64_t max_ack_delay = 25;
     std::uint64_t initial_max_data = 1 << 20;

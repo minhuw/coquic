@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from coquic_rag.ingest.models import SectionCitation
-from coquic_rag.ingest.rfc_parser import parse_source_document
+from coquic_rag.ingest.rfc_parser import parse_rfc_document, parse_source_document
 
 
 def test_parse_rfc9000_core_metadata_and_sections() -> None:
@@ -49,6 +49,34 @@ def test_parse_source_document_rejects_unknown_text(tmp_path: Path) -> None:
         ValueError, match="Unable to identify source document as RFC or Internet-Draft"
     ):
         parse_source_document(bad_doc)
+
+
+def test_parse_source_document_preserves_wrapped_title(tmp_path: Path) -> None:
+    wrapped = tmp_path / "rfc9998-wrapped-title.txt"
+    wrapped.write_text(
+        (
+            "Request for Comments: 9998\n\n"
+            "           Wrapped RFC Title First Line\n"
+            "           Wrapped RFC Title Second Line\n\n"
+            "Abstract\n\n"
+            "1.  Intro\n"
+            "Body text.\n"
+        ),
+        encoding="utf-8",
+    )
+
+    doc = parse_source_document(wrapped)
+    assert doc.title == "Wrapped RFC Title First Line Wrapped RFC Title Second Line"
+
+
+def test_parse_rfc_document_rejects_draft_fixture() -> None:
+    with pytest.raises(ValueError, match="parse_rfc_document only accepts RFC input"):
+        parse_rfc_document(Path("docs/rfc/draft-ietf-quic-qlog-main-schema-13.txt"))
+
+
+def test_parse_rfc_document_accepts_rfc_fixture() -> None:
+    doc = parse_rfc_document(Path("docs/rfc/rfc9000.txt"))
+    assert doc.rfc == 9000
 
 
 def test_extract_section_citations_from_body_text() -> None:

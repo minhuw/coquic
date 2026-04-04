@@ -32,11 +32,13 @@ def _extract_draft_name(front_matter: str) -> str:
 
 
 def _extract_title(front_matter: str) -> str:
-    lines = [line.strip() for line in front_matter.splitlines() if line.strip()]
-    for line in reversed(lines):
-        if _DRAFT_NAME_RE.fullmatch(line):
+    paragraphs = [p for p in re.split(r"\n\s*\n", front_matter.strip()) if p.strip()]
+    for paragraph in reversed(paragraphs):
+        lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+        filtered_lines = [line for line in lines if not _DRAFT_NAME_RE.fullmatch(line)]
+        if not filtered_lines:
             continue
-        return line
+        return " ".join(filtered_lines)
     raise ValueError("Unable to parse source document title")
 
 
@@ -108,5 +110,8 @@ def parse_source_document(path: Path) -> SourceDocument:
     )
 
 
-# Compatibility alias for existing call sites.
-parse_rfc_document = parse_source_document
+def parse_rfc_document(path: Path) -> SourceDocument:
+    document = parse_source_document(path)
+    if document.doc_kind != "rfc":
+        raise ValueError("parse_rfc_document only accepts RFC input")
+    return document

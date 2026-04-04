@@ -83,6 +83,7 @@ def test_mcp_server_exposes_query_tools(tmp_path: Path) -> None:
     server = _build_server(tmp_path)
 
     tools = anyio.run(server.list_tools)
+    tools_by_name = {tool.name: tool for tool in tools}
     tool_names = {tool.name for tool in tools}
     assert tool_names == {
         "search_sections",
@@ -91,20 +92,35 @@ def test_mcp_server_exposes_query_tools(tmp_path: Path) -> None:
         "related_sections",
         "lookup_term",
     }
+    for tool_name in ("search_sections", "get_section", "trace_term", "related_sections"):
+        input_schema = tools_by_name[tool_name].inputSchema
+        assert "doc_id" in input_schema["properties"]
+        assert "rfc" not in input_schema["properties"]
 
     _, get_section_result = anyio.run(
         server.call_tool,
         "get_section",
         {"doc_id": "draft-ietf-quic-qlog-main-schema-13", "section_id": "1"},
     )
+    assert get_section_result["doc_id"] == "draft-ietf-quic-qlog-main-schema-13"
     assert get_section_result["citation"] == "draft-ietf-quic-qlog-main-schema-13 Section 1"
 
     _, trace_term_result = anyio.run(
         server.call_tool,
         "trace_term",
-        {"term": "max_udp_payload_size"},
+        {"term": "max_udp_payload_size", "doc_id": "rfc9000"},
     )
-    assert trace_term_result["definitions"][0]["citation"] == "RFC 9000 Section 18.2"
+    assert trace_term_result["definitions"]
+    assert all(
+        definition["doc_id"] == "rfc9000"
+        and definition["rfc_number"] == 9000
+        for definition in trace_term_result["definitions"]
+    )
+    assert all(
+        mention["doc_id"] == "rfc9000"
+        and mention["rfc_number"] == 9000
+        for mention in trace_term_result["mentions"]
+    )
 
     _, related_sections_result = anyio.run(
         server.call_tool,
@@ -119,9 +135,13 @@ def test_mcp_server_exposes_query_tools(tmp_path: Path) -> None:
     _, search_sections_result = anyio.run(
         server.call_tool,
         "search_sections",
-        {"query": "ACK frame behavior", "top_k": 3},
+        {"query": "ACK frame behavior", "doc_id": "rfc9000", "top_k": 3},
     )
-    assert search_sections_result["results"][0]["rfc"] == 9000
+    assert search_sections_result["results"]
+    assert all(
+        result["doc_id"] == "rfc9000" and result["rfc_number"] == 9000
+        for result in search_sections_result["results"]
+    )
 
     _, lookup_term_result = anyio.run(
         server.call_tool,

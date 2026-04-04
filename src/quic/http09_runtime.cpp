@@ -51,8 +51,8 @@ constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
     "[--testcase "
-    "handshake|transfer|keyupdate|amplificationlimit|multiconnect|chacha20|retry|resumption|"
-    "zerortt|v2] "
+    "handshake|transfer|keyupdate|amplificationlimit|rebind-port|rebind-addr|"
+    "connectionmigration|multiconnect|chacha20|retry|resumption|zerortt|v2] "
     "[--requests URLS] "
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
@@ -215,6 +215,15 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
     if (value == "amplificationlimit") {
         return QuicHttp09Testcase::transfer;
     }
+    if (value == "rebind-port") {
+        return QuicHttp09Testcase::rebind_port;
+    }
+    if (value == "rebind-addr") {
+        return QuicHttp09Testcase::rebind_addr;
+    }
+    if (value == "connectionmigration") {
+        return QuicHttp09Testcase::connectionmigration;
+    }
     if (value == "multiconnect") {
         return QuicHttp09Testcase::multiconnect;
     }
@@ -235,7 +244,9 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
 
 constexpr QuicHttp09Testcase transfer_semantics_testcase(QuicHttp09Testcase testcase) {
     // keyupdate is a distinct runtime testcase name but uses transfer transport/TLS profile.
-    if (testcase == QuicHttp09Testcase::keyupdate) {
+    if (testcase == QuicHttp09Testcase::keyupdate || testcase == QuicHttp09Testcase::rebind_port ||
+        testcase == QuicHttp09Testcase::rebind_addr ||
+        testcase == QuicHttp09Testcase::connectionmigration) {
         return QuicHttp09Testcase::transfer;
     }
     return testcase;

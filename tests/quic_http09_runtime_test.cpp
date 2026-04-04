@@ -3128,6 +3128,83 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsKeyUpdateCliFlag) {
               coquic::quic::QuicHttp09Testcase::keyupdate);
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialRebindPortTestcase) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar testcase("TESTCASE", "rebind-port");
+    ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
+              coquic::quic::QuicHttp09Testcase::rebind_port);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeAcceptsRebindAddrCliFlag) {
+    const char *argv[] = {"coquic",      "interop-client", "--testcase",
+                          "rebind-addr", "--requests",     "https://localhost/hello.txt"};
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
+              coquic::quic::QuicHttp09Testcase::rebind_addr);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialConnectionMigrationTestcase) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar testcase("TESTCASE", "connectionmigration");
+    ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
+              coquic::quic::QuicHttp09Testcase::connectionmigration);
+}
+
+TEST(QuicHttp09RuntimeTest, MigrationCasesUseTransferTransportProfile) {
+    const auto transfer = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .requests_env = "https://localhost/hello.txt",
+    };
+    const auto rebind_port = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::rebind_port,
+        .requests_env = "https://localhost/hello.txt",
+    };
+    const auto rebind_addr = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::rebind_addr,
+        .requests_env = "https://localhost/hello.txt",
+    };
+    const auto migration = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::connectionmigration,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    const auto transfer_core = coquic::quic::make_http09_client_core_config(transfer);
+    const auto rebind_port_core = coquic::quic::make_http09_client_core_config(rebind_port);
+    const auto rebind_addr_core = coquic::quic::make_http09_client_core_config(rebind_addr);
+    const auto migration_core = coquic::quic::make_http09_client_core_config(migration);
+
+    EXPECT_EQ(rebind_port_core.transport.initial_max_data,
+              transfer_core.transport.initial_max_data);
+    EXPECT_EQ(rebind_addr_core.transport.initial_max_data,
+              transfer_core.transport.initial_max_data);
+    EXPECT_EQ(migration_core.transport.initial_max_data, transfer_core.transport.initial_max_data);
+    EXPECT_EQ(rebind_port_core.transport.initial_max_streams_uni,
+              transfer_core.transport.initial_max_streams_uni);
+    EXPECT_EQ(rebind_addr_core.transport.initial_max_streams_uni,
+              transfer_core.transport.initial_max_streams_uni);
+    EXPECT_EQ(migration_core.transport.initial_max_streams_uni,
+              transfer_core.transport.initial_max_streams_uni);
+    EXPECT_EQ(rebind_port_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
+    EXPECT_EQ(rebind_addr_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
+    EXPECT_EQ(migration_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
+}
+
 TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfile) {
     const auto keyupdate = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,

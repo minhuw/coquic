@@ -26,6 +26,8 @@ Included documents:
 - `rfc9312.txt` - Manageability of the QUIC Transport Protocol
 - `rfc9368.txt` - Compatible Version Negotiation for QUIC
 - `rfc9369.txt` - QUIC Version 2
+- `draft-ietf-quic-ack-frequency-14.txt` - QUIC Acknowledgment Frequency
+- `draft-ietf-quic-multipath-21.txt` - Managing multiple paths for a QUIC connection
 - `draft-ietf-quic-qlog-main-schema-13.txt` - qlog: Structured Logging for Network Protocols
 - `draft-ietf-quic-qlog-quic-events-12.txt` - QUIC event definitions for qlog
 - `draft-ietf-quic-qlog-h3-events-12.txt` - HTTP/3 qlog event definitions

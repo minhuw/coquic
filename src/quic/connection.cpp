@@ -4377,8 +4377,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     application_space_.recovery.largest_acked_packet_number();
                 const bool can_initiate_local_key_update =
                     local_key_update_requested_ && handshake_confirmed_ &&
-                    application_space_.read_secret.has_value() &&
-                    application_space_.write_secret.has_value() && !local_key_update_initiated_ &&
+                    application_space_.read_secret.has_value() && !local_key_update_initiated_ &&
                     current_write_phase_first_packet_number_.has_value() &&
                     largest_acked.has_value() &&
                     *largest_acked >= *current_write_phase_first_packet_number_;

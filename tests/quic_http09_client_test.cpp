@@ -540,6 +540,29 @@ TEST(QuicHttp09ClientTest, ActivatePendingRequestWithoutPendingOpenRequestIsNoOp
     EXPECT_EQ(endpoint.next_request_index_, 0u);
 }
 
+TEST(QuicHttp09ClientTest, ActivatePendingRequestSkipsKeyUpdateForNonInitialRequestIndex) {
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests =
+            {
+                request_for_target("/alpha.txt"),
+                request_for_target("/beta.txt"),
+            },
+        .download_root = std::filesystem::path("/downloads"),
+        .request_key_update = true,
+    });
+    endpoint.pending_open_request_ = QuicHttp09ClientEndpoint::PendingOpenRequest{
+        .request_index = 1,
+        .stream_id = 4,
+    };
+
+    endpoint.activate_pending_request();
+
+    EXPECT_NE(endpoint.request_streams_.find(4), endpoint.request_streams_.end());
+    EXPECT_TRUE(endpoint.pending_core_inputs_.empty());
+    EXPECT_FALSE(endpoint.key_update_requested_);
+    EXPECT_EQ(endpoint.next_request_index_, 2u);
+}
+
 TEST(QuicHttp09ClientTest, FailedEndpointCannotIssueAnotherRequest) {
     QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
         .requests = {request_for_target("/alpha.txt")},

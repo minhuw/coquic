@@ -65,6 +65,29 @@ PreferredAddress sample_preferred_address() {
     };
 }
 
+std::vector<std::byte>
+encode_preferred_address_parameter_for_test(std::size_t connection_id_length) {
+    std::vector<std::byte> bytes;
+    const auto parameter_value_length = 4u + 2u + 16u + 2u + 1u + connection_id_length + 16u;
+    bytes.reserve(2 + parameter_value_length);
+    bytes.push_back(std::byte{0x0d});
+    bytes.push_back(static_cast<std::byte>(parameter_value_length));
+
+    // IPv4 address + port.
+    bytes.insert(bytes.end(), 4, std::byte{0x00});
+    bytes.insert(bytes.end(), 2, std::byte{0x00});
+    // IPv6 address + port.
+    bytes.insert(bytes.end(), 16, std::byte{0x00});
+    bytes.insert(bytes.end(), 2, std::byte{0x00});
+    // Connection ID length + CID bytes.
+    bytes.push_back(static_cast<std::byte>(connection_id_length));
+    bytes.insert(bytes.end(), connection_id_length, std::byte{0x01});
+    // Stateless reset token.
+    bytes.insert(bytes.end(), 16, std::byte{0x02});
+
+    return bytes;
+}
+
 TEST(QuicTransportParametersTest, RoundTripsMinimalClientParameters) {
     const TransportParameters parameters{
         .max_udp_payload_size = 1200,
@@ -687,6 +710,67 @@ TEST(QuicTransportParametersTest, RejectsPreferredAddressWithEmptyConnectionId) 
 
     ASSERT_FALSE(validation.has_value());
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTransportParametersTest,
+     ServerRejectsPreferredAddressWhenInitialSourceConnectionIdIsZeroLength) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::server,
+        TransportParameters{
+            .original_destination_connection_id = ConnectionId{std::byte{0x83}},
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{},
+            .preferred_address = sample_preferred_address(),
+        },
+        make_validation_context(ConnectionId{}, ConnectionId{std::byte{0x83}}));
+
+    ASSERT_FALSE(validation.has_value());
+    EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTransportParametersTest, RejectsPreferredAddressCidLengthZeroEncoding) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(
+        encode_preferred_address_parameter_for_test(0));
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsPreferredAddressCidLengthAboveTwentyEncoding) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(
+        encode_preferred_address_parameter_for_test(21));
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsSerializingPreferredAddressWithZeroLengthConnectionId) {
+    auto preferred_address = sample_preferred_address();
+    preferred_address.connection_id.clear();
+    const auto encoded = coquic::quic::serialize_transport_parameters(TransportParameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+        .preferred_address = std::move(preferred_address),
+    });
+
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsSerializingPreferredAddressWithTooLongConnectionId) {
+    auto preferred_address = sample_preferred_address();
+    preferred_address.connection_id.assign(21, std::byte{0xee});
+    const auto encoded = coquic::quic::serialize_transport_parameters(TransportParameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+        .preferred_address = std::move(preferred_address),
+    });
+
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
 }
 
 TEST(QuicTransportParametersTest, ValidatesServerConnectionIdsAgainstHandshakeContext) {

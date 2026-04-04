@@ -40,6 +40,7 @@ constexpr std::uint64_t minimum_max_udp_payload_size = 1200;
 constexpr std::uint64_t minimum_active_connection_id_limit = 2;
 constexpr std::uint64_t maximum_ack_delay_exponent = 20;
 constexpr std::uint64_t maximum_max_ack_delay = (std::uint64_t{1} << 14);
+constexpr std::size_t maximum_connection_id_length = 20;
 
 void append_parameter_header(std::vector<std::byte> &output, std::uint64_t id, std::size_t length) {
     const auto encoded_id = coquic::quic::encode_varint(id).value();
@@ -281,6 +282,11 @@ serialize_transport_parameters(const TransportParameters &parameters) {
 
     append_connection_id_parameter(output, retry_source_connection_id_parameter_id,
                                    parameters.retry_source_connection_id);
+    if (parameters.preferred_address.has_value() &&
+        (parameters.preferred_address->connection_id.empty() ||
+         parameters.preferred_address->connection_id.size() > maximum_connection_id_length)) {
+        return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
+    }
     append_preferred_address_parameter(output, parameters.preferred_address);
     append_version_information_parameter(output, parameters.version_information);
 
@@ -412,6 +418,10 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             }
 
             const auto connection_id_length = std::to_integer<std::uint8_t>(value[24]);
+            if (connection_id_length == 0 || connection_id_length > maximum_connection_id_length) {
+                return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                                 offset);
+            }
             if (value.size() != fixed_prefix_length + connection_id_length + token_length) {
                 return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
                                                                  offset);
@@ -540,6 +550,10 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
 
     if (parameters.preferred_address.has_value() &&
         parameters.preferred_address->connection_id.empty()) {
+        return validation_failure();
+    }
+    if (parameters.preferred_address.has_value() &&
+        parameters.initial_source_connection_id->empty()) {
         return validation_failure();
     }
 

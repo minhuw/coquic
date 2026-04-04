@@ -12140,35 +12140,80 @@ TEST(QuicCoreTest, KeyUpdatedAckOnlyPacketRetiresAckedApplicationFragment) {
 
 TEST(QuicCoreTest, LocalKeyUpdateWaitsForHandshakeConfirmationAndAckedCurrentPhasePacket) {
     auto connection = make_connected_client_connection();
+    const auto original_write_key_phase = connection.application_write_key_phase_;
     connection.handshake_confirmed_ = false;
     connection.request_key_update();
 
     EXPECT_TRUE(connection.local_key_update_requested_);
     EXPECT_FALSE(connection.local_key_update_initiated_);
+    EXPECT_EQ(connection.application_write_key_phase_, original_write_key_phase);
+
+    ASSERT_TRUE(connection.queue_stream_send(0, bytes_from_ints({0x61}), false).has_value());
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+
+    EXPECT_TRUE(connection.local_key_update_requested_);
+    EXPECT_FALSE(connection.local_key_update_initiated_);
+    EXPECT_EQ(connection.application_write_key_phase_, original_write_key_phase);
+
+    const auto decoded = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(decoded.size(), 1u);
+    const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded.front());
+    ASSERT_NE(one_rtt, nullptr);
+    EXPECT_EQ(one_rtt->key_phase, original_write_key_phase);
 }
 
 TEST(QuicCoreTest, LocalKeyUpdateUsesNewKeyPhaseAfterCurrentPhasePacketIsAcknowledged) {
     auto connection = make_connected_client_connection();
+    const auto original_write_key_phase = connection.application_write_key_phase_;
     connection.request_key_update();
+
+    EXPECT_TRUE(connection.local_key_update_requested_);
+    EXPECT_FALSE(connection.local_key_update_initiated_);
+    EXPECT_EQ(connection.application_write_key_phase_, original_write_key_phase);
 
     ASSERT_TRUE(connection.queue_stream_send(0, bytes_from_ints({0x61}), false).has_value());
     const auto current_phase_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(current_phase_datagram.empty());
 
-    connection.process_inbound_ack(connection.application_space_,
-                                   coquic::quic::AckFrame{
-                                       .largest_acknowledged = 0,
-                                       .first_ack_range = 0,
-                                   },
-                                   coquic::quic::test::test_time(2),
-                                   connection.config_.transport.ack_delay_exponent,
-                                   connection.config_.transport.max_ack_delay, false);
+    EXPECT_TRUE(connection.local_key_update_requested_);
+    EXPECT_FALSE(connection.local_key_update_initiated_);
+    EXPECT_EQ(connection.application_write_key_phase_, original_write_key_phase);
+
+    const auto decoded_current = decode_sender_datagram(connection, current_phase_datagram);
+    ASSERT_EQ(decoded_current.size(), 1u);
+    const auto *current_one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded_current.front());
+    ASSERT_NE(current_one_rtt, nullptr);
+    EXPECT_EQ(current_one_rtt->key_phase, original_write_key_phase);
+
+    const auto ack_result = connection.process_inbound_ack(connection.application_space_,
+                                                           coquic::quic::AckFrame{
+                                                               .largest_acknowledged = 0,
+                                                               .first_ack_range = 0,
+                                                           },
+                                                           coquic::quic::test::test_time(2),
+                                                           connection.config_.transport
+                                                               .ack_delay_exponent,
+                                                           connection.config_.transport.max_ack_delay,
+                                                           false);
+    ASSERT_TRUE(ack_result.has_value());
 
     ASSERT_TRUE(connection.queue_stream_send(4, bytes_from_ints({0x62}), false).has_value());
     const auto updated_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
     ASSERT_FALSE(updated_datagram.empty());
+
+    EXPECT_TRUE(connection.local_key_update_initiated_);
+    EXPECT_EQ(connection.application_write_key_phase_, !original_write_key_phase);
+
+    const auto decoded_updated = decode_sender_datagram(connection, updated_datagram);
+    ASSERT_EQ(decoded_updated.size(), 1u);
+    const auto *updated_one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded_updated.front());
+    ASSERT_NE(updated_one_rtt, nullptr);
+    EXPECT_EQ(updated_one_rtt->key_phase, !original_write_key_phase);
 }
 
 TEST(QuicCoreTest, LocalKeyUpdateRetainsPreviousReadKeysUntilPeerRespondsInNewPhase) {

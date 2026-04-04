@@ -56,6 +56,7 @@ struct QuicCoreConfig {
 
 using QuicCoreClock = std::chrono::steady_clock;
 using QuicCoreTimePoint = QuicCoreClock::time_point;
+using QuicPathId = std::uint64_t;
 
 enum class QuicCoreStateChange : std::uint8_t {
     handshake_ready,
@@ -80,6 +81,7 @@ struct QuicCoreStart {};
 
 struct QuicCoreInboundDatagram {
     std::vector<std::byte> bytes;
+    QuicPathId path_id = 0;
 };
 
 struct QuicCoreSendStreamData {
@@ -106,6 +108,7 @@ using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicC
                                    QuicCoreRequestKeyUpdate, QuicCoreTimerExpired>;
 
 struct QuicCoreSendDatagram {
+    std::optional<QuicPathId> path_id;
     std::vector<std::byte> bytes;
 };
 

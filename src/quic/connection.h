@@ -103,7 +103,8 @@ class QuicConnection {
     explicit QuicConnection(QuicCoreConfig config);
 
     void start();
-    void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now);
+    void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
+                                  QuicPathId path_id = 0);
     StreamStateResult<bool> queue_stream_send(std::uint64_t stream_id,
                                               std::span<const std::byte> bytes, bool fin);
     StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
@@ -117,6 +118,7 @@ class QuicConnection {
     std::optional<QuicCoreStateChange> take_state_change();
     std::optional<QuicCoreResumptionStateAvailable> take_resumption_state_available();
     std::optional<QuicCoreZeroRttStatusEvent> take_zero_rtt_status_event();
+    std::optional<QuicPathId> last_drained_path_id() const;
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     bool is_handshake_complete() const;
     bool has_processed_peer_packet() const;
@@ -256,6 +258,9 @@ class QuicConnection {
     std::optional<QuicCoreTimePoint> last_peer_activity_time_;
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
     std::optional<QuicCoreTimePoint> server_zero_rtt_discard_deadline_;
+    std::optional<QuicPathId> current_send_path_id_;
+    std::optional<QuicPathId> last_drained_path_id_;
+    QuicPathId last_inbound_path_id_ = 0;
 };
 
 } // namespace coquic::quic

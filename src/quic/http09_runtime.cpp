@@ -843,9 +843,16 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
     return false;
 }
 
+struct RuntimeSendRoute {
+    int socket_fd = -1;
+    sockaddr_storage peer{};
+    socklen_t peer_len = 0;
+};
+
 struct RuntimeWaitStep {
     std::optional<QuicCoreInput> input;
     QuicCoreTimePoint input_time;
+    int socket_fd = -1;
     sockaddr_storage source{};
     socklen_t source_len = 0;
     bool has_source = false;
@@ -927,6 +934,7 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
                         .bytes = std::move(inbound),
                     },
                 .input_time = now(),
+                .socket_fd = socket_fd,
                 .source = source,
                 .source_len = source_len,
                 .has_source = true,
@@ -981,11 +989,13 @@ wait_for_socket_or_deadline(const RuntimeWaitConfig &config,
             return RuntimeWaitStep{
                 .input = QuicCoreTimerExpired{},
                 .input_time = timer_due ? current : now(),
+                .socket_fd = config.socket_fd,
             };
         }
 
         return RuntimeWaitStep{
             .input_time = now(),
+            .socket_fd = config.socket_fd,
             .idle_timeout = true,
         };
     }
@@ -1014,15 +1024,29 @@ ClientLoopIo make_runtime_client_loop_io() {
     };
 }
 
-bool handle_core_effects(int fd, const QuicCoreResult &result, const sockaddr_storage *peer,
-                         socklen_t peer_len, std::string_view role_name) {
+bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
+                         const sockaddr_storage *fallback_peer, socklen_t fallback_peer_len,
+                         const std::unordered_map<QuicPathId, RuntimeSendRoute> &path_routes,
+                         std::string_view role_name) {
     for (const auto &effect : result.effects) {
         const auto *send = std::get_if<QuicCoreSendDatagram>(&effect);
         if (send == nullptr) {
             continue;
         }
 
-        if (!send_datagram(fd, send->bytes, *peer, peer_len, role_name)) {
+        int socket_fd = fallback_socket_fd;
+        const sockaddr_storage *peer = fallback_peer;
+        socklen_t peer_len = fallback_peer_len;
+        if (send->path_id.has_value()) {
+            const auto route_it = path_routes.find(*send->path_id);
+            if (route_it != path_routes.end()) {
+                socket_fd = route_it->second.socket_fd;
+                peer = &route_it->second.peer;
+                peer_len = route_it->second.peer_len;
+            }
+        }
+
+        if (!send_datagram(socket_fd, send->bytes, *peer, peer_len, role_name)) {
             return false;
         }
     }
@@ -1053,7 +1077,50 @@ struct EndpointDriveState {
     bool terminal_success = false;
     bool terminal_failure = false;
     std::optional<QuicResumptionState> last_resumption_state;
+    std::unordered_map<std::string, QuicPathId> path_ids_by_peer_tuple;
+    std::unordered_map<QuicPathId, RuntimeSendRoute> path_routes;
+    QuicPathId next_path_id = 1;
 };
+
+std::string runtime_peer_tuple_key(int socket_fd, const sockaddr_storage &peer,
+                                   socklen_t peer_len) {
+    const auto encoded_peer_len =
+        std::min<std::size_t>(static_cast<std::size_t>(peer_len), sizeof(sockaddr_storage));
+    std::string key(sizeof(socket_fd) + sizeof(encoded_peer_len) + encoded_peer_len, '\0');
+    std::size_t offset = 0;
+    std::memcpy(key.data() + offset, &socket_fd, sizeof(socket_fd));
+    offset += sizeof(socket_fd);
+    std::memcpy(key.data() + offset, &encoded_peer_len, sizeof(encoded_peer_len));
+    offset += sizeof(encoded_peer_len);
+    std::memcpy(key.data() + offset, &peer, encoded_peer_len);
+    return key;
+}
+
+std::optional<QuicPathId> assign_runtime_path_for_inbound_step(EndpointDriveState &state,
+                                                               RuntimeWaitStep &step) {
+    if (!step.input.has_value() || !step.has_source || step.source_len <= 0) {
+        return std::nullopt;
+    }
+    auto *inbound = std::get_if<QuicCoreInboundDatagram>(&*step.input);
+    if (inbound == nullptr) {
+        return std::nullopt;
+    }
+
+    const auto peer_key = runtime_peer_tuple_key(step.socket_fd, step.source, step.source_len);
+    const auto existing = state.path_ids_by_peer_tuple.find(peer_key);
+    const auto path_id =
+        existing != state.path_ids_by_peer_tuple.end() ? existing->second : state.next_path_id++;
+    if (existing == state.path_ids_by_peer_tuple.end()) {
+        state.path_ids_by_peer_tuple.emplace(peer_key, path_id);
+    }
+    state.path_routes[path_id] = RuntimeSendRoute{
+        .socket_fd = step.socket_fd,
+        .peer = step.source,
+        .peer_len = step.source_len,
+    };
+    inbound->path_id = path_id;
+    return path_id;
+}
 
 void record_resumption_state(EndpointDriveState &state, const QuicCoreResult &result) {
     for (const auto &effect : result.effects) {
@@ -1213,7 +1280,8 @@ bool drive_endpoint_until_blocked(const EndpointDriver &endpoint, QuicCore &core
 
     for (;;) {
         record_resumption_state(state, current_result);
-        if (!handle_core_effects(fd, current_result, peer, peer_len, role_name)) {
+        if (!handle_core_effects(fd, current_result, peer, peer_len, state.path_routes,
+                                 role_name)) {
             state.terminal_failure = true;
             return false;
         }
@@ -1372,6 +1440,7 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
                 return false;
             }
 
+            assign_runtime_path_for_inbound_step(state, receive.step);
             auto step_result =
                 core.advance(std::move(*receive.step.input), receive.step.input_time);
             saw_peer_input = true;
@@ -1460,6 +1529,7 @@ int run_http09_client_connection_loop(const EndpointDriver &endpoint, QuicCore &
             std::cerr << "http09-client failed: runtime step missing input\n";
             return 1;
         }
+        assign_runtime_path_for_inbound_step(state, *step);
         auto step_input = std::move(*step->input);
         const bool step_has_peer_input =
             std::holds_alternative<QuicCoreInboundDatagram>(step_input);
@@ -1634,6 +1704,7 @@ bool process_existing_server_session_datagram(ServerSession &session, RuntimeWai
                    << '\n';
         });
     }
+    static_cast<void>(assign_runtime_path_for_inbound_step(session.state, step));
     session.peer = step.source;
     session.peer_len = step.source_len;
     if (!step.input.has_value()) {
@@ -1972,6 +2043,7 @@ int run_http09_server(const Http09RuntimeConfig &config) {
 
         auto &session = create_session(parsed->destination_connection_id, step.source,
                                        step.source_len, retry_context);
+        static_cast<void>(assign_runtime_path_for_inbound_step(session.state, step));
         auto session_input = std::move(*step.input);
         const auto session_result = session.core.advance(std::move(session_input), step.input_time);
         const bool endpoint_failed = !drive_endpoint_until_blocked(
@@ -2046,6 +2118,28 @@ QuicCore make_local_error_client_core_for_tests() {
         .mode = Http09RuntimeMode::client,
     };
     return QuicCore(make_http09_client_core_config(config));
+}
+
+struct RecordedSendToForTests {
+    int calls = 0;
+    int socket_fd = -1;
+    socklen_t peer_len = 0;
+    std::uint16_t peer_port = 0;
+};
+
+thread_local RecordedSendToForTests g_recorded_sendto_for_tests;
+
+ssize_t record_sendto_for_tests(int socket_fd, const void *, size_t length, int,
+                                const sockaddr *destination, socklen_t destination_len) {
+    g_recorded_sendto_for_tests.calls += 1;
+    g_recorded_sendto_for_tests.socket_fd = socket_fd;
+    g_recorded_sendto_for_tests.peer_len = destination_len;
+    if (destination != nullptr && destination->sa_family == AF_INET &&
+        destination_len >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
+        const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(destination);
+        g_recorded_sendto_for_tests.peer_port = ntohs(ipv4->sin_port);
+    }
+    return static_cast<ssize_t>(length);
 }
 
 struct ScriptedClientLoopIoForTests {
@@ -3166,6 +3260,102 @@ bool zero_rtt_request_allowance_for_tests() {
         !allow_requests_before_handshake_ready(false, make_result(QuicZeroRttStatus::accepted));
     return unavailable_rejected & not_attempted_rejected & rejected_rejected & attempted_allowed &
            accepted_allowed & missing_status_allowed & disabled_rejected;
+}
+
+bool runtime_assigns_stable_path_ids_for_tests() {
+    const auto make_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+    EndpointDriveState state;
+    RuntimeWaitStep first{
+        .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x01}}},
+        .input_time = now(),
+        .socket_fd = 4,
+        .source = make_peer(4444),
+        .source_len = peer_len,
+        .has_source = true,
+    };
+    RuntimeWaitStep second{
+        .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x02}}},
+        .input_time = now(),
+        .socket_fd = 4,
+        .source = make_peer(4444),
+        .source_len = peer_len,
+        .has_source = true,
+    };
+    RuntimeWaitStep third{
+        .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x03}}},
+        .input_time = now(),
+        .socket_fd = 7,
+        .source = make_peer(4444),
+        .source_len = peer_len,
+        .has_source = true,
+    };
+
+    const auto first_assigned = assign_runtime_path_for_inbound_step(state, first);
+    const auto second_assigned = assign_runtime_path_for_inbound_step(state, second);
+    const auto third_assigned = assign_runtime_path_for_inbound_step(state, third);
+    const auto first_path = std::get<QuicCoreInboundDatagram>(*first.input).path_id;
+    const auto second_path = std::get<QuicCoreInboundDatagram>(*second.input).path_id;
+    const auto third_path = std::get<QuicCoreInboundDatagram>(*third.input).path_id;
+    return first_assigned.has_value() & second_assigned.has_value() & third_assigned.has_value() &
+           (first_path != 0) & (first_path == second_path) & (first_path != third_path) &
+           (state.path_routes.at(first_path).socket_fd == 4) &
+           (state.path_routes.at(third_path).socket_fd == 7);
+}
+
+bool drive_endpoint_uses_transport_selected_path_for_tests() {
+    g_recorded_sendto_for_tests = {};
+    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        Http09RuntimeOpsOverride{
+            .sendto_fn = &record_sendto_for_tests,
+        },
+    };
+
+    const auto make_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+    const auto selected_path_id = static_cast<QuicPathId>(9);
+    const int fallback_socket_fd = 31;
+    const int selected_socket_fd = 77;
+    const auto fallback_peer = make_peer(8443);
+    const auto selected_peer = make_peer(9443);
+
+    EndpointDriveState state;
+    state.path_routes[selected_path_id] = RuntimeSendRoute{
+        .socket_fd = selected_socket_fd,
+        .peer = selected_peer,
+        .peer_len = peer_len,
+    };
+
+    QuicCoreResult result;
+    result.effects.emplace_back(QuicCoreSendDatagram{
+        .path_id = selected_path_id,
+        .bytes = {std::byte{0xaa}},
+    });
+
+    ScriptedEndpointForTests endpoint;
+    QuicCore core = make_local_error_client_core_for_tests();
+    const bool drove =
+        drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, fallback_socket_fd,
+                                     &fallback_peer, peer_len, result, state, "client");
+    return drove & (g_recorded_sendto_for_tests.calls == 1) &
+           (g_recorded_sendto_for_tests.socket_fd == selected_socket_fd) &
+           (g_recorded_sendto_for_tests.peer_port == 9443);
 }
 
 bool version_negotiation_without_source_connection_id_fails_for_tests() {

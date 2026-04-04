@@ -1109,9 +1109,13 @@ void QuicConnection::start() {
 }
 
 void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
-                                              QuicCoreTimePoint now) {
+                                              QuicCoreTimePoint now, QuicPathId path_id) {
     if (status_ == HandshakeStatus::failed || bytes.empty()) {
         return;
+    }
+    last_inbound_path_id_ = path_id;
+    if (!current_send_path_id_.has_value()) {
+        current_send_path_id_ = path_id;
     }
 
     maybe_discard_server_zero_rtt_packet_space(now);
@@ -1475,6 +1479,7 @@ std::vector<std::byte> QuicConnection::drain_outbound_datagram(QuicCoreTimePoint
     if (status_ == HandshakeStatus::failed) {
         return {};
     }
+    last_drained_path_id_.reset();
 
     const auto synced = sync_tls_state();
     if (!synced.has_value()) {
@@ -1575,6 +1580,10 @@ std::optional<QuicCoreZeroRttStatusEvent> QuicConnection::take_zero_rtt_status_e
     auto next = pending_zero_rtt_status_event_;
     pending_zero_rtt_status_event_.reset();
     return next;
+}
+
+std::optional<QuicPathId> QuicConnection::last_drained_path_id() const {
+    return last_drained_path_id_;
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::next_wakeup() const {
@@ -3225,7 +3234,7 @@ void QuicConnection::replay_deferred_protected_packets(QuicCoreTimePoint now) {
     auto deferred_packets = std::move(deferred_protected_packets_);
     deferred_protected_packets_.clear();
     for (const auto &packet_bytes : deferred_packets) {
-        process_inbound_datagram(packet_bytes, now);
+        process_inbound_datagram(packet_bytes, now, last_inbound_path_id_);
         if (status_ == HandshakeStatus::failed) {
             return;
         }
@@ -4002,7 +4011,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         }
 
         note_outbound_datagram_bytes(datagram.value().size());
-
+        last_drained_path_id_ = current_send_path_id_;
         return datagram.value();
     };
     const auto trim_crypto_ranges_to_fit =

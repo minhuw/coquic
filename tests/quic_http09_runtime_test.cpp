@@ -4096,6 +4096,14 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverRetryAndZeroRttBranches) {
     static_cast<void>(testing::internal::GetCapturedStderr());
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeAssignsStablePathIdsPerPeerTuple) {
+    EXPECT_TRUE(coquic::quic::test::runtime_assigns_stable_path_ids_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, DriveEndpointUsesTransportSelectedPathAndSocket) {
+    EXPECT_TRUE(coquic::quic::test::drive_endpoint_uses_transport_selected_path_for_tests());
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeTraceHooksCoverIdleTimeoutAndServerFailureBranches) {
     ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
 

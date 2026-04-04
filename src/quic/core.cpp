@@ -159,7 +159,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                         return;
                     }
                 }
-                connection_->process_inbound_datagram(in.bytes, now);
+                connection_->process_inbound_datagram(in.bytes, now, in.path_id);
             },
             [&](const QuicCoreSendStreamData &in) {
                 const auto queued = connection_->queue_stream_send(in.stream_id, in.bytes, in.fin);
@@ -195,7 +195,10 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         if (datagram.empty()) {
             break;
         }
-        result.effects.emplace_back(QuicCoreSendDatagram{std::move(datagram)});
+        result.effects.emplace_back(QuicCoreSendDatagram{
+            .path_id = connection_->last_drained_path_id(),
+            .bytes = std::move(datagram),
+        });
     }
     while (const auto received = connection_->take_received_stream_data()) {
         result.effects.emplace_back(*received);

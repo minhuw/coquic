@@ -185,7 +185,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                     result.local_error = stream_state_error_to_local_error(queued.error());
                 }
             },
-            [&](const QuicCoreRequestKeyUpdate &) {},
+            [&](const QuicCoreRequestKeyUpdate &) { connection_->request_key_update(); },
             [&](const QuicCoreTimerExpired &) { connection_->on_timeout(now); },
         },
         input);

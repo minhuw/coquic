@@ -98,8 +98,8 @@ struct QuicCoreTimerExpired {};
 struct QuicCoreRequestKeyUpdate {};
 
 using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
-                                   QuicCoreResetStream, QuicCoreStopSending, QuicCoreTimerExpired,
-                                   QuicCoreRequestKeyUpdate>;
+                                   QuicCoreResetStream, QuicCoreStopSending,
+                                   QuicCoreRequestKeyUpdate, QuicCoreTimerExpired>;
 
 struct QuicCoreSendDatagram {
     std::vector<std::byte> bytes;

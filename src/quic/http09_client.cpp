@@ -157,6 +157,10 @@ void QuicHttp09ClientEndpoint::activate_pending_request() {
                        .request_target = config_.requests[request_index].request_target,
                        .complete = false,
                    });
+    if (config_.request_key_update && !key_update_requested_ && request_index == 0) {
+        pending_core_inputs_.emplace_back(QuicCoreRequestKeyUpdate{});
+        key_update_requested_ = true;
+    }
     next_request_index_ = request_index + 1;
     pending_open_request_.reset();
 }

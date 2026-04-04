@@ -16,6 +16,7 @@ struct QuicHttp09ClientConfig {
     std::vector<QuicHttp09Request> requests;
     std::filesystem::path download_root;
     bool allow_requests_before_handshake_ready = false;
+    bool request_key_update = false;
 };
 
 class QuicHttp09ClientEndpoint {
@@ -55,6 +56,7 @@ class QuicHttp09ClientEndpoint {
     bool handshake_ready_ = false;
     bool complete_ = false;
     bool failed_ = false;
+    bool key_update_requested_ = false;
     bool blocked_on_stream_limit_ = false;
     std::size_t next_request_index_ = 0;
     std::optional<std::size_t> max_concurrent_requests_;

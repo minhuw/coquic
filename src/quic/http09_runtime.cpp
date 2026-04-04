@@ -1521,6 +1521,7 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
         .download_root = config.download_root,
         .allow_requests_before_handshake_ready =
             allow_requests_before_handshake_ready(attempt_zero_rtt_requests, start_result),
+        .request_key_update = config.testcase == QuicHttp09Testcase::keyupdate,
     });
     return ClientConnectionRunResult{
         .exit_code = run_http09_client_connection_loop(

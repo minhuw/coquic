@@ -149,6 +149,40 @@ TEST(QuicHttp09ClientTest, OpensNextBidirectionalStreamAfterHandshake) {
     EXPECT_TRUE(second_sends[0].fin);
 }
 
+TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesSingleRequestAfterFirstRequestActivation) {
+    const auto now = coquic::quic::test::test_time();
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+        .request_key_update = true,
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+    const auto accepted =
+        endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
+
+    ASSERT_EQ(accepted.core_inputs.size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::QuicCoreRequestKeyUpdate>(
+        accepted.core_inputs.front()));
+}
+
+TEST(QuicHttp09ClientTest, TransferCaseDoesNotQueueLocalKeyUpdateRequest) {
+    const auto now = coquic::quic::test::test_time();
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+        .request_key_update = false,
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+    const auto accepted =
+        endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(accepted.core_inputs.empty());
+}
+
 TEST(QuicHttp09ClientTest, DoesNotReissueRequestsAfterInitialPoll) {
     const auto now = coquic::quic::test::test_time();
     QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{

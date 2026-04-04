@@ -1039,11 +1039,14 @@ bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
         socklen_t peer_len = fallback_peer_len;
         if (send->path_id.has_value()) {
             const auto route_it = path_routes.find(*send->path_id);
-            if (route_it != path_routes.end()) {
-                socket_fd = route_it->second.socket_fd;
-                peer = &route_it->second.peer;
-                peer_len = route_it->second.peer_len;
+            if (route_it == path_routes.end()) {
+                std::cerr << "http09-" << role_name
+                          << " failed: missing route for path_id=" << *send->path_id << '\n';
+                return false;
             }
+            socket_fd = route_it->second.socket_fd;
+            peer = &route_it->second.peer;
+            peer_len = route_it->second.peer_len;
         }
 
         if (!send_datagram(socket_fd, send->bytes, *peer, peer_len, role_name)) {
@@ -3356,6 +3359,131 @@ bool drive_endpoint_uses_transport_selected_path_for_tests() {
     return drove & (g_recorded_sendto_for_tests.calls == 1) &
            (g_recorded_sendto_for_tests.socket_fd == selected_socket_fd) &
            (g_recorded_sendto_for_tests.peer_port == 9443);
+}
+
+bool core_version_negotiation_restart_preserves_inbound_path_ids_for_tests() {
+    const Http09RuntimeConfig runtime_config{
+        .mode = Http09RuntimeMode::client,
+    };
+    auto core_config = make_runtime_client_core_config(runtime_config, /*connection_index=*/3);
+    core_config.original_version = kQuicVersion1;
+    core_config.initial_version = kQuicVersion1;
+    core_config.supported_versions = {kQuicVersion2, kQuicVersion1};
+    const auto source_connection_id = core_config.source_connection_id;
+    const auto initial_destination_connection_id = core_config.initial_destination_connection_id;
+    QuicCore core(std::move(core_config));
+
+    const auto version_negotiation_packet = serialize_packet(VersionNegotiationPacket{
+        .destination_connection_id = source_connection_id,
+        .source_connection_id = initial_destination_connection_id,
+        .supported_versions = {kQuicVersion2},
+    });
+    if (!version_negotiation_packet.has_value()) {
+        return false;
+    }
+
+    constexpr QuicPathId kInboundPathId = 41;
+    const auto result = core.advance(
+        QuicCoreInboundDatagram{
+            .bytes = version_negotiation_packet.value(),
+            .path_id = kInboundPathId,
+        },
+        now());
+
+    bool saw_send = false;
+    bool all_sends_match_path = true;
+    for (const auto &effect : result.effects) {
+        const auto *send = std::get_if<QuicCoreSendDatagram>(&effect);
+        if (send == nullptr) {
+            continue;
+        }
+        saw_send = true;
+        if (!send->path_id.has_value() || *send->path_id != kInboundPathId) {
+            all_sends_match_path = false;
+        }
+    }
+    return saw_send & all_sends_match_path;
+}
+
+bool core_retry_restart_preserves_inbound_path_ids_for_tests() {
+    const Http09RuntimeConfig runtime_config{
+        .mode = Http09RuntimeMode::client,
+    };
+    auto core_config = make_runtime_client_core_config(runtime_config, /*connection_index=*/4);
+    const auto source_connection_id = core_config.source_connection_id;
+    const auto original_destination_connection_id = core_config.initial_destination_connection_id;
+    const auto retry_source_connection_id =
+        make_runtime_connection_id(std::byte{0x73}, /*sequence=*/9);
+    QuicCore core(std::move(core_config));
+
+    RetryPacket retry_packet{
+        .version = kQuicVersion1,
+        .retry_unused_bits = 0,
+        .destination_connection_id = source_connection_id,
+        .source_connection_id = retry_source_connection_id,
+        .retry_token = {std::byte{0x99}, std::byte{0x98}},
+    };
+    const auto retry_integrity =
+        compute_retry_integrity_tag(retry_packet, original_destination_connection_id);
+    if (!retry_integrity.has_value()) {
+        return false;
+    }
+    retry_packet.retry_integrity_tag = retry_integrity.value();
+    const auto encoded_retry = serialize_packet(retry_packet);
+    if (!encoded_retry.has_value()) {
+        return false;
+    }
+
+    constexpr QuicPathId kInboundPathId = 52;
+    const auto result = core.advance(
+        QuicCoreInboundDatagram{
+            .bytes = encoded_retry.value(),
+            .path_id = kInboundPathId,
+        },
+        now());
+
+    bool saw_send = false;
+    bool all_sends_match_path = true;
+    for (const auto &effect : result.effects) {
+        const auto *send = std::get_if<QuicCoreSendDatagram>(&effect);
+        if (send == nullptr) {
+            continue;
+        }
+        saw_send = true;
+        if (!send->path_id.has_value() || *send->path_id != kInboundPathId) {
+            all_sends_match_path = false;
+        }
+    }
+    return saw_send & all_sends_match_path;
+}
+
+bool drive_endpoint_rejects_unknown_transport_selected_path_for_tests() {
+    g_recorded_sendto_for_tests = {};
+    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        Http09RuntimeOpsOverride{
+            .sendto_fn = &record_sendto_for_tests,
+        },
+    };
+
+    sockaddr_storage fallback_peer{};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&fallback_peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(8555);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    EndpointDriveState state;
+    QuicCoreResult result;
+    result.effects.emplace_back(QuicCoreSendDatagram{
+        .path_id = static_cast<QuicPathId>(404),
+        .bytes = {std::byte{0xdd}},
+    });
+
+    ScriptedEndpointForTests endpoint;
+    QuicCore core = make_local_error_client_core_for_tests();
+    const bool drove = drive_endpoint_until_blocked(
+        make_endpoint_driver(endpoint), core, /*fd=*/18, &fallback_peer,
+        static_cast<socklen_t>(sizeof(sockaddr_in)), result, state, "client");
+    return !drove & state.terminal_failure & (g_recorded_sendto_for_tests.calls == 0);
 }
 
 bool version_negotiation_without_source_connection_id_fails_for_tests() {

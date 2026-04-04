@@ -117,6 +117,8 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                                     config_.initial_version = supported_version;
                                     config_.reacted_to_version_negotiation = true;
                                     connection_ = std::make_unique<QuicConnection>(config_);
+                                    connection_->last_inbound_path_id_ = in.path_id;
+                                    connection_->current_send_path_id_ = in.path_id;
                                     connection_->start();
                                     return;
                                 }
@@ -154,6 +156,8 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             connection_ = std::make_unique<QuicConnection>(config_);
                             connection_->initial_space_.next_send_packet_number =
                                 next_initial_send_packet_number;
+                            connection_->last_inbound_path_id_ = in.path_id;
+                            connection_->current_send_path_id_ = in.path_id;
                             connection_->start();
                         }
                         return;

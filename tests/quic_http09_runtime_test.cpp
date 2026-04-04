@@ -4133,6 +4133,20 @@ TEST(QuicHttp09RuntimeTest, DeferredReplayPreservesIndividualBufferedPathIds) {
     EXPECT_EQ(connection.current_send_path_id_.value_or(0), 11u);
 }
 
+TEST(QuicHttp09RuntimeTest, CoreVersionNegotiationRestartPreservesInboundPathIds) {
+    EXPECT_TRUE(coquic::quic::test::
+                    core_version_negotiation_restart_preserves_inbound_path_ids_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, CoreRetryRestartPreservesInboundPathIds) {
+    EXPECT_TRUE(coquic::quic::test::core_retry_restart_preserves_inbound_path_ids_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, DriveEndpointRejectsUnknownTransportSelectedPath) {
+    EXPECT_TRUE(
+        coquic::quic::test::drive_endpoint_rejects_unknown_transport_selected_path_for_tests());
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeTraceHooksCoverIdleTimeoutAndServerFailureBranches) {
     ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
 

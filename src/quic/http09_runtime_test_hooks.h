@@ -166,6 +166,9 @@ bool zero_rtt_request_allowance_for_tests();
 bool version_negotiation_without_source_connection_id_fails_for_tests();
 bool runtime_assigns_stable_path_ids_for_tests();
 bool drive_endpoint_uses_transport_selected_path_for_tests();
+bool core_version_negotiation_restart_preserves_inbound_path_ids_for_tests();
+bool core_retry_restart_preserves_inbound_path_ids_for_tests();
+bool drive_endpoint_rejects_unknown_transport_selected_path_for_tests();
 ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests case_id);
 std::optional<ParsedServerDatagramForTests>
 parse_server_datagram_for_routing_for_tests(std::span<const std::byte> bytes);

@@ -3165,6 +3165,33 @@ TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfile) {
               coquic::quic::test::client_receive_timeout_ms_for_tests(transfer));
 }
 
+TEST(QuicHttp09RuntimeTest, KeyUpdateRuntimeEnablesClientKeyUpdatePolicy) {
+    const auto keyupdate = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::keyupdate,
+        .download_root = std::filesystem::path("/downloads"),
+        .requests_env = "https://localhost/hello.txt",
+    };
+    const auto transfer = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .download_root = std::filesystem::path("/downloads"),
+        .requests_env = "https://localhost/hello.txt",
+    };
+    const auto requests = coquic::quic::parse_http09_requests_env("https://localhost/hello.txt");
+    ASSERT_TRUE(requests.has_value());
+
+    const auto keyupdate_client_config =
+        coquic::quic::test::make_http09_client_endpoint_config_for_tests(
+            keyupdate, requests.value(), false, coquic::quic::QuicCoreResult{});
+    const auto transfer_client_config =
+        coquic::quic::test::make_http09_client_endpoint_config_for_tests(
+            transfer, requests.value(), false, coquic::quic::QuicCoreResult{});
+
+    EXPECT_TRUE(keyupdate_client_config.request_key_update);
+    EXPECT_FALSE(transfer_client_config.request_key_update);
+}
+
 TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfileOnServerPath) {
     const auto keyupdate = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::server,

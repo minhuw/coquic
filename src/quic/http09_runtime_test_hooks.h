@@ -135,6 +135,9 @@ std::string format_connection_id_hex_for_tests(std::span<const std::byte> connec
 std::string format_connection_id_key_hex_for_tests(std::string_view connection_id_key);
 std::string connection_id_key_for_tests(std::span<const std::byte> connection_id);
 int client_receive_timeout_ms_for_tests(const Http09RuntimeConfig &config);
+QuicHttp09ClientConfig make_http09_client_endpoint_config_for_tests(
+    const Http09RuntimeConfig &config, const std::vector<QuicHttp09Request> &requests,
+    bool attempt_zero_rtt_requests, const QuicCoreResult &start_result);
 int run_http09_client_connection_for_tests(const Http09RuntimeConfig &config,
                                            const std::vector<QuicHttp09Request> &requests,
                                            std::uint64_t connection_index);

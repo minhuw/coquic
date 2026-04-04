@@ -6,7 +6,6 @@
 #include <fstream>
 #include <iterator>
 #include <string>
-#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -174,11 +173,6 @@ TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesSingleRequestAfterFirstRequestActi
         endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
 
     EXPECT_EQ(key_update_input_count(accepted), 1u);
-}
-
-TEST(QuicHttp09ClientTest, KeyUpdateInputTypeIsIndependentFromTimerExpiredInput) {
-    EXPECT_FALSE((std::is_same_v<coquic::quic::QuicCoreTimerExpired,
-                                 coquic::quic::QuicCoreRequestKeyUpdate>));
 }
 
 TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesRequestOnlyOnceAcrossLaterActivity) {

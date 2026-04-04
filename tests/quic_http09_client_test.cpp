@@ -177,8 +177,8 @@ TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesSingleRequestAfterFirstRequestActi
 }
 
 TEST(QuicHttp09ClientTest, KeyUpdateInputTypeIsIndependentFromTimerExpiredInput) {
-    EXPECT_FALSE((std::is_base_of_v<coquic::quic::QuicCoreTimerExpired,
-                                    coquic::quic::QuicCoreRequestKeyUpdate>));
+    EXPECT_FALSE((std::is_same_v<coquic::quic::QuicCoreTimerExpired,
+                                 coquic::quic::QuicCoreRequestKeyUpdate>));
 }
 
 TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesRequestOnlyOnceAcrossLaterActivity) {
@@ -224,7 +224,7 @@ TEST(QuicHttp09ClientTest, TransferCaseDoesNotQueueLocalKeyUpdateRequest) {
     const auto accepted =
         endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
 
-    EXPECT_TRUE(accepted.core_inputs.empty());
+    EXPECT_EQ(key_update_input_count(accepted), 0u);
 }
 
 TEST(QuicHttp09ClientTest, DoesNotReissueRequestsAfterInitialPoll) {

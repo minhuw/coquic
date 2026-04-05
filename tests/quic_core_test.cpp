@@ -1050,6 +1050,39 @@ TEST(QuicCoreTest, ConnectionQlogServerAlpnSelectionEmissionIsIdempotent) {
     EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:alpn_information"), 1u);
 }
 
+TEST(QuicCoreTest, ConnectionQlogServerAlpnSelectionSkipsMalformedPeerAlpnList) {
+    auto connection = make_connected_server_connection();
+    connection.tls_.emplace(coquic::quic::TlsAdapterConfig{
+        .role = coquic::quic::EndpointRole::server,
+        .verify_peer = false,
+        .server_name = "localhost",
+        .application_protocol = connection.config_.application_protocol,
+        .identity = connection.config_.identity,
+        .local_transport_parameters = coquic::quic::test::sample_transport_parameters(),
+        .allowed_tls_cipher_suites = connection.config_.allowed_tls_cipher_suites,
+    });
+
+    const auto malformed_offered = std::vector<uint8_t>({6, 'c', 'o', 'q', 'u', 'i', 'c', 1});
+    const uint8_t *selected = nullptr;
+    uint8_t selected_length = 0;
+    ASSERT_EQ(coquic::quic::test::TlsAdapterTestPeer::call_static_select_application_protocol(
+                  &*connection.tls_, &selected, &selected_length, malformed_offered),
+              SSL_TLSEXT_ERR_OK);
+
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    connection.config_.qlog = coquic::quic::QuicQlogConfig{.directory = qlog_dir.path()};
+    connection.qlog_session_ = coquic::quic::qlog::Session::try_open(
+        *connection.config_.qlog, connection.config_.role,
+        connection.client_initial_destination_connection_id(), coquic::quic::test::test_time(0));
+    ASSERT_NE(connection.qlog_session_, nullptr);
+
+    connection.maybe_emit_qlog_alpn_information(coquic::quic::test::test_time(1));
+
+    const auto records = coquic::quic::test::qlog_seq_records_from_file(
+        coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:alpn_information"), 0u);
+}
+
 TEST(QuicCoreTest, ConnectionQlogPacketLostReturnsWhenSessionOrSnapshotMissing) {
     auto connection = make_connected_client_connection();
     auto packet_without_snapshot = coquic::quic::SentPacketRecord{
@@ -13921,6 +13954,10 @@ TEST(QuicCoreTest, ConnectionHelperMethodsCoverRemainingStreamOpenAndFlowControl
     blocked_stream.send_flow_control_committed = 6;
     blocked.connection_flow_control_.peer_max_data = 5;
     blocked.connection_flow_control_.highest_sent = 5;
+    const auto blocked_queued_bytes = blocked.total_queued_stream_bytes();
+    EXPECT_EQ(blocked_queued_bytes, 6u);
+    EXPECT_TRUE(blocked.connection_flow_control_.should_send_data_blocked(blocked_queued_bytes));
+    EXPECT_EQ(blocked.connection_flow_control_.sendable_bytes(blocked_queued_bytes), 0u);
     blocked.maybe_queue_connection_blocked_frame();
     ASSERT_TRUE(blocked.connection_flow_control_.pending_data_blocked_frame.has_value());
     if (blocked.connection_flow_control_.pending_data_blocked_frame.has_value()) {

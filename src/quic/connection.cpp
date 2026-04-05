@@ -3491,20 +3491,30 @@ CodecResult<bool> QuicConnection::sync_tls_state() {
     maybe_emit_qlog_alpn_information(last_peer_activity_time_.value_or(QuicCoreTimePoint{}));
     auto *tls = tls_.has_value() ? &*tls_ : nullptr;
     const bool tls_handshake_complete = tls != nullptr ? tls->handshake_complete() : false;
-    if (!resumption_state_emitted_ && (tls != nullptr) && tls_handshake_complete &&
-        peer_transport_parameters_.has_value()) {
-        if (const auto ticket = tls->take_resumption_state(); ticket.has_value()) {
-            auto encoded = encode_resumption_state(
-                *ticket, current_version_, config_.application_protocol,
-                *peer_transport_parameters_, config_.zero_rtt.application_context);
-            pending_resumption_state_effect_ = QuicCoreResumptionStateAvailable{
-                .state =
-                    QuicResumptionState{
-                        .serialized = std::move(encoded),
-                    },
-            };
-            resumption_state_emitted_ = true;
-        }
+    if (resumption_state_emitted_) {
+        return CodecResult<bool>::success(true);
+    }
+    if (tls == nullptr) {
+        return CodecResult<bool>::success(true);
+    }
+    if (!tls_handshake_complete) {
+        return CodecResult<bool>::success(true);
+    }
+    if (!peer_transport_parameters_.has_value()) {
+        return CodecResult<bool>::success(true);
+    }
+
+    if (const auto ticket = tls->take_resumption_state(); ticket.has_value()) {
+        auto encoded = encode_resumption_state(
+            *ticket, current_version_, config_.application_protocol, *peer_transport_parameters_,
+            config_.zero_rtt.application_context);
+        pending_resumption_state_effect_ = QuicCoreResumptionStateAvailable{
+            .state =
+                QuicResumptionState{
+                    .serialized = std::move(encoded),
+                },
+        };
+        resumption_state_emitted_ = true;
     }
     return CodecResult<bool>::success(true);
 }
@@ -3529,7 +3539,8 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
         }
 
         peer_transport_parameters_ = parameters.value();
-    } else if (!peer_transport_parameters_.has_value()) {
+    }
+    if (!peer_transport_parameters_.has_value()) {
         return CodecResult<bool>::success(true);
     }
 

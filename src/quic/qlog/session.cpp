@@ -22,31 +22,6 @@ std::string format_connection_id_hex(const ConnectionId &connection_id) {
     return hex;
 }
 
-template <typename SessionFactory>
-std::unique_ptr<Session> try_open_with_sink(std::unique_ptr<QlogFileSeqSink> sink,
-                                            EndpointRole role, const ConnectionId &odcid,
-                                            QuicCoreTimePoint start_time,
-                                            SessionFactory &&session_factory) {
-    const auto suffix = role == EndpointRole::client ? "client" : "server";
-    const auto odcid_hex = format_connection_id_hex(odcid);
-    if (sink == nullptr || !sink->healthy()) {
-        return nullptr;
-    }
-
-    const auto preamble = serialize_file_seq_preamble(FilePreamble{
-        .title = "coquic qlog",
-        .description = "core QUIC trace",
-        .group_id = odcid_hex,
-        .vantage_point_type = suffix,
-        .event_schemas = {"urn:ietf:params:qlog:events:quic-12"},
-    });
-    if (!sink->write_record(make_json_seq_record(preamble))) {
-        return nullptr;
-    }
-
-    return std::forward<SessionFactory>(session_factory)(start_time, std::move(sink));
-}
-
 } // namespace
 
 Session::Session(QuicCoreTimePoint start_time, std::unique_ptr<QlogFileSeqSink> sink)
@@ -63,28 +38,41 @@ std::unique_ptr<Session> Session::try_open(const QuicQlogConfig &config, Endpoin
     if (!sink->open()) {
         return nullptr;
     }
-    return try_open_with_sink(
-        std::move(sink), role, odcid, start_time,
-        [](QuicCoreTimePoint session_start_time, std::unique_ptr<QlogFileSeqSink> session_sink) {
-            return std::unique_ptr<Session>(
-                new Session(session_start_time, std::move(session_sink)));
-        });
+    return try_open_with_sink_for_test(std::move(sink), role, odcid, start_time);
 }
 
 std::unique_ptr<Session> Session::try_open_with_sink_for_test(std::unique_ptr<QlogFileSeqSink> sink,
                                                               EndpointRole role,
                                                               const ConnectionId &odcid,
                                                               QuicCoreTimePoint start_time) {
-    return try_open_with_sink(
-        std::move(sink), role, odcid, start_time,
-        [](QuicCoreTimePoint session_start_time, std::unique_ptr<QlogFileSeqSink> session_sink) {
-            return std::unique_ptr<Session>(
-                new Session(session_start_time, std::move(session_sink)));
-        });
+    const auto suffix = role == EndpointRole::client ? "client" : "server";
+    const auto odcid_hex = format_connection_id_hex(odcid);
+    if (sink == nullptr) {
+        return nullptr;
+    }
+    if (!sink->healthy()) {
+        return nullptr;
+    }
+
+    const auto preamble = serialize_file_seq_preamble(FilePreamble{
+        .title = "coquic qlog",
+        .description = "core QUIC trace",
+        .group_id = odcid_hex,
+        .vantage_point_type = suffix,
+        .event_schemas = {"urn:ietf:params:qlog:events:quic-12"},
+    });
+    if (!sink->write_record(make_json_seq_record(preamble))) {
+        return nullptr;
+    }
+
+    return std::unique_ptr<Session>(new Session(start_time, std::move(sink)));
 }
 
 bool Session::healthy() const {
-    return sink_ != nullptr && sink_->healthy();
+    if (sink_ == nullptr) {
+        return false;
+    }
+    return sink_->healthy();
 }
 
 std::uint32_t Session::next_inbound_datagram_id() {

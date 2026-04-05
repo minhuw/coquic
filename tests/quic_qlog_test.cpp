@@ -102,9 +102,10 @@ TEST(QuicQlogTest, SessionOpenRejectsNullAndUnhealthySinks) {
                                                    coquic::quic::test::test_time(0)),
               nullptr);
 
-    coquic::quic::test::ScopedTempDir dir;
-    auto unopened_sink = std::make_unique<QlogFileSeqSink>(dir.path() / "unopened.sqlog");
-    EXPECT_EQ(Session::try_open_with_sink_for_test(std::move(unopened_sink), EndpointRole::server,
+    auto unhealthy_sink = std::make_unique<QlogFileSeqSink>(std::filesystem::path("/dev/full"));
+    ASSERT_TRUE(unhealthy_sink->open());
+    EXPECT_FALSE(unhealthy_sink->write_record("\x1e{\"time\":0}\n"));
+    EXPECT_EQ(Session::try_open_with_sink_for_test(std::move(unhealthy_sink), EndpointRole::server,
                                                    qlog_bytes({0x01, 0x02, 0x03, 0x04}),
                                                    coquic::quic::test::test_time(1)),
               nullptr);
@@ -305,6 +306,7 @@ TEST(QuicQlogTest, SerializersCoverRemainingFramesAndOptionalFields) {
     const auto binary_alpn = std::vector<std::byte>{std::byte{0x00}, std::byte{0xff}};
     const auto printable_alpn = qlog_bytes({0x63, 0x6f, 0x71, 0x75, 0x69, 0x63});
     const auto mixed_alpn = qlog_bytes({0x63, 0x01});
+    const auto high_mixed_alpn = qlog_bytes({0x63, 0xff});
     const auto second_printable_alpn = qlog_bytes({0x68, 0x33});
     const std::array local_alpns{binary_alpn};
     const std::array peer_alpns{printable_alpn};
@@ -318,6 +320,12 @@ TEST(QuicQlogTest, SerializersCoverRemainingFramesAndOptionalFields) {
     EXPECT_NE(alpn_json.find("\"client_alpns\""), std::string::npos);
     EXPECT_NE(alpn_json.find("\"server_alpns\""), std::string::npos);
     EXPECT_NE(alpn_json.find("\"chosen_alpn\""), std::string::npos);
+
+    const std::array high_alpns{high_mixed_alpn};
+    const auto high_binary_alpn_json = coquic::quic::qlog::serialize_alpn_information(
+        std::span(high_alpns), std::nullopt, std::nullopt, EndpointRole::client);
+    EXPECT_EQ(high_binary_alpn_json.find("\"byte_value\":\"63ff\",\"string_value\""),
+              std::string::npos);
 
     const std::array local_multiple_alpns{mixed_alpn, second_printable_alpn};
     const auto list_json = coquic::quic::qlog::serialize_alpn_information(

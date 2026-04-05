@@ -4273,7 +4273,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     .trigger = pto_probe_burst_active ? std::optional<std::string>("pto_probe")
                                                       : std::nullopt,
                 });
-            if (qlog_session_ != nullptr && outbound_datagram_id.has_value()) {
+            if (outbound_datagram_id.has_value()) {
                 static_cast<void>(qlog_session_->write_event(
                     now, "quic:packet_sent", qlog::serialize_packet_snapshot(snapshot)));
             }

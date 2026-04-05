@@ -1152,6 +1152,17 @@ TEST(QuicTlsAdapterContractTest, RuntimeStatusUpdateReturnsWhenSslIsMissing) {
 }
 
 TEST(QuicTlsAdapterContractTest,
+     RuntimeStatusUpdateWithSslAndNoSelectedAlpnKeepsSelectedProtocolEmpty) {
+    TlsAdapter adapter(make_client_config());
+    ASSERT_TRUE(adapter.start().has_value());
+    ASSERT_FALSE(adapter.selected_application_protocol().has_value());
+
+    TlsAdapterTestPeer::update_runtime_status(adapter);
+
+    EXPECT_FALSE(adapter.selected_application_protocol().has_value());
+}
+
+TEST(QuicTlsAdapterContractTest,
      NotSentEarlyDataMarksAttemptedHandshakeAsRejectedWhenHandshakeCompletes) {
     TlsAdapter adapter(make_client_config());
     ASSERT_TRUE(adapter.start().has_value());

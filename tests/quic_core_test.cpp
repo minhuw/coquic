@@ -959,6 +959,124 @@ TEST(QuicCoreTest, QlogRecoveryMetricsUpdatedAndPtoProbeTriggerAreEmitted) {
     EXPECT_TRUE(coquic::quic::test::qlog_any_record_contains(records, "\"trigger\":\"pto_probe\""));
 }
 
+TEST(QuicCoreTest, ConnectionQlogSessionOpenGuardsRespectConfigAndExistingSession) {
+    auto connection = make_connected_client_connection();
+    const auto odcid = connection.client_initial_destination_connection_id();
+
+    connection.config_.qlog.reset();
+    connection.maybe_open_qlog_session(coquic::quic::test::test_time(0), odcid);
+    EXPECT_EQ(connection.qlog_session_, nullptr);
+
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    connection.config_.qlog = coquic::quic::QuicQlogConfig{.directory = qlog_dir.path()};
+    connection.maybe_open_qlog_session(coquic::quic::test::test_time(1), odcid);
+    ASSERT_NE(connection.qlog_session_, nullptr);
+    auto *existing = connection.qlog_session_.get();
+
+    connection.maybe_open_qlog_session(coquic::quic::test::test_time(2), odcid);
+    EXPECT_EQ(connection.qlog_session_.get(), existing);
+}
+
+TEST(QuicCoreTest, ConnectionQlogLocalStartupEventsAreIdempotent) {
+    auto connection = make_connected_client_connection();
+    connection.emit_local_qlog_startup_events(coquic::quic::test::test_time(0));
+
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    connection.config_.qlog = coquic::quic::QuicQlogConfig{.directory = qlog_dir.path()};
+    connection.qlog_session_ = coquic::quic::qlog::Session::try_open(
+        *connection.config_.qlog, connection.config_.role,
+        connection.client_initial_destination_connection_id(), coquic::quic::test::test_time(0));
+    ASSERT_NE(connection.qlog_session_, nullptr);
+
+    connection.emit_local_qlog_startup_events(coquic::quic::test::test_time(1));
+    connection.emit_local_qlog_startup_events(coquic::quic::test::test_time(2));
+
+    const auto records = coquic::quic::test::qlog_seq_records_from_file(
+        coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:version_information"), 1u);
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:alpn_information"), 1u);
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:parameters_set"), 1u);
+}
+
+TEST(QuicCoreTest, ConnectionQlogRemoteParametersReturnWhenPeerParametersMissing) {
+    auto connection = make_connected_client_connection();
+
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    connection.config_.qlog = coquic::quic::QuicQlogConfig{.directory = qlog_dir.path()};
+    connection.qlog_session_ = coquic::quic::qlog::Session::try_open(
+        *connection.config_.qlog, connection.config_.role,
+        connection.client_initial_destination_connection_id(), coquic::quic::test::test_time(0));
+    ASSERT_NE(connection.qlog_session_, nullptr);
+
+    connection.peer_transport_parameters_.reset();
+    connection.maybe_emit_remote_qlog_parameters(coquic::quic::test::test_time(1));
+
+    const auto records = coquic::quic::test::qlog_seq_records_from_file(
+        coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:parameters_set"), 0u);
+}
+
+TEST(QuicCoreTest, ConnectionQlogServerAlpnSelectionEmissionIsIdempotent) {
+    auto connection = make_connected_server_connection();
+    connection.tls_.emplace(coquic::quic::TlsAdapterConfig{
+        .role = coquic::quic::EndpointRole::server,
+        .verify_peer = false,
+        .server_name = "localhost",
+        .application_protocol = connection.config_.application_protocol,
+        .identity = connection.config_.identity,
+        .local_transport_parameters = coquic::quic::test::sample_transport_parameters(),
+        .allowed_tls_cipher_suites = connection.config_.allowed_tls_cipher_suites,
+    });
+
+    const auto offered = std::vector<uint8_t>({6, 'c', 'o', 'q', 'u', 'i', 'c'});
+    const uint8_t *selected = nullptr;
+    uint8_t selected_length = 0;
+    ASSERT_EQ(coquic::quic::test::TlsAdapterTestPeer::call_static_select_application_protocol(
+                  &*connection.tls_, &selected, &selected_length, offered),
+              SSL_TLSEXT_ERR_OK);
+
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    connection.config_.qlog = coquic::quic::QuicQlogConfig{.directory = qlog_dir.path()};
+    connection.qlog_session_ = coquic::quic::qlog::Session::try_open(
+        *connection.config_.qlog, connection.config_.role,
+        connection.client_initial_destination_connection_id(), coquic::quic::test::test_time(0));
+    ASSERT_NE(connection.qlog_session_, nullptr);
+
+    connection.maybe_emit_qlog_alpn_information(coquic::quic::test::test_time(1));
+    connection.maybe_emit_qlog_alpn_information(coquic::quic::test::test_time(2));
+
+    const auto records = coquic::quic::test::qlog_seq_records_from_file(
+        coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:alpn_information"), 1u);
+}
+
+TEST(QuicCoreTest, ConnectionQlogPacketLostReturnsWhenSessionOrSnapshotMissing) {
+    auto connection = make_connected_client_connection();
+    auto packet_without_snapshot = coquic::quic::SentPacketRecord{
+        .packet_number = 3,
+        .sent_time = coquic::quic::test::test_time(0),
+        .ack_eliciting = true,
+        .in_flight = true,
+    };
+
+    connection.emit_qlog_packet_lost(packet_without_snapshot, "time_threshold",
+                                     coquic::quic::test::test_time(1));
+
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    connection.config_.qlog = coquic::quic::QuicQlogConfig{.directory = qlog_dir.path()};
+    connection.qlog_session_ = coquic::quic::qlog::Session::try_open(
+        *connection.config_.qlog, connection.config_.role,
+        connection.client_initial_destination_connection_id(), coquic::quic::test::test_time(0));
+    ASSERT_NE(connection.qlog_session_, nullptr);
+
+    connection.emit_qlog_packet_lost(packet_without_snapshot, "time_threshold",
+                                     coquic::quic::test::test_time(2));
+
+    const auto records = coquic::quic::test::qlog_seq_records_from_file(
+        coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:packet_lost"), 0u);
+}
+
 TEST(QuicCoreTest, TestUtilsExtractResumptionAndZeroRttEffects) {
     const auto result = coquic::quic::QuicCoreResult{
         .effects =

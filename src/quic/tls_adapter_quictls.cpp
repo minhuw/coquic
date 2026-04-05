@@ -1001,10 +1001,11 @@ class TlsAdapter::Impl {
             const uint8_t *selected = nullptr;
             unsigned selected_len = 0;
             SSL_get0_alpn_selected(ssl_.get(), &selected, &selected_len);
-            if (selected_len != 0) {
+            const unsigned safe_selected_len = selected != nullptr ? selected_len : 0;
+            if (safe_selected_len != 0) {
                 selected_application_protocol_ = std::vector<std::byte>(
                     reinterpret_cast<const std::byte *>(selected),
-                    reinterpret_cast<const std::byte *>(selected + selected_len));
+                    reinterpret_cast<const std::byte *>(selected + safe_selected_len));
             }
         }
         update_early_data_status();

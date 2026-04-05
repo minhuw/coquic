@@ -631,6 +631,47 @@ TEST(QuicTlsAdapterContractTest, SelectApplicationProtocolRejectsNullPointersAnd
               SSL_TLSEXT_ERR_ALERT_FATAL);
 }
 
+TEST(QuicTlsAdapterContractTest, QlogTelemetryCapturesServerOfferedAndSelectedApplicationProtocol) {
+    TlsAdapter server(make_server_config());
+    const auto offered = std::vector<uint8_t>({6, 'c', 'o', 'q', 'u', 'i', 'c'});
+    const uint8_t *selected = nullptr;
+    uint8_t selected_length = 0;
+
+    ASSERT_EQ(TlsAdapterTestPeer::call_static_select_application_protocol(
+                  &server, &selected, &selected_length, offered),
+              SSL_TLSEXT_ERR_OK);
+
+    const auto expected = std::vector<std::byte>{
+        static_cast<std::byte>('c'), static_cast<std::byte>('o'), static_cast<std::byte>('q'),
+        static_cast<std::byte>('u'), static_cast<std::byte>('i'), static_cast<std::byte>('c'),
+    };
+
+    ASSERT_EQ(server.peer_offered_application_protocols().size(), 1u);
+    EXPECT_EQ(server.peer_offered_application_protocols().front(), expected);
+    const auto selected_protocol = server.selected_application_protocol();
+    ASSERT_TRUE(selected_protocol.has_value());
+    EXPECT_EQ(selected_protocol.value_or(std::vector<std::byte>{}), expected);
+}
+
+TEST(QuicTlsAdapterContractTest, QlogTelemetryPublishesSelectedApplicationProtocolAfterHandshake) {
+    TlsAdapter client(make_client_config());
+    TlsAdapter server(make_server_config());
+
+    drive_tls_handshake(client, server);
+
+    const auto expected = std::vector<std::byte>{
+        static_cast<std::byte>('c'), static_cast<std::byte>('o'), static_cast<std::byte>('q'),
+        static_cast<std::byte>('u'), static_cast<std::byte>('i'), static_cast<std::byte>('c'),
+    };
+
+    const auto client_selected = client.selected_application_protocol();
+    const auto server_selected = server.selected_application_protocol();
+    ASSERT_TRUE(client_selected.has_value());
+    ASSERT_TRUE(server_selected.has_value());
+    EXPECT_EQ(client_selected.value_or(std::vector<std::byte>{}), expected);
+    EXPECT_EQ(server_selected.value_or(std::vector<std::byte>{}), expected);
+}
+
 TEST(QuicTlsAdapterContractTest, FaultInjectorHonorsConfiguredOccurrence) {
     const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::initialize_ctx_new, 2);
 

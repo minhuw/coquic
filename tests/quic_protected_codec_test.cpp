@@ -716,6 +716,39 @@ TEST(QuicProtectedCodecTest, RejectsInitialWithoutClientInitialDestinationConnec
     EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
 }
 
+TEST(QuicProtectedCodecTest, SerializeProtectedDatagramWithMetadataTracksPacketOffsets) {
+    const auto context =
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+    const std::array<coquic::quic::ProtectedPacket, 2> packets = {
+        make_minimal_handshake_packet(),
+        coquic::quic::ProtectedPacket{make_minimal_handshake_packet()},
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram_with_metadata(packets, context);
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_EQ(encoded.value().packet_metadata.size(), 2u);
+    EXPECT_EQ(encoded.value().packet_metadata[0].offset, 0u);
+    EXPECT_EQ(encoded.value().packet_metadata[1].offset, encoded.value().packet_metadata[0].length);
+    EXPECT_EQ(encoded.value().packet_metadata[0].length + encoded.value().packet_metadata[1].length,
+              encoded.value().bytes.size());
+}
+
+TEST(QuicProtectedCodecTest, LegacySerializeProtectedDatagramStillReturnsOnlyBytes) {
+    const auto context =
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+    const std::array<coquic::quic::ProtectedPacket, 1> packets = {
+        make_minimal_handshake_packet(),
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(packets, context);
+    const auto encoded_with_metadata =
+        coquic::quic::serialize_protected_datagram_with_metadata(packets, context);
+
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded_with_metadata.has_value());
+    EXPECT_EQ(encoded.value(), encoded_with_metadata.value().bytes);
+}
+
 TEST(QuicProtectedCodecTest, RoundTripsQuicV2InitialPacket) {
     auto packet = make_minimal_initial_packet();
     packet.version = 0x6b3343cfu;

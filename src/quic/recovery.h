@@ -3,12 +3,14 @@
 #include <chrono>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <vector>
 
 #include "src/quic/core.h"
 #include "src/quic/crypto_stream.h"
 #include "src/quic/frame.h"
+#include "src/quic/qlog/fwd.h"
 #include "src/quic/streams.h"
 
 namespace coquic::quic {
@@ -38,6 +40,8 @@ struct SentPacketRecord {
     std::optional<DataBlockedFrame> data_blocked_frame;
     std::vector<StreamDataBlockedFrame> stream_data_blocked_frames;
     std::vector<StreamFrameSendFragment> stream_fragments;
+    std::shared_ptr<qlog::PacketSnapshot> qlog_packet_snapshot;
+    bool qlog_pto_probe = false;
     bool has_ping = false;
     std::size_t bytes_in_flight = 0;
 };

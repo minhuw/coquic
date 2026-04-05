@@ -142,6 +142,7 @@ fn addProjectLibrary(
         "src/quic/packet_number.cpp",
         "src/quic/plaintext_codec.cpp",
         "src/quic/qlog/json.cpp",
+        "src/quic/qlog/session.cpp",
         "src/quic/qlog/sink.cpp",
         "src/quic/recovery.cpp",
         "src/quic/protected_codec.cpp",

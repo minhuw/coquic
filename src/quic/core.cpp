@@ -93,7 +93,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     QuicCoreResult result;
     std::visit(
         overloaded{
-            [&](const QuicCoreStart &) { connection_->start(); },
+            [&](const QuicCoreStart &) { connection_->start(now); },
             [&](const QuicCoreInboundDatagram &in) {
                 if (config_.role == EndpointRole::client) {
                     if (!connection_->is_handshake_complete()) {
@@ -117,7 +117,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                                     config_.initial_version = supported_version;
                                     config_.reacted_to_version_negotiation = true;
                                     connection_ = std::make_unique<QuicConnection>(config_);
-                                    connection_->start();
+                                    connection_->start(now);
                                     return;
                                 }
                             }
@@ -154,7 +154,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             connection_ = std::make_unique<QuicConnection>(config_);
                             connection_->initial_space_.next_send_packet_number =
                                 next_initial_send_packet_number;
-                            connection_->start();
+                            connection_->start(now);
                         }
                         return;
                     }

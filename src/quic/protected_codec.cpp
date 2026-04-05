@@ -1266,11 +1266,12 @@ deserialize_protected_one_rtt_packet(std::span<const std::byte> bytes,
 
 } // namespace
 
-CodecResult<std::vector<std::byte>>
-serialize_protected_datagram(std::span<const ProtectedPacket> packets,
-                             const SerializeProtectionContext &context) {
-    std::vector<std::byte> datagram;
+CodecResult<SerializedProtectedDatagram>
+serialize_protected_datagram_with_metadata(std::span<const ProtectedPacket> packets,
+                                           const SerializeProtectionContext &context) {
+    SerializedProtectedDatagram out;
     for (std::size_t index = 0; index < packets.size(); ++index) {
+        const auto offset = out.bytes.size();
         const auto encoded = std::visit(
             [&](const auto &packet) -> CodecResult<std::vector<std::byte>> {
                 using PacketType = std::decay_t<decltype(packet)>;
@@ -1281,24 +1282,47 @@ serialize_protected_datagram(std::span<const ProtectedPacket> packets,
                 } else if constexpr (std::is_same_v<PacketType, ProtectedZeroRttPacket>) {
                     return serialize_protected_zero_rtt_packet(packet, context);
                 } else {
-                    const auto appended =
-                        append_protected_one_rtt_packet_to_datagram_impl(datagram, packet, context);
+                    const auto before = out.bytes.size();
+                    const auto appended = append_protected_one_rtt_packet_to_datagram_impl(
+                        out.bytes, packet, context);
                     if (!appended.has_value()) {
                         return CodecResult<std::vector<std::byte>>::failure(
                             appended.error().code, appended.error().offset);
                     }
+                    out.packet_metadata.push_back(SerializedProtectedPacketMetadata{
+                        .offset = before,
+                        .length = appended.value(),
+                    });
                     return CodecResult<std::vector<std::byte>>::success({});
                 }
             },
             packets[index]);
         if (!encoded.has_value())
-            return CodecResult<std::vector<std::byte>>::failure(encoded.error().code,
-                                                                encoded.error().offset);
+            return CodecResult<SerializedProtectedDatagram>::failure(encoded.error().code,
+                                                                     encoded.error().offset);
 
-        datagram.insert(datagram.end(), encoded.value().begin(), encoded.value().end());
+        if (!encoded.value().empty()) {
+            out.bytes.insert(out.bytes.end(), encoded.value().begin(), encoded.value().end());
+            out.packet_metadata.push_back(SerializedProtectedPacketMetadata{
+                .offset = offset,
+                .length = encoded.value().size(),
+            });
+        }
     }
 
-    return CodecResult<std::vector<std::byte>>::success(std::move(datagram));
+    return CodecResult<SerializedProtectedDatagram>::success(std::move(out));
+}
+
+CodecResult<std::vector<std::byte>>
+serialize_protected_datagram(std::span<const ProtectedPacket> packets,
+                             const SerializeProtectionContext &context) {
+    auto encoded = serialize_protected_datagram_with_metadata(packets, context);
+    if (!encoded.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(encoded.error().code,
+                                                            encoded.error().offset);
+    }
+
+    return CodecResult<std::vector<std::byte>>::success(std::move(encoded.value().bytes));
 }
 
 CodecResult<std::vector<ProtectedPacket>>

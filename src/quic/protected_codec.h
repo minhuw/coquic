@@ -104,6 +104,20 @@ struct DeserializeProtectionContext {
 using ProtectedPacket = std::variant<ProtectedInitialPacket, ProtectedHandshakePacket,
                                      ProtectedZeroRttPacket, ProtectedOneRttPacket>;
 
+struct SerializedProtectedPacketMetadata {
+    std::size_t offset = 0;
+    std::size_t length = 0;
+};
+
+struct SerializedProtectedDatagram {
+    std::vector<std::byte> bytes;
+    std::vector<SerializedProtectedPacketMetadata> packet_metadata;
+};
+
+CodecResult<SerializedProtectedDatagram>
+serialize_protected_datagram_with_metadata(std::span<const ProtectedPacket> packets,
+                                           const SerializeProtectionContext &context);
+
 CodecResult<std::vector<std::byte>>
 serialize_protected_datagram(std::span<const ProtectedPacket> packets,
                              const SerializeProtectionContext &context);

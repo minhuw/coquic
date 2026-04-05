@@ -362,6 +362,22 @@ std::vector<uint8_t> encode_application_protocol_list(std::string_view applicati
     return encoded;
 }
 
+std::vector<std::vector<std::byte>>
+decode_application_protocol_list(std::span<const uint8_t> offered) {
+    std::vector<std::vector<std::byte>> values;
+    std::size_t offset = 0;
+    while (offset < offered.size()) {
+        const auto length = static_cast<std::size_t>(offered[offset++]);
+        if (offset + length > offered.size()) {
+            return {};
+        }
+        values.emplace_back(reinterpret_cast<const std::byte *>(offered.data() + offset),
+                            reinterpret_cast<const std::byte *>(offered.data() + offset + length));
+        offset += length;
+    }
+    return values;
+}
+
 bool set_alpn_protos_failed(SSL *ssl, const std::vector<uint8_t> &encoded) {
     return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_client_alpn) ||
            (consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_client_alpn_set_protos)
@@ -576,6 +592,14 @@ class TlsAdapter::Impl {
         return peer_transport_parameters_;
     }
 
+    const std::vector<std::vector<std::byte>> &peer_offered_application_protocols() const {
+        return peer_offered_application_protocols_;
+    }
+
+    const std::optional<std::vector<std::byte>> &selected_application_protocol() const {
+        return selected_application_protocol_;
+    }
+
     bool early_data_attempted() const {
         return early_data_attempted_;
     }
@@ -634,6 +658,10 @@ class TlsAdapter::Impl {
     static int select_application_protocol(SSL *, const uint8_t **out, uint8_t *out_len,
                                            const uint8_t *in, unsigned in_len, void *arg) {
         auto *impl = static_cast<Impl *>(arg);
+        if (impl != nullptr) {
+            impl->peer_offered_application_protocols_ =
+                decode_application_protocol_list(std::span(in, in_len));
+        }
         if (impl == nullptr || out == nullptr || out_len == nullptr ||
             !application_protocol_valid(impl->config_.application_protocol) ||
             !client_offered_application_protocol(std::span(in, in_len),
@@ -643,6 +671,9 @@ class TlsAdapter::Impl {
 
         *out = reinterpret_cast<const uint8_t *>(impl->config_.application_protocol.data());
         *out_len = static_cast<uint8_t>(impl->config_.application_protocol.size());
+        impl->selected_application_protocol_ =
+            std::vector<std::byte>(reinterpret_cast<const std::byte *>(*out),
+                                   reinterpret_cast<const std::byte *>(*out + *out_len));
         return SSL_TLSEXT_ERR_OK;
     }
 
@@ -966,6 +997,16 @@ class TlsAdapter::Impl {
     }
 
     void update_runtime_status() {
+        if (ssl_ != nullptr) {
+            const uint8_t *selected = nullptr;
+            unsigned selected_len = 0;
+            SSL_get0_alpn_selected(ssl_.get(), &selected, &selected_len);
+            if (selected != nullptr && selected_len != 0) {
+                selected_application_protocol_ = std::vector<std::byte>(
+                    reinterpret_cast<const std::byte *>(selected),
+                    reinterpret_cast<const std::byte *>(selected + selected_len));
+            }
+        }
         update_early_data_status();
         update_resumed_resumption_state();
     }
@@ -1030,6 +1071,8 @@ class TlsAdapter::Impl {
     std::optional<std::vector<std::byte>> pending_resumption_state_;
     std::optional<std::vector<std::byte>> resumed_resumption_state_;
     std::optional<std::vector<std::byte>> peer_transport_parameters_;
+    std::vector<std::vector<std::byte>> peer_offered_application_protocols_;
+    std::optional<std::vector<std::byte>> selected_application_protocol_;
     bool early_data_attempted_ = false;
     std::optional<bool> early_data_accepted_;
     std::optional<CodecError> sticky_error_;
@@ -1074,6 +1117,14 @@ const std::optional<std::vector<std::byte>> &TlsAdapter::resumed_resumption_stat
 
 const std::optional<std::vector<std::byte>> &TlsAdapter::peer_transport_parameters() const {
     return impl_->peer_transport_parameters();
+}
+
+const std::vector<std::vector<std::byte>> &TlsAdapter::peer_offered_application_protocols() const {
+    return impl_->peer_offered_application_protocols();
+}
+
+const std::optional<std::vector<std::byte>> &TlsAdapter::selected_application_protocol() const {
+    return impl_->selected_application_protocol();
 }
 
 bool TlsAdapter::early_data_attempted() const {

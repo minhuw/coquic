@@ -2,14 +2,18 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/quic/congestion.h"
 #include "src/quic/core.h"
 #include "src/quic/crypto_stream.h"
+#include "src/quic/qlog/fwd.h"
+#include "src/quic/qlog/types.h"
 #include "src/quic/recovery.h"
 #include "src/quic/streams.h"
 #include "src/quic/tls_adapter.h"
@@ -98,11 +102,32 @@ struct StoredClientResumptionState {
     std::vector<std::byte> application_context;
 };
 
+struct DeferredProtectedPacket {
+    std::vector<std::byte> bytes;
+    std::uint32_t datagram_id = 0;
+
+    DeferredProtectedPacket() = default;
+    DeferredProtectedPacket(std::vector<std::byte> packet_bytes, std::uint32_t id = 0)
+        : bytes(std::move(packet_bytes)), datagram_id(id) {
+    }
+
+    bool operator==(const DeferredProtectedPacket &) const = default;
+    bool operator==(const std::vector<std::byte> &other) const {
+        return datagram_id == 0 && bytes == other;
+    }
+};
+
 class QuicConnection {
   public:
     explicit QuicConnection(QuicCoreConfig config);
+    ~QuicConnection();
+    QuicConnection(const QuicConnection &) = delete;
+    QuicConnection &operator=(const QuicConnection &) = delete;
+    QuicConnection(QuicConnection &&) noexcept;
+    QuicConnection &operator=(QuicConnection &&) noexcept;
 
     void start();
+    void start(QuicCoreTimePoint now);
     void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now);
     StreamStateResult<bool> queue_stream_send(std::uint64_t stream_id,
                                               std::span<const std::byte> bytes, bool fin);
@@ -126,8 +151,26 @@ class QuicConnection {
     friend class QuicCore;
 
     void start_client_if_needed();
+    void start_client_if_needed(QuicCoreTimePoint now);
     void start_server_if_needed(const ConnectionId &client_initial_destination_connection_id,
                                 std::uint32_t client_initial_version = kQuicVersion1);
+    void start_server_if_needed(const ConnectionId &client_initial_destination_connection_id,
+                                QuicCoreTimePoint now,
+                                std::uint32_t client_initial_version = kQuicVersion1);
+    void maybe_open_qlog_session(QuicCoreTimePoint now, const ConnectionId &odcid);
+    void emit_local_qlog_startup_events(QuicCoreTimePoint now);
+    void maybe_emit_remote_qlog_parameters(QuicCoreTimePoint now);
+    void maybe_emit_qlog_alpn_information(QuicCoreTimePoint now);
+    qlog::PacketSnapshot
+    make_qlog_packet_snapshot(const ProtectedPacket &packet,
+                              const qlog::PacketSnapshotContext &context) const;
+    qlog::RecoveryMetricsSnapshot current_qlog_recovery_metrics() const;
+    void maybe_emit_qlog_recovery_metrics(QuicCoreTimePoint now);
+    void emit_qlog_packet_lost(const SentPacketRecord &packet, std::string_view trigger,
+                               QuicCoreTimePoint now);
+    void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
+                                  std::optional<std::uint32_t> inbound_datagram_id,
+                                  bool replay_trigger, bool count_inbound_bytes);
     CodecResult<ConnectionId>
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
@@ -252,7 +295,8 @@ class QuicConnection {
     bool resumption_state_emitted_ = false;
     bool zero_rtt_attempted_event_emitted_ = false;
     bool processed_peer_packet_ = false;
-    std::vector<std::vector<std::byte>> deferred_protected_packets_;
+    std::unique_ptr<qlog::Session> qlog_session_;
+    std::vector<DeferredProtectedPacket> deferred_protected_packets_;
     std::optional<QuicCoreTimePoint> last_peer_activity_time_;
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
     std::optional<QuicCoreTimePoint> server_zero_rtt_discard_deadline_;

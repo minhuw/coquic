@@ -20,6 +20,8 @@
 #include <variant>
 #include <vector>
 
+#include <gtest/gtest.h>
+
 #define private public
 #include "src/quic/connection.h"
 #undef private
@@ -30,6 +32,11 @@ namespace coquic::quic::test {
 
 inline std::string read_text_file(const char *path) {
     std::ifstream input(path);
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+inline std::string read_text_file(const std::filesystem::path &path) {
+    std::ifstream input(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 }
 
@@ -343,6 +350,64 @@ class ScopedTempDir {
   private:
     std::filesystem::path path_;
 };
+
+inline std::vector<std::filesystem::path> sqlog_files_in(const std::filesystem::path &dir) {
+    std::vector<std::filesystem::path> out;
+    if (!std::filesystem::exists(dir)) {
+        return out;
+    }
+
+    for (const auto &entry : std::filesystem::directory_iterator(dir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".sqlog") {
+            out.push_back(entry.path());
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+inline std::filesystem::path only_sqlog_file_in(const std::filesystem::path &dir) {
+    const auto files = sqlog_files_in(dir);
+    EXPECT_EQ(files.size(), 1u);
+    return files.empty() ? std::filesystem::path{} : files.front();
+}
+
+inline std::vector<std::string> qlog_seq_records_from_file(const std::filesystem::path &path) {
+    const auto text = read_text_file(path);
+    std::vector<std::string> out;
+    std::string current;
+    for (const char ch : text) {
+        if (ch == '\x1e') {
+            if (!current.empty()) {
+                out.push_back(current);
+                current.clear();
+            }
+            continue;
+        }
+        if (ch != '\n') {
+            current.push_back(ch);
+        }
+    }
+    if (!current.empty()) {
+        out.push_back(current);
+    }
+    return out;
+}
+
+inline bool qlog_any_record_contains(std::span<const std::string> records,
+                                     std::string_view needle) {
+    return std::any_of(records.begin(), records.end(), [&](const std::string &record) {
+        return record.find(needle) != std::string::npos;
+    });
+}
+
+inline std::size_t qlog_event_count(std::span<const std::string> records, std::string_view name) {
+    const auto needle = std::string("\"name\":\"") + std::string(name) + "\"";
+    return static_cast<std::size_t>(
+        std::count_if(records.begin(), records.end(), [&](const std::string &record) {
+            return record.find(needle) != std::string::npos;
+        }));
+}
 
 inline void drive_quic_handshake(QuicCore &client, QuicCore &server, QuicCoreTimePoint now,
                                  std::vector<QuicCoreStateChange> *client_events = nullptr,

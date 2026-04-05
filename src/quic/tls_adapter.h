@@ -66,6 +66,8 @@ class TlsAdapter {
     std::optional<std::vector<std::byte>> take_resumption_state();
     const std::optional<std::vector<std::byte>> &resumed_resumption_state() const;
     const std::optional<std::vector<std::byte>> &peer_transport_parameters() const;
+    const std::vector<std::vector<std::byte>> &peer_offered_application_protocols() const;
+    const std::optional<std::vector<std::byte>> &selected_application_protocol() const;
     bool early_data_attempted() const;
     std::optional<bool> early_data_accepted() const;
     bool handshake_complete() const;

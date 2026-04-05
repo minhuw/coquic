@@ -36,9 +36,6 @@ class Session {
 
   private:
     Session(QuicCoreTimePoint start_time, std::unique_ptr<QlogFileSeqSink> sink);
-    static std::unique_ptr<Session> try_open_with_sink(std::unique_ptr<QlogFileSeqSink> sink,
-                                                       EndpointRole role, const ConnectionId &odcid,
-                                                       QuicCoreTimePoint start_time);
 
     std::unique_ptr<QlogFileSeqSink> sink_;
     QuicCoreTimePoint start_time_{};

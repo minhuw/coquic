@@ -22,15 +22,11 @@ std::string format_connection_id_hex(const ConnectionId &connection_id) {
     return hex;
 }
 
-} // namespace
-
-Session::Session(QuicCoreTimePoint start_time, std::unique_ptr<QlogFileSeqSink> sink)
-    : sink_(std::move(sink)), start_time_(start_time) {
-}
-
-std::unique_ptr<Session> Session::try_open_with_sink(std::unique_ptr<QlogFileSeqSink> sink,
-                                                     EndpointRole role, const ConnectionId &odcid,
-                                                     QuicCoreTimePoint start_time) {
+template <typename SessionFactory>
+std::unique_ptr<Session> try_open_with_sink(std::unique_ptr<QlogFileSeqSink> sink,
+                                            EndpointRole role, const ConnectionId &odcid,
+                                            QuicCoreTimePoint start_time,
+                                            SessionFactory &&session_factory) {
     const auto suffix = role == EndpointRole::client ? "client" : "server";
     const auto odcid_hex = format_connection_id_hex(odcid);
     if (sink == nullptr || !sink->healthy()) {
@@ -48,7 +44,13 @@ std::unique_ptr<Session> Session::try_open_with_sink(std::unique_ptr<QlogFileSeq
         return nullptr;
     }
 
-    return std::unique_ptr<Session>(new Session(start_time, std::move(sink)));
+    return std::forward<SessionFactory>(session_factory)(start_time, std::move(sink));
+}
+
+} // namespace
+
+Session::Session(QuicCoreTimePoint start_time, std::unique_ptr<QlogFileSeqSink> sink)
+    : sink_(std::move(sink)), start_time_(start_time) {
 }
 
 std::unique_ptr<Session> Session::try_open(const QuicQlogConfig &config, EndpointRole role,
@@ -61,14 +63,24 @@ std::unique_ptr<Session> Session::try_open(const QuicQlogConfig &config, Endpoin
     if (!sink->open()) {
         return nullptr;
     }
-    return try_open_with_sink(std::move(sink), role, odcid, start_time);
+    return try_open_with_sink(
+        std::move(sink), role, odcid, start_time,
+        [](QuicCoreTimePoint session_start_time, std::unique_ptr<QlogFileSeqSink> session_sink) {
+            return std::unique_ptr<Session>(
+                new Session(session_start_time, std::move(session_sink)));
+        });
 }
 
 std::unique_ptr<Session> Session::try_open_with_sink_for_test(std::unique_ptr<QlogFileSeqSink> sink,
                                                               EndpointRole role,
                                                               const ConnectionId &odcid,
                                                               QuicCoreTimePoint start_time) {
-    return try_open_with_sink(std::move(sink), role, odcid, start_time);
+    return try_open_with_sink(
+        std::move(sink), role, odcid, start_time,
+        [](QuicCoreTimePoint session_start_time, std::unique_ptr<QlogFileSeqSink> session_sink) {
+            return std::unique_ptr<Session>(
+                new Session(session_start_time, std::move(session_sink)));
+        });
 }
 
 bool Session::healthy() const {

@@ -631,6 +631,17 @@ TEST(QuicTlsAdapterContractTest, SelectApplicationProtocolRejectsNullPointersAnd
               SSL_TLSEXT_ERR_ALERT_FATAL);
 }
 
+TEST(QuicTlsAdapterContractTest, SelectApplicationProtocolRejectsMalformedOfferedList) {
+    TlsAdapter server(make_server_config());
+    const auto malformed = std::vector<uint8_t>({6, 'c', 'o', 'q', 'u', 'i'});
+    const uint8_t *selected = nullptr;
+    uint8_t selected_length = 0;
+
+    EXPECT_EQ(TlsAdapterTestPeer::call_static_select_application_protocol(
+                  &server, &selected, &selected_length, malformed),
+              SSL_TLSEXT_ERR_ALERT_FATAL);
+}
+
 TEST(QuicTlsAdapterContractTest, QlogTelemetryCapturesServerOfferedAndSelectedApplicationProtocol) {
     TlsAdapter server(make_server_config());
     const auto offered = std::vector<uint8_t>({6, 'c', 'o', 'q', 'u', 'i', 'c'});

@@ -188,6 +188,22 @@ TEST(QuicQlogTest, SerializersCoverRemainingFramesAndOptionalFields) {
     EXPECT_NE(snapshot_json.find("\"frame_type\":\"connection_close_application\""),
               std::string::npos);
     EXPECT_NE(snapshot_json.find("\"frame_type\":\"handshake_done\""), std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"frame_type\":\"ack\""), std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"largest_acknowledged\":20"), std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"ack_delay\":21"), std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"sequence_number\":15"), std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"retire_prior_to\":1"), std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"connection_id\":\"abcd\""), std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"frame_type\":\"path_challenge\",\"data\":\"0001020304050607\""),
+              std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"frame_type\":\"path_response\",\"data\":\"0706050403020100\""),
+              std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"frame_type\":\"connection_close_transport\",\"error_code\":17"),
+              std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"frame_type_value\":18"), std::string::npos);
+    EXPECT_NE(
+        snapshot_json.find("\"frame_type\":\"connection_close_application\",\"error_code\":19"),
+        std::string::npos);
     EXPECT_NE(snapshot_json.find("\"spin_bit\":true"), std::string::npos);
     EXPECT_NE(snapshot_json.find("\"key_phase\":1"), std::string::npos);
     EXPECT_NE(snapshot_json.find("\"scid\":\"0102\""), std::string::npos);

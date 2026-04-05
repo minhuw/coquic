@@ -28,14 +28,12 @@ Session::Session(QuicCoreTimePoint start_time, std::unique_ptr<QlogFileSeqSink> 
     : sink_(std::move(sink)), start_time_(start_time) {
 }
 
-std::unique_ptr<Session> Session::try_open(const QuicQlogConfig &config, EndpointRole role,
-                                           const ConnectionId &odcid,
-                                           QuicCoreTimePoint start_time) {
+std::unique_ptr<Session> Session::try_open_with_sink(std::unique_ptr<QlogFileSeqSink> sink,
+                                                     EndpointRole role, const ConnectionId &odcid,
+                                                     QuicCoreTimePoint start_time) {
     const auto suffix = role == EndpointRole::client ? "client" : "server";
     const auto odcid_hex = format_connection_id_hex(odcid);
-    auto sink =
-        std::make_unique<QlogFileSeqSink>(config.directory / (odcid_hex + "_" + suffix + ".sqlog"));
-    if (!sink->open()) {
+    if (sink == nullptr || !sink->healthy()) {
         return nullptr;
     }
 
@@ -51,6 +49,26 @@ std::unique_ptr<Session> Session::try_open(const QuicQlogConfig &config, Endpoin
     }
 
     return std::unique_ptr<Session>(new Session(start_time, std::move(sink)));
+}
+
+std::unique_ptr<Session> Session::try_open(const QuicQlogConfig &config, EndpointRole role,
+                                           const ConnectionId &odcid,
+                                           QuicCoreTimePoint start_time) {
+    const auto suffix = role == EndpointRole::client ? "client" : "server";
+    const auto odcid_hex = format_connection_id_hex(odcid);
+    auto sink =
+        std::make_unique<QlogFileSeqSink>(config.directory / (odcid_hex + "_" + suffix + ".sqlog"));
+    if (!sink->open()) {
+        return nullptr;
+    }
+    return try_open_with_sink(std::move(sink), role, odcid, start_time);
+}
+
+std::unique_ptr<Session> Session::try_open_with_sink_for_test(std::unique_ptr<QlogFileSeqSink> sink,
+                                                              EndpointRole role,
+                                                              const ConnectionId &odcid,
+                                                              QuicCoreTimePoint start_time) {
+    return try_open_with_sink(std::move(sink), role, odcid, start_time);
 }
 
 bool Session::healthy() const {

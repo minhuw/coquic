@@ -16175,6 +16175,51 @@ TEST(QuicCoreTest, PendingUnidirectionalMaxStreamsFrameCountsAsPendingApplicatio
     EXPECT_FALSE(connection.has_pending_application_send());
 }
 
+TEST(QuicCoreTest, ConnectionMoveConstructionPreservesConnectionStartBehavior) {
+    coquic::quic::QuicConnection source(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicConnection moved(std::move(source));
+
+    moved.start(coquic::quic::test::test_time(1));
+    const auto datagram = moved.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(datagram.empty());
+}
+
+TEST(QuicCoreTest, ConnectionMoveAssignmentPreservesConnectionStartBehavior) {
+    coquic::quic::QuicConnection source(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicConnection destination(coquic::quic::test::make_client_core_config());
+    destination = std::move(source);
+
+    destination.start(coquic::quic::test::test_time(1));
+    const auto datagram = destination.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(datagram.empty());
+}
+
+TEST(QuicCoreTest, ConnectionRemoteQlogParametersAreEmittedAtMostOnce) {
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    auto connection = make_connected_client_connection();
+    connection.config_.qlog = coquic::quic::QuicQlogConfig{.directory = qlog_dir.path()};
+    connection.qlog_session_ = coquic::quic::qlog::Session::try_open(
+        *connection.config_.qlog, connection.config_.role,
+        connection.config_.initial_destination_connection_id, coquic::quic::test::test_time(0));
+    ASSERT_TRUE(connection.qlog_session_ != nullptr);
+
+    connection.maybe_emit_remote_qlog_parameters(coquic::quic::test::test_time(1));
+    connection.maybe_emit_remote_qlog_parameters(coquic::quic::test::test_time(2));
+
+    const auto records = coquic::quic::test::qlog_seq_records_from_file(
+        coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:parameters_set"), 1u);
+}
+
+TEST(QuicCoreTest, ConnectionDeferredProtectedPacketEqualityDependsOnDatagramId) {
+    const auto bytes = bytes_from_ints({0xaa, 0xbb, 0xcc});
+
+    EXPECT_TRUE(coquic::quic::DeferredProtectedPacket(bytes) == bytes);
+    EXPECT_FALSE(coquic::quic::DeferredProtectedPacket(bytes, 7) == bytes);
+}
+
 TEST(QuicCoreTest, ClosingPeerInitiatedUnidirectionalStreamRefreshesStreamLimit) {
     auto connection = make_connected_server_connection();
     auto &stream =

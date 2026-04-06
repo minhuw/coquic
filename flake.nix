@@ -473,7 +473,8 @@
         includePreCommit = true;
         banner = "coquic dev shell ready. Run: zig build";
         extraPackages = [
-          pkgs.clang-tools
+          llvmPkgs.clang
+          llvmPkgs.clang-tools
           pkgs.lldb
           boringssl
           pkgs.python3

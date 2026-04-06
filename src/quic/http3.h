@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -11,34 +12,34 @@
 
 namespace coquic::quic {
 
-inline constexpr const char *kHttp3ApplicationProtocol = "h3";
+inline constexpr std::string_view kHttp3ApplicationProtocol = "h3";
 
-enum class Http3ErrorCode : std::uint64_t {
-    no_error = 0x100,
-    general_protocol_error = 0x101,
-    internal_error = 0x102,
-    stream_creation_error = 0x103,
-    closed_critical_stream = 0x104,
-    frame_unexpected = 0x105,
-    frame_error = 0x106,
-    excessive_load = 0x107,
-    id_error = 0x108,
-    settings_error = 0x109,
-    missing_settings = 0x10a,
-    request_rejected = 0x10b,
-    request_cancelled = 0x10c,
-    request_incomplete = 0x10d,
-    message_error = 0x10e,
-    connect_error = 0x10f,
-    version_fallback = 0x110,
-    qpack_decompression_failed = 0x200,
-    qpack_encoder_stream_error = 0x201,
-    qpack_decoder_stream_error = 0x202,
+enum class Http3ErrorCode : std::uint16_t {
+    no_error = 0x0100,
+    general_protocol_error = 0x0101,
+    internal_error = 0x0102,
+    stream_creation_error = 0x0103,
+    closed_critical_stream = 0x0104,
+    frame_unexpected = 0x0105,
+    frame_error = 0x0106,
+    excessive_load = 0x0107,
+    id_error = 0x0108,
+    settings_error = 0x0109,
+    missing_settings = 0x010a,
+    request_rejected = 0x010b,
+    request_cancelled = 0x010c,
+    request_incomplete = 0x010d,
+    message_error = 0x010e,
+    version_fallback = 0x0110,
+    qpack_decompression_failed = 0x0200,
+    qpack_encoder_stream_error = 0x0201,
+    qpack_decoder_stream_error = 0x0202,
 };
 
 struct Http3Error {
-    Http3ErrorCode code = Http3ErrorCode::internal_error;
-    std::string reason;
+    Http3ErrorCode code = Http3ErrorCode::general_protocol_error;
+    std::string detail;
+    std::optional<std::uint64_t> stream_id;
 };
 
 template <typename T> struct Http3Result {
@@ -70,13 +71,9 @@ template <typename T> struct Http3Result {
         };
     }
 
-    static Http3Result failure(Http3ErrorCode code, std::string reason) {
+    static Http3Result failure(const Http3Error &error) {
         return Http3Result{
-            .storage =
-                Http3Error{
-                    .code = code,
-                    .reason = std::move(reason),
-                },
+            .storage = error,
         };
     }
 };
@@ -99,7 +96,7 @@ struct Http3RequestHead {
 };
 
 struct Http3ResponseHead {
-    std::uint16_t status = 0;
+    std::uint16_t status = 200;
     Http3Headers headers;
 };
 

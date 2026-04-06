@@ -186,10 +186,10 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                 }
             },
             [&](const QuicCoreCloseConnection &in) {
-                connection_->queue_application_close(LocalApplicationCloseCommand{
+                static_cast<void>(connection_->queue_application_close(LocalApplicationCloseCommand{
                     .application_error_code = in.application_error_code,
                     .reason_phrase = in.reason_phrase,
-                });
+                }));
             },
             [&](const QuicCoreRequestKeyUpdate &) { connection_->request_key_update(); },
             [&](const QuicCoreTimerExpired &) { connection_->on_timeout(now); },

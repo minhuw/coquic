@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <type_traits>
 
 #include "src/quic/connection_test_hooks.h"
 #include "src/quic/packet_crypto_test_hooks.h"
@@ -16,6 +17,7 @@
 #include "src/quic/varint.h"
 #include "src/quic/qlog/types.h"
 #include "tests/quic_test_utils.h"
+#include "src/quic/http3.h"
 #include "src/quic/qlog/session.h"
 
 namespace coquic::quic {
@@ -3153,23 +3155,29 @@ TEST(QuicCoreTest, StopSendingLocalCommandRejectsSendOnlyStreams) {
 }
 
 TEST(QuicCoreTest, LocalApplicationCloseQueuesApplicationConnectionCloseFrame) {
+    static_assert(std::is_same_v<
+                  decltype(std::declval<coquic::quic::QuicConnection &>().queue_application_close(
+                      coquic::quic::LocalApplicationCloseCommand{})),
+                  coquic::quic::StreamStateResult<bool>>);
+
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
     coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
-    ASSERT_TRUE(client.is_handshake_complete());
 
-    const auto close = client.advance(
+    const auto closed = client.advance(
         coquic::quic::QuicCoreCloseConnection{
-            .application_error_code = 0x103u,
-            .reason_phrase = "h3 local close",
+            .application_error_code =
+                static_cast<std::uint64_t>(coquic::quic::Http3ErrorCode::missing_settings),
+            .reason_phrase = "http3 missing settings",
         },
         coquic::quic::test::test_time(1));
-
-    EXPECT_FALSE(close.local_error.has_value());
-    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(close).empty());
+    EXPECT_FALSE(coquic::quic::test::send_datagrams_from(closed).empty());
+    EXPECT_EQ(coquic::quic::test::count_state_change(coquic::quic::test::state_changes_from(closed),
+                                                     coquic::quic::QuicCoreStateChange::failed),
+              1u);
 
     bool saw_application_close = false;
-    for (const auto &datagram : coquic::quic::test::send_datagrams_from(close)) {
+    for (const auto &datagram : coquic::quic::test::send_datagrams_from(closed)) {
         for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
             const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
             if (one_rtt == nullptr) {
@@ -3184,18 +3192,23 @@ TEST(QuicCoreTest, LocalApplicationCloseQueuesApplicationConnectionCloseFrame) {
                 }
 
                 saw_application_close = true;
-                EXPECT_EQ(close_frame->error_code, 0x103u);
+                EXPECT_EQ(
+                    close_frame->error_code,
+                    static_cast<std::uint64_t>(coquic::quic::Http3ErrorCode::missing_settings));
                 EXPECT_EQ(coquic::quic::test::string_from_bytes(close_frame->reason.bytes),
-                          "h3 local close");
+                          "http3 missing settings");
             }
         }
     }
-
     EXPECT_TRUE(saw_application_close);
     EXPECT_TRUE(client.has_failed());
-    EXPECT_EQ(coquic::quic::test::count_state_change(coquic::quic::test::state_changes_from(close),
-                                                     coquic::quic::QuicCoreStateChange::failed),
-              1u);
+
+    const auto delivered = coquic::quic::test::relay_send_datagrams_to_peer(
+        closed, server, coquic::quic::test::test_time(2));
+    const auto changes = coquic::quic::test::state_changes_from(delivered);
+    EXPECT_EQ(
+        coquic::quic::test::count_state_change(changes, coquic::quic::QuicCoreStateChange::failed),
+        1u);
 }
 
 TEST(QuicCoreTest, PeerStopSendingQueuesAutomaticReset) {

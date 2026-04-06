@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <optional>
 #include <span>
-#include <utility>
 #include <variant>
 #include <vector>
 
@@ -13,21 +12,21 @@
 
 namespace coquic::quic {
 
-enum class Http3UniStreamType : std::uint64_t {
+enum class Http3UniStreamType : std::uint8_t {
     control = 0x00,
     push = 0x01,
     qpack_encoder = 0x02,
     qpack_decoder = 0x03,
 };
 
-inline constexpr std::uint64_t kHttp3FrameData = 0x00;
-inline constexpr std::uint64_t kHttp3FrameHeaders = 0x01;
-inline constexpr std::uint64_t kHttp3FrameSettings = 0x04;
-inline constexpr std::uint64_t kHttp3FrameGoaway = 0x07;
+inline constexpr std::uint64_t kHttp3FrameTypeData = 0x00;
+inline constexpr std::uint64_t kHttp3FrameTypeHeaders = 0x01;
+inline constexpr std::uint64_t kHttp3FrameTypeSettings = 0x04;
+inline constexpr std::uint64_t kHttp3FrameTypeGoaway = 0x07;
 
-inline constexpr std::uint64_t kHttp3SettingQpackMaxTableCapacity = 0x01;
-inline constexpr std::uint64_t kHttp3SettingMaxFieldSectionSize = 0x06;
-inline constexpr std::uint64_t kHttp3SettingQpackBlockedStreams = 0x07;
+inline constexpr std::uint64_t kHttp3SettingsQpackMaxTableCapacity = 0x01;
+inline constexpr std::uint64_t kHttp3SettingsMaxFieldSectionSize = 0x06;
+inline constexpr std::uint64_t kHttp3SettingsQpackBlockedStreams = 0x07;
 
 struct Http3Setting {
     std::uint64_t id = 0;
@@ -43,7 +42,7 @@ struct Http3DataFrame {
 };
 
 struct Http3HeadersFrame {
-    std::vector<std::byte> payload;
+    std::vector<std::byte> field_section;
 
     bool operator==(const Http3HeadersFrame &) const = default;
 };
@@ -69,30 +68,28 @@ struct Http3DecodedFrame {
 };
 
 struct Http3ConnectionState {
+    std::optional<std::uint64_t> local_control_stream_id;
+    std::optional<std::uint64_t> local_qpack_encoder_stream_id;
+    std::optional<std::uint64_t> local_qpack_decoder_stream_id;
+    std::optional<std::uint64_t> remote_control_stream_id;
+    std::optional<std::uint64_t> remote_qpack_encoder_stream_id;
+    std::optional<std::uint64_t> remote_qpack_decoder_stream_id;
     bool local_settings_sent = false;
-    bool peer_settings_received = false;
-    bool local_goaway_sent = false;
-    bool peer_goaway_received = false;
+    bool remote_settings_received = false;
+    std::optional<std::uint64_t> goaway_id;
 };
 
-Http3Result<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame);
+CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame);
+CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> bytes);
+CodecResult<VarIntDecoded> parse_http3_uni_stream_type(std::span<const std::byte> bytes);
+CodecResult<std::vector<std::byte>> serialize_http3_uni_stream_prefix(Http3UniStreamType type);
+CodecResult<std::vector<std::byte>>
+serialize_http3_control_stream(std::span<const Http3Setting> settings);
 
-Http3Result<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> bytes);
-
-Http3Result<Http3UniStreamType> parse_http3_uni_stream_type(std::span<const std::byte> bytes,
-                                                            std::size_t &bytes_consumed);
-
-Http3Result<std::vector<std::byte>> serialize_http3_uni_stream_prefix(Http3UniStreamType type);
-
-Http3Result<std::vector<std::byte>>
-serialize_http3_control_stream(const Http3SettingsFrame &settings,
-                               const std::optional<Http3GoawayFrame> &goaway = std::nullopt);
-
-Http3Result<Http3SettingsFrame> validate_http3_settings_frame(const Http3SettingsFrame &settings);
-
-Http3Result<Http3RequestHead> validate_http3_request_headers(const Http3Headers &headers);
-Http3Result<Http3ResponseHead> validate_http3_response_headers(const Http3Headers &headers);
-Http3Result<Http3Headers> validate_http3_trailers(const Http3Headers &headers);
+Http3Result<bool> validate_http3_settings_frame(const Http3SettingsFrame &frame);
+Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Http3Field> fields);
+Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const Http3Field> fields);
+Http3Result<Http3Headers> validate_http3_trailers(std::span<const Http3Field> fields);
 
 bool http3_frame_allowed_on_control_stream(const Http3Frame &frame);
 bool http3_frame_allowed_on_request_stream(const Http3Frame &frame);

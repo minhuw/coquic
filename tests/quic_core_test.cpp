@@ -6754,7 +6754,8 @@ TEST(QuicCoreTest, ServerInitialPacketsUsePeerSourceConnectionIdAsDestination) {
     ASSERT_EQ(packets.size(), 1u);
     const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets[0]);
     ASSERT_NE(initial, nullptr);
-    EXPECT_EQ(initial->destination_connection_id, connection.peer_source_connection_id_.value());
+    EXPECT_EQ(initial->destination_connection_id,
+              optional_value_or_terminate(connection.peer_source_connection_id_));
 }
 
 TEST(QuicCoreTest, InitialProbePacketCanFallbackToPing) {
@@ -9420,8 +9421,7 @@ TEST(QuicCoreTest, ConnectionFlowControlTracksMissingPendingFramesAndAcknowledge
     state.pending_data_blocked_frame = coquic::quic::DataBlockedFrame{.maximum_data = 11};
     state.data_blocked_state = coquic::quic::StreamControlFrameState::pending;
     state.queue_data_blocked(/*maximum_data=*/12);
-    ASSERT_TRUE(state.pending_data_blocked_frame.has_value());
-    EXPECT_EQ(state.pending_data_blocked_frame->maximum_data, 12u);
+    EXPECT_EQ(optional_ref_or_terminate(state.pending_data_blocked_frame).maximum_data, 12u);
 
     state.data_blocked_state = coquic::quic::StreamControlFrameState::pending;
     state.pending_data_blocked_frame = std::nullopt;

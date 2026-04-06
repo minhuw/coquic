@@ -188,23 +188,32 @@ void wake_runtime_server(std::string_view host, std::uint16_t port) {
              sizeof(address));
 }
 
+int run_http09_runtime_child_process(
+    const coquic::quic::Http09RuntimeConfig &config,
+    const std::shared_ptr<std::atomic<bool>> &stop_requested,
+    coquic::quic::test::Http09RuntimeOpsOverride override_ops) noexcept {
+    try {
+        ScopedRuntimeServerStopFlag stop_flag(*stop_requested);
+        if (override_ops.poll_fn == nullptr) {
+            override_ops.poll_fn = &stoppable_poll;
+        }
+        const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            override_ops,
+        };
+        return coquic::quic::run_http09_runtime(config);
+    } catch (...) {
+        std::abort();
+    }
+}
+
 class ScopedChildProcess {
   public:
     explicit ScopedChildProcess(const coquic::quic::Http09RuntimeConfig &config,
                                 coquic::quic::test::Http09RuntimeOpsOverride override_ops = {})
         : host_(config.host), port_(config.port),
           stop_requested_(std::make_shared<std::atomic<bool>>(false)),
-          future_(std::async(std::launch::async, [config, stop_requested = stop_requested_,
-                                                  override_ops]() mutable {
-              ScopedRuntimeServerStopFlag stop_flag(*stop_requested);
-              if (override_ops.poll_fn == nullptr) {
-                  override_ops.poll_fn = &stoppable_poll;
-              }
-              const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
-                  override_ops,
-              };
-              return coquic::quic::run_http09_runtime(config);
-          })) {
+          future_(std::async(std::launch::async, run_http09_runtime_child_process, config,
+                             stop_requested_, override_ops)) {
     }
 
     ~ScopedChildProcess() {

@@ -9,6 +9,7 @@
 
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -53,7 +54,7 @@ constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
     "[--testcase "
     "handshake|transfer|keyupdate|amplificationlimit|rebind-port|rebind-addr|"
-    "connectionmigration|multiconnect|chacha20|retry|resumption|zerortt|v2] "
+    "connectionmigration|ecn|multiconnect|chacha20|retry|resumption|zerortt|v2] "
     "[--requests URLS] "
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
@@ -71,8 +72,11 @@ test::Http09RuntimeOpsOverride make_default_runtime_ops() {
         .socket_fn = ::socket,
         .bind_fn = ::bind,
         .poll_fn = ::poll,
+        .setsockopt_fn = ::setsockopt,
         .sendto_fn = ::sendto,
+        .sendmsg_fn = ::sendmsg,
         .recvfrom_fn = ::recvfrom,
+        .recvmsg_fn = ::recvmsg,
         .getaddrinfo_fn = ::getaddrinfo,
         .freeaddrinfo_fn = ::freeaddrinfo,
         .gethostname_fn = ::gethostname,
@@ -95,11 +99,20 @@ void apply_runtime_ops_override(const test::Http09RuntimeOpsOverride &override_o
     if (override_ops.poll_fn != nullptr) {
         ops.poll_fn = override_ops.poll_fn;
     }
+    if (override_ops.setsockopt_fn != nullptr) {
+        ops.setsockopt_fn = override_ops.setsockopt_fn;
+    }
     if (override_ops.sendto_fn != nullptr) {
         ops.sendto_fn = override_ops.sendto_fn;
     }
+    if (override_ops.sendmsg_fn != nullptr) {
+        ops.sendmsg_fn = override_ops.sendmsg_fn;
+    }
     if (override_ops.recvfrom_fn != nullptr) {
         ops.recvfrom_fn = override_ops.recvfrom_fn;
+    }
+    if (override_ops.recvmsg_fn != nullptr) {
+        ops.recvmsg_fn = override_ops.recvmsg_fn;
     }
     if (override_ops.getaddrinfo_fn != nullptr) {
         ops.getaddrinfo_fn = override_ops.getaddrinfo_fn;
@@ -110,6 +123,106 @@ void apply_runtime_ops_override(const test::Http09RuntimeOpsOverride &override_o
     if (override_ops.gethostname_fn != nullptr) {
         ops.gethostname_fn = override_ops.gethostname_fn;
     }
+}
+
+bool has_legacy_sendto_override() {
+    const auto defaults = make_default_runtime_ops();
+    return runtime_ops().sendto_fn != defaults.sendto_fn &&
+           runtime_ops().sendmsg_fn == defaults.sendmsg_fn;
+}
+
+bool has_legacy_recvfrom_override() {
+    const auto defaults = make_default_runtime_ops();
+    return runtime_ops().recvfrom_fn != defaults.recvfrom_fn &&
+           runtime_ops().recvmsg_fn == defaults.recvmsg_fn;
+}
+
+bool is_ect_codepoint(QuicEcnCodepoint ecn) {
+    return ecn == QuicEcnCodepoint::ect0 || ecn == QuicEcnCodepoint::ect1;
+}
+
+int linux_traffic_class_for_ecn(QuicEcnCodepoint ecn) {
+    switch (ecn) {
+    case QuicEcnCodepoint::ect0:
+        return 0x02;
+    case QuicEcnCodepoint::ect1:
+        return 0x01;
+    case QuicEcnCodepoint::ce:
+        return 0x03;
+    case QuicEcnCodepoint::unavailable:
+    case QuicEcnCodepoint::not_ect:
+        return 0x00;
+    }
+    return 0x00;
+}
+
+QuicEcnCodepoint ecn_from_linux_traffic_class(int traffic_class) {
+    switch (traffic_class & 0x03) {
+    case 0x01:
+        return QuicEcnCodepoint::ect1;
+    case 0x02:
+        return QuicEcnCodepoint::ect0;
+    case 0x03:
+        return QuicEcnCodepoint::ce;
+    default:
+        return QuicEcnCodepoint::not_ect;
+    }
+}
+
+bool configure_linux_ecn_socket_options(int fd, int family) {
+#if defined(__linux__)
+    const auto set_bool_socket_option = [&](int level, int name) {
+        const int enabled = 1;
+        return runtime_ops().setsockopt_fn(fd, level, name, &enabled, sizeof(enabled)) == 0;
+    };
+
+    if (family == AF_INET || family == AF_INET6) {
+        if (!set_bool_socket_option(IPPROTO_IP, IP_RECVTOS)) {
+            return false;
+        }
+    }
+    if (family == AF_INET6) {
+        if (!set_bool_socket_option(IPPROTO_IPV6, IPV6_RECVTCLASS)) {
+            return false;
+        }
+    }
+#else
+    static_cast<void>(fd);
+    static_cast<void>(family);
+#endif
+    return true;
+}
+
+bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_len) {
+    if (peer.ss_family != AF_INET6 || peer_len < static_cast<socklen_t>(sizeof(sockaddr_in6))) {
+        return false;
+    }
+
+    const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(&peer);
+    return IN6_IS_ADDR_V4MAPPED(&ipv6->sin6_addr);
+}
+
+QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message) {
+#if defined(__linux__)
+    if ((message.msg_flags & MSG_CTRUNC) != 0) {
+        return QuicEcnCodepoint::unavailable;
+    }
+    for (auto *control = CMSG_FIRSTHDR(&message); control != nullptr;
+         control = CMSG_NXTHDR(const_cast<msghdr *>(&message), control)) {
+        if ((control->cmsg_level == IPPROTO_IP && control->cmsg_type == IP_TOS) ||
+            (control->cmsg_level == IPPROTO_IPV6 && control->cmsg_type == IPV6_TCLASS)) {
+            int traffic_class = 0;
+            const auto payload_size =
+                control->cmsg_len > CMSG_LEN(0) ? control->cmsg_len - CMSG_LEN(0) : 0;
+            std::memcpy(&traffic_class, CMSG_DATA(control),
+                        std::min<std::size_t>(sizeof(traffic_class), payload_size));
+            return ecn_from_linux_traffic_class(traffic_class);
+        }
+    }
+#else
+    static_cast<void>(message);
+#endif
+    return QuicEcnCodepoint::unavailable;
 }
 
 class ScopedFd {
@@ -248,6 +361,9 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
     if (value == "connectionmigration") {
         return QuicHttp09Testcase::connectionmigration;
     }
+    if (value == "ecn") {
+        return QuicHttp09Testcase::ecn;
+    }
     if (value == "multiconnect") {
         return QuicHttp09Testcase::multiconnect;
     }
@@ -269,7 +385,7 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
 constexpr QuicHttp09Testcase transfer_semantics_testcase(QuicHttp09Testcase testcase) {
     // keyupdate is a distinct runtime testcase name but uses transfer transport/TLS profile.
     if (testcase == QuicHttp09Testcase::keyupdate || testcase == QuicHttp09Testcase::rebind_port ||
-        testcase == QuicHttp09Testcase::rebind_addr ||
+        testcase == QuicHttp09Testcase::rebind_addr || testcase == QuicHttp09Testcase::ecn ||
         testcase == QuicHttp09Testcase::connectionmigration) {
         return QuicHttp09Testcase::transfer;
     }
@@ -584,7 +700,20 @@ int open_udp_socket(int family) {
 
     if (family == AF_INET6) {
         const int disabled = 0;
-        (void)::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &disabled, sizeof(disabled));
+        if (runtime_ops().setsockopt_fn(fd, IPPROTO_IPV6, IPV6_V6ONLY, &disabled,
+                                        sizeof(disabled)) != 0) {
+            const int option_errno = errno;
+            ::close(fd);
+            errno = option_errno;
+            return -1;
+        }
+    }
+
+    if (!configure_linux_ecn_socket_options(fd, family)) {
+        const int option_errno = errno;
+        ::close(fd);
+        errno = option_errno;
+        return -1;
     }
 
     return fd;
@@ -660,7 +789,8 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
 }
 
 bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer,
-                   socklen_t peer_len, std::string_view role_name);
+                   socklen_t peer_len, std::string_view role_name,
+                   QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect);
 
 ConnectionId make_runtime_connection_id(std::byte prefix, std::uint64_t sequence) {
     ConnectionId connection_id(kRuntimeConnectionIdLength, std::byte{0x00});
@@ -1003,15 +1133,58 @@ bool send_version_negotiation_for_probe(int fd, std::span<const std::byte> datag
 }
 
 bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer,
-                   socklen_t peer_len, std::string_view role_name) {
+                   socklen_t peer_len, std::string_view role_name, QuicEcnCodepoint ecn) {
     const auto *buffer = reinterpret_cast<const void *>(datagram.data());
-    const ssize_t sent = runtime_ops().sendto_fn(
-        fd, buffer, datagram.size(), 0, reinterpret_cast<const sockaddr *>(&peer), peer_len);
+    const bool use_sendmsg = !has_legacy_sendto_override() && is_ect_codepoint(ecn) &&
+                             peer_len > 0 &&
+                             (peer.ss_family == AF_INET || peer.ss_family == AF_INET6);
+    if (!use_sendmsg) {
+        const ssize_t sent = runtime_ops().sendto_fn(
+            fd, buffer, datagram.size(), 0, reinterpret_cast<const sockaddr *>(&peer), peer_len);
+        if (sent >= 0) {
+            return true;
+        }
+
+        std::cerr << "http09-" << role_name << " failed: sendto error: " << std::strerror(errno)
+                  << '\n';
+        return false;
+    }
+
+    iovec iov{
+        .iov_base = const_cast<void *>(buffer),
+        .iov_len = datagram.size(),
+    };
+    std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
+    msghdr message{};
+    message.msg_name = const_cast<sockaddr *>(reinterpret_cast<const sockaddr *>(&peer));
+    message.msg_namelen = peer_len;
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.data();
+    message.msg_controllen = control.size();
+
+    auto *header = CMSG_FIRSTHDR(&message);
+    if (header == nullptr) {
+        errno = EINVAL;
+        std::cerr << "http09-" << role_name << " failed: sendmsg control setup error\n";
+        return false;
+    }
+
+    const bool use_ipv4_traffic_class =
+        peer.ss_family == AF_INET || is_ipv4_mapped_ipv6_address(peer, peer_len);
+    header->cmsg_level = use_ipv4_traffic_class ? IPPROTO_IP : IPPROTO_IPV6;
+    header->cmsg_type = use_ipv4_traffic_class ? IP_TOS : IPV6_TCLASS;
+    header->cmsg_len = CMSG_LEN(sizeof(int));
+    const int traffic_class = linux_traffic_class_for_ecn(ecn);
+    std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
+    message.msg_controllen = header->cmsg_len;
+
+    const ssize_t sent = runtime_ops().sendmsg_fn(fd, &message, 0);
     if (sent >= 0) {
         return true;
     }
 
-    std::cerr << "http09-" << role_name << " failed: sendto error: " << std::strerror(errno)
+    std::cerr << "http09-" << role_name << " failed: sendmsg error: " << std::strerror(errno)
               << '\n';
     return false;
 }
@@ -1082,10 +1255,32 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
     std::vector<std::byte> inbound(kMaxDatagramBytes);
     sockaddr_storage source{};
     socklen_t source_len = sizeof(source);
+    QuicEcnCodepoint inbound_ecn = QuicEcnCodepoint::unavailable;
     ssize_t bytes_read = 0;
     do {
-        bytes_read = runtime_ops().recvfrom_fn(socket_fd, inbound.data(), inbound.size(), flags,
-                                               reinterpret_cast<sockaddr *>(&source), &source_len);
+        if (has_legacy_recvfrom_override()) {
+            bytes_read =
+                runtime_ops().recvfrom_fn(socket_fd, inbound.data(), inbound.size(), flags,
+                                          reinterpret_cast<sockaddr *>(&source), &source_len);
+        } else {
+            std::array<std::byte, 256> control{};
+            iovec iov{
+                .iov_base = inbound.data(),
+                .iov_len = inbound.size(),
+            };
+            msghdr message{};
+            message.msg_name = &source;
+            message.msg_namelen = sizeof(source);
+            message.msg_iov = &iov;
+            message.msg_iovlen = 1;
+            message.msg_control = control.data();
+            message.msg_controllen = control.size();
+            bytes_read = runtime_ops().recvmsg_fn(socket_fd, &message, flags);
+            source_len = static_cast<socklen_t>(message.msg_namelen);
+            if (bytes_read >= 0) {
+                inbound_ecn = recvmsg_ecn_from_control(message);
+            }
+        }
     } while (bytes_read < 0 && errno == EINTR);
 
     if (bytes_read < 0) {
@@ -1096,7 +1291,7 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
             };
         }
 
-        std::cerr << "http09-" << role_name << " failed: recvfrom error: " << std::strerror(errno)
+        std::cerr << "http09-" << role_name << " failed: recvmsg error: " << std::strerror(errno)
                   << '\n';
         return ReceiveDatagramResult{
             .status = ReceiveDatagramStatus::error,
@@ -1116,6 +1311,7 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
                 .input =
                     QuicCoreInboundDatagram{
                         .bytes = std::move(inbound),
+                        .ecn = inbound_ecn,
                     },
                 .input_time = now(),
                 .socket_fd = socket_fd,
@@ -1261,7 +1457,7 @@ bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
             stream << " bytes=" << send->bytes.size() << '\n';
         });
 
-        if (!send_datagram(socket_fd, send->bytes, *peer, peer_len, role_name)) {
+        if (!send_datagram(socket_fd, send->bytes, *peer, peer_len, role_name, send->ecn)) {
             return false;
         }
     }
@@ -2671,6 +2867,37 @@ struct RecordedSendToForTests {
 
 thread_local RecordedSendToForTests g_recorded_sendto_for_tests;
 
+struct RecordedSetSockOptForTests {
+    struct Call {
+        int level = 0;
+        int name = 0;
+        int value = 0;
+    };
+
+    std::vector<Call> calls;
+};
+
+thread_local RecordedSetSockOptForTests g_recorded_setsockopt_for_tests;
+
+struct RecordedSendMsgForTests {
+    int calls = 0;
+    int socket_fd = -1;
+    int level = 0;
+    int type = 0;
+    int traffic_class = 0;
+};
+
+thread_local RecordedSendMsgForTests g_recorded_sendmsg_for_tests;
+
+struct RecordedRecvMsgForTests {
+    QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
+    std::vector<std::byte> bytes;
+    sockaddr_storage peer{};
+    socklen_t peer_len = 0;
+};
+
+thread_local RecordedRecvMsgForTests g_recorded_recvmsg_for_tests;
+
 ssize_t record_sendto_for_tests(int socket_fd, const void *, size_t length, int,
                                 const sockaddr *destination, socklen_t destination_len) {
     g_recorded_sendto_for_tests.calls += 1;
@@ -2690,6 +2917,69 @@ ssize_t record_sendto_for_tests(int socket_fd, const void *, size_t length, int,
     g_recorded_sendto_for_tests.peer_port = peer_port;
     g_recorded_sendto_for_tests.peer_ports.push_back(peer_port);
     return static_cast<ssize_t>(length);
+}
+
+int record_setsockopt_for_tests(int, int level, int name, const void *value, socklen_t value_len) {
+    int option_value = 0;
+    if (value != nullptr && value_len >= static_cast<socklen_t>(sizeof(option_value))) {
+        std::memcpy(&option_value, value, sizeof(option_value));
+    }
+    g_recorded_setsockopt_for_tests.calls.push_back(RecordedSetSockOptForTests::Call{
+        .level = level,
+        .name = name,
+        .value = option_value,
+    });
+    return 0;
+}
+
+ssize_t record_sendmsg_for_tests(int socket_fd, const msghdr *message, int) {
+    g_recorded_sendmsg_for_tests.calls += 1;
+    g_recorded_sendmsg_for_tests.socket_fd = socket_fd;
+    g_recorded_sendmsg_for_tests.level = 0;
+    g_recorded_sendmsg_for_tests.type = 0;
+    g_recorded_sendmsg_for_tests.traffic_class = 0;
+    for (auto *control = CMSG_FIRSTHDR(const_cast<msghdr *>(message)); control != nullptr;
+         control = CMSG_NXTHDR(const_cast<msghdr *>(message), control)) {
+        g_recorded_sendmsg_for_tests.level = control->cmsg_level;
+        g_recorded_sendmsg_for_tests.type = control->cmsg_type;
+        std::memcpy(&g_recorded_sendmsg_for_tests.traffic_class, CMSG_DATA(control),
+                    sizeof(g_recorded_sendmsg_for_tests.traffic_class));
+        break;
+    }
+    return message != nullptr && message->msg_iov != nullptr
+               ? static_cast<ssize_t>(message->msg_iov[0].iov_len)
+               : 0;
+}
+
+ssize_t record_recvmsg_for_tests(int, msghdr *message, int) {
+    if (message == nullptr || message->msg_iov == nullptr || message->msg_iovlen == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const auto bytes_to_copy = std::min<std::size_t>(g_recorded_recvmsg_for_tests.bytes.size(),
+                                                     message->msg_iov[0].iov_len);
+    std::memcpy(message->msg_iov[0].iov_base, g_recorded_recvmsg_for_tests.bytes.data(),
+                bytes_to_copy);
+    if (message->msg_name != nullptr &&
+        message->msg_namelen >= static_cast<socklen_t>(sizeof(sockaddr_storage))) {
+        std::memcpy(message->msg_name, &g_recorded_recvmsg_for_tests.peer,
+                    sizeof(sockaddr_storage));
+        message->msg_namelen = g_recorded_recvmsg_for_tests.peer_len;
+    }
+
+    auto *header = CMSG_FIRSTHDR(message);
+    if (header != nullptr) {
+        const bool ipv6 = g_recorded_recvmsg_for_tests.peer.ss_family == AF_INET6;
+        header->cmsg_level = ipv6 ? IPPROTO_IPV6 : IPPROTO_IP;
+        header->cmsg_type = ipv6 ? IPV6_TCLASS : IP_TOS;
+        header->cmsg_len = CMSG_LEN(sizeof(int));
+        const int traffic_class = linux_traffic_class_for_ecn(g_recorded_recvmsg_for_tests.ecn);
+        std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
+        message->msg_controllen = header->cmsg_len;
+    }
+
+    return static_cast<ssize_t>(bytes_to_copy);
 }
 
 struct ScriptedClientLoopIoForTests {
@@ -3972,6 +4262,111 @@ bool runtime_assigns_stable_path_ids_for_tests() {
            (state.path_routes.at(third_path).socket_fd == 7);
 }
 
+bool runtime_configures_linux_ecn_socket_options_for_tests() {
+    g_recorded_setsockopt_for_tests = {};
+    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        Http09RuntimeOpsOverride{
+            .socket_fn = [](int, int, int) { return 41; },
+            .setsockopt_fn = &record_setsockopt_for_tests,
+        },
+    };
+
+    const int fd = open_udp_socket(AF_INET6);
+    const bool opened = fd == 41;
+    const auto has_call = [](int level, int name, int value) {
+        return std::ranges::any_of(g_recorded_setsockopt_for_tests.calls,
+                                   [&](const RecordedSetSockOptForTests::Call &call) {
+                                       return call.level == level && call.name == name &&
+                                              call.value == value;
+                                   });
+    };
+    return opened && has_call(IPPROTO_IPV6, IPV6_V6ONLY, 0) &&
+           has_call(IPPROTO_IP, IP_RECVTOS, 1) && has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1);
+}
+
+bool runtime_sendmsg_uses_outbound_ecn_for_tests() {
+    g_recorded_sendmsg_for_tests = {};
+    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        Http09RuntimeOpsOverride{
+            .sendmsg_fn = &record_sendmsg_for_tests,
+        },
+    };
+    const std::array<std::byte, 1> datagram = {
+        std::byte{0x01},
+    };
+
+    sockaddr_storage peer{};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(4433);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    const bool sent =
+        send_datagram(/*fd=*/17, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in)),
+                      "client", QuicEcnCodepoint::ect1);
+    return sent && (g_recorded_sendmsg_for_tests.calls == 1) &&
+           (g_recorded_sendmsg_for_tests.socket_fd == 17) &&
+           (g_recorded_sendmsg_for_tests.level == IPPROTO_IP) &&
+           (g_recorded_sendmsg_for_tests.type == IP_TOS) &&
+           (g_recorded_sendmsg_for_tests.traffic_class == 0x01);
+}
+
+bool runtime_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests() {
+    g_recorded_sendmsg_for_tests = {};
+    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        Http09RuntimeOpsOverride{
+            .sendmsg_fn = &record_sendmsg_for_tests,
+        },
+    };
+    const std::array<std::byte, 1> datagram = {
+        std::byte{0x01},
+    };
+
+    sockaddr_storage peer{};
+    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&peer);
+    ipv6.sin6_family = AF_INET6;
+    ipv6.sin6_port = htons(4433);
+    ipv6.sin6_addr.s6_addr[10] = 0xff;
+    ipv6.sin6_addr.s6_addr[11] = 0xff;
+    ipv6.sin6_addr.s6_addr[12] = 127;
+    ipv6.sin6_addr.s6_addr[15] = 1;
+
+    const bool sent =
+        send_datagram(/*fd=*/23, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in6)),
+                      "server", QuicEcnCodepoint::ect1);
+    return sent && (g_recorded_sendmsg_for_tests.calls == 1) &&
+           (g_recorded_sendmsg_for_tests.socket_fd == 23) &&
+           (g_recorded_sendmsg_for_tests.level == IPPROTO_IP) &&
+           (g_recorded_sendmsg_for_tests.type == IP_TOS) &&
+           (g_recorded_sendmsg_for_tests.traffic_class == 0x01);
+}
+
+bool runtime_recvmsg_maps_ecn_to_core_input_for_tests() {
+    g_recorded_recvmsg_for_tests = {};
+    g_recorded_recvmsg_for_tests.ecn = QuicEcnCodepoint::ce;
+    g_recorded_recvmsg_for_tests.bytes = {std::byte{0xaa}, std::byte{0xbb}};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&g_recorded_recvmsg_for_tests.peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(6121);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in);
+
+    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        Http09RuntimeOpsOverride{
+            .recvmsg_fn = &record_recvmsg_for_tests,
+        },
+    };
+
+    const auto received = receive_datagram(/*socket_fd=*/29, "client", /*flags=*/0);
+    if (received.status != ReceiveDatagramStatus::ok || !received.step.input.has_value()) {
+        return false;
+    }
+
+    const auto *inbound = std::get_if<QuicCoreInboundDatagram>(&*received.step.input);
+    return inbound != nullptr && inbound->bytes == g_recorded_recvmsg_for_tests.bytes &&
+           inbound->ecn == QuicEcnCodepoint::ce;
+}
+
 bool drive_endpoint_uses_transport_selected_path_for_tests() {
     g_recorded_sendto_for_tests = {};
     const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
@@ -4127,19 +4522,19 @@ bool runtime_connectionmigration_request_flow_case_for_tests(bool official_alias
     std::vector<QuicCoreInput> core_inputs;
     maybe_queue_client_runtime_policy_inputs(config, policy, core_inputs);
 
-    if (!policy.preferred_address_path_id.has_value() | core_inputs.size() != 1) {
+    if (!policy.preferred_address_path_id.has_value() || core_inputs.size() != 1) {
         return false;
     }
     const auto preferred_address_path_id = policy.preferred_address_path_id.value_or(QuicPathId{});
-    if (!official_alias & !state.path_routes.contains(preferred_address_path_id)) {
+    if (!official_alias && !state.path_routes.contains(preferred_address_path_id)) {
         return false;
     }
     const auto &request = std::get<QuicCoreRequestConnectionMigration>(core_inputs.front());
-    return policy.handshake_ready_seen & policy.handshake_confirmed_seen &
-           policy.preferred_address_request_queued &
-           (request.path_id == preferred_address_path_id) &
-           (request.reason == QuicMigrationRequestReason::preferred_address) &
-           (official_alias | (state.path_routes.at(preferred_address_path_id).socket_fd == 17));
+    return policy.handshake_ready_seen && policy.handshake_confirmed_seen &&
+           policy.preferred_address_request_queued &&
+           (request.path_id == preferred_address_path_id) &&
+           (request.reason == QuicMigrationRequestReason::preferred_address) &&
+           (official_alias || (state.path_routes.at(preferred_address_path_id).socket_fd == 17));
 }
 
 bool runtime_connectionmigration_request_flow_for_tests() {
@@ -4638,6 +5033,11 @@ bool runtime_misc_internal_coverage_for_tests() {
     {
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
             Http09RuntimeOpsOverride{
+                .socket_fn = [](int, int, int) -> int {
+                    static thread_local int next_fd = 760;
+                    return next_fd++;
+                },
+                .bind_fn = [](int, const sockaddr *, socklen_t) -> int { return 0; },
                 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                 .getaddrinfo_fn = [](const char *node, const char *service, const addrinfo *hints,
                                      addrinfo **results) -> int {
@@ -4649,11 +5049,6 @@ bool runtime_misc_internal_coverage_for_tests() {
                     return ::getaddrinfo(node, service, hints, results);
                 },
                 .freeaddrinfo_fn = ::freeaddrinfo,
-                .socket_fn = [](int, int, int) -> int {
-                    static thread_local int next_fd = 760;
-                    return next_fd++;
-                },
-                .bind_fn = [](int, const sockaddr *, socklen_t) -> int { return 0; },
             },
         };
         const auto server_config = Http09RuntimeConfig{

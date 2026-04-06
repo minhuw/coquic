@@ -7,7 +7,7 @@ testcase="${TESTCASE:-}"
 
 supports_testcase() {
   case "$1" in
-    handshake | transfer | keyupdate | amplificationlimit | rebind-port | rebind-addr | connectionmigration | multiconnect | chacha20 | retry | resumption | zerortt | v2)
+    handshake | transfer | keyupdate | amplificationlimit | rebind-port | rebind-addr | connectionmigration | ecn | multiconnect | chacha20 | retry | resumption | zerortt | v2)
       return 0
       ;;
     *)

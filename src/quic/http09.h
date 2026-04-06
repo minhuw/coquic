@@ -20,6 +20,7 @@ enum class QuicHttp09Testcase : std::uint8_t {
     rebind_port,
     rebind_addr,
     connectionmigration,
+    ecn,
     multiconnect,
     chacha20,
     resumption,

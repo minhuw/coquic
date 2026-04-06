@@ -64,6 +64,14 @@ using QuicCoreClock = std::chrono::steady_clock;
 using QuicCoreTimePoint = QuicCoreClock::time_point;
 using QuicPathId = std::uint64_t;
 
+enum class QuicEcnCodepoint : std::uint8_t {
+    unavailable,
+    not_ect,
+    ect0,
+    ect1,
+    ce,
+};
+
 enum class QuicCoreStateChange : std::uint8_t {
     handshake_ready,
     handshake_confirmed,
@@ -94,6 +102,7 @@ struct QuicCoreStart {};
 struct QuicCoreInboundDatagram {
     std::vector<std::byte> bytes;
     QuicPathId path_id = 0;
+    QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
 };
 
 struct QuicCoreSendStreamData {
@@ -127,6 +136,7 @@ using QuicCoreInput =
 struct QuicCoreSendDatagram {
     std::optional<QuicPathId> path_id;
     std::vector<std::byte> bytes;
+    QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
 };
 
 struct QuicCoreReceiveStreamData {

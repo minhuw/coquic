@@ -2294,6 +2294,7 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerBindsPreferredSocketAndPoll
             .socket_fn = &record_server_socket_then_succeed,
             .bind_fn = &record_server_bind_then_succeed,
             .poll_fn = &record_poll_descriptor_count_then_cancel,
+            .setsockopt_fn = [](int, int, int, const void *, socklen_t) { return 0; },
             .recvfrom_fn = &would_block_recvfrom,
         },
     };
@@ -3270,6 +3271,17 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialV2Testcase) {
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::quic::QuicHttp09Testcase::v2);
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialEcnTestcase) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar testcase("TESTCASE", "ecn");
+    ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::quic::QuicHttp09Testcase::ecn);
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeTreatsAmplificationLimitEnvironmentAliasAsTransfer) {
     const char *argv[] = {"coquic"};
     ScopedEnvVar role("ROLE", "client");
@@ -4028,6 +4040,23 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksSelectEarliestWakeupAcrossEntries)
         std::nullopt,
     };
     EXPECT_FALSE(coquic::quic::test::earliest_runtime_wakeup_for_tests(empty_wakeups).has_value());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeConfiguresLinuxSocketsForReceivingEcnMetadata) {
+    EXPECT_TRUE(coquic::quic::test::runtime_configures_linux_ecn_socket_options_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeUsesSendmsgToApplyOutboundEcnMarkings) {
+    EXPECT_TRUE(coquic::quic::test::runtime_sendmsg_uses_outbound_ecn_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeUsesIpTosForIpv4MappedIpv6OutboundEcnMarkings) {
+    EXPECT_TRUE(
+        coquic::quic::test::runtime_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeMapsRecvmsgEcnMetadataIntoCoreInputs) {
+    EXPECT_TRUE(coquic::quic::test::runtime_recvmsg_maps_ecn_to_core_input_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveEndpointUntilBlockedFailureCases) {

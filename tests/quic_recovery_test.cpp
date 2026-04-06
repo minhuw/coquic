@@ -184,6 +184,79 @@ TEST(QuicRecoveryTest, AckHistorySkipsAckDelayWhenNowPredatesLargestPacketReceip
     EXPECT_EQ(ack->ack_delay, 0u);
 }
 
+TEST(QuicRecoveryTest, AckHistoryBuildsAckFrameWithZeroEcnCountsWhenMetadataIsAccessible) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/2, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(20),
+                            coquic::quic::QuicEcnCodepoint::not_ect);
+
+    const auto ack =
+        history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(28));
+    if (!ack.has_value()) {
+        GTEST_FAIL() << "expected ACK frame";
+        return;
+    }
+    const auto &ack_frame = *ack;
+    if (!ack_frame.ecn_counts.has_value()) {
+        GTEST_FAIL() << "expected ECN counts";
+        return;
+    }
+    const auto &ecn_counts = *ack_frame.ecn_counts;
+    EXPECT_EQ(ecn_counts.ect0, 0u);
+    EXPECT_EQ(ecn_counts.ect1, 0u);
+    EXPECT_EQ(ecn_counts.ecn_ce, 0u);
+}
+
+TEST(QuicRecoveryTest, AckHistoryBuildsAckFrameWithEcnCountsForMarkedPackets) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/0, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1), coquic::quic::QuicEcnCodepoint::ect0);
+    history.record_received(/*packet_number=*/1, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(2), coquic::quic::QuicEcnCodepoint::ect1);
+    history.record_received(/*packet_number=*/2, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(3), coquic::quic::QuicEcnCodepoint::ce);
+
+    const auto ack =
+        history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(4));
+    if (!ack.has_value()) {
+        GTEST_FAIL() << "expected ACK frame";
+        return;
+    }
+    const auto &ack_frame = *ack;
+    if (!ack_frame.ecn_counts.has_value()) {
+        GTEST_FAIL() << "expected ECN counts";
+        return;
+    }
+    const auto &ecn_counts = *ack_frame.ecn_counts;
+    EXPECT_EQ(ecn_counts.ect0, 1u);
+    EXPECT_EQ(ecn_counts.ect1, 1u);
+    EXPECT_EQ(ecn_counts.ecn_ce, 1u);
+}
+
+TEST(QuicRecoveryTest, DuplicatePacketsDoNotIncreaseEcnCountsTwice) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/3, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1), coquic::quic::QuicEcnCodepoint::ce);
+    history.record_received(/*packet_number=*/3, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(2), coquic::quic::QuicEcnCodepoint::ce);
+
+    const auto ack =
+        history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(3));
+    if (!ack.has_value()) {
+        GTEST_FAIL() << "expected ACK frame";
+        return;
+    }
+    const auto &ack_frame = *ack;
+    if (!ack_frame.ecn_counts.has_value()) {
+        GTEST_FAIL() << "expected ECN counts";
+        return;
+    }
+    const auto &ecn_counts = *ack_frame.ecn_counts;
+    EXPECT_EQ(ecn_counts.ect0, 0u);
+    EXPECT_EQ(ecn_counts.ect1, 0u);
+    EXPECT_EQ(ecn_counts.ecn_ce, 1u);
+}
+
 TEST(QuicRecoveryTest, HistoryWithoutPendingAckReturnsNulloptEvenWhenPacketsExist) {
     ReceivedPacketHistory history;
     history.record_received(/*packet_number=*/1, /*ack_eliciting=*/false,
@@ -215,12 +288,6 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
             .offset = 11,
             .bytes = {std::byte{0xaa}, std::byte{0xbb}},
         }},
-        .stream_fragments = {coquic::quic::StreamFrameSendFragment{
-            .stream_id = 0,
-            .offset = 21,
-            .bytes = {std::byte{0xcc}},
-            .fin = false,
-        }},
         .reset_stream_frames = {coquic::quic::ResetStreamFrame{
             .stream_id = 8,
             .application_protocol_error_code = 9,
@@ -229,6 +296,12 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
         .stop_sending_frames = {coquic::quic::StopSendingFrame{
             .stream_id = 12,
             .application_protocol_error_code = 13,
+        }},
+        .stream_fragments = {coquic::quic::StreamFrameSendFragment{
+            .stream_id = 0,
+            .offset = 21,
+            .bytes = {std::byte{0xcc}},
+            .fin = false,
         }},
         .has_ping = true,
     });
@@ -241,12 +314,6 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
             .offset = 31,
             .bytes = {std::byte{0xdd}},
         }},
-        .stream_fragments = {coquic::quic::StreamFrameSendFragment{
-            .stream_id = 4,
-            .offset = 41,
-            .bytes = {std::byte{0xee}, std::byte{0xff}},
-            .fin = true,
-        }},
         .reset_stream_frames = {coquic::quic::ResetStreamFrame{
             .stream_id = 14,
             .application_protocol_error_code = 15,
@@ -255,6 +322,12 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
         .stop_sending_frames = {coquic::quic::StopSendingFrame{
             .stream_id = 18,
             .application_protocol_error_code = 19,
+        }},
+        .stream_fragments = {coquic::quic::StreamFrameSendFragment{
+            .stream_id = 4,
+            .offset = 41,
+            .bytes = {std::byte{0xee}, std::byte{0xff}},
+            .fin = true,
         }},
     });
 

@@ -45,6 +45,8 @@ struct SentPacketRecord {
     bool has_ping = false;
     std::size_t bytes_in_flight = 0;
     bool force_ack = false;
+    QuicPathId path_id = 0;
+    QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
 };
 
 struct RecoveryRttState {
@@ -58,7 +60,8 @@ class ReceivedPacketHistory {
   public:
     bool contains(std::uint64_t packet_number) const;
     void record_received(std::uint64_t packet_number, bool ack_eliciting,
-                         QuicCoreTimePoint received_time);
+                         QuicCoreTimePoint received_time,
+                         QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
     bool has_ack_to_send() const;
     std::optional<AckFrame> build_ack_frame(std::uint64_t ack_delay_exponent, QuicCoreTimePoint now,
                                             bool allow_non_pending = false) const;
@@ -78,6 +81,8 @@ class ReceivedPacketHistory {
     bool ack_pending_ = false;
     std::optional<std::uint64_t> largest_received_packet_number_;
     std::optional<ReceivedPacketRecord> largest_received_packet_record_;
+    bool ecn_feedback_accessible_ = false;
+    AckEcnCounts ecn_counts_{};
 
     friend struct test::ReceivedPacketHistoryTestPeer;
 };

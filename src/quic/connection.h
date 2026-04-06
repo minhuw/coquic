@@ -107,11 +107,14 @@ struct DeferredProtectedDatagram {
     std::vector<std::byte> bytes;
     QuicPathId path_id = 0;
     std::optional<std::uint32_t> datagram_id;
+    QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
 
     DeferredProtectedDatagram() = default;
     DeferredProtectedDatagram(std::vector<std::byte> datagram_bytes, QuicPathId id = 0,
-                              std::optional<std::uint32_t> qlog_datagram_id = std::nullopt)
-        : bytes(std::move(datagram_bytes)), path_id(id), datagram_id(qlog_datagram_id) {
+                              std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
+                              QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+        : bytes(std::move(datagram_bytes)), path_id(id), datagram_id(qlog_datagram_id),
+          ecn(datagram_ecn) {
     }
 
     bool operator==(const DeferredProtectedDatagram &) const = default;
@@ -137,7 +140,7 @@ struct DeferredProtectedPacket {
     operator DeferredProtectedDatagram() const {
         return DeferredProtectedDatagram{
             bytes,
-            /*path_id=*/0,
+            /*id=*/0,
             datagram_id == 0 ? std::nullopt : std::optional<std::uint32_t>(datagram_id),
         };
     }
@@ -165,6 +168,24 @@ struct LocalConnectionIdRecord {
     bool retired = false;
 };
 
+enum class QuicPathEcnState : std::uint8_t {
+    probing,
+    capable,
+    failed,
+};
+
+struct PathEcnState {
+    QuicPathEcnState state = QuicPathEcnState::probing;
+    QuicEcnCodepoint transmit_mark = QuicEcnCodepoint::ect0;
+    std::array<AckEcnCounts, 3> last_peer_counts{};
+    std::array<bool, 3> has_last_peer_counts{};
+    std::uint64_t total_sent_ect0 = 0;
+    std::uint64_t total_sent_ect1 = 0;
+    std::uint64_t probing_packets_sent = 0;
+    std::uint64_t probing_packets_acked = 0;
+    std::uint64_t probing_packets_lost = 0;
+};
+
 struct PathState {
     QuicPathId id = 0;
     bool validated = false;
@@ -178,8 +199,10 @@ struct PathState {
     std::optional<QuicCoreTimePoint> validation_deadline;
     std::uint64_t peer_connection_id_sequence = 0;
     std::optional<ConnectionId> destination_connection_id_override;
+    PathEcnState ecn;
 };
 
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 class QuicConnection {
   public:
     explicit QuicConnection(QuicCoreConfig config);
@@ -192,7 +215,8 @@ class QuicConnection {
     void start();
     void start(QuicCoreTimePoint now);
     void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
-                                  QuicPathId path_id = 0);
+                                  QuicPathId path_id = 0,
+                                  QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
     StreamStateResult<bool> queue_stream_send(std::uint64_t stream_id,
                                               std::span<const std::byte> bytes, bool fin);
     StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
@@ -210,6 +234,7 @@ class QuicConnection {
     std::optional<QuicCoreResumptionStateAvailable> take_resumption_state_available();
     std::optional<QuicCoreZeroRttStatusEvent> take_zero_rtt_status_event();
     std::optional<QuicPathId> last_drained_path_id() const;
+    QuicEcnCodepoint last_drained_ecn_codepoint() const;
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     std::vector<ConnectionId> active_local_connection_ids() const;
     bool is_handshake_complete() const;
@@ -238,13 +263,14 @@ class QuicConnection {
     void emit_qlog_packet_lost(const SentPacketRecord &packet, std::string_view trigger,
                                QuicCoreTimePoint now);
     void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
-                                  QuicPathId path_id,
+                                  QuicPathId path_id, QuicEcnCodepoint ecn,
                                   std::optional<std::uint32_t> inbound_datagram_id,
                                   bool replay_trigger, bool count_inbound_bytes);
     CodecResult<ConnectionId>
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
-    CodecResult<bool> process_inbound_packet(const ProtectedPacket &packet, QuicCoreTimePoint now);
+    CodecResult<bool> process_inbound_packet(const ProtectedPacket &packet, QuicCoreTimePoint now,
+                                             QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
     CodecResult<bool> process_inbound_crypto(EncryptionLevel level, std::span<const Frame> frames,
                                              QuicCoreTimePoint now);
     CodecResult<bool> process_inbound_application(std::span<const Frame> frames,
@@ -326,6 +352,8 @@ class QuicConnection {
     void note_outbound_datagram_bytes(std::size_t bytes,
                                       std::optional<QuicPathId> path_id = std::nullopt);
     void mark_peer_address_validated();
+    void disable_ecn_on_path(QuicPathId path_id);
+    QuicEcnCodepoint outbound_ecn_codepoint_for_path(std::optional<QuicPathId> path_id) const;
     ConnectionId
     outbound_destination_connection_id(std::optional<QuicPathId> path_id = std::nullopt) const;
     ConnectionId client_initial_destination_connection_id() const;
@@ -404,6 +432,7 @@ class QuicConnection {
     std::optional<QuicPathId> previous_path_id_;
     std::optional<QuicPathId> current_send_path_id_;
     std::optional<QuicPathId> last_drained_path_id_;
+    QuicEcnCodepoint last_drained_ecn_codepoint_ = QuicEcnCodepoint::not_ect;
     QuicPathId last_inbound_path_id_ = 0;
 };
 

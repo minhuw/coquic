@@ -62,6 +62,23 @@ std::chrono::milliseconds latest_loss_delay(const RecoveryRttState &rtt) {
     return std::max(kGranularity, rounded_up_loss_delay);
 }
 
+void note_received_ecn(AckEcnCounts &counts, QuicEcnCodepoint ecn) {
+    switch (ecn) {
+    case QuicEcnCodepoint::ect0:
+        ++counts.ect0;
+        break;
+    case QuicEcnCodepoint::ect1:
+        ++counts.ect1;
+        break;
+    case QuicEcnCodepoint::ce:
+        ++counts.ecn_ce;
+        break;
+    case QuicEcnCodepoint::unavailable:
+    case QuicEcnCodepoint::not_ect:
+        break;
+    }
+}
+
 } // namespace
 
 bool ReceivedPacketHistory::contains(std::uint64_t packet_number) const {
@@ -77,7 +94,7 @@ bool ReceivedPacketHistory::contains(std::uint64_t packet_number) const {
 }
 
 void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ack_eliciting,
-                                            QuicCoreTimePoint received_time) {
+                                            QuicCoreTimePoint received_time, QuicEcnCodepoint ecn) {
     if (contains(packet_number)) {
         if (ack_eliciting) {
             ack_pending_ = true;
@@ -121,6 +138,10 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
     if (ack_eliciting) {
         ack_pending_ = true;
     }
+    if (ecn != QuicEcnCodepoint::unavailable) {
+        ecn_feedback_accessible_ = true;
+    }
+    note_received_ecn(ecn_counts_, ecn);
 }
 
 bool ReceivedPacketHistory::has_ack_to_send() const {
@@ -161,6 +182,9 @@ std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack
             .range_length = range_end - range_start,
         });
         previous_smallest = range_start;
+    }
+    if (ecn_feedback_accessible_) {
+        ack.ecn_counts = ecn_counts_;
     }
 
     return ack;

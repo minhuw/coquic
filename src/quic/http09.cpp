@@ -70,7 +70,7 @@ bool is_invalid_http09_target_char(char ch) {
 
 constexpr QuicHttp09Testcase transfer_profile_testcase(QuicHttp09Testcase testcase) {
     if (testcase == QuicHttp09Testcase::keyupdate || testcase == QuicHttp09Testcase::rebind_port ||
-        testcase == QuicHttp09Testcase::rebind_addr ||
+        testcase == QuicHttp09Testcase::rebind_addr || testcase == QuicHttp09Testcase::ecn ||
         testcase == QuicHttp09Testcase::connectionmigration) {
         return QuicHttp09Testcase::transfer;
     }

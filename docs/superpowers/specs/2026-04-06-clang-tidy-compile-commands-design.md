@@ -94,12 +94,13 @@ This should optimize for correctness rather than cleverness.
 
 ### 2. Add A Build-Only Compile Database Step
 
-Update `build.zig` to add a `compdb` step that compiles the project library and
-the GoogleTest binary without running the tests.
+Update `build.zig` to add a `compdb` step that compiles the main executable and
+the GoogleTest binary without running either artifact.
 
 This keeps compile-database generation aligned with the real build graph while
-avoiding the unnecessary cost of executing the full test suite just to collect
-compiler arguments.
+covering both ordinary project sources such as `src/main.cpp` and the GoogleTest
+suite while still avoiding the unnecessary cost of executing either program just
+to collect compiler arguments.
 
 ### 3. Replace The Serial Wrapper With A Database-Backed Parallel Wrapper
 

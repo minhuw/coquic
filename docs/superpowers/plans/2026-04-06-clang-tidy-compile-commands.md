@@ -14,7 +14,7 @@
 
 - Create `scripts/compile-commands-from-verbose-cc.py`: parse `zig --verbose-cc` output into `compile_commands.json`.
 - Create `scripts/refresh-compile-commands.sh`: rebuild the compilation database when it is missing or stale.
-- Modify `build.zig`: add a `compdb` step that compiles the test binary without running it.
+- Modify `build.zig`: add a `compdb` step that compiles the main executable and test binary without running them.
 - Modify `scripts/run-clang-tidy.sh`: replace the serial manual-flag path with parallel `clang-tidy -p`.
 - Modify `flake.nix`: prefer Nix-provided LLVM clang/clang-tidy tools in the default dev shell.
 - Modify `.github/workflows/ci.yml`: refresh `compile_commands.json` before lint.
@@ -45,8 +45,9 @@ Update `build.zig` immediately after the existing `test` step definition:
 
     const compdb_step = b.step(
         "compdb",
-        "Build the GoogleTest binary without running it",
+        "Build the main executable and GoogleTest binary without running them",
     );
+    compdb_step.dependOn(&exe.step);
     compdb_step.dependOn(&smoke.step);
 ```
 

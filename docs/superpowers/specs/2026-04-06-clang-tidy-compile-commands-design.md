@@ -41,7 +41,7 @@ design bug here; they are part of the intended policy and must remain enabled.
 ## Recommended Approach
 
 Generate `compile_commands.json` from Zig's real C/C++ compiler invocations by
-parsing `zig build test --verbose-cc`, then feed that database into parallel
+parsing `zig build compdb --verbose-cc`, then feed that database into parallel
 `clang-tidy` execution from the repository wrapper.
 
 ### Why This Approach
@@ -68,7 +68,7 @@ The refresh script should:
 
 - runs from the repository root
 - checks whether `compile_commands.json` is missing or stale
-- refreshes it by running `zig build test --verbose-cc`
+- refreshes it by running `zig build compdb --verbose-cc`
 - sends the emitted compile commands into the parser script
 - removes any previous stale output before regenerating
 
@@ -92,7 +92,16 @@ change compile commands, including:
 
 This should optimize for correctness rather than cleverness.
 
-### 2. Replace The Serial Wrapper With A Database-Backed Parallel Wrapper
+### 2. Add A Build-Only Compile Database Step
+
+Update `build.zig` to add a `compdb` step that compiles the project library and
+the GoogleTest binary without running the tests.
+
+This keeps compile-database generation aligned with the real build graph while
+avoiding the unnecessary cost of executing the full test suite just to collect
+compiler arguments.
+
+### 3. Replace The Serial Wrapper With A Database-Backed Parallel Wrapper
 
 Update `scripts/run-clang-tidy.sh` so it no longer fabricates per-file compiler
 arguments.
@@ -109,7 +118,7 @@ Instead it should:
 The wrapper should keep using the repo-local `.clang-tidy` configuration rather
 than embedding check configuration in the script.
 
-### 3. Add Tooling To The Nix Shell
+### 4. Add Tooling To The Nix Shell
 
 Update `flake.nix` so the default dev shell includes the tools needed by the
 new refresh and parallel-lint flow. In practice this means:
@@ -120,7 +129,7 @@ new refresh and parallel-lint flow. In practice this means:
 
 No host-installed `bear` dependency should remain in the lint path.
 
-### 4. Update CI To Warm The Database Before Lint
+### 5. Update CI To Warm The Database Before Lint
 
 Update `.github/workflows/ci.yml` so the lint job refreshes
 `compile_commands.json` before invoking the `pre-commit` lint hook.

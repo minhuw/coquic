@@ -28,6 +28,9 @@ jobs:
       - name: Format Check
         run: nix develop -c pre-commit run clang-format --all-files --show-diff-on-failure
 
+      - name: Refresh compile_commands.json
+        run: nix develop -c ./scripts/refresh-compile-commands.sh
+
       - name: Lint
         run: nix develop -c pre-commit run coquic-clang-tidy --all-files --show-diff-on-failure
 

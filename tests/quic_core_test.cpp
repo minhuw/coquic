@@ -3152,6 +3152,52 @@ TEST(QuicCoreTest, StopSendingLocalCommandRejectsSendOnlyStreams) {
     EXPECT_FALSE(client.has_failed());
 }
 
+TEST(QuicCoreTest, LocalApplicationCloseQueuesApplicationConnectionCloseFrame) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+
+    const auto close = client.advance(
+        coquic::quic::QuicCoreCloseConnection{
+            .application_error_code = 0x103u,
+            .reason_phrase = "h3 local close",
+        },
+        coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(close.local_error.has_value());
+    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(close).empty());
+
+    bool saw_application_close = false;
+    for (const auto &datagram : coquic::quic::test::send_datagrams_from(close)) {
+        for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
+            const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+            if (one_rtt == nullptr) {
+                continue;
+            }
+
+            for (const auto &frame : one_rtt->frames) {
+                const auto *close_frame =
+                    std::get_if<coquic::quic::ApplicationConnectionCloseFrame>(&frame);
+                if (close_frame == nullptr) {
+                    continue;
+                }
+
+                saw_application_close = true;
+                EXPECT_EQ(close_frame->error_code, 0x103u);
+                EXPECT_EQ(coquic::quic::test::string_from_bytes(close_frame->reason.bytes),
+                          "h3 local close");
+            }
+        }
+    }
+
+    EXPECT_TRUE(saw_application_close);
+    EXPECT_TRUE(client.has_failed());
+    EXPECT_EQ(coquic::quic::test::count_state_change(coquic::quic::test::state_changes_from(close),
+                                                     coquic::quic::QuicCoreStateChange::failed),
+              1u);
+}
+
 TEST(QuicCoreTest, PeerStopSendingQueuesAutomaticReset) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());

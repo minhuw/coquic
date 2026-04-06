@@ -1517,6 +1517,20 @@ StreamStateResult<bool> QuicConnection::queue_stop_sending(LocalStopSendingComma
     return StreamStateResult<bool>::success(true);
 }
 
+void QuicConnection::queue_application_close(LocalApplicationCloseCommand command) {
+    if (status_ == HandshakeStatus::failed) {
+        return;
+    }
+
+    local_application_close_pending_ = true;
+    local_application_close_error_code_ = command.application_error_code;
+    local_application_close_reason_.clear();
+    local_application_close_reason_.reserve(command.reason_phrase.size());
+    for (const char ch : command.reason_phrase) {
+        local_application_close_reason_.push_back(static_cast<std::byte>(ch));
+    }
+}
+
 void QuicConnection::request_key_update() {
     local_key_update_requested_ = true;
 }
@@ -3923,6 +3937,10 @@ PeerStreamOpenLimits QuicConnection::peer_stream_open_limits() const {
 }
 
 bool QuicConnection::has_pending_application_send() const {
+    if (local_application_close_pending_) {
+        return true;
+    }
+
     if (handshake_done_state_ == StreamControlFrameState::pending) {
         return true;
     }
@@ -4666,6 +4684,38 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         application_space_.pending_probe_packet.has_value() | !application_crypto_frames.empty();
     if ((can_send_one_rtt_packets || use_zero_rtt_packet_protection) &&
         has_pending_application_payload) {
+        if (local_application_close_pending_) {
+            if (!can_send_one_rtt_packets) {
+                return {};
+            }
+
+            const auto packet_number = application_space_.next_send_packet_number++;
+            packets.emplace_back(make_application_protected_packet(
+                /*use_zero_rtt_packet_protection=*/false, current_version_,
+                destination_connection_id, config_.source_connection_id,
+                application_write_key_phase_, kDefaultInitialPacketNumberLength, packet_number,
+                std::vector<Frame>{
+                    Frame{ApplicationConnectionCloseFrame{
+                        .error_code = local_application_close_error_code_,
+                        .reason =
+                            ConnectionCloseReason{
+                                .bytes = local_application_close_reason_,
+                            },
+                    }},
+                },
+                {}));
+
+            auto datagram = finalize_datagram(packets);
+            if (datagram.empty()) {
+                return datagram;
+            }
+
+            local_application_close_pending_ = false;
+            local_application_close_reason_.clear();
+            mark_failed();
+            return datagram;
+        }
+
         const auto base_ack_frame = use_zero_rtt_packet_protection
                                         ? std::optional<AckFrame>{}
                                         : application_space_.received_packets.build_ack_frame(

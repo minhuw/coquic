@@ -100,12 +100,18 @@ struct QuicCoreStopSending {
     std::uint64_t application_error_code = 0;
 };
 
+struct QuicCoreCloseConnection {
+    std::uint64_t application_error_code = 0;
+    std::string reason_phrase;
+};
+
 struct QuicCoreTimerExpired {};
 struct QuicCoreRequestKeyUpdate {};
 
-using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
-                                   QuicCoreResetStream, QuicCoreStopSending,
-                                   QuicCoreRequestKeyUpdate, QuicCoreTimerExpired>;
+using QuicCoreInput =
+    std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
+                 QuicCoreResetStream, QuicCoreStopSending, QuicCoreCloseConnection,
+                 QuicCoreRequestKeyUpdate, QuicCoreTimerExpired>;
 
 struct QuicCoreSendDatagram {
     std::vector<std::byte> bytes;

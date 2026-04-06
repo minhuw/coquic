@@ -54,6 +54,11 @@ struct LocalStopSendingCommand {
     std::uint64_t application_error_code = 0;
 };
 
+struct LocalApplicationCloseCommand {
+    std::uint64_t application_error_code = 0;
+    std::string reason_phrase;
+};
+
 struct ConnectionFlowControlState {
     std::uint64_t peer_max_data = 0;
     std::uint64_t highest_sent = 0;
@@ -133,6 +138,7 @@ class QuicConnection {
                                               std::span<const std::byte> bytes, bool fin);
     StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
     StreamStateResult<bool> queue_stop_sending(LocalStopSendingCommand command);
+    void queue_application_close(LocalApplicationCloseCommand command);
     void request_key_update();
     std::vector<std::byte> drain_outbound_datagram(QuicCoreTimePoint now);
     void on_timeout(QuicCoreTimePoint now);
@@ -295,6 +301,9 @@ class QuicConnection {
     bool resumption_state_emitted_ = false;
     bool zero_rtt_attempted_event_emitted_ = false;
     bool processed_peer_packet_ = false;
+    bool local_application_close_pending_ = false;
+    std::uint64_t local_application_close_error_code_ = 0;
+    std::vector<std::byte> local_application_close_reason_;
     std::unique_ptr<qlog::Session> qlog_session_;
     std::vector<DeferredProtectedPacket> deferred_protected_packets_;
     std::optional<QuicCoreTimePoint> last_peer_activity_time_;

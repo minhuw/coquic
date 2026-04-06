@@ -8,6 +8,15 @@
 #include "src/quic/buffer.h"
 #include "src/quic/varint.h"
 
+namespace {
+
+[[gnu::noinline]] std::uint64_t runtime_quic_varint(std::uint64_t value) {
+    volatile std::uint64_t runtime_value = value;
+    return runtime_value;
+}
+
+} // namespace
+
 TEST(QuicVarIntTest, RoundTripsBoundaryValues) {
     for (std::uint64_t value : {
              0ull,
@@ -37,14 +46,19 @@ TEST(QuicVarIntTest, ReportsEncodedSizesAcrossAllQuicVarIntWidths) {
 }
 
 TEST(QuicVarIntTest, EncodesEightByteVarintsFromRuntimeValue) {
-    volatile std::uint64_t runtime_value = 1073741824ull;
-    const auto encoded_size = &coquic::quic::encoded_varint_size;
+    const auto runtime_value = runtime_quic_varint(1073741824ull);
 
-    EXPECT_EQ(encoded_size(runtime_value), 8u);
+    EXPECT_EQ(coquic::quic::encoded_varint_size(runtime_value), 8u);
 
     const auto encoded = coquic::quic::encode_varint(runtime_value);
     ASSERT_TRUE(encoded.has_value());
     EXPECT_EQ(encoded.value().size(), 8u);
+}
+
+TEST(QuicVarIntTest, ReportsEightByteWidthForMaximumRuntimeValue) {
+    const auto max_value = runtime_quic_varint(4611686018427387903ull);
+
+    EXPECT_EQ(coquic::quic::encoded_varint_size(max_value), 8u);
 }
 
 TEST(QuicVarIntTest, RejectsTruncatedEncoding) {

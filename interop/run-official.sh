@@ -11,12 +11,18 @@ readonly interop_peer_image="${INTEROP_PEER_IMAGE:-}"
 readonly simulator_image="${INTEROP_SIMULATOR_IMAGE:-martenseemann/quic-network-simulator@sha256:c23d82a55caffe681b1bdae65d4d30d23e1283141a414a7f02ee56cf15f9c6b9}"
 readonly iperf_image="${INTEROP_IPERF_IMAGE:-martenseemann/quic-interop-iperf-endpoint@sha256:cb50cc8019d45d9cad5faecbe46a3c21dd5e871949819a5175423755a9045106}"
 readonly interop_testcases="${INTEROP_TESTCASES:-handshake,transfer}"
+readonly interop_directions="${INTEROP_DIRECTIONS:-both}"
+readonly interop_analysis_shell_package="${INTEROP_ANALYSIS_SHELL_PACKAGE:-nixpkgs#wireshark}"
 readonly log_root="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
 readonly runner_repo_url="https://github.com/quic-interop/quic-interop-runner"
 readonly runner_dir="$(mktemp -d "${TMPDIR:-/tmp}/coquic-interop-runner.XXXXXX")"
 readonly runner_network_pattern='interop-runner.*_(leftnet|rightnet)$'
 readonly coquic_image="${INTEROP_COQUIC_IMAGE:-coquic-interop:quictls-musl}"
 readonly coquic_package="${INTEROP_COQUIC_PACKAGE:-interop-image-quictls-musl}"
+
+have_interop_analysis_tools() {
+  command -v tshark >/dev/null 2>&1 && command -v editcap >/dev/null 2>&1
+}
 
 cleanup() {
   cleanup_runner_state
@@ -51,6 +57,11 @@ echo "Using official ${interop_peer_impl} image: ${interop_peer_image}"
 echo "Using official simulator image: ${simulator_image}"
 echo "Using official iperf image: ${iperf_image}"
 echo "Running official testcases: ${interop_testcases}"
+if have_interop_analysis_tools; then
+  echo "Using host packet analysis tools: tshark=$(command -v tshark) editcap=$(command -v editcap)"
+else
+  echo "Packet analysis tools missing on host; using ${interop_analysis_shell_package} via nix shell"
+fi
 
 mkdir -p "${log_root}"
 rm -rf "${log_root:?}/"*
@@ -113,10 +124,15 @@ if "COQUIC_RUNTIME_TRACE" not in text:
 if "COQUIC_PACKET_TRACE" not in text:
     text = text.replace(server_env_anchor,
                         server_env_anchor + "      - COQUIC_PACKET_TRACE=$COQUIC_PACKET_TRACE\n")
+    text = text.replace(client_env_anchor,
+                        client_env_anchor + "      - COQUIC_PACKET_TRACE=$COQUIC_PACKET_TRACE\n")
 
 if "COQUIC_PACKET_TRACE_SCID" not in text:
     text = text.replace(server_env_anchor,
                         server_env_anchor +
+                        "      - COQUIC_PACKET_TRACE_SCID=$COQUIC_PACKET_TRACE_SCID\n")
+    text = text.replace(client_env_anchor,
+                        client_env_anchor +
                         "      - COQUIC_PACKET_TRACE_SCID=$COQUIC_PACKET_TRACE_SCID\n")
 
 path.write_text(text)
@@ -129,9 +145,20 @@ python3 -m pip install --quiet -r "${runner_dir}/requirements.txt"
 
 nix --option eval-cache false build ".#${coquic_package}"
 docker load -i "$(nix path-info ".#${coquic_package}")" >/dev/null
-docker pull "${interop_peer_image}" >/dev/null
-docker pull "${simulator_image}" >/dev/null
-docker pull "${iperf_image}" >/dev/null
+
+ensure_docker_image() {
+  local image=$1
+  if docker image inspect "${image}" >/dev/null 2>&1; then
+    echo "Using cached image: ${image}"
+    return 0
+  fi
+
+  docker pull "${image}" >/dev/null
+}
+
+ensure_docker_image "${interop_peer_image}"
+ensure_docker_image "${simulator_image}"
+ensure_docker_image "${iperf_image}"
 
 run_direction() {
   local server=$1
@@ -148,17 +175,32 @@ run_direction() {
 
   echo "== official interop: server=${server} client=${client} testcases=${interop_testcases} =="
   set +e
-  run_output="$(
-    cd "${runner_dir}"
-    python3 run.py \
-      --server "${server}" \
-      --client "${client}" \
-      --test "${interop_testcases}" \
-      --log-dir "${direction_log_dir}" \
-      --json "${results_json}" \
-      --debug
-  2>&1
-  )"
+  if have_interop_analysis_tools; then
+    run_output="$(
+      cd "${runner_dir}"
+      python3 run.py \
+        --server "${server}" \
+        --client "${client}" \
+        --test "${interop_testcases}" \
+        --log-dir "${direction_log_dir}" \
+        --json "${results_json}" \
+        --debug
+    2>&1
+    )"
+  else
+    run_output="$(
+      cd "${runner_dir}"
+      nix shell "${interop_analysis_shell_package}" -c \
+        python3 run.py \
+          --server "${server}" \
+          --client "${client}" \
+          --test "${interop_testcases}" \
+          --log-dir "${direction_log_dir}" \
+          --json "${results_json}" \
+          --debug
+    2>&1
+    )"
+  fi
   status=$?
   set -e
 
@@ -263,7 +305,21 @@ docker network ls --format '{{.Name}}' |
   grep -E -- "${runner_network_pattern}" |
   xargs -r docker network rm >/dev/null 2>&1 || true
 
-run_direction coquic "${interop_peer_impl}"
-run_direction "${interop_peer_impl}" coquic
+case "${interop_directions}" in
+  both)
+    run_direction coquic "${interop_peer_impl}"
+    run_direction "${interop_peer_impl}" coquic
+    ;;
+  coquic-server)
+    run_direction coquic "${interop_peer_impl}"
+    ;;
+  coquic-client)
+    run_direction "${interop_peer_impl}" coquic
+    ;;
+  *)
+    echo "INTEROP_DIRECTIONS must be one of: both, coquic-server, coquic-client" >&2
+    exit 1
+    ;;
+esac
 
 echo "Pinned official interop runner cases passed."

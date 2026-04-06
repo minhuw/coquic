@@ -117,6 +117,10 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                                     config_.initial_version = supported_version;
                                     config_.reacted_to_version_negotiation = true;
                                     connection_ = std::make_unique<QuicConnection>(config_);
+                                    connection_->last_inbound_path_id_ = in.path_id;
+                                    connection_->current_send_path_id_ = in.path_id;
+                                    connection_->ensure_path_state(in.path_id)
+                                        .is_current_send_path = true;
                                     connection_->start(now);
                                     return;
                                 }
@@ -154,12 +158,15 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             connection_ = std::make_unique<QuicConnection>(config_);
                             connection_->initial_space_.next_send_packet_number =
                                 next_initial_send_packet_number;
+                            connection_->last_inbound_path_id_ = in.path_id;
+                            connection_->current_send_path_id_ = in.path_id;
+                            connection_->ensure_path_state(in.path_id).is_current_send_path = true;
                             connection_->start(now);
                         }
                         return;
                     }
                 }
-                connection_->process_inbound_datagram(in.bytes, now);
+                connection_->process_inbound_datagram(in.bytes, now, in.path_id);
             },
             [&](const QuicCoreSendStreamData &in) {
                 const auto queued = connection_->queue_stream_send(in.stream_id, in.bytes, in.fin);
@@ -186,6 +193,16 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                 }
             },
             [&](const QuicCoreRequestKeyUpdate &) { connection_->request_key_update(); },
+            [&](const QuicCoreRequestConnectionMigration &in) {
+                const auto requested =
+                    connection_->request_connection_migration(in.path_id, in.reason);
+                if (!requested.has_value()) {
+                    result.local_error = QuicCoreLocalError{
+                        .code = QuicCoreLocalErrorCode::unsupported_operation,
+                        .stream_id = std::nullopt,
+                    };
+                }
+            },
             [&](const QuicCoreTimerExpired &) { connection_->on_timeout(now); },
         },
         input);
@@ -195,7 +212,10 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         if (datagram.empty()) {
             break;
         }
-        result.effects.emplace_back(QuicCoreSendDatagram{std::move(datagram)});
+        result.effects.emplace_back(QuicCoreSendDatagram{
+            .path_id = connection_->last_drained_path_id(),
+            .bytes = std::move(datagram),
+        });
     }
     while (const auto received = connection_->take_received_stream_data()) {
         result.effects.emplace_back(*received);
@@ -209,6 +229,9 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     while (const auto event = connection_->take_state_change()) {
         result.effects.emplace_back(QuicCoreStateEvent{*event});
     }
+    while (const auto preferred = connection_->take_peer_preferred_address_available()) {
+        result.effects.emplace_back(*preferred);
+    }
     while (const auto state = connection_->take_resumption_state_available()) {
         result.effects.emplace_back(*state);
     }
@@ -217,6 +240,10 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     }
     result.next_wakeup = connection_->next_wakeup();
     return result;
+}
+
+std::vector<ConnectionId> QuicCore::active_local_connection_ids() const {
+    return connection_->active_local_connection_ids();
 }
 
 bool QuicCore::is_handshake_complete() const {

@@ -30,6 +30,8 @@ constexpr std::uint64_t initial_max_streams_bidi_parameter_id = 0x08;
 constexpr std::uint64_t initial_max_streams_uni_parameter_id = 0x09;
 constexpr std::uint64_t ack_delay_exponent_parameter_id = 0x0a;
 constexpr std::uint64_t max_ack_delay_parameter_id = 0x0b;
+constexpr std::uint64_t disable_active_migration_parameter_id = 0x0c;
+constexpr std::uint64_t preferred_address_parameter_id = 0x0d;
 constexpr std::uint64_t active_connection_id_limit_parameter_id = 0x0e;
 constexpr std::uint64_t initial_source_connection_id_parameter_id = 0x0f;
 constexpr std::uint64_t retry_source_connection_id_parameter_id = 0x10;
@@ -38,6 +40,7 @@ constexpr std::uint64_t minimum_max_udp_payload_size = 1200;
 constexpr std::uint64_t minimum_active_connection_id_limit = 2;
 constexpr std::uint64_t maximum_ack_delay_exponent = 20;
 constexpr std::uint64_t maximum_max_ack_delay = (std::uint64_t{1} << 14);
+constexpr std::size_t maximum_connection_id_length = 20;
 
 void append_parameter_header(std::vector<std::byte> &output, std::uint64_t id, std::size_t length) {
     const auto encoded_id = coquic::quic::encode_varint(id).value();
@@ -69,6 +72,11 @@ void append_u32_be(std::vector<std::byte> &output, std::uint32_t value) {
     output.push_back(static_cast<std::byte>(value & 0xffu));
 }
 
+void append_u16_be(std::vector<std::byte> &output, std::uint16_t value) {
+    output.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
+    output.push_back(static_cast<std::byte>(value & 0xffu));
+}
+
 std::uint32_t read_u32_be(std::span<const std::byte> bytes) {
     std::uint32_t value = 0;
     for (const auto byte : bytes) {
@@ -76,6 +84,30 @@ std::uint32_t read_u32_be(std::span<const std::byte> bytes) {
     }
 
     return value;
+}
+
+std::uint16_t read_u16_be(std::span<const std::byte> bytes) {
+    return static_cast<std::uint16_t>((std::to_integer<std::uint8_t>(bytes[0]) << 8) |
+                                      std::to_integer<std::uint8_t>(bytes[1]));
+}
+
+void append_preferred_address_parameter(
+    std::vector<std::byte> &output, const std::optional<coquic::quic::PreferredAddress> &value) {
+    if (!value.has_value()) {
+        return;
+    }
+
+    std::vector<std::byte> encoded;
+    encoded.reserve(4 + 2 + 16 + 2 + 1 + value->connection_id.size() + 16);
+    encoded.insert(encoded.end(), value->ipv4_address.begin(), value->ipv4_address.end());
+    append_u16_be(encoded, value->ipv4_port);
+    encoded.insert(encoded.end(), value->ipv6_address.begin(), value->ipv6_address.end());
+    append_u16_be(encoded, value->ipv6_port);
+    encoded.push_back(static_cast<std::byte>(value->connection_id.size()));
+    encoded.insert(encoded.end(), value->connection_id.begin(), value->connection_id.end());
+    encoded.insert(encoded.end(), value->stateless_reset_token.begin(),
+                   value->stateless_reset_token.end());
+    append_raw_parameter(output, preferred_address_parameter_id, encoded);
 }
 
 void append_version_information_parameter(std::vector<std::byte> &output,
@@ -241,11 +273,21 @@ serialize_transport_parameters(const TransportParameters &parameters) {
     append_raw_parameter(output, initial_max_streams_uni_parameter_id,
                          encoded_initial_max_streams_uni.value());
 
+    if (parameters.disable_active_migration) {
+        append_parameter_header(output, disable_active_migration_parameter_id, 0);
+    }
+
     append_connection_id_parameter(output, initial_source_connection_id_parameter_id,
                                    parameters.initial_source_connection_id);
 
     append_connection_id_parameter(output, retry_source_connection_id_parameter_id,
                                    parameters.retry_source_connection_id);
+    if (parameters.preferred_address.has_value() &&
+        (parameters.preferred_address->connection_id.empty() ||
+         parameters.preferred_address->connection_id.size() > maximum_connection_id_length)) {
+        return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+    append_preferred_address_parameter(output, parameters.preferred_address);
     append_version_information_parameter(output, parameters.version_information);
 
     return CodecResult<std::vector<std::byte>>::success(std::move(output));
@@ -360,6 +402,46 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
         case retry_source_connection_id_parameter_id:
             parameters.retry_source_connection_id = ConnectionId(value.begin(), value.end());
             break;
+        case disable_active_migration_parameter_id:
+            if (!value.empty()) {
+                return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                                 offset);
+            }
+            parameters.disable_active_migration = true;
+            break;
+        case preferred_address_parameter_id: {
+            constexpr std::size_t fixed_prefix_length = 4 + 2 + 16 + 2 + 1;
+            constexpr std::size_t token_length = 16;
+            if (value.size() < fixed_prefix_length + token_length) {
+                return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                                 offset);
+            }
+
+            const auto connection_id_length = std::to_integer<std::uint8_t>(value[24]);
+            if (connection_id_length == 0 || connection_id_length > maximum_connection_id_length) {
+                return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                                 offset);
+            }
+            if (value.size() != fixed_prefix_length + connection_id_length + token_length) {
+                return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                                 offset);
+            }
+
+            PreferredAddress preferred_address;
+            std::copy_n(value.begin(), preferred_address.ipv4_address.size(),
+                        preferred_address.ipv4_address.begin());
+            preferred_address.ipv4_port = read_u16_be(value.subspan(4, 2));
+            std::copy_n(value.begin() + 6, preferred_address.ipv6_address.size(),
+                        preferred_address.ipv6_address.begin());
+            preferred_address.ipv6_port = read_u16_be(value.subspan(22, 2));
+            preferred_address.connection_id.assign(value.begin() + 25,
+                                                   value.begin() + 25 + connection_id_length);
+            std::copy_n(value.begin() + 25 + connection_id_length,
+                        preferred_address.stateless_reset_token.size(),
+                        preferred_address.stateless_reset_token.begin());
+            parameters.preferred_address = std::move(preferred_address);
+            break;
+        }
         case version_information_parameter_id: {
             if (value.size() < sizeof(std::uint32_t) ||
                 (value.size() % sizeof(std::uint32_t)) != 0) {
@@ -427,7 +509,8 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
 
     if (peer_role == EndpointRole::client) {
         if (parameters.original_destination_connection_id.has_value() ||
-            parameters.retry_source_connection_id.has_value()) {
+            parameters.retry_source_connection_id.has_value() ||
+            parameters.preferred_address.has_value()) {
             return validation_failure();
         }
 
@@ -462,6 +545,15 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
             return validation_failure();
         }
     } else if (parameters.retry_source_connection_id.has_value()) {
+        return validation_failure();
+    }
+
+    if (parameters.preferred_address.has_value() &&
+        parameters.preferred_address->connection_id.empty()) {
+        return validation_failure();
+    }
+    if (parameters.preferred_address.has_value() &&
+        parameters.initial_source_connection_id->empty()) {
         return validation_failure();
     }
 

@@ -68,8 +68,21 @@ bool is_invalid_http09_target_char(char ch) {
     return value <= 0x20u || value == 0x7fu;
 }
 
+constexpr QuicHttp09Testcase transfer_profile_testcase(QuicHttp09Testcase testcase) {
+    if (testcase == QuicHttp09Testcase::keyupdate || testcase == QuicHttp09Testcase::rebind_port ||
+        testcase == QuicHttp09Testcase::rebind_addr ||
+        testcase == QuicHttp09Testcase::connectionmigration) {
+        return QuicHttp09Testcase::transfer;
+    }
+    return testcase;
+}
+
 QuicTransportConfig http09_transport_for_testcase(QuicHttp09Testcase testcase) {
+    testcase = transfer_profile_testcase(testcase);
     auto config = QuicTransportConfig{};
+    if (testcase == QuicHttp09Testcase::transfer) {
+        config.active_connection_id_limit = 4;
+    }
     if (testcase == QuicHttp09Testcase::multiconnect) {
         config.max_idle_timeout = 180000;
     }
@@ -206,6 +219,7 @@ http09_zero_rtt_application_context(std::span<const QuicHttp09Request> requests)
 }
 
 QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase) {
+    testcase = transfer_profile_testcase(testcase);
     auto config = http09_transport_for_testcase(testcase);
     if (testcase == QuicHttp09Testcase::transfer) {
         config.initial_max_data = 32ull * 1024ull * 1024ull;
@@ -215,6 +229,7 @@ QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase test
 }
 
 QuicTransportConfig http09_server_transport_for_testcase(QuicHttp09Testcase testcase) {
+    testcase = transfer_profile_testcase(testcase);
     auto config = http09_transport_for_testcase(testcase);
     if (testcase == QuicHttp09Testcase::resumption || testcase == QuicHttp09Testcase::zerortt) {
         // Official resumed interop cases fan out enough request streams that the
@@ -225,6 +240,7 @@ QuicTransportConfig http09_server_transport_for_testcase(QuicHttp09Testcase test
 }
 
 std::vector<CipherSuite> http09_tls_cipher_suites_for_testcase(QuicHttp09Testcase testcase) {
+    testcase = transfer_profile_testcase(testcase);
     if (testcase == QuicHttp09Testcase::chacha20) {
         return {
             CipherSuite::tls_chacha20_poly1305_sha256,

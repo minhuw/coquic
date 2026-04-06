@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -17,11 +18,23 @@ struct VersionInformation {
     bool operator==(const VersionInformation &) const = default;
 };
 
+struct PreferredAddress {
+    std::array<std::byte, 4> ipv4_address{};
+    std::uint16_t ipv4_port = 0;
+    std::array<std::byte, 16> ipv6_address{};
+    std::uint16_t ipv6_port = 0;
+    ConnectionId connection_id;
+    std::array<std::byte, 16> stateless_reset_token{};
+
+    bool operator==(const PreferredAddress &) const = default;
+};
+
 struct TransportParameters {
     std::optional<ConnectionId> original_destination_connection_id;
     std::uint64_t max_idle_timeout = 0;
     std::uint64_t max_udp_payload_size = 65527;
     std::uint64_t active_connection_id_limit = 2;
+    bool disable_active_migration = false;
     std::uint64_t ack_delay_exponent = 3;
     std::uint64_t max_ack_delay = 25;
     std::uint64_t initial_max_data = 0;
@@ -32,6 +45,7 @@ struct TransportParameters {
     std::uint64_t initial_max_streams_uni = 0;
     std::optional<ConnectionId> initial_source_connection_id;
     std::optional<ConnectionId> retry_source_connection_id;
+    std::optional<PreferredAddress> preferred_address;
     std::optional<VersionInformation> version_information;
 };
 

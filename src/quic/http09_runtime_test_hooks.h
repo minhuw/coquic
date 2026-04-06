@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "src/quic/http09_runtime.h"
 #include "src/quic/packet.h"
@@ -76,6 +77,7 @@ enum class ClientConnectionLoopCaseForTests : std::uint8_t {
     nonblocking_drain_repeats_pending_endpoint_progress,
     idle_timeout_with_future_wakeup_trace,
     idle_timeout_with_elapsed_wakeup_trace,
+    timer_due_emits_send_trace_with_future_wakeup,
 };
 
 struct ClientConnectionLoopResultForTests {
@@ -97,6 +99,8 @@ enum class ServerLoopCaseForTests : std::uint8_t {
     blocking_wait_missing_input,
     nonblocking_drain_repeats_pending_endpoint_progress,
     outer_pump_repeats_pending_endpoint_progress,
+    ready_datagram_preempts_next_pending_work_pump,
+    pending_endpoint_without_transport_progress_waits_instead_of_spinning,
 };
 
 struct ServerLoopResultForTests {
@@ -108,6 +112,24 @@ struct ServerLoopResultForTests {
     std::size_t pump_calls = 0;
 };
 
+struct ExistingServerSessionDatagramRouteResultForTests {
+    bool processed = false;
+    bool erased = false;
+    bool has_migrated_path_route = false;
+    int migrated_path_socket_fd = -1;
+    int sendto_calls = 0;
+    int sendto_socket_fd = -1;
+    std::uint16_t sendto_peer_port = 0;
+    std::vector<int> sendto_socket_fds;
+    std::vector<std::uint16_t> sendto_peer_ports;
+};
+
+struct RuntimePathSeedForTests {
+    int socket_fd = -1;
+    sockaddr_storage peer{};
+    socklen_t peer_len = 0;
+};
+
 struct Http09RuntimeOpsOverride {
     int (*socket_fn)(int, int, int) = nullptr;
     int (*bind_fn)(int, const sockaddr *, socklen_t) = nullptr;
@@ -116,6 +138,7 @@ struct Http09RuntimeOpsOverride {
     ssize_t (*recvfrom_fn)(int, void *, size_t, int, sockaddr *, socklen_t *) = nullptr;
     int (*getaddrinfo_fn)(const char *, const char *, const addrinfo *, addrinfo **) = nullptr;
     void (*freeaddrinfo_fn)(addrinfo *) = nullptr;
+    int (*gethostname_fn)(char *, size_t) = nullptr;
 };
 
 class ScopedHttp09RuntimeOpsOverride {
@@ -157,6 +180,7 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
 bool existing_server_session_failure_cleans_up_for_tests();
 bool existing_server_session_missing_input_fails_for_tests();
 bool supported_long_header_routes_via_initial_destination_for_tests();
+bool preferred_address_routes_to_existing_server_session_for_tests();
 bool expired_server_timer_failure_cleans_up_for_tests();
 bool expired_server_timer_success_preserves_session_for_tests();
 bool pending_server_work_failure_cleans_up_for_tests();
@@ -167,6 +191,33 @@ bool retry_trace_paths_for_tests();
 bool send_retry_for_initial_failures_for_tests();
 bool zero_rtt_request_allowance_for_tests();
 bool version_negotiation_without_source_connection_id_fails_for_tests();
+bool runtime_assigns_stable_path_ids_for_tests();
+bool drive_endpoint_uses_transport_selected_path_for_tests();
+bool core_version_negotiation_restart_preserves_inbound_path_ids_for_tests();
+bool core_retry_restart_preserves_inbound_path_ids_for_tests();
+bool drive_endpoint_rejects_unknown_transport_selected_path_for_tests();
+bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests();
+bool server_connectionmigration_preferred_address_config_for_tests();
+bool runtime_connectionmigration_request_flow_for_tests();
+bool runtime_official_connectionmigration_client_request_flow_for_tests();
+bool runtime_regular_transfer_does_not_queue_preferred_address_migration_for_tests();
+bool runtime_registers_all_server_core_connection_ids_for_tests();
+bool runtime_misc_internal_coverage_for_tests();
+bool runtime_additional_internal_coverage_for_tests();
+bool runtime_connectionmigration_failure_paths_for_tests();
+bool runtime_restart_failure_paths_for_tests();
+ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_datagram_for_tests(
+    QuicCore &core, std::span<const RuntimePathSeedForTests> seeded_paths,
+    std::span<const std::byte> local_connection_id,
+    std::span<const std::byte> initial_destination_connection_id, int inbound_socket_fd,
+    const sockaddr_storage &inbound_peer, socklen_t inbound_peer_len, std::vector<std::byte> bytes,
+    QuicCoreTimePoint input_time);
+ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_datagram_for_tests(
+    QuicCore &core, int established_socket_fd, const sockaddr_storage &established_peer,
+    socklen_t established_peer_len, std::span<const std::byte> local_connection_id,
+    std::span<const std::byte> initial_destination_connection_id, int inbound_socket_fd,
+    const sockaddr_storage &inbound_peer, socklen_t inbound_peer_len, std::vector<std::byte> bytes,
+    QuicCoreTimePoint input_time);
 ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests case_id);
 std::optional<ParsedServerDatagramForTests>
 parse_server_datagram_for_routing_for_tests(std::span<const std::byte> bytes);

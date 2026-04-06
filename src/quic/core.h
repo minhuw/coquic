@@ -13,6 +13,7 @@
 #include "src/quic/packet.h"
 #include "src/quic/resumption.h"
 #include "src/quic/tls_adapter.h"
+#include "src/quic/transport_parameters.h"
 #include "src/quic/version.h"
 
 namespace coquic::quic {
@@ -20,6 +21,9 @@ namespace coquic::quic {
 struct QuicTransportConfig {
     std::uint64_t max_idle_timeout = 0;
     std::uint64_t max_udp_payload_size = 65527;
+    std::uint64_t active_connection_id_limit = 2;
+    bool disable_active_migration = false;
+    std::optional<PreferredAddress> preferred_address;
     std::uint64_t ack_delay_exponent = 3;
     std::uint64_t max_ack_delay = 25;
     std::uint64_t initial_max_data = 1 << 20;
@@ -58,9 +62,11 @@ struct QuicCoreConfig {
 
 using QuicCoreClock = std::chrono::steady_clock;
 using QuicCoreTimePoint = QuicCoreClock::time_point;
+using QuicPathId = std::uint64_t;
 
 enum class QuicCoreStateChange : std::uint8_t {
     handshake_ready,
+    handshake_confirmed,
     failed,
 };
 
@@ -73,6 +79,11 @@ enum class QuicCoreLocalErrorCode : std::uint8_t {
     final_size_conflict,
 };
 
+enum class QuicMigrationRequestReason : std::uint8_t {
+    active,
+    preferred_address,
+};
+
 struct QuicCoreLocalError {
     QuicCoreLocalErrorCode code;
     std::optional<std::uint64_t> stream_id;
@@ -82,6 +93,7 @@ struct QuicCoreStart {};
 
 struct QuicCoreInboundDatagram {
     std::vector<std::byte> bytes;
+    QuicPathId path_id = 0;
 };
 
 struct QuicCoreSendStreamData {
@@ -102,12 +114,18 @@ struct QuicCoreStopSending {
 
 struct QuicCoreTimerExpired {};
 struct QuicCoreRequestKeyUpdate {};
+struct QuicCoreRequestConnectionMigration {
+    QuicPathId path_id = 0;
+    QuicMigrationRequestReason reason = QuicMigrationRequestReason::active;
+};
 
-using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
-                                   QuicCoreResetStream, QuicCoreStopSending,
-                                   QuicCoreRequestKeyUpdate, QuicCoreTimerExpired>;
+using QuicCoreInput =
+    std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
+                 QuicCoreResetStream, QuicCoreStopSending, QuicCoreRequestKeyUpdate,
+                 QuicCoreRequestConnectionMigration, QuicCoreTimerExpired>;
 
 struct QuicCoreSendDatagram {
+    std::optional<QuicPathId> path_id;
     std::vector<std::byte> bytes;
 };
 
@@ -132,10 +150,14 @@ struct QuicCoreStateEvent {
     QuicCoreStateChange change;
 };
 
+struct QuicCorePeerPreferredAddressAvailable {
+    PreferredAddress preferred_address;
+};
+
 using QuicCoreEffect =
     std::variant<QuicCoreSendDatagram, QuicCoreReceiveStreamData, QuicCorePeerResetStream,
-                 QuicCorePeerStopSending, QuicCoreStateEvent, QuicCoreResumptionStateAvailable,
-                 QuicCoreZeroRttStatusEvent>;
+                 QuicCorePeerStopSending, QuicCoreStateEvent, QuicCorePeerPreferredAddressAvailable,
+                 QuicCoreResumptionStateAvailable, QuicCoreZeroRttStatusEvent>;
 
 struct QuicCoreResult {
     std::vector<QuicCoreEffect> effects;
@@ -156,6 +178,7 @@ class QuicCore {
     QuicCore &operator=(QuicCore &&) noexcept;
 
     QuicCoreResult advance(QuicCoreInput input, QuicCoreTimePoint now);
+    std::vector<ConnectionId> active_local_connection_ids() const;
     bool is_handshake_complete() const;
     bool has_failed() const;
 

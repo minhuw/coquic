@@ -204,6 +204,18 @@ inline std::vector<QuicCorePeerStopSending> peer_stops_from(const QuicCoreResult
     return out;
 }
 
+inline bool inject_inbound_application_frames_on_path(QuicConnection &connection,
+                                                      QuicPathId path_id, std::vector<Frame> frames,
+                                                      bool allow_preconnected_frames = false) {
+    const auto processed = connection.process_inbound_application(
+        frames, test_time(), allow_preconnected_frames, path_id);
+    if (!processed.has_value()) {
+        connection.status_ = HandshakeStatus::failed;
+        return false;
+    }
+    return true;
+}
+
 inline QuicCoreResult relay_send_datagrams_to_peer(const QuicCoreResult &result, QuicCore &peer,
                                                    QuicCoreTimePoint now) {
     QuicCoreResult combined;

@@ -44,6 +44,7 @@ struct SentPacketRecord {
     bool qlog_pto_probe = false;
     bool has_ping = false;
     std::size_t bytes_in_flight = 0;
+    bool force_ack = false;
 };
 
 struct RecoveryRttState {
@@ -59,8 +60,8 @@ class ReceivedPacketHistory {
     void record_received(std::uint64_t packet_number, bool ack_eliciting,
                          QuicCoreTimePoint received_time);
     bool has_ack_to_send() const;
-    std::optional<AckFrame> build_ack_frame(std::uint64_t ack_delay_exponent,
-                                            QuicCoreTimePoint now) const;
+    std::optional<AckFrame> build_ack_frame(std::uint64_t ack_delay_exponent, QuicCoreTimePoint now,
+                                            bool allow_non_pending = false) const;
     void on_ack_sent();
 
   private:

@@ -74,12 +74,12 @@ void NewRenoCongestionController::on_packets_lost(std::span<const SentPacketReco
     }
 }
 
-void NewRenoCongestionController::on_loss_event(QuicCoreTimePoint now) {
-    if (recovery_start_time_.has_value() && now <= *recovery_start_time_) {
+void NewRenoCongestionController::on_loss_event(QuicCoreTimePoint lost_packet_sent_time) {
+    if (recovery_start_time_.has_value() && lost_packet_sent_time <= *recovery_start_time_) {
         return;
     }
 
-    recovery_start_time_ = now;
+    recovery_start_time_ = lost_packet_sent_time;
     slow_start_threshold_ = std::max(minimum_window(), congestion_window_ / 2);
     congestion_window_ = slow_start_threshold_;
     congestion_avoidance_credit_ = 0;

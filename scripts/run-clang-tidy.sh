@@ -9,6 +9,8 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
+cd "${repo_root}"
+
 "${repo_root}/scripts/refresh-compile-commands.sh"
 
 job_count="${COQUIC_CLANG_TIDY_JOBS:-}"

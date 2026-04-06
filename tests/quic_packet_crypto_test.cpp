@@ -338,11 +338,14 @@ TEST_P(QuicPacketCryptoOpenFaultTest, RejectsOpeningWhenFaultInjected) {
 }
 
 TEST_P(QuicPacketCryptoHeaderProtectionFaultTest, RejectsHeaderProtectionWhenFaultInjected) {
-    const auto params = GetParam();
+    const auto &params = GetParam();
     const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(params.fault_point);
 
-    const auto mask = coquic::quic::make_header_protection_mask(params.cipher_suite, params.hp_key,
-                                                                params.sample);
+    const auto mask = coquic::quic::make_header_protection_mask(
+        params.cipher_suite, coquic::quic::HeaderProtectionMaskInput{
+                                 .hp_key = params.hp_key,
+                                 .sample = params.sample,
+                             });
     ASSERT_FALSE(mask.has_value());
     EXPECT_EQ(mask.error().code, coquic::quic::CodecErrorCode::header_protection_failed);
 }
@@ -633,10 +636,12 @@ TEST(QuicPacketCryptoTest, ExpandsChaChaTrafficSecretFromRfc9001AppendixA5) {
 }
 
 TEST(QuicPacketCryptoTest, BuildsAesHeaderProtectionMaskFromRfc9001AppendixA2) {
-    const auto mask =
-        coquic::quic::make_header_protection_mask(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
-                                                  hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
-                                                  hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"));
+    const auto mask = coquic::quic::make_header_protection_mask(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        coquic::quic::HeaderProtectionMaskInput{
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+        });
     ASSERT_TRUE(mask.has_value());
     EXPECT_EQ(to_hex(mask.value()), "437b9aec36");
 }
@@ -644,8 +649,10 @@ TEST(QuicPacketCryptoTest, BuildsAesHeaderProtectionMaskFromRfc9001AppendixA2) {
 TEST(QuicPacketCryptoTest, BuildsHeaderProtectionMaskFromFirstSixteenSampleBytes) {
     const auto mask = coquic::quic::make_header_protection_mask(
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
-        hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
-        hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9bfeedface"));
+        coquic::quic::HeaderProtectionMaskInput{
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9bfeedface"),
+        });
     ASSERT_TRUE(mask.has_value());
     EXPECT_EQ(to_hex(mask.value()), "437b9aec36");
 }
@@ -653,8 +660,10 @@ TEST(QuicPacketCryptoTest, BuildsHeaderProtectionMaskFromFirstSixteenSampleBytes
 TEST(QuicPacketCryptoTest, BuildsChaChaHeaderProtectionMaskFromRfc9001AppendixA5) {
     const auto mask = coquic::quic::make_header_protection_mask(
         coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
-        hex_bytes("25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4"),
-        hex_bytes("5e5cd55c41f69080575d7999c25a5bfb"));
+        coquic::quic::HeaderProtectionMaskInput{
+            .hp_key = hex_bytes("25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4"),
+            .sample = hex_bytes("5e5cd55c41f69080575d7999c25a5bfb"),
+        });
     ASSERT_TRUE(mask.has_value());
     EXPECT_EQ(to_hex(mask.value()), "aefefe7d03");
 }
@@ -1028,7 +1037,10 @@ TEST(QuicPacketCryptoTest, RejectsPayloadWhenAuthenticationFails) {
 TEST(QuicPacketCryptoTest, RejectsShortHeaderProtectionSample) {
     const auto mask = coquic::quic::make_header_protection_mask(
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
-        hex_bytes("9f50449e04a0e810283a1e9933adedd2"), hex_bytes("d1b1c98dd7689fb8"));
+        coquic::quic::HeaderProtectionMaskInput{
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8"),
+        });
     ASSERT_FALSE(mask.has_value());
     EXPECT_EQ(mask.error().code, coquic::quic::CodecErrorCode::header_protection_sample_too_short);
 }
@@ -1051,7 +1063,8 @@ TEST(QuicPacketCryptoTest, RejectsUnsupportedCipherSuites) {
     ASSERT_FALSE(opened.has_value());
     EXPECT_EQ(opened.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
 
-    const auto mask = coquic::quic::make_header_protection_mask(invalid_cipher_suite(), {}, {});
+    const auto mask = coquic::quic::make_header_protection_mask(
+        invalid_cipher_suite(), coquic::quic::HeaderProtectionMaskInput{});
     ASSERT_FALSE(mask.has_value());
     EXPECT_EQ(mask.error().code, coquic::quic::CodecErrorCode::unsupported_cipher_suite);
 }
@@ -1134,7 +1147,10 @@ TEST(QuicPacketCryptoTest, RejectsOpenPayloadWhenLengthGuardFaultIsInjected) {
 TEST(QuicPacketCryptoTest, RejectsHeaderProtectionWhenKeyLengthDoesNotMatchCipherSuite) {
     const auto mask = coquic::quic::make_header_protection_mask(
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
-        hex_bytes("9f50449e04a0e810283a1e9933aded"), hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"));
+        coquic::quic::HeaderProtectionMaskInput{
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933aded"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+        });
     ASSERT_FALSE(mask.has_value());
     EXPECT_EQ(mask.error().code, coquic::quic::CodecErrorCode::invalid_packet_protection_state);
 }

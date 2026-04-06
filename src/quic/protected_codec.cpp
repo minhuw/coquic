@@ -507,9 +507,12 @@ CodecResult<std::vector<std::byte>>
 apply_long_header_protection(std::vector<std::byte> packet_bytes, PacketNumberSpan packet_number,
                              CipherSuite cipher_suite, const PacketProtectionKeys &keys) {
     const auto mask = make_header_protection_mask(
-        cipher_suite, keys.hp_key,
-        std::span<const std::byte>(packet_bytes)
-            .subspan(packet_number.packet_number_offset + kHeaderProtectionSampleOffset));
+        cipher_suite, HeaderProtectionMaskInput{
+                          .hp_key = keys.hp_key,
+                          .sample = std::span<const std::byte>(packet_bytes)
+                                        .subspan(packet_number.packet_number_offset +
+                                                 kHeaderProtectionSampleOffset),
+                      });
     if (!mask.has_value())
         return CodecResult<std::vector<std::byte>>::failure(mask.error().code, mask.error().offset);
 
@@ -535,9 +538,12 @@ remove_long_header_protection(std::span<const std::byte> bytes, const LongHeader
     std::vector<std::byte> packet_bytes(
         bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(layout.packet_end_offset));
     const auto mask = make_header_protection_mask(
-        cipher_suite, keys.hp_key,
-        std::span<const std::byte>(packet_bytes)
-            .subspan(layout.packet_number_offset + kHeaderProtectionSampleOffset));
+        cipher_suite,
+        HeaderProtectionMaskInput{
+            .hp_key = keys.hp_key,
+            .sample = std::span<const std::byte>(packet_bytes)
+                          .subspan(layout.packet_number_offset + kHeaderProtectionSampleOffset),
+        });
     if (!mask.has_value())
         return CodecResult<RemovedLongHeaderProtection>::failure(mask.error().code,
                                                                  mask.error().offset);
@@ -575,9 +581,12 @@ CodecResult<bool> apply_short_header_protection_in_place(std::span<std::byte> pa
                                                          CipherSuite cipher_suite,
                                                          const PacketProtectionKeys &keys) {
     const auto mask = make_header_protection_mask(
-        cipher_suite, keys.hp_key,
-        std::span<const std::byte>(packet_bytes)
-            .subspan(packet_number.packet_number_offset + kHeaderProtectionSampleOffset));
+        cipher_suite, HeaderProtectionMaskInput{
+                          .hp_key = keys.hp_key,
+                          .sample = std::span<const std::byte>(packet_bytes)
+                                        .subspan(packet_number.packet_number_offset +
+                                                 kHeaderProtectionSampleOffset),
+                      });
     if (!mask.has_value())
         return CodecResult<bool>::failure(mask.error().code, mask.error().offset);
 
@@ -599,9 +608,12 @@ remove_short_header_protection(std::span<const std::byte> bytes, std::size_t pac
 
     std::vector<std::byte> packet_bytes(bytes.begin(), bytes.end());
     const auto mask = make_header_protection_mask(
-        cipher_suite, keys.hp_key,
-        std::span<const std::byte>(packet_bytes)
-            .subspan(packet_number_offset + kHeaderProtectionSampleOffset));
+        cipher_suite,
+        HeaderProtectionMaskInput{
+            .hp_key = keys.hp_key,
+            .sample = std::span<const std::byte>(packet_bytes)
+                          .subspan(packet_number_offset + kHeaderProtectionSampleOffset),
+        });
     if (!mask.has_value())
         return CodecResult<RemovedShortHeaderProtection>::failure(mask.error().code,
                                                                   mask.error().offset);

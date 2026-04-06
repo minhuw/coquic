@@ -40,28 +40,44 @@ design bug here; they are part of the intended policy and must remain enabled.
 
 ## Recommended Approach
 
-Use `bear` to generate `compile_commands.json` from an actual `zig build test`
-invocation, then feed that database into LLVM's parallel `run-clang-tidy`.
+Generate `compile_commands.json` from Zig's real C/C++ compiler invocations by
+parsing `zig build test --verbose-cc`, then feed that database into parallel
+`clang-tidy` execution from the repository wrapper.
 
 ### Why This Approach
 
-- `bear` captures the real compile commands emitted during the build instead of
-  forcing the repository to duplicate Zig's flags manually.
-- `run-clang-tidy` is the supported parallel runner for `clang-tidy` when a
-  compilation database exists.
+- `zig build --verbose-cc` exposes the real C/C++ compile commands that Zig
+  executes for this project.
+- a small repo-local parser can turn that output into a deterministic
+  `compile_commands.json` without trying to intercept Zig internals.
+- parallel `clang-tidy` execution can be achieved directly from the wrapper once
+  each file is analyzed with `-p .`.
 - This fixes both the correctness problem and the serial-execution problem with
   relatively small repository changes.
 
 ## Proposed Repository Changes
 
-### 1. Add A Compile Database Refresh Script
+### 1. Add A Compile Database Refresh Pipeline
 
-Create a repository script, `scripts/refresh-compile-commands.sh`, that:
+Create two repository scripts:
+
+- `scripts/refresh-compile-commands.sh`
+- `scripts/compile-commands-from-verbose-cc.py`
+
+The refresh script should:
 
 - runs from the repository root
 - checks whether `compile_commands.json` is missing or stale
-- refreshes it with `bear -- zig build test`
+- refreshes it by running `zig build test --verbose-cc`
+- sends the emitted compile commands into the parser script
 - removes any previous stale output before regenerating
+
+The parser script should:
+
+- read verbose `zig clang` lines from standard input
+- extract only real compile commands for project source and test files
+- serialize a valid `compile_commands.json`
+- write one entry per translation unit with the repo root as `directory`
 
 The staleness check should be simple and deterministic. It should refresh when
 `compile_commands.json` is missing or older than inputs that can materially
@@ -71,6 +87,7 @@ change compile commands, including:
 - `flake.nix`
 - `flake.lock`
 - `.clang-tidy`
+- `scripts/compile-commands-from-verbose-cc.py`
 - `scripts/run-clang-tidy.sh`
 
 This should optimize for correctness rather than cleverness.
@@ -85,22 +102,23 @@ Instead it should:
 - ensure it is running from the repo root
 - exit early when no filenames are supplied
 - call `scripts/refresh-compile-commands.sh`
-- invoke `run-clang-tidy` against the repository's `compile_commands.json`
-- limit analysis to the requested files using a file-regex filter built from the
-  incoming pre-commit filenames
+- invoke `clang-tidy -p "${repo_root}"` for the requested files
+- run those `clang-tidy` invocations in parallel using the local machine's CPU
+  count rather than a serial shell loop
 
 The wrapper should keep using the repo-local `.clang-tidy` configuration rather
 than embedding check configuration in the script.
 
 ### 3. Add Tooling To The Nix Shell
 
-Update `flake.nix` so the default dev shell includes `bear` alongside the
-existing clang tooling. This makes compile database generation available both
-locally and in CI without depending on host-installed tools.
+Update `flake.nix` so the default dev shell includes the tools needed by the
+new refresh and parallel-lint flow. In practice this means:
 
-If `run-clang-tidy` is already provided by the existing clang package, reuse it.
-If not, the shell package selection should be adjusted so the LLVM parallel
-runner is available from Nix.
+- Python remains available for the compile-command parser
+- the shell should prefer Nix-provided clang tooling over any incompatible
+  host-installed alternatives
+
+No host-installed `bear` dependency should remain in the lint path.
 
 ### 4. Update CI To Warm The Database Before Lint
 
@@ -147,12 +165,20 @@ cost. This is acceptable because:
 - correctness of compile commands is more important than avoiding a one-time
   setup cost
 
-### Pre-Commit Filename Filtering Must Be Exact
+To keep the verbose-cc output complete, the refresh script should use a
+dedicated throwaway Zig cache directory for database generation. That ensures
+compile commands are emitted even when the normal build cache is warm.
 
-`run-clang-tidy` should still only analyze the files requested by pre-commit.
-The wrapper should therefore build a conservative regex from the incoming file
-list and pass it to the runner, rather than falling back to repo-wide analysis
-for every local commit.
+### Compile Command Parsing Must Be Conservative
+
+The parser should only emit translation units that belong to the repository's
+project sources and tests. It should ignore unrelated toolchain output.
+
+### Pre-Commit File Selection Must Stay Narrow
+
+The wrapper should still only analyze the files requested by pre-commit. It
+should therefore parallelize only the incoming filenames rather than falling
+back to repo-wide analysis for every local commit.
 
 ### Captured Commands Must Match The Default Profile
 

@@ -335,7 +335,11 @@ pub fn build(b: *std.Build) void {
     }
     const test_step = b.step("test", "Run the GoogleTest suite");
     test_step.dependOn(&smoke_run.step);
-    const compdb_step = b.step("compdb", "Build the GoogleTest binary without running it");
+    const compdb_step = b.step(
+        "compdb",
+        "Build the main executable and GoogleTest binary without running them",
+    );
+    compdb_step.dependOn(&run_exe.step);
     compdb_step.dependOn(&smoke.step);
 
     const coverage_lib = addProjectLibrary(

@@ -272,6 +272,15 @@ thread_local int g_freeaddrinfo_calls = 0;
 thread_local int g_last_socket_family = AF_UNSPEC;
 thread_local int g_last_getaddrinfo_family = AF_UNSPEC;
 
+struct ServerSocketPollTrace {
+    int next_socket_fd = 700;
+    std::vector<int> opened_sockets;
+    std::vector<std::uint16_t> bound_ports;
+    std::vector<nfds_t> poll_descriptor_counts;
+};
+
+thread_local ServerSocketPollTrace g_server_socket_poll_trace;
+
 int missing_results_getaddrinfo(const char *, const char *, const addrinfo *hints,
                                 addrinfo **results) {
     if (results == nullptr || hints == nullptr) {
@@ -313,6 +322,20 @@ class ScopedRuntimeAddressFamilyReset {
     ScopedRuntimeAddressFamilyReset &operator=(const ScopedRuntimeAddressFamilyReset &) = delete;
 };
 
+class ScopedServerSocketPollTraceReset {
+  public:
+    ScopedServerSocketPollTraceReset() {
+        g_server_socket_poll_trace = {};
+    }
+
+    ~ScopedServerSocketPollTraceReset() {
+        g_server_socket_poll_trace = {};
+    }
+
+    ScopedServerSocketPollTraceReset(const ScopedServerSocketPollTraceReset &) = delete;
+    ScopedServerSocketPollTraceReset &operator=(const ScopedServerSocketPollTraceReset &) = delete;
+};
+
 int fail_getaddrinfo_with_results(const char *, const char *, const addrinfo *,
                                   addrinfo **results) {
     if (results == nullptr) {
@@ -337,6 +360,25 @@ int record_socket_family_then_fail(int family, int, int) {
     g_last_socket_family = family;
     errno = EMFILE;
     return -1;
+}
+
+int record_server_socket_then_succeed(int, int, int) {
+    const int fd = g_server_socket_poll_trace.next_socket_fd++;
+    g_server_socket_poll_trace.opened_sockets.push_back(fd);
+    return fd;
+}
+
+int record_server_bind_then_succeed(int, const sockaddr *address, socklen_t address_len) {
+    if (address != nullptr && address->sa_family == AF_INET &&
+        address_len >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
+        const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(address);
+        g_server_socket_poll_trace.bound_ports.push_back(ntohs(ipv4->sin_port));
+    } else if (address != nullptr && address->sa_family == AF_INET6 &&
+               address_len >= static_cast<socklen_t>(sizeof(sockaddr_in6))) {
+        const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(address);
+        g_server_socket_poll_trace.bound_ports.push_back(ntohs(ipv6->sin6_port));
+    }
+    return 0;
 }
 
 int ipv6_only_getaddrinfo(const char *node, const char *service, const addrinfo *hints,
@@ -454,6 +496,33 @@ int prefer_ipv4_mixed_getaddrinfo(const char *node, const char *service, const a
     return 0;
 }
 
+int hostname_ipv6_getaddrinfo(const char *node, const char *service, const addrinfo *hints,
+                              addrinfo **results) {
+    if (results == nullptr || hints == nullptr || node == nullptr || service == nullptr) {
+        return EAI_FAIL;
+    }
+    *results = nullptr;
+
+    g_last_getaddrinfo_family = hints->ai_family;
+    if (std::string_view(node) != "interop-server-host" || std::string_view(service) != "444") {
+        return EAI_NONAME;
+    }
+    if (hints->ai_family != AF_INET6) {
+        return EAI_ADDRFAMILY;
+    }
+    if (hints->ai_flags != AI_NUMERICSERV) {
+        return EAI_BADFLAGS;
+    }
+
+    auto *ipv6 = make_ipv6_addrinfo_result("2001:db8::9", 444);
+    if (ipv6 == nullptr) {
+        return EAI_FAIL;
+    }
+
+    *results = ipv6;
+    return 0;
+}
+
 int fallback_to_earlier_valid_result_getaddrinfo(const char *node, const char *service,
                                                  const addrinfo *hints, addrinfo **results) {
     if (results == nullptr || hints == nullptr || node == nullptr || service == nullptr) {
@@ -563,6 +632,11 @@ ssize_t fail_recvfrom(int, void *, size_t, int, sockaddr *, socklen_t *) {
     return -1;
 }
 
+ssize_t would_block_recvfrom(int, void *, size_t, int, sockaddr *, socklen_t *) {
+    errno = EWOULDBLOCK;
+    return -1;
+}
+
 int fail_poll(pollfd *, nfds_t, int) {
     errno = EIO;
     return -1;
@@ -587,6 +661,12 @@ int timeout_poll(pollfd *descriptors, nfds_t descriptor_count, int) {
         descriptors[0].revents = 0;
     }
     return 0;
+}
+
+int record_poll_descriptor_count_then_cancel(pollfd *, nfds_t descriptor_count, int) {
+    g_server_socket_poll_trace.poll_descriptor_counts.push_back(descriptor_count);
+    errno = ECANCELED;
+    return -1;
 }
 
 thread_local int g_timeout_then_error_poll_calls = 0;
@@ -1721,6 +1801,40 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-over-udp");
 }
 
+TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileAfterConnectionMigration) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir download_root;
+    document_root.write_file("hello.txt", "hello-after-migration");
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::connectionmigration,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::connectionmigration,
+        .download_root = download_root.path(),
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    auto server_process = launch_runtime_server_process(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
+    EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-after-migration");
+}
+
 TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferLargeFile) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
@@ -2168,6 +2282,38 @@ TEST(QuicHttp09RuntimeTest, ServerFailsWhenSocketBindFails) {
     };
 
     EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerBindsPreferredSocketAndPollsBothSockets) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const ScopedServerSocketPollTraceReset trace_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        {
+            .socket_fn = &record_server_socket_then_succeed,
+            .bind_fn = &record_server_bind_then_succeed,
+            .poll_fn = &record_poll_descriptor_count_then_cancel,
+            .recvfrom_fn = &would_block_recvfrom,
+        },
+    };
+
+    const auto server = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::quic::QuicHttp09Testcase::connectionmigration,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+    ASSERT_EQ(g_server_socket_poll_trace.opened_sockets.size(), 2u);
+    ASSERT_EQ(g_server_socket_poll_trace.bound_ports.size(), 2u);
+    EXPECT_EQ(g_server_socket_poll_trace.bound_ports[0], port);
+    EXPECT_EQ(g_server_socket_poll_trace.bound_ports[1], port + 1);
+    ASSERT_FALSE(g_server_socket_poll_trace.poll_descriptor_counts.empty());
+    EXPECT_EQ(g_server_socket_poll_trace.poll_descriptor_counts.front(), 2u);
 }
 
 TEST(QuicHttp09RuntimeTest, ServerFailsWhenConfiguredHostIsNotIpv4) {
@@ -4072,7 +4218,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.exit_code, 1);
     EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.receive_calls, 3U);
     EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.wait_calls, 0U);
-    EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.pump_calls, 3U);
+    EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.pump_calls, 2U);
 
     const auto outer_pump_repeats_pending_endpoint_progress =
         coquic::quic::test::run_server_loop_case_for_tests(
@@ -4082,7 +4228,27 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(outer_pump_repeats_pending_endpoint_progress.receive_calls, 2U);
     EXPECT_EQ(outer_pump_repeats_pending_endpoint_progress.wait_calls, 0U);
     EXPECT_EQ(outer_pump_repeats_pending_endpoint_progress.process_expired_calls, 3U);
-    EXPECT_EQ(outer_pump_repeats_pending_endpoint_progress.pump_calls, 3U);
+    EXPECT_EQ(outer_pump_repeats_pending_endpoint_progress.pump_calls, 2U);
+
+    const auto ready_datagram_preempts_next_pending_work_pump =
+        coquic::quic::test::run_server_loop_case_for_tests(
+            coquic::quic::test::ServerLoopCaseForTests::
+                ready_datagram_preempts_next_pending_work_pump);
+    EXPECT_EQ(ready_datagram_preempts_next_pending_work_pump.exit_code, 1);
+    EXPECT_EQ(ready_datagram_preempts_next_pending_work_pump.receive_calls, 2U);
+    EXPECT_EQ(ready_datagram_preempts_next_pending_work_pump.wait_calls, 0U);
+    EXPECT_EQ(ready_datagram_preempts_next_pending_work_pump.process_expired_calls, 2U);
+    EXPECT_EQ(ready_datagram_preempts_next_pending_work_pump.pump_calls, 1U);
+
+    const auto pending_endpoint_without_transport_progress_waits_instead_of_spinning =
+        coquic::quic::test::run_server_loop_case_for_tests(
+            coquic::quic::test::ServerLoopCaseForTests::
+                pending_endpoint_without_transport_progress_waits_instead_of_spinning);
+    EXPECT_EQ(pending_endpoint_without_transport_progress_waits_instead_of_spinning.exit_code, 1);
+    EXPECT_EQ(pending_endpoint_without_transport_progress_waits_instead_of_spinning.receive_calls,
+              1U);
+    EXPECT_EQ(pending_endpoint_without_transport_progress_waits_instead_of_spinning.wait_calls, 1U);
+    EXPECT_EQ(pending_endpoint_without_transport_progress_waits_instead_of_spinning.pump_calls, 2U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverRetryAndZeroRttBranches) {
@@ -4099,6 +4265,11 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverRetryAndZeroRttBranches) {
 
 TEST(QuicHttp09RuntimeTest, RuntimeAssignsStablePathIdsPerPeerTuple) {
     EXPECT_TRUE(coquic::quic::test::runtime_assigns_stable_path_ids_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, PreferredAddressCidRoutesToExistingServerSession) {
+    EXPECT_TRUE(
+        coquic::quic::test::preferred_address_routes_to_existing_server_session_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, DriveEndpointUsesTransportSelectedPathAndSocket) {
@@ -4133,6 +4304,28 @@ TEST(QuicHttp09RuntimeTest, DeferredReplayPreservesIndividualBufferedPathIds) {
     EXPECT_EQ(connection.current_send_path_id_.value_or(0), 11u);
 }
 
+TEST(QuicHttp09RuntimeTest, DeferredReplayKeepsDistinctPathsForIdenticalPayloads) {
+    coquic::quic::QuicConnection connection(coquic::quic::QuicCoreConfig{
+        .role = coquic::quic::EndpointRole::client,
+        .source_connection_id = {std::byte{0x01}},
+        .initial_destination_connection_id = {std::byte{0x02}},
+    });
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+
+    const auto deferred = std::vector<std::byte>{
+        std::byte{0x40}, std::byte{0x0a}, std::byte{0x0b}, std::byte{0x0c}, std::byte{0x0d},
+    };
+    connection.process_inbound_datagram(deferred, coquic::quic::test::test_time(1), /*path_id=*/11);
+    connection.process_inbound_datagram(deferred, coquic::quic::test::test_time(2), /*path_id=*/22);
+
+    ASSERT_EQ(connection.deferred_protected_packets_.size(), 2u);
+    EXPECT_EQ(connection.deferred_protected_packets_[0].bytes, deferred);
+    EXPECT_EQ(connection.deferred_protected_packets_[0].path_id, 11u);
+    EXPECT_EQ(connection.deferred_protected_packets_[1].bytes, deferred);
+    EXPECT_EQ(connection.deferred_protected_packets_[1].path_id, 22u);
+}
+
 TEST(QuicHttp09RuntimeTest, CoreVersionNegotiationRestartPreservesInboundPathIds) {
     EXPECT_TRUE(coquic::quic::test::
                     core_version_negotiation_restart_preserves_inbound_path_ids_for_tests());
@@ -4145,6 +4338,1166 @@ TEST(QuicHttp09RuntimeTest, CoreRetryRestartPreservesInboundPathIds) {
 TEST(QuicHttp09RuntimeTest, DriveEndpointRejectsUnknownTransportSelectedPath) {
     EXPECT_TRUE(
         coquic::quic::test::drive_endpoint_rejects_unknown_transport_selected_path_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigAdvertisesPreferredAddress) {
+    EXPECT_TRUE(
+        coquic::quic::test::server_connectionmigration_preferred_address_config_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigIncludesPreferredAddressResetToken) {
+    const auto core =
+        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
+            .mode = coquic::quic::Http09RuntimeMode::server,
+            .host = "127.0.0.1",
+            .port = 443,
+            .testcase = coquic::quic::QuicHttp09Testcase::connectionmigration,
+        });
+
+    ASSERT_TRUE(core.transport.preferred_address.has_value());
+    const auto preferred_address =
+        core.transport.preferred_address.value_or(coquic::quic::PreferredAddress{});
+    EXPECT_FALSE(std::all_of(preferred_address.stateless_reset_token.begin(),
+                             preferred_address.stateless_reset_token.end(),
+                             [](std::byte byte) { return byte == std::byte{0x00}; }));
+}
+
+TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigUsesConcreteAddressForWildcardHost) {
+    ScopedEnvVar hostname("HOSTNAME", "interop-server-host");
+    ScopedFreeaddrinfoCounterReset freeaddrinfo_counter;
+    ScopedRuntimeAddressFamilyReset address_family_reset;
+    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops(
+        coquic::quic::test::Http09RuntimeOpsOverride{
+            .getaddrinfo_fn = hostname_ipv6_getaddrinfo,
+            .freeaddrinfo_fn = counting_freeaddrinfo,
+        });
+
+    const auto core =
+        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
+            .mode = coquic::quic::Http09RuntimeMode::server,
+            .host = "::",
+            .port = 443,
+            .testcase = coquic::quic::QuicHttp09Testcase::connectionmigration,
+        });
+
+    ASSERT_TRUE(core.transport.preferred_address.has_value());
+    const auto preferred_address =
+        core.transport.preferred_address.value_or(coquic::quic::PreferredAddress{});
+    EXPECT_EQ(g_last_getaddrinfo_family, AF_INET6);
+    EXPECT_EQ(g_freeaddrinfo_calls, 1);
+    EXPECT_EQ(preferred_address.ipv6_port, 444);
+    EXPECT_EQ(preferred_address.ipv6_address, (std::array<std::byte, 16>{
+                                                  std::byte{0x20},
+                                                  std::byte{0x01},
+                                                  std::byte{0x0d},
+                                                  std::byte{0xb8},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x09},
+                                              }));
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeQueuesPreferredAddressMigrationRequestAfterHandshakeConfirmed) {
+    EXPECT_TRUE(coquic::quic::test::runtime_connectionmigration_request_flow_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest,
+     OfficialConnectionMigrationClientRequestQueuesPreferredAddressMigration) {
+    EXPECT_TRUE(
+        coquic::quic::test::runtime_official_connectionmigration_client_request_flow_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeProcessesPolicyInputsBeforeTerminalSuccess) {
+    EXPECT_TRUE(
+        coquic::quic::test::runtime_policy_core_inputs_advance_before_terminal_success_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, RegularTransferDoesNotQueuePreferredAddressMigration) {
+    EXPECT_TRUE(
+        coquic::quic::test::
+            runtime_regular_transfer_does_not_queue_preferred_address_migration_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeRegistersAllServerCoreConnectionIdsForRouting) {
+    EXPECT_TRUE(coquic::quic::test::runtime_registers_all_server_core_connection_ids_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeMiscInternalCoverageHooksExerciseFallbackPaths) {
+    testing::internal::CaptureStderr();
+    const bool covered = coquic::quic::test::runtime_misc_internal_coverage_for_tests();
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(covered) << stderr_output;
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeInternalCoverageHooksExerciseRemainingBranches) {
+    testing::internal::CaptureStderr();
+    const bool covered = coquic::quic::test::runtime_additional_internal_coverage_for_tests();
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(covered) << stderr_output;
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeConnectionMigrationFailureHooksExerciseFalseBranches) {
+    EXPECT_TRUE(coquic::quic::test::runtime_connectionmigration_failure_paths_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeRestartFailureHooksExerciseRestartFailures) {
+    EXPECT_TRUE(coquic::quic::test::runtime_restart_failure_paths_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, ExistingServerSessionRouteHelperErasesFailedSession) {
+    const auto make_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+    const auto make_secret = [](std::byte fill) {
+        return coquic::quic::TrafficSecret{
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .secret = std::vector<std::byte>(32, fill),
+        };
+    };
+    const auto make_connected_runtime_server_connection =
+        [&](const coquic::quic::QuicCoreConfig &config) {
+            coquic::quic::QuicConnection connection(config);
+            connection.started_ = true;
+            connection.status_ = coquic::quic::HandshakeStatus::connected;
+            connection.handshake_confirmed_ = true;
+            connection.peer_address_validated_ = true;
+            connection.peer_source_connection_id_ = make_runtime_connection_id(std::byte{0xc1}, 3);
+            connection.client_initial_destination_connection_id_ =
+                make_runtime_connection_id(std::byte{0x83}, 2);
+            connection.local_transport_parameters_ = coquic::quic::TransportParameters{
+                .original_destination_connection_id =
+                    connection.client_initial_destination_connection_id_,
+                .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+                .max_ack_delay = connection.config_.transport.max_ack_delay,
+                .initial_max_data = connection.config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    connection.config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    connection.config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    connection.config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = connection.config_.source_connection_id,
+            };
+            connection.initialize_local_flow_control();
+            connection.application_space_.read_secret = make_secret(std::byte{0x21});
+            connection.application_space_.write_secret = make_secret(std::byte{0x31});
+            connection.peer_transport_parameters_ = coquic::quic::TransportParameters{
+                .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+                .max_ack_delay = connection.config_.transport.max_ack_delay,
+                .initial_max_data = connection.config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    connection.config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    connection.config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    connection.config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = connection.peer_source_connection_id_,
+            };
+            connection.peer_transport_parameters_validated_ = true;
+            connection.initialize_peer_flow_control_from_transport_parameters();
+            return connection;
+        };
+
+    auto core_config =
+        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
+            .mode = coquic::quic::Http09RuntimeMode::server,
+            .host = "127.0.0.1",
+            .port = 443,
+            .testcase = coquic::quic::QuicHttp09Testcase::rebind_addr,
+        });
+    core_config.source_connection_id = make_runtime_connection_id(std::byte{0x53}, 1);
+
+    coquic::quic::QuicCore server(core_config);
+    server.connection_ = std::make_unique<coquic::quic::QuicConnection>(
+        make_connected_runtime_server_connection(core_config));
+    auto &connection = *server.connection_;
+
+    const auto local_connection_id = connection.config_.source_connection_id;
+    const auto initial_destination_connection_id =
+        connection.client_initial_destination_connection_id();
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = connection.application_read_key_phase_,
+                .destination_connection_id = local_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 77,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = 0,
+                            .first_ack_range = 0,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = initial_destination_connection_id,
+            .one_rtt_secret = connection.application_space_.read_secret,
+            .one_rtt_key_phase = connection.application_read_key_phase_,
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    connection.mark_failed();
+
+    const auto peer = make_peer(39968);
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+    const auto route = coquic::quic::test::route_existing_server_session_datagram_for_tests(
+        server, /*established_socket_fd=*/31, peer, peer_len, local_connection_id,
+        initial_destination_connection_id, /*inbound_socket_fd=*/31, peer, peer_len,
+        encoded.value(), coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(route.processed);
+    EXPECT_TRUE(route.erased);
+}
+
+TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesLiveLikeMigrationRetransmitOnNewPath) {
+    const auto make_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+    const auto make_secret = [](std::byte fill) {
+        return coquic::quic::TrafficSecret{
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .secret = std::vector<std::byte>(32, fill),
+        };
+    };
+    const auto make_connected_runtime_server_connection =
+        [&](const coquic::quic::QuicCoreConfig &config) {
+            coquic::quic::QuicConnection connection(config);
+            connection.started_ = true;
+            connection.status_ = coquic::quic::HandshakeStatus::connected;
+            connection.handshake_confirmed_ = true;
+            connection.peer_address_validated_ = true;
+            connection.peer_source_connection_id_ = make_runtime_connection_id(std::byte{0xc1}, 3);
+            connection.client_initial_destination_connection_id_ =
+                make_runtime_connection_id(std::byte{0x83}, 2);
+            connection.local_transport_parameters_ = coquic::quic::TransportParameters{
+                .original_destination_connection_id =
+                    connection.client_initial_destination_connection_id_,
+                .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+                .max_ack_delay = connection.config_.transport.max_ack_delay,
+                .initial_max_data = connection.config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    connection.config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    connection.config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    connection.config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = connection.config_.source_connection_id,
+            };
+            connection.initialize_local_flow_control();
+            connection.application_space_.read_secret = make_secret(std::byte{0x21});
+            connection.application_space_.write_secret = make_secret(std::byte{0x31});
+            connection.peer_transport_parameters_ = coquic::quic::TransportParameters{
+                .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+                .max_ack_delay = connection.config_.transport.max_ack_delay,
+                .initial_max_data = connection.config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    connection.config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    connection.config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    connection.config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = connection.peer_source_connection_id_,
+            };
+            connection.peer_transport_parameters_validated_ = true;
+            connection.initialize_peer_flow_control_from_transport_parameters();
+            return connection;
+        };
+
+    auto core_config =
+        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
+            .mode = coquic::quic::Http09RuntimeMode::server,
+            .host = "127.0.0.1",
+            .port = 443,
+            .testcase = coquic::quic::QuicHttp09Testcase::rebind_addr,
+        });
+    core_config.source_connection_id = make_runtime_connection_id(std::byte{0x53}, 1);
+
+    coquic::quic::QuicCore server(core_config);
+    server.connection_ = std::make_unique<coquic::quic::QuicConnection>(
+        make_connected_runtime_server_connection(core_config));
+    auto &connection = *server.connection_;
+    connection.application_space_.next_send_packet_number = 8241;
+    connection.last_validated_path_id_ = 1;
+    connection.current_send_path_id_ = 1;
+    connection.ensure_path_state(1).validated = true;
+    connection.ensure_path_state(1).is_current_send_path = true;
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0,
+                                       coquic::quic::test::bytes_from_string(
+                                           std::string(static_cast<std::size_t>(512) * 1024u, 'm')),
+                                       false)
+                    .has_value());
+
+    for (std::size_t i = 0; i < 131; ++i) {
+        const auto datagram = connection.drain_outbound_datagram(
+            coquic::quic::test::test_time(static_cast<std::int64_t>(i) + 1));
+        ASSERT_FALSE(datagram.empty());
+        EXPECT_EQ(connection.last_drained_path_id(), 1u);
+    }
+    for (std::size_t i = 0; i < 22; ++i) {
+        const auto datagram = connection.drain_outbound_datagram(
+            coquic::quic::test::test_time(132 + static_cast<std::int64_t>(i)));
+        ASSERT_FALSE(datagram.empty());
+        EXPECT_EQ(connection.last_drained_path_id(), 1u);
+    }
+
+    const auto first_gap_packet = connection.application_space_.sent_packets.at(8372);
+    ASSERT_FALSE(first_gap_packet.stream_fragments.empty());
+    const auto tracked_gap_offset = first_gap_packet.stream_fragments.front().offset;
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::vector<coquic::quic::Frame>{
+                            coquic::quic::AckFrame{
+                                .largest_acknowledged = 8371,
+                                .first_ack_range = 8371 - 8241,
+                            },
+                        },
+                        coquic::quic::test::test_time(99), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/2)
+                    .has_value());
+    connection.ensure_path_state(2).anti_amplification_received_bytes = 4000;
+
+    const auto migration_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(100));
+    ASSERT_FALSE(migration_datagram.empty());
+    ASSERT_EQ(connection.last_drained_path_id(), std::optional<coquic::quic::QuicPathId>{2});
+    ASSERT_TRUE(connection.paths_.contains(2));
+    ASSERT_TRUE(connection.paths_.at(2).outstanding_challenge.has_value());
+    const auto challenge = optional_ref_or_terminate(connection.paths_.at(2).outstanding_challenge);
+    ASSERT_EQ(std::prev(connection.application_space_.sent_packets.end())->first, 8394u);
+
+    const auto local_connection_id = connection.config_.source_connection_id;
+    const auto initial_destination_connection_id =
+        connection.client_initial_destination_connection_id();
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = connection.application_read_key_phase_,
+                .destination_connection_id = local_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 1759,
+                .frames =
+                    {
+                        coquic::quic::PathResponseFrame{.data = challenge},
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = 8394,
+                            .first_ack_range = 0,
+                            .additional_ranges =
+                                {
+                                    coquic::quic::AckRange{
+                                        .gap = 21,
+                                        .range_length = 8371 - 8241,
+                                    },
+                                },
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = initial_destination_connection_id,
+            .one_rtt_secret = connection.application_space_.read_secret,
+            .one_rtt_key_phase = connection.application_read_key_phase_,
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto old_peer = make_peer(39968);
+    const auto new_peer = make_peer(38910);
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+    const auto route = coquic::quic::test::route_existing_server_session_datagram_for_tests(
+        server, /*established_socket_fd=*/31, old_peer, peer_len, local_connection_id,
+        initial_destination_connection_id, /*inbound_socket_fd=*/77, new_peer, peer_len,
+        encoded.value(), coquic::quic::test::test_time(101));
+
+    ASSERT_TRUE(route.processed);
+    EXPECT_FALSE(route.erased);
+    EXPECT_TRUE(route.has_migrated_path_route);
+    EXPECT_EQ(route.migrated_path_socket_fd, 77);
+    EXPECT_GT(route.sendto_calls, 0);
+    EXPECT_EQ(route.sendto_socket_fd, 77);
+    EXPECT_EQ(route.sendto_peer_port, 38910);
+
+    const auto &post_connection = *server.connection_;
+    EXPECT_EQ(post_connection.current_send_path_id_, std::optional<coquic::quic::QuicPathId>{2});
+
+    bool saw_retransmit_for_gap_offset = false;
+    for (const auto &[packet_number, packet] : post_connection.application_space_.sent_packets) {
+        static_cast<void>(packet_number);
+        for (const auto &fragment : packet.stream_fragments) {
+            if (fragment.offset == tracked_gap_offset) {
+                saw_retransmit_for_gap_offset = true;
+            }
+        }
+    }
+
+    EXPECT_TRUE(saw_retransmit_for_gap_offset);
+}
+
+TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindToLatestIpv6Peer) {
+    const auto make_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&peer);
+        ipv6.sin6_family = AF_INET6;
+        ipv6.sin6_port = htons(port);
+        ipv6.sin6_addr = in6addr_loopback;
+        return peer;
+    };
+    const auto make_secret = [](std::byte fill) {
+        return coquic::quic::TrafficSecret{
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .secret = std::vector<std::byte>(32, fill),
+        };
+    };
+    const auto make_connected_runtime_server_connection =
+        [&](const coquic::quic::QuicCoreConfig &config) {
+            coquic::quic::QuicConnection connection(config);
+            connection.started_ = true;
+            connection.status_ = coquic::quic::HandshakeStatus::connected;
+            connection.handshake_confirmed_ = true;
+            connection.peer_address_validated_ = true;
+            connection.peer_source_connection_id_ = make_runtime_connection_id(std::byte{0xc1}, 3);
+            connection.client_initial_destination_connection_id_ =
+                make_runtime_connection_id(std::byte{0x83}, 2);
+            connection.local_transport_parameters_ = coquic::quic::TransportParameters{
+                .original_destination_connection_id =
+                    connection.client_initial_destination_connection_id_,
+                .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+                .max_ack_delay = connection.config_.transport.max_ack_delay,
+                .initial_max_data = connection.config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    connection.config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    connection.config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    connection.config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = connection.config_.source_connection_id,
+            };
+            connection.initialize_local_flow_control();
+            connection.application_space_.read_secret = make_secret(std::byte{0x21});
+            connection.application_space_.write_secret = make_secret(std::byte{0x31});
+            connection.peer_transport_parameters_ = coquic::quic::TransportParameters{
+                .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+                .max_ack_delay = connection.config_.transport.max_ack_delay,
+                .initial_max_data = connection.config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    connection.config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    connection.config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    connection.config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = connection.peer_source_connection_id_,
+            };
+            connection.peer_transport_parameters_validated_ = true;
+            connection.initialize_peer_flow_control_from_transport_parameters();
+            return connection;
+        };
+
+    auto core_config =
+        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
+            .mode = coquic::quic::Http09RuntimeMode::server,
+            .host = "::1",
+            .port = 443,
+            .testcase = coquic::quic::QuicHttp09Testcase::rebind_port,
+        });
+    core_config.source_connection_id = make_runtime_connection_id(std::byte{0x53}, 1);
+
+    coquic::quic::QuicCore server(core_config);
+    server.connection_ = std::make_unique<coquic::quic::QuicConnection>(
+        make_connected_runtime_server_connection(core_config));
+    auto &connection = *server.connection_;
+    connection.application_space_.next_send_packet_number = 900;
+    connection.last_validated_path_id_ = 2;
+    connection.current_send_path_id_ = 2;
+    connection.previous_path_id_ = 1;
+    connection.ensure_path_state(1).validated = true;
+    connection.ensure_path_state(2).validated = true;
+    connection.ensure_path_state(2).is_current_send_path = true;
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+
+    ASSERT_TRUE(connection
+                    .queue_stream_send(
+                        0, coquic::quic::test::bytes_from_string(std::string(4096, 'r')), false)
+                    .has_value());
+    connection.ensure_path_state(2).anti_amplification_received_bytes = 4000;
+
+    const auto path2_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(path2_datagram.empty());
+    ASSERT_EQ(connection.last_drained_path_id(), std::optional<coquic::quic::QuicPathId>{2});
+
+    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+    const auto largest_sent_packet =
+        std::prev(connection.application_space_.sent_packets.end())->first;
+
+    const auto local_connection_id = connection.config_.source_connection_id;
+    const auto initial_destination_connection_id =
+        connection.client_initial_destination_connection_id();
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = connection.application_read_key_phase_,
+                .destination_connection_id = local_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 77,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = largest_sent_packet,
+                            .first_ack_range = 0,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = initial_destination_connection_id,
+            .one_rtt_secret = connection.application_space_.read_secret,
+            .one_rtt_key_phase = connection.application_read_key_phase_,
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto original_peer = make_peer(38910);
+    const auto first_rebind_peer = make_peer(39968);
+    const auto second_rebind_peer = make_peer(40926);
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6));
+    const std::array seeded_paths{
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 31,
+            .peer = original_peer,
+            .peer_len = peer_len,
+        },
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 77,
+            .peer = first_rebind_peer,
+            .peer_len = peer_len,
+        },
+    };
+    const auto route = coquic::quic::test::route_existing_server_session_datagram_for_tests(
+        server, seeded_paths, local_connection_id, initial_destination_connection_id,
+        /*inbound_socket_fd=*/77, second_rebind_peer, peer_len, encoded.value(),
+        coquic::quic::test::test_time(2));
+
+    ASSERT_TRUE(route.processed);
+    EXPECT_FALSE(route.erased);
+    EXPECT_GT(route.sendto_calls, 0);
+    EXPECT_EQ(route.sendto_socket_fd, 77);
+    EXPECT_EQ(route.sendto_peer_port, 40926);
+
+    ASSERT_TRUE(server.connection_->paths_.contains(3));
+    ASSERT_TRUE(server.connection_->paths_.at(3).outstanding_challenge.has_value());
+    const auto second_rebind_challenge =
+        optional_ref_or_terminate(server.connection_->paths_.at(3).outstanding_challenge);
+    const auto largest_sent_after_second_rebind =
+        std::prev(server.connection_->application_space_.sent_packets.end())->first;
+
+    const auto path_response_encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = server.connection_->application_read_key_phase_,
+                .destination_connection_id = local_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 78,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = largest_sent_after_second_rebind,
+                            .first_ack_range = 0,
+                        },
+                        coquic::quic::PathResponseFrame{
+                            .data = second_rebind_challenge,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = initial_destination_connection_id,
+            .one_rtt_secret = server.connection_->application_space_.read_secret,
+            .one_rtt_key_phase = server.connection_->application_read_key_phase_,
+        });
+    ASSERT_TRUE(path_response_encoded.has_value());
+
+    const std::array seeded_paths_after_second_rebind{
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 31,
+            .peer = original_peer,
+            .peer_len = peer_len,
+        },
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 77,
+            .peer = first_rebind_peer,
+            .peer_len = peer_len,
+        },
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 77,
+            .peer = second_rebind_peer,
+            .peer_len = peer_len,
+        },
+    };
+    const auto path_response_route =
+        coquic::quic::test::route_existing_server_session_datagram_for_tests(
+            server, seeded_paths_after_second_rebind, local_connection_id,
+            initial_destination_connection_id, /*inbound_socket_fd=*/77, second_rebind_peer,
+            peer_len, path_response_encoded.value(), coquic::quic::test::test_time(3));
+
+    ASSERT_TRUE(path_response_route.processed);
+    EXPECT_FALSE(path_response_route.erased);
+    EXPECT_GT(path_response_route.sendto_calls, 0);
+    EXPECT_EQ(path_response_route.sendto_socket_fd, 77);
+    EXPECT_EQ(path_response_route.sendto_peer_port, 40926);
+    ASSERT_TRUE(server.connection_->paths_.contains(3));
+    EXPECT_TRUE(server.connection_->paths_.at(3).validated);
+    EXPECT_EQ(server.connection_->current_send_path_id_,
+              std::optional<coquic::quic::QuicPathId>{3});
+    EXPECT_EQ(server.connection_->last_validated_path_id_,
+              std::optional<coquic::quic::QuicPathId>{3});
+}
+
+TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindToLatestV4MappedPeer) {
+    const auto make_peer = [](std::array<std::uint8_t, 4> ipv4_octets, std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&peer);
+        ipv6.sin6_family = AF_INET6;
+        ipv6.sin6_port = htons(port);
+        ipv6.sin6_addr = IN6ADDR_ANY_INIT;
+        ipv6.sin6_addr.s6_addr[10] = 0xff;
+        ipv6.sin6_addr.s6_addr[11] = 0xff;
+        ipv6.sin6_addr.s6_addr[12] = ipv4_octets[0];
+        ipv6.sin6_addr.s6_addr[13] = ipv4_octets[1];
+        ipv6.sin6_addr.s6_addr[14] = ipv4_octets[2];
+        ipv6.sin6_addr.s6_addr[15] = ipv4_octets[3];
+        return peer;
+    };
+    const auto make_secret = [](std::byte fill) {
+        return coquic::quic::TrafficSecret{
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .secret = std::vector<std::byte>(32, fill),
+        };
+    };
+    const auto make_connected_runtime_server_connection =
+        [&](const coquic::quic::QuicCoreConfig &config) {
+            coquic::quic::QuicConnection connection(config);
+            connection.started_ = true;
+            connection.status_ = coquic::quic::HandshakeStatus::connected;
+            connection.handshake_confirmed_ = true;
+            connection.peer_address_validated_ = true;
+            connection.peer_source_connection_id_ = make_runtime_connection_id(std::byte{0xc1}, 3);
+            connection.client_initial_destination_connection_id_ =
+                make_runtime_connection_id(std::byte{0x83}, 2);
+            connection.local_transport_parameters_ = coquic::quic::TransportParameters{
+                .original_destination_connection_id =
+                    connection.client_initial_destination_connection_id_,
+                .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+                .max_ack_delay = connection.config_.transport.max_ack_delay,
+                .initial_max_data = connection.config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    connection.config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    connection.config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    connection.config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = connection.config_.source_connection_id,
+            };
+            connection.initialize_local_flow_control();
+            connection.application_space_.read_secret = make_secret(std::byte{0x21});
+            connection.application_space_.write_secret = make_secret(std::byte{0x31});
+            connection.peer_transport_parameters_ = coquic::quic::TransportParameters{
+                .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+                .max_ack_delay = connection.config_.transport.max_ack_delay,
+                .initial_max_data = connection.config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    connection.config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    connection.config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    connection.config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = connection.peer_source_connection_id_,
+            };
+            connection.peer_transport_parameters_validated_ = true;
+            connection.initialize_peer_flow_control_from_transport_parameters();
+            return connection;
+        };
+
+    auto core_config =
+        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
+            .mode = coquic::quic::Http09RuntimeMode::server,
+            .host = "::",
+            .port = 443,
+            .testcase = coquic::quic::QuicHttp09Testcase::rebind_port,
+        });
+    core_config.source_connection_id = make_runtime_connection_id(std::byte{0x53}, 1);
+
+    coquic::quic::QuicCore server(core_config);
+    server.connection_ = std::make_unique<coquic::quic::QuicConnection>(
+        make_connected_runtime_server_connection(core_config));
+    auto &connection = *server.connection_;
+    connection.application_space_.next_send_packet_number = 900;
+    connection.last_validated_path_id_ = 2;
+    connection.current_send_path_id_ = 2;
+    connection.previous_path_id_ = 1;
+    connection.ensure_path_state(1).validated = true;
+    connection.ensure_path_state(2).validated = true;
+    connection.ensure_path_state(2).is_current_send_path = true;
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+
+    ASSERT_TRUE(connection
+                    .queue_stream_send(
+                        0, coquic::quic::test::bytes_from_string(std::string(4096, 'r')), false)
+                    .has_value());
+    connection.ensure_path_state(2).anti_amplification_received_bytes = 4000;
+
+    const auto path2_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(path2_datagram.empty());
+    ASSERT_EQ(connection.last_drained_path_id(), std::optional<coquic::quic::QuicPathId>{2});
+
+    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+    const auto largest_sent_packet =
+        std::prev(connection.application_space_.sent_packets.end())->first;
+
+    const auto local_connection_id = connection.config_.source_connection_id;
+    const auto initial_destination_connection_id =
+        connection.client_initial_destination_connection_id();
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = connection.application_read_key_phase_,
+                .destination_connection_id = local_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 77,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = largest_sent_packet,
+                            .first_ack_range = 0,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = initial_destination_connection_id,
+            .one_rtt_secret = connection.application_space_.read_secret,
+            .one_rtt_key_phase = connection.application_read_key_phase_,
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto original_peer = make_peer({193, 167, 0, 100}, 38910);
+    const auto first_rebind_peer = make_peer({193, 167, 0, 100}, 57607);
+    const auto second_rebind_peer = make_peer({193, 167, 0, 100}, 59022);
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6));
+    const std::array seeded_paths{
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 31,
+            .peer = original_peer,
+            .peer_len = peer_len,
+        },
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 77,
+            .peer = first_rebind_peer,
+            .peer_len = peer_len,
+        },
+    };
+    const auto route = coquic::quic::test::route_existing_server_session_datagram_for_tests(
+        server, seeded_paths, local_connection_id, initial_destination_connection_id,
+        /*inbound_socket_fd=*/77, second_rebind_peer, peer_len, encoded.value(),
+        coquic::quic::test::test_time(2));
+
+    ASSERT_TRUE(route.processed);
+    EXPECT_FALSE(route.erased);
+    EXPECT_GT(route.sendto_calls, 0);
+    EXPECT_EQ(route.sendto_socket_fd, 77);
+    EXPECT_EQ(route.sendto_peer_port, 59022);
+    ASSERT_EQ(route.sendto_socket_fds.size(), route.sendto_peer_ports.size());
+    for (const auto socket_fd : route.sendto_socket_fds) {
+        EXPECT_EQ(socket_fd, 77);
+    }
+    for (const auto peer_port : route.sendto_peer_ports) {
+        EXPECT_EQ(peer_port, 59022);
+    }
+
+    ASSERT_TRUE(server.connection_->paths_.contains(3));
+    ASSERT_TRUE(server.connection_->paths_.at(3).outstanding_challenge.has_value());
+    const auto second_rebind_challenge =
+        optional_ref_or_terminate(server.connection_->paths_.at(3).outstanding_challenge);
+    const auto largest_sent_after_second_rebind =
+        std::prev(server.connection_->application_space_.sent_packets.end())->first;
+
+    const auto path_response_encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = server.connection_->application_read_key_phase_,
+                .destination_connection_id = local_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 78,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = largest_sent_after_second_rebind,
+                            .first_ack_range = 0,
+                        },
+                        coquic::quic::PathResponseFrame{
+                            .data = second_rebind_challenge,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = initial_destination_connection_id,
+            .one_rtt_secret = server.connection_->application_space_.read_secret,
+            .one_rtt_key_phase = server.connection_->application_read_key_phase_,
+        });
+    ASSERT_TRUE(path_response_encoded.has_value());
+
+    const std::array seeded_paths_after_second_rebind{
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 31,
+            .peer = original_peer,
+            .peer_len = peer_len,
+        },
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 77,
+            .peer = first_rebind_peer,
+            .peer_len = peer_len,
+        },
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 77,
+            .peer = second_rebind_peer,
+            .peer_len = peer_len,
+        },
+    };
+    const auto path_response_route =
+        coquic::quic::test::route_existing_server_session_datagram_for_tests(
+            server, seeded_paths_after_second_rebind, local_connection_id,
+            initial_destination_connection_id, /*inbound_socket_fd=*/77, second_rebind_peer,
+            peer_len, path_response_encoded.value(), coquic::quic::test::test_time(3));
+
+    ASSERT_TRUE(path_response_route.processed);
+    EXPECT_FALSE(path_response_route.erased);
+    EXPECT_GT(path_response_route.sendto_calls, 0);
+    EXPECT_EQ(path_response_route.sendto_socket_fd, 77);
+    EXPECT_EQ(path_response_route.sendto_peer_port, 59022);
+    ASSERT_EQ(path_response_route.sendto_socket_fds.size(),
+              path_response_route.sendto_peer_ports.size());
+    for (const auto socket_fd : path_response_route.sendto_socket_fds) {
+        EXPECT_EQ(socket_fd, 77);
+    }
+    for (const auto peer_port : path_response_route.sendto_peer_ports) {
+        EXPECT_EQ(peer_port, 59022);
+    }
+    ASSERT_TRUE(server.connection_->paths_.contains(3));
+    EXPECT_TRUE(server.connection_->paths_.at(3).validated);
+    EXPECT_EQ(server.connection_->current_send_path_id_,
+              std::optional<coquic::quic::QuicPathId>{3});
+    EXPECT_EQ(server.connection_->last_validated_path_id_,
+              std::optional<coquic::quic::QuicPathId>{3});
+}
+
+TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindAddrToLatestV4MappedPeer) {
+    const auto make_peer = [](std::array<std::uint8_t, 4> ipv4_octets, std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&peer);
+        ipv6.sin6_family = AF_INET6;
+        ipv6.sin6_port = htons(port);
+        ipv6.sin6_addr = IN6ADDR_ANY_INIT;
+        ipv6.sin6_addr.s6_addr[10] = 0xff;
+        ipv6.sin6_addr.s6_addr[11] = 0xff;
+        ipv6.sin6_addr.s6_addr[12] = ipv4_octets[0];
+        ipv6.sin6_addr.s6_addr[13] = ipv4_octets[1];
+        ipv6.sin6_addr.s6_addr[14] = ipv4_octets[2];
+        ipv6.sin6_addr.s6_addr[15] = ipv4_octets[3];
+        return peer;
+    };
+    const auto make_secret = [](std::byte fill) {
+        return coquic::quic::TrafficSecret{
+            .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+            .secret = std::vector<std::byte>(32, fill),
+        };
+    };
+    const auto make_connected_runtime_server_connection =
+        [&](const coquic::quic::QuicCoreConfig &config) {
+            coquic::quic::QuicConnection connection(config);
+            connection.started_ = true;
+            connection.status_ = coquic::quic::HandshakeStatus::connected;
+            connection.handshake_confirmed_ = true;
+            connection.peer_address_validated_ = true;
+            connection.peer_source_connection_id_ = make_runtime_connection_id(std::byte{0xc1}, 3);
+            connection.client_initial_destination_connection_id_ =
+                make_runtime_connection_id(std::byte{0x83}, 2);
+            connection.local_transport_parameters_ = coquic::quic::TransportParameters{
+                .original_destination_connection_id =
+                    connection.client_initial_destination_connection_id_,
+                .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+                .max_ack_delay = connection.config_.transport.max_ack_delay,
+                .initial_max_data = connection.config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    connection.config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    connection.config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    connection.config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = connection.config_.source_connection_id,
+            };
+            connection.initialize_local_flow_control();
+            connection.application_space_.read_secret = make_secret(std::byte{0x21});
+            connection.application_space_.write_secret = make_secret(std::byte{0x31});
+            connection.peer_transport_parameters_ = coquic::quic::TransportParameters{
+                .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+                .max_ack_delay = connection.config_.transport.max_ack_delay,
+                .initial_max_data = connection.config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    connection.config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    connection.config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    connection.config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = connection.peer_source_connection_id_,
+            };
+            connection.peer_transport_parameters_validated_ = true;
+            connection.initialize_peer_flow_control_from_transport_parameters();
+            return connection;
+        };
+
+    auto core_config =
+        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
+            .mode = coquic::quic::Http09RuntimeMode::server,
+            .host = "::",
+            .port = 443,
+            .testcase = coquic::quic::QuicHttp09Testcase::rebind_addr,
+        });
+    core_config.source_connection_id = make_runtime_connection_id(std::byte{0x53}, 1);
+
+    coquic::quic::QuicCore server(core_config);
+    server.connection_ = std::make_unique<coquic::quic::QuicConnection>(
+        make_connected_runtime_server_connection(core_config));
+    auto &connection = *server.connection_;
+    connection.application_space_.next_send_packet_number = 900;
+    connection.last_validated_path_id_ = 2;
+    connection.current_send_path_id_ = 2;
+    connection.previous_path_id_ = 1;
+    connection.ensure_path_state(1).validated = true;
+    connection.ensure_path_state(2).validated = true;
+    connection.ensure_path_state(2).is_current_send_path = true;
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+
+    ASSERT_TRUE(connection
+                    .queue_stream_send(
+                        0, coquic::quic::test::bytes_from_string(std::string(4096, 'r')), false)
+                    .has_value());
+    connection.ensure_path_state(2).anti_amplification_received_bytes = 4000;
+
+    const auto path2_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(path2_datagram.empty());
+    ASSERT_EQ(connection.last_drained_path_id(), std::optional<coquic::quic::QuicPathId>{2});
+
+    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+    const auto largest_sent_packet =
+        std::prev(connection.application_space_.sent_packets.end())->first;
+
+    const auto local_connection_id = connection.config_.source_connection_id;
+    const auto initial_destination_connection_id =
+        connection.client_initial_destination_connection_id();
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = connection.application_read_key_phase_,
+                .destination_connection_id = local_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 77,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = largest_sent_packet,
+                            .first_ack_range = 0,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = initial_destination_connection_id,
+            .one_rtt_secret = connection.application_space_.read_secret,
+            .one_rtt_key_phase = connection.application_read_key_phase_,
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto original_peer = make_peer({193, 167, 0, 100}, 38910);
+    const auto first_rebind_peer = make_peer({193, 167, 0, 71}, 39968);
+    const auto second_rebind_peer = make_peer({193, 167, 0, 3}, 38910);
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6));
+    const std::array seeded_paths{
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 31,
+            .peer = original_peer,
+            .peer_len = peer_len,
+        },
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 77,
+            .peer = first_rebind_peer,
+            .peer_len = peer_len,
+        },
+    };
+    const auto route = coquic::quic::test::route_existing_server_session_datagram_for_tests(
+        server, seeded_paths, local_connection_id, initial_destination_connection_id,
+        /*inbound_socket_fd=*/77, second_rebind_peer, peer_len, encoded.value(),
+        coquic::quic::test::test_time(2));
+
+    ASSERT_TRUE(route.processed);
+    EXPECT_FALSE(route.erased);
+    EXPECT_GT(route.sendto_calls, 0);
+    EXPECT_EQ(route.sendto_socket_fd, 77);
+    EXPECT_EQ(route.sendto_peer_port, 38910);
+    ASSERT_EQ(route.sendto_socket_fds.size(), route.sendto_peer_ports.size());
+    for (const auto socket_fd : route.sendto_socket_fds) {
+        EXPECT_EQ(socket_fd, 77);
+    }
+    for (const auto peer_port : route.sendto_peer_ports) {
+        EXPECT_EQ(peer_port, 38910);
+    }
+
+    ASSERT_TRUE(server.connection_->paths_.contains(3));
+    ASSERT_TRUE(server.connection_->paths_.at(3).outstanding_challenge.has_value());
+    const auto second_rebind_challenge =
+        optional_ref_or_terminate(server.connection_->paths_.at(3).outstanding_challenge);
+    const auto largest_sent_after_second_rebind =
+        std::prev(server.connection_->application_space_.sent_packets.end())->first;
+
+    const auto path_response_encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = server.connection_->application_read_key_phase_,
+                .destination_connection_id = local_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 78,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = largest_sent_after_second_rebind,
+                            .first_ack_range = 0,
+                        },
+                        coquic::quic::PathResponseFrame{
+                            .data = second_rebind_challenge,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = initial_destination_connection_id,
+            .one_rtt_secret = server.connection_->application_space_.read_secret,
+            .one_rtt_key_phase = server.connection_->application_read_key_phase_,
+        });
+    ASSERT_TRUE(path_response_encoded.has_value());
+
+    const std::array seeded_paths_after_second_rebind{
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 31,
+            .peer = original_peer,
+            .peer_len = peer_len,
+        },
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 77,
+            .peer = first_rebind_peer,
+            .peer_len = peer_len,
+        },
+        coquic::quic::test::RuntimePathSeedForTests{
+            .socket_fd = 77,
+            .peer = second_rebind_peer,
+            .peer_len = peer_len,
+        },
+    };
+    const auto path_response_route =
+        coquic::quic::test::route_existing_server_session_datagram_for_tests(
+            server, seeded_paths_after_second_rebind, local_connection_id,
+            initial_destination_connection_id, /*inbound_socket_fd=*/77, second_rebind_peer,
+            peer_len, path_response_encoded.value(), coquic::quic::test::test_time(3));
+
+    ASSERT_TRUE(path_response_route.processed);
+    EXPECT_FALSE(path_response_route.erased);
+    EXPECT_GT(path_response_route.sendto_calls, 0);
+    EXPECT_EQ(path_response_route.sendto_socket_fd, 77);
+    EXPECT_EQ(path_response_route.sendto_peer_port, 38910);
+    ASSERT_EQ(path_response_route.sendto_socket_fds.size(),
+              path_response_route.sendto_peer_ports.size());
+    for (const auto socket_fd : path_response_route.sendto_socket_fds) {
+        EXPECT_EQ(socket_fd, 77);
+    }
+    for (const auto peer_port : path_response_route.sendto_peer_ports) {
+        EXPECT_EQ(peer_port, 38910);
+    }
+    ASSERT_TRUE(server.connection_->paths_.contains(3));
+    EXPECT_TRUE(server.connection_->paths_.at(3).validated);
+    EXPECT_EQ(server.connection_->current_send_path_id_,
+              std::optional<coquic::quic::QuicPathId>{3});
+    EXPECT_EQ(server.connection_->last_validated_path_id_,
+              std::optional<coquic::quic::QuicPathId>{3});
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeTraceHooksCoverIdleTimeoutAndServerFailureBranches) {

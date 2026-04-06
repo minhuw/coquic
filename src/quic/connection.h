@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -122,6 +123,34 @@ inline bool operator==(const std::vector<std::byte> &lhs, const DeferredProtecte
     return lhs == rhs.bytes;
 }
 
+struct PeerConnectionIdRecord {
+    std::uint64_t sequence_number = 0;
+    ConnectionId connection_id;
+    std::array<std::byte, 16> stateless_reset_token{};
+};
+
+struct LocalConnectionIdRecord {
+    std::uint64_t sequence_number = 0;
+    ConnectionId connection_id;
+    std::array<std::byte, 16> stateless_reset_token{};
+    bool retired = false;
+};
+
+struct PathState {
+    QuicPathId id = 0;
+    bool validated = false;
+    bool is_current_send_path = false;
+    bool challenge_pending = false;
+    bool validation_initiated_locally = false;
+    std::uint64_t anti_amplification_received_bytes = 0;
+    std::uint64_t anti_amplification_sent_bytes = 0;
+    std::optional<std::array<std::byte, 8>> outstanding_challenge;
+    std::optional<std::array<std::byte, 8>> pending_response;
+    std::optional<QuicCoreTimePoint> validation_deadline;
+    std::uint64_t peer_connection_id_sequence = 0;
+    std::optional<ConnectionId> destination_connection_id_override;
+};
+
 class QuicConnection {
   public:
     explicit QuicConnection(QuicCoreConfig config);
@@ -133,6 +162,8 @@ class QuicConnection {
                                               std::span<const std::byte> bytes, bool fin);
     StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
     StreamStateResult<bool> queue_stop_sending(LocalStopSendingCommand command);
+    CodecResult<bool> request_connection_migration(QuicPathId path_id,
+                                                   QuicMigrationRequestReason reason);
     void request_key_update();
     std::vector<std::byte> drain_outbound_datagram(QuicCoreTimePoint now);
     void on_timeout(QuicCoreTimePoint now);
@@ -140,10 +171,12 @@ class QuicConnection {
     std::optional<QuicCorePeerResetStream> take_peer_reset_stream();
     std::optional<QuicCorePeerStopSending> take_peer_stop_sending();
     std::optional<QuicCoreStateChange> take_state_change();
+    std::optional<QuicCorePeerPreferredAddressAvailable> take_peer_preferred_address_available();
     std::optional<QuicCoreResumptionStateAvailable> take_resumption_state_available();
     std::optional<QuicCoreZeroRttStatusEvent> take_zero_rtt_status_event();
     std::optional<QuicPathId> last_drained_path_id() const;
     std::optional<QuicCoreTimePoint> next_wakeup() const;
+    std::vector<ConnectionId> active_local_connection_ids() const;
     bool is_handshake_complete() const;
     bool has_processed_peer_packet() const;
     bool has_failed() const;
@@ -162,7 +195,8 @@ class QuicConnection {
                                              QuicCoreTimePoint now);
     CodecResult<bool> process_inbound_application(std::span<const Frame> frames,
                                                   QuicCoreTimePoint now,
-                                                  bool allow_preconnected_frames = false);
+                                                  bool allow_preconnected_frames = false,
+                                                  QuicPathId path_id = 0);
     CodecResult<bool> process_inbound_ack(PacketSpaceState &packet_space, const AckFrame &ack,
                                           QuicCoreTimePoint now, std::uint64_t ack_delay_exponent,
                                           std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);
@@ -190,6 +224,17 @@ class QuicConnection {
     CodecResult<bool> validate_peer_transport_parameters_if_ready();
     void update_handshake_status();
     void confirm_handshake();
+    PathState &ensure_path_state(QuicPathId path_id);
+    void start_path_validation(QuicPathId path_id, bool initiated_locally);
+    void queue_path_response(QuicPathId path_id, const std::array<std::byte, 8> &data);
+    bool path_validation_timed_out(QuicPathId path_id, QuicCoreTimePoint now) const;
+    CodecResult<bool> process_new_connection_id_frame(const NewConnectionIdFrame &frame);
+    CodecResult<bool> process_retire_connection_id_frame(const RetireConnectionIdFrame &frame);
+    void issue_spare_connection_ids();
+    std::array<std::byte, 8> next_path_challenge_data(QuicPathId path_id);
+    std::uint64_t select_peer_connection_id_sequence_for_path(QuicPathId path_id) const;
+    ConnectionId active_peer_destination_connection_id() const;
+    std::optional<NewConnectionIdFrame> take_pending_new_connection_id_frame();
     bool should_reset_client_handshake_peer_state(const ConnectionId &source_connection_id) const;
     void reset_client_handshake_peer_state_for_new_source_connection_id();
     bool packet_targets_discarded_long_header_space(std::span<const std::byte> packet_bytes) const;
@@ -216,13 +261,19 @@ class QuicConnection {
     void maybe_refresh_connection_receive_credit(bool force);
     void maybe_refresh_stream_receive_credit(StreamState &stream, bool force);
     void maybe_refresh_peer_stream_limit(StreamState &stream);
+    bool is_probing_only(std::span<const Frame> frames) const;
+    void maybe_switch_to_path(QuicPathId path_id, bool initiated_locally);
     bool anti_amplification_applies() const;
+    bool anti_amplification_applies(QuicPathId path_id) const;
     std::uint64_t anti_amplification_send_budget() const;
+    std::uint64_t anti_amplification_send_budget(QuicPathId path_id) const;
     std::size_t outbound_datagram_size_limit() const;
     void note_inbound_datagram_bytes(std::size_t bytes);
-    void note_outbound_datagram_bytes(std::size_t bytes);
+    void note_outbound_datagram_bytes(std::size_t bytes,
+                                      std::optional<QuicPathId> path_id = std::nullopt);
     void mark_peer_address_validated();
-    ConnectionId outbound_destination_connection_id() const;
+    ConnectionId
+    outbound_destination_connection_id(std::optional<QuicPathId> path_id = std::nullopt) const;
     ConnectionId client_initial_destination_connection_id() const;
     std::vector<std::byte> flush_outbound_datagram(QuicCoreTimePoint now);
     void mark_failed();
@@ -242,6 +293,13 @@ class QuicConnection {
     std::optional<ConnectionId> peer_source_connection_id_;
     std::optional<ConnectionId> client_initial_destination_connection_id_;
     std::optional<TransportParameters> peer_transport_parameters_;
+    std::map<std::uint64_t, PeerConnectionIdRecord> peer_connection_ids_;
+    std::map<std::uint64_t, LocalConnectionIdRecord> local_connection_ids_;
+    std::map<QuicPathId, PathState> paths_;
+    std::uint64_t active_peer_connection_id_sequence_ = 0;
+    std::uint64_t active_local_connection_id_sequence_ = 0;
+    std::uint64_t next_local_connection_id_sequence_ = 1;
+    std::uint64_t next_path_challenge_sequence_ = 1;
     bool peer_transport_parameters_validated_ = false;
     bool peer_address_validated_ = false;
     std::uint64_t anti_amplification_received_bytes_ = 0;
@@ -254,8 +312,11 @@ class QuicConnection {
     std::vector<QuicCorePeerResetStream> pending_peer_reset_effects_;
     std::vector<QuicCorePeerStopSending> pending_peer_stop_effects_;
     std::vector<QuicCoreStateChange> pending_state_changes_;
+    std::optional<QuicCorePeerPreferredAddressAvailable> pending_preferred_address_effect_;
     std::optional<QuicCoreResumptionStateAvailable> pending_resumption_state_effect_;
     std::optional<QuicCoreZeroRttStatusEvent> pending_zero_rtt_status_event_;
+    std::vector<NewConnectionIdFrame> pending_new_connection_id_frames_;
+    std::vector<RetireConnectionIdFrame> pending_retire_connection_id_frames_;
     std::optional<StoredClientResumptionState> decoded_resumption_state_;
     std::optional<std::uint64_t> last_application_send_stream_id_;
     NewRenoCongestionController congestion_controller_;
@@ -274,7 +335,9 @@ class QuicConnection {
     bool handshake_confirmed_ = false;
     StreamControlFrameState handshake_done_state_ = StreamControlFrameState::none;
     bool handshake_ready_emitted_ = false;
+    bool handshake_confirmed_emitted_ = false;
     bool failed_emitted_ = false;
+    bool peer_preferred_address_emitted_ = false;
     bool resumption_state_emitted_ = false;
     bool zero_rtt_attempted_event_emitted_ = false;
     bool processed_peer_packet_ = false;
@@ -282,6 +345,8 @@ class QuicConnection {
     std::optional<QuicCoreTimePoint> last_peer_activity_time_;
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
     std::optional<QuicCoreTimePoint> server_zero_rtt_discard_deadline_;
+    std::optional<QuicPathId> last_validated_path_id_;
+    std::optional<QuicPathId> previous_path_id_;
     std::optional<QuicPathId> current_send_path_id_;
     std::optional<QuicPathId> last_drained_path_id_;
     QuicPathId last_inbound_path_id_ = 0;

@@ -155,7 +155,7 @@ Run:
 ```bash
 INTEROP_TESTCASES=amplificationlimit \
 INTEROP_PEER_IMPL=picoquic \
-INTEROP_PEER_IMAGE=privateoctopus/picoquic@sha256:065707ed509ce25b3bb3be4816c924ac4fd6f603297e14a3ee34cb035c73f700 \
+INTEROP_PEER_IMAGE=privateoctopus/picoquic@sha256:7e4110e3260cd9d4f815ad63ca1d93e020e94d3a8d3cb6cb9cc5c59d97999b05 \
 nix develop -c bash interop/run-official.sh
 ```
 

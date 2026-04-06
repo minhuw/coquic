@@ -60,6 +60,7 @@ using QuicPathId = std::uint64_t;
 
 enum class QuicCoreStateChange : std::uint8_t {
     handshake_ready,
+    handshake_confirmed,
     failed,
 };
 
@@ -70,6 +71,11 @@ enum class QuicCoreLocalErrorCode : std::uint8_t {
     send_side_closed,
     receive_side_closed,
     final_size_conflict,
+};
+
+enum class QuicMigrationRequestReason : std::uint8_t {
+    active,
+    preferred_address,
 };
 
 struct QuicCoreLocalError {
@@ -102,10 +108,15 @@ struct QuicCoreStopSending {
 
 struct QuicCoreTimerExpired {};
 struct QuicCoreRequestKeyUpdate {};
+struct QuicCoreRequestConnectionMigration {
+    QuicPathId path_id = 0;
+    QuicMigrationRequestReason reason = QuicMigrationRequestReason::active;
+};
 
-using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
-                                   QuicCoreResetStream, QuicCoreStopSending,
-                                   QuicCoreRequestKeyUpdate, QuicCoreTimerExpired>;
+using QuicCoreInput =
+    std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
+                 QuicCoreResetStream, QuicCoreStopSending, QuicCoreRequestKeyUpdate,
+                 QuicCoreRequestConnectionMigration, QuicCoreTimerExpired>;
 
 struct QuicCoreSendDatagram {
     std::optional<QuicPathId> path_id;
@@ -133,10 +144,14 @@ struct QuicCoreStateEvent {
     QuicCoreStateChange change;
 };
 
+struct QuicCorePeerPreferredAddressAvailable {
+    PreferredAddress preferred_address;
+};
+
 using QuicCoreEffect =
     std::variant<QuicCoreSendDatagram, QuicCoreReceiveStreamData, QuicCorePeerResetStream,
-                 QuicCorePeerStopSending, QuicCoreStateEvent, QuicCoreResumptionStateAvailable,
-                 QuicCoreZeroRttStatusEvent>;
+                 QuicCorePeerStopSending, QuicCoreStateEvent, QuicCorePeerPreferredAddressAvailable,
+                 QuicCoreResumptionStateAvailable, QuicCoreZeroRttStatusEvent>;
 
 struct QuicCoreResult {
     std::vector<QuicCoreEffect> effects;
@@ -157,6 +172,7 @@ class QuicCore {
     QuicCore &operator=(QuicCore &&) noexcept;
 
     QuicCoreResult advance(QuicCoreInput input, QuicCoreTimePoint now);
+    std::vector<ConnectionId> active_local_connection_ids() const;
     bool is_handshake_complete() const;
     bool has_failed() const;
 

@@ -46,6 +46,66 @@ std::string format_connection_id_hex(std::span<const std::byte> connection_id) {
     return hex.str();
 }
 
+ConnectionId make_issued_connection_id(std::span<const std::byte> base_connection_id,
+                                       std::uint64_t sequence_number) {
+    ConnectionId connection_id(base_connection_id.begin(), base_connection_id.end());
+    if (connection_id.empty()) {
+        return connection_id;
+    }
+
+    for (std::size_t i = 0; i < connection_id.size(); ++i) {
+        const auto sequence_shift = static_cast<unsigned>((i % sizeof(sequence_number)) * 8u);
+        auto mixed = static_cast<std::uint8_t>((sequence_number >> sequence_shift) & 0xffu);
+        mixed ^= static_cast<std::uint8_t>(0x5au + static_cast<unsigned>(i * 17u));
+        connection_id[connection_id.size() - 1u - i] ^= std::byte{mixed};
+    }
+
+    return connection_id;
+}
+
+std::array<std::byte, 16> make_stateless_reset_token(std::span<const std::byte> connection_id,
+                                                     std::uint64_t sequence_number) {
+    std::array<std::byte, 16> token{};
+    for (std::size_t i = 0; i < token.size(); ++i) {
+        const auto sequence_shift = static_cast<unsigned>((i % sizeof(sequence_number)) * 8u);
+        auto mixed = static_cast<std::uint8_t>((sequence_number >> sequence_shift) & 0xffu);
+        mixed ^= static_cast<std::uint8_t>(0xa5u + static_cast<unsigned>(i * 13u));
+        if (!connection_id.empty()) {
+            mixed ^= std::to_integer<std::uint8_t>(connection_id[i % connection_id.size()]);
+        }
+        token[i] = std::byte{mixed};
+    }
+
+    return token;
+}
+
+std::array<std::byte, 8> make_path_challenge_data(std::span<const std::byte> local_connection_id,
+                                                  QuicPathId path_id,
+                                                  std::uint64_t sequence_number) {
+    std::array<std::byte, 8> challenge{};
+    for (std::size_t index = 0; index < challenge.size(); ++index) {
+        const auto path_shift = static_cast<unsigned>((index % sizeof(path_id)) * 8u);
+        const auto sequence_shift = static_cast<unsigned>(index * 8u);
+        auto mixed = static_cast<std::uint8_t>(((path_id >> path_shift) & 0xffu) ^
+                                               ((sequence_number >> sequence_shift) & 0xffu) ^
+                                               static_cast<std::uint64_t>(0x31u + index));
+        if (!local_connection_id.empty()) {
+            mixed ^= std::to_integer<std::uint8_t>(
+                local_connection_id[(local_connection_id.size() - 1u - index) %
+                                    local_connection_id.size()]);
+        }
+        challenge[index] = std::byte{mixed};
+    }
+    return challenge;
+}
+
+std::size_t count_active_connection_ids(
+    const std::map<std::uint64_t, LocalConnectionIdRecord> &connection_ids) {
+    return static_cast<std::size_t>(
+        std::count_if(connection_ids.begin(), connection_ids.end(),
+                      [](const auto &entry) { return !entry.second.retired; }));
+}
+
 bool packet_trace_matches_connection(std::span<const std::byte> local_connection_id) {
     if (!packet_trace_enabled()) {
         return false;
@@ -57,6 +117,97 @@ bool packet_trace_matches_connection(std::span<const std::byte> local_connection
     }
 
     return std::string_view(filter) == format_connection_id_hex(local_connection_id);
+}
+
+std::string format_optional_path_id(std::optional<QuicPathId> path_id) {
+    if (!path_id.has_value()) {
+        return "-";
+    }
+    return std::to_string(*path_id);
+}
+
+const PathState *find_path_state(const std::map<QuicPathId, PathState> &paths,
+                                 std::optional<QuicPathId> path_id) {
+    if (!path_id.has_value()) {
+        return nullptr;
+    }
+    const auto it = paths.find(*path_id);
+    return it == paths.end() ? nullptr : &it->second;
+}
+
+std::string format_path_state_summary(const PathState *path) {
+    if (path == nullptr) {
+        return "-";
+    }
+
+    std::ostringstream summary;
+    summary << "id=" << path->id << " val=" << static_cast<int>(path->validated)
+            << " cur=" << static_cast<int>(path->is_current_send_path)
+            << " chal=" << static_cast<int>(path->challenge_pending)
+            << " out=" << static_cast<int>(path->outstanding_challenge.has_value())
+            << " resp=" << static_cast<int>(path->pending_response.has_value())
+            << " recv=" << path->anti_amplification_received_bytes
+            << " sent=" << path->anti_amplification_sent_bytes;
+    return summary.str();
+}
+
+std::string format_ack_ranges(const AckFrame &ack) {
+    std::ostringstream ranges;
+    ranges << '[';
+    if (ack.largest_acknowledged < ack.first_ack_range) {
+        ranges << "invalid";
+    } else {
+        auto range_smallest = ack.largest_acknowledged - ack.first_ack_range;
+        ranges << range_smallest << '-' << ack.largest_acknowledged;
+        auto previous_smallest = range_smallest;
+        for (const auto &range : ack.additional_ranges) {
+            if (previous_smallest < range.gap + 2) {
+                ranges << ",invalid";
+                break;
+            }
+
+            const auto range_largest = previous_smallest - range.gap - 2;
+            if (range_largest < range.range_length) {
+                ranges << ",invalid";
+                break;
+            }
+
+            range_smallest = range_largest - range.range_length;
+            ranges << ',' << range_smallest << '-' << range_largest;
+            previous_smallest = range_smallest;
+        }
+    }
+    ranges << ']';
+    return ranges.str();
+}
+
+std::string summarize_packets(std::span<const SentPacketRecord> packets) {
+    if (packets.empty()) {
+        return "count=0";
+    }
+
+    auto [first_packet, last_packet] =
+        std::minmax_element(packets.begin(), packets.end(),
+                            [](const SentPacketRecord &lhs, const SentPacketRecord &rhs) {
+                                return lhs.packet_number < rhs.packet_number;
+                            });
+
+    std::size_t stream_fragment_count = 0;
+    std::optional<std::uint64_t> first_stream_offset;
+    for (const auto &packet : packets) {
+        stream_fragment_count += packet.stream_fragments.size();
+        if (!first_stream_offset.has_value() && !packet.stream_fragments.empty()) {
+            first_stream_offset = packet.stream_fragments.front().offset;
+        }
+    }
+
+    std::ostringstream summary;
+    summary << "count=" << packets.size() << " pn=" << first_packet->packet_number << '-'
+            << last_packet->packet_number << " stream_fragments=" << stream_fragment_count;
+    if (first_stream_offset.has_value()) {
+        summary << " first_stream_offset=" << *first_stream_offset;
+    }
+    return summary.str();
 }
 
 bool supports_version(std::span<const std::uint32_t> supported_versions, std::uint32_t version) {
@@ -185,6 +336,11 @@ void log_codec_failure(std::string_view where, const CodecError &error) {
 std::size_t datagram_size_or_zero(const CodecResult<std::vector<std::byte>> &datagram) {
     const auto *value = std::get_if<std::vector<std::byte>>(&datagram.storage);
     return value == nullptr ? 0 : value->size();
+}
+
+bool is_empty_packet_payload_error(const CodecResult<std::vector<std::byte>> &datagram) {
+    const auto *error = std::get_if<CodecError>(&datagram.storage);
+    return error != nullptr && error->code == CodecErrorCode::empty_packet_payload;
 }
 
 std::uint32_t read_u32_be(std::span<const std::byte> bytes) {
@@ -804,6 +960,9 @@ bool stream_fragment_is_probe_worthy(const StreamState &stream,
 
 std::size_t application_ack_eliciting_frame_count(
     bool include_handshake_done, const std::optional<MaxDataFrame> &max_data_frame,
+    std::span<const NewConnectionIdFrame> new_connection_id_frames,
+    std::span<const RetireConnectionIdFrame> retire_connection_id_frames,
+    bool has_path_response_frame, bool has_path_challenge_frame,
     std::span<const MaxStreamDataFrame> max_stream_data_frames,
     std::span<const MaxStreamsFrame> max_streams_frames,
     std::span<const ResetStreamFrame> reset_stream_frames,
@@ -811,9 +970,12 @@ std::size_t application_ack_eliciting_frame_count(
     const std::optional<DataBlockedFrame> &data_blocked_frame,
     std::span<const StreamDataBlockedFrame> stream_data_blocked_frames,
     std::span<const StreamFrameSendFragment> stream_fragments) {
-    return max_stream_data_frames.size() + max_streams_frames.size() + reset_stream_frames.size() +
+    return new_connection_id_frames.size() + retire_connection_id_frames.size() +
+           max_stream_data_frames.size() + max_streams_frames.size() + reset_stream_frames.size() +
            stop_sending_frames.size() + stream_data_blocked_frames.size() +
            stream_fragments.size() + static_cast<std::size_t>(include_handshake_done) +
+           static_cast<std::size_t>(has_path_response_frame) +
+           static_cast<std::size_t>(has_path_challenge_frame) +
            static_cast<std::size_t>(max_data_frame.has_value()) +
            static_cast<std::size_t>(data_blocked_frame.has_value());
 }
@@ -1084,7 +1246,6 @@ QuicConnection::QuicConnection(QuicCoreConfig config)
         .max_udp_payload_size = config_.transport.max_udp_payload_size,
         .active_connection_id_limit = config_.transport.active_connection_id_limit,
         .disable_active_migration = config_.transport.disable_active_migration,
-        .preferred_address = config_.transport.preferred_address,
         .ack_delay_exponent = config_.transport.ack_delay_exponent,
         .max_ack_delay = config_.transport.max_ack_delay,
         .initial_max_data = config_.transport.initial_max_data,
@@ -1095,8 +1256,26 @@ QuicConnection::QuicConnection(QuicCoreConfig config)
         .initial_max_streams_bidi = config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
+        .preferred_address = config_.transport.preferred_address,
     };
     initialize_local_flow_control();
+    local_connection_ids_.emplace(0, LocalConnectionIdRecord{
+                                         .sequence_number = 0,
+                                         .connection_id = config_.source_connection_id,
+                                         .stateless_reset_token = make_stateless_reset_token(
+                                             config_.source_connection_id, /*sequence_number=*/0),
+                                     });
+    if (config_.transport.preferred_address.has_value()) {
+        // RFC 9000 reserves sequence number 1 for the preferred-address CID.
+        local_connection_ids_.emplace(
+            1,
+            LocalConnectionIdRecord{
+                .sequence_number = 1,
+                .connection_id = config_.transport.preferred_address->connection_id,
+                .stateless_reset_token = config_.transport.preferred_address->stateless_reset_token,
+            });
+        next_local_connection_id_sequence_ = 2;
+    }
     peer_address_validated_ = config_.role == EndpointRole::client;
 }
 
@@ -1116,6 +1295,7 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
     last_inbound_path_id_ = path_id;
     if (!current_send_path_id_.has_value()) {
         current_send_path_id_ = path_id;
+        ensure_path_state(path_id).is_current_send_path = true;
     }
 
     maybe_discard_server_zero_rtt_packet_space(now);
@@ -1156,7 +1336,10 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
     };
     const auto defer_packet = [&](std::span<const std::byte> packet_bytes,
                                   QuicPathId deferred_path_id) {
-        auto deferred = std::vector<std::byte>(packet_bytes.begin(), packet_bytes.end());
+        auto deferred = DeferredProtectedDatagram{
+            std::vector<std::byte>(packet_bytes.begin(), packet_bytes.end()),
+            deferred_path_id,
+        };
         if (std::find(deferred_protected_packets_.begin(), deferred_protected_packets_.end(),
                       deferred) != deferred_protected_packets_.end()) {
             return;
@@ -1164,7 +1347,7 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
         if (deferred_protected_packets_.size() >= kMaximumDeferredProtectedPackets) {
             deferred_protected_packets_.erase(deferred_protected_packets_.begin());
         }
-        deferred_protected_packets_.emplace_back(std::move(deferred), deferred_path_id);
+        deferred_protected_packets_.push_back(std::move(deferred));
     };
     std::size_t offset = 0;
     bool processed_any_packet = false;
@@ -1473,8 +1656,30 @@ StreamStateResult<bool> QuicConnection::queue_stop_sending(LocalStopSendingComma
     return StreamStateResult<bool>::success(true);
 }
 
+CodecResult<bool> QuicConnection::request_connection_migration(QuicPathId path_id,
+                                                               QuicMigrationRequestReason reason) {
+    const bool peer_disables_active_migration =
+        peer_transport_parameters_.has_value() &&
+        peer_transport_parameters_->disable_active_migration;
+    if (reason == QuicMigrationRequestReason::active && peer_disables_active_migration) {
+        return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
+    }
+
+    maybe_switch_to_path(path_id, /*initiated_locally=*/true);
+    if (reason == QuicMigrationRequestReason::preferred_address &&
+        peer_transport_parameters_.has_value() &&
+        peer_transport_parameters_->preferred_address.has_value()) {
+        ensure_path_state(path_id).destination_connection_id_override =
+            peer_transport_parameters_->preferred_address->connection_id;
+    }
+    return CodecResult<bool>::success(true);
+}
+
 void QuicConnection::request_key_update() {
     local_key_update_requested_ = true;
+    if (!local_key_update_initiated_) {
+        current_write_phase_first_packet_number_ = application_space_.next_send_packet_number;
+    }
 }
 
 std::vector<std::byte> QuicConnection::drain_outbound_datagram(QuicCoreTimePoint now) {
@@ -1507,6 +1712,20 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
 
     maybe_discard_server_zero_rtt_packet_space(now);
 
+    if (current_send_path_id_.has_value() &&
+        path_validation_timed_out(*current_send_path_id_, now) &&
+        last_validated_path_id_.has_value()) {
+        auto &current = paths_.at(*current_send_path_id_);
+        current.is_current_send_path = false;
+        current.challenge_pending = false;
+        current.validation_initiated_locally = false;
+        current.outstanding_challenge.reset();
+        current.validation_deadline.reset();
+        previous_path_id_ = current_send_path_id_;
+        current_send_path_id_ = last_validated_path_id_;
+        ensure_path_state(*last_validated_path_id_).is_current_send_path = true;
+    }
+
     if (const auto deadline = loss_deadline(); deadline.has_value() && now >= *deadline) {
         detect_lost_packets(now);
     }
@@ -1529,6 +1748,29 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
 
     if (const auto deadline = pto_deadline(); deadline.has_value() && now >= *deadline) {
         arm_pto_probe(now);
+        if (packet_trace_matches_connection(config_.source_connection_id)) {
+            const auto in_flight_ack_eliciting_count = [](const PacketSpaceState &packet_space) {
+                return std::count_if(packet_space.sent_packets.begin(),
+                                     packet_space.sent_packets.end(), [](const auto &entry) {
+                                         return entry.second.ack_eliciting & entry.second.in_flight;
+                                     });
+            };
+            std::cerr << "quic-packet-trace timeout scid="
+                      << format_connection_id_hex(config_.source_connection_id)
+                      << " status=" << static_cast<int>(status_)
+                      << " confirmed=" << static_cast<int>(handshake_confirmed_)
+                      << " initial_if=" << in_flight_ack_eliciting_count(initial_space_)
+                      << " handshake_if=" << in_flight_ack_eliciting_count(handshake_space_)
+                      << " application_if=" << in_flight_ack_eliciting_count(application_space_)
+                      << " initial_probe="
+                      << static_cast<int>(initial_space_.pending_probe_packet.has_value())
+                      << " handshake_probe="
+                      << static_cast<int>(handshake_space_.pending_probe_packet.has_value())
+                      << " application_probe="
+                      << static_cast<int>(application_space_.pending_probe_packet.has_value())
+                      << " rempto=" << static_cast<unsigned>(remaining_pto_probe_datagrams_)
+                      << " pto_count=" << pto_count_ << '\n';
+        }
     }
 }
 
@@ -1572,6 +1814,13 @@ std::optional<QuicCoreStateChange> QuicConnection::take_state_change() {
     return next;
 }
 
+std::optional<QuicCorePeerPreferredAddressAvailable>
+QuicConnection::take_peer_preferred_address_available() {
+    auto next = pending_preferred_address_effect_;
+    pending_preferred_address_effect_.reset();
+    return next;
+}
+
 std::optional<QuicCoreResumptionStateAvailable> QuicConnection::take_resumption_state_available() {
     auto next = std::move(pending_resumption_state_effect_);
     pending_resumption_state_effect_.reset();
@@ -1595,6 +1844,19 @@ std::optional<QuicCoreTimePoint> QuicConnection::next_wakeup() const {
 
     return earliest_of(
         {loss_deadline(), pto_deadline(), ack_deadline(), zero_rtt_discard_deadline()});
+}
+
+std::vector<ConnectionId> QuicConnection::active_local_connection_ids() const {
+    std::vector<ConnectionId> connection_ids;
+    connection_ids.reserve(local_connection_ids_.size());
+    for (const auto &[sequence_number, record] : local_connection_ids_) {
+        static_cast<void>(sequence_number);
+        if (record.retired) {
+            continue;
+        }
+        connection_ids.push_back(record.connection_id);
+    }
+    return connection_ids;
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::loss_deadline() const {
@@ -1690,7 +1952,27 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
         return reference_time;
     }();
     if (!client_handshake_keepalive_reference_time.has_value() || initial_packet_space_discarded_) {
-        return std::nullopt;
+        const auto client_receive_keepalive_reference_time =
+            [this]() -> std::optional<QuicCoreTimePoint> {
+            const bool has_receive_interest = std::ranges::any_of(
+                streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
+            const bool eligible = (config_.role == EndpointRole::client) & handshake_confirmed_ &
+                                  last_peer_activity_time_.has_value() & has_receive_interest &
+                                  !has_in_flight_ack_eliciting_packet(initial_space_) &
+                                  !has_in_flight_ack_eliciting_packet(handshake_space_) &
+                                  !has_in_flight_ack_eliciting_packet(application_space_);
+            if (!eligible) {
+                return std::nullopt;
+            }
+
+            return last_peer_activity_time_;
+        }();
+        if (!client_receive_keepalive_reference_time.has_value()) {
+            return std::nullopt;
+        }
+
+        return compute_pto_deadline(shared_rtt_state, application_max_ack_delay,
+                                    *client_receive_keepalive_reference_time, pto_count_);
     }
 
     return compute_pto_deadline(shared_rtt_state, std::chrono::milliseconds(0),
@@ -1743,7 +2025,9 @@ void QuicConnection::detect_lost_packets(PacketSpaceState &packet_space, QuicCor
         const auto application_max_ack_delay = std::chrono::milliseconds(
             peer_transport_parameters_.has_value() ? peer_transport_parameters_->max_ack_delay
                                                    : TransportParameters{}.max_ack_delay);
-        congestion_controller_.on_loss_event(now);
+        const auto latest_lost_packet =
+            std::ranges::max_element(ack_eliciting_lost_packets, {}, &SentPacketRecord::sent_time);
+        congestion_controller_.on_loss_event(latest_lost_packet->sent_time);
         if (establishes_persistent_congestion(ack_eliciting_lost_packets, shared_rtt_state,
                                               application_max_ack_delay)) {
             congestion_controller_.on_persistent_congestion();
@@ -1799,6 +2083,33 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     }
     const bool client_handshake_keepalive_due = client_handshake_keepalive_deadline.has_value() &&
                                                 now >= *client_handshake_keepalive_deadline;
+    const auto client_receive_keepalive_reference_time =
+        [this]() -> std::optional<QuicCoreTimePoint> {
+        const bool has_receive_interest = std::ranges::any_of(
+            streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
+        const bool eligible = (config_.role == EndpointRole::client) & handshake_confirmed_ &
+                              last_peer_activity_time_.has_value() & has_receive_interest &
+                              !has_in_flight_ack_eliciting_packet(initial_space_) &
+                              !has_in_flight_ack_eliciting_packet(handshake_space_) &
+                              !has_in_flight_ack_eliciting_packet(application_space_);
+        if (!eligible) {
+            return std::nullopt;
+        }
+
+        return last_peer_activity_time_;
+    }();
+    const bool client_receive_keepalive_eligible =
+        client_receive_keepalive_reference_time.has_value();
+    PacketSpaceState *client_receive_keepalive_space =
+        client_receive_keepalive_eligible ? &application_space_ : nullptr;
+    auto client_receive_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
+    if (client_receive_keepalive_reference_time.has_value()) {
+        client_receive_keepalive_deadline =
+            compute_pto_deadline(shared_rtt_state, application_max_ack_delay,
+                                 *client_receive_keepalive_reference_time, pto_count_);
+    }
+    const bool client_receive_keepalive_due =
+        client_receive_keepalive_deadline.has_value() && now >= *client_receive_keepalive_deadline;
     const auto consider_packet_space = [&](PacketSpaceState &packet_space,
                                            std::chrono::milliseconds max_ack_delay) {
         std::optional<QuicCoreTimePoint> packet_space_deadline;
@@ -1838,20 +2149,33 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     }
 
     if (selected_packet_space == nullptr) {
-        if (!client_handshake_keepalive_due) {
+        if (!client_handshake_keepalive_due && !client_receive_keepalive_due) {
             return;
         }
-        selected_packet_space = client_handshake_keepalive_space;
-        selected_deadline = client_handshake_keepalive_deadline;
+        if (client_handshake_keepalive_due) {
+            selected_packet_space = client_handshake_keepalive_space;
+            selected_deadline = client_handshake_keepalive_deadline;
+        } else {
+            selected_packet_space = client_receive_keepalive_space;
+            selected_deadline = client_receive_keepalive_deadline;
+        }
     }
 
     ++pto_count_;
     remaining_pto_probe_datagrams_ = 0;
     bool armed_pto_probe = false;
+    if (current_send_path_id_.has_value()) {
+        auto &path = ensure_path_state(*current_send_path_id_);
+        if (!path.validated && path.outstanding_challenge.has_value()) {
+            path.challenge_pending = true;
+        }
+    }
     const auto arm_packet_space_probe = [&](PacketSpaceState &packet_space) {
         const bool allow_client_handshake_keepalive_probe =
             client_handshake_keepalive_due && &packet_space == client_handshake_keepalive_space;
-        if (!allow_client_handshake_keepalive_probe &&
+        const bool allow_client_receive_keepalive_probe =
+            client_receive_keepalive_due && &packet_space == client_receive_keepalive_space;
+        if (!allow_client_handshake_keepalive_probe && !allow_client_receive_keepalive_probe &&
             !has_in_flight_ack_eliciting_packet(packet_space)) {
             return;
         }
@@ -1861,6 +2185,19 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         }
 
         packet_space.pending_probe_packet = select_pto_probe(packet_space);
+        if (allow_client_receive_keepalive_probe & packet_space.pending_probe_packet.has_value()) {
+            packet_space.pending_probe_packet->force_ack = true;
+            if ((&packet_space == &application_space_) & current_send_path_id_.has_value()) {
+                auto &path = ensure_path_state(*current_send_path_id_);
+                if (path.validated) {
+                    if (!path.outstanding_challenge.has_value()) {
+                        path.outstanding_challenge =
+                            next_path_challenge_data(*current_send_path_id_);
+                    }
+                    path.challenge_pending = true;
+                }
+            }
+        }
         armed_pto_probe |= packet_space.pending_probe_packet.has_value();
     };
 
@@ -1882,6 +2219,34 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
 
     if (armed_pto_probe) {
         remaining_pto_probe_datagrams_ = 2;
+    }
+
+    if (packet_trace_matches_connection(config_.source_connection_id)) {
+        constexpr std::array<const char *, 4> kPacketSpaceNames = {
+            "none",
+            "initial",
+            "handshake",
+            "application",
+        };
+        const auto selected_packet_space_index =
+            static_cast<std::size_t>(selected_packet_space == &initial_space_) +
+            static_cast<std::size_t>(selected_packet_space == &handshake_space_) * 2u +
+            static_cast<std::size_t>(selected_packet_space == &application_space_) * 3u;
+        const char *selected_packet_space_name = kPacketSpaceNames[selected_packet_space_index];
+
+        std::cerr << "quic-packet-trace arm-pto scid="
+                  << format_connection_id_hex(config_.source_connection_id)
+                  << " selected=" << selected_packet_space_name
+                  << " client_hs_due=" << static_cast<int>(client_handshake_keepalive_due)
+                  << " client_recv_due=" << static_cast<int>(client_receive_keepalive_due)
+                  << " armed=" << static_cast<int>(armed_pto_probe) << " initial_probe="
+                  << static_cast<int>(initial_space_.pending_probe_packet.has_value())
+                  << " handshake_probe="
+                  << static_cast<int>(handshake_space_.pending_probe_packet.has_value())
+                  << " application_probe="
+                  << static_cast<int>(application_space_.pending_probe_packet.has_value())
+                  << " rempto=" << static_cast<unsigned>(remaining_pto_probe_datagrams_)
+                  << " pto_count=" << pto_count_ << '\n';
     }
 }
 
@@ -2144,7 +2509,6 @@ void QuicConnection::start_client_if_needed() {
         .max_udp_payload_size = config_.transport.max_udp_payload_size,
         .active_connection_id_limit = config_.transport.active_connection_id_limit,
         .disable_active_migration = config_.transport.disable_active_migration,
-        .preferred_address = config_.transport.preferred_address,
         .ack_delay_exponent = config_.transport.ack_delay_exponent,
         .max_ack_delay = config_.transport.max_ack_delay,
         .initial_max_data = config_.transport.initial_max_data,
@@ -2155,6 +2519,7 @@ void QuicConnection::start_client_if_needed() {
         .initial_max_streams_bidi = config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
+        .preferred_address = config_.transport.preferred_address,
         .version_information = version_information_for_handshake(
             config_.supported_versions, current_version_, config_.retry_source_connection_id,
             original_version_, current_version_),
@@ -2252,7 +2617,6 @@ void QuicConnection::start_server_if_needed(
         .max_udp_payload_size = config_.transport.max_udp_payload_size,
         .active_connection_id_limit = config_.transport.active_connection_id_limit,
         .disable_active_migration = config_.transport.disable_active_migration,
-        .preferred_address = config_.transport.preferred_address,
         .ack_delay_exponent = config_.transport.ack_delay_exponent,
         .max_ack_delay = config_.transport.max_ack_delay,
         .initial_max_data = config_.transport.initial_max_data,
@@ -2264,6 +2628,7 @@ void QuicConnection::start_server_if_needed(
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
         .retry_source_connection_id = config_.retry_source_connection_id,
+        .preferred_address = config_.transport.preferred_address,
         .version_information = version_information_for_handshake(
             config_.supported_versions, current_version_, config_.retry_source_connection_id,
             original_version_, current_version_),
@@ -2478,6 +2843,11 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                 const bool duplicate_initial_packet =
                     initial_space_.received_packets.contains(protected_packet.packet_number);
                 peer_source_connection_id_ = protected_packet.source_connection_id;
+                peer_connection_ids_[0] = PeerConnectionIdRecord{
+                    .sequence_number = 0,
+                    .connection_id = protected_packet.source_connection_id,
+                };
+                active_peer_connection_id_sequence_ = 0;
                 initial_space_.largest_authenticated_packet_number = protected_packet.packet_number;
                 const auto processed =
                     process_inbound_crypto(EncryptionLevel::initial, protected_packet.frames, now);
@@ -2512,6 +2882,11 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                     reset_client_handshake_peer_state_for_new_source_connection_id();
                 }
                 peer_source_connection_id_ = protected_packet.source_connection_id;
+                peer_connection_ids_[0] = PeerConnectionIdRecord{
+                    .sequence_number = 0,
+                    .connection_id = protected_packet.source_connection_id,
+                };
+                active_peer_connection_id_sequence_ = 0;
                 handshake_space_.largest_authenticated_packet_number =
                     protected_packet.packet_number;
                 const auto processed = process_inbound_crypto(EncryptionLevel::handshake,
@@ -2543,8 +2918,8 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
             } else if constexpr (std::is_same_v<PacketType, ProtectedZeroRttPacket>) {
                 application_space_.largest_authenticated_packet_number =
                     protected_packet.packet_number;
-                const auto processed =
-                    process_inbound_application(protected_packet.frames, now, true);
+                const auto processed = process_inbound_application(protected_packet.frames, now,
+                                                                   true, last_inbound_path_id_);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
@@ -2563,11 +2938,12 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                     std::ranges::any_of(protected_packet.frames, [](const Frame &frame) {
                         return std::holds_alternative<CryptoFrame>(frame);
                     });
-                const auto processed =
-                    process_inbound_application(protected_packet.frames, now, has_crypto_frame);
+                const auto processed = process_inbound_application(
+                    protected_packet.frames, now, has_crypto_frame, last_inbound_path_id_);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
-                    if (config_.role == EndpointRole::server) {
+                    if (config_.role == EndpointRole::server &&
+                        status_ != HandshakeStatus::connected) {
                         mark_peer_address_validated();
                     }
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
@@ -2704,7 +3080,9 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         const auto ack_eliciting_lost_packets =
             ack_eliciting_in_flight_losses(ack_result.lost_packets);
         if (!ack_eliciting_lost_packets.empty()) {
-            congestion_controller_.on_loss_event(now);
+            const auto latest_lost_packet = std::ranges::max_element(ack_eliciting_lost_packets, {},
+                                                                     &SentPacketRecord::sent_time);
+            congestion_controller_.on_loss_event(latest_lost_packet->sent_time);
             if (establishes_persistent_congestion(ack_eliciting_lost_packets, shared_rtt_state,
                                                   std::chrono::milliseconds(max_ack_delay_ms))) {
                 congestion_controller_.on_persistent_congestion();
@@ -2725,6 +3103,31 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         if (!client_handshake_keepalive_ack_only) {
             pto_count_ = 0;
         }
+    }
+
+    if (packet_space_is_application(packet_space, application_space_) &&
+        packet_trace_matches_connection(config_.source_connection_id)) {
+        std::cerr << "quic-packet-trace ack scid="
+                  << format_connection_id_hex(config_.source_connection_id)
+                  << " path=" << last_inbound_path_id_ << " ranges=" << format_ack_ranges(ack)
+                  << " acked={" << summarize_packets(ack_result.acked_packets) << "}"
+                  << " late={" << summarize_packets(late_acked_packets) << "}"
+                  << " lost={" << summarize_packets(ack_result.lost_packets) << "}"
+                  << " pending_send=" << static_cast<int>(has_pending_application_send())
+                  << " probe="
+                  << static_cast<int>(application_space_.pending_probe_packet.has_value())
+                  << " rempto=" << static_cast<unsigned>(remaining_pto_probe_datagrams_)
+                  << " pto_count=" << pto_count_
+                  << " cwnd=" << congestion_controller_.congestion_window()
+                  << " bif=" << congestion_controller_.bytes_in_flight()
+                  << " current=" << format_optional_path_id(current_send_path_id_)
+                  << " previous=" << format_optional_path_id(previous_path_id_)
+                  << " last_validated=" << format_optional_path_id(last_validated_path_id_)
+                  << " inbound_path={"
+                  << format_path_state_summary(find_path_state(paths_, last_inbound_path_id_))
+                  << "} current_path={"
+                  << format_path_state_summary(find_path_state(paths_, current_send_path_id_))
+                  << "}\n";
     }
 
     return CodecResult<bool>::success(true);
@@ -2807,6 +3210,12 @@ void QuicConnection::mark_lost_packet(PacketSpaceState &packet_space,
                                       const SentPacketRecord &packet) {
     if (packet_space_is_application(packet_space, application_space_)) {
         congestion_controller_.on_packets_lost(std::span<const SentPacketRecord>(&packet, 1));
+        if (current_send_path_id_.has_value()) {
+            auto &path = ensure_path_state(*current_send_path_id_);
+            if (!path.validated & path.outstanding_challenge.has_value()) {
+                path.challenge_pending = true;
+            }
+        }
     }
     for (const auto &range : packet.crypto_ranges) {
         packet_space.send_crypto.mark_lost(range.offset, range.bytes.size());
@@ -2898,8 +3307,61 @@ void QuicConnection::rebuild_recovery(PacketSpaceState &packet_space) {
 
 CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Frame> frames,
                                                               QuicCoreTimePoint now,
-                                                              bool allow_preconnected_frames) {
+                                                              bool allow_preconnected_frames,
+                                                              QuicPathId path_id) {
+    static_assert(std::variant_size_v<Frame> == 21,
+                  "Update process_inbound_application when Frame gains new variants");
     const bool require_connected = !allow_preconnected_frames;
+    const bool traces_this_packet = packet_trace_matches_connection(config_.source_connection_id);
+    const bool has_ack_frame = std::ranges::any_of(
+        frames, [](const Frame &frame) { return std::holds_alternative<AckFrame>(frame); });
+    const bool has_path_challenge_frame = std::ranges::any_of(frames, [](const Frame &frame) {
+        return std::holds_alternative<PathChallengeFrame>(frame);
+    });
+    const bool has_path_response_frame = std::ranges::any_of(frames, [](const Frame &frame) {
+        return std::holds_alternative<PathResponseFrame>(frame);
+    });
+    if (traces_this_packet & (has_ack_frame | has_path_challenge_frame | has_path_response_frame)) {
+        std::cerr << "quic-packet-trace recv-app scid="
+                  << format_connection_id_hex(config_.source_connection_id) << " path=" << path_id
+                  << " frames_ack=" << static_cast<int>(has_ack_frame)
+                  << " frames_path_challenge=" << static_cast<int>(has_path_challenge_frame)
+                  << " frames_path_response=" << static_cast<int>(has_path_response_frame)
+                  << " probing_only=" << static_cast<int>(is_probing_only(frames))
+                  << " current=" << format_optional_path_id(current_send_path_id_)
+                  << " previous=" << format_optional_path_id(previous_path_id_)
+                  << " last_validated=" << format_optional_path_id(last_validated_path_id_)
+                  << " inbound_path={"
+                  << format_path_state_summary(find_path_state(paths_, path_id))
+                  << "} current_path={"
+                  << format_path_state_summary(find_path_state(paths_, current_send_path_id_))
+                  << "} probe="
+                  << static_cast<int>(application_space_.pending_probe_packet.has_value())
+                  << " rempto=" << static_cast<unsigned>(remaining_pto_probe_datagrams_)
+                  << " pto_count=" << pto_count_
+                  << " cwnd=" << congestion_controller_.congestion_window()
+                  << " bif=" << congestion_controller_.bytes_in_flight() << '\n';
+    }
+    const auto keep_current_validating_path = [&] {
+        if (!current_send_path_id_.has_value() || path_id == *current_send_path_id_) {
+            return false;
+        }
+        const auto current = paths_.find(*current_send_path_id_);
+        const auto inbound = paths_.find(path_id);
+        const bool has_current = current != paths_.end();
+        const bool has_inbound = inbound != paths_.end();
+        const bool current_validating = has_current ? !current->second.validated : false;
+        const bool inbound_validated = has_inbound ? inbound->second.validated : false;
+        return static_cast<bool>(has_current & has_inbound & current_validating &
+                                 inbound_validated);
+    }();
+    if (path_id != current_send_path_id_.value_or(path_id) && !is_probing_only(frames) &&
+        !keep_current_validating_path) {
+        maybe_switch_to_path(path_id, /*initiated_locally=*/false);
+    }
+    if (!paths_.empty() | (path_id != 0) | current_send_path_id_.has_value()) {
+        ensure_path_state(path_id);
+    }
     for (const auto &frame : frames) {
         if (is_padding_frame(frame)) {
             continue;
@@ -3156,7 +3618,61 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
             continue;
         }
 
-        if (std::holds_alternative<NewConnectionIdFrame>(frame)) {
+        if (const auto *new_connection_id = std::get_if<NewConnectionIdFrame>(&frame)) {
+            const auto stored = process_new_connection_id_frame(*new_connection_id);
+            if (!stored.has_value()) {
+                return CodecResult<bool>::failure(stored.error().code, stored.error().offset);
+            }
+            continue;
+        }
+
+        if (const auto *path_challenge = std::get_if<PathChallengeFrame>(&frame)) {
+            if (application_frame_requires_connected_state(require_connected, status_)) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            queue_path_response(path_id, path_challenge->data);
+            continue;
+        }
+
+        if (const auto *path_response = std::get_if<PathResponseFrame>(&frame)) {
+            if (application_frame_requires_connected_state(require_connected, status_)) {
+                return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+            }
+
+            auto matching_path = std::find_if(paths_.begin(), paths_.end(), [&](const auto &entry) {
+                return entry.second.outstanding_challenge.has_value() &&
+                       entry.second.outstanding_challenge.value() == path_response->data;
+            });
+            auto *path = matching_path != paths_.end() ? &matching_path->second
+                                                       : &ensure_path_state(path_id);
+            const auto validated_path_id =
+                matching_path != paths_.end() ? matching_path->first : path_id;
+            const bool had_outstanding_challenge = path->outstanding_challenge.has_value();
+            const bool matched_outstanding_challenge =
+                had_outstanding_challenge &&
+                path->outstanding_challenge.value() == path_response->data;
+            if (matched_outstanding_challenge) {
+                path->validated = true;
+                path->challenge_pending = false;
+                path->validation_initiated_locally = false;
+                path->outstanding_challenge.reset();
+                path->validation_deadline.reset();
+                last_validated_path_id_ = validated_path_id;
+                if (current_send_path_id_ != validated_path_id) {
+                    maybe_switch_to_path(validated_path_id, /*initiated_locally=*/false);
+                }
+            }
+            if (traces_this_packet) {
+                std::cerr << "quic-packet-trace path-response scid="
+                          << format_connection_id_hex(config_.source_connection_id)
+                          << " path=" << path_id << " validated_path=" << validated_path_id
+                          << " had_outstanding=" << static_cast<int>(had_outstanding_challenge)
+                          << " matched=" << static_cast<int>(matched_outstanding_challenge)
+                          << " current=" << format_optional_path_id(current_send_path_id_)
+                          << " last_validated=" << format_optional_path_id(last_validated_path_id_)
+                          << " path_state={" << format_path_state_summary(path) << "}\n";
+            }
             continue;
         }
 
@@ -3182,15 +3698,12 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
             continue;
         }
 
-        const bool allow_preconnected_retire_connection_id_frame =
-            application_space_.read_secret.has_value() & (status_ == HandshakeStatus::in_progress) &
-            std::holds_alternative<RetireConnectionIdFrame>(frame);
-        const bool reject_preconnected_application_frame =
-            require_connected & !allow_preconnected_retire_connection_id_frame &
-            (status_ != HandshakeStatus::connected);
-        if (reject_preconnected_application_frame) {
-            return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+        const auto &retire_connection_id = std::get<RetireConnectionIdFrame>(frame);
+        const auto retired = process_retire_connection_id_frame(retire_connection_id);
+        if (!retired.has_value()) {
+            return CodecResult<bool>::failure(retired.error().code, retired.error().offset);
         }
+        continue;
     }
 
     return CodecResult<bool>::success(true);
@@ -3256,6 +3769,15 @@ CodecResult<bool> QuicConnection::sync_tls_state() {
         return validated;
     }
 
+    if (!peer_preferred_address_emitted_ && peer_transport_parameters_validated_ &&
+        peer_transport_parameters_.has_value() &&
+        peer_transport_parameters_->preferred_address.has_value()) {
+        pending_preferred_address_effect_ = QuicCorePeerPreferredAddressAvailable{
+            .preferred_address = *peer_transport_parameters_->preferred_address,
+        };
+        peer_preferred_address_emitted_ = true;
+    }
+
     update_handshake_status();
     auto *tls = tls_.has_value() ? &*tls_ : nullptr;
     const bool tls_handshake_complete = tls != nullptr ? tls->handshake_complete() : false;
@@ -3288,7 +3810,8 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
     }
 
     const auto &peer_transport_parameters_bytes = tls_->peer_transport_parameters();
-    if (peer_transport_parameters_bytes.has_value()) {
+    const bool received_peer_transport_parameters = peer_transport_parameters_bytes.has_value();
+    if (received_peer_transport_parameters) {
         const auto parameters =
             deserialize_transport_parameters(peer_transport_parameters_bytes.value());
         if (!parameters.has_value()) {
@@ -3297,7 +3820,9 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
         }
 
         peer_transport_parameters_ = parameters.value();
-    } else if (!peer_transport_parameters_.has_value()) {
+    }
+
+    if (!received_peer_transport_parameters & !peer_transport_parameters_.has_value()) {
         return CodecResult<bool>::success(true);
     }
 
@@ -3306,9 +3831,10 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
         return CodecResult<bool>::success(true);
     }
 
-    const auto validation = validate_peer_transport_parameters(opposite_role(config_.role),
-                                                               peer_transport_parameters_.value(),
-                                                               validation_context.value());
+    const auto peer_transport_parameters =
+        peer_transport_parameters_.value_or(TransportParameters{});
+    const auto validation = validate_peer_transport_parameters(
+        opposite_role(config_.role), peer_transport_parameters, validation_context.value());
     if (!validation.has_value()) {
         log_codec_failure("validate_peer_transport_parameters", validation.error());
         return CodecResult<bool>::failure(validation.error().code, validation.error().offset);
@@ -3316,6 +3842,14 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
 
     peer_transport_parameters_validated_ = true;
     initialize_peer_flow_control_from_transport_parameters();
+    const auto peer_preferred_address = peer_transport_parameters.preferred_address;
+    const auto emitted_preferred_address = peer_preferred_address.value_or(PreferredAddress{});
+    if (!peer_preferred_address_emitted_ & peer_preferred_address.has_value()) {
+        pending_preferred_address_effect_ = QuicCorePeerPreferredAddressAvailable{
+            .preferred_address = emitted_preferred_address,
+        };
+        peer_preferred_address_emitted_ = true;
+    }
     return CodecResult<bool>::success(true);
 }
 
@@ -3333,6 +3867,9 @@ void QuicConnection::update_handshake_status() {
     if (handshake_ready) {
         if (status_ != HandshakeStatus::connected) {
             status_ = HandshakeStatus::connected;
+            if (config_.role == EndpointRole::client) {
+                mark_peer_address_validated();
+            }
             queue_state_change(QuicCoreStateChange::handshake_ready);
         }
         if (config_.role == EndpointRole::server) {
@@ -3351,7 +3888,248 @@ void QuicConnection::confirm_handshake() {
     }
 
     handshake_confirmed_ = true;
+    queue_state_change(QuicCoreStateChange::handshake_confirmed);
+    issue_spare_connection_ids();
     discard_handshake_packet_space();
+}
+
+PathState &QuicConnection::ensure_path_state(QuicPathId path_id) {
+    auto [it, inserted] = paths_.try_emplace(
+        path_id, PathState{
+                     .id = path_id,
+                     .peer_connection_id_sequence = active_peer_connection_id_sequence_,
+                 });
+    if (inserted) {
+        it->second.validated =
+            last_validated_path_id_.has_value() && last_validated_path_id_ == path_id;
+    }
+    return it->second;
+}
+
+void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_locally) {
+    if (current_send_path_id_.has_value() && current_send_path_id_ != path_id) {
+        previous_path_id_ = current_send_path_id_;
+        if (const auto current = paths_.find(*current_send_path_id_); current != paths_.end()) {
+            current->second.is_current_send_path = false;
+        }
+    }
+
+    const auto peer_connection_id_sequence = [&] {
+        if (initiated_locally) {
+            return select_peer_connection_id_sequence_for_path(path_id);
+        }
+        if (const auto existing = paths_.find(path_id);
+            existing != paths_.end() &&
+            peer_connection_ids_.contains(existing->second.peer_connection_id_sequence)) {
+            return existing->second.peer_connection_id_sequence;
+        }
+        if (current_send_path_id_.has_value()) {
+            if (const auto current = paths_.find(*current_send_path_id_);
+                current != paths_.end() &&
+                peer_connection_ids_.contains(current->second.peer_connection_id_sequence)) {
+                return current->second.peer_connection_id_sequence;
+            }
+        }
+        return active_peer_connection_id_sequence_;
+    }();
+    auto &path = ensure_path_state(path_id);
+    path.validated = false;
+    path.is_current_send_path = true;
+    path.peer_connection_id_sequence = peer_connection_id_sequence;
+    path.challenge_pending = true;
+    path.validation_initiated_locally = initiated_locally;
+    path.outstanding_challenge = next_path_challenge_data(path_id);
+    path.validation_deadline.reset();
+    current_send_path_id_ = path_id;
+}
+
+std::array<std::byte, 8> QuicConnection::next_path_challenge_data(QuicPathId path_id) {
+    return make_path_challenge_data(config_.source_connection_id, path_id,
+                                    next_path_challenge_sequence_++);
+}
+
+void QuicConnection::queue_path_response(QuicPathId path_id, const std::array<std::byte, 8> &data) {
+    auto &path = ensure_path_state(path_id);
+    path.pending_response = data;
+}
+
+bool QuicConnection::path_validation_timed_out(QuicPathId path_id, QuicCoreTimePoint now) const {
+    const auto path = paths_.find(path_id);
+    if (path == paths_.end()) {
+        return false;
+    }
+
+    const auto &validation_deadline = path->second.validation_deadline;
+    return validation_deadline.has_value() && now >= validation_deadline.value();
+}
+
+CodecResult<bool>
+QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &frame) {
+    if (!peer_connection_ids_.contains(0) && peer_source_connection_id_.has_value()) {
+        peer_connection_ids_.emplace(0, PeerConnectionIdRecord{
+                                            .sequence_number = 0,
+                                            .connection_id = peer_source_connection_id_.value(),
+                                        });
+    }
+    if (frame.retire_prior_to > frame.sequence_number) {
+        return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    const auto duplicate_sequence = peer_connection_ids_.find(frame.sequence_number);
+    if (duplicate_sequence != peer_connection_ids_.end()) {
+        const bool mismatched_duplicate =
+            duplicate_sequence->second.connection_id != frame.connection_id |
+            duplicate_sequence->second.stateless_reset_token != frame.stateless_reset_token;
+        if (mismatched_duplicate) {
+            return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+        }
+    }
+
+    const auto conflicting_connection_id = std::find_if(
+        peer_connection_ids_.begin(), peer_connection_ids_.end(), [&](const auto &entry) {
+            return entry.first != frame.sequence_number &&
+                   entry.second.connection_id == frame.connection_id;
+        });
+    if (conflicting_connection_id != peer_connection_ids_.end()) {
+        return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    for (const auto &[sequence_number, record] : peer_connection_ids_) {
+        static_cast<void>(record);
+        if (sequence_number >= frame.retire_prior_to) {
+            continue;
+        }
+
+        pending_retire_connection_id_frames_.push_back(RetireConnectionIdFrame{
+            .sequence_number = sequence_number,
+        });
+    }
+    std::erase_if(peer_connection_ids_,
+                  [&](const auto &entry) { return entry.first < frame.retire_prior_to; });
+    peer_connection_ids_[frame.sequence_number] = PeerConnectionIdRecord{
+        .sequence_number = frame.sequence_number,
+        .connection_id = frame.connection_id,
+        .stateless_reset_token = frame.stateless_reset_token,
+    };
+
+    if (!peer_connection_ids_.contains(active_peer_connection_id_sequence_) |
+        (active_peer_connection_id_sequence_ < frame.retire_prior_to)) {
+        active_peer_connection_id_sequence_ = frame.sequence_number;
+    }
+
+    if (peer_connection_ids_.size() > local_transport_parameters_.active_connection_id_limit) {
+        return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    return CodecResult<bool>::success(true);
+}
+
+CodecResult<bool>
+QuicConnection::process_retire_connection_id_frame(const RetireConnectionIdFrame &frame) {
+    issue_spare_connection_ids();
+    const auto record = local_connection_ids_.find(frame.sequence_number);
+    if (record == local_connection_ids_.end()) {
+        if (!handshake_confirmed_) {
+            return CodecResult<bool>::success(true);
+        }
+        return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+    if (record->second.retired) {
+        return CodecResult<bool>::success(true);
+    }
+
+    record->second.retired = true;
+    if (frame.sequence_number == active_local_connection_id_sequence_) {
+        const auto next_active =
+            std::find_if(local_connection_ids_.begin(), local_connection_ids_.end(),
+                         [](const auto &entry) { return !entry.second.retired; });
+        if (next_active != local_connection_ids_.end()) {
+            active_local_connection_id_sequence_ = next_active->first;
+        }
+    }
+    issue_spare_connection_ids();
+    return CodecResult<bool>::success(true);
+}
+
+void QuicConnection::issue_spare_connection_ids() {
+    if (!handshake_confirmed_ || !peer_transport_parameters_.has_value() ||
+        config_.source_connection_id.empty()) {
+        return;
+    }
+
+    const auto peer_limit =
+        static_cast<std::size_t>(peer_transport_parameters_->active_connection_id_limit);
+    if (peer_limit == 0) {
+        return;
+    }
+
+    while (count_active_connection_ids(local_connection_ids_) < peer_limit) {
+        const auto sequence_number = next_local_connection_id_sequence_++;
+        const auto connection_id =
+            make_issued_connection_id(config_.source_connection_id, sequence_number);
+        const auto stateless_reset_token =
+            make_stateless_reset_token(connection_id, sequence_number);
+        local_connection_ids_[sequence_number] = LocalConnectionIdRecord{
+            .sequence_number = sequence_number,
+            .connection_id = connection_id,
+            .stateless_reset_token = stateless_reset_token,
+        };
+        pending_new_connection_id_frames_.push_back(NewConnectionIdFrame{
+            .sequence_number = sequence_number,
+            .retire_prior_to = 0,
+            .connection_id = connection_id,
+            .stateless_reset_token = stateless_reset_token,
+        });
+    }
+}
+
+std::uint64_t
+QuicConnection::select_peer_connection_id_sequence_for_path(QuicPathId path_id) const {
+    if (const auto path = paths_.find(path_id);
+        path != paths_.end() &&
+        peer_connection_ids_.contains(path->second.peer_connection_id_sequence)) {
+        return path->second.peer_connection_id_sequence;
+    }
+
+    const auto sequence_assigned_to_other_path = [&](std::uint64_t sequence_number) {
+        return std::ranges::any_of(paths_, [&](const auto &entry) {
+            return (entry.first != path_id) &
+                   (entry.second.peer_connection_id_sequence == sequence_number);
+        });
+    };
+
+    for (const auto &[sequence_number, connection_id] : peer_connection_ids_) {
+        static_cast<void>(connection_id);
+        if ((sequence_number == active_peer_connection_id_sequence_) |
+            sequence_assigned_to_other_path(sequence_number)) {
+            continue;
+        }
+
+        return sequence_number;
+    }
+
+    return active_peer_connection_id_sequence_;
+}
+
+ConnectionId QuicConnection::active_peer_destination_connection_id() const {
+    if (const auto active = peer_connection_ids_.find(active_peer_connection_id_sequence_);
+        active != peer_connection_ids_.end()) {
+        return active->second.connection_id;
+    }
+    if (peer_source_connection_id_.has_value()) {
+        return peer_source_connection_id_.value();
+    }
+    return config_.initial_destination_connection_id;
+}
+
+std::optional<NewConnectionIdFrame> QuicConnection::take_pending_new_connection_id_frame() {
+    if (pending_new_connection_id_frames_.empty()) {
+        return std::nullopt;
+    }
+
+    auto frame = pending_new_connection_id_frames_.front();
+    pending_new_connection_id_frames_.erase(pending_new_connection_id_frames_.begin());
+    return frame;
 }
 
 bool QuicConnection::should_reset_client_handshake_peer_state(
@@ -3367,6 +4145,8 @@ void QuicConnection::reset_client_handshake_peer_state_for_new_source_connection
     reset_packet_space_receive_state(zero_rtt_space_);
     deferred_protected_packets_.clear();
     peer_transport_parameters_.reset();
+    peer_connection_ids_.clear();
+    active_peer_connection_id_sequence_ = 0;
     peer_transport_parameters_validated_ = false;
 }
 
@@ -3437,6 +4217,11 @@ void QuicConnection::queue_state_change(QuicCoreStateChange change) {
             return;
         }
         handshake_ready_emitted_ = true;
+    } else if (change == QuicCoreStateChange::handshake_confirmed) {
+        if (handshake_confirmed_emitted_) {
+            return;
+        }
+        handshake_confirmed_emitted_ = true;
     } else {
         if (failed_emitted_) {
             return;
@@ -3679,6 +4464,13 @@ PeerStreamOpenLimits QuicConnection::peer_stream_open_limits() const {
 }
 
 bool QuicConnection::has_pending_application_send() const {
+    for (const auto &[path_id, path] : paths_) {
+        static_cast<void>(path_id);
+        if (path.pending_response.has_value() || path.challenge_pending) {
+            return true;
+        }
+    }
+
     if (handshake_done_state_ == StreamControlFrameState::pending) {
         return true;
     }
@@ -3791,12 +4583,71 @@ void QuicConnection::maybe_refresh_peer_stream_limit(StreamState &stream) {
                                                 peer_stream_open_limits().unidirectional + 1);
 }
 
+bool QuicConnection::is_probing_only(std::span<const Frame> frames) const {
+    return std::ranges::all_of(frames, [](const Frame &frame) {
+        return is_padding_frame(frame) | std::holds_alternative<PathChallengeFrame>(frame) |
+               std::holds_alternative<PathResponseFrame>(frame) |
+               std::holds_alternative<NewConnectionIdFrame>(frame);
+    });
+}
+
+void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_locally) {
+    if (current_send_path_id_.has_value() && current_send_path_id_ == path_id) {
+        return;
+    }
+
+    const auto existing_path = paths_.find(path_id);
+    if (existing_path != paths_.end() && existing_path->second.validated) {
+        if (current_send_path_id_.has_value()) {
+            previous_path_id_ = current_send_path_id_;
+            if (const auto current = paths_.find(*current_send_path_id_); current != paths_.end()) {
+                current->second.is_current_send_path = false;
+            }
+        }
+        auto &path = existing_path->second;
+        path.is_current_send_path = true;
+        current_send_path_id_ = path_id;
+        return;
+    }
+
+    start_path_validation(path_id, initiated_locally);
+}
+
 bool QuicConnection::anti_amplification_applies() const {
+    const auto pending_response_path =
+        std::find_if(paths_.begin(), paths_.end(),
+                     [](const auto &entry) { return entry.second.pending_response.has_value(); });
+    if (pending_response_path != paths_.end()) {
+        return anti_amplification_applies(pending_response_path->first);
+    }
+    if (current_send_path_id_.has_value() && anti_amplification_applies(*current_send_path_id_)) {
+        return true;
+    }
     return config_.role == EndpointRole::server && status_ == HandshakeStatus::in_progress &&
            !peer_address_validated_;
 }
 
+bool QuicConnection::anti_amplification_applies(QuicPathId path_id) const {
+    if ((config_.role != EndpointRole::server) | !paths_.contains(path_id)) {
+        return false;
+    }
+
+    const auto &path = paths_.at(path_id);
+    return !path.validated & ((path.anti_amplification_received_bytes != 0) |
+                              (path.anti_amplification_sent_bytes != 0));
+}
+
 std::uint64_t QuicConnection::anti_amplification_send_budget() const {
+    const auto pending_response_path =
+        std::find_if(paths_.begin(), paths_.end(),
+                     [](const auto &entry) { return entry.second.pending_response.has_value(); });
+    if (pending_response_path != paths_.end()) {
+        return anti_amplification_send_budget(pending_response_path->first);
+    }
+    if (current_send_path_id_.has_value() && anti_amplification_applies(*current_send_path_id_)) {
+        return anti_amplification_send_budget(*current_send_path_id_);
+    }
+
     constexpr auto kMaxUint64 = std::numeric_limits<std::uint64_t>::max();
     if (anti_amplification_received_bytes_ > kMaxUint64 / 3u) {
         return kMaxUint64;
@@ -3805,7 +4656,36 @@ std::uint64_t QuicConnection::anti_amplification_send_budget() const {
     return anti_amplification_received_bytes_ * 3u;
 }
 
+std::uint64_t QuicConnection::anti_amplification_send_budget(QuicPathId path_id) const {
+    constexpr auto kMaxUint64 = std::numeric_limits<std::uint64_t>::max();
+    const auto &path = paths_.at(path_id);
+    if (path.anti_amplification_received_bytes > kMaxUint64 / 3u) {
+        return kMaxUint64;
+    }
+
+    return path.anti_amplification_received_bytes * 3u;
+}
+
 std::size_t QuicConnection::outbound_datagram_size_limit() const {
+    const auto pending_response_path =
+        std::find_if(paths_.begin(), paths_.end(),
+                     [](const auto &entry) { return entry.second.pending_response.has_value(); });
+    if (pending_response_path != paths_.end() &&
+        anti_amplification_applies(pending_response_path->first)) {
+        const auto remaining_budget =
+            saturating_subtract(anti_amplification_send_budget(pending_response_path->first),
+                                pending_response_path->second.anti_amplification_sent_bytes);
+        return static_cast<std::size_t>(std::min<std::uint64_t>(
+            remaining_budget, static_cast<std::uint64_t>(kMaximumDatagramSize)));
+    }
+    if (current_send_path_id_.has_value() && anti_amplification_applies(*current_send_path_id_)) {
+        const auto &path = paths_.at(*current_send_path_id_);
+        const auto remaining_budget =
+            saturating_subtract(anti_amplification_send_budget(*current_send_path_id_),
+                                path.anti_amplification_sent_bytes);
+        return static_cast<std::size_t>(std::min<std::uint64_t>(
+            remaining_budget, static_cast<std::uint64_t>(kMaximumDatagramSize)));
+    }
     if (!anti_amplification_applies()) {
         return kMaximumDatagramSize;
     }
@@ -3817,7 +4697,21 @@ std::size_t QuicConnection::outbound_datagram_size_limit() const {
 }
 
 void QuicConnection::note_inbound_datagram_bytes(std::size_t bytes) {
-    if (!anti_amplification_applies() || bytes == 0) {
+    if (bytes == 0) {
+        return;
+    }
+
+    if (status_ == HandshakeStatus::connected) {
+        auto &path = ensure_path_state(last_inbound_path_id_);
+        const auto received = path.anti_amplification_received_bytes;
+        const auto increment = static_cast<std::uint64_t>(bytes);
+        path.anti_amplification_received_bytes =
+            received > std::numeric_limits<std::uint64_t>::max() - increment
+                ? std::numeric_limits<std::uint64_t>::max()
+                : received + increment;
+        return;
+    }
+    if (!anti_amplification_applies()) {
         return;
     }
 
@@ -3829,8 +4723,24 @@ void QuicConnection::note_inbound_datagram_bytes(std::size_t bytes) {
             : received + increment;
 }
 
-void QuicConnection::note_outbound_datagram_bytes(std::size_t bytes) {
-    if (!anti_amplification_applies() || bytes == 0) {
+void QuicConnection::note_outbound_datagram_bytes(std::size_t bytes,
+                                                  std::optional<QuicPathId> path_id) {
+    if (bytes == 0) {
+        return;
+    }
+
+    const auto effective_path_id = path_id.has_value() ? path_id : current_send_path_id_;
+    if (effective_path_id.has_value() && anti_amplification_applies(*effective_path_id)) {
+        auto &path = ensure_path_state(*effective_path_id);
+        const auto sent = path.anti_amplification_sent_bytes;
+        const auto increment = static_cast<std::uint64_t>(bytes);
+        path.anti_amplification_sent_bytes =
+            sent > std::numeric_limits<std::uint64_t>::max() - increment
+                ? std::numeric_limits<std::uint64_t>::max()
+                : sent + increment;
+        return;
+    }
+    if (!anti_amplification_applies()) {
         return;
     }
 
@@ -3843,14 +4753,35 @@ void QuicConnection::note_outbound_datagram_bytes(std::size_t bytes) {
 
 void QuicConnection::mark_peer_address_validated() {
     peer_address_validated_ = true;
+    if (current_send_path_id_.has_value()) {
+        auto &path = ensure_path_state(*current_send_path_id_);
+        path.validated = true;
+        path.challenge_pending = false;
+        path.validation_initiated_locally = false;
+        path.outstanding_challenge.reset();
+        path.validation_deadline.reset();
+        last_validated_path_id_ = current_send_path_id_;
+    }
 }
 
-ConnectionId QuicConnection::outbound_destination_connection_id() const {
-    if (peer_source_connection_id_.has_value()) {
-        return peer_source_connection_id_.value();
+ConnectionId
+QuicConnection::outbound_destination_connection_id(std::optional<QuicPathId> path_id) const {
+    if (path_id.has_value()) {
+        if (const auto path = paths_.find(*path_id); path != paths_.end()) {
+            const auto &destination_connection_id_override =
+                path->second.destination_connection_id_override;
+            if (destination_connection_id_override.has_value()) {
+                return destination_connection_id_override.value();
+            }
+            if (const auto peer_connection_id =
+                    peer_connection_ids_.find(path->second.peer_connection_id_sequence);
+                peer_connection_id != peer_connection_ids_.end()) {
+                return peer_connection_id->second.connection_id;
+            }
+        }
     }
 
-    return config_.initial_destination_connection_id;
+    return active_peer_destination_connection_id();
 }
 
 ConnectionId QuicConnection::client_initial_destination_connection_id() const {
@@ -3863,7 +4794,26 @@ ConnectionId QuicConnection::client_initial_destination_connection_id() const {
 
 std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
     const auto max_outbound_datagram_size = outbound_datagram_size_limit();
+    const bool traces_this_connection =
+        packet_trace_matches_connection(config_.source_connection_id);
     if (max_outbound_datagram_size == 0) {
+        if (traces_this_connection) {
+            std::cerr << "quic-packet-trace send-blocked scid="
+                      << format_connection_id_hex(config_.source_connection_id)
+                      << " reason=amp-budget-zero"
+                      << " current=" << format_optional_path_id(current_send_path_id_)
+                      << " previous=" << format_optional_path_id(previous_path_id_)
+                      << " last_validated=" << format_optional_path_id(last_validated_path_id_)
+                      << " current_path={"
+                      << format_path_state_summary(find_path_state(paths_, current_send_path_id_))
+                      << "} inbound_path={"
+                      << format_path_state_summary(find_path_state(paths_, last_inbound_path_id_))
+                      << "} pending_send=" << static_cast<int>(has_pending_application_send())
+                      << " probe="
+                      << static_cast<int>(application_space_.pending_probe_packet.has_value())
+                      << " rempto=" << static_cast<unsigned>(remaining_pto_probe_datagrams_)
+                      << '\n';
+        }
         return {};
     }
 
@@ -3873,7 +4823,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
     }
 
     auto packets = std::vector<ProtectedPacket>{};
+    auto selected_send_path_id = current_send_path_id_;
     const auto destination_connection_id = outbound_destination_connection_id();
+    const auto application_destination_connection_id = [&]() {
+        return outbound_destination_connection_id(selected_send_path_id);
+    };
     const auto initial_destination_connection_id = config_.role == EndpointRole::client
                                                        ? client_initial_destination_connection_id()
                                                        : destination_connection_id;
@@ -4012,8 +4966,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
         }
 
-        note_outbound_datagram_bytes(datagram.value().size());
-        last_drained_path_id_ = current_send_path_id_;
+        note_outbound_datagram_bytes(datagram.value().size(), selected_send_path_id);
+        last_drained_path_id_ = selected_send_path_id;
         return datagram.value();
     };
     const auto trim_crypto_ranges_to_fit =
@@ -4374,7 +5328,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
     const bool can_send_one_rtt_packets = application_space_.write_secret.has_value();
     const bool has_pending_application_payload =
         application_space_.received_packets.has_ack_to_send() | has_pending_application_send() |
-        application_space_.pending_probe_packet.has_value() | !application_crypto_frames.empty();
+        application_space_.pending_probe_packet.has_value() |
+        !pending_new_connection_id_frames_.empty() | !pending_retire_connection_id_frames_.empty() |
+        !application_crypto_frames.empty();
     if ((can_send_one_rtt_packets || use_zero_rtt_packet_protection) &&
         has_pending_application_payload) {
         const auto base_ack_frame = use_zero_rtt_packet_protection
@@ -4474,6 +5430,100 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
 
             return local_stream_limit_state_.take_max_streams_frames();
+        };
+        const auto take_new_connection_id_frames =
+            [&](bool force_ack_only) -> std::vector<NewConnectionIdFrame> {
+            if (force_ack_only) {
+                return {};
+            }
+
+            std::vector<NewConnectionIdFrame> frames;
+            while (const auto frame = take_pending_new_connection_id_frame()) {
+                frames.push_back(*frame);
+            }
+            return frames;
+        };
+        const auto take_retire_connection_id_frames =
+            [&](bool force_ack_only) -> std::vector<RetireConnectionIdFrame> {
+            if (force_ack_only) {
+                return {};
+            }
+
+            auto frames = std::move(pending_retire_connection_id_frames_);
+            pending_retire_connection_id_frames_.clear();
+            return frames;
+        };
+        struct PendingPathValidationFrames {
+            QuicPathId path_id = 0;
+            std::optional<PathResponseFrame> response;
+            std::optional<PathChallengeFrame> challenge;
+        };
+        const auto mark_path_challenge_sent = [](auto &path) { path.challenge_pending = false; };
+        const auto take_path_validation_frames =
+            [&](bool force_ack_only) -> PendingPathValidationFrames {
+            static_cast<void>(force_ack_only);
+
+            const auto response_path =
+                std::find_if(paths_.begin(), paths_.end(), [](const auto &entry) {
+                    return entry.second.pending_response.has_value();
+                });
+            if (response_path != paths_.end()) {
+                PendingPathValidationFrames frames{
+                    .path_id = response_path->first,
+                    .response =
+                        PathResponseFrame{
+                            .data = *response_path->second.pending_response,
+                        },
+                };
+                response_path->second.pending_response.reset();
+                if (response_path->second.challenge_pending &
+                    response_path->second.outstanding_challenge.has_value()) {
+                    frames.challenge = PathChallengeFrame{
+                        .data = *response_path->second.outstanding_challenge,
+                    };
+                    mark_path_challenge_sent(response_path->second);
+                } else if (!response_path->second.validated &
+                           !response_path->second.outstanding_challenge.has_value()) {
+                    response_path->second.outstanding_challenge =
+                        next_path_challenge_data(response_path->first);
+                    frames.challenge = PathChallengeFrame{
+                        .data = *response_path->second.outstanding_challenge,
+                    };
+                    mark_path_challenge_sent(response_path->second);
+                }
+                if (!response_path->second.validated &
+                    current_send_path_id_ != response_path->first) {
+                    if (current_send_path_id_.has_value()) {
+                        previous_path_id_ = current_send_path_id_;
+                        if (const auto current = paths_.find(*current_send_path_id_);
+                            current != paths_.end()) {
+                            current->second.is_current_send_path = false;
+                        }
+                    }
+                    response_path->second.is_current_send_path = true;
+                    current_send_path_id_ = response_path->first;
+                }
+                return frames;
+            }
+
+            if (!current_send_path_id_.has_value()) {
+                return {};
+            }
+            const auto path = paths_.find(*current_send_path_id_);
+            if (path == paths_.end()) {
+                return {};
+            }
+
+            PendingPathValidationFrames frames{
+                .path_id = *current_send_path_id_,
+            };
+            if (path->second.challenge_pending & path->second.outstanding_challenge.has_value()) {
+                frames.challenge = PathChallengeFrame{
+                    .data = *path->second.outstanding_challenge,
+                };
+                mark_path_challenge_sent(path->second);
+            }
+            return frames;
         };
         const auto take_stream_data_blocked_frames =
             [](auto &streams) -> std::vector<StreamDataBlockedFrame> {
@@ -4590,6 +5640,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             [&](std::span<const ByteRange> crypto_ranges, bool include_handshake_done,
                 const std::optional<AckFrame> &ack_frame,
                 const std::optional<MaxDataFrame> &max_data_frame,
+                std::span<const NewConnectionIdFrame> new_connection_id_frames,
+                std::span<const RetireConnectionIdFrame> retire_connection_id_frames,
+                const PendingPathValidationFrames &path_validation_frames,
                 std::span<const MaxStreamDataFrame> max_stream_data_frames,
                 std::span<const MaxStreamsFrame> max_streams_frames,
                 std::span<const ResetStreamFrame> reset_stream_frames,
@@ -4599,13 +5652,16 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 std::span<const StreamFrameSendFragment> stream_fragments,
                 bool include_ping) -> CodecResult<std::vector<std::byte>> {
             std::vector<Frame> candidate_frames;
-            candidate_frames.reserve(crypto_ranges.size() + (ack_frame.has_value() ? 1u : 0u) +
-                                     (include_handshake_done ? 1u : 0u) +
-                                     (max_data_frame.has_value() ? 1u : 0u) +
-                                     max_stream_data_frames.size() + max_streams_frames.size() +
-                                     reset_stream_frames.size() + stop_sending_frames.size() +
-                                     (data_blocked_frame.has_value() ? 1u : 0u) +
-                                     stream_data_blocked_frames.size() + (include_ping ? 1u : 0u));
+            candidate_frames.reserve(
+                crypto_ranges.size() + (ack_frame.has_value() ? 1u : 0u) +
+                (include_handshake_done ? 1u : 0u) + (max_data_frame.has_value() ? 1u : 0u) +
+                new_connection_id_frames.size() + retire_connection_id_frames.size() +
+                static_cast<std::size_t>(path_validation_frames.response.has_value()) +
+                static_cast<std::size_t>(path_validation_frames.challenge.has_value()) +
+                max_stream_data_frames.size() + max_streams_frames.size() +
+                reset_stream_frames.size() + stop_sending_frames.size() +
+                (data_blocked_frame.has_value() ? 1u : 0u) + stream_data_blocked_frames.size() +
+                (include_ping ? 1u : 0u));
             append_application_crypto_frames(candidate_frames, crypto_ranges);
             if (ack_frame.has_value()) {
                 candidate_frames.emplace_back(*ack_frame);
@@ -4615,6 +5671,18 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
             if (max_data_frame.has_value()) {
                 candidate_frames.emplace_back(*max_data_frame);
+            }
+            for (const auto &frame : new_connection_id_frames) {
+                candidate_frames.emplace_back(frame);
+            }
+            for (const auto &frame : retire_connection_id_frames) {
+                candidate_frames.emplace_back(frame);
+            }
+            if (path_validation_frames.response.has_value()) {
+                candidate_frames.emplace_back(*path_validation_frames.response);
+            }
+            if (path_validation_frames.challenge.has_value()) {
+                candidate_frames.emplace_back(*path_validation_frames.challenge);
             }
             for (const auto &frame : max_stream_data_frames) {
                 candidate_frames.emplace_back(frame);
@@ -4640,10 +5708,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
             auto candidate_packets = packets;
             candidate_packets.emplace_back(make_application_protected_packet(
-                use_zero_rtt_packet_protection, current_version_, destination_connection_id,
-                config_.source_connection_id, application_write_key_phase_,
-                kDefaultInitialPacketNumberLength, application_space_.next_send_packet_number,
-                std::move(candidate_frames), stream_fragments));
+                use_zero_rtt_packet_protection, current_version_,
+                application_destination_connection_id(), config_.source_connection_id,
+                application_write_key_phase_, kDefaultInitialPacketNumberLength,
+                application_space_.next_send_packet_number, std::move(candidate_frames),
+                stream_fragments));
 
             return serialize_candidate_datagram(candidate_packets);
         };
@@ -4658,6 +5727,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         };
         const auto restore_unsent_application_candidate =
             [&](const std::optional<MaxDataFrame> &max_data_frame,
+                std::span<const NewConnectionIdFrame> new_connection_id_frames,
+                std::span<const RetireConnectionIdFrame> retire_connection_id_frames,
+                const PendingPathValidationFrames &path_validation_frames,
                 std::span<const MaxStreamDataFrame> max_stream_data_frames,
                 std::span<const MaxStreamsFrame> max_streams_frames,
                 std::span<const ResetStreamFrame> reset_stream_frames,
@@ -4673,6 +5745,20 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 }
                 if (data_blocked_frame.has_value()) {
                     connection_flow_control_.mark_data_blocked_frame_lost(*data_blocked_frame);
+                }
+                pending_new_connection_id_frames_.insert(pending_new_connection_id_frames_.begin(),
+                                                         new_connection_id_frames.begin(),
+                                                         new_connection_id_frames.end());
+                pending_retire_connection_id_frames_.insert(
+                    pending_retire_connection_id_frames_.begin(),
+                    retire_connection_id_frames.begin(), retire_connection_id_frames.end());
+                if (path_validation_frames.response.has_value()) {
+                    auto &path = ensure_path_state(path_validation_frames.path_id);
+                    path.pending_response = path_validation_frames.response->data;
+                }
+                if (path_validation_frames.challenge.has_value()) {
+                    auto &path = ensure_path_state(path_validation_frames.path_id);
+                    path.challenge_pending = true;
                 }
                 for (const auto &frame : max_stream_data_frames) {
                     streams_.at(frame.stream_id).mark_max_stream_data_frame_lost(frame);
@@ -4697,6 +5783,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             [&](std::span<const ByteRange> crypto_ranges, bool include_handshake_done,
                 const std::optional<AckFrame> &candidate_ack_frame,
                 const std::optional<MaxDataFrame> &max_data_frame,
+                std::span<const NewConnectionIdFrame> new_connection_id_frames,
+                std::span<const RetireConnectionIdFrame> retire_connection_id_frames,
+                const PendingPathValidationFrames &path_validation_frames,
                 std::span<const MaxStreamDataFrame> max_stream_data_frames,
                 std::span<const MaxStreamsFrame> max_streams_frames,
                 std::span<const ResetStreamFrame> reset_stream_frames,
@@ -4711,6 +5800,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
             auto candidate_datagram = serialize_application_candidate(
                 crypto_ranges, include_handshake_done, candidate_ack_frame, max_data_frame,
+                new_connection_id_frames, retire_connection_id_frames, path_validation_frames,
                 max_stream_data_frames, max_streams_frames, reset_stream_frames,
                 stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
                 stream_fragments, include_ping);
@@ -4736,9 +5826,10 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 candidate_datagram = CodecResult<std::vector<std::byte>>::success(
                     serialize_application_candidate(
                         crypto_ranges, include_handshake_done, trimmed_ack_frame, max_data_frame,
-                        max_stream_data_frames, max_streams_frames, reset_stream_frames,
-                        stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
-                        stream_fragments, include_ping)
+                        new_connection_id_frames, retire_connection_id_frames,
+                        path_validation_frames, max_stream_data_frames, max_streams_frames,
+                        reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                        stream_data_blocked_frames, stream_fragments, include_ping)
                         .value());
 
                 if (candidate_datagram.value().size() <= max_outbound_datagram_size) {
@@ -4779,9 +5870,50 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             return false;
         };
         const auto should_send_application_probe_first = [&]() {
+            const auto validation_only_path_id = [&]() -> std::optional<QuicPathId> {
+                const auto response_path =
+                    std::find_if(paths_.begin(), paths_.end(), [](const auto &entry) {
+                        return entry.second.pending_response.has_value();
+                    });
+                if (response_path != paths_.end()) {
+                    return response_path->first;
+                }
+                return current_send_path_id_;
+            }();
+            if (validation_only_path_id.has_value()) {
+                const auto validation_path = paths_.find(*validation_only_path_id);
+                if (validation_path != paths_.end() && !validation_path->second.validated &&
+                    !validation_path->second.validation_initiated_locally) {
+                    return false;
+                }
+            }
             if (pending_application_probe == nullptr) {
                 return false;
             }
+
+            const auto probe_has_path_validation = [&]() {
+                const auto response_path =
+                    std::find_if(paths_.begin(), paths_.end(), [](const auto &entry) {
+                        return entry.second.pending_response.has_value();
+                    });
+                if (response_path != paths_.end()) {
+                    return true;
+                }
+
+                if (!current_send_path_id_.has_value()) {
+                    return false;
+                }
+
+                const auto current_path = paths_.find(*current_send_path_id_);
+                const bool has_current_path = current_path != paths_.end();
+                const bool challenge_pending =
+                    has_current_path ? current_path->second.challenge_pending : false;
+                const bool has_outstanding_challenge =
+                    has_current_path ? current_path->second.outstanding_challenge.has_value()
+                                     : false;
+                return static_cast<bool>(has_current_path & challenge_pending &
+                                         has_outstanding_challenge);
+            }();
 
             if (has_pending_application_stream_send()) {
                 // If there is queued stream response data, don't let a control-only PTO probe
@@ -4799,16 +5931,70 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
 
             const bool probe_is_retransmittable =
-                retransmittable_probe_frame_count(*pending_application_probe) != 0;
+                (retransmittable_probe_frame_count(*pending_application_probe) != 0) |
+                probe_has_path_validation;
             return static_cast<bool>(probe_is_retransmittable | !has_pending_application_send());
         };
 
         if (should_send_application_probe_first()) {
             const auto &probe_packet = *pending_application_probe;
+            auto probe_max_data_frame = probe_packet.max_data_frame;
+            std::optional<MaxDataFrame> fresh_probe_max_data_frame;
+            auto probe_max_stream_data_frames = probe_packet.max_stream_data_frames;
+            std::vector<MaxStreamDataFrame> fresh_probe_max_stream_data_frames;
+            if (probe_packet.force_ack) {
+                maybe_refresh_connection_receive_credit(/*force=*/true);
+                if (!probe_max_data_frame.has_value() &
+                    (connection_flow_control_.max_data_state == StreamControlFrameState::pending) &
+                    connection_flow_control_.pending_max_data_frame.has_value()) {
+                    fresh_probe_max_data_frame = connection_flow_control_.pending_max_data_frame;
+                    probe_max_data_frame = fresh_probe_max_data_frame;
+                }
+
+                for (auto &[stream_id, stream] : streams_) {
+                    static_cast<void>(stream_id);
+                    maybe_refresh_stream_receive_credit(stream, /*force=*/true);
+                    if ((stream.flow_control.max_stream_data_state !=
+                         StreamControlFrameState::pending) |
+                        !stream.flow_control.pending_max_stream_data_frame.has_value()) {
+                        continue;
+                    }
+
+                    const auto frame = stream.flow_control.pending_max_stream_data_frame.value_or(
+                        MaxStreamDataFrame{});
+                    const bool already_selected = std::ranges::any_of(
+                        probe_max_stream_data_frames, [&](const MaxStreamDataFrame &selected) {
+                            return (selected.stream_id == frame.stream_id) &
+                                   (selected.maximum_stream_data == frame.maximum_stream_data);
+                        });
+                    if (already_selected) {
+                        continue;
+                    }
+
+                    fresh_probe_max_stream_data_frames.push_back(frame);
+                    probe_max_stream_data_frames.push_back(frame);
+                }
+            }
+            const auto probe_base_ack_frame =
+                probe_packet.force_ack ? application_space_.received_packets.build_ack_frame(
+                                             local_transport_parameters_.ack_delay_exponent, now,
+                                             /*allow_non_pending=*/true)
+                                       : base_ack_frame;
             const auto &probe_crypto_ranges = application_crypto_ranges.empty()
                                                   ? probe_packet.crypto_ranges
                                                   : application_crypto_ranges;
             const auto include_ping = retransmittable_probe_frame_count(probe_packet) == 0;
+            const auto restore_unsent_path_validation_frames =
+                [&](const PendingPathValidationFrames &path_validation_frames) {
+                    if (path_validation_frames.response.has_value()) {
+                        auto &path = ensure_path_state(path_validation_frames.path_id);
+                        path.pending_response = path_validation_frames.response->data;
+                    }
+                    if (path_validation_frames.challenge.has_value()) {
+                        auto &path = ensure_path_state(path_validation_frames.path_id);
+                        path.challenge_pending = true;
+                    }
+                };
             const auto make_probe_stream_fragments = [&]() {
                 auto fragments = probe_packet.stream_fragments;
                 for (auto &fragment : fragments) {
@@ -4840,11 +6026,15 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     application_space_.send_crypto.mark_unsent(range.offset, range.bytes.size());
                 }
             };
+            auto path_validation_frames = take_path_validation_frames(/*force_ack_only=*/false);
+            selected_send_path_id = path_validation_frames.response.has_value()
+                                        ? std::optional<QuicPathId>{path_validation_frames.path_id}
+                                        : current_send_path_id_;
             auto probe_stream_fragments = make_probe_stream_fragments();
             mark_probe_fragments_sent(probe_stream_fragments);
             auto ack_frame = trim_application_ack_frame(
-                probe_crypto_ranges, probe_packet.has_handshake_done, base_ack_frame,
-                probe_packet.max_data_frame, probe_packet.max_stream_data_frames,
+                probe_crypto_ranges, probe_packet.has_handshake_done, probe_base_ack_frame,
+                probe_max_data_frame, {}, {}, path_validation_frames, probe_max_stream_data_frames,
                 probe_packet.max_streams_frames, probe_packet.reset_stream_frames,
                 probe_packet.stop_sending_frames, probe_packet.data_blocked_frame,
                 probe_packet.stream_data_blocked_frames, probe_stream_fragments, include_ping);
@@ -4854,7 +6044,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
             auto datagram = serialize_application_candidate(
                 probe_crypto_ranges, probe_packet.has_handshake_done, ack_frame,
-                probe_packet.max_data_frame, probe_packet.max_stream_data_frames,
+                probe_max_data_frame, {}, {}, path_validation_frames, probe_max_stream_data_frames,
                 probe_packet.max_streams_frames, probe_packet.reset_stream_frames,
                 probe_packet.stop_sending_frames, probe_packet.data_blocked_frame,
                 probe_packet.stream_data_blocked_frames, probe_stream_fragments, include_ping);
@@ -4865,10 +6055,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             if (ack_frame.has_value() && datagram.value().size() > max_outbound_datagram_size) {
                 auto no_ack_datagram = serialize_application_candidate(
                     probe_crypto_ranges, probe_packet.has_handshake_done, std::nullopt,
-                    probe_packet.max_data_frame, probe_packet.max_stream_data_frames,
-                    probe_packet.max_streams_frames, probe_packet.reset_stream_frames,
-                    probe_packet.stop_sending_frames, probe_packet.data_blocked_frame,
-                    probe_packet.stream_data_blocked_frames, probe_stream_fragments, include_ping);
+                    probe_max_data_frame, {}, {}, path_validation_frames,
+                    probe_max_stream_data_frames, probe_packet.max_streams_frames,
+                    probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                    probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
+                    probe_stream_fragments, include_ping);
                 if (!no_ack_datagram.has_value()) {
                     mark_failed();
                     return {};
@@ -4912,10 +6103,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
                     datagram = serialize_application_candidate(
                         probe_crypto_ranges, probe_packet.has_handshake_done, candidate_ack_frame,
-                        probe_packet.max_data_frame, probe_packet.max_stream_data_frames,
-                        probe_packet.max_streams_frames, probe_packet.reset_stream_frames,
-                        probe_packet.stop_sending_frames, probe_packet.data_blocked_frame,
-                        probe_packet.stream_data_blocked_frames, fragments, include_ping);
+                        probe_max_data_frame, {}, {}, path_validation_frames,
+                        probe_max_stream_data_frames, probe_packet.max_streams_frames,
+                        probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                        probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
+                        fragments, include_ping);
                     if (!datagram.has_value()) {
                         mark_failed();
                         return false;
@@ -4935,11 +6127,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     mark_probe_fragments_sent(probe_stream_fragments);
                     datagram = serialize_application_candidate(
                         probe_crypto_ranges, probe_packet.has_handshake_done, ack_frame,
-                        probe_packet.max_data_frame, probe_packet.max_stream_data_frames,
-                        probe_packet.max_streams_frames, probe_packet.reset_stream_frames,
-                        probe_packet.stop_sending_frames, probe_packet.data_blocked_frame,
-                        probe_packet.stream_data_blocked_frames, probe_stream_fragments,
-                        include_ping);
+                        probe_max_data_frame, {}, {}, path_validation_frames,
+                        probe_max_stream_data_frames, probe_packet.max_streams_frames,
+                        probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                        probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
+                        probe_stream_fragments, include_ping);
                     if (!datagram.has_value()) {
                         mark_failed();
                         return {};
@@ -4951,6 +6143,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             const auto probe_datagram_size = datagram_size_or_zero(datagram);
             if (probe_datagram_size > max_outbound_datagram_size) {
                 restore_unsent_application_probe_candidate();
+                restore_unsent_path_validation_frames(path_validation_frames);
                 if (!packets.empty()) {
                     return finalize_datagram(packets);
                 }
@@ -4965,10 +6158,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             frames.reserve(
                 probe_crypto_ranges.size() + (ack_frame.has_value() ? 1u : 0u) +
                 (probe_packet.has_handshake_done ? 1u : 0u) +
-                (probe_packet.max_data_frame.has_value() ? 1u : 0u) +
-                probe_packet.max_stream_data_frames.size() +
-                probe_packet.max_streams_frames.size() + probe_packet.reset_stream_frames.size() +
-                probe_packet.stop_sending_frames.size() +
+                (probe_max_data_frame.has_value() ? 1u : 0u) +
+                static_cast<std::size_t>(path_validation_frames.response.has_value()) +
+                static_cast<std::size_t>(path_validation_frames.challenge.has_value()) +
+                probe_max_stream_data_frames.size() + probe_packet.max_streams_frames.size() +
+                probe_packet.reset_stream_frames.size() + probe_packet.stop_sending_frames.size() +
                 (probe_packet.data_blocked_frame.has_value() ? 1u : 0u) +
                 probe_packet.stream_data_blocked_frames.size() + (include_ping ? 1u : 0u));
             append_application_crypto_frames(frames, probe_crypto_ranges);
@@ -4978,10 +6172,16 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             if (probe_packet.has_handshake_done) {
                 frames.emplace_back(HandshakeDoneFrame{});
             }
-            if (probe_packet.max_data_frame.has_value()) {
-                frames.emplace_back(*probe_packet.max_data_frame);
+            if (probe_max_data_frame.has_value()) {
+                frames.emplace_back(*probe_max_data_frame);
             }
-            for (const auto &frame : probe_packet.max_stream_data_frames) {
+            if (path_validation_frames.response.has_value()) {
+                frames.emplace_back(*path_validation_frames.response);
+            }
+            if (path_validation_frames.challenge.has_value()) {
+                frames.emplace_back(*path_validation_frames.challenge);
+            }
+            for (const auto &frame : probe_max_stream_data_frames) {
                 frames.emplace_back(frame);
             }
             for (const auto &frame : probe_packet.max_streams_frames) {
@@ -5009,10 +6209,16 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 return {};
             }
             packets.emplace_back(make_application_protected_packet(
-                use_zero_rtt_packet_protection, current_version_, destination_connection_id,
-                config_.source_connection_id, application_write_key_phase_,
-                kDefaultInitialPacketNumberLength, *packet_number, std::move(frames),
-                probe_stream_fragments));
+                use_zero_rtt_packet_protection, current_version_,
+                application_destination_connection_id(), config_.source_connection_id,
+                application_write_key_phase_, kDefaultInitialPacketNumberLength, *packet_number,
+                std::move(frames), probe_stream_fragments));
+            if (fresh_probe_max_data_frame.has_value()) {
+                static_cast<void>(connection_flow_control_.take_max_data_frame());
+            }
+            for (const auto &frame : fresh_probe_max_stream_data_frames) {
+                static_cast<void>(streams_.at(frame.stream_id).take_max_stream_data_frame());
+            }
 
             track_sent_packet(
                 application_space_,
@@ -5026,8 +6232,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     .crypto_ranges = probe_crypto_ranges,
                     .reset_stream_frames = probe_packet.reset_stream_frames,
                     .stop_sending_frames = probe_packet.stop_sending_frames,
-                    .max_data_frame = probe_packet.max_data_frame,
-                    .max_stream_data_frames = probe_packet.max_stream_data_frames,
+                    .max_data_frame = probe_max_data_frame,
+                    .max_stream_data_frames = probe_max_stream_data_frames,
                     .max_streams_frames = probe_packet.max_streams_frames,
                     .data_blocked_frame = probe_packet.data_blocked_frame,
                     .stream_data_blocked_frames = probe_packet.stream_data_blocked_frames,
@@ -5043,33 +6249,96 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 application_space_.pending_ack_deadline = std::nullopt;
                 application_space_.force_ack_send = false;
             }
+            if (preserve_pto_probe_packets) {
+                restore_unsent_path_validation_frames(path_validation_frames);
+            }
             clear_probe_packet_after_send(application_space_.pending_probe_packet);
         } else {
             const auto include_handshake_done =
                 !use_zero_rtt_packet_protection && config_.role == EndpointRole::server &&
                 handshake_done_state_ == StreamControlFrameState::pending;
+            const auto validation_only_path_id = [&]() -> std::optional<QuicPathId> {
+                const auto response_path =
+                    std::find_if(paths_.begin(), paths_.end(), [](const auto &entry) {
+                        return entry.second.pending_response.has_value();
+                    });
+                if (response_path != paths_.end()) {
+                    return response_path->first;
+                }
+                return current_send_path_id_;
+            }();
+            const bool validation_only_send = [&]() {
+                if (!validation_only_path_id.has_value()) {
+                    return false;
+                }
+                const auto validation_path = paths_.find(*validation_only_path_id);
+                const bool has_validation_path = validation_path != paths_.end();
+                const bool path_unvalidated =
+                    has_validation_path ? !validation_path->second.validated : false;
+                const bool remotely_initiated =
+                    has_validation_path ? !validation_path->second.validation_initiated_locally
+                                        : false;
+                return static_cast<bool>(has_validation_path & path_unvalidated &
+                                         remotely_initiated);
+            }();
             const auto send_application_ack_only =
                 [&](const AckFrame &ack_frame) -> std::vector<std::byte> {
+                const auto restore_unsent_path_validation_frames =
+                    [&](const PendingPathValidationFrames &path_validation_frames) {
+                        if (path_validation_frames.response.has_value()) {
+                            auto &path = ensure_path_state(path_validation_frames.path_id);
+                            path.pending_response = path_validation_frames.response->data;
+                        }
+                        if (path_validation_frames.challenge.has_value()) {
+                            auto &path = ensure_path_state(path_validation_frames.path_id);
+                            path.challenge_pending = true;
+                        }
+                    };
+                auto path_validation_frames = take_path_validation_frames(/*force_ack_only=*/false);
+                selected_send_path_id =
+                    path_validation_frames.response.has_value()
+                        ? std::optional<QuicPathId>{path_validation_frames.path_id}
+                        : current_send_path_id_;
                 auto ack_only_datagram = serialize_application_candidate(
-                    {}, /*include_handshake_done=*/false, ack_frame, std::nullopt, {}, {}, {}, {},
-                    std::nullopt, {}, {}, /*include_ping=*/false);
+                    {}, /*include_handshake_done=*/false, ack_frame, std::nullopt, {}, {},
+                    path_validation_frames, {}, {}, {}, {}, std::nullopt, {}, {},
+                    /*include_ping=*/false);
                 if (!ack_only_datagram.has_value()) {
+                    restore_unsent_path_validation_frames(path_validation_frames);
                     mark_failed();
                     return {};
                 }
 
                 std::vector<Frame> ack_only_frames;
                 ack_only_frames.emplace_back(ack_frame);
+                if (path_validation_frames.response.has_value()) {
+                    ack_only_frames.emplace_back(*path_validation_frames.response);
+                }
+                if (path_validation_frames.challenge.has_value()) {
+                    ack_only_frames.emplace_back(*path_validation_frames.challenge);
+                }
                 const auto packet_number =
                     reserve_application_packet_number(!use_zero_rtt_packet_protection);
                 if (!packet_number.has_value()) {
+                    restore_unsent_path_validation_frames(path_validation_frames);
                     return {};
                 }
                 packets.emplace_back(make_application_protected_packet(
-                    use_zero_rtt_packet_protection, current_version_, destination_connection_id,
-                    config_.source_connection_id, application_write_key_phase_,
-                    kDefaultInitialPacketNumberLength, *packet_number, std::move(ack_only_frames),
-                    {}));
+                    use_zero_rtt_packet_protection, current_version_,
+                    application_destination_connection_id(), config_.source_connection_id,
+                    application_write_key_phase_, kDefaultInitialPacketNumberLength, *packet_number,
+                    std::move(ack_only_frames), {}));
+                if (path_validation_frames.response.has_value() |
+                    path_validation_frames.challenge.has_value()) {
+                    track_sent_packet(application_space_,
+                                      SentPacketRecord{
+                                          .packet_number = *packet_number,
+                                          .sent_time = now,
+                                          .ack_eliciting = true,
+                                          .in_flight = true,
+                                          .bytes_in_flight = ack_only_datagram.value().size(),
+                                      });
+                }
                 application_space_.received_packets.on_ack_sent();
                 application_space_.pending_ack_deadline = std::nullopt;
                 application_space_.force_ack_send = false;
@@ -5077,7 +6346,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             };
             std::vector<Frame> frames;
             const auto force_ack_only =
-                application_space_.force_ack_send & base_ack_frame.has_value();
+                (application_space_.force_ack_send & base_ack_frame.has_value()) |
+                validation_only_send;
             auto max_data_frame = force_ack_only ? std::optional<MaxDataFrame>{}
                                                  : connection_flow_control_.take_max_data_frame();
             auto data_blocked_frame = force_ack_only
@@ -5086,6 +6356,12 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             auto max_stream_data_frames = force_ack_only ? std::vector<MaxStreamDataFrame>{}
                                                          : take_max_stream_data_frames(streams_);
             auto max_streams_frames = take_max_streams_frames(force_ack_only);
+            auto new_connection_id_frames = take_new_connection_id_frames(force_ack_only);
+            auto retire_connection_id_frames = take_retire_connection_id_frames(force_ack_only);
+            auto path_validation_frames = take_path_validation_frames(force_ack_only);
+            selected_send_path_id = path_validation_frames.response.has_value()
+                                        ? std::optional<QuicPathId>{path_validation_frames.path_id}
+                                        : current_send_path_id_;
             auto reset_stream_frames = force_ack_only ? std::vector<ResetStreamFrame>{}
                                                       : take_reset_stream_frames(streams_);
             auto stop_sending_frames = force_ack_only ? std::vector<StopSendingFrame>{}
@@ -5101,6 +6377,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                             max_outbound_datagram_size, candidate_last_stream_id);
             auto selected_ack_frame = trim_application_ack_frame(
                 application_crypto_ranges, include_handshake_done, base_ack_frame, max_data_frame,
+                new_connection_id_frames, retire_connection_id_frames, path_validation_frames,
                 max_stream_data_frames, max_streams_frames, reset_stream_frames,
                 stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
                 stream_fragments, /*include_ping=*/false);
@@ -5110,10 +6387,21 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
             auto candidate_datagram = serialize_application_candidate(
                 application_crypto_ranges, include_handshake_done, selected_ack_frame,
-                max_data_frame, max_stream_data_frames, max_streams_frames, reset_stream_frames,
-                stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
-                stream_fragments, /*include_ping=*/false);
+                max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                path_validation_frames, max_stream_data_frames, max_streams_frames,
+                reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                stream_data_blocked_frames, stream_fragments, /*include_ping=*/false);
+            const auto finalize_existing_packets_or_empty = [&]() -> std::vector<std::byte> {
+                if (packets.empty()) {
+                    return {};
+                }
+                selected_send_path_id = current_send_path_id_;
+                return finalize_datagram(packets);
+            };
             if (!candidate_datagram.has_value()) {
+                if (is_empty_packet_payload_error(candidate_datagram)) {
+                    return finalize_existing_packets_or_empty();
+                }
                 mark_failed();
                 return {};
             }
@@ -5121,6 +6409,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 candidate_datagram.value().size() > max_outbound_datagram_size) {
                 auto no_ack_candidate = serialize_application_candidate(
                     application_crypto_ranges, include_handshake_done, std::nullopt, max_data_frame,
+                    new_connection_id_frames, retire_connection_id_frames, path_validation_frames,
                     max_stream_data_frames, max_streams_frames, reset_stream_frames,
                     stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
                     stream_fragments, /*include_ping=*/false);
@@ -5169,10 +6458,14 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
                     datagram = serialize_application_candidate(
                         application_crypto_ranges, include_handshake_done, ack_frame,
-                        max_data_frame, max_stream_data_frames, max_streams_frames,
+                        max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                        path_validation_frames, max_stream_data_frames, max_streams_frames,
                         reset_stream_frames, stop_sending_frames, data_blocked_frame,
                         stream_data_blocked_frames, fragments, /*include_ping=*/false);
                     if (!datagram.has_value()) {
+                        if (is_empty_packet_payload_error(datagram)) {
+                            return false;
+                        }
                         mark_failed();
                         return false;
                     }
@@ -5182,7 +6475,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             };
             const auto fallback_to_existing_packets_or_ack_only = [&]() -> std::vector<std::byte> {
                 if (!packets.empty()) {
-                    return finalize_datagram(packets);
+                    return finalize_existing_packets_or_empty();
                 }
                 if (selected_ack_frame.has_value()) {
                     return send_application_ack_only(*selected_ack_frame);
@@ -5196,7 +6489,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 }
                 if (selected_ack_frame.has_value()) {
                     restore_unsent_application_candidate(
-                        max_data_frame, max_stream_data_frames, max_streams_frames,
+                        max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                        path_validation_frames, max_stream_data_frames, max_streams_frames,
                         reset_stream_frames, stop_sending_frames, data_blocked_frame,
                         stream_data_blocked_frames, stream_fragments);
 
@@ -5204,6 +6498,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     data_blocked_frame = connection_flow_control_.take_data_blocked_frame();
                     max_stream_data_frames = take_max_stream_data_frames(streams_);
                     max_streams_frames = take_max_streams_frames(/*force_ack_only=*/false);
+                    new_connection_id_frames =
+                        take_new_connection_id_frames(/*force_ack_only=*/false);
+                    retire_connection_id_frames =
+                        take_retire_connection_id_frames(/*force_ack_only=*/false);
+                    path_validation_frames = take_path_validation_frames(/*force_ack_only=*/false);
                     reset_stream_frames = take_reset_stream_frames(streams_);
                     stop_sending_frames = take_stop_sending_frames(streams_);
                     stream_data_blocked_frames = take_stream_data_blocked_frames(streams_);
@@ -5214,24 +6513,31 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     selected_ack_frame = std::nullopt;
                     candidate_datagram = serialize_application_candidate(
                         application_crypto_ranges, include_handshake_done, selected_ack_frame,
-                        max_data_frame, max_stream_data_frames, max_streams_frames,
+                        max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                        path_validation_frames, max_stream_data_frames, max_streams_frames,
                         reset_stream_frames, stop_sending_frames, data_blocked_frame,
                         stream_data_blocked_frames, stream_fragments, /*include_ping=*/false);
-                    if (!candidate_datagram.has_value()) {
+                    if (!candidate_datagram.has_value() &
+                        !is_empty_packet_payload_error(candidate_datagram)) {
                         mark_failed();
                         return {};
                     }
                     static_cast<void>(trim_candidate_to_fit(selected_ack_frame, candidate_datagram,
                                                             stream_fragments));
                 }
+                if (!candidate_datagram.has_value()) {
+                    return fallback_to_existing_packets_or_ack_only();
+                }
             }
             const auto candidate_datagram_size = datagram_size_or_zero(candidate_datagram);
             if (candidate_datagram_size > max_outbound_datagram_size) {
-                restore_unsent_application_candidate(max_data_frame, max_stream_data_frames,
-                                                     max_streams_frames, reset_stream_frames,
-                                                     stop_sending_frames, data_blocked_frame,
-                                                     stream_data_blocked_frames, stream_fragments);
+                restore_unsent_application_candidate(
+                    max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                    path_validation_frames, max_stream_data_frames, max_streams_frames,
+                    reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                    stream_data_blocked_frames, stream_fragments);
                 if (!packets.empty()) {
+                    selected_send_path_id = current_send_path_id_;
                     return finalize_datagram(packets);
                 }
                 if (max_outbound_datagram_size == kMaximumDatagramSize) {
@@ -5245,6 +6551,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 application_crypto_frames.size() + (selected_ack_frame.has_value() ? 1u : 0u) +
                 (include_handshake_done ? 1u : 0u) + reset_stream_frames.size() +
                 stop_sending_frames.size() + (max_data_frame.has_value() ? 1u : 0u) +
+                new_connection_id_frames.size() + retire_connection_id_frames.size() +
+                static_cast<std::size_t>(path_validation_frames.response.has_value()) +
+                static_cast<std::size_t>(path_validation_frames.challenge.has_value()) +
                 max_stream_data_frames.size() + max_streams_frames.size() +
                 (data_blocked_frame.has_value() ? 1u : 0u) + stream_data_blocked_frames.size());
             for (const auto &frame : application_crypto_frames) {
@@ -5259,17 +6568,40 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             const auto ack_eliciting =
                 !application_crypto_frames.empty() ||
                 application_ack_eliciting_frame_count(
-                    include_handshake_done, max_data_frame, max_stream_data_frames,
+                    include_handshake_done, max_data_frame, new_connection_id_frames,
+                    retire_connection_id_frames, path_validation_frames.response.has_value(),
+                    path_validation_frames.challenge.has_value(), max_stream_data_frames,
                     max_streams_frames, reset_stream_frames, stop_sending_frames,
                     data_blocked_frame, stream_data_blocked_frames, stream_fragments) != 0;
             const auto bypass_congestion_window =
-                application_space_.pending_probe_packet.has_value();
+                application_space_.pending_probe_packet.has_value() ||
+                (path_validation_frames.challenge.has_value() && stream_fragments.empty());
             if (ack_eliciting && !bypass_congestion_window &&
                 !congestion_controller_.can_send_ack_eliciting(candidate_datagram.value().size())) {
-                restore_unsent_application_candidate(max_data_frame, max_stream_data_frames,
-                                                     max_streams_frames, reset_stream_frames,
-                                                     stop_sending_frames, data_blocked_frame,
-                                                     stream_data_blocked_frames, stream_fragments);
+                if (traces_this_connection) {
+                    std::cerr
+                        << "quic-packet-trace send-blocked scid="
+                        << format_connection_id_hex(config_.source_connection_id)
+                        << " reason=congestion"
+                        << " size=" << candidate_datagram.value().size()
+                        << " current=" << format_optional_path_id(current_send_path_id_)
+                        << " previous=" << format_optional_path_id(previous_path_id_)
+                        << " last_validated=" << format_optional_path_id(last_validated_path_id_)
+                        << " current_path={"
+                        << format_path_state_summary(find_path_state(paths_, current_send_path_id_))
+                        << "} cwnd=" << congestion_controller_.congestion_window()
+                        << " bif=" << congestion_controller_.bytes_in_flight()
+                        << " pending_send=" << static_cast<int>(has_pending_application_send())
+                        << " probe="
+                        << static_cast<int>(application_space_.pending_probe_packet.has_value())
+                        << " rempto=" << static_cast<unsigned>(remaining_pto_probe_datagrams_)
+                        << '\n';
+                }
+                restore_unsent_application_candidate(
+                    max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                    path_validation_frames, max_stream_data_frames, max_streams_frames,
+                    reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                    stream_data_blocked_frames, stream_fragments);
                 return fallback_to_existing_packets_or_ack_only();
             }
             last_application_send_stream_id_ = candidate_last_stream_id;
@@ -5282,6 +6614,18 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             }
             if (max_data_frame.has_value()) {
                 frames.emplace_back(*max_data_frame);
+            }
+            for (const auto &frame : new_connection_id_frames) {
+                frames.emplace_back(frame);
+            }
+            for (const auto &frame : retire_connection_id_frames) {
+                frames.emplace_back(frame);
+            }
+            if (path_validation_frames.response.has_value()) {
+                frames.emplace_back(*path_validation_frames.response);
+            }
+            if (path_validation_frames.challenge.has_value()) {
+                frames.emplace_back(*path_validation_frames.challenge);
             }
             for (const auto &frame : max_stream_data_frames) {
                 frames.emplace_back(frame);
@@ -5312,10 +6656,10 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                           << " bytes=" << candidate_datagram.value().size() << '\n';
             }
             packets.emplace_back(make_application_protected_packet(
-                use_zero_rtt_packet_protection, current_version_, destination_connection_id,
-                config_.source_connection_id, application_write_key_phase_,
-                kDefaultInitialPacketNumberLength, *packet_number, std::move(frames),
-                stream_fragments));
+                use_zero_rtt_packet_protection, current_version_,
+                application_destination_connection_id(), config_.source_connection_id,
+                application_write_key_phase_, kDefaultInitialPacketNumberLength, *packet_number,
+                std::move(frames), stream_fragments));
 
             if (ack_eliciting) {
                 track_sent_packet(application_space_,
@@ -5346,11 +6690,33 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 application_space_.pending_ack_deadline = std::nullopt;
                 application_space_.force_ack_send = false;
             }
-            clear_probe_packet_after_send(application_space_.pending_probe_packet);
+            if (!validation_only_send) {
+                clear_probe_packet_after_send(application_space_.pending_probe_packet);
+            }
         }
     }
 
     if (packets.empty()) {
+        if (traces_this_connection & (has_pending_application_send() |
+                                      application_space_.pending_probe_packet.has_value())) {
+            std::cerr << "quic-packet-trace send-empty scid="
+                      << format_connection_id_hex(config_.source_connection_id)
+                      << " max=" << max_outbound_datagram_size
+                      << " current=" << format_optional_path_id(current_send_path_id_)
+                      << " previous=" << format_optional_path_id(previous_path_id_)
+                      << " last_validated=" << format_optional_path_id(last_validated_path_id_)
+                      << " current_path={"
+                      << format_path_state_summary(find_path_state(paths_, current_send_path_id_))
+                      << "} inbound_path={"
+                      << format_path_state_summary(find_path_state(paths_, last_inbound_path_id_))
+                      << "} pending_send=" << static_cast<int>(has_pending_application_send())
+                      << " probe="
+                      << static_cast<int>(application_space_.pending_probe_packet.has_value())
+                      << " rempto=" << static_cast<unsigned>(remaining_pto_probe_datagrams_)
+                      << " pto_count=" << pto_count_
+                      << " cwnd=" << congestion_controller_.congestion_window()
+                      << " bif=" << congestion_controller_.bytes_in_flight() << '\n';
+        }
         return {};
     }
 
@@ -5412,7 +6778,13 @@ bool connection_helper_edge_cases_for_tests() {
 
     const auto failed_datagram =
         CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
+    const auto empty_packet_payload_datagram =
+        CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::empty_packet_payload, 0);
     const bool failed_datagram_reports_zero_size = datagram_size_or_zero(failed_datagram) == 0;
+    const bool empty_packet_payload_error_reported =
+        is_empty_packet_payload_error(empty_packet_payload_datagram);
+    const bool non_empty_packet_payload_error_not_reported =
+        !is_empty_packet_payload_error(failed_datagram);
 
     TransportParameters invalid_transport_parameters;
     invalid_transport_parameters.max_udp_payload_size = std::numeric_limits<std::uint64_t>::max();
@@ -5524,6 +6896,115 @@ bool connection_helper_edge_cases_for_tests() {
         format_connection_id_hex(retry_source_connection_id);
     const bool empty_connection_id_formats_empty = empty_connection_id_hex.empty();
     const bool connection_id_formats_lower_hex = retry_source_connection_id_hex == "5300";
+    const bool empty_issued_connection_id_remains_empty =
+        make_issued_connection_id({}, /*sequence_number=*/7).empty();
+    const DeferredProtectedDatagram deferred_packet(bytes_from_ints({0x01, 0x02, 0x03}),
+                                                    /*id=*/9);
+    const bool vector_equals_deferred_packet =
+        bytes_from_ints({0x01, 0x02, 0x03}) == deferred_packet;
+
+    PathState traced_path{
+        .id = 7,
+        .validated = true,
+        .is_current_send_path = true,
+        .challenge_pending = true,
+        .anti_amplification_received_bytes = 11,
+        .anti_amplification_sent_bytes = 7,
+        .outstanding_challenge =
+            std::array{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
+                       std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08}},
+        .pending_response =
+            std::array{std::byte{0x11}, std::byte{0x12}, std::byte{0x13}, std::byte{0x14},
+                       std::byte{0x15}, std::byte{0x16}, std::byte{0x17}, std::byte{0x18}},
+    };
+    std::map<QuicPathId, PathState> traced_paths{
+        {traced_path.id, traced_path},
+    };
+    const bool optional_path_none_formats_dash = format_optional_path_id(std::nullopt) == "-";
+    const bool optional_path_value_formats_decimal = format_optional_path_id(traced_path.id) == "7";
+    const bool missing_optional_path_returns_null =
+        find_path_state(traced_paths, std::nullopt) == nullptr;
+    const bool unknown_path_returns_null = find_path_state(traced_paths, 99) == nullptr;
+    const bool existing_path_is_found = find_path_state(traced_paths, traced_path.id) != nullptr;
+    const bool null_path_summary_formats_dash = format_path_state_summary(nullptr) == "-";
+    const std::string traced_path_summary = format_path_state_summary(&traced_path);
+    const bool traced_path_summary_mentions_path_state =
+        (traced_path_summary.find("id=7") != std::string::npos) &
+        (traced_path_summary.find("val=1") != std::string::npos) &
+        (traced_path_summary.find("cur=1") != std::string::npos) &
+        (traced_path_summary.find("chal=1") != std::string::npos) &
+        (traced_path_summary.find("out=1") != std::string::npos) &
+        (traced_path_summary.find("resp=1") != std::string::npos) &
+        (traced_path_summary.find("recv=11") != std::string::npos) &
+        (traced_path_summary.find("sent=7") != std::string::npos);
+    const bool invalid_ack_first_range_formats_invalid = format_ack_ranges(AckFrame{
+                                                             .largest_acknowledged = 1,
+                                                             .first_ack_range = 2,
+                                                         }) == "[invalid]";
+    const bool invalid_ack_gap_formats_invalid = format_ack_ranges(AckFrame{
+                                                     .largest_acknowledged = 10,
+                                                     .first_ack_range = 0,
+                                                     .additional_ranges =
+                                                         {
+                                                             AckRange{.gap = 9, .range_length = 0},
+                                                         },
+                                                 }) == "[10-10,invalid]";
+    const bool invalid_ack_range_length_formats_invalid =
+        format_ack_ranges(AckFrame{
+            .largest_acknowledged = 10,
+            .first_ack_range = 2,
+            .additional_ranges =
+                {
+                    AckRange{.gap = 0, .range_length = 7},
+                },
+        }) == "[8-10,invalid]";
+    const bool valid_ack_ranges_format_expected = format_ack_ranges(AckFrame{
+                                                      .largest_acknowledged = 10,
+                                                      .first_ack_range = 1,
+                                                      .additional_ranges =
+                                                          {
+                                                              AckRange{.gap = 0, .range_length = 1},
+                                                          },
+                                                  }) == "[9-10,6-7]";
+    const bool empty_packet_summary_reports_zero = summarize_packets({}) == "count=0";
+    const std::array sent_packets = {
+        SentPacketRecord{
+            .packet_number = 5,
+            .stream_fragments =
+                {
+                    StreamFrameSendFragment{
+                        .stream_id = 0,
+                        .offset = 4,
+                        .bytes = SharedBytes(bytes_from_ints({0xaa, 0xbb})),
+                        .fin = false,
+                        .consumes_flow_control = true,
+                    },
+                },
+        },
+        SentPacketRecord{
+            .packet_number = 9,
+        },
+    };
+    const std::string packet_summary = summarize_packets(sent_packets);
+    const bool packet_summary_mentions_counts =
+        (packet_summary.find("count=2") != std::string::npos) &
+        (packet_summary.find("pn=5-9") != std::string::npos) &
+        (packet_summary.find("stream_fragments=1") != std::string::npos) &
+        (packet_summary.find("first_stream_offset=4") != std::string::npos);
+    const std::array no_stream_packets = {
+        SentPacketRecord{
+            .packet_number = 6,
+        },
+        SentPacketRecord{
+            .packet_number = 8,
+        },
+    };
+    const std::string no_stream_packet_summary = summarize_packets(no_stream_packets);
+    const bool packet_summary_without_stream_offset_omits_offset =
+        (no_stream_packet_summary.find("count=2") != std::string::npos) &
+        (no_stream_packet_summary.find("pn=6-8") != std::string::npos) &
+        (no_stream_packet_summary.find("stream_fragments=0") != std::string::npos) &
+        (no_stream_packet_summary.find("first_stream_offset=") == std::string::npos);
 
     bool trace_unset_disabled = false;
     bool trace_empty_disabled = false;
@@ -5646,6 +7127,7 @@ bool connection_helper_edge_cases_for_tests() {
 
     return retry_same_version_omits_version_information &
            retry_version_change_keeps_version_information & failed_datagram_reports_zero_size &
+           empty_packet_payload_error_reported & non_empty_packet_payload_error_not_reported &
            encode_failure_returns_empty & wrong_magic_rejected & truncated_tls_state_rejected &
            missing_application_protocol_rejected & missing_transport_parameters_rejected &
            missing_application_context_rejected & trailing_bytes_rejected &
@@ -5654,8 +7136,16 @@ bool connection_helper_edge_cases_for_tests() {
            handshake_long_header_is_bufferable & protected_one_rtt_packet_deferred &
            connected_protected_one_rtt_packet_not_deferred & corrupted_long_header_discarded &
            short_header_not_discarded_as_corrupted_long_header & empty_connection_id_formats_empty &
-           connection_id_formats_lower_hex & trace_unset_disabled & trace_empty_disabled &
-           trace_zero_disabled & trace_matches_without_filter & trace_matches_with_empty_filter &
+           connection_id_formats_lower_hex & empty_issued_connection_id_remains_empty &
+           vector_equals_deferred_packet & optional_path_none_formats_dash &
+           optional_path_value_formats_decimal & missing_optional_path_returns_null &
+           unknown_path_returns_null & existing_path_is_found & null_path_summary_formats_dash &
+           traced_path_summary_mentions_path_state & invalid_ack_first_range_formats_invalid &
+           invalid_ack_gap_formats_invalid & invalid_ack_range_length_formats_invalid &
+           valid_ack_ranges_format_expected & empty_packet_summary_reports_zero &
+           packet_summary_mentions_counts & packet_summary_without_stream_offset_omits_offset &
+           trace_unset_disabled & trace_empty_disabled & trace_zero_disabled &
+           trace_matches_without_filter & trace_matches_with_empty_filter &
            trace_matches_with_exact_filter & trace_rejects_mismatched_filter &
            empty_long_header_rejected & short_header_rejected & truncated_version_rejected &
            unsupported_version_rejected & missing_destination_connection_id_length_rejected &

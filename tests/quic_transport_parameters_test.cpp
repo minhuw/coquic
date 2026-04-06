@@ -745,6 +745,34 @@ TEST(QuicTransportParametersTest, RejectsPreferredAddressCidLengthAboveTwentyEnc
     EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
 }
 
+TEST(QuicTransportParametersTest, RejectsDisableActiveMigrationValueWithNonEmptyEncoding) {
+    const auto decoded =
+        coquic::quic::deserialize_transport_parameters(byte_vector({0x0c, 0x01, 0x00}));
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsTooShortPreferredAddressEncoding) {
+    auto encoded = byte_vector({0x0d, 0x28});
+    encoded.insert(encoded.end(), 40, std::byte{0x00});
+
+    const auto decoded = coquic::quic::deserialize_transport_parameters(encoded);
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsPreferredAddressEncodingWithLengthMismatch) {
+    auto encoded = encode_preferred_address_parameter_for_test(4);
+    encoded[26] = std::byte{0x05};
+
+    const auto decoded = coquic::quic::deserialize_transport_parameters(encoded);
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicTransportParametersTest, RejectsSerializingPreferredAddressWithZeroLengthConnectionId) {
     auto preferred_address = sample_preferred_address();
     preferred_address.connection_id.clear();

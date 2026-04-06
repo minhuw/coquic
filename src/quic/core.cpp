@@ -190,6 +190,16 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                 }
             },
             [&](const QuicCoreRequestKeyUpdate &) { connection_->request_key_update(); },
+            [&](const QuicCoreRequestConnectionMigration &in) {
+                const auto requested =
+                    connection_->request_connection_migration(in.path_id, in.reason);
+                if (!requested.has_value()) {
+                    result.local_error = QuicCoreLocalError{
+                        .code = QuicCoreLocalErrorCode::unsupported_operation,
+                        .stream_id = std::nullopt,
+                    };
+                }
+            },
             [&](const QuicCoreTimerExpired &) { connection_->on_timeout(now); },
         },
         input);
@@ -216,6 +226,9 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     while (const auto event = connection_->take_state_change()) {
         result.effects.emplace_back(QuicCoreStateEvent{*event});
     }
+    while (const auto preferred = connection_->take_peer_preferred_address_available()) {
+        result.effects.emplace_back(*preferred);
+    }
     while (const auto state = connection_->take_resumption_state_available()) {
         result.effects.emplace_back(*state);
     }
@@ -224,6 +237,10 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     }
     result.next_wakeup = connection_->next_wakeup();
     return result;
+}
+
+std::vector<ConnectionId> QuicCore::active_local_connection_ids() const {
+    return connection_->active_local_connection_ids();
 }
 
 bool QuicCore::is_handshake_complete() const {

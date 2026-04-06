@@ -97,6 +97,29 @@ TEST(QuicHttp09Test, MigrationAliasesReuseTransferTransportAndTlsProfiles) {
     }
 }
 
+TEST(QuicHttp09Test, KeyUpdateReusesTransferTransportAndTlsProfiles) {
+    const auto transfer_client = coquic::quic::http09_client_transport_for_testcase(
+        coquic::quic::QuicHttp09Testcase::transfer);
+    const auto transfer_server = coquic::quic::http09_server_transport_for_testcase(
+        coquic::quic::QuicHttp09Testcase::transfer);
+    const auto transfer_tls = coquic::quic::http09_tls_cipher_suites_for_testcase(
+        coquic::quic::QuicHttp09Testcase::transfer);
+
+    const auto keyupdate_client = coquic::quic::http09_client_transport_for_testcase(
+        coquic::quic::QuicHttp09Testcase::keyupdate);
+    EXPECT_EQ(keyupdate_client.initial_max_data, transfer_client.initial_max_data);
+    EXPECT_EQ(keyupdate_client.initial_max_stream_data_bidi_local,
+              transfer_client.initial_max_stream_data_bidi_local);
+
+    const auto keyupdate_server = coquic::quic::http09_server_transport_for_testcase(
+        coquic::quic::QuicHttp09Testcase::keyupdate);
+    EXPECT_EQ(keyupdate_server.initial_max_streams_bidi, transfer_server.initial_max_streams_bidi);
+
+    EXPECT_EQ(coquic::quic::http09_tls_cipher_suites_for_testcase(
+                  coquic::quic::QuicHttp09Testcase::keyupdate),
+              transfer_tls);
+}
+
 TEST(QuicHttp09Test, UsesExtendedIdleTimeoutProfileForMulticonnectCase) {
     const auto config = coquic::quic::http09_client_transport_for_testcase(
         coquic::quic::QuicHttp09Testcase::multiconnect);

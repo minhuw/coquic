@@ -128,11 +128,12 @@ bool ReceivedPacketHistory::has_ack_to_send() const {
 }
 
 std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack_delay_exponent,
-                                                               QuicCoreTimePoint now) const {
+                                                               QuicCoreTimePoint now,
+                                                               bool allow_non_pending) const {
     if (ranges_.empty()) {
         return std::nullopt;
     }
-    if (!ack_pending_) {
+    if (!ack_pending_ && !allow_non_pending) {
         return std::nullopt;
     }
 

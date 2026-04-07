@@ -22,9 +22,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Enable Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Format Check
         run: nix develop -c pre-commit run clang-format --all-files --show-diff-on-failure
 

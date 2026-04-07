@@ -17,7 +17,77 @@
 
 namespace coquic::quic {
 CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secret);
+// Test-local adapters preserve the existing test call sites while the public
+// API uses request structs to satisfy clang-tidy in production code.
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
+CodecResult<std::vector<std::byte>> make_packet_protection_nonce(std::span<const std::byte> iv,
+                                                                 std::uint64_t packet_number) {
+    return make_packet_protection_nonce(PacketProtectionNonceInput{
+        .iv = iv,
+        .packet_number = packet_number,
+    });
 }
+
+CodecResult<std::size_t> seal_payload_into(CipherSuite cipher_suite, std::span<const std::byte> key,
+                                           std::span<const std::byte> nonce,
+                                           std::span<const std::byte> associated_data,
+                                           std::span<const std::byte> plaintext,
+                                           std::span<std::byte> ciphertext) {
+    return seal_payload_into(SealPayloadIntoInput{
+        .cipher_suite = cipher_suite,
+        .key = key,
+        .nonce = nonce,
+        .associated_data = associated_data,
+        .plaintext = plaintext,
+        .ciphertext = ciphertext,
+    });
+}
+
+CodecResult<std::size_t> seal_payload_chunks_into(CipherSuite cipher_suite,
+                                                  std::span<const std::byte> key,
+                                                  std::span<const std::byte> nonce,
+                                                  std::span<const std::byte> associated_data,
+                                                  std::span<const PlaintextChunk> plaintext_chunks,
+                                                  std::span<std::byte> ciphertext) {
+    return seal_payload_chunks_into(SealPayloadChunksIntoInput{
+        .cipher_suite = cipher_suite,
+        .key = key,
+        .nonce = nonce,
+        .associated_data = associated_data,
+        .plaintext_chunks = plaintext_chunks,
+        .ciphertext = ciphertext,
+    });
+}
+
+CodecResult<std::vector<std::byte>> seal_payload(CipherSuite cipher_suite,
+                                                 std::span<const std::byte> key,
+                                                 std::span<const std::byte> nonce,
+                                                 std::span<const std::byte> associated_data,
+                                                 std::span<const std::byte> plaintext) {
+    return seal_payload(SealPayloadInput{
+        .cipher_suite = cipher_suite,
+        .key = key,
+        .nonce = nonce,
+        .associated_data = associated_data,
+        .plaintext = plaintext,
+    });
+}
+
+CodecResult<std::vector<std::byte>> open_payload(CipherSuite cipher_suite,
+                                                 std::span<const std::byte> key,
+                                                 std::span<const std::byte> nonce,
+                                                 std::span<const std::byte> associated_data,
+                                                 std::span<const std::byte> ciphertext) {
+    return open_payload(OpenPayloadInput{
+        .cipher_suite = cipher_suite,
+        .key = key,
+        .nonce = nonce,
+        .associated_data = associated_data,
+        .ciphertext = ciphertext,
+    });
+}
+// NOLINTEND(bugprone-easily-swappable-parameters)
+} // namespace coquic::quic
 
 namespace {
 

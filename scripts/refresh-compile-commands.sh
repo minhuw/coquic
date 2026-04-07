@@ -5,6 +5,11 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 compile_commands="${repo_root}/compile_commands.json"
+lock_file="${repo_root}/.zig-cache/compile-commands.lock"
+
+mkdir -p "${repo_root}/.zig-cache"
+exec 9>"${lock_file}"
+flock 9
 
 inputs=(
     "${repo_root}/build.zig"

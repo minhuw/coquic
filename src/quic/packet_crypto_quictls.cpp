@@ -482,12 +482,12 @@ CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secre
     });
 }
 
-CodecResult<std::vector<std::byte>> make_packet_protection_nonce(std::span<const std::byte> iv,
-                                                                 std::uint64_t packet_number) {
-    auto nonce = std::vector<std::byte>(iv.begin(), iv.end());
-    auto packet_number_value = packet_number;
+CodecResult<std::vector<std::byte>> make_packet_protection_nonce(PacketProtectionNonceInput input) {
+    auto nonce = std::vector<std::byte>(input.iv.begin(), input.iv.end());
+    auto packet_number_value = input.packet_number;
 
-    for (std::size_t index = 0; index < sizeof(packet_number) && index < nonce.size(); ++index) {
+    for (std::size_t index = 0; index < sizeof(input.packet_number) && index < nonce.size();
+         ++index) {
         const auto nonce_index = nonce.size() - 1 - index;
         nonce[nonce_index] ^= static_cast<std::byte>(packet_number_value & 0xff);
         packet_number_value >>= 8;
@@ -512,9 +512,13 @@ compute_retry_integrity_tag(const RetryPacket &packet,
                                                                retry_pseudo_packet.error().offset);
     }
 
-    const auto integrity_tag_ciphertext =
-        seal_payload(CipherSuite::tls_aes_128_gcm_sha256, retry_material.value().key,
-                     retry_material.value().nonce, retry_pseudo_packet.value(), {});
+    const auto integrity_tag_ciphertext = seal_payload(SealPayloadInput{
+        .cipher_suite = CipherSuite::tls_aes_128_gcm_sha256,
+        .key = retry_material.value().key,
+        .nonce = retry_material.value().nonce,
+        .associated_data = retry_pseudo_packet.value(),
+        .plaintext = {},
+    });
     if (!integrity_tag_ciphertext.has_value()) {
         return CodecResult<std::array<std::byte, 16>>::failure(
             integrity_tag_ciphertext.error().code, integrity_tag_ciphertext.error().offset);
@@ -547,16 +551,12 @@ validate_retry_integrity_tag(const RetryPacket &packet,
     return CodecResult<bool>::success(valid);
 }
 
-CodecResult<std::size_t> seal_payload_into(CipherSuite cipher_suite, std::span<const std::byte> key,
-                                           std::span<const std::byte> nonce,
-                                           std::span<const std::byte> associated_data,
-                                           std::span<const std::byte> plaintext,
-                                           std::span<std::byte> ciphertext) {
-    const auto parameters = cipher_suite_parameters(cipher_suite);
+CodecResult<std::size_t> seal_payload_into(const SealPayloadIntoInput &input) {
+    const auto parameters = cipher_suite_parameters(input.cipher_suite);
     if (!parameters.has_value())
         return CodecResult<std::size_t>::failure(parameters.error().code, 0);
-    if ((key.size() != parameters.value().key_length) |
-        (nonce.size() != parameters.value().iv_length))
+    if ((input.key.size() != parameters.value().key_length) |
+        (input.nonce.size() != parameters.value().iv_length))
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
 
@@ -565,27 +565,23 @@ CodecResult<std::size_t> seal_payload_into(CipherSuite cipher_suite, std::span<c
         &EVP_aes_256_gcm,
         &EVP_chacha20_poly1305,
     };
-    const auto cipher = kAeadCiphers[static_cast<std::size_t>(cipher_suite)]();
+    const auto cipher = kAeadCiphers[static_cast<std::size_t>(input.cipher_suite)]();
 
     return seal_aead_into(cipher, SealAeadRequest{
-                                      .key = key,
-                                      .nonce = nonce,
-                                      .associated_data = associated_data,
-                                      .plaintext = plaintext,
-                                      .ciphertext = ciphertext,
+                                      .key = input.key,
+                                      .nonce = input.nonce,
+                                      .associated_data = input.associated_data,
+                                      .plaintext = input.plaintext,
+                                      .ciphertext = input.ciphertext,
                                   });
 }
 
-CodecResult<std::size_t> seal_payload_chunks_into(CipherSuite cipher_suite,
-                                                  std::span<const std::byte> key,
-                                                  std::span<const std::byte> nonce,
-                                                  std::span<const std::byte> associated_data,
-                                                  std::span<const PlaintextChunk> plaintext_chunks,
-                                                  std::span<std::byte> ciphertext) {
-    const auto parameters = cipher_suite_parameters(cipher_suite);
+CodecResult<std::size_t> seal_payload_chunks_into(const SealPayloadChunksIntoInput &input) {
+    const auto parameters = cipher_suite_parameters(input.cipher_suite);
     if (!parameters.has_value())
         return CodecResult<std::size_t>::failure(parameters.error().code, 0);
-    if (key.size() != parameters.value().key_length || nonce.size() != parameters.value().iv_length)
+    if (input.key.size() != parameters.value().key_length ||
+        input.nonce.size() != parameters.value().iv_length)
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
 
@@ -594,23 +590,26 @@ CodecResult<std::size_t> seal_payload_chunks_into(CipherSuite cipher_suite,
         &EVP_aes_256_gcm,
         &EVP_chacha20_poly1305,
     };
-    const auto cipher = kAeadCiphers[static_cast<std::size_t>(cipher_suite)]();
+    const auto cipher = kAeadCiphers[static_cast<std::size_t>(input.cipher_suite)]();
 
-    return seal_aead_chunks_into(cipher, key, nonce, associated_data, plaintext_chunks, ciphertext);
+    return seal_aead_chunks_into(cipher, input.key, input.nonce, input.associated_data,
+                                 input.plaintext_chunks, input.ciphertext);
 }
 
-CodecResult<std::vector<std::byte>> seal_payload(CipherSuite cipher_suite,
-                                                 std::span<const std::byte> key,
-                                                 std::span<const std::byte> nonce,
-                                                 std::span<const std::byte> associated_data,
-                                                 std::span<const std::byte> plaintext) {
-    const auto parameters = cipher_suite_parameters(cipher_suite);
+CodecResult<std::vector<std::byte>> seal_payload(const SealPayloadInput &input) {
+    const auto parameters = cipher_suite_parameters(input.cipher_suite);
     if (!parameters.has_value())
         return crypto_failure(parameters.error().code);
 
-    std::vector<std::byte> ciphertext(plaintext.size() + aead_tag_length);
-    const auto written = seal_payload_into(cipher_suite, key, nonce, associated_data, plaintext,
-                                           std::span<std::byte>{ciphertext});
+    std::vector<std::byte> ciphertext(input.plaintext.size() + aead_tag_length);
+    const auto written = seal_payload_into(SealPayloadIntoInput{
+        .cipher_suite = input.cipher_suite,
+        .key = input.key,
+        .nonce = input.nonce,
+        .associated_data = input.associated_data,
+        .plaintext = input.plaintext,
+        .ciphertext = std::span<std::byte>{ciphertext},
+    });
     if (!written.has_value())
         return crypto_failure(written.error().code);
 
@@ -618,15 +617,12 @@ CodecResult<std::vector<std::byte>> seal_payload(CipherSuite cipher_suite,
     return CodecResult<std::vector<std::byte>>::success(std::move(ciphertext));
 }
 
-CodecResult<std::vector<std::byte>> open_payload(CipherSuite cipher_suite,
-                                                 std::span<const std::byte> key,
-                                                 std::span<const std::byte> nonce,
-                                                 std::span<const std::byte> associated_data,
-                                                 std::span<const std::byte> ciphertext) {
-    const auto parameters = cipher_suite_parameters(cipher_suite);
+CodecResult<std::vector<std::byte>> open_payload(const OpenPayloadInput &input) {
+    const auto parameters = cipher_suite_parameters(input.cipher_suite);
     if (!parameters.has_value())
         return crypto_failure(parameters.error().code);
-    if (key.size() != parameters.value().key_length || nonce.size() != parameters.value().iv_length)
+    if (input.key.size() != parameters.value().key_length ||
+        input.nonce.size() != parameters.value().iv_length)
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
 
     static constexpr std::array<const EVP_CIPHER *(*)(), 3> kAeadCiphers{
@@ -634,9 +630,9 @@ CodecResult<std::vector<std::byte>> open_payload(CipherSuite cipher_suite,
         &EVP_aes_256_gcm,
         &EVP_chacha20_poly1305,
     };
-    const auto cipher = kAeadCiphers[static_cast<std::size_t>(cipher_suite)]();
+    const auto cipher = kAeadCiphers[static_cast<std::size_t>(input.cipher_suite)]();
 
-    return open_aead(cipher, key, nonce, associated_data, ciphertext);
+    return open_aead(cipher, input.key, input.nonce, input.associated_data, input.ciphertext);
 }
 
 CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite cipher_suite,

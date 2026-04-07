@@ -3925,7 +3925,7 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
     ClientSocketSet client_sockets{
         .primary =
             ClientSocketDescriptor{
-                .fd = -1,
+                .fd = 17,
                 .family = AF_UNSPEC,
             },
     };

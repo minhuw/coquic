@@ -658,7 +658,11 @@ PatchedLengthField patch_long_header_length_field_or_assert(std::vector<std::byt
 
 std::vector<std::byte> make_packet_protection_nonce_or_assert(std::span<const std::byte> iv,
                                                               std::uint64_t packet_number) {
-    return make_packet_protection_nonce(iv, packet_number).value();
+    return make_packet_protection_nonce(PacketProtectionNonceInput{
+                                            .iv = iv,
+                                            .packet_number = packet_number,
+                                        })
+        .value();
 }
 
 void pad_long_header_plaintext_for_header_protection(std::vector<std::byte> &plaintext_image,
@@ -714,10 +718,14 @@ serialize_protected_initial_packet(const ProtectedInitialPacket &packet,
     const auto nonce =
         make_packet_protection_nonce_or_assert(keys.value().iv, packet.packet_number);
 
-    const auto ciphertext =
-        seal_payload(kInitialCipherSuite, keys.value().key, nonce,
-                     std::span<const std::byte>(sealed_packet).first(protected_payload_offset),
-                     std::span<const std::byte>(sealed_packet).subspan(protected_payload_offset));
+    const auto ciphertext = seal_payload(SealPayloadInput{
+        .cipher_suite = kInitialCipherSuite,
+        .key = keys.value().key,
+        .nonce = nonce,
+        .associated_data =
+            std::span<const std::byte>(sealed_packet).first(protected_payload_offset),
+        .plaintext = std::span<const std::byte>(sealed_packet).subspan(protected_payload_offset),
+    });
     if (!ciphertext.has_value())
         return CodecResult<std::vector<std::byte>>::failure(ciphertext.error().code,
                                                             ciphertext.error().offset);
@@ -765,11 +773,15 @@ deserialize_protected_initial_packet(std::span<const std::byte> bytes,
     const auto nonce =
         make_packet_protection_nonce_or_assert(keys.value().iv, packet_number.value());
 
-    const auto plaintext =
-        open_payload(kInitialCipherSuite, keys.value().key, nonce,
-                     std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
-                     std::span<const std::byte>(unprotected.value().packet_bytes)
-                         .subspan(header_end, layout.value().packet_end_offset - header_end));
+    const auto plaintext = open_payload(OpenPayloadInput{
+        .cipher_suite = kInitialCipherSuite,
+        .key = keys.value().key,
+        .nonce = nonce,
+        .associated_data =
+            std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
+        .ciphertext = std::span<const std::byte>(unprotected.value().packet_bytes)
+                          .subspan(header_end, layout.value().packet_end_offset - header_end),
+    });
     if (!plaintext.has_value()) {
         return CodecResult<ProtectedPacketDecodeResult>::failure(plaintext.error().code,
                                                                  plaintext.error().offset);
@@ -843,10 +855,14 @@ serialize_protected_handshake_packet(const ProtectedHandshakePacket &packet,
     const auto nonce =
         make_packet_protection_nonce_or_assert(keys.value().iv, packet.packet_number);
 
-    const auto ciphertext =
-        seal_payload(cipher_suite, keys.value().key, nonce,
-                     std::span<const std::byte>(sealed_packet).first(protected_payload_offset),
-                     std::span<const std::byte>(sealed_packet).subspan(protected_payload_offset));
+    const auto ciphertext = seal_payload(SealPayloadInput{
+        .cipher_suite = cipher_suite,
+        .key = keys.value().key,
+        .nonce = nonce,
+        .associated_data =
+            std::span<const std::byte>(sealed_packet).first(protected_payload_offset),
+        .plaintext = std::span<const std::byte>(sealed_packet).subspan(protected_payload_offset),
+    });
     if (!ciphertext.has_value())
         return CodecResult<std::vector<std::byte>>::failure(ciphertext.error().code,
                                                             ciphertext.error().offset);
@@ -898,11 +914,15 @@ deserialize_protected_handshake_packet(std::span<const std::byte> bytes,
     const auto nonce =
         make_packet_protection_nonce_or_assert(keys.value().iv, packet_number.value());
 
-    const auto plaintext =
-        open_payload(cipher_suite, keys.value().key, nonce,
-                     std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
-                     std::span<const std::byte>(unprotected.value().packet_bytes)
-                         .subspan(header_end, layout.value().packet_end_offset - header_end));
+    const auto plaintext = open_payload(OpenPayloadInput{
+        .cipher_suite = cipher_suite,
+        .key = keys.value().key,
+        .nonce = nonce,
+        .associated_data =
+            std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
+        .ciphertext = std::span<const std::byte>(unprotected.value().packet_bytes)
+                          .subspan(header_end, layout.value().packet_end_offset - header_end),
+    });
     if (!plaintext.has_value()) {
         return CodecResult<ProtectedPacketDecodeResult>::failure(plaintext.error().code,
                                                                  plaintext.error().offset);
@@ -976,10 +996,14 @@ serialize_protected_zero_rtt_packet(const ProtectedZeroRttPacket &packet,
     const auto protected_payload_offset = patch.packet_number_offset + packet.packet_number_length;
     const auto nonce =
         make_packet_protection_nonce_or_assert(keys.value().iv, packet.packet_number);
-    const auto ciphertext =
-        seal_payload(cipher_suite, keys.value().key, nonce,
-                     std::span<const std::byte>(sealed_packet).first(protected_payload_offset),
-                     std::span<const std::byte>(sealed_packet).subspan(protected_payload_offset));
+    const auto ciphertext = seal_payload(SealPayloadInput{
+        .cipher_suite = cipher_suite,
+        .key = keys.value().key,
+        .nonce = nonce,
+        .associated_data =
+            std::span<const std::byte>(sealed_packet).first(protected_payload_offset),
+        .plaintext = std::span<const std::byte>(sealed_packet).subspan(protected_payload_offset),
+    });
     if (!ciphertext.has_value()) {
         return CodecResult<std::vector<std::byte>>::failure(ciphertext.error().code,
                                                             ciphertext.error().offset);
@@ -1036,11 +1060,15 @@ deserialize_protected_zero_rtt_packet(std::span<const std::byte> bytes,
         layout.value().packet_number_offset + unprotected.value().packet_number_length;
     const auto nonce =
         make_packet_protection_nonce_or_assert(keys.value().iv, packet_number.value());
-    const auto plaintext =
-        open_payload(cipher_suite, keys.value().key, nonce,
-                     std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
-                     std::span<const std::byte>(unprotected.value().packet_bytes)
-                         .subspan(header_end, layout.value().packet_end_offset - header_end));
+    const auto plaintext = open_payload(OpenPayloadInput{
+        .cipher_suite = cipher_suite,
+        .key = keys.value().key,
+        .nonce = nonce,
+        .associated_data =
+            std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
+        .ciphertext = std::span<const std::byte>(unprotected.value().packet_bytes)
+                          .subspan(header_end, layout.value().packet_end_offset - header_end),
+    });
     if (!plaintext.has_value()) {
         return CodecResult<ProtectedPacketDecodeResult>::failure(plaintext.error().code,
                                                                  plaintext.error().offset);
@@ -1137,10 +1165,15 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
         auto packet_bytes = std::span<std::byte>(datagram).subspan(datagram_begin, packet_size);
         std::copy_n(padded_plaintext_image.begin(), payload_offset, packet_bytes.begin());
 
-        const auto ciphertext = seal_payload_into(
-            cipher_suite, keys.value().key, nonce,
-            std::span<const std::byte>(padded_plaintext_image).first(payload_offset),
-            plaintext_payload, packet_bytes.subspan(payload_offset));
+        const auto ciphertext = seal_payload_into(SealPayloadIntoInput{
+            .cipher_suite = cipher_suite,
+            .key = keys.value().key,
+            .nonce = nonce,
+            .associated_data =
+                std::span<const std::byte>(padded_plaintext_image).first(payload_offset),
+            .plaintext = plaintext_payload,
+            .ciphertext = packet_bytes.subspan(payload_offset),
+        });
         if (!ciphertext.has_value()) {
             rollback();
             return CodecResult<std::size_t>::failure(ciphertext.error().code,
@@ -1173,9 +1206,14 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
     std::copy(packet_chunks.value().header.begin(), packet_chunks.value().header.end(),
               packet_bytes.begin());
 
-    const auto ciphertext = seal_payload_chunks_into(
-        cipher_suite, keys.value().key, nonce, packet_chunks.value().header,
-        packet_chunks.value().payload_chunks, packet_bytes.subspan(payload_offset));
+    const auto ciphertext = seal_payload_chunks_into(SealPayloadChunksIntoInput{
+        .cipher_suite = cipher_suite,
+        .key = keys.value().key,
+        .nonce = nonce,
+        .associated_data = packet_chunks.value().header,
+        .plaintext_chunks = packet_chunks.value().payload_chunks,
+        .ciphertext = packet_bytes.subspan(payload_offset),
+    });
     if (!ciphertext.has_value()) {
         rollback();
         return CodecResult<std::size_t>::failure(ciphertext.error().code,
@@ -1237,10 +1275,15 @@ deserialize_protected_one_rtt_packet(std::span<const std::byte> bytes,
     const auto nonce =
         make_packet_protection_nonce_or_assert(keys.value().iv, packet_number.value());
 
-    const auto plaintext = open_payload(
-        cipher_suite, keys.value().key, nonce,
-        std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
-        std::span<const std::byte>(unprotected.value().packet_bytes).subspan(header_end));
+    const auto plaintext = open_payload(OpenPayloadInput{
+        .cipher_suite = cipher_suite,
+        .key = keys.value().key,
+        .nonce = nonce,
+        .associated_data =
+            std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
+        .ciphertext =
+            std::span<const std::byte>(unprotected.value().packet_bytes).subspan(header_end),
+    });
     if (!plaintext.has_value())
         return CodecResult<ProtectedPacketDecodeResult>::failure(plaintext.error().code,
                                                                  plaintext.error().offset);

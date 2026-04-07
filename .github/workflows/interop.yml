@@ -23,9 +23,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Enable Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Set up Docker 29.1
         uses: docker/setup-docker-action@v5
         with:
@@ -65,9 +62,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Enable Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Set up Docker 29.1
         uses: docker/setup-docker-action@v5
         with:
@@ -106,9 +100,6 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Enable Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Set up Docker 29.1
         uses: docker/setup-docker-action@v5

@@ -4,6 +4,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
+if grep -q 'DeterminateSystems/magic-nix-cache-action@main' .github/workflows/interop.yml; then
+  echo "interop workflow must not use DeterminateSystems/magic-nix-cache-action@main" >&2
+  exit 1
+fi
+
 actual_block="$(
   awk '
     /^  interop-self:$/ {
@@ -37,9 +42,6 @@ expected_block="$(cat <<'EOF'
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Enable Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Set up Docker 29.1
         uses: docker/setup-docker-action@v5

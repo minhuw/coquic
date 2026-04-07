@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <span>
@@ -46,6 +47,7 @@ struct TlsAdapterConfig {
     bool attempt_zero_rtt = false;
     bool accept_zero_rtt = false;
     std::vector<std::byte> zero_rtt_context;
+    std::optional<std::filesystem::path> tls_keylog_path;
 };
 
 class TlsAdapter {

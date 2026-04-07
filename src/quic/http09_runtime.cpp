@@ -788,6 +788,7 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
     if (config.qlog_directory.has_value()) {
         core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
     }
+    core.tls_keylog_path = config.tls_keylog_path;
     core.transport.preferred_address = runtime_preferred_address_for_server(config);
     return core;
 }
@@ -5953,6 +5954,10 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
     if (const auto qlogdir = getenv_string("QLOGDIR"); qlogdir.has_value() && !qlogdir->empty()) {
         config.qlog_directory = std::filesystem::path(*qlogdir);
     }
+    if (const auto sslkeylogfile = getenv_string("SSLKEYLOGFILE");
+        sslkeylogfile.has_value() && !sslkeylogfile->empty()) {
+        config.tls_keylog_path = std::filesystem::path(*sslkeylogfile);
+    }
     if (const auto server_name = getenv_string("SERVER_NAME"); server_name.has_value()) {
         config.server_name = *server_name;
         server_name_specified = true;
@@ -6087,6 +6092,7 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
     if (config.qlog_directory.has_value()) {
         core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
     }
+    core.tls_keylog_path = config.tls_keylog_path;
     return core;
 }
 

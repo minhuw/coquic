@@ -2855,6 +2855,7 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
         .attempt_zero_rtt = enable_zero_rtt_attempt,
         .accept_zero_rtt = false,
         .zero_rtt_context = config_.zero_rtt.application_context,
+        .tls_keylog_path = config_.tls_keylog_path,
     });
     const auto tls_started = tls_->start();
     if (!tls_started.has_value()) {
@@ -2944,6 +2945,7 @@ void QuicConnection::start_server_if_needed(
         .allowed_tls_cipher_suites = config_.allowed_tls_cipher_suites,
         .accept_zero_rtt = config_.zero_rtt.allow,
         .zero_rtt_context = config_.zero_rtt.application_context,
+        .tls_keylog_path = config_.tls_keylog_path,
     });
     const auto tls_started = tls_->start();
     if (!tls_started.has_value()) {

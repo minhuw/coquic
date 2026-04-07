@@ -29,6 +29,7 @@ struct Http09RuntimeConfig {
     std::string server_name = "localhost";
     std::string requests_env;
     std::optional<std::filesystem::path> qlog_directory;
+    std::optional<std::filesystem::path> tls_keylog_path;
 };
 
 struct ParsedHttp09Authority {

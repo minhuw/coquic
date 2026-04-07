@@ -165,6 +165,7 @@ run_direction() {
   local client=$2
   local direction_log_dir="${log_root}/${server}_${client}"
   local results_json="${direction_log_dir}/results.json"
+  local runner_log_dir="${direction_log_dir}/runner"
   local run_output
   local status
   local testcase
@@ -172,6 +173,7 @@ run_direction() {
 
   cleanup_runner_state
   rm -rf "${direction_log_dir}"
+  mkdir -p "${direction_log_dir}"
 
   echo "== official interop: server=${server} client=${client} testcases=${interop_testcases} =="
   set +e
@@ -182,7 +184,7 @@ run_direction() {
         --server "${server}" \
         --client "${client}" \
         --test "${interop_testcases}" \
-        --log-dir "${direction_log_dir}" \
+        --log-dir "${runner_log_dir}" \
         --json "${results_json}" \
         --debug
     2>&1
@@ -195,7 +197,7 @@ run_direction() {
           --server "${server}" \
           --client "${client}" \
           --test "${interop_testcases}" \
-          --log-dir "${direction_log_dir}" \
+          --log-dir "${runner_log_dir}" \
           --json "${results_json}" \
           --debug
     2>&1
@@ -284,6 +286,11 @@ if failed:
         f"{server}/{client}: {', '.join(failed)}"
     )
 PY
+
+  if [ -d "${runner_log_dir}/${server}_${client}" ]; then
+    mv "${runner_log_dir}/${server}_${client}" "${direction_log_dir}/${server}_${client}"
+  fi
+  rmdir "${runner_log_dir}" >/dev/null 2>&1 || true
 
   if [ "${status}" -ne 0 ]; then
     return "${status}"

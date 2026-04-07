@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -148,6 +149,29 @@ TEST(QuicTlsAdapterContractTest, ClientAndServerExchangeHandshakeBytesAndSecrets
     EXPECT_TRUE(std::any_of(server_secrets.begin(), server_secrets.end(), [](const auto &secret) {
         return secret.level == EncryptionLevel::handshake;
     }));
+}
+
+TEST(QuicTlsAdapterContractTest, HandshakeWritesTlsKeyLogFilesWhenConfigured) {
+    coquic::quic::test::ScopedTempDir dir;
+    const auto client_keylog = dir.path() / "client" / "keys.log";
+    const auto server_keylog = dir.path() / "server" / "keys.log";
+
+    auto client_config = make_client_config();
+    client_config.tls_keylog_path = client_keylog;
+    auto server_config = make_server_config();
+    server_config.tls_keylog_path = server_keylog;
+
+    TlsAdapter client(std::move(client_config));
+    TlsAdapter server(std::move(server_config));
+
+    drive_tls_handshake(client, server);
+
+    ASSERT_TRUE(std::filesystem::exists(client_keylog));
+    ASSERT_TRUE(std::filesystem::exists(server_keylog));
+    const auto client_log = coquic::quic::test::read_text_file(client_keylog.string());
+    const auto server_log = coquic::quic::test::read_text_file(server_keylog.string());
+    EXPECT_NE(client_log.find("TRAFFIC_SECRET"), std::string::npos);
+    EXPECT_NE(server_log.find("TRAFFIC_SECRET"), std::string::npos);
 }
 
 TEST(QuicTlsAdapterContractTest, HandshakeCanBeConstrainedToChaCha20CipherSuite) {

@@ -4,6 +4,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -688,6 +690,15 @@ class TlsAdapter::Impl {
     }
 
   private:
+    static void on_keylog_line(const SSL *ssl, const char *line) {
+        auto *impl = static_cast<Impl *>(SSL_get_app_data(const_cast<SSL *>(ssl)));
+        if (impl == nullptr || line == nullptr) {
+            return;
+        }
+
+        impl->append_tls_keylog_line(line);
+    }
+
     void initialize() {
         ERR_clear_error();
         ctx_.reset(new_ssl_ctx(config_.role));
@@ -711,6 +722,7 @@ class TlsAdapter::Impl {
 
         SSL_CTX_set_verify(ctx_.get(), config_.verify_peer ? SSL_VERIFY_PEER : SSL_VERIFY_NONE,
                            nullptr);
+        SSL_CTX_set_keylog_callback(ctx_.get(), &Impl::on_keylog_line);
         if (verify_paths_init_failed(config_.verify_peer, ctx_.get())) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
@@ -853,6 +865,27 @@ class TlsAdapter::Impl {
         }
 
         return !install_identity_failed(ctx_.get(), certificate, extra_chain, private_key.get());
+    }
+
+    void append_tls_keylog_line(std::string_view line) {
+        if (!config_.tls_keylog_path.has_value()) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(tls_keylog_mutex_);
+        std::error_code mkdir_error;
+        const auto parent = config_.tls_keylog_path->parent_path();
+        if (!parent.empty()) {
+            std::filesystem::create_directories(parent, mkdir_error);
+        }
+
+        std::ofstream output(*config_.tls_keylog_path, std::ios::binary | std::ios::app);
+        if (!output.is_open()) {
+            return;
+        }
+
+        output.write(line.data(), static_cast<std::streamsize>(line.size()));
+        output.put('\n');
     }
 
     CodecResult<bool> drive_handshake() {
@@ -1074,6 +1107,7 @@ class TlsAdapter::Impl {
     std::optional<std::vector<std::byte>> peer_transport_parameters_;
     std::vector<std::vector<std::byte>> peer_offered_application_protocols_;
     std::optional<std::vector<std::byte>> selected_application_protocol_;
+    std::mutex tls_keylog_mutex_;
     bool early_data_attempted_ = false;
     std::optional<bool> early_data_accepted_;
     std::optional<CodecError> sticky_error_;

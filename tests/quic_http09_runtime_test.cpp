@@ -2998,6 +2998,46 @@ TEST(QuicHttp09RuntimeTest, RuntimeReadsQlogDirectoryFromEnvironment) {
               std::filesystem::path("/logs/qlog"));
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeLeavesTlsKeylogDisabledWhenSslkeylogfileUnsetOrEmpty) {
+    const char *argv[] = {"coquic"};
+
+    {
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+        ScopedEnvVar sslkeylogfile("SSLKEYLOGFILE", std::nullopt);
+
+        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        const auto &runtime = optional_ref_or_terminate(parsed);
+        EXPECT_FALSE(runtime.tls_keylog_path.has_value());
+    }
+
+    {
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+        ScopedEnvVar sslkeylogfile("SSLKEYLOGFILE", "");
+
+        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        const auto &runtime = optional_ref_or_terminate(parsed);
+        EXPECT_FALSE(runtime.tls_keylog_path.has_value());
+    }
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeReadsTlsKeylogPathFromEnvironment) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+    ScopedEnvVar sslkeylogfile("SSLKEYLOGFILE", "/logs/keys.log");
+
+    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    ASSERT_TRUE(runtime.tls_keylog_path.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(runtime.tls_keylog_path),
+              std::filesystem::path("/logs/keys.log"));
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimePropagatesQlogDirectoryIntoClientAndServerCoreConfigs) {
     const auto qlog_path = std::filesystem::path("/logs/qlog");
 
@@ -3022,6 +3062,32 @@ TEST(QuicHttp09RuntimeTest, RuntimePropagatesQlogDirectoryIntoClientAndServerCor
                             });
     ASSERT_TRUE(server_core.qlog.has_value());
     EXPECT_EQ(optional_ref_or_terminate(server_core.qlog).directory, qlog_path);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimePropagatesTlsKeylogPathIntoClientAndServerCoreConfigs) {
+    const auto keylog_path = std::filesystem::path("/logs/keys.log");
+
+    const auto client_runtime = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::client,
+        .requests_env = "https://localhost/a.txt",
+        .tls_keylog_path = keylog_path,
+    };
+    const auto client_core = coquic::quic::make_http09_client_core_config(client_runtime);
+    ASSERT_TRUE(client_core.tls_keylog_path.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(client_core.tls_keylog_path), keylog_path);
+
+    const auto server_runtime = coquic::quic::Http09RuntimeConfig{
+        .mode = coquic::quic::Http09RuntimeMode::server,
+        .tls_keylog_path = keylog_path,
+    };
+    const auto server_core =
+        coquic::quic::test::make_http09_server_core_config_with_identity_for_tests(
+            server_runtime, coquic::quic::TlsIdentity{
+                                .certificate_pem = "test-certificate-pem",
+                                .private_key_pem = "test-private-key-pem",
+                            });
+    ASSERT_TRUE(server_core.tls_keylog_path.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(server_core.tls_keylog_path), keylog_path);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidAndEmptyPortStringsFromEnvironment) {

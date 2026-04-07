@@ -58,6 +58,7 @@ struct QuicCoreConfig {
     std::optional<QuicResumptionState> resumption_state;
     QuicZeroRttConfig zero_rtt;
     std::optional<QuicQlogConfig> qlog;
+    std::optional<std::filesystem::path> tls_keylog_path;
 };
 
 using QuicCoreClock = std::chrono::steady_clock;

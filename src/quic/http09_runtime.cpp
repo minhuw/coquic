@@ -1204,6 +1204,41 @@ struct ServerSocketSet {
     std::optional<int> preferred_fd;
 };
 
+struct ClientSocketDescriptor {
+    int fd = -1;
+    int family = AF_UNSPEC;
+};
+
+struct ClientSocketSet {
+    ClientSocketDescriptor primary;
+    std::optional<ClientSocketDescriptor> secondary;
+};
+
+class ScopedClientSockets {
+  public:
+    explicit ScopedClientSockets(ClientSocketSet &sockets) : sockets_(&sockets) {
+    }
+
+    ~ScopedClientSockets() {
+        if (sockets_ == nullptr) {
+            return;
+        }
+        if (sockets_->secondary.has_value() && sockets_->secondary->fd >= 0 &&
+            sockets_->secondary->fd != sockets_->primary.fd) {
+            ::close(sockets_->secondary->fd);
+        }
+        if (sockets_->primary.fd >= 0) {
+            ::close(sockets_->primary.fd);
+        }
+    }
+
+    ScopedClientSockets(const ScopedClientSockets &) = delete;
+    ScopedClientSockets &operator=(const ScopedClientSockets &) = delete;
+
+  private:
+    ClientSocketSet *sockets_ = nullptr;
+};
+
 struct RuntimeWaitStep {
     std::optional<QuicCoreInput> input;
     QuicCoreTimePoint input_time;
@@ -1427,6 +1462,58 @@ ClientLoopIo make_runtime_client_loop_io() {
     };
 }
 
+int client_socket_fd_for_family(const ClientSocketSet &sockets, int family) {
+    if (sockets.primary.family == family) {
+        return sockets.primary.fd;
+    }
+    if (sockets.secondary.has_value() && sockets.secondary->family == family) {
+        return sockets.secondary->fd;
+    }
+    return -1;
+}
+
+std::array<int, 2> active_client_socket_fds(const ClientSocketSet &sockets) {
+    return {
+        sockets.primary.fd,
+        sockets.secondary.has_value() ? sockets.secondary->fd : -1,
+    };
+}
+
+std::size_t active_client_socket_count(const ClientSocketSet &sockets) {
+    return sockets.secondary.has_value() ? 2u : 1u;
+}
+
+std::optional<int> ensure_client_socket_for_family(ClientSocketSet &sockets, int family,
+                                                   std::string_view role_name) {
+    if (family != AF_INET && family != AF_INET6) {
+        std::cerr << "http09-" << role_name << " failed: unsupported preferred-address family\n";
+        return std::nullopt;
+    }
+
+    if (const int existing_fd = client_socket_fd_for_family(sockets, family); existing_fd >= 0) {
+        return existing_fd;
+    }
+
+    if (sockets.secondary.has_value()) {
+        std::cerr << "http09-" << role_name
+                  << " failed: no client socket slot available for preferred-address family\n";
+        return std::nullopt;
+    }
+
+    const int socket_fd = open_udp_socket(family);
+    if (socket_fd < 0) {
+        std::cerr << "http09-" << role_name
+                  << " failed: unable to create UDP socket: " << std::strerror(errno) << '\n';
+        return std::nullopt;
+    }
+
+    sockets.secondary = ClientSocketDescriptor{
+        .fd = socket_fd,
+        .family = family,
+    };
+    return socket_fd;
+}
+
 bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
                          const sockaddr_storage *fallback_peer, socklen_t fallback_peer_len,
                          const std::unordered_map<QuicPathId, RuntimeSendRoute> &path_routes,
@@ -1604,8 +1691,10 @@ void record_resumption_state(EndpointDriveState &state, const QuicCoreResult &re
     }
 }
 
-void observe_client_runtime_policy_effects(const QuicCoreResult &result, EndpointDriveState &state,
-                                           ClientRuntimePolicyState &policy, int socket_fd) {
+bool observe_client_runtime_policy_effects(const QuicCoreResult &result, EndpointDriveState &state,
+                                           ClientRuntimePolicyState &policy,
+                                           ClientSocketSet &client_sockets,
+                                           std::string_view role_name) {
     for (const auto &effect : result.effects) {
         if (const auto *event = std::get_if<QuicCoreStateEvent>(&effect);
             event != nullptr && event->change == QuicCoreStateChange::handshake_ready) {
@@ -1623,17 +1712,23 @@ void observe_client_runtime_policy_effects(const QuicCoreResult &result, Endpoin
         }
         if (const auto *preferred = std::get_if<QuicCorePeerPreferredAddressAvailable>(&effect)) {
             const auto peer = sockaddr_from_preferred_address(preferred->preferred_address);
-            policy.preferred_address_path_id = remember_runtime_path(
-                state, peer, sockaddr_len_from_preferred_address(preferred->preferred_address),
-                socket_fd);
+            const auto peer_len = sockaddr_len_from_preferred_address(preferred->preferred_address);
+            const auto preferred_socket_fd =
+                ensure_client_socket_for_family(client_sockets, peer.ss_family, role_name);
+            if (!preferred_socket_fd.has_value()) {
+                return false;
+            }
+            policy.preferred_address_path_id =
+                remember_runtime_path(state, peer, peer_len, *preferred_socket_fd);
             with_runtime_trace([&](std::ostream &stream) {
                 stream << "http09-client trace: observed preferred_address path_id="
-                       << *policy.preferred_address_path_id
+                       << *policy.preferred_address_path_id << " socket_fd=" << *preferred_socket_fd
                        << " ipv4_port=" << preferred->preferred_address.ipv4_port
                        << " ipv6_port=" << preferred->preferred_address.ipv6_port << '\n';
             });
         }
     }
+    return true;
 }
 
 bool runtime_client_should_attempt_preferred_address_migration(const Http09RuntimeConfig &config) {
@@ -1873,6 +1968,7 @@ bool drive_endpoint_until_blocked(const EndpointDriver &endpoint, QuicCore &core
                                   std::string_view role_name,
                                   const Http09RuntimeConfig *runtime_config = nullptr,
                                   ClientRuntimePolicyState *client_policy = nullptr,
+                                  ClientSocketSet *client_sockets = nullptr,
                                   bool *observed_send_effects = nullptr) {
     QuicCoreResult current_result = initial_result;
     bool pending_terminal_success = false;
@@ -1883,7 +1979,12 @@ bool drive_endpoint_until_blocked(const EndpointDriver &endpoint, QuicCore &core
     for (;;) {
         record_resumption_state(state, current_result);
         if ((runtime_config != nullptr) & (client_policy != nullptr)) {
-            observe_client_runtime_policy_effects(current_result, state, *client_policy, fd);
+            if (client_sockets == nullptr ||
+                !observe_client_runtime_policy_effects(current_result, state, *client_policy,
+                                                       *client_sockets, role_name)) {
+                state.terminal_failure = true;
+                return false;
+            }
         }
         if (observed_send_effects != nullptr &&
             std::any_of(current_result.effects.begin(), current_result.effects.end(),
@@ -1934,9 +2035,10 @@ bool drive_endpoint_until_blocked(const EndpointDriver &endpoint, QuicCore &core
 }
 
 int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
-                                      const EndpointDriver &endpoint, QuicCore &core, int socket_fd,
-                                      int idle_timeout_ms, const sockaddr_storage &peer,
-                                      socklen_t peer_len, EndpointDriveState &state,
+                                      const EndpointDriver &endpoint, QuicCore &core,
+                                      ClientSocketSet &client_sockets, int idle_timeout_ms,
+                                      const sockaddr_storage &peer, socklen_t peer_len,
+                                      EndpointDriveState &state,
                                       ClientRuntimePolicyState &client_policy,
                                       const ClientLoopIo &io, const QuicCoreResult &start_result) {
     struct PumpEndpointWorkResult {
@@ -1968,8 +2070,9 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
 
         return success_drain_complete(current);
     };
-    if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, start_result,
-                                      state, "client", &config, &client_policy)) {
+    if (!drive_endpoint_until_blocked(endpoint, core, client_sockets.primary.fd, &peer, peer_len,
+                                      start_result, state, "client", &config, &client_policy,
+                                      &client_sockets)) {
         return 1;
     }
     if (state.terminal_success) {
@@ -1990,9 +2093,9 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
             timer_result.effects.begin(), timer_result.effects.end(), [](const auto &effect) {
                 return std::holds_alternative<QuicCoreSendDatagram>(effect);
             });
-        const bool ok =
-            drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, timer_result,
-                                         state, "client", &config, &client_policy);
+        const bool ok = drive_endpoint_until_blocked(endpoint, core, client_sockets.primary.fd,
+                                                     &peer, peer_len, timer_result, state, "client",
+                                                     &config, &client_policy, &client_sockets);
         with_runtime_trace([&](std::ostream &stream) {
             const auto next_wakeup_delta_ms =
                 state.next_wakeup.has_value()
@@ -2041,8 +2144,9 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
 
         auto result = advance_core_with_inputs(core, update.core_inputs, now());
         return PumpEndpointWorkResult{
-            .ok = drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, result,
-                                               state, "client", &config, &client_policy),
+            .ok = drive_endpoint_until_blocked(endpoint, core, client_sockets.primary.fd, &peer,
+                                               peer_len, result, state, "client", &config,
+                                               &client_policy, &client_sockets),
             .advanced_core = true,
         };
     };
@@ -2067,9 +2171,45 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
                 return true;
             }
 
-            auto receive = io.receive_datagram(socket_fd, /*flags=*/MSG_DONTWAIT,
-                                               /*role_name=*/"client");
-            if (receive.status == ReceiveDatagramStatus::would_block) {
+            bool received_datagram = false;
+            bool all_sockets_would_block = true;
+            for (const int socket_fd : active_client_socket_fds(client_sockets)) {
+                if (socket_fd < 0) {
+                    continue;
+                }
+
+                auto receive = io.receive_datagram(socket_fd, /*flags=*/MSG_DONTWAIT,
+                                                   /*role_name=*/"client");
+                if (receive.status == ReceiveDatagramStatus::would_block) {
+                    continue;
+                }
+                all_sockets_would_block = false;
+                if (receive.status == ReceiveDatagramStatus::error) {
+                    return false;
+                }
+
+                assign_runtime_path_for_inbound_step(state, receive.step);
+                auto step_result =
+                    core.advance(std::move(*receive.step.input), receive.step.input_time);
+                saw_peer_input = true;
+                if (!drive_endpoint_until_blocked(endpoint, core, client_sockets.primary.fd, &peer,
+                                                  peer_len, step_result, state, "client", &config,
+                                                  &client_policy, &client_sockets)) {
+                    return false;
+                }
+                received_datagram = true;
+                const bool terminal_after_receive = state.terminal_success | state.terminal_failure;
+                if (terminal_after_receive) {
+                    refresh_terminal_success_deadline_from_peer_input(receive.step.input_time);
+                    return true;
+                }
+                break;
+            }
+
+            if (received_datagram) {
+                continue;
+            }
+            if (all_sockets_would_block) {
                 with_runtime_trace([&](std::ostream &stream) {
                     const auto current = now();
                     const auto next_wakeup_delay_ms =
@@ -2089,24 +2229,6 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
                 if (pump_result.advanced_core && state.endpoint_has_pending_work) {
                     continue;
                 }
-                return true;
-            }
-            if (receive.status == ReceiveDatagramStatus::error) {
-                return false;
-            }
-
-            assign_runtime_path_for_inbound_step(state, receive.step);
-            auto step_result =
-                core.advance(std::move(*receive.step.input), receive.step.input_time);
-            saw_peer_input = true;
-            if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len,
-                                              step_result, state, "client", &config,
-                                              &client_policy)) {
-                return false;
-            }
-            const bool terminal_after_receive = state.terminal_success | state.terminal_failure;
-            if (terminal_after_receive) {
-                refresh_terminal_success_deadline_from_peer_input(receive.step.input_time);
                 return true;
             }
         }
@@ -2147,10 +2269,11 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
             wait_next_wakeup = std::min(wait_next_wakeup.value_or(*terminal_success_deadline),
                                         *terminal_success_deadline);
         }
+        const auto socket_fds = active_client_socket_fds(client_sockets);
         auto step = io.wait_for_socket_or_deadline(
             RuntimeWaitConfig{
-                .socket_fds = {socket_fd, -1},
-                .socket_fd_count = 1,
+                .socket_fds = socket_fds,
+                .socket_fd_count = active_client_socket_count(client_sockets),
                 .idle_timeout_ms = idle_timeout_ms,
                 .role_name = "client",
             },
@@ -2192,8 +2315,9 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
             std::holds_alternative<QuicCoreInboundDatagram>(step_input);
         saw_peer_input = step_has_peer_input || saw_peer_input;
         auto step_result = core.advance(std::move(step_input), step->input_time);
-        if (!drive_endpoint_until_blocked(endpoint, core, socket_fd, &peer, peer_len, step_result,
-                                          state, "client", &config, &client_policy)) {
+        if (!drive_endpoint_until_blocked(endpoint, core, client_sockets.primary.fd, &peer,
+                                          peer_len, step_result, state, "client", &config,
+                                          &client_policy, &client_sockets)) {
             return 1;
         }
         if (state.terminal_success) {
@@ -2253,7 +2377,14 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
             .exit_code = 1,
         };
     }
-    ScopedFd socket_guard(socket_fd);
+    ClientSocketSet client_sockets{
+        .primary =
+            ClientSocketDescriptor{
+                .fd = socket_fd,
+                .family = peer_address.family,
+            },
+    };
+    ScopedClientSockets socket_guard(client_sockets);
 
     const sockaddr_storage peer = peer_address.address;
     const socklen_t peer_len = peer_address.address_len;
@@ -2270,10 +2401,10 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
     QuicHttp09ClientEndpoint endpoint(make_http09_client_endpoint_config(
         config, requests, attempt_zero_rtt_requests, start_result));
     return ClientConnectionRunResult{
-        .exit_code = run_http09_client_connection_loop(config, make_endpoint_driver(endpoint), core,
-                                                       socket_fd, client_receive_timeout_ms(config),
-                                                       peer, peer_len, state, client_policy,
-                                                       make_runtime_client_loop_io(), start_result),
+        .exit_code = run_http09_client_connection_loop(
+            config, make_endpoint_driver(endpoint), core, client_sockets,
+            client_receive_timeout_ms(config), peer, peer_len, state, client_policy,
+            make_runtime_client_loop_io(), start_result),
         .resumption_state = state.last_resumption_state,
     };
 }
@@ -2443,7 +2574,7 @@ bool pump_server_pending_endpoint_work(ServerSessionMap &sessions,
         bool observed_send_effects = false;
         const bool endpoint_failed = !drive_endpoint_until_blocked(
             endpoint_driver, session->core, session->socket_fd, &session->peer, session->peer_len,
-            result, session->state, "server", nullptr, nullptr, &observed_send_effects);
+            result, session->state, "server", nullptr, nullptr, nullptr, &observed_send_effects);
         made_progress = made_progress | observed_send_effects;
         refresh_server_session_connection_id_routes(*session, connection_id_routes);
         const bool core_failed = session->core.has_failed();
@@ -3030,6 +3161,42 @@ ClientLoopIo make_scripted_client_loop_io_for_tests(ScriptedClientLoopIoForTests
         .now_fn = &scripted_client_loop_now_for_tests,
         .receive_datagram_fn = &scripted_client_loop_receive_for_tests,
         .wait_for_socket_or_deadline_fn = &scripted_client_loop_wait_for_tests,
+    };
+}
+
+struct WaitCaptureClientLoopIoForTests {
+    bool wait_called = false;
+    std::size_t wait_socket_fd_count = 0;
+    std::array<int, 2> wait_socket_fds = {-1, -1};
+};
+
+QuicCoreTimePoint wait_capture_client_loop_now_for_tests(void *) {
+    return now();
+}
+
+ReceiveDatagramResult wait_capture_client_loop_receive_for_tests(void *, int, int,
+                                                                 std::string_view) {
+    return ReceiveDatagramResult{
+        .status = ReceiveDatagramStatus::would_block,
+    };
+}
+
+std::optional<RuntimeWaitStep>
+wait_capture_client_loop_wait_for_tests(void *context, const RuntimeWaitConfig &config,
+                                        const std::optional<QuicCoreTimePoint> &) {
+    auto &capture = *static_cast<WaitCaptureClientLoopIoForTests *>(context);
+    capture.wait_called = true;
+    capture.wait_socket_fd_count = config.socket_fd_count;
+    capture.wait_socket_fds = config.socket_fds;
+    return std::nullopt;
+}
+
+ClientLoopIo make_wait_capture_client_loop_io_for_tests(WaitCaptureClientLoopIoForTests &capture) {
+    return ClientLoopIo{
+        .context = &capture,
+        .now_fn = &wait_capture_client_loop_now_for_tests,
+        .receive_datagram_fn = &wait_capture_client_loop_receive_for_tests,
+        .wait_for_socket_or_deadline_fn = &wait_capture_client_loop_wait_for_tests,
     };
 }
 
@@ -3755,6 +3922,13 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
         .mode = Http09RuntimeMode::client,
     };
     ClientRuntimePolicyState client_policy;
+    ClientSocketSet client_sockets{
+        .primary =
+            ClientSocketDescriptor{
+                .fd = -1,
+                .family = AF_UNSPEC,
+            },
+    };
     g_recorded_sendto_for_tests = {};
     const ScopedHttp09RuntimeOpsOverride runtime_ops{
         Http09RuntimeOpsOverride{
@@ -3762,7 +3936,7 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
         },
     };
     const int exit_code = run_http09_client_connection_loop(
-        config, make_endpoint_driver(endpoint), core, /*socket_fd=*/-1,
+        config, make_endpoint_driver(endpoint), core, client_sockets,
         /*idle_timeout_ms=*/kDefaultClientReceiveTimeoutMs, peer, /*peer_len=*/0, state,
         client_policy, make_scripted_client_loop_io_for_tests(io_script), start_result);
     return ClientConnectionLoopResultForTests{
@@ -4448,10 +4622,17 @@ bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests() {
         .mode = Http09RuntimeMode::client,
         .testcase = QuicHttp09Testcase::connectionmigration,
     };
+    ClientSocketSet client_sockets{
+        .primary =
+            ClientSocketDescriptor{
+                .fd = 17,
+                .family = AF_INET,
+            },
+    };
     sockaddr_storage peer{};
     const bool drove = drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, /*fd=*/17,
                                                     &peer, /*peer_len=*/0, initial_result, state,
-                                                    "client", &config, &policy);
+                                                    "client", &config, &policy, &client_sockets);
     return drove & state.terminal_success & policy.preferred_address_request_queued &
            (endpoint.next_on_core_result_index == 2);
 }
@@ -4500,6 +4681,13 @@ bool runtime_connectionmigration_request_flow_case_for_tests(bool official_alias
 
     EndpointDriveState state;
     ClientRuntimePolicyState policy;
+    ClientSocketSet client_sockets{
+        .primary =
+            ClientSocketDescriptor{
+                .fd = 17,
+                .family = AF_INET,
+            },
+    };
     QuicCoreResult result;
     result.effects.emplace_back(QuicCoreStateEvent{
         .change = QuicCoreStateChange::handshake_ready,
@@ -4518,7 +4706,9 @@ bool runtime_connectionmigration_request_flow_case_for_tests(bool official_alias
         });
     }
 
-    observe_client_runtime_policy_effects(result, state, policy, /*socket_fd=*/17);
+    if (!observe_client_runtime_policy_effects(result, state, policy, client_sockets, "client")) {
+        return false;
+    }
     if (!keep_path_route) {
         state.path_routes.clear();
     }
@@ -4552,6 +4742,144 @@ bool runtime_official_connectionmigration_client_request_flow_for_tests() {
         /*official_alias=*/true, /*include_preferred_address=*/true, /*keep_path_route=*/true);
 }
 
+bool runtime_cross_family_preferred_address_uses_compatible_socket_for_tests() {
+    EndpointDriveState state;
+    ClientRuntimePolicyState policy;
+    ClientSocketSet client_sockets{
+        .primary =
+            ClientSocketDescriptor{
+                .fd = 17,
+                .family = AF_INET,
+            },
+    };
+    QuicCoreResult result;
+    result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
+        .preferred_address =
+            PreferredAddress{
+                .ipv6_address =
+                    {
+                        std::byte{0x20},
+                        std::byte{0x01},
+                        std::byte{0x0d},
+                        std::byte{0xb8},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x46},
+                    },
+                .ipv6_port = 4444,
+                .connection_id = make_runtime_connection_id(std::byte{0x5a}, 1),
+            },
+    });
+
+    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        Http09RuntimeOpsOverride{
+            .socket_fn = [](int family, int, int) -> int {
+                if (family != AF_INET6) {
+                    errno = EAFNOSUPPORT;
+                    return -1;
+                }
+                return 23;
+            },
+            .setsockopt_fn = [](int, int, int, const void *, socklen_t) -> int { return 0; },
+        },
+    };
+
+    if (!observe_client_runtime_policy_effects(result, state, policy, client_sockets, "client")) {
+        return false;
+    }
+    if (!policy.preferred_address_path_id.has_value()) {
+        return false;
+    }
+
+    const auto route_it = state.path_routes.find(*policy.preferred_address_path_id);
+    return route_it != state.path_routes.end() && route_it->second.peer.ss_family == AF_INET6 &&
+           route_it->second.socket_fd == 23;
+}
+
+bool runtime_client_loop_uses_all_active_sockets_for_tests() {
+    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        Http09RuntimeOpsOverride{
+            .socket_fn = [](int family, int, int) -> int {
+                if (family != AF_INET6) {
+                    errno = EAFNOSUPPORT;
+                    return -1;
+                }
+                return 23;
+            },
+            .setsockopt_fn = [](int, int, int, const void *, socklen_t) -> int { return 0; },
+        },
+    };
+
+    ScriptedEndpointForTests endpoint;
+    endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+
+    QuicCore core = make_local_error_client_core_for_tests();
+    QuicCoreResult start_result;
+    start_result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
+        .preferred_address =
+            PreferredAddress{
+                .ipv6_address =
+                    {
+                        std::byte{0x20},
+                        std::byte{0x01},
+                        std::byte{0x0d},
+                        std::byte{0xb8},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x46},
+                    },
+                .ipv6_port = 4444,
+                .connection_id = make_runtime_connection_id(std::byte{0x5a}, 1),
+            },
+    });
+
+    sockaddr_storage peer{};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(443);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    EndpointDriveState state;
+    ClientRuntimePolicyState client_policy;
+    ClientSocketSet client_sockets{
+        .primary =
+            ClientSocketDescriptor{
+                .fd = 17,
+                .family = AF_INET,
+            },
+    };
+    WaitCaptureClientLoopIoForTests io_capture;
+    const int exit_code = run_http09_client_connection_loop(
+        Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::connectionmigration,
+        },
+        make_endpoint_driver(endpoint), core, client_sockets,
+        /*idle_timeout_ms=*/kDefaultClientReceiveTimeoutMs, peer,
+        static_cast<socklen_t>(sizeof(sockaddr_in)), state, client_policy,
+        make_wait_capture_client_loop_io_for_tests(io_capture), start_result);
+    return exit_code == 1 && io_capture.wait_called && io_capture.wait_socket_fd_count == 2 &&
+           io_capture.wait_socket_fds[0] == 17 && io_capture.wait_socket_fds[1] == 23;
+}
+
 bool runtime_regular_transfer_does_not_queue_preferred_address_migration_for_tests() {
     const Http09RuntimeConfig config{
         .mode = Http09RuntimeMode::client,
@@ -4561,6 +4889,13 @@ bool runtime_regular_transfer_does_not_queue_preferred_address_migration_for_tes
 
     EndpointDriveState state;
     ClientRuntimePolicyState policy;
+    ClientSocketSet client_sockets{
+        .primary =
+            ClientSocketDescriptor{
+                .fd = 17,
+                .family = AF_INET,
+            },
+    };
     QuicCoreResult result;
     result.effects.emplace_back(QuicCoreStateEvent{
         .change = QuicCoreStateChange::handshake_ready,
@@ -4577,7 +4912,9 @@ bool runtime_regular_transfer_does_not_queue_preferred_address_migration_for_tes
             },
     });
 
-    observe_client_runtime_policy_effects(result, state, policy, /*socket_fd=*/17);
+    if (!observe_client_runtime_policy_effects(result, state, policy, client_sockets, "client")) {
+        return false;
+    }
     std::vector<QuicCoreInput> core_inputs;
     maybe_queue_client_runtime_policy_inputs(config, policy, core_inputs);
     return policy.handshake_ready_seen & policy.handshake_confirmed_seen &
@@ -4907,6 +5244,13 @@ bool runtime_misc_internal_coverage_for_tests() {
 
         EndpointDriveState state;
         ClientRuntimePolicyState policy;
+        ClientSocketSet client_sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 17,
+                    .family = AF_INET,
+                },
+        };
         QuicCoreResult result;
         result.effects.emplace_back(QuicCoreStateEvent{
             .change = QuicCoreStateChange::handshake_ready,
@@ -4917,7 +5261,21 @@ bool runtime_misc_internal_coverage_for_tests() {
         result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
             .preferred_address = ipv6_preferred_address,
         });
-        observe_client_runtime_policy_effects(result, state, policy, /*socket_fd=*/17);
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .socket_fn = [](int family, int, int) -> int {
+                    if (family != AF_INET6) {
+                        errno = EAFNOSUPPORT;
+                        return -1;
+                    }
+                    return 23;
+                },
+                .setsockopt_fn = [](int, int, int, const void *, socklen_t) -> int { return 0; },
+            },
+        };
+        check(
+            "policy observes cross-family preferred address",
+            observe_client_runtime_policy_effects(result, state, policy, client_sockets, "client"));
         std::vector<QuicCoreInput> core_inputs;
         maybe_queue_client_runtime_policy_inputs(
             Http09RuntimeConfig{

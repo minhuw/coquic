@@ -4046,7 +4046,11 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
         }
 
         if (const auto *path_challenge = std::get_if<PathChallengeFrame>(&frame)) {
-            if (application_frame_requires_connected_state(require_connected, status_)) {
+            const bool allow_preconnected_path_validation_frame =
+                application_space_.read_secret.has_value() &&
+                status_ == HandshakeStatus::in_progress;
+            if (require_connected && !allow_preconnected_path_validation_frame &&
+                status_ != HandshakeStatus::connected) {
                 return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
             }
 
@@ -4055,7 +4059,11 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
         }
 
         if (const auto *path_response = std::get_if<PathResponseFrame>(&frame)) {
-            if (application_frame_requires_connected_state(require_connected, status_)) {
+            const bool allow_preconnected_path_validation_frame =
+                application_space_.read_secret.has_value() &&
+                status_ == HandshakeStatus::in_progress;
+            if (require_connected && !allow_preconnected_path_validation_frame &&
+                status_ != HandshakeStatus::connected) {
                 return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
             }
 

@@ -2796,11 +2796,45 @@ TEST(QuicCoreTest,
     EXPECT_FALSE(connection.has_failed());
 }
 
-TEST(QuicCoreTest, PreconnectedPathResponseIsRejectedWhilePaddingIsIgnored) {
+TEST(QuicCoreTest,
+     ServerProcessesOneRttPathChallengeBeforeHandshakeCompletesWhenApplicationKeysExist) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+
+    constexpr std::array<std::byte, 8> challenge = {
+        std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
+        std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08}};
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .key_phase = false,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 1,
+            .packet_number = 7,
+            .frames =
+                {
+                    coquic::quic::AckFrame{},
+                    coquic::quic::PathChallengeFrame{
+                        .data = challenge,
+                    },
+                    coquic::quic::PingFrame{},
+                },
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(processed.value());
+    EXPECT_FALSE(connection.has_failed());
+    ASSERT_TRUE(connection.paths_.contains(0));
+    ASSERT_TRUE(connection.paths_.at(0).pending_response.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(connection.paths_.at(0).pending_response), challenge);
+}
+
+TEST(QuicCoreTest, PreconnectedPathResponseWithoutApplicationKeysIsRejectedWhilePaddingIsIgnored) {
     {
         auto connection = make_connected_client_connection();
         connection.status_ = coquic::quic::HandshakeStatus::in_progress;
         connection.handshake_confirmed_ = false;
+        connection.application_space_.read_secret.reset();
 
         const auto processed = connection.process_inbound_application(
             std::array<coquic::quic::Frame, 1>{
@@ -2828,6 +2862,7 @@ TEST(QuicCoreTest, PreconnectedPathResponseIsRejectedWhilePaddingIsIgnored) {
         auto connection = make_connected_client_connection();
         connection.status_ = coquic::quic::HandshakeStatus::in_progress;
         connection.handshake_confirmed_ = false;
+        connection.application_space_.read_secret.reset();
 
         const auto processed = connection.process_inbound_application(
             std::array<coquic::quic::Frame, 1>{
@@ -2838,6 +2873,35 @@ TEST(QuicCoreTest, PreconnectedPathResponseIsRejectedWhilePaddingIsIgnored) {
         ASSERT_TRUE(processed.has_value());
         EXPECT_TRUE(processed.value());
     }
+}
+
+TEST(QuicCoreTest, PreconnectedPathResponseIsAcceptedWhenApplicationKeysExist) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+
+    constexpr std::array<std::byte, 8> challenge = {
+        std::byte{0x31}, std::byte{0x32}, std::byte{0x33}, std::byte{0x34},
+        std::byte{0x35}, std::byte{0x36}, std::byte{0x37}, std::byte{0x38}};
+    auto &candidate_path = connection.ensure_path_state(9);
+    candidate_path.validated = false;
+    candidate_path.challenge_pending = false;
+    candidate_path.validation_initiated_locally = false;
+    candidate_path.outstanding_challenge = challenge;
+
+    const auto processed = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::PathResponseFrame{
+                .data = challenge,
+            },
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/9);
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(processed.value());
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_TRUE(connection.paths_.at(9).validated);
+    EXPECT_EQ(connection.last_validated_path_id_, 9u);
+    EXPECT_EQ(connection.current_send_path_id_, 9u);
 }
 
 TEST(QuicCoreTest, RetireConnectionIdPacketSchedulesApplicationAck) {
@@ -17198,7 +17262,7 @@ TEST(QuicCoreTest, ProcessInboundApplicationCoversPreconnectedRetireConnectionId
     connection.application_space_.read_secret = make_test_traffic_secret();
 
     const auto gated = connection.process_inbound_application(
-        std::array<coquic::quic::Frame, 1>{coquic::quic::PathChallengeFrame{}},
+        std::array<coquic::quic::Frame, 1>{coquic::quic::MaxDataFrame{.maximum_data = 1}},
         coquic::quic::test::test_time(1));
     ASSERT_FALSE(gated.has_value());
     EXPECT_EQ(gated.error().code, coquic::quic::CodecErrorCode::invalid_varint);

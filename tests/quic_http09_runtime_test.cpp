@@ -4520,6 +4520,15 @@ TEST(QuicHttp09RuntimeTest,
         coquic::quic::test::runtime_official_connectionmigration_client_request_flow_for_tests());
 }
 
+TEST(QuicHttp09RuntimeTest, CrossFamilyPreferredAddressUsesCompatibleSocket) {
+    EXPECT_TRUE(coquic::quic::test::
+                    runtime_cross_family_preferred_address_uses_compatible_socket_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, ClientLoopUsesAllActiveSocketsForPreferredAddress) {
+    EXPECT_TRUE(coquic::quic::test::runtime_client_loop_uses_all_active_sockets_for_tests());
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeProcessesPolicyInputsBeforeTerminalSuccess) {
     EXPECT_TRUE(
         coquic::quic::test::runtime_policy_core_inputs_advance_before_terminal_success_for_tests());

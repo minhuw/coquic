@@ -640,16 +640,15 @@ CodecResult<std::vector<std::byte>> open_payload(CipherSuite cipher_suite,
 }
 
 CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite cipher_suite,
-                                                                std::span<const std::byte> hp_key,
-                                                                std::span<const std::byte> sample) {
+                                                                HeaderProtectionMaskInput input) {
     const auto parameters = cipher_suite_parameters(cipher_suite);
     if (!parameters.has_value())
         return crypto_failure(parameters.error().code);
-    if (hp_key.size() != parameters.value().hp_key_length)
+    if (input.hp_key.size() != parameters.value().hp_key_length)
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
-    if (sample.size() < header_protection_sample_length)
+    if (input.sample.size() < header_protection_sample_length)
         return crypto_failure(CodecErrorCode::header_protection_sample_too_short);
-    const auto sample_prefix = sample.first(header_protection_sample_length);
+    const auto sample_prefix = input.sample.first(header_protection_sample_length);
 
     std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> context(
         consume_packet_crypto_fault(PacketCryptoFaultPoint::header_protection_context_new) ||
@@ -667,7 +666,7 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
         int produced_length = 0;
         const auto init_failed =
             consume_packet_crypto_fault(PacketCryptoFaultPoint::header_protection_chacha_init) |
-            (EVP_EncryptInit_ex(context.get(), EVP_chacha20(), nullptr, openssl_data(hp_key),
+            (EVP_EncryptInit_ex(context.get(), EVP_chacha20(), nullptr, openssl_data(input.hp_key),
                                 openssl_data(sample_prefix)) <= 0) |
             (EVP_EncryptUpdate(context.get(), openssl_data(std::span{mask}), &produced_length,
                                openssl_data(std::span<const std::byte>{zeros}),
@@ -710,7 +709,8 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
     int produced_length = 0;
     const auto init_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::header_protection_aes_init) |
-        (EVP_EncryptInit_ex(context.get(), cipher, nullptr, openssl_data(hp_key), nullptr) <= 0) |
+        (EVP_EncryptInit_ex(context.get(), cipher, nullptr, openssl_data(input.hp_key), nullptr) <=
+         0) |
         consume_packet_crypto_fault(PacketCryptoFaultPoint::header_protection_aes_set_padding) |
         (EVP_CIPHER_CTX_set_padding(context.get(), 0) <= 0) |
         consume_packet_crypto_fault(PacketCryptoFaultPoint::header_protection_aes_update) |

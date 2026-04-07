@@ -801,23 +801,22 @@ CodecResult<std::vector<std::byte>> open_payload(CipherSuite cipher_suite,
 }
 
 CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite cipher_suite,
-                                                                std::span<const std::byte> hp_key,
-                                                                std::span<const std::byte> sample) {
+                                                                HeaderProtectionMaskInput input) {
     const auto parameters = cipher_suite_parameters(cipher_suite);
     if (!parameters.has_value()) {
         return crypto_failure(parameters.error().code);
     }
-    if (hp_key.size() != parameters.value().hp_key_length) {
+    if (input.hp_key.size() != parameters.value().hp_key_length) {
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
     }
-    if (sample.size() < header_protection_sample_length) {
+    if (input.sample.size() < header_protection_sample_length) {
         return crypto_failure(CodecErrorCode::header_protection_sample_too_short);
     }
     if (consume_packet_crypto_fault(PacketCryptoFaultPoint::header_protection_context_new)) {
         return crypto_failure(CodecErrorCode::header_protection_failed);
     }
 
-    const auto sample_prefix = sample.first(header_protection_sample_length);
+    const auto sample_prefix = input.sample.first(header_protection_sample_length);
 
     if (cipher_suite == CipherSuite::tls_chacha20_poly1305_sha256) {
         if (consume_packet_crypto_fault(PacketCryptoFaultPoint::header_protection_chacha_init)) {
@@ -834,7 +833,7 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
 
         CRYPTO_chacha_20(openssl_data(std::span{mask}),
                          openssl_data(std::span<const std::byte>{zeros}), mask.size(),
-                         openssl_data(hp_key), openssl_data(nonce), counter);
+                         openssl_data(input.hp_key), openssl_data(nonce), counter);
 
         if (consume_packet_crypto_fault(PacketCryptoFaultPoint::header_protection_chacha_final)) {
             return crypto_failure(CodecErrorCode::header_protection_failed);
@@ -864,7 +863,7 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
 
     std::vector<std::byte> block(header_protection_sample_length);
     int produced_length = 0;
-    const auto init_failed = header_protection_aes_init(context.get(), cipher, hp_key) <= 0 ||
+    const auto init_failed = header_protection_aes_init(context.get(), cipher, input.hp_key) <= 0 ||
                              header_protection_aes_set_padding(context.get()) <= 0 ||
                              header_protection_aes_update(context.get(), std::span{block},
                                                           &produced_length, sample_prefix) <= 0;

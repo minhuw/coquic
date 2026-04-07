@@ -169,11 +169,15 @@ QuicEcnCodepoint ecn_from_linux_traffic_class(int traffic_class) {
     }
 }
 
-bool configure_linux_ecn_socket_options(int fd, int family) {
+struct LinuxSocketDescriptor {
+    int fd = -1;
+};
+
+bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family) {
 #if defined(__linux__)
     const auto set_bool_socket_option = [&](int level, int name) {
         const int enabled = 1;
-        return runtime_ops().setsockopt_fn(fd, level, name, &enabled, sizeof(enabled)) == 0;
+        return runtime_ops().setsockopt_fn(socket.fd, level, name, &enabled, sizeof(enabled)) == 0;
     };
 
     if (family == AF_INET || family == AF_INET6) {
@@ -709,7 +713,7 @@ int open_udp_socket(int family) {
         }
     }
 
-    if (!configure_linux_ecn_socket_options(fd, family)) {
+    if (!configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = fd}, family)) {
         const int option_errno = errno;
         ::close(fd);
         errno = option_errno;

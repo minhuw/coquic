@@ -21,6 +21,11 @@ struct PlaintextChunk {
     std::span<const std::byte> bytes;
 };
 
+struct HeaderProtectionMaskInput {
+    std::span<const std::byte> hp_key;
+    std::span<const std::byte> sample;
+};
+
 CodecResult<PacketProtectionKeys>
 derive_initial_packet_keys(EndpointRole local_role, bool for_local_send,
                            const ConnectionId &client_initial_destination_connection_id,
@@ -65,7 +70,6 @@ CodecResult<std::vector<std::byte>> open_payload(CipherSuite cipher_suite,
                                                  std::span<const std::byte> ciphertext);
 
 CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite cipher_suite,
-                                                                std::span<const std::byte> hp_key,
-                                                                std::span<const std::byte> sample);
+                                                                HeaderProtectionMaskInput input);
 
 } // namespace coquic::quic

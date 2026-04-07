@@ -121,6 +121,11 @@ struct QuicCoreStopSending {
     std::uint64_t application_error_code = 0;
 };
 
+struct QuicCoreCloseConnection {
+    std::uint64_t application_error_code = 0;
+    std::string reason_phrase;
+};
+
 struct QuicCoreTimerExpired {};
 struct QuicCoreRequestKeyUpdate {};
 struct QuicCoreRequestConnectionMigration {
@@ -128,10 +133,10 @@ struct QuicCoreRequestConnectionMigration {
     QuicMigrationRequestReason reason = QuicMigrationRequestReason::active;
 };
 
-using QuicCoreInput =
-    std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
-                 QuicCoreResetStream, QuicCoreStopSending, QuicCoreRequestKeyUpdate,
-                 QuicCoreRequestConnectionMigration, QuicCoreTimerExpired>;
+using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
+                                   QuicCoreResetStream, QuicCoreStopSending,
+                                   QuicCoreCloseConnection, QuicCoreRequestKeyUpdate,
+                                   QuicCoreRequestConnectionMigration, QuicCoreTimerExpired>;
 
 struct QuicCoreSendDatagram {
     std::optional<QuicPathId> path_id;

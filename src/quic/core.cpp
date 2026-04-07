@@ -192,6 +192,12 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                     result.local_error = stream_state_error_to_local_error(queued.error());
                 }
             },
+            [&](const QuicCoreCloseConnection &in) {
+                static_cast<void>(connection_->queue_application_close(LocalApplicationCloseCommand{
+                    .application_error_code = in.application_error_code,
+                    .reason_phrase = in.reason_phrase,
+                }));
+            },
             [&](const QuicCoreRequestKeyUpdate &) { connection_->request_key_update(); },
             [&](const QuicCoreRequestConnectionMigration &in) {
                 const auto requested =

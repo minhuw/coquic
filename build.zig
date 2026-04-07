@@ -138,6 +138,8 @@ fn addProjectLibrary(
         "src/quic/http09_client.cpp",
         "src/quic/http09_runtime.cpp",
         "src/quic/http09_server.cpp",
+        "src/quic/http3_protocol.cpp",
+        "src/quic/http3_qpack.cpp",
         "src/quic/packet.cpp",
         "src/quic/packet_number.cpp",
         "src/quic/plaintext_codec.cpp",
@@ -268,6 +270,8 @@ pub fn build(b: *std.Build) void {
         "tests/quic_http09_server_test.cpp",
         "tests/quic_http09_client_test.cpp",
         "tests/quic_http09_runtime_test.cpp",
+        "tests/quic_http3_protocol_test.cpp",
+        "tests/quic_http3_qpack_test.cpp",
         "tests/quic_qlog_test.cpp",
         "tests/quic_recovery_test.cpp",
         "tests/quic_streams_test.cpp",
@@ -331,7 +335,11 @@ pub fn build(b: *std.Build) void {
     }
     const test_step = b.step("test", "Run the GoogleTest suite");
     test_step.dependOn(&smoke_run.step);
-    const compdb_step = b.step("compdb", "Build the GoogleTest binary without running it");
+    const compdb_step = b.step(
+        "compdb",
+        "Build the main executable and GoogleTest binary without running them",
+    );
+    compdb_step.dependOn(&exe.step);
     compdb_step.dependOn(&smoke.step);
 
     const coverage_lib = addProjectLibrary(

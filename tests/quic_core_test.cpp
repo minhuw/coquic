@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <type_traits>
 
 #include "src/quic/connection_test_hooks.h"
 #include "src/quic/packet_crypto_test_hooks.h"
@@ -16,6 +17,7 @@
 #include "src/quic/varint.h"
 #include "src/quic/qlog/types.h"
 #include "tests/quic_test_utils.h"
+#include "src/quic/http3.h"
 #include "src/quic/qlog/session.h"
 
 namespace coquic::quic {
@@ -2475,9 +2477,10 @@ TEST(QuicCoreTest, ApplicationAckFramesIncludeEcnCountsWhenReceiveMetadataIsAvai
     ASSERT_NE(ack_it, application->frames.end());
     const auto &ack = std::get<coquic::quic::AckFrame>(*ack_it);
     ASSERT_TRUE(ack.ecn_counts.has_value());
-    EXPECT_EQ(ack.ecn_counts->ect0, 0u);
-    EXPECT_EQ(ack.ecn_counts->ect1, 0u);
-    EXPECT_EQ(ack.ecn_counts->ecn_ce, 1u);
+    const auto &ecn_counts = optional_ref_or_terminate(ack.ecn_counts);
+    EXPECT_EQ(ecn_counts.ect0, 0u);
+    EXPECT_EQ(ecn_counts.ect1, 0u);
+    EXPECT_EQ(ecn_counts.ecn_ce, 1u);
 }
 
 TEST(QuicCoreTest, AckOnlyZeroRttPacketDoesNotScheduleApplicationAckDeadline) {
@@ -3914,6 +3917,63 @@ TEST(QuicCoreTest, StopSendingLocalCommandRejectsSendOnlyStreams) {
     expect_local_error(result, coquic::quic::QuicCoreLocalErrorCode::invalid_stream_direction, 2);
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(result).empty());
     EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicCoreTest, LocalApplicationCloseQueuesApplicationConnectionCloseFrame) {
+    static_assert(std::is_same_v<
+                  decltype(std::declval<coquic::quic::QuicConnection &>().queue_application_close(
+                      coquic::quic::LocalApplicationCloseCommand{})),
+                  coquic::quic::StreamStateResult<bool>>);
+
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+
+    const auto closed = client.advance(
+        coquic::quic::QuicCoreCloseConnection{
+            .application_error_code =
+                static_cast<std::uint64_t>(coquic::quic::Http3ErrorCode::missing_settings),
+            .reason_phrase = "http3 missing settings",
+        },
+        coquic::quic::test::test_time(1));
+    EXPECT_FALSE(coquic::quic::test::send_datagrams_from(closed).empty());
+    EXPECT_EQ(coquic::quic::test::count_state_change(coquic::quic::test::state_changes_from(closed),
+                                                     coquic::quic::QuicCoreStateChange::failed),
+              1u);
+
+    bool saw_application_close = false;
+    for (const auto &datagram : coquic::quic::test::send_datagrams_from(closed)) {
+        for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
+            const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+            if (one_rtt == nullptr) {
+                continue;
+            }
+
+            for (const auto &frame : one_rtt->frames) {
+                const auto *close_frame =
+                    std::get_if<coquic::quic::ApplicationConnectionCloseFrame>(&frame);
+                if (close_frame == nullptr) {
+                    continue;
+                }
+
+                saw_application_close = true;
+                EXPECT_EQ(
+                    close_frame->error_code,
+                    static_cast<std::uint64_t>(coquic::quic::Http3ErrorCode::missing_settings));
+                EXPECT_EQ(coquic::quic::test::string_from_bytes(close_frame->reason.bytes),
+                          "http3 missing settings");
+            }
+        }
+    }
+    EXPECT_TRUE(saw_application_close);
+    EXPECT_TRUE(client.has_failed());
+
+    const auto delivered = coquic::quic::test::relay_send_datagrams_to_peer(
+        closed, server, coquic::quic::test::test_time(2));
+    const auto changes = coquic::quic::test::state_changes_from(delivered);
+    EXPECT_EQ(
+        coquic::quic::test::count_state_change(changes, coquic::quic::QuicCoreStateChange::failed),
+        1u);
 }
 
 TEST(QuicCoreTest, PeerStopSendingQueuesAutomaticReset) {
@@ -7625,7 +7685,8 @@ TEST(QuicCoreTest, ServerInitialPacketsUsePeerSourceConnectionIdAsDestination) {
     ASSERT_EQ(packets.size(), 1u);
     const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets[0]);
     ASSERT_NE(initial, nullptr);
-    EXPECT_EQ(initial->destination_connection_id, connection.peer_source_connection_id_.value());
+    EXPECT_EQ(initial->destination_connection_id,
+              optional_value_or_terminate(connection.peer_source_connection_id_));
 }
 
 TEST(QuicCoreTest, InitialProbePacketCanFallbackToPing) {
@@ -10550,8 +10611,7 @@ TEST(QuicCoreTest, ConnectionFlowControlTracksMissingPendingFramesAndAcknowledge
     state.pending_data_blocked_frame = coquic::quic::DataBlockedFrame{.maximum_data = 11};
     state.data_blocked_state = coquic::quic::StreamControlFrameState::pending;
     state.queue_data_blocked(/*maximum_data=*/12);
-    ASSERT_TRUE(state.pending_data_blocked_frame.has_value());
-    EXPECT_EQ(state.pending_data_blocked_frame->maximum_data, 12u);
+    EXPECT_EQ(optional_ref_or_terminate(state.pending_data_blocked_frame).maximum_data, 12u);
 
     state.data_blocked_state = coquic::quic::StreamControlFrameState::pending;
     state.pending_data_blocked_frame = std::nullopt;
@@ -13910,7 +13970,8 @@ TEST(QuicCoreTest, RequestKeyUpdatePreservesRecordedPhaseStartWhenAlreadyInitiat
 
     EXPECT_TRUE(connection.local_key_update_requested_);
     ASSERT_TRUE(connection.current_write_phase_first_packet_number_.has_value());
-    EXPECT_EQ(*connection.current_write_phase_first_packet_number_, 17u);
+    EXPECT_EQ(optional_value_or_terminate(connection.current_write_phase_first_packet_number_),
+              17u);
 }
 
 TEST(QuicCoreTest, LocalKeyUpdateWaitsUntilLargestAckCoversCurrentWritePhasePacket) {
@@ -18587,7 +18648,7 @@ TEST(QuicCoreTest, InboundMigratedAckGapDatagramRetransmitsLostStreamData) {
         }
 
         ASSERT_TRUE(send->path_id.has_value());
-        EXPECT_EQ(*send->path_id, 11u);
+        EXPECT_EQ(optional_value_or_terminate(send->path_id), 11u);
         saw_send_on_migrated_path = true;
 
         for (const auto &packet : decode_sender_datagram(connection, send->bytes)) {

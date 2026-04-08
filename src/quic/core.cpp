@@ -245,6 +245,18 @@ std::size_t QuicCore::connection_count() const {
 
 QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreTimePoint now) {
     if (const auto *open = std::get_if<QuicCoreOpenConnection>(&input)) {
+        if (endpoint_config_.role != EndpointRole::client) {
+            (void)now;
+            QuicCoreResult result;
+            result.local_error = QuicCoreLocalError{
+                .connection = std::nullopt,
+                .code = QuicCoreLocalErrorCode::unsupported_operation,
+                .stream_id = std::nullopt,
+            };
+            result.next_wakeup = next_wakeup();
+            return result;
+        }
+
         QuicCoreConfig config{
             .role = endpoint_config_.role,
             .source_connection_id = open->connection.source_connection_id,
@@ -302,8 +314,14 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
 
     (void)now;
     QuicCoreResult result;
+    const auto connection = [&]() -> std::optional<QuicConnectionHandle> {
+        if (const auto *command = std::get_if<QuicCoreConnectionCommand>(&input)) {
+            return command->connection;
+        }
+        return std::nullopt;
+    }();
     result.local_error = QuicCoreLocalError{
-        .connection = std::nullopt,
+        .connection = connection,
         .code = QuicCoreLocalErrorCode::unsupported_operation,
         .stream_id = std::nullopt,
     };
@@ -313,11 +331,21 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
 
 QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     QuicCoreResult result;
-    auto *entry = ensure_legacy_entry();
-    if (entry == nullptr || entry->connection == nullptr || !legacy_config_.has_value()) {
+    if (!legacy_config_.has_value()) {
+        result.local_error = QuicCoreLocalError{
+            .connection = std::nullopt,
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        };
+        result.next_wakeup = next_wakeup();
         return result;
     }
-    auto &config = *legacy_config_;
+
+    auto *entry = ensure_legacy_entry();
+    if (entry == nullptr || entry->connection == nullptr) {
+        return result;
+    }
+    auto config = legacy_config_.value_or(QuicCoreConfig{});
     auto *connection = entry->connection.get();
 
     std::visit(
@@ -480,6 +508,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         result.effects.emplace_back(*status);
     }
     result.next_wakeup = next_wakeup();
+    legacy_config_ = std::move(config);
     return result;
 }
 

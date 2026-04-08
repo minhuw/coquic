@@ -58,10 +58,58 @@ TEST(QuicCoreEndpointTest, UnsupportedEndpointCommandReportsLocalErrorWithoutLeg
     });
 
     EXPECT_TRUE(result.local_error.has_value());
+    EXPECT_EQ(local_error.connection, std::optional<coquic::quic::QuicConnectionHandle>{1u});
     EXPECT_EQ(local_error.code, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation);
     EXPECT_EQ(result.next_wakeup, core.next_wakeup());
     EXPECT_TRUE(core.active_local_connection_ids().empty());
     EXPECT_FALSE(core.is_handshake_complete());
     EXPECT_FALSE(core.has_failed());
+}
+
+TEST(QuicCoreEndpointTest, EndpointConstructedCoreRejectsLegacyAdvance) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0)));
+
+    const auto result =
+        core.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(1));
+    const auto local_error = result.local_error.value_or(coquic::quic::QuicCoreLocalError{
+        .connection = std::nullopt,
+        .code = coquic::quic::QuicCoreLocalErrorCode::invalid_stream_id,
+        .stream_id = std::nullopt,
+    });
+
+    EXPECT_TRUE(result.local_error.has_value());
+    EXPECT_EQ(local_error.connection, std::nullopt);
+    EXPECT_EQ(local_error.code, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation);
+    EXPECT_EQ(result.next_wakeup, core.next_wakeup());
+}
+
+TEST(QuicCoreEndpointTest, ServerEndpointRejectsClientOpenConnection) {
+    coquic::quic::QuicCore core(make_server_endpoint_config());
+
+    const auto result = core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0));
+    const auto local_error = result.local_error.value_or(coquic::quic::QuicCoreLocalError{
+        .connection = std::nullopt,
+        .code = coquic::quic::QuicCoreLocalErrorCode::invalid_stream_id,
+        .stream_id = std::nullopt,
+    });
+
+    EXPECT_TRUE(result.local_error.has_value());
+    EXPECT_EQ(local_error.connection, std::nullopt);
+    EXPECT_EQ(local_error.code, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation);
+    EXPECT_TRUE(lifecycle_events_from(result).empty());
+    EXPECT_TRUE(send_effects_from(result).empty());
+    EXPECT_EQ(core.connection_count(), 0u);
 }
 } // namespace

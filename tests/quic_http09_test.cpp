@@ -82,9 +82,10 @@ TEST(QuicHttp09Test, MigrationAliasesReuseTransferTransportAndTlsProfiles) {
     const auto transfer_tls = coquic::quic::http09_tls_cipher_suites_for_testcase(
         coquic::quic::QuicHttp09Testcase::transfer);
 
-    for (const auto testcase : {coquic::quic::QuicHttp09Testcase::rebind_port,
-                                coquic::quic::QuicHttp09Testcase::rebind_addr,
-                                coquic::quic::QuicHttp09Testcase::connectionmigration}) {
+    for (const auto testcase :
+         {coquic::quic::QuicHttp09Testcase::rebind_port,
+          coquic::quic::QuicHttp09Testcase::rebind_addr, coquic::quic::QuicHttp09Testcase::ecn,
+          coquic::quic::QuicHttp09Testcase::connectionmigration}) {
         const auto client = coquic::quic::http09_client_transport_for_testcase(testcase);
         EXPECT_EQ(client.initial_max_data, transfer_client.initial_max_data);
         EXPECT_EQ(client.initial_max_stream_data_bidi_local,

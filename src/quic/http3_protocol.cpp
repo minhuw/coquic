@@ -38,21 +38,12 @@ CodecResult<std::uint64_t> read_varint(BufferReader &reader) {
 
 CodecResult<std::vector<std::byte>>
 serialize_http3_payload_frame(std::uint64_t type, std::span<const std::byte> payload) {
-    const auto encoded_type = encode_varint(type);
-    if (!encoded_type.has_value()) {
-        return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
-                                                     encoded_type.error().offset);
-    }
-
-    const auto encoded_length = encode_varint(payload.size());
-    if (!encoded_length.has_value()) {
-        return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
-                                                     encoded_length.error().offset);
-    }
+    const auto encoded_type = encode_varint(type).value();
+    const auto encoded_length = encode_varint(payload.size()).value();
 
     BufferWriter writer;
-    writer.write_bytes(encoded_type.value());
-    writer.write_bytes(encoded_length.value());
+    writer.write_bytes(encoded_type);
+    writer.write_bytes(encoded_length);
     writer.write_bytes(payload);
     return CodecResult<std::vector<std::byte>>::success(writer.bytes());
 }
@@ -129,22 +120,19 @@ CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> byte
         return codec_failure<Http3DecodedFrame>(CodecErrorCode::http3_parse_error, reader.offset());
     }
 
-    const auto payload = reader.read_exact(static_cast<std::size_t>(frame_length.value()));
-    if (!payload.has_value()) {
-        return codec_failure<Http3DecodedFrame>(payload.error().code, payload.error().offset);
-    }
+    const auto payload = reader.read_exact(static_cast<std::size_t>(frame_length.value())).value();
 
     Http3Frame frame;
     if (frame_type.value() == kHttp3FrameTypeData) {
         frame = Http3DataFrame{
-            .payload = std::vector<std::byte>(payload.value().begin(), payload.value().end()),
+            .payload = std::vector<std::byte>(payload.begin(), payload.end()),
         };
     } else if (frame_type.value() == kHttp3FrameTypeHeaders) {
         frame = Http3HeadersFrame{
-            .field_section = std::vector<std::byte>(payload.value().begin(), payload.value().end()),
+            .field_section = std::vector<std::byte>(payload.begin(), payload.end()),
         };
     } else if (frame_type.value() == kHttp3FrameTypeSettings) {
-        BufferReader payload_reader(payload.value());
+        BufferReader payload_reader(payload);
         Http3SettingsFrame settings{};
         while (payload_reader.remaining() > 0) {
             const auto setting_id = read_varint(payload_reader);
@@ -166,7 +154,7 @@ CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> byte
         }
         frame = std::move(settings);
     } else if (frame_type.value() == kHttp3FrameTypeGoaway) {
-        BufferReader payload_reader(payload.value());
+        BufferReader payload_reader(payload);
         const auto id = read_varint(payload_reader);
         if (!id.has_value()) {
             return codec_failure<Http3DecodedFrame>(id.error().code, id.error().offset);
@@ -198,10 +186,7 @@ CodecResult<std::vector<std::byte>> serialize_http3_uni_stream_prefix(Http3UniSt
 
 CodecResult<std::vector<std::byte>>
 serialize_http3_control_stream(std::span<const Http3Setting> settings) {
-    auto prefix = serialize_http3_uni_stream_prefix(Http3UniStreamType::control);
-    if (!prefix.has_value()) {
-        return codec_failure<std::vector<std::byte>>(prefix.error().code, prefix.error().offset);
-    }
+    auto prefix = serialize_http3_uni_stream_prefix(Http3UniStreamType::control).value();
 
     auto frame = serialize_http3_frame(Http3Frame{Http3SettingsFrame{
         .settings = std::vector<Http3Setting>(settings.begin(), settings.end()),
@@ -210,7 +195,7 @@ serialize_http3_control_stream(std::span<const Http3Setting> settings) {
         return codec_failure<std::vector<std::byte>>(frame.error().code, frame.error().offset);
     }
 
-    auto output = prefix.value();
+    auto output = std::move(prefix);
     output.insert(output.end(), frame.value().begin(), frame.value().end());
     return CodecResult<std::vector<std::byte>>::success(std::move(output));
 }
@@ -239,7 +224,7 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
             return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                    "empty header name");
         }
-        const bool is_pseudo = !field.name.empty() && field.name.front() == ':';
+        const bool is_pseudo = field.name.front() == ':';
         if (is_pseudo && saw_regular_header) {
             return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                    "pseudo header after regular header");
@@ -314,7 +299,7 @@ Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const H
             return http3_failure<Http3ResponseHead>(Http3ErrorCode::message_error,
                                                     "empty header name");
         }
-        const bool is_pseudo = !field.name.empty() && field.name.front() == ':';
+        const bool is_pseudo = field.name.front() == ':';
         if (is_pseudo && saw_regular_header) {
             return http3_failure<Http3ResponseHead>(Http3ErrorCode::message_error,
                                                     "pseudo header after regular header");
@@ -345,7 +330,7 @@ Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const H
         const auto *end = begin + field.value.size();
         const auto parsed = std::from_chars(begin, end, status);
         if (field.value.size() != 3 || parsed.ec != std::errc{} || parsed.ptr != end ||
-            status < 100 || status > 999) {
+            status < 100) {
             return http3_failure<Http3ResponseHead>(Http3ErrorCode::message_error,
                                                     "invalid :status");
         }

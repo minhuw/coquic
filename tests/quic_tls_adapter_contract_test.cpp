@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -917,6 +918,49 @@ TEST(QuicTlsAdapterContractTest, NullSslAndDirectSendAlertTestHooksRemainSafe) {
               0);
 }
 
+TEST(QuicTlsAdapterContractTest, KeylogCallbacksRemainSafeForNullInputsAndUnwritablePaths) {
+    TlsAdapter adapter(make_client_config());
+    TlsAdapterTestPeer::call_static_on_keylog_line_with_null_app_data(adapter, "CLIENT_RANDOM");
+    TlsAdapterTestPeer::call_static_on_keylog_line(adapter, nullptr);
+
+    TlsAdapter missing_ssl_adapter(make_client_config());
+    TlsAdapterTestPeer::reset_ssl(missing_ssl_adapter);
+    TlsAdapterTestPeer::call_static_on_keylog_line(missing_ssl_adapter, "CLIENT_RANDOM deadbeef");
+
+    coquic::quic::test::ScopedTempDir dir;
+    const auto unwritable_path = dir.path() / "keys";
+    std::filesystem::create_directories(unwritable_path);
+
+    auto config = make_client_config();
+    config.tls_keylog_path = unwritable_path;
+    TlsAdapter unwritable_adapter(std::move(config));
+    TlsAdapterTestPeer::call_static_on_keylog_line(unwritable_adapter, "CLIENT_RANDOM deadbeef");
+
+    coquic::quic::test::ScopedTempDir relative_dir;
+    struct ScopedCurrentPath {
+        explicit ScopedCurrentPath(const std::filesystem::path &path)
+            : previous(std::filesystem::current_path()) {
+            std::filesystem::current_path(path);
+        }
+
+        ~ScopedCurrentPath() {
+            std::filesystem::current_path(previous);
+        }
+
+        std::filesystem::path previous;
+    };
+    {
+        ScopedCurrentPath cwd(relative_dir.path());
+        auto relative_config = make_client_config();
+        relative_config.tls_keylog_path = std::filesystem::path("keys.log");
+        TlsAdapter relative_adapter(std::move(relative_config));
+        TlsAdapterTestPeer::call_static_on_keylog_line(relative_adapter, "CLIENT_RANDOM feedface");
+    }
+
+    EXPECT_TRUE(std::filesystem::is_directory(unwritable_path));
+    EXPECT_TRUE(std::filesystem::exists(relative_dir.path() / "keys.log"));
+}
+
 TEST(QuicTlsAdapterContractTest, SecretCallbackHooksCoverMissingSslAndWriteOnlyNullAppDataPaths) {
     const std::array<uint8_t, 32> secret{};
 
@@ -1171,7 +1215,9 @@ TEST(QuicTlsAdapterContractTest, RuntimeStatusUpdateReturnsWhenSslIsMissing) {
     TlsAdapter adapter(make_client_config());
     TlsAdapterTestPeer::reset_ssl(adapter);
 
-    TlsAdapterTestPeer::update_runtime_status(adapter);
+    const std::function<void(TlsAdapter &)> update_runtime_status =
+        TlsAdapterTestPeer::update_runtime_status;
+    update_runtime_status(adapter);
     EXPECT_EQ(adapter.early_data_accepted(), std::nullopt);
 }
 

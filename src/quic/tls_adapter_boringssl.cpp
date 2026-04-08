@@ -1307,6 +1307,21 @@ int TlsAdapterTestPeer::call_static_send_alert_with_null_app_data(TlsAdapter &ad
     });
 }
 
+void TlsAdapterTestPeer::call_static_on_keylog_line(TlsAdapter &adapter, const char *line) {
+    if (adapter.impl_->ssl_ == nullptr) {
+        return;
+    }
+    TlsAdapter::Impl::on_keylog_line(adapter.impl_->ssl_.get(), line);
+}
+
+void TlsAdapterTestPeer::call_static_on_keylog_line_with_null_app_data(TlsAdapter &adapter,
+                                                                       const char *line) {
+    static_cast<void>(call_with_null_app_data(adapter.impl_->ssl_.get(), [&](SSL *ssl) {
+        TlsAdapter::Impl::on_keylog_line(ssl, line);
+        return 0;
+    }));
+}
+
 void TlsAdapterTestPeer::capture_peer_transport_parameters(TlsAdapter &adapter) {
     adapter.impl_->capture_peer_transport_parameters();
 }

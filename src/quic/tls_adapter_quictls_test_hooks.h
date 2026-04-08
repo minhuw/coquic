@@ -123,6 +123,9 @@ class TlsAdapterTestPeer {
                                                          uint8_t alert);
     static int call_static_on_new_session_with_null_app_data(TlsAdapter &adapter,
                                                              SSL_SESSION *session);
+    static void call_static_on_keylog_line(TlsAdapter &adapter, const char *line);
+    static void call_static_on_keylog_line_with_null_app_data(TlsAdapter &adapter,
+                                                              const char *line);
 
     static void capture_peer_transport_parameters(TlsAdapter &adapter);
     static void set_peer_transport_parameters(TlsAdapter &adapter, std::vector<std::byte> bytes);

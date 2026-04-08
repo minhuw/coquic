@@ -1075,7 +1075,8 @@ class TlsAdapter::Impl {
     }
 
     void update_resumed_resumption_state() {
-        if (resumed_resumption_state_.has_value() || SSL_session_reused(ssl_.get()) != 1) {
+        if (ssl_ == nullptr || resumed_resumption_state_.has_value() ||
+            SSL_session_reused(ssl_.get()) != 1) {
             return;
         }
 
@@ -1439,6 +1440,21 @@ int TlsAdapterTestPeer::call_static_on_new_session_with_null_app_data(TlsAdapter
     return call_with_null_app_data(adapter.impl_->ssl_.get(), [&](SSL *ssl) {
         return TlsAdapter::Impl::on_new_session(ssl, session);
     });
+}
+
+void TlsAdapterTestPeer::call_static_on_keylog_line(TlsAdapter &adapter, const char *line) {
+    if (adapter.impl_->ssl_ == nullptr) {
+        return;
+    }
+    TlsAdapter::Impl::on_keylog_line(adapter.impl_->ssl_.get(), line);
+}
+
+void TlsAdapterTestPeer::call_static_on_keylog_line_with_null_app_data(TlsAdapter &adapter,
+                                                                       const char *line) {
+    static_cast<void>(call_with_null_app_data(adapter.impl_->ssl_.get(), [&](SSL *ssl) {
+        TlsAdapter::Impl::on_keylog_line(ssl, line);
+        return 0;
+    }));
 }
 
 void TlsAdapterTestPeer::capture_peer_transport_parameters(TlsAdapter &adapter) {

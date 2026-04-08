@@ -257,6 +257,21 @@ TEST(QuicRecoveryTest, DuplicatePacketsDoNotIncreaseEcnCountsTwice) {
     EXPECT_EQ(ecn_counts.ecn_ce, 1u);
 }
 
+TEST(QuicRecoveryTest, UnknownEcnCodepointLeavesAckEcnCountsZeroed) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/5, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1),
+                            static_cast<coquic::quic::QuicEcnCodepoint>(0xff));
+
+    const auto ack =
+        history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(2));
+    ASSERT_TRUE(ack.has_value());
+    ASSERT_TRUE(ack->ecn_counts.has_value());
+    EXPECT_EQ(ack->ecn_counts->ect0, 0u);
+    EXPECT_EQ(ack->ecn_counts->ect1, 0u);
+    EXPECT_EQ(ack->ecn_counts->ecn_ce, 0u);
+}
+
 TEST(QuicRecoveryTest, HistoryWithoutPendingAckReturnsNulloptEvenWhenPacketsExist) {
     ReceivedPacketHistory history;
     history.record_received(/*packet_number=*/1, /*ack_eliciting=*/false,

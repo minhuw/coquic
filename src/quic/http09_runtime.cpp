@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <cctype>
@@ -1159,7 +1160,7 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
         .iov_base = const_cast<void *>(buffer),
         .iov_len = datagram.size(),
     };
-    std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
+    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
     msghdr message{};
     message.msg_name = const_cast<sockaddr *>(reinterpret_cast<const sockaddr *>(&peer));
     message.msg_namelen = peer_len;
@@ -1168,12 +1169,7 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
     message.msg_control = control.data();
     message.msg_controllen = control.size();
 
-    auto *header = CMSG_FIRSTHDR(&message);
-    if (header == nullptr) {
-        errno = EINVAL;
-        std::cerr << "http09-" << role_name << " failed: sendmsg control setup error\n";
-        return false;
-    }
+    auto *header = reinterpret_cast<cmsghdr *>(control.data());
 
     const bool use_ipv4_traffic_class =
         peer.ss_family == AF_INET || is_ipv4_mapped_ipv6_address(peer, peer_len);
@@ -1217,19 +1213,16 @@ struct ClientSocketSet {
 
 class ScopedClientSockets {
   public:
-    explicit ScopedClientSockets(ClientSocketSet &sockets) : sockets_(&sockets) {
+    explicit ScopedClientSockets(ClientSocketSet &sockets) : sockets_(sockets) {
     }
 
     ~ScopedClientSockets() {
-        if (sockets_ == nullptr) {
-            return;
+        if (sockets_.secondary.has_value() && sockets_.secondary->fd >= 0 &&
+            sockets_.secondary->fd != sockets_.primary.fd) {
+            ::close(sockets_.secondary->fd);
         }
-        if (sockets_->secondary.has_value() && sockets_->secondary->fd >= 0 &&
-            sockets_->secondary->fd != sockets_->primary.fd) {
-            ::close(sockets_->secondary->fd);
-        }
-        if (sockets_->primary.fd >= 0) {
-            ::close(sockets_->primary.fd);
+        if (sockets_.primary.fd >= 0) {
+            ::close(sockets_.primary.fd);
         }
     }
 
@@ -1237,7 +1230,7 @@ class ScopedClientSockets {
     ScopedClientSockets &operator=(const ScopedClientSockets &) = delete;
 
   private:
-    ClientSocketSet *sockets_ = nullptr;
+    ClientSocketSet &sockets_;
 };
 
 struct RuntimeWaitStep {
@@ -2173,7 +2166,6 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
             }
 
             bool received_datagram = false;
-            bool all_sockets_would_block = true;
             for (const int socket_fd : active_client_socket_fds(client_sockets)) {
                 if (socket_fd < 0) {
                     continue;
@@ -2184,7 +2176,6 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
                 if (receive.status == ReceiveDatagramStatus::would_block) {
                     continue;
                 }
-                all_sockets_would_block = false;
                 if (receive.status == ReceiveDatagramStatus::error) {
                     return false;
                 }
@@ -2210,28 +2201,26 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
             if (received_datagram) {
                 continue;
             }
-            if (all_sockets_would_block) {
-                with_runtime_trace([&](std::ostream &stream) {
-                    const auto current = now();
-                    const auto next_wakeup_delay_ms =
-                        state.next_wakeup.has_value()
-                            ? std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::abs(state.next_wakeup.value() - current))
-                                  .count()
-                            : -1;
-                    stream << "http09-client trace: would-block pending="
-                           << state.endpoint_has_pending_work
-                           << " advanced_core=" << pump_result.advanced_core
-                           << " terminal_success=" << state.terminal_success
-                           << " terminal_failure=" << state.terminal_failure
-                           << " has_next_wakeup=" << state.next_wakeup.has_value()
-                           << " next_wakeup_delta_ms=" << next_wakeup_delay_ms << '\n';
-                });
-                if (pump_result.advanced_core && state.endpoint_has_pending_work) {
-                    continue;
-                }
-                return true;
+            with_runtime_trace([&](std::ostream &stream) {
+                const auto current = now();
+                const auto next_wakeup_delay_ms =
+                    state.next_wakeup.has_value()
+                        ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::abs(state.next_wakeup.value() - current))
+                              .count()
+                        : -1;
+                stream << "http09-client trace: would-block pending="
+                       << state.endpoint_has_pending_work
+                       << " advanced_core=" << pump_result.advanced_core
+                       << " terminal_success=" << state.terminal_success
+                       << " terminal_failure=" << state.terminal_failure
+                       << " has_next_wakeup=" << state.next_wakeup.has_value()
+                       << " next_wakeup_delta_ms=" << next_wakeup_delay_ms << '\n';
+            });
+            if (pump_result.advanced_core && state.endpoint_has_pending_work) {
+                continue;
             }
+            return true;
         }
     };
 
@@ -2953,6 +2942,10 @@ int run_http09_server(const Http09RuntimeConfig &config) {
 
 } // namespace
 
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((no_profile_instrument_function)), apply_to = function)
+#endif
+
 namespace test {
 
 namespace {
@@ -3033,6 +3026,8 @@ struct RecordedRecvMsgForTests {
 };
 
 thread_local RecordedRecvMsgForTests g_recorded_recvmsg_for_tests;
+thread_local int g_runtime_low_level_getaddrinfo_calls_for_tests = 0;
+thread_local int g_runtime_low_level_bind_calls_for_tests = 0;
 
 ssize_t record_sendto_for_tests(int socket_fd, const void *, size_t length, int,
                                 const sockaddr *destination, socklen_t destination_len) {
@@ -5522,6 +5517,576 @@ bool runtime_additional_internal_coverage_for_tests() {
     return ok;
 }
 
+bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
+    bool ok = true;
+    const auto check = [&](std::string_view label, bool condition) {
+        if (!condition) {
+            std::cerr << "runtime_low_level_socket_and_ecn_coverage_for_tests failed: " << label
+                      << '\n';
+            ok = false;
+        }
+        return condition;
+    };
+
+    check("not_ect maps to zero traffic class",
+          linux_traffic_class_for_ecn(QuicEcnCodepoint::not_ect) == 0x00);
+    check("unavailable maps to zero traffic class",
+          linux_traffic_class_for_ecn(QuicEcnCodepoint::unavailable) == 0x00);
+    check("unknown codepoint falls back to zero traffic class",
+          linux_traffic_class_for_ecn(static_cast<QuicEcnCodepoint>(0xff)) == 0x00);
+    check("traffic class 0x01 maps to ect1",
+          ecn_from_linux_traffic_class(0x01) == QuicEcnCodepoint::ect1);
+    check("ecn testcase uses transfer semantics",
+          transfer_semantics_testcase(QuicHttp09Testcase::ecn) == QuicHttp09Testcase::transfer);
+    check("connectionmigration testcase uses transfer semantics",
+          transfer_semantics_testcase(QuicHttp09Testcase::connectionmigration) ==
+              QuicHttp09Testcase::transfer);
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendto_fn = record_sendto_for_tests,
+                .sendmsg_fn = record_sendmsg_for_tests,
+            },
+        };
+        check("sendto override is not legacy when sendmsg is also overridden",
+              !has_legacy_sendto_override());
+    }
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .recvfrom_fn = [](int, void *, size_t, int, sockaddr *, socklen_t *) -> ssize_t {
+                    return 0;
+                },
+                .recvmsg_fn = record_recvmsg_for_tests,
+            },
+        };
+        check("recvfrom override is not legacy when recvmsg is also overridden",
+              !has_legacy_recvfrom_override());
+    }
+
+    sockaddr_storage ipv4_peer{};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&ipv4_peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(4443);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    check("ipv4 peer is not treated as ipv4-mapped ipv6",
+          !is_ipv4_mapped_ipv6_address(ipv4_peer, sizeof(sockaddr_in)));
+
+    sockaddr_storage short_ipv6_peer{};
+    auto &short_ipv6 = *reinterpret_cast<sockaddr_in6 *>(&short_ipv6_peer);
+    short_ipv6.sin6_family = AF_INET6;
+    check("short ipv6 peer is not treated as ipv4 mapped",
+          !is_ipv4_mapped_ipv6_address(short_ipv6_peer,
+                                       static_cast<socklen_t>(sizeof(sockaddr_in6) - 1)));
+
+    msghdr truncated_message{};
+    truncated_message.msg_flags = MSG_CTRUNC;
+    check("truncated recvmsg control returns unavailable",
+          recvmsg_ecn_from_control(truncated_message) == QuicEcnCodepoint::unavailable);
+
+    {
+        std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
+        msghdr message{};
+        message.msg_control = control.data();
+        message.msg_controllen = control.size();
+        auto *header = CMSG_FIRSTHDR(&message);
+        check("ipv6 control header exists", header != nullptr);
+        if (header != nullptr) {
+            header->cmsg_level = IPPROTO_IPV6;
+            header->cmsg_type = IPV6_TCLASS;
+            header->cmsg_len = CMSG_LEN(sizeof(int));
+            const int traffic_class = 0x03;
+            std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
+            message.msg_controllen = header->cmsg_len;
+            check("ipv6 tclass control maps to ce",
+                  recvmsg_ecn_from_control(message) == QuicEcnCodepoint::ce);
+        }
+    }
+
+    {
+        std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
+        msghdr message{};
+        message.msg_control = control.data();
+        message.msg_controllen = control.size();
+        auto *header = CMSG_FIRSTHDR(&message);
+        check("ipv6 unrelated control header exists", header != nullptr);
+        if (header != nullptr) {
+            header->cmsg_level = IPPROTO_IPV6;
+            header->cmsg_type = IPV6_HOPLIMIT;
+            header->cmsg_len = CMSG_LEN(sizeof(int));
+            message.msg_controllen = header->cmsg_len;
+            check("ipv6 unrelated control leaves ecn unavailable",
+                  recvmsg_ecn_from_control(message) == QuicEcnCodepoint::unavailable);
+        }
+    }
+
+    {
+        std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
+        msghdr message{};
+        message.msg_control = control.data();
+        message.msg_controllen = control.size();
+        auto *header = CMSG_FIRSTHDR(&message);
+        check("zero-payload control header exists", header != nullptr);
+        if (header != nullptr) {
+            header->cmsg_level = IPPROTO_IP;
+            header->cmsg_type = IP_TOS;
+            header->cmsg_len = CMSG_LEN(0);
+            message.msg_controllen = header->cmsg_len;
+            check("zero-payload control falls back to not_ect",
+                  recvmsg_ecn_from_control(message) == QuicEcnCodepoint::not_ect);
+        }
+    }
+
+    {
+        std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
+        msghdr message{};
+        message.msg_control = control.data();
+        message.msg_controllen = control.size();
+        auto *header = CMSG_FIRSTHDR(&message);
+        check("unrelated control header exists", header != nullptr);
+        if (header != nullptr) {
+            header->cmsg_level = IPPROTO_IP;
+            header->cmsg_type = IP_TTL;
+            header->cmsg_len = CMSG_LEN(sizeof(int));
+            message.msg_controllen = header->cmsg_len;
+            check("unrelated control leaves ecn unavailable",
+                  recvmsg_ecn_from_control(message) == QuicEcnCodepoint::unavailable);
+        }
+    }
+
+    {
+        g_recorded_setsockopt_for_tests = {};
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .setsockopt_fn = record_setsockopt_for_tests,
+            },
+        };
+        check("unsupported family skips linux ecn socket options",
+              configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = -1}, AF_UNSPEC));
+        check("unsupported family leaves setsockopt untouched",
+              g_recorded_setsockopt_for_tests.calls.empty());
+    }
+
+    {
+        const int fd = ::socket(AF_INET6, SOCK_DGRAM, 0);
+        check("test ipv6 socket opened", fd >= 0);
+        if (fd >= 0) {
+            ScopedFd socket_guard(fd);
+            const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+                Http09RuntimeOpsOverride{
+                    .setsockopt_fn = [](int current_fd, int level, int name, const void *value,
+                                        socklen_t value_len) -> int {
+                        if (level == IPPROTO_IPV6 && name == IPV6_RECVTCLASS) {
+                            errno = ENOPROTOOPT;
+                            return -1;
+                        }
+                        return ::setsockopt(current_fd, level, name, value, value_len);
+                    },
+                },
+            };
+            check("ipv6 ecn socket option failure is surfaced",
+                  !configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = fd}, AF_INET6));
+        }
+    }
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .socket_fn = [](int family, int type, int protocol) -> int {
+                    return ::socket(family, type, protocol);
+                },
+                .setsockopt_fn = [](int current_fd, int level, int name, const void *value,
+                                    socklen_t value_len) -> int {
+                    if (level == IPPROTO_IPV6 && name == IPV6_V6ONLY) {
+                        errno = EINVAL;
+                        return -1;
+                    }
+                    return ::setsockopt(current_fd, level, name, value, value_len);
+                },
+            },
+        };
+        check("open udp socket fails when ipv6 v6only disable fails",
+              (open_udp_socket(AF_INET6) == -1) & (errno == EINVAL));
+    }
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .socket_fn = [](int family, int type, int protocol) -> int {
+                    return ::socket(family, type, protocol);
+                },
+                .setsockopt_fn = [](int current_fd, int level, int name, const void *value,
+                                    socklen_t value_len) -> int {
+                    if (level == IPPROTO_IPV6 && name == IPV6_RECVTCLASS) {
+                        errno = ENOPROTOOPT;
+                        return -1;
+                    }
+                    return ::setsockopt(current_fd, level, name, value, value_len);
+                },
+            },
+        };
+        check("open udp socket fails when ipv6 ecn setup fails",
+              (open_udp_socket(AF_INET6) == -1) & (errno == ENOPROTOOPT));
+    }
+
+    {
+        sockaddr_storage peer{};
+        std::memcpy(&peer, &ipv4_peer, sizeof(ipv4_peer));
+        const auto bytes = bytes_from_string_for_runtime_tests("ecn");
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendmsg_fn = [](int, const msghdr *, int) -> ssize_t {
+                    errno = EIO;
+                    return -1;
+                },
+            },
+        };
+        check("sendmsg failure returns false",
+              !send_datagram(/*fd=*/-1, bytes, peer, sizeof(ipv4_peer), "client",
+                             QuicEcnCodepoint::ect0));
+    }
+
+    {
+        g_recorded_sendto_for_tests = {};
+        sockaddr_storage peer{};
+        auto &fallback_ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        fallback_ipv4.sin_family = AF_INET;
+        const auto bytes = bytes_from_string_for_runtime_tests("ecn");
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendto_fn = record_sendto_for_tests,
+                .sendmsg_fn = record_sendmsg_for_tests,
+            },
+        };
+        check("zero peer length falls back to sendto",
+              send_datagram(/*fd=*/19, bytes, peer, /*peer_len=*/0, "client",
+                            QuicEcnCodepoint::ect0));
+        check("zero peer length uses sendto once", g_recorded_sendto_for_tests.calls == 1);
+    }
+
+    {
+        g_recorded_sendto_for_tests = {};
+        sockaddr_storage peer{};
+        peer.ss_family = AF_UNSPEC;
+        const auto bytes = bytes_from_string_for_runtime_tests("ecn");
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendto_fn = record_sendto_for_tests,
+                .sendmsg_fn = record_sendmsg_for_tests,
+            },
+        };
+        check("unsupported peer family falls back to sendto",
+              send_datagram(/*fd=*/21, bytes, peer, sizeof(sockaddr_storage), "client",
+                            QuicEcnCodepoint::ect0));
+        check("unsupported peer family uses sendto once", g_recorded_sendto_for_tests.calls == 1);
+    }
+
+    {
+        g_recorded_sendmsg_for_tests = {};
+        sockaddr_storage peer{};
+        auto &ipv6_peer = *reinterpret_cast<sockaddr_in6 *>(&peer);
+        ipv6_peer.sin6_family = AF_INET6;
+        ipv6_peer.sin6_port = htons(4434);
+        ipv6_peer.sin6_addr = in6addr_loopback;
+        const auto bytes = bytes_from_string_for_runtime_tests("ecn");
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendmsg_fn = record_sendmsg_for_tests,
+            },
+        };
+        check("native ipv6 sendmsg succeeds",
+              send_datagram(/*fd=*/22, bytes, peer, sizeof(sockaddr_in6), "client",
+                            QuicEcnCodepoint::ect0));
+        check("native ipv6 sendmsg uses ipv6 tclass",
+              (g_recorded_sendmsg_for_tests.level == IPPROTO_IPV6) &
+                  (g_recorded_sendmsg_for_tests.type == IPV6_TCLASS) &
+                  (g_recorded_sendmsg_for_tests.traffic_class == 0x02));
+    }
+
+    {
+        const int primary_fd = ::dup(STDOUT_FILENO);
+        const int secondary_fd = ::dup(STDOUT_FILENO);
+        check("client socket dups open", primary_fd >= 0 && secondary_fd >= 0);
+        if (primary_fd >= 0 && secondary_fd >= 0) {
+            ClientSocketSet sockets{
+                .primary =
+                    ClientSocketDescriptor{
+                        .fd = primary_fd,
+                        .family = AF_INET,
+                    },
+                .secondary =
+                    ClientSocketDescriptor{
+                        .fd = secondary_fd,
+                        .family = AF_INET6,
+                    },
+            };
+            check("secondary client socket lookup returns secondary fd",
+                  client_socket_fd_for_family(sockets, AF_INET6) == secondary_fd);
+            {
+                ScopedClientSockets close_sockets(sockets);
+            }
+            errno = 0;
+            check("secondary client socket was closed",
+                  (::close(secondary_fd) == -1) & (errno == EBADF));
+            errno = 0;
+            check("primary client socket was closed",
+                  (::close(primary_fd) == -1) & (errno == EBADF));
+        } else {
+            if (primary_fd >= 0) {
+                ::close(primary_fd);
+            }
+            if (secondary_fd >= 0) {
+                ::close(secondary_fd);
+            }
+        }
+    }
+
+    {
+        const int primary_fd = ::dup(STDOUT_FILENO);
+        check("shared client socket dup opened", primary_fd >= 0);
+        if (primary_fd >= 0) {
+            ClientSocketSet sockets{
+                .primary =
+                    ClientSocketDescriptor{
+                        .fd = primary_fd,
+                        .family = AF_INET,
+                    },
+                .secondary =
+                    ClientSocketDescriptor{
+                        .fd = primary_fd,
+                        .family = AF_INET6,
+                    },
+            };
+            {
+                ScopedClientSockets close_sockets(sockets);
+            }
+            errno = 0;
+            check("shared client socket closes only once",
+                  (::close(primary_fd) == -1) & (errno == EBADF));
+        }
+    }
+
+    {
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = -1,
+                    .family = AF_INET,
+                },
+        };
+        ScopedClientSockets close_sockets(sockets);
+        check("negative primary client socket is ignored", true);
+    }
+
+    {
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 17,
+                    .family = AF_INET,
+                },
+            .secondary =
+                ClientSocketDescriptor{
+                    .fd = -1,
+                    .family = AF_INET6,
+                },
+        };
+        ScopedClientSockets close_sockets(sockets);
+        check("negative secondary client socket is ignored", true);
+    }
+
+    {
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 17,
+                    .family = AF_INET,
+                },
+        };
+        check("unsupported preferred-address family fails",
+              !ensure_client_socket_for_family(sockets, AF_UNSPEC, "client").has_value());
+    }
+
+    {
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 17,
+                    .family = AF_UNSPEC,
+                },
+            .secondary =
+                ClientSocketDescriptor{
+                    .fd = 23,
+                    .family = AF_INET6,
+                },
+        };
+        check("occupied secondary slot rejects new preferred-address family",
+              !ensure_client_socket_for_family(sockets, AF_INET, "client").has_value());
+    }
+
+    {
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 17,
+                    .family = AF_INET,
+                },
+        };
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .socket_fn = [](int, int, int) -> int {
+                    errno = EMFILE;
+                    return -1;
+                },
+            },
+        };
+        check("preferred-address socket creation failure is reported",
+              !ensure_client_socket_for_family(sockets, AF_INET6, "client").has_value());
+    }
+
+    const PreferredAddress preferred_ipv4{
+        .ipv4_address = {std::byte{127}, std::byte{0}, std::byte{0}, std::byte{2}},
+        .ipv4_port = 4444,
+        .connection_id = make_runtime_connection_id(std::byte{0x44}, 1),
+    };
+
+    {
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 17,
+                    .family = AF_UNSPEC,
+                },
+            .secondary =
+                ClientSocketDescriptor{
+                    .fd = 23,
+                    .family = AF_INET6,
+                },
+        };
+        QuicCoreResult result;
+        result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
+            .preferred_address = preferred_ipv4,
+        });
+        check("preferred-address observation fails when no client socket slot is available",
+              !observe_client_runtime_policy_effects(result, state, policy, sockets, "client"));
+    }
+
+    {
+        ScriptedEndpointForTests endpoint;
+        QuicCore core = make_local_error_client_core_for_tests();
+        QuicCoreResult result;
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        const Http09RuntimeConfig config{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::connectionmigration,
+        };
+        check("drive endpoint fails when policy sockets are missing",
+              !drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, /*fd=*/17,
+                                            /*peer=*/nullptr, /*peer_len=*/0, result, state,
+                                            "client", &config, &policy,
+                                            /*client_sockets=*/nullptr));
+        check("missing policy sockets mark terminal failure", state.terminal_failure);
+    }
+
+    {
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 17,
+                    .family = AF_UNSPEC,
+                },
+            .secondary =
+                ClientSocketDescriptor{
+                    .fd = 23,
+                    .family = AF_INET6,
+                },
+        };
+        QuicCoreResult result;
+        result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
+            .preferred_address = preferred_ipv4,
+        });
+        ScriptedEndpointForTests endpoint;
+        QuicCore core = make_local_error_client_core_for_tests();
+        const Http09RuntimeConfig config{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::connectionmigration,
+        };
+        check("drive endpoint fails when preferred-address observation fails",
+              !drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, /*fd=*/17,
+                                            /*peer=*/nullptr, /*peer_len=*/0, result, state,
+                                            "client", &config, &policy, &sockets) &
+                  state.terminal_failure);
+    }
+
+    {
+        g_runtime_low_level_getaddrinfo_calls_for_tests = 0;
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .socket_fn = [](int family, int type, int protocol) -> int {
+                    return ::socket(family, type, protocol);
+                },
+                .bind_fn = [](int, const sockaddr *, socklen_t) -> int { return 0; },
+                .getaddrinfo_fn = [](const char *node, const char *service, const addrinfo *hints,
+                                     addrinfo **results) -> int {
+                    g_runtime_low_level_getaddrinfo_calls_for_tests += 1;
+                    if (g_runtime_low_level_getaddrinfo_calls_for_tests == 2) {
+                        return EAI_FAIL;
+                    }
+                    return ::getaddrinfo(node, service, hints, results);
+                },
+                .freeaddrinfo_fn = ::freeaddrinfo,
+            },
+        };
+        const auto server_config = Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::server,
+            .host = "127.0.0.1",
+            .port = 443,
+            .testcase = QuicHttp09Testcase::connectionmigration,
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+        };
+        check("preferred bind resolution failure aborts server before certificate setup",
+              run_http09_server(server_config) == 1);
+    }
+
+    {
+        g_runtime_low_level_bind_calls_for_tests = 0;
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .socket_fn = [](int family, int type, int protocol) -> int {
+                    return ::socket(family, type, protocol);
+                },
+                .bind_fn = [](int, const sockaddr *, socklen_t) -> int {
+                    g_runtime_low_level_bind_calls_for_tests += 1;
+                    if (g_runtime_low_level_bind_calls_for_tests == 2) {
+                        errno = EADDRINUSE;
+                        return -1;
+                    }
+                    return 0;
+                },
+            },
+        };
+        const auto server_config = Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::server,
+            .host = "127.0.0.1",
+            .port = 443,
+            .testcase = QuicHttp09Testcase::connectionmigration,
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+        };
+        check("preferred bind socket failure aborts server", run_http09_server(server_config) == 1);
+    }
+
+    return ok;
+}
+
 bool runtime_connectionmigration_failure_paths_for_tests() {
     return !runtime_connectionmigration_request_flow_case_for_tests(
                /*official_alias=*/false, /*include_preferred_address=*/false,
@@ -5896,6 +6461,10 @@ parse_server_datagram_for_routing_for_tests(std::span<const std::byte> bytes) {
 }
 
 } // namespace test
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#endif
 
 std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view authority) {
     return parse_http09_authority_impl(authority);

@@ -4624,6 +4624,13 @@ TEST(QuicHttp09RuntimeTest, RuntimeInternalCoverageHooksExerciseRemainingBranche
     EXPECT_TRUE(covered) << stderr_output;
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeLowLevelHooksExerciseSocketAndEcnFallbacks) {
+    testing::internal::CaptureStderr();
+    const bool covered = coquic::quic::test::runtime_low_level_socket_and_ecn_coverage_for_tests();
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(covered) << stderr_output;
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeConnectionMigrationFailureHooksExerciseFalseBranches) {
     EXPECT_TRUE(coquic::quic::test::runtime_connectionmigration_failure_paths_for_tests());
 }

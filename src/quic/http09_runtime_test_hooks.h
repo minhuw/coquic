@@ -213,6 +213,7 @@ bool runtime_recvmsg_maps_ecn_to_core_input_for_tests();
 bool runtime_registers_all_server_core_connection_ids_for_tests();
 bool runtime_misc_internal_coverage_for_tests();
 bool runtime_additional_internal_coverage_for_tests();
+bool runtime_low_level_socket_and_ecn_coverage_for_tests();
 bool runtime_connectionmigration_failure_paths_for_tests();
 bool runtime_restart_failure_paths_for_tests();
 ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_datagram_for_tests(

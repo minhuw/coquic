@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -64,6 +65,35 @@ struct QuicCoreConfig {
 using QuicCoreClock = std::chrono::steady_clock;
 using QuicCoreTimePoint = QuicCoreClock::time_point;
 using QuicPathId = std::uint64_t;
+using QuicConnectionHandle = std::uint64_t;
+using QuicRouteHandle = std::uint64_t;
+
+struct QuicCoreEndpointConfig {
+    EndpointRole role = EndpointRole::client;
+    std::vector<std::uint32_t> supported_versions = {kQuicVersion1};
+    bool verify_peer = false;
+    bool retry_enabled = false;
+    std::string application_protocol = "coquic";
+    std::optional<TlsIdentity> identity;
+    QuicTransportConfig transport;
+    std::vector<CipherSuite> allowed_tls_cipher_suites;
+    std::optional<QuicQlogConfig> qlog;
+    std::optional<std::filesystem::path> tls_keylog_path;
+};
+
+struct QuicCoreClientConnectionConfig {
+    ConnectionId source_connection_id;
+    ConnectionId initial_destination_connection_id;
+    std::optional<ConnectionId> original_destination_connection_id;
+    std::optional<ConnectionId> retry_source_connection_id;
+    std::vector<std::byte> retry_token;
+    std::uint32_t original_version = kQuicVersion1;
+    std::uint32_t initial_version = kQuicVersion1;
+    bool reacted_to_version_negotiation = false;
+    std::string server_name = "localhost";
+    std::optional<QuicResumptionState> resumption_state;
+    QuicZeroRttConfig zero_rtt;
+};
 
 enum class QuicEcnCodepoint : std::uint8_t {
     unavailable,
@@ -94,6 +124,7 @@ enum class QuicMigrationRequestReason : std::uint8_t {
 };
 
 struct QuicCoreLocalError {
+    std::optional<QuicConnectionHandle> connection;
     QuicCoreLocalErrorCode code;
     std::optional<std::uint64_t> stream_id;
 };
@@ -103,6 +134,7 @@ struct QuicCoreStart {};
 struct QuicCoreInboundDatagram {
     std::vector<std::byte> bytes;
     QuicPathId path_id = 0;
+    std::optional<QuicRouteHandle> route_handle;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
 };
 
@@ -131,8 +163,27 @@ struct QuicCoreTimerExpired {};
 struct QuicCoreRequestKeyUpdate {};
 struct QuicCoreRequestConnectionMigration {
     QuicPathId path_id = 0;
+    std::optional<QuicRouteHandle> route_handle;
     QuicMigrationRequestReason reason = QuicMigrationRequestReason::active;
 };
+
+struct QuicCoreOpenConnection {
+    QuicCoreClientConnectionConfig connection;
+    QuicRouteHandle initial_route_handle = 0;
+};
+
+using QuicCoreConnectionInput =
+    std::variant<QuicCoreSendStreamData, QuicCoreResetStream, QuicCoreStopSending,
+                 QuicCoreCloseConnection, QuicCoreRequestKeyUpdate,
+                 QuicCoreRequestConnectionMigration>;
+
+struct QuicCoreConnectionCommand {
+    QuicConnectionHandle connection = 0;
+    QuicCoreConnectionInput input;
+};
+
+using QuicCoreEndpointInput = std::variant<QuicCoreOpenConnection, QuicCoreInboundDatagram,
+                                           QuicCoreConnectionCommand, QuicCoreTimerExpired>;
 
 using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
                                    QuicCoreResetStream, QuicCoreStopSending,
@@ -140,40 +191,69 @@ using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicC
                                    QuicCoreRequestConnectionMigration, QuicCoreTimerExpired>;
 
 struct QuicCoreSendDatagram {
+    QuicConnectionHandle connection = 0;
     std::optional<QuicPathId> path_id;
+    std::optional<QuicRouteHandle> route_handle;
     std::vector<std::byte> bytes;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
 };
 
 struct QuicCoreReceiveStreamData {
+    QuicConnectionHandle connection = 0;
     std::uint64_t stream_id = 0;
     std::vector<std::byte> bytes;
     bool fin = false;
 };
 
 struct QuicCorePeerResetStream {
+    QuicConnectionHandle connection = 0;
     std::uint64_t stream_id = 0;
     std::uint64_t application_error_code = 0;
     std::uint64_t final_size = 0;
 };
 
 struct QuicCorePeerStopSending {
+    QuicConnectionHandle connection = 0;
     std::uint64_t stream_id = 0;
     std::uint64_t application_error_code = 0;
 };
 
 struct QuicCoreStateEvent {
+    QuicConnectionHandle connection = 0;
     QuicCoreStateChange change;
 };
 
+enum class QuicCoreConnectionLifecycle : std::uint8_t {
+    created,
+    accepted,
+    closed,
+};
+
+struct QuicCoreConnectionLifecycleEvent {
+    QuicConnectionHandle connection = 0;
+    QuicCoreConnectionLifecycle event = QuicCoreConnectionLifecycle::created;
+};
+
 struct QuicCorePeerPreferredAddressAvailable {
+    QuicConnectionHandle connection = 0;
     PreferredAddress preferred_address;
+};
+
+struct QuicCoreResumptionStateAvailable {
+    QuicConnectionHandle connection = 0;
+    QuicResumptionState state;
+};
+
+struct QuicCoreZeroRttStatusEvent {
+    QuicConnectionHandle connection = 0;
+    QuicZeroRttStatus status = QuicZeroRttStatus::not_attempted;
 };
 
 using QuicCoreEffect =
     std::variant<QuicCoreSendDatagram, QuicCoreReceiveStreamData, QuicCorePeerResetStream,
-                 QuicCorePeerStopSending, QuicCoreStateEvent, QuicCorePeerPreferredAddressAvailable,
-                 QuicCoreResumptionStateAvailable, QuicCoreZeroRttStatusEvent>;
+                 QuicCorePeerStopSending, QuicCoreStateEvent, QuicCoreConnectionLifecycleEvent,
+                 QuicCorePeerPreferredAddressAvailable, QuicCoreResumptionStateAvailable,
+                 QuicCoreZeroRttStatusEvent>;
 
 struct QuicCoreResult {
     std::vector<QuicCoreEffect> effects;
@@ -185,6 +265,7 @@ class QuicConnection;
 
 class QuicCore {
   public:
+    explicit QuicCore(QuicCoreEndpointConfig config);
     explicit QuicCore(QuicCoreConfig config);
     ~QuicCore();
 
@@ -193,14 +274,43 @@ class QuicCore {
     QuicCore(QuicCore &&) noexcept;
     QuicCore &operator=(QuicCore &&) noexcept;
 
+    QuicCoreResult advance_endpoint(QuicCoreEndpointInput input, QuicCoreTimePoint now);
     QuicCoreResult advance(QuicCoreInput input, QuicCoreTimePoint now);
+    std::optional<QuicCoreTimePoint> next_wakeup() const;
+    std::size_t connection_count() const;
     std::vector<ConnectionId> active_local_connection_ids() const;
     bool is_handshake_complete() const;
     bool has_failed() const;
 
   private:
-    QuicCoreConfig config_;
-    std::unique_ptr<QuicConnection> connection_;
+    struct ConnectionEntry;
+    struct LegacyConnectionView {
+        QuicCore *owner = nullptr;
+
+        LegacyConnectionView() = default;
+        explicit LegacyConnectionView(QuicCore *core) : owner(core) {
+        }
+
+        LegacyConnectionView &operator=(std::unique_ptr<QuicConnection> connection);
+        QuicConnection *get() const;
+        QuicConnection *operator->() const;
+        QuicConnection &operator*() const;
+        explicit operator bool() const;
+        bool operator==(std::nullptr_t) const;
+        bool operator!=(std::nullptr_t) const;
+    };
+
+    ConnectionEntry *legacy_entry();
+    const ConnectionEntry *legacy_entry() const;
+    ConnectionEntry *ensure_legacy_entry();
+    void set_legacy_connection(std::unique_ptr<QuicConnection> connection);
+
+    QuicCoreEndpointConfig endpoint_config_;
+    std::optional<QuicCoreConfig> legacy_config_;
+    std::map<QuicConnectionHandle, ConnectionEntry> connections_;
+    std::optional<QuicConnectionHandle> legacy_connection_handle_;
+    QuicConnectionHandle next_connection_handle_ = 1;
+    LegacyConnectionView connection_;
 };
 
 } // namespace coquic::quic

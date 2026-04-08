@@ -8,7 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "src/quic/recovery.h"
-#include "tests/quic_test_utils.h"
+#include "tests/support/quic_test_utils.h"
 
 namespace coquic::quic::test {
 

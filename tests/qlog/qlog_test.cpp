@@ -12,7 +12,7 @@
 #include "src/quic/qlog/json.h"
 #include "src/quic/qlog/session.h"
 #include "src/quic/qlog/sink.h"
-#include "tests/quic_test_utils.h"
+#include "tests/support/quic_test_utils.h"
 
 namespace {
 

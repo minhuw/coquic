@@ -16,7 +16,7 @@
 
 #include "src/quic/tls_adapter.h"
 #include "src/quic/tls_adapter_quictls_test_hooks.h"
-#include "tests/quic_test_utils.h"
+#include "tests/support/quic_test_utils.h"
 
 namespace {
 

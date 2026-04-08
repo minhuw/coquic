@@ -12,7 +12,7 @@
 #define private public
 #include "src/quic/http09_client.h"
 #undef private
-#include "tests/quic_test_utils.h"
+#include "tests/support/quic_test_utils.h"
 
 namespace {
 

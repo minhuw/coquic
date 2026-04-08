@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "src/quic/http09_server.h"
-#include "tests/quic_test_utils.h"
+#include "tests/support/quic_test_utils.h"
 
 namespace coquic::quic::test {
 

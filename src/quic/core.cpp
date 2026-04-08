@@ -199,6 +199,7 @@ QuicCore::QuicCore(QuicCoreConfig config)
           .tls_keylog_path = config.tls_keylog_path,
       }),
       legacy_config_(std::move(config)), connection_(this) {
+    static_cast<void>(ensure_legacy_entry());
 }
 
 QuicCore::~QuicCore() = default;
@@ -299,7 +300,15 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         return result;
     }
 
-    return {};
+    (void)now;
+    QuicCoreResult result;
+    result.local_error = QuicCoreLocalError{
+        .connection = std::nullopt,
+        .code = QuicCoreLocalErrorCode::unsupported_operation,
+        .stream_id = std::nullopt,
+    };
+    result.next_wakeup = next_wakeup();
+    return result;
 }
 
 QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
@@ -478,30 +487,21 @@ std::vector<ConnectionId> QuicCore::active_local_connection_ids() const {
     if (const auto *entry = legacy_entry()) {
         return entry->connection->active_local_connection_ids();
     }
-    if (connections_.empty()) {
-        return {};
-    }
-    return connections_.begin()->second.connection->active_local_connection_ids();
+    return {};
 }
 
 bool QuicCore::is_handshake_complete() const {
     if (const auto *entry = legacy_entry()) {
         return entry->connection->is_handshake_complete();
     }
-    if (connections_.empty()) {
-        return false;
-    }
-    return connections_.begin()->second.connection->is_handshake_complete();
+    return false;
 }
 
 bool QuicCore::has_failed() const {
     if (const auto *entry = legacy_entry()) {
         return entry->connection->has_failed();
     }
-    if (connections_.empty()) {
-        return false;
-    }
-    return connections_.begin()->second.connection->has_failed();
+    return false;
 }
 
 } // namespace coquic::quic

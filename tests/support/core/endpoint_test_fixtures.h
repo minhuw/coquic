@@ -12,18 +12,18 @@ namespace coquic::quic::test_support {
 inline QuicCoreEndpointConfig make_client_endpoint_config() {
     return QuicCoreEndpointConfig{
         .role = EndpointRole::client,
+        .supported_versions = {kQuicVersion1},
         .verify_peer = false,
         .application_protocol = "coquic",
-        .supported_versions = {kQuicVersion1},
     };
 }
 
 inline QuicCoreEndpointConfig make_server_endpoint_config() {
     return QuicCoreEndpointConfig{
         .role = EndpointRole::server,
+        .supported_versions = {kQuicVersion1},
         .verify_peer = false,
         .application_protocol = "hq-interop",
-        .supported_versions = {kQuicVersion1},
         .identity =
             TlsIdentity{
                 .certificate_pem = test::read_text_file("tests/fixtures/quic-server-cert.pem"),

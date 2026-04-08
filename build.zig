@@ -257,7 +257,7 @@ pub fn build(b: *std.Build) void {
     const fmt_include_dir = requireEnv(b, "FMT_INCLUDE_DIR");
     const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");
     const default_test_files = &.{
-        "tests/smoke.cpp",
+        "tests/smoke/smoke_test.cpp",
         "tests/quic_core_test.cpp",
         "tests/quic_congestion_test.cpp",
         "tests/quic_frame_test.cpp",

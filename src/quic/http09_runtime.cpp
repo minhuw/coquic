@@ -5532,8 +5532,11 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
           linux_traffic_class_for_ecn(QuicEcnCodepoint::not_ect) == 0x00);
     check("unavailable maps to zero traffic class",
           linux_traffic_class_for_ecn(QuicEcnCodepoint::unavailable) == 0x00);
+    QuicEcnCodepoint invalid_ecn_codepoint = QuicEcnCodepoint::unavailable;
+    const std::uint8_t invalid_ecn_codepoint_raw = 0xff;
+    std::memcpy(&invalid_ecn_codepoint, &invalid_ecn_codepoint_raw, sizeof(invalid_ecn_codepoint));
     check("unknown codepoint falls back to zero traffic class",
-          linux_traffic_class_for_ecn(static_cast<QuicEcnCodepoint>(0xff)) == 0x00);
+          linux_traffic_class_for_ecn(invalid_ecn_codepoint) == 0x00);
     check("traffic class 0x01 maps to ect1",
           ecn_from_linux_traffic_class(0x01) == QuicEcnCodepoint::ect1);
     check("ecn testcase uses transfer semantics",
@@ -5676,6 +5679,7 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
             ScopedFd socket_guard(fd);
             const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
                 Http09RuntimeOpsOverride{
+                    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                     .setsockopt_fn = [](int current_fd, int level, int name, const void *value,
                                         socklen_t value_len) -> int {
                         if (level == IPPROTO_IPV6 && name == IPV6_RECVTCLASS) {
@@ -5694,9 +5698,11 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
     {
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
             Http09RuntimeOpsOverride{
+                // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                 .socket_fn = [](int family, int type, int protocol) -> int {
                     return ::socket(family, type, protocol);
                 },
+                // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                 .setsockopt_fn = [](int current_fd, int level, int name, const void *value,
                                     socklen_t value_len) -> int {
                     if (level == IPPROTO_IPV6 && name == IPV6_V6ONLY) {
@@ -5714,9 +5720,11 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
     {
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
             Http09RuntimeOpsOverride{
+                // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                 .socket_fn = [](int family, int type, int protocol) -> int {
                     return ::socket(family, type, protocol);
                 },
+                // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                 .setsockopt_fn = [](int current_fd, int level, int name, const void *value,
                                     socklen_t value_len) -> int {
                     if (level == IPPROTO_IPV6 && name == IPV6_RECVTCLASS) {
@@ -6029,10 +6037,12 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
         g_runtime_low_level_getaddrinfo_calls_for_tests = 0;
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
             Http09RuntimeOpsOverride{
+                // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                 .socket_fn = [](int family, int type, int protocol) -> int {
                     return ::socket(family, type, protocol);
                 },
                 .bind_fn = [](int, const sockaddr *, socklen_t) -> int { return 0; },
+                // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                 .getaddrinfo_fn = [](const char *node, const char *service, const addrinfo *hints,
                                      addrinfo **results) -> int {
                     g_runtime_low_level_getaddrinfo_calls_for_tests += 1;
@@ -6060,6 +6070,7 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
         g_runtime_low_level_bind_calls_for_tests = 0;
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
             Http09RuntimeOpsOverride{
+                // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                 .socket_fn = [](int family, int type, int protocol) -> int {
                     return ::socket(family, type, protocol);
                 },

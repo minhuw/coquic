@@ -1,6 +1,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -53,6 +54,13 @@ std::vector<std::uint64_t> packet_numbers_from(const std::vector<SentPacketRecor
         packet_numbers.push_back(packet.packet_number);
     }
     return packet_numbers;
+}
+
+coquic::quic::QuicEcnCodepoint invalid_ecn_codepoint() {
+    constexpr std::uint8_t raw = 0xff;
+    coquic::quic::QuicEcnCodepoint value{};
+    std::memcpy(&value, &raw, sizeof(value));
+    return value;
 }
 
 TEST(QuicRecoveryTest, AckHistoryBuildsSingleContiguousAckRange) {
@@ -260,16 +268,23 @@ TEST(QuicRecoveryTest, DuplicatePacketsDoNotIncreaseEcnCountsTwice) {
 TEST(QuicRecoveryTest, UnknownEcnCodepointLeavesAckEcnCountsZeroed) {
     ReceivedPacketHistory history;
     history.record_received(/*packet_number=*/5, /*ack_eliciting=*/true,
-                            coquic::quic::test::test_time(1),
-                            static_cast<coquic::quic::QuicEcnCodepoint>(0xff));
+                            coquic::quic::test::test_time(1), invalid_ecn_codepoint());
 
     const auto ack =
         history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(2));
-    ASSERT_TRUE(ack.has_value());
-    ASSERT_TRUE(ack->ecn_counts.has_value());
-    EXPECT_EQ(ack->ecn_counts->ect0, 0u);
-    EXPECT_EQ(ack->ecn_counts->ect1, 0u);
-    EXPECT_EQ(ack->ecn_counts->ecn_ce, 0u);
+    if (!ack.has_value()) {
+        GTEST_FAIL() << "expected ACK frame";
+        return;
+    }
+    const auto &ack_frame = *ack;
+    if (!ack_frame.ecn_counts.has_value()) {
+        GTEST_FAIL() << "expected ECN counts";
+        return;
+    }
+    const auto &ecn_counts = *ack_frame.ecn_counts;
+    EXPECT_EQ(ecn_counts.ect0, 0u);
+    EXPECT_EQ(ecn_counts.ect1, 0u);
+    EXPECT_EQ(ecn_counts.ecn_ce, 0u);
 }
 
 TEST(QuicRecoveryTest, HistoryWithoutPendingAckReturnsNulloptEvenWhenPacketsExist) {

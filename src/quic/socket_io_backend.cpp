@@ -44,6 +44,11 @@ struct SocketIoRoute {
     socklen_t peer_len = 0;
 };
 
+struct SocketIoSocket {
+    int fd = -1;
+    int family = AF_UNSPEC;
+};
+
 struct SocketIoRouteState {
     std::unordered_map<std::string, QuicRouteHandle> route_handles_by_peer_tuple;
     std::unordered_map<QuicRouteHandle, SocketIoRoute> routes_by_handle;
@@ -628,18 +633,22 @@ struct SocketIoBackend::Impl {
     }
 
     ~Impl() {
-        if (socket_fd >= 0) {
-            ::close(socket_fd);
+        for (const auto &socket : sockets) {
+            if (socket.fd >= 0) {
+                ::close(socket.fd);
+            }
         }
     }
 
-    void reset_routes() {
-        route_state = {};
+    int socket_fd_for_family(int family) const {
+        const auto socket_it =
+            std::find_if(sockets.begin(), sockets.end(),
+                         [&](const SocketIoSocket &socket) { return socket.family == family; });
+        return socket_it != sockets.end() ? socket_it->fd : -1;
     }
 
     SocketIoBackendConfig config;
-    int socket_fd = -1;
-    int socket_family = AF_UNSPEC;
+    std::vector<SocketIoSocket> sockets;
     SocketIoRouteState route_state;
 };
 
@@ -678,11 +687,14 @@ bool SocketIoBackend::open_listener(std::string_view host, std::uint16_t port) {
                 .family = preferred_udp_address_family(host),
             },
             bind_address)) {
+        std::cerr << "http09-" << impl_->config.role_name << " failed: invalid host address\n";
         return false;
     }
 
     const int socket_fd = open_udp_socket(bind_address.family);
     if (socket_fd < 0) {
+        std::cerr << "http09-" << impl_->config.role_name
+                  << " failed: unable to create UDP socket: " << std::strerror(errno) << '\n';
         return false;
     }
 
@@ -692,15 +704,15 @@ bool SocketIoBackend::open_listener(std::string_view host, std::uint16_t port) {
         const int bind_errno = errno;
         ::close(socket_fd);
         errno = bind_errno;
+        std::cerr << "http09-" << impl_->config.role_name
+                  << " failed: unable to bind UDP socket: " << std::strerror(errno) << '\n';
         return false;
     }
 
-    if (impl_->socket_fd >= 0 && impl_->socket_fd != socket_fd) {
-        ::close(impl_->socket_fd);
-    }
-    impl_->socket_fd = socket_fd;
-    impl_->socket_family = bind_address.family;
-    impl_->reset_routes();
+    impl_->sockets.push_back(SocketIoSocket{
+        .fd = socket_fd,
+        .family = bind_address.family,
+    });
     return true;
 }
 
@@ -715,24 +727,24 @@ std::optional<QuicRouteHandle> SocketIoBackend::ensure_route(const QuicIoRemote 
         return std::nullopt;
     }
 
-    if (impl_->socket_fd < 0) {
+    int socket_fd = impl_->socket_fd_for_family(route_family);
+    if (socket_fd < 0) {
         const int socket_fd = open_udp_socket(route_family);
         if (socket_fd < 0) {
             return std::nullopt;
         }
-        impl_->socket_fd = socket_fd;
-        impl_->socket_family = route_family;
-        impl_->reset_routes();
-    } else if (impl_->socket_family != AF_UNSPEC && impl_->socket_family != route_family) {
-        return std::nullopt;
+        impl_->sockets.push_back(SocketIoSocket{
+            .fd = socket_fd,
+            .family = route_family,
+        });
+        return remember_route_handle(impl_->route_state, remote.peer, remote.peer_len, socket_fd);
     }
 
-    return remember_route_handle(impl_->route_state, remote.peer, remote.peer_len,
-                                 impl_->socket_fd);
+    return remember_route_handle(impl_->route_state, remote.peer, remote.peer_len, socket_fd);
 }
 
 std::optional<QuicIoEvent> SocketIoBackend::wait(std::optional<QuicCoreTimePoint> next_wakeup) {
-    if (impl_->socket_fd < 0) {
+    if (impl_->sockets.empty()) {
         return std::nullopt;
     }
 
@@ -751,14 +763,18 @@ std::optional<QuicIoEvent> SocketIoBackend::wait(std::optional<QuicCoreTimePoint
         }
     }
 
-    pollfd descriptor{
-        .fd = impl_->socket_fd,
-        .events = POLLIN,
-        .revents = 0,
-    };
+    std::vector<pollfd> descriptors(impl_->sockets.size());
+    for (std::size_t index = 0; index < impl_->sockets.size(); ++index) {
+        descriptors[index] = pollfd{
+            .fd = impl_->sockets[index].fd,
+            .events = POLLIN,
+            .revents = 0,
+        };
+    }
     int poll_result = 0;
     do {
-        poll_result = socket_io_backend_ops_state().poll_fn(&descriptor, 1, timeout_ms);
+        poll_result = socket_io_backend_ops_state().poll_fn(descriptors.data(), descriptors.size(),
+                                                            timeout_ms);
     } while (poll_result < 0 && errno == EINTR);
 
     if (poll_result < 0) {
@@ -784,14 +800,21 @@ std::optional<QuicIoEvent> SocketIoBackend::wait(std::optional<QuicCoreTimePoint
         };
     }
 
-    if ((descriptor.revents & POLLIN) != 0) {
-        auto received = receive_datagram(impl_->socket_fd, impl_->config.role_name, /*flags=*/0);
+    for (const auto &descriptor : descriptors) {
+        if ((descriptor.revents & POLLIN) == 0) {
+            continue;
+        }
+
+        auto received = receive_datagram(descriptor.fd, impl_->config.role_name, /*flags=*/0);
+        if (received.status == ReceiveDatagramStatus::would_block) {
+            continue;
+        }
         if (received.status != ReceiveDatagramStatus::ok) {
             return std::nullopt;
         }
 
         const auto handle = remember_route_handle(impl_->route_state, received.source,
-                                                  received.source_len, impl_->socket_fd);
+                                                  received.source_len, descriptor.fd);
         return QuicIoEvent{
             .kind = QuicIoEvent::Kind::rx_datagram,
             .now = received.input_time,
@@ -802,6 +825,11 @@ std::optional<QuicIoEvent> SocketIoBackend::wait(std::optional<QuicCoreTimePoint
                     .ecn = received.ecn,
                 },
         };
+    }
+
+    if (std::any_of(descriptors.begin(), descriptors.end(),
+                    [](const pollfd &descriptor) { return descriptor.revents != 0; })) {
+        return std::nullopt;
     }
 
     return std::nullopt;

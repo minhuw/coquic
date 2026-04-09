@@ -3,6 +3,7 @@
 #include "src/quic/buffer.h"
 #include "src/quic/packet.h"
 #include "src/quic/packet_crypto.h"
+#include "src/quic/socket_io_backend.h"
 #include "src/quic/version.h"
 
 #include "src/coquic.h"
@@ -1349,6 +1350,8 @@ struct EndpointDriveState {
     bool terminal_success = false;
     bool terminal_failure = false;
     std::optional<QuicResumptionState> last_resumption_state;
+    std::unordered_map<QuicRouteHandle, QuicPathId> path_id_by_route_handle;
+    std::unordered_map<QuicPathId, QuicRouteHandle> route_handle_by_path_id;
     std::unordered_map<std::string, QuicPathId> path_ids_by_peer_tuple;
     std::unordered_map<QuicPathId, RuntimeSendRoute> path_routes;
     std::unordered_map<std::string, QuicRouteHandle> route_handles_by_peer_tuple;
@@ -1362,6 +1365,16 @@ struct ClientRuntimePolicyState {
     bool handshake_confirmed_seen = false;
     bool preferred_address_request_queued = false;
     std::optional<QuicPathId> preferred_address_path_id;
+};
+
+struct ClientIoContext {
+    std::unique_ptr<QuicIoBackend> backend;
+    std::optional<QuicRouteHandle> primary_route_handle;
+    std::optional<QuicRouteHandle> preferred_route_handle;
+};
+
+struct ServerIoContext {
+    std::unique_ptr<QuicIoBackend> backend;
 };
 
 std::string runtime_peer_tuple_key(int socket_fd, const sockaddr_storage &peer,
@@ -1392,6 +1405,22 @@ QuicPathId remember_runtime_path(EndpointDriveState &state, const sockaddr_stora
         .peer = peer,
         .peer_len = peer_len,
     };
+    return path_id;
+}
+
+QuicPathId remember_runtime_path_for_route_handle(EndpointDriveState &state,
+                                                  QuicRouteHandle route_handle) {
+    const auto existing = state.path_id_by_route_handle.find(route_handle);
+    if (existing != state.path_id_by_route_handle.end()) {
+        return existing->second;
+    }
+
+    QuicPathId path_id = state.next_path_id++;
+    while (state.route_handle_by_path_id.contains(path_id)) {
+        path_id = state.next_path_id++;
+    }
+    state.path_id_by_route_handle.emplace(route_handle, path_id);
+    state.route_handle_by_path_id.emplace(path_id, route_handle);
     return path_id;
 }
 
@@ -1428,7 +1457,67 @@ std::optional<QuicPathId> assign_runtime_path_for_inbound_step(EndpointDriveStat
     inbound->path_id = path_id;
     inbound->route_handle =
         remember_runtime_route_handle(state, step.source, step.source_len, step.socket_fd);
+    state.path_id_by_route_handle[*inbound->route_handle] = path_id;
+    state.route_handle_by_path_id[path_id] = *inbound->route_handle;
     return path_id;
+}
+
+QuicCoreInboundDatagram make_inbound_datagram_from_io_event(EndpointDriveState &state,
+                                                            const QuicIoRxDatagram &datagram) {
+    const auto path_id = remember_runtime_path_for_route_handle(state, datagram.route_handle);
+    return QuicCoreInboundDatagram{
+        .bytes = datagram.bytes,
+        .path_id = path_id,
+        .route_handle = datagram.route_handle,
+        .ecn = datagram.ecn,
+    };
+}
+
+bool handle_core_effects_with_backend(const std::optional<QuicRouteHandle> &fallback_route_handle,
+                                      QuicIoBackend &backend, const QuicCoreResult &result,
+                                      const EndpointDriveState &state, std::string_view role_name) {
+    for (const auto &effect : result.effects) {
+        const auto *send = std::get_if<QuicCoreSendDatagram>(&effect);
+        if (send == nullptr) {
+            continue;
+        }
+
+        std::optional<QuicRouteHandle> route_handle = send->route_handle;
+        if (!route_handle.has_value() && send->path_id.has_value()) {
+            const auto route_it = state.route_handle_by_path_id.find(*send->path_id);
+            if (route_it == state.route_handle_by_path_id.end()) {
+                std::cerr << "http09-" << role_name
+                          << " failed: missing route for path_id=" << *send->path_id << '\n';
+                return false;
+            }
+            route_handle = route_it->second;
+        }
+        if (!route_handle.has_value()) {
+            route_handle = fallback_route_handle;
+        }
+        if (!route_handle.has_value()) {
+            std::cerr << "http09-" << role_name
+                      << " failed: missing fallback route for send effect\n";
+            return false;
+        }
+
+        with_runtime_trace([&](std::ostream &stream) {
+            stream << "http09-" << role_name << " trace: send_effect path_id="
+                   << (send->path_id.has_value() ? std::to_string(*send->path_id)
+                                                 : std::string{"-"})
+                   << " route_handle=" << *route_handle << " bytes=" << send->bytes.size() << '\n';
+        });
+
+        if (!backend.send(QuicIoTxDatagram{
+                .route_handle = *route_handle,
+                .bytes = send->bytes,
+                .ecn = send->ecn,
+            })) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 void record_resumption_state(EndpointDriveState &state, const QuicCoreResult &result) {
@@ -1472,6 +1561,58 @@ bool observe_client_runtime_policy_effects(const QuicCoreResult &result, Endpoin
             with_runtime_trace([&](std::ostream &stream) {
                 stream << "http09-client trace: observed preferred_address path_id="
                        << *policy.preferred_address_path_id << " socket_fd=" << *preferred_socket_fd
+                       << " ipv4_port=" << preferred->preferred_address.ipv4_port
+                       << " ipv6_port=" << preferred->preferred_address.ipv6_port << '\n';
+            });
+        }
+    }
+    return true;
+}
+
+bool observe_client_runtime_policy_effects_with_backend(const QuicCoreResult &result,
+                                                        EndpointDriveState &state,
+                                                        ClientRuntimePolicyState &policy,
+                                                        ClientIoContext &io_context,
+                                                        std::string_view role_name) {
+    for (const auto &effect : result.effects) {
+        if (const auto *event = std::get_if<QuicCoreStateEvent>(&effect);
+            event != nullptr && event->change == QuicCoreStateChange::handshake_ready) {
+            policy.handshake_ready_seen = true;
+            with_runtime_trace([&](std::ostream &stream) {
+                stream << "http09-client trace: observed handshake_ready\n";
+            });
+        }
+        if (const auto *event = std::get_if<QuicCoreStateEvent>(&effect);
+            event != nullptr && event->change == QuicCoreStateChange::handshake_confirmed) {
+            policy.handshake_confirmed_seen = true;
+            with_runtime_trace([&](std::ostream &stream) {
+                stream << "http09-client trace: observed handshake_confirmed\n";
+            });
+        }
+        if (const auto *preferred = std::get_if<QuicCorePeerPreferredAddressAvailable>(&effect)) {
+            if (io_context.backend == nullptr) {
+                return false;
+            }
+
+            const auto peer = sockaddr_from_preferred_address(preferred->preferred_address);
+            const auto peer_len = sockaddr_len_from_preferred_address(preferred->preferred_address);
+            const auto route_handle = io_context.backend->ensure_route(QuicIoRemote{
+                .peer = peer,
+                .peer_len = peer_len,
+                .family = peer.ss_family,
+            });
+            if (!route_handle.has_value()) {
+                std::cerr << "http09-" << role_name
+                          << " failed: unable to create preferred-address route\n";
+                return false;
+            }
+
+            io_context.preferred_route_handle = route_handle;
+            policy.preferred_address_path_id =
+                remember_runtime_path_for_route_handle(state, route_handle.value());
+            with_runtime_trace([&](std::ostream &stream) {
+                stream << "http09-client trace: observed preferred_address route_handle="
+                       << route_handle.value() << " path_id=" << *policy.preferred_address_path_id
                        << " ipv4_port=" << preferred->preferred_address.ipv4_port
                        << " ipv6_port=" << preferred->preferred_address.ipv6_port << '\n';
             });
@@ -1780,6 +1921,237 @@ bool drive_endpoint_until_blocked(const EndpointDriver &endpoint, QuicCore &core
         }
 
         return true;
+    }
+}
+
+bool drive_endpoint_until_blocked_with_backend(
+    const EndpointDriver &endpoint, QuicCore &core,
+    const std::optional<QuicRouteHandle> &fallback_route_handle, QuicIoBackend &backend,
+    const QuicCoreResult &initial_result, EndpointDriveState &state, std::string_view role_name,
+    const Http09RuntimeConfig *runtime_config = nullptr,
+    ClientRuntimePolicyState *client_policy = nullptr, ClientIoContext *client_io = nullptr,
+    bool *observed_send_effects = nullptr) {
+    QuicCoreResult current_result = initial_result;
+    bool pending_terminal_success = false;
+    if (observed_send_effects != nullptr) {
+        *observed_send_effects = false;
+    }
+
+    for (;;) {
+        record_resumption_state(state, current_result);
+        if ((runtime_config != nullptr) & (client_policy != nullptr)) {
+            if (client_io == nullptr ||
+                !observe_client_runtime_policy_effects_with_backend(
+                    current_result, state, *client_policy, *client_io, role_name)) {
+                state.terminal_failure = true;
+                return false;
+            }
+        }
+        if (observed_send_effects != nullptr &&
+            std::any_of(current_result.effects.begin(), current_result.effects.end(),
+                        [](const auto &effect) {
+                            return std::holds_alternative<QuicCoreSendDatagram>(effect);
+                        })) {
+            *observed_send_effects = true;
+        }
+        if (!handle_core_effects_with_backend(fallback_route_handle, backend, current_result, state,
+                                              role_name)) {
+            state.terminal_failure = true;
+            return false;
+        }
+        state.next_wakeup = current_result.next_wakeup;
+        auto update = endpoint.on_core_result(current_result, now());
+        if ((runtime_config != nullptr) & (client_policy != nullptr)) {
+            maybe_queue_client_runtime_policy_inputs(*runtime_config, *client_policy,
+                                                     update.core_inputs);
+        }
+        state.endpoint_has_pending_work = update.has_pending_work;
+        if (current_result.local_error.has_value() && !update.handled_local_error) {
+            state.terminal_failure = true;
+            return false;
+        }
+        if (update.terminal_failure) {
+            state.terminal_failure = true;
+            return false;
+        }
+        pending_terminal_success = pending_terminal_success | update.terminal_success;
+
+        if (!update.core_inputs.empty()) {
+            current_result = advance_core_with_inputs(core, update.core_inputs, now());
+            continue;
+        }
+
+        if (pending_terminal_success) {
+            with_runtime_trace([&](std::ostream &stream) {
+                stream << "http09-" << role_name
+                       << " trace: terminal_success core_inputs=" << update.core_inputs.size()
+                       << '\n';
+            });
+            state.terminal_success = true;
+            return true;
+        }
+
+        return true;
+    }
+}
+
+int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
+                                              const EndpointDriver &endpoint, QuicCore &core,
+                                              ClientIoContext &io_context,
+                                              EndpointDriveState &state,
+                                              ClientRuntimePolicyState &client_policy,
+                                              const QuicCoreResult &start_result) {
+    if (io_context.backend == nullptr || !io_context.primary_route_handle.has_value()) {
+        return 1;
+    }
+
+    auto &backend = *io_context.backend;
+    bool saw_peer_input = false;
+    std::optional<QuicCoreTimePoint> terminal_success_deadline;
+    const auto ensure_terminal_success_deadline = [&](QuicCoreTimePoint current) {
+        if (!saw_peer_input || terminal_success_deadline.has_value()) {
+            return;
+        }
+
+        terminal_success_deadline =
+            current + std::chrono::milliseconds(kClientSuccessDrainWindowMs);
+    };
+    const auto refresh_terminal_success_deadline_from_peer_input = [&](QuicCoreTimePoint current) {
+        terminal_success_deadline =
+            current + std::chrono::milliseconds(kClientSuccessDrainWindowMs);
+    };
+    const auto should_exit_after_terminal_success = [&](QuicCoreTimePoint current) {
+        if (!saw_peer_input) {
+            return true;
+        }
+        return current >= terminal_success_deadline.value_or(QuicCoreTimePoint::max());
+    };
+    const auto drive_result = [&](const QuicCoreResult &result) {
+        return drive_endpoint_until_blocked_with_backend(
+            endpoint, core, io_context.primary_route_handle, backend, result, state, "client",
+            &config, &client_policy, &io_context);
+    };
+
+    if (!drive_result(start_result)) {
+        return 1;
+    }
+    if (state.terminal_success) {
+        return 0;
+    }
+
+    const auto process_expired_client_timer = [&](QuicCoreTimePoint current,
+                                                  bool &processed_any) -> bool {
+        processed_any = false;
+        const auto next_wakeup = state.next_wakeup;
+        if (!next_wakeup.has_value() || next_wakeup.value() > current) {
+            return true;
+        }
+
+        processed_any = true;
+        return drive_result(core.advance(QuicCoreTimerExpired{}, current));
+    };
+
+    struct PumpEndpointWorkResult {
+        bool ok = true;
+        bool advanced_core = false;
+    };
+    const auto pump_client_endpoint_work_once = [&]() -> PumpEndpointWorkResult {
+        if (!state.endpoint_has_pending_work) {
+            return {};
+        }
+
+        auto update = endpoint.poll(now());
+        state.endpoint_has_pending_work = update.has_pending_work;
+        if (update.terminal_failure) {
+            state.terminal_failure = true;
+            return PumpEndpointWorkResult{
+                .ok = false,
+            };
+        }
+        if (update.terminal_success) {
+            state.terminal_success = true;
+            return {};
+        }
+        if (update.core_inputs.empty()) {
+            return {};
+        }
+
+        return PumpEndpointWorkResult{
+            .ok = drive_result(advance_core_with_inputs(core, update.core_inputs, now())),
+            .advanced_core = true,
+        };
+    };
+
+    for (;;) {
+        if (state.terminal_success && should_exit_after_terminal_success(now())) {
+            return 0;
+        }
+
+        bool processed_timers = false;
+        if (!process_expired_client_timer(now(), processed_timers)) {
+            return 1;
+        }
+        if (processed_timers) {
+            continue;
+        }
+
+        if (!pump_client_endpoint_work_once().ok) {
+            return 1;
+        }
+        if (state.terminal_success) {
+            const auto current = now();
+            ensure_terminal_success_deadline(current);
+            if (should_exit_after_terminal_success(current)) {
+                return 0;
+            }
+        }
+
+        auto wait_next_wakeup = state.next_wakeup;
+        if (terminal_success_deadline.has_value()) {
+            wait_next_wakeup = std::min(wait_next_wakeup.value_or(*terminal_success_deadline),
+                                        *terminal_success_deadline);
+        }
+        const auto event = backend.wait(wait_next_wakeup);
+        if (!event.has_value()) {
+            return 1;
+        }
+
+        switch (event->kind) {
+        case QuicIoEvent::Kind::idle_timeout: {
+            if (state.terminal_success) {
+                return 0;
+            }
+            std::cerr << "http09-client failed: timed out waiting for progress\n";
+            return 1;
+        }
+        case QuicIoEvent::Kind::shutdown:
+            return 1;
+        case QuicIoEvent::Kind::timer_expired:
+            if (!drive_result(core.advance(QuicCoreTimerExpired{}, event->now))) {
+                return 1;
+            }
+            if (state.terminal_success) {
+                ensure_terminal_success_deadline(event->now);
+            }
+            continue;
+        case QuicIoEvent::Kind::rx_datagram: {
+            if (!event->datagram.has_value()) {
+                return 1;
+            }
+            auto inbound = make_inbound_datagram_from_io_event(state, *event->datagram);
+            saw_peer_input = true;
+            if (!drive_result(core.advance(std::move(inbound), event->now))) {
+                return 1;
+            }
+            if (state.terminal_success) {
+                refresh_terminal_success_deadline_from_peer_input(event->now);
+                if (should_exit_after_terminal_success(now())) {
+                    return 0;
+                }
+            }
+            continue;
+        }
+        }
     }
 }
 
@@ -2101,38 +2473,30 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
         };
     }
 
-    ResolvedUdpAddress peer_address{};
-    if (!resolve_udp_address(
-            UdpAddressResolutionQuery{
-                .host = remote->host,
-                .port = remote->port,
-            },
-            peer_address)) {
+    auto socket_backend = std::make_unique<SocketIoBackend>(SocketIoBackendConfig{
+        .role_name = "client",
+        .idle_timeout_ms = client_receive_timeout_ms(config),
+    });
+    const auto remote_address = socket_backend->resolve_remote(remote->host, remote->port);
+    if (!remote_address.has_value()) {
         std::cerr << "http09-client failed: invalid host address\n";
         return ClientConnectionRunResult{
             .exit_code = 1,
         };
     }
 
-    const int socket_fd = open_udp_socket(peer_address.family);
-    if (socket_fd < 0) {
+    const auto primary_route_handle = socket_backend->ensure_route(*remote_address);
+    if (!primary_route_handle.has_value()) {
         std::cerr << "http09-client failed: unable to create UDP socket: " << std::strerror(errno)
                   << '\n';
         return ClientConnectionRunResult{
             .exit_code = 1,
         };
     }
-    ClientSocketSet client_sockets{
-        .primary =
-            ClientSocketDescriptor{
-                .fd = socket_fd,
-                .family = peer_address.family,
-            },
+    ClientIoContext io_context{
+        .backend = std::move(socket_backend),
+        .primary_route_handle = primary_route_handle,
     };
-    ScopedClientSockets socket_guard(client_sockets);
-
-    const sockaddr_storage peer = peer_address.address;
-    const socklen_t peer_len = peer_address.address_len;
 
     const bool attempt_zero_rtt_requests = core_config.zero_rtt.attempt;
     core_config.server_name = remote->server_name;
@@ -2146,10 +2510,9 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
     QuicHttp09ClientEndpoint endpoint(make_http09_client_endpoint_config(
         config, requests, attempt_zero_rtt_requests, start_result));
     return ClientConnectionRunResult{
-        .exit_code = run_http09_client_connection_loop(
-            config, make_endpoint_driver(endpoint), core, client_sockets,
-            client_receive_timeout_ms(config), peer, peer_len, state, client_policy,
-            make_runtime_client_loop_io(), start_result),
+        .exit_code = run_http09_client_connection_backend_loop(
+            config, make_endpoint_driver(endpoint), core, io_context, state, client_policy,
+            start_result),
         .resumption_state = state.last_resumption_state,
     };
 }
@@ -2586,6 +2949,81 @@ bool process_server_endpoint_core_result(QuicCore &core, EndpointDriveState &tra
     return true;
 }
 
+bool process_server_endpoint_core_result_with_backend(
+    QuicCore &core, EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
+    const std::filesystem::path &document_root, QuicCoreResult initial_result,
+    const std::optional<QuicRouteHandle> &fallback_route_handle, QuicIoBackend &backend,
+    bool *observed_send_effects = nullptr) {
+    std::deque<QuicCoreResult> pending_results;
+    pending_results.push_back(std::move(initial_result));
+    if (observed_send_effects != nullptr) {
+        *observed_send_effects = false;
+    }
+
+    while (!pending_results.empty()) {
+        auto current_result = std::move(pending_results.front());
+        pending_results.pop_front();
+
+        if (current_result.local_error.has_value() &&
+            !current_result.local_error->connection.has_value()) {
+            return false;
+        }
+        if (observed_send_effects != nullptr && result_has_send_effects(current_result)) {
+            *observed_send_effects = true;
+        }
+        if (!handle_core_effects_with_backend(fallback_route_handle, backend, current_result,
+                                              transport_state, "server")) {
+            return false;
+        }
+
+        ensure_server_connection_endpoints_for_accepts(endpoints, current_result, document_root);
+        const auto connections = result_connection_handles(current_result);
+        for (const auto connection : connections) {
+            auto endpoint_it = endpoints.find(connection);
+            if (endpoint_it == endpoints.end()) {
+                continue;
+            }
+
+            const bool connection_closed = result_has_connection_lifecycle(
+                current_result, connection, QuicCoreConnectionLifecycle::closed);
+            auto connection_result = slice_result_for_connection(current_result, connection);
+            auto update = endpoint_it->second.endpoint.on_core_result(connection_result, now());
+            endpoint_it->second.has_pending_work = update.has_pending_work;
+
+            if (connection_result.local_error.has_value()) {
+                endpoint_it->second.has_pending_work = false;
+                endpoints.erase(endpoint_it);
+                continue;
+            }
+            if (connection_closed) {
+                endpoint_it->second.has_pending_work = false;
+                continue;
+            }
+            if (update.terminal_failure) {
+                endpoint_it->second.has_pending_work = false;
+                pending_results.push_back(core.advance_endpoint(
+                    QuicCoreConnectionCommand{
+                        .connection = connection,
+                        .input = QuicCoreCloseConnection{},
+                    },
+                    now()));
+                continue;
+            }
+            if (update.core_inputs.empty()) {
+                continue;
+            }
+
+            pending_results.push_back(
+                advance_endpoint_connection_inputs(core, connection, update.core_inputs, now()));
+        }
+
+        erase_closed_server_connection_endpoints(endpoints, current_result);
+    }
+
+    transport_state.next_wakeup = core.next_wakeup();
+    return true;
+}
+
 bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transport_state,
                                       ServerConnectionEndpointMap &endpoints,
                                       const std::filesystem::path &document_root,
@@ -2636,6 +3074,62 @@ bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transp
                 advance_endpoint_connection_inputs(core, connection, update.core_inputs, now()),
                 /*fallback_socket_fd=*/-1, /*fallback_peer=*/nullptr, /*fallback_peer_len=*/0,
                 &observed_send_effects)) {
+            return false;
+        }
+        made_progress = made_progress | observed_send_effects;
+    }
+
+    return true;
+}
+
+bool pump_shared_server_endpoint_work_with_backend(QuicCore &core,
+                                                   EndpointDriveState &transport_state,
+                                                   ServerConnectionEndpointMap &endpoints,
+                                                   const std::filesystem::path &document_root,
+                                                   QuicIoBackend &backend, bool &made_progress) {
+    made_progress = false;
+    std::vector<QuicConnectionHandle> pending_connections;
+    for (const auto &[connection, endpoint] : endpoints) {
+        if (endpoint.has_pending_work) {
+            pending_connections.push_back(connection);
+        }
+    }
+
+    for (const auto connection : pending_connections) {
+        auto endpoint_it = endpoints.find(connection);
+        if (endpoint_it == endpoints.end()) {
+            continue;
+        }
+
+        auto update = endpoint_it->second.endpoint.poll(now());
+        endpoint_it->second.has_pending_work = update.has_pending_work;
+
+        if (update.terminal_failure) {
+            endpoint_it->second.has_pending_work = false;
+            bool observed_send_effects = false;
+            if (!process_server_endpoint_core_result_with_backend(
+                    core, transport_state, endpoints, document_root,
+                    core.advance_endpoint(
+                        QuicCoreConnectionCommand{
+                            .connection = connection,
+                            .input = QuicCoreCloseConnection{},
+                        },
+                        now()),
+                    std::nullopt, backend, &observed_send_effects)) {
+                return false;
+            }
+            made_progress = made_progress | observed_send_effects;
+            continue;
+        }
+        if (update.core_inputs.empty()) {
+            continue;
+        }
+
+        bool observed_send_effects = false;
+        if (!process_server_endpoint_core_result_with_backend(
+                core, transport_state, endpoints, document_root,
+                advance_endpoint_connection_inputs(core, connection, update.core_inputs, now()),
+                std::nullopt, backend, &observed_send_effects)) {
             return false;
         }
         made_progress = made_progress | observed_send_effects;
@@ -2790,49 +3284,22 @@ int run_http09_server_loop(const ServerSocketSet &sockets, const ServerLoopIo &i
 }
 
 int run_http09_server(const Http09RuntimeConfig &config) {
-    ResolvedUdpAddress bind_address{};
-    if (!resolve_udp_address(
-            UdpAddressResolutionQuery{
-                .host = config.host,
-                .port = config.port,
-                .extra_flags = AI_PASSIVE,
-            },
-            bind_address)) {
-        std::cerr << "http09-server failed: invalid host address\n";
+    auto socket_backend = std::make_unique<SocketIoBackend>(SocketIoBackendConfig{
+        .role_name = "server",
+        .idle_timeout_ms = kServerIdleTimeoutMs,
+    });
+    if (!socket_backend->open_listener(config.host, config.port)) {
         return 1;
     }
-
-    const int primary_socket_fd = open_and_bind_udp_socket(bind_address, "server");
-    if (primary_socket_fd < 0) {
-        return 1;
-    }
-    ScopedFd primary_socket_guard(primary_socket_fd);
-
-    ServerSocketSet sockets{
-        .primary_fd = primary_socket_fd,
-    };
-
-    std::optional<ScopedFd> preferred_socket_guard;
     if (config.testcase == QuicHttp09Testcase::connectionmigration) {
-        ResolvedUdpAddress preferred_bind{};
-        if (!resolve_udp_address(
-                UdpAddressResolutionQuery{
-                    .host = config.host,
-                    .port = static_cast<std::uint16_t>(config.port + 1),
-                    .extra_flags = AI_PASSIVE,
-                },
-                preferred_bind)) {
-            std::cerr << "http09-server failed: invalid host address\n";
+        if (!socket_backend->open_listener(config.host,
+                                           static_cast<std::uint16_t>(config.port + 1))) {
             return 1;
         }
-
-        const int preferred_socket_fd = open_and_bind_udp_socket(preferred_bind, "server");
-        if (preferred_socket_fd < 0) {
-            return 1;
-        }
-        sockets.preferred_fd = preferred_socket_fd;
-        preferred_socket_guard.emplace(preferred_socket_fd);
     }
+    ServerIoContext io_context{
+        .backend = std::move(socket_backend),
+    };
 
     auto certificate_pem =
         read_required_text_file(config.certificate_chain_path, "certificate chain");
@@ -2852,63 +3319,75 @@ int run_http09_server(const Http09RuntimeConfig &config) {
     EndpointDriveState transport_state;
     ServerConnectionEndpointMap endpoints;
     bool server_failed = false;
+    auto &backend = *io_context.backend;
 
-    const auto process_server_datagram = [&](RuntimeWaitStep step) -> bool {
-        if (!step.input.has_value()) {
-            std::cerr << "http09-server failed: runtime step missing input\n";
-            return false;
-        }
-
-        static_cast<void>(assign_runtime_path_for_inbound_step(transport_state, step));
-        auto *inbound = std::get_if<QuicCoreInboundDatagram>(&*step.input);
-        if (inbound == nullptr) {
-            std::cerr << "http09-server failed: runtime step missing inbound datagram\n";
-            return false;
-        }
-        auto result = core.advance_endpoint(std::move(*inbound), step.input_time);
-        return process_server_endpoint_core_result(
+    const auto process_server_datagram = [&](const QuicIoRxDatagram &datagram,
+                                             QuicCoreTimePoint input_time) -> bool {
+        auto inbound = make_inbound_datagram_from_io_event(transport_state, datagram);
+        auto result = core.advance_endpoint(std::move(inbound), input_time);
+        return process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
-            step.socket_fd, step.has_source ? &step.source : nullptr,
-            step.has_source ? step.source_len : 0);
+            datagram.route_handle, backend);
     };
 
-    return run_http09_server_loop(
-        sockets, make_runtime_server_loop_io(),
-        ServerLoopDriver{
-            .earliest_wakeup = [&] { return core.next_wakeup(); },
-            .process_expired_timers =
-                [&](QuicCoreTimePoint current, bool &processed_any) {
-                    processed_any = false;
-                    const auto next_wakeup = core.next_wakeup();
-                    if (!next_wakeup.has_value() || next_wakeup.value() > current) {
-                        return;
-                    }
+    for (;;) {
+        if (server_failed) {
+            return 1;
+        }
 
-                    processed_any = true;
-                    if (!process_server_endpoint_core_result(
-                            core, transport_state, endpoints, config.document_root,
-                            core.advance_endpoint(QuicCoreTimerExpired{}, current),
-                            /*fallback_socket_fd=*/-1, /*fallback_peer=*/nullptr,
-                            /*fallback_peer_len=*/0)) {
-                        server_failed = true;
-                    }
-                },
-            .pump_endpoint_work =
-                [&] {
-                    bool made_progress = false;
-                    if (!pump_shared_server_endpoint_work(core, transport_state, endpoints,
-                                                          config.document_root, made_progress)) {
-                        server_failed = true;
-                        return false;
-                    }
-                    return made_progress;
-                },
-            .has_pending_endpoint_work =
-                [&] { return has_pending_shared_server_endpoint_work(endpoints); },
-            .process_datagram =
-                [&](RuntimeWaitStep step) { return process_server_datagram(std::move(step)); },
-            .has_failed = [&] { return server_failed; },
-        });
+        bool processed_timers = false;
+        const auto current = now();
+        const auto next_wakeup = core.next_wakeup();
+        if (next_wakeup.has_value() && next_wakeup.value() <= current) {
+            processed_timers = true;
+            if (!process_server_endpoint_core_result_with_backend(
+                    core, transport_state, endpoints, config.document_root,
+                    core.advance_endpoint(QuicCoreTimerExpired{}, current), std::nullopt,
+                    backend)) {
+                server_failed = true;
+                continue;
+            }
+        }
+        if (processed_timers) {
+            continue;
+        }
+
+        bool made_progress = false;
+        if (!pump_shared_server_endpoint_work_with_backend(
+                core, transport_state, endpoints, config.document_root, backend, made_progress)) {
+            server_failed = true;
+            continue;
+        }
+        if (made_progress && has_pending_shared_server_endpoint_work(endpoints)) {
+            continue;
+        }
+
+        const auto event = backend.wait(core.next_wakeup());
+        if (!event.has_value()) {
+            return 1;
+        }
+
+        switch (event->kind) {
+        case QuicIoEvent::Kind::idle_timeout:
+            continue;
+        case QuicIoEvent::Kind::shutdown:
+            return 1;
+        case QuicIoEvent::Kind::timer_expired:
+            if (!process_server_endpoint_core_result_with_backend(
+                    core, transport_state, endpoints, config.document_root,
+                    core.advance_endpoint(QuicCoreTimerExpired{}, event->now), std::nullopt,
+                    backend)) {
+                server_failed = true;
+            }
+            continue;
+        case QuicIoEvent::Kind::rx_datagram:
+            if (!event->datagram.has_value() ||
+                !process_server_datagram(*event->datagram, event->now)) {
+                server_failed = true;
+            }
+            continue;
+        }
+    }
 }
 
 } // namespace

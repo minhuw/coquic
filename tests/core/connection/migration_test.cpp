@@ -315,7 +315,7 @@ TEST(QuicCoreTest, CoreMigrationRequestReportsUnsupportedOperationWhenPeerDisabl
 
     const auto result = core.advance(
         coquic::quic::QuicCoreRequestConnectionMigration{
-            .path_id = 7,
+            .route_handle = 7,
             .reason = coquic::quic::QuicMigrationRequestReason::active,
         },
         coquic::quic::test::test_time(1));

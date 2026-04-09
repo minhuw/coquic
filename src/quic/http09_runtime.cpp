@@ -1222,7 +1222,6 @@ std::optional<int> ensure_client_socket_for_family(ClientSocketSet &sockets, int
 
 bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
                          const sockaddr_storage *fallback_peer, socklen_t fallback_peer_len,
-                         const std::unordered_map<QuicPathId, RuntimeSendRoute> &path_routes,
                          const std::unordered_map<QuicRouteHandle, RuntimeSendRoute> &route_routes,
                          std::string_view role_name) {
     for (const auto &effect : result.effects) {
@@ -1245,16 +1244,6 @@ bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
             socket_fd = route_it->second.socket_fd;
             peer = &route_it->second.peer;
             peer_len = route_it->second.peer_len;
-        } else if (send->path_id.has_value()) {
-            const auto route_it = path_routes.find(*send->path_id);
-            if (route_it == path_routes.end()) {
-                std::cerr << "http09-" << role_name
-                          << " failed: missing route for path_id=" << *send->path_id << '\n';
-                return false;
-            }
-            socket_fd = route_it->second.socket_fd;
-            peer = &route_it->second.peer;
-            peer_len = route_it->second.peer_len;
         }
         if (socket_fd < 0 || peer == nullptr) {
             std::cerr << "http09-" << role_name
@@ -1263,10 +1252,7 @@ bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
         }
 
         with_runtime_trace([&](std::ostream &stream) {
-            stream << "http09-" << role_name << " trace: send_effect path_id="
-                   << (send->path_id.has_value() ? std::to_string(*send->path_id)
-                                                 : std::string{"-"})
-                   << " route_handle="
+            stream << "http09-" << role_name << " trace: send_effect route_handle="
                    << (send->route_handle.has_value() ? std::to_string(*send->route_handle)
                                                       : std::string{"-"})
                    << " socket_fd=" << socket_fd << " peer_len=" << peer_len;
@@ -1294,7 +1280,10 @@ QuicCoreResult advance_core_with_inputs(QuicCore &core, std::span<const QuicCore
                     if constexpr (std::is_same_v<T, QuicCoreStart>) {
                         stream << "start";
                     } else if constexpr (std::is_same_v<T, QuicCoreInboundDatagram>) {
-                        stream << "inbound path_id=" << value.path_id
+                        stream << "inbound route_handle="
+                               << (value.route_handle.has_value()
+                                       ? std::to_string(*value.route_handle)
+                                       : std::string{"-"})
                                << " bytes=" << value.bytes.size();
                     } else if constexpr (std::is_same_v<T, QuicCoreSendStreamData>) {
                         stream << "send_stream stream_id=" << value.stream_id
@@ -1306,7 +1295,7 @@ QuicCoreResult advance_core_with_inputs(QuicCore &core, std::span<const QuicCore
                     } else if constexpr (std::is_same_v<T, QuicCoreRequestKeyUpdate>) {
                         stream << "key_update";
                     } else if constexpr (std::is_same_v<T, QuicCoreRequestConnectionMigration>) {
-                        stream << "migration path_id=" << value.path_id << " reason="
+                        stream << "migration route_handle=" << value.route_handle << " reason="
                                << (value.reason == QuicMigrationRequestReason::preferred_address
                                        ? "preferred_address"
                                        : "active");
@@ -1324,9 +1313,9 @@ QuicCoreResult advance_core_with_inputs(QuicCore &core, std::span<const QuicCore
                    << " has_next_wakeup=" << static_cast<int>(step.next_wakeup.has_value());
             for (const auto &effect : step.effects) {
                 if (const auto *send = std::get_if<QuicCoreSendDatagram>(&effect)) {
-                    stream << " send_path="
-                           << (send->path_id.has_value() ? std::to_string(*send->path_id)
-                                                         : std::string{"-"})
+                    stream << " send_route="
+                           << (send->route_handle.has_value() ? std::to_string(*send->route_handle)
+                                                              : std::string{"-"})
                            << " send_bytes=" << send->bytes.size();
                 }
             }
@@ -1350,13 +1339,10 @@ struct EndpointDriveState {
     bool terminal_success = false;
     bool terminal_failure = false;
     std::optional<QuicResumptionState> last_resumption_state;
-    std::unordered_map<QuicRouteHandle, QuicPathId> path_id_by_route_handle;
-    std::unordered_map<QuicPathId, QuicRouteHandle> route_handle_by_path_id;
     std::unordered_map<std::string, QuicPathId> path_ids_by_peer_tuple;
     std::unordered_map<QuicPathId, RuntimeSendRoute> path_routes;
     std::unordered_map<std::string, QuicRouteHandle> route_handles_by_peer_tuple;
     std::unordered_map<QuicRouteHandle, RuntimeSendRoute> route_routes;
-    QuicPathId next_path_id = 1;
     QuicRouteHandle next_route_handle = 1;
 };
 
@@ -1364,7 +1350,7 @@ struct ClientRuntimePolicyState {
     bool handshake_ready_seen = false;
     bool handshake_confirmed_seen = false;
     bool preferred_address_request_queued = false;
-    std::optional<QuicPathId> preferred_address_path_id;
+    std::optional<QuicRouteHandle> preferred_address_route_handle;
 };
 
 struct ClientIoContext {
@@ -1395,8 +1381,13 @@ QuicPathId remember_runtime_path(EndpointDriveState &state, const sockaddr_stora
                                  socklen_t peer_len, int socket_fd) {
     const auto peer_key = runtime_peer_tuple_key(socket_fd, peer, peer_len);
     const auto existing = state.path_ids_by_peer_tuple.find(peer_key);
-    const auto path_id =
-        existing != state.path_ids_by_peer_tuple.end() ? existing->second : state.next_path_id++;
+    const auto path_id = existing != state.path_ids_by_peer_tuple.end() ? existing->second : [&] {
+        QuicPathId next_path_id = 1;
+        while (state.path_routes.contains(next_path_id)) {
+            next_path_id += 1;
+        }
+        return next_path_id;
+    }();
     if (existing == state.path_ids_by_peer_tuple.end()) {
         state.path_ids_by_peer_tuple.emplace(peer_key, path_id);
     }
@@ -1405,22 +1396,6 @@ QuicPathId remember_runtime_path(EndpointDriveState &state, const sockaddr_stora
         .peer = peer,
         .peer_len = peer_len,
     };
-    return path_id;
-}
-
-QuicPathId remember_runtime_path_for_route_handle(EndpointDriveState &state,
-                                                  QuicRouteHandle route_handle) {
-    const auto existing = state.path_id_by_route_handle.find(route_handle);
-    if (existing != state.path_id_by_route_handle.end()) {
-        return existing->second;
-    }
-
-    QuicPathId path_id = state.next_path_id++;
-    while (state.route_handle_by_path_id.contains(path_id)) {
-        path_id = state.next_path_id++;
-    }
-    state.path_id_by_route_handle.emplace(route_handle, path_id);
-    state.route_handle_by_path_id.emplace(path_id, route_handle);
     return path_id;
 }
 
@@ -1454,20 +1429,14 @@ std::optional<QuicPathId> assign_runtime_path_for_inbound_step(EndpointDriveStat
     }
 
     const auto path_id = remember_runtime_path(state, step.source, step.source_len, step.socket_fd);
-    inbound->path_id = path_id;
     inbound->route_handle =
         remember_runtime_route_handle(state, step.source, step.source_len, step.socket_fd);
-    state.path_id_by_route_handle[*inbound->route_handle] = path_id;
-    state.route_handle_by_path_id[path_id] = *inbound->route_handle;
     return path_id;
 }
 
-QuicCoreInboundDatagram make_inbound_datagram_from_io_event(EndpointDriveState &state,
-                                                            const QuicIoRxDatagram &datagram) {
-    const auto path_id = remember_runtime_path_for_route_handle(state, datagram.route_handle);
+QuicCoreInboundDatagram make_inbound_datagram_from_io_event(const QuicIoRxDatagram &datagram) {
     return QuicCoreInboundDatagram{
         .bytes = datagram.bytes,
-        .path_id = path_id,
         .route_handle = datagram.route_handle,
         .ecn = datagram.ecn,
     };
@@ -1475,7 +1444,7 @@ QuicCoreInboundDatagram make_inbound_datagram_from_io_event(EndpointDriveState &
 
 bool handle_core_effects_with_backend(const std::optional<QuicRouteHandle> &fallback_route_handle,
                                       QuicIoBackend &backend, const QuicCoreResult &result,
-                                      const EndpointDriveState &state, std::string_view role_name) {
+                                      std::string_view role_name) {
     for (const auto &effect : result.effects) {
         const auto *send = std::get_if<QuicCoreSendDatagram>(&effect);
         if (send == nullptr) {
@@ -1483,15 +1452,6 @@ bool handle_core_effects_with_backend(const std::optional<QuicRouteHandle> &fall
         }
 
         std::optional<QuicRouteHandle> route_handle = send->route_handle;
-        if (!route_handle.has_value() && send->path_id.has_value()) {
-            const auto route_it = state.route_handle_by_path_id.find(*send->path_id);
-            if (route_it == state.route_handle_by_path_id.end()) {
-                std::cerr << "http09-" << role_name
-                          << " failed: missing route for path_id=" << *send->path_id << '\n';
-                return false;
-            }
-            route_handle = route_it->second;
-        }
         if (!route_handle.has_value()) {
             route_handle = fallback_route_handle;
         }
@@ -1502,10 +1462,8 @@ bool handle_core_effects_with_backend(const std::optional<QuicRouteHandle> &fall
         }
 
         with_runtime_trace([&](std::ostream &stream) {
-            stream << "http09-" << role_name << " trace: send_effect path_id="
-                   << (send->path_id.has_value() ? std::to_string(*send->path_id)
-                                                 : std::string{"-"})
-                   << " route_handle=" << *route_handle << " bytes=" << send->bytes.size() << '\n';
+            stream << "http09-" << role_name << " trace: send_effect route_handle=" << *route_handle
+                   << " bytes=" << send->bytes.size() << '\n';
         });
 
         if (!backend.send(QuicIoTxDatagram{
@@ -1556,11 +1514,13 @@ bool observe_client_runtime_policy_effects(const QuicCoreResult &result, Endpoin
             if (!preferred_socket_fd.has_value()) {
                 return false;
             }
-            policy.preferred_address_path_id =
-                remember_runtime_path(state, peer, peer_len, *preferred_socket_fd);
+            policy.preferred_address_route_handle =
+                remember_runtime_route_handle(state, peer, peer_len, *preferred_socket_fd);
+            static_cast<void>(remember_runtime_path(state, peer, peer_len, *preferred_socket_fd));
             with_runtime_trace([&](std::ostream &stream) {
-                stream << "http09-client trace: observed preferred_address path_id="
-                       << *policy.preferred_address_path_id << " socket_fd=" << *preferred_socket_fd
+                stream << "http09-client trace: observed preferred_address route_handle="
+                       << *policy.preferred_address_route_handle
+                       << " socket_fd=" << *preferred_socket_fd
                        << " ipv4_port=" << preferred->preferred_address.ipv4_port
                        << " ipv6_port=" << preferred->preferred_address.ipv6_port << '\n';
             });
@@ -1608,11 +1568,10 @@ bool observe_client_runtime_policy_effects_with_backend(const QuicCoreResult &re
             }
 
             io_context.preferred_route_handle = route_handle;
-            policy.preferred_address_path_id =
-                remember_runtime_path_for_route_handle(state, route_handle.value());
+            policy.preferred_address_route_handle = route_handle;
             with_runtime_trace([&](std::ostream &stream) {
                 stream << "http09-client trace: observed preferred_address route_handle="
-                       << route_handle.value() << " path_id=" << *policy.preferred_address_path_id
+                       << route_handle.value()
                        << " ipv4_port=" << preferred->preferred_address.ipv4_port
                        << " ipv6_port=" << preferred->preferred_address.ipv6_port << '\n';
             });
@@ -1648,19 +1607,19 @@ void maybe_queue_client_runtime_policy_inputs(const Http09RuntimeConfig &config,
                                               ClientRuntimePolicyState &policy,
                                               std::vector<QuicCoreInput> &core_inputs) {
     if (!runtime_client_should_attempt_preferred_address_migration(config) ||
-        !policy.handshake_confirmed_seen || !policy.preferred_address_path_id.has_value() ||
+        !policy.handshake_confirmed_seen || !policy.preferred_address_route_handle.has_value() ||
         policy.preferred_address_request_queued) {
         return;
     }
 
     core_inputs.emplace_back(QuicCoreRequestConnectionMigration{
-        .path_id = *policy.preferred_address_path_id,
+        .route_handle = *policy.preferred_address_route_handle,
         .reason = QuicMigrationRequestReason::preferred_address,
     });
     policy.preferred_address_request_queued = true;
     with_runtime_trace([&](std::ostream &stream) {
-        stream << "http09-client trace: queued preferred_address migration path_id="
-               << *policy.preferred_address_path_id << '\n';
+        stream << "http09-client trace: queued preferred_address migration route_handle="
+               << *policy.preferred_address_route_handle << '\n';
     });
 }
 
@@ -1883,8 +1842,8 @@ bool drive_endpoint_until_blocked(const EndpointDriver &endpoint, QuicCore &core
                         })) {
             *observed_send_effects = true;
         }
-        if (!handle_core_effects(fd, current_result, peer, peer_len, state.path_routes,
-                                 state.route_routes, role_name)) {
+        if (!handle_core_effects(fd, current_result, peer, peer_len, state.route_routes,
+                                 role_name)) {
             state.terminal_failure = true;
             return false;
         }
@@ -1954,7 +1913,7 @@ bool drive_endpoint_until_blocked_with_backend(
                         })) {
             *observed_send_effects = true;
         }
-        if (!handle_core_effects_with_backend(fallback_route_handle, backend, current_result, state,
+        if (!handle_core_effects_with_backend(fallback_route_handle, backend, current_result,
                                               role_name)) {
             state.terminal_failure = true;
             return false;
@@ -2138,7 +2097,7 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
             if (!event->datagram.has_value()) {
                 return 1;
             }
-            auto inbound = make_inbound_datagram_from_io_event(state, *event->datagram);
+            auto inbound = make_inbound_datagram_from_io_event(*event->datagram);
             saw_peer_input = true;
             if (!drive_result(core.advance(std::move(inbound), event->now))) {
                 return 1;
@@ -2896,8 +2855,7 @@ bool process_server_endpoint_core_result(QuicCore &core, EndpointDriveState &tra
             *observed_send_effects = true;
         }
         if (!handle_core_effects(fallback_socket_fd, current_result, fallback_peer,
-                                 fallback_peer_len, transport_state.path_routes,
-                                 transport_state.route_routes, "server")) {
+                                 fallback_peer_len, transport_state.route_routes, "server")) {
             return false;
         }
 
@@ -2972,7 +2930,7 @@ bool process_server_endpoint_core_result_with_backend(
             *observed_send_effects = true;
         }
         if (!handle_core_effects_with_backend(fallback_route_handle, backend, current_result,
-                                              transport_state, "server")) {
+                                              "server")) {
             return false;
         }
 
@@ -3323,7 +3281,7 @@ int run_http09_server(const Http09RuntimeConfig &config) {
 
     const auto process_server_datagram = [&](const QuicIoRxDatagram &datagram,
                                              QuicCoreTimePoint input_time) -> bool {
-        auto inbound = make_inbound_datagram_from_io_event(transport_state, datagram);
+        auto inbound = make_inbound_datagram_from_io_event(datagram);
         auto result = core.advance_endpoint(std::move(inbound), input_time);
         return process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
@@ -4657,13 +4615,14 @@ bool runtime_assigns_stable_path_ids_for_tests() {
     const auto first_assigned = assign_runtime_path_for_inbound_step(state, first);
     const auto second_assigned = assign_runtime_path_for_inbound_step(state, second);
     const auto third_assigned = assign_runtime_path_for_inbound_step(state, third);
-    const auto first_path = std::get<QuicCoreInboundDatagram>(*first.input).path_id;
-    const auto second_path = std::get<QuicCoreInboundDatagram>(*second.input).path_id;
-    const auto third_path = std::get<QuicCoreInboundDatagram>(*third.input).path_id;
-    return first_assigned.has_value() & second_assigned.has_value() & third_assigned.has_value() &
-           (first_path != 0) & (first_path == second_path) & (first_path != third_path) &
-           (state.path_routes.at(first_path).socket_fd == 4) &
-           (state.path_routes.at(third_path).socket_fd == 7);
+    if (!first_assigned.has_value() || !second_assigned.has_value() ||
+        !third_assigned.has_value()) {
+        return false;
+    }
+    return (first_assigned.value_or(0) != 0) & (first_assigned == second_assigned) &
+           (first_assigned != third_assigned) &
+           (state.path_routes.at(*first_assigned).socket_fd == 4) &
+           (state.path_routes.at(*third_assigned).socket_fd == 7);
 }
 
 bool runtime_server_route_handles_are_stable_per_peer_tuple_for_tests() {
@@ -4846,14 +4805,14 @@ bool drive_endpoint_uses_transport_selected_path_for_tests() {
     };
 
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
-    const auto selected_path_id = static_cast<QuicPathId>(9);
+    const auto selected_route_handle = static_cast<QuicRouteHandle>(9);
     const int fallback_socket_fd = 31;
     const int selected_socket_fd = 77;
     const auto fallback_peer = make_peer(8443);
     const auto selected_peer = make_peer(9443);
 
     EndpointDriveState state;
-    state.path_routes[selected_path_id] = RuntimeSendRoute{
+    state.route_routes[selected_route_handle] = RuntimeSendRoute{
         .socket_fd = selected_socket_fd,
         .peer = selected_peer,
         .peer_len = peer_len,
@@ -4861,7 +4820,7 @@ bool drive_endpoint_uses_transport_selected_path_for_tests() {
 
     QuicCoreResult result;
     result.effects.emplace_back(QuicCoreSendDatagram{
-        .path_id = selected_path_id,
+        .route_handle = selected_route_handle,
         .bytes = {std::byte{0xaa}},
     });
 
@@ -4894,25 +4853,17 @@ bool runtime_server_send_effect_uses_route_handle_for_tests() {
 
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
     const int fallback_socket_fd = 31;
-    const int path_socket_fd = 55;
     const int route_socket_fd = 77;
     const auto fallback_peer = make_peer(8443);
-    const auto path_peer = make_peer(9443);
     const auto route_peer = make_peer(10443);
 
     QuicCoreResult result;
     result.effects.emplace_back(QuicCoreSendDatagram{
-        .path_id = 9,
         .route_handle = 5,
         .bytes = {std::byte{0xaa}},
     });
 
     EndpointDriveState state;
-    state.path_routes.emplace(9, RuntimeSendRoute{
-                                     .socket_fd = path_socket_fd,
-                                     .peer = path_peer,
-                                     .peer_len = peer_len,
-                                 });
     state.route_routes.emplace(5, RuntimeSendRoute{
                                       .socket_fd = route_socket_fd,
                                       .peer = route_peer,
@@ -4920,7 +4871,7 @@ bool runtime_server_send_effect_uses_route_handle_for_tests() {
                                   });
 
     const bool handled = handle_core_effects(fallback_socket_fd, result, &fallback_peer, peer_len,
-                                             state.path_routes, state.route_routes, "server");
+                                             state.route_routes, "server");
     return handled & (g_recorded_sendto_for_tests.calls == 1) &
            (g_recorded_sendto_for_tests.socket_fd == route_socket_fd) &
            (g_recorded_sendto_for_tests.peer_port == 10443);
@@ -5044,25 +4995,27 @@ bool runtime_connectionmigration_request_flow_case_for_tests(bool official_alias
         return false;
     }
     if (!keep_path_route) {
-        state.path_routes.clear();
+        state.route_routes.clear();
     }
 
     std::vector<QuicCoreInput> core_inputs;
     maybe_queue_client_runtime_policy_inputs(config, policy, core_inputs);
 
-    if (!policy.preferred_address_path_id.has_value() || core_inputs.size() != 1) {
+    if (!policy.preferred_address_route_handle.has_value() || core_inputs.size() != 1) {
         return false;
     }
-    const auto preferred_address_path_id = policy.preferred_address_path_id.value_or(QuicPathId{});
-    if (!official_alias && !state.path_routes.contains(preferred_address_path_id)) {
+    const auto preferred_address_route_handle =
+        policy.preferred_address_route_handle.value_or(QuicRouteHandle{});
+    if (!official_alias && !state.route_routes.contains(preferred_address_route_handle)) {
         return false;
     }
     const auto &request = std::get<QuicCoreRequestConnectionMigration>(core_inputs.front());
     return policy.handshake_ready_seen && policy.handshake_confirmed_seen &&
            policy.preferred_address_request_queued &&
-           (request.path_id == preferred_address_path_id) &&
+           (request.route_handle == preferred_address_route_handle) &&
            (request.reason == QuicMigrationRequestReason::preferred_address) &&
-           (official_alias || (state.path_routes.at(preferred_address_path_id).socket_fd == 17));
+           (official_alias ||
+            (state.route_routes.at(preferred_address_route_handle).socket_fd == 17));
 }
 
 bool runtime_connectionmigration_request_flow_for_tests() {
@@ -5130,12 +5083,12 @@ bool runtime_cross_family_preferred_address_uses_compatible_socket_for_tests() {
     if (!observe_client_runtime_policy_effects(result, state, policy, client_sockets, "client")) {
         return false;
     }
-    if (!policy.preferred_address_path_id.has_value()) {
+    if (!policy.preferred_address_route_handle.has_value()) {
         return false;
     }
 
-    const auto route_it = state.path_routes.find(*policy.preferred_address_path_id);
-    return route_it != state.path_routes.end() && route_it->second.peer.ss_family == AF_INET6 &&
+    const auto route_it = state.route_routes.find(*policy.preferred_address_route_handle);
+    return route_it != state.route_routes.end() && route_it->second.peer.ss_family == AF_INET6 &&
            route_it->second.socket_fd == 23;
 }
 
@@ -5252,8 +5205,8 @@ bool runtime_regular_transfer_does_not_queue_preferred_address_migration_for_tes
     std::vector<QuicCoreInput> core_inputs;
     maybe_queue_client_runtime_policy_inputs(config, policy, core_inputs);
     return policy.handshake_ready_seen & policy.handshake_confirmed_seen &
-           policy.preferred_address_path_id.has_value() & !policy.preferred_address_request_queued &
-           core_inputs.empty();
+           policy.preferred_address_route_handle.has_value() &
+           !policy.preferred_address_request_queued & core_inputs.empty();
 }
 
 bool runtime_registers_all_server_core_connection_ids_case_for_tests(
@@ -5561,17 +5514,17 @@ bool runtime_misc_internal_coverage_for_tests() {
         run_traced_input(QuicCoreStart{});
         run_traced_input(QuicCoreInboundDatagram{
             .bytes = bytes_from_string_for_runtime_tests("input"),
-            .path_id = 4,
+            .route_handle = 4,
         });
         run_traced_input(QuicCoreResetStream{.stream_id = 0, .application_error_code = 1});
         run_traced_input(QuicCoreStopSending{.stream_id = 0, .application_error_code = 2});
         run_traced_input(QuicCoreRequestKeyUpdate{});
         run_traced_input(QuicCoreRequestConnectionMigration{
-            .path_id = 9,
+            .route_handle = 9,
             .reason = QuicMigrationRequestReason::preferred_address,
         });
         run_traced_input(QuicCoreRequestConnectionMigration{
-            .path_id = 10,
+            .route_handle = 10,
             .reason = QuicMigrationRequestReason::active,
         });
         run_traced_input(QuicCoreTimerExpired{});
@@ -5617,8 +5570,8 @@ bool runtime_misc_internal_coverage_for_tests() {
                 .testcase = QuicHttp09Testcase::connectionmigration,
             },
             policy, core_inputs);
-        check("policy records preferred address path",
-              policy.preferred_address_path_id.has_value());
+        check("policy records preferred address route",
+              policy.preferred_address_route_handle.has_value());
         check("policy queues one migration input", core_inputs.size() == 1);
 
         const auto client_timer_trace = run_client_connection_loop_case_for_tests(
@@ -6581,11 +6534,11 @@ bool core_version_negotiation_restart_preserves_inbound_path_ids_case_for_tests(
         return false;
     }
 
-    constexpr QuicPathId kInboundPathId = 41;
+    constexpr QuicRouteHandle kInboundRouteHandle = 41;
     const auto result = core.advance(
         QuicCoreInboundDatagram{
             .bytes = version_negotiation_packet.value(),
-            .path_id = kInboundPathId,
+            .route_handle = kInboundRouteHandle,
         },
         now());
 
@@ -6595,7 +6548,7 @@ bool core_version_negotiation_restart_preserves_inbound_path_ids_case_for_tests(
                                     });
     if (force_path_id_mismatch) {
         effects.emplace_back(QuicCoreSendDatagram{
-            .path_id = std::nullopt,
+            .route_handle = std::nullopt,
             .bytes = {std::byte{0x01}},
         });
     }
@@ -6607,7 +6560,7 @@ bool core_version_negotiation_restart_preserves_inbound_path_ids_case_for_tests(
             continue;
         }
         saw_send = true;
-        if (send->path_id != std::optional<QuicPathId>{kInboundPathId}) {
+        if (send->route_handle != std::optional<QuicRouteHandle>{kInboundRouteHandle}) {
             all_sends_match_path = false;
         }
     }
@@ -6656,11 +6609,11 @@ bool core_retry_restart_preserves_inbound_path_ids_case_for_tests(bool force_int
         return false;
     }
 
-    constexpr QuicPathId kInboundPathId = 52;
+    constexpr QuicRouteHandle kInboundRouteHandle = 52;
     const auto result = core.advance(
         QuicCoreInboundDatagram{
             .bytes = encoded_retry.value(),
-            .path_id = kInboundPathId,
+            .route_handle = kInboundRouteHandle,
         },
         now());
 
@@ -6670,7 +6623,7 @@ bool core_retry_restart_preserves_inbound_path_ids_case_for_tests(bool force_int
                                     });
     if (force_path_id_mismatch) {
         effects.emplace_back(QuicCoreSendDatagram{
-            .path_id = std::nullopt,
+            .route_handle = std::nullopt,
             .bytes = {std::byte{0x02}},
         });
     }
@@ -6682,7 +6635,7 @@ bool core_retry_restart_preserves_inbound_path_ids_case_for_tests(bool force_int
             continue;
         }
         saw_send = true;
-        if (send->path_id != std::optional<QuicPathId>{kInboundPathId}) {
+        if (send->route_handle != std::optional<QuicRouteHandle>{kInboundRouteHandle}) {
             all_sends_match_path = false;
         }
     }
@@ -6711,7 +6664,7 @@ bool drive_endpoint_rejects_unknown_transport_selected_path_for_tests() {
     EndpointDriveState state;
     QuicCoreResult result;
     result.effects.emplace_back(QuicCoreSendDatagram{
-        .path_id = static_cast<QuicPathId>(404),
+        .route_handle = static_cast<QuicRouteHandle>(404),
         .bytes = {std::byte{0xdd}},
     });
 

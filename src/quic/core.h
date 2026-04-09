@@ -135,7 +135,6 @@ struct QuicCoreStart {};
 
 struct QuicCoreInboundDatagram {
     std::vector<std::byte> bytes;
-    QuicPathId path_id = 0;
     std::optional<QuicRouteHandle> route_handle;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
 };
@@ -164,8 +163,7 @@ struct QuicCoreCloseConnection {
 struct QuicCoreTimerExpired {};
 struct QuicCoreRequestKeyUpdate {};
 struct QuicCoreRequestConnectionMigration {
-    QuicPathId path_id = 0;
-    std::optional<QuicRouteHandle> route_handle;
+    QuicRouteHandle route_handle = 0;
     QuicMigrationRequestReason reason = QuicMigrationRequestReason::active;
 };
 
@@ -194,7 +192,6 @@ using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicC
 
 struct QuicCoreSendDatagram {
     QuicConnectionHandle connection = 0;
-    std::optional<QuicPathId> path_id;
     std::optional<QuicRouteHandle> route_handle;
     std::vector<std::byte> bytes;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
@@ -355,8 +352,9 @@ class QuicCore {
     find_endpoint_connection_for_datagram(const ParsedEndpointDatagram &parsed) const;
     void erase_endpoint_connection_routes(const ConnectionEntry &entry);
     void refresh_server_connection_routes(ConnectionEntry &entry);
-    QuicPathId remember_inbound_path(ConnectionEntry &entry,
-                                     const QuicCoreInboundDatagram &inbound);
+    QuicPathId remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle);
+    static std::optional<QuicRouteHandle>
+    route_handle_for_path(const ConnectionEntry &entry, const std::optional<QuicPathId> &path_id);
 
     QuicCoreEndpointConfig endpoint_config_;
     std::optional<QuicCoreConfig> legacy_config_;

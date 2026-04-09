@@ -1,9 +1,18 @@
 #include <gtest/gtest.h>
 
+#include <type_traits>
+#include <utility>
+
 #include "tests/support/core/endpoint_test_fixtures.h"
 
 namespace {
 using namespace coquic::quic::test_support;
+
+template <typename T, typename = void> struct has_public_path_id_member : std::false_type {};
+
+template <typename T>
+struct has_public_path_id_member<T, std::void_t<decltype(std::declval<T>().path_id)>>
+    : std::true_type {};
 
 TEST(QuicCoreEndpointTest, ClientOpenCreatesStableHandleAndTagsInitialSendRoute) {
     coquic::quic::QuicCore core(make_client_endpoint_config());
@@ -27,6 +36,24 @@ TEST(QuicCoreEndpointTest, ClientOpenCreatesStableHandleAndTagsInitialSendRoute)
 
     ASSERT_TRUE(core.next_wakeup().has_value());
     EXPECT_EQ(core.connection_count(), 1u);
+}
+
+TEST(QuicCoreEndpointTest, ClientOpenSendEffectDoesNotExposePublicPathId) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    const auto result = core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0));
+
+    EXPECT_FALSE(has_public_path_id_member<coquic::quic::QuicCoreInboundDatagram>::value);
+    EXPECT_FALSE(has_public_path_id_member<coquic::quic::QuicCoreSendDatagram>::value);
+
+    const auto sends = send_effects_from(result);
+    ASSERT_FALSE(sends.empty());
+    EXPECT_EQ(sends.front().route_handle, std::optional<coquic::quic::QuicRouteHandle>{17u});
 }
 
 TEST(QuicCoreEndpointTest, EndpointCommandUsesConnectionHandleWithoutLegacyFallback) {

@@ -29,6 +29,7 @@ constexpr auto kStreamStateErrorMap = std::to_array<QuicCoreLocalErrorCode>({
 });
 constexpr std::size_t kMinimumClientInitialDatagramBytes = 1200;
 constexpr std::size_t kEndpointConnectionIdLength = 8;
+constexpr QuicPathId kDefaultPathId = 0;
 
 static_assert(kStreamStateErrorMap.size() ==
               static_cast<std::size_t>(StreamStateErrorCode::final_size_conflict) + 1);
@@ -58,7 +59,6 @@ QuicCoreResult drain_connection_effects(
                                                   : route_handle_by_path_id.end();
         result.effects.emplace_back(QuicCoreSendDatagram{
             .connection = handle,
-            .path_id = path_id,
             .route_handle = route_it != route_handle_by_path_id.end()
                                 ? std::optional<QuicRouteHandle>(route_it->second)
                                 : default_route_handle,
@@ -535,36 +535,37 @@ void QuicCore::refresh_server_connection_routes(ConnectionEntry &entry) {
     entry.initial_destination_connection_id_key = next_initial_destination_key;
 }
 
-QuicPathId QuicCore::remember_inbound_path(ConnectionEntry &entry,
-                                           const QuicCoreInboundDatagram &inbound) {
-    if (!inbound.route_handle.has_value()) {
-        if (inbound.path_id >= entry.next_path_id) {
-            entry.next_path_id = inbound.path_id + 1;
-        }
-        return inbound.path_id;
+QuicPathId QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle) {
+    if (!entry.default_route_handle.has_value()) {
+        entry.default_route_handle = route_handle;
     }
 
-    const auto existing = entry.path_id_by_route_handle.find(*inbound.route_handle);
+    const auto existing = entry.path_id_by_route_handle.find(route_handle);
     if (existing != entry.path_id_by_route_handle.end()) {
         return existing->second;
     }
 
-    QuicPathId path_id = inbound.path_id;
-    if (entry.route_handle_by_path_id.contains(path_id)) {
+    QuicPathId path_id =
+        entry.route_handle_by_path_id.empty() ? kDefaultPathId : entry.next_path_id++;
+    while (entry.route_handle_by_path_id.contains(path_id)) {
         path_id = entry.next_path_id++;
-        while (entry.route_handle_by_path_id.contains(path_id)) {
-            path_id = entry.next_path_id++;
-        }
-    } else if (path_id >= entry.next_path_id) {
-        entry.next_path_id = path_id + 1;
     }
 
-    entry.path_id_by_route_handle.emplace(*inbound.route_handle, path_id);
-    entry.route_handle_by_path_id.emplace(path_id, *inbound.route_handle);
-    if (!entry.default_route_handle.has_value()) {
-        entry.default_route_handle = inbound.route_handle;
-    }
+    entry.path_id_by_route_handle.emplace(route_handle, path_id);
+    entry.route_handle_by_path_id.emplace(path_id, route_handle);
     return path_id;
+}
+
+std::optional<QuicRouteHandle>
+QuicCore::route_handle_for_path(const ConnectionEntry &entry,
+                                const std::optional<QuicPathId> &path_id) {
+    if (path_id.has_value()) {
+        const auto route_it = entry.route_handle_by_path_id.find(*path_id);
+        if (route_it != entry.route_handle_by_path_id.end()) {
+            return route_it->second;
+        }
+    }
+    return entry.default_route_handle;
 }
 
 QuicCore::QuicCore(QuicCoreEndpointConfig config)
@@ -713,7 +714,12 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             auto entry_it = connections_.find(*handle);
             if (entry_it != connections_.end()) {
                 auto &entry = entry_it->second;
-                const auto path_id = remember_inbound_path(entry, *inbound);
+                const auto path_id =
+                    inbound->route_handle.has_value()
+                        ? remember_inbound_path(entry, *inbound->route_handle)
+                        : (entry.default_route_handle.has_value()
+                               ? remember_inbound_path(entry, *entry.default_route_handle)
+                               : kDefaultPathId);
                 entry.connection->process_inbound_datagram(inbound->bytes, now, path_id,
                                                            inbound->ecn);
 
@@ -830,7 +836,11 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .default_route_handle = inbound->route_handle,
             .connection = std::make_unique<QuicConnection>(std::move(config)),
         };
-        const auto path_id = remember_inbound_path(entry, *inbound);
+        const auto path_id = inbound->route_handle.has_value()
+                                 ? remember_inbound_path(entry, *inbound->route_handle)
+                                 : (entry.default_route_handle.has_value()
+                                        ? remember_inbound_path(entry, *entry.default_route_handle)
+                                        : kDefaultPathId);
         entry.connection->process_inbound_datagram(inbound->bytes, now, path_id, inbound->ecn);
 
         auto drained =
@@ -911,14 +921,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                 },
                 [&](const QuicCoreRequestKeyUpdate &) { entry.connection->request_key_update(); },
                 [&](const QuicCoreRequestConnectionMigration &in) {
-                    QuicPathId path_id = in.path_id;
-                    if (in.route_handle.has_value()) {
-                        const auto route_it = entry.path_id_by_route_handle.find(*in.route_handle);
-                        if (route_it != entry.path_id_by_route_handle.end()) {
-                            path_id = route_it->second;
-                        }
-                    }
-
+                    const auto path_id = remember_inbound_path(entry, in.route_handle);
                     const auto requested =
                         entry.connection->request_connection_migration(path_id, in.reason);
                     if (!requested.has_value()) {
@@ -1031,6 +1034,12 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         overloaded{
             [&](const QuicCoreStart &) { connection->start(now); },
             [&](const QuicCoreInboundDatagram &in) {
+                const auto path_id =
+                    in.route_handle.has_value()
+                        ? remember_inbound_path(*entry, *in.route_handle)
+                        : (entry->default_route_handle.has_value()
+                               ? remember_inbound_path(*entry, *entry->default_route_handle)
+                               : kDefaultPathId);
                 if (config.role == EndpointRole::client) {
                     if (!connection->is_handshake_complete()) {
                         const auto version_negotiation = parse_version_negotiation_packet(in.bytes);
@@ -1054,9 +1063,9 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                                     config.reacted_to_version_negotiation = true;
                                     entry->connection = std::make_unique<QuicConnection>(config);
                                     connection = entry->connection.get();
-                                    connection->last_inbound_path_id_ = in.path_id;
-                                    connection->current_send_path_id_ = in.path_id;
-                                    connection->ensure_path_state(in.path_id).is_current_send_path =
+                                    connection->last_inbound_path_id_ = path_id;
+                                    connection->current_send_path_id_ = path_id;
+                                    connection->ensure_path_state(path_id).is_current_send_path =
                                         true;
                                     connection->start(now);
                                     return;
@@ -1096,15 +1105,15 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             connection = entry->connection.get();
                             connection->initial_space_.next_send_packet_number =
                                 next_initial_send_packet_number;
-                            connection->last_inbound_path_id_ = in.path_id;
-                            connection->current_send_path_id_ = in.path_id;
-                            connection->ensure_path_state(in.path_id).is_current_send_path = true;
+                            connection->last_inbound_path_id_ = path_id;
+                            connection->current_send_path_id_ = path_id;
+                            connection->ensure_path_state(path_id).is_current_send_path = true;
                             connection->start(now);
                         }
                         return;
                     }
                 }
-                connection->process_inbound_datagram(in.bytes, now, in.path_id, in.ecn);
+                connection->process_inbound_datagram(in.bytes, now, path_id, in.ecn);
             },
             [&](const QuicCoreSendStreamData &in) {
                 const auto queued = connection->queue_stream_send(in.stream_id, in.bytes, in.fin);
@@ -1138,8 +1147,8 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
             },
             [&](const QuicCoreRequestKeyUpdate &) { connection->request_key_update(); },
             [&](const QuicCoreRequestConnectionMigration &in) {
-                const auto requested =
-                    connection->request_connection_migration(in.path_id, in.reason);
+                const auto path_id = remember_inbound_path(*entry, in.route_handle);
+                const auto requested = connection->request_connection_migration(path_id, in.reason);
                 if (!requested.has_value()) {
                     result.local_error = QuicCoreLocalError{
                         .connection = std::nullopt,
@@ -1157,8 +1166,10 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         if (datagram.empty()) {
             break;
         }
+        const auto route_handle = route_handle_for_path(*entry, connection->last_drained_path_id());
         result.effects.emplace_back(QuicCoreSendDatagram{
-            .path_id = connection->last_drained_path_id(),
+            .connection = entry->handle,
+            .route_handle = route_handle,
             .bytes = std::move(datagram),
             .ecn = connection->last_drained_ecn_codepoint(),
         });

@@ -1852,7 +1852,7 @@ TEST(QuicCoreTest, InboundMigratedAckGapDatagramRetransmitsLostStreamData) {
     const auto result = server.advance(
         coquic::quic::QuicCoreInboundDatagram{
             .bytes = encoded.value(),
-            .path_id = 11,
+            .route_handle = 11,
         },
         coquic::quic::test::test_time(101));
 
@@ -1867,8 +1867,8 @@ TEST(QuicCoreTest, InboundMigratedAckGapDatagramRetransmitsLostStreamData) {
             continue;
         }
 
-        ASSERT_TRUE(send->path_id.has_value());
-        EXPECT_EQ(optional_value_or_terminate(send->path_id), 11u);
+        ASSERT_TRUE(send->route_handle.has_value());
+        EXPECT_EQ(optional_value_or_terminate(send->route_handle), 11u);
         saw_send_on_migrated_path = true;
 
         for (const auto &packet : decode_sender_datagram(connection, send->bytes)) {
@@ -2003,7 +2003,7 @@ TEST(QuicCoreTest, LiveLikeMigratedAckGapDatagramRetransmitsLostStreamData) {
     const auto result = server.advance(
         coquic::quic::QuicCoreInboundDatagram{
             .bytes = encoded.value(),
-            .path_id = 11,
+            .route_handle = 11,
         },
         coquic::quic::test::test_time(101));
 
@@ -2016,8 +2016,8 @@ TEST(QuicCoreTest, LiveLikeMigratedAckGapDatagramRetransmitsLostStreamData) {
             continue;
         }
 
-        ASSERT_TRUE(send->path_id.has_value());
-        EXPECT_EQ(optional_value_or_terminate(send->path_id), 11u);
+        ASSERT_TRUE(send->route_handle.has_value());
+        EXPECT_EQ(optional_value_or_terminate(send->route_handle), 11u);
 
         for (const auto &packet : decode_sender_datagram(connection, send->bytes)) {
             const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);

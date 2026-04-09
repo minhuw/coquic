@@ -4,10 +4,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -283,7 +283,14 @@ class QuicCore {
     bool has_failed() const;
 
   private:
-    struct ConnectionEntry;
+    struct ConnectionEntry {
+        QuicConnectionHandle handle = 0;
+        std::optional<QuicRouteHandle> default_route_handle;
+        std::unique_ptr<QuicConnection> connection;
+        std::unordered_map<QuicRouteHandle, QuicPathId> path_id_by_route_handle;
+        std::unordered_map<QuicPathId, QuicRouteHandle> route_handle_by_path_id;
+    };
+
     struct LegacyConnectionView {
         QuicCore *owner = nullptr;
 
@@ -307,7 +314,7 @@ class QuicCore {
 
     QuicCoreEndpointConfig endpoint_config_;
     std::optional<QuicCoreConfig> legacy_config_;
-    std::map<QuicConnectionHandle, ConnectionEntry> connections_;
+    std::unordered_map<QuicConnectionHandle, ConnectionEntry> connections_;
     std::optional<QuicConnectionHandle> legacy_connection_handle_;
     QuicConnectionHandle next_connection_handle_ = 1;
     LegacyConnectionView connection_;

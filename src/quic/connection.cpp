@@ -1931,6 +1931,16 @@ std::optional<QuicCoreZeroRttStatusEvent> QuicConnection::take_zero_rtt_status_e
     return next;
 }
 
+std::optional<QuicConnectionTerminalState> QuicConnection::take_terminal_state() {
+    if (!pending_terminal_state_.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto next = pending_terminal_state_;
+    pending_terminal_state_.reset();
+    return next;
+}
+
 std::optional<QuicPathId> QuicConnection::last_drained_path_id() const {
     return last_drained_path_id_;
 }
@@ -3288,6 +3298,7 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
         }
 
         if (std::holds_alternative<TransportConnectionCloseFrame>(frame)) {
+            pending_terminal_state_ = QuicConnectionTerminalState::closed;
             mark_failed();
             continue;
         }
@@ -4119,6 +4130,7 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
         const bool has_application_close =
             std::holds_alternative<ApplicationConnectionCloseFrame>(frame);
         if (has_transport_close | has_application_close) {
+            pending_terminal_state_ = QuicConnectionTerminalState::closed;
             mark_failed();
             continue;
         }
@@ -4643,6 +4655,9 @@ void QuicConnection::mark_failed() {
         return;
     }
 
+    if (!pending_terminal_state_.has_value()) {
+        pending_terminal_state_ = QuicConnectionTerminalState::failed;
+    }
     status_ = HandshakeStatus::failed;
     streams_.clear();
     deferred_protected_packets_.clear();
@@ -7273,6 +7288,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             if (application_close_frame.has_value()) {
                 pending_application_close_.reset();
                 local_application_close_sent_ = true;
+                pending_terminal_state_ = QuicConnectionTerminalState::closed;
                 mark_failed();
             }
         }

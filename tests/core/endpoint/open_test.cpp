@@ -29,7 +29,7 @@ TEST(QuicCoreEndpointTest, ClientOpenCreatesStableHandleAndTagsInitialSendRoute)
     EXPECT_EQ(core.connection_count(), 1u);
 }
 
-TEST(QuicCoreEndpointTest, UnsupportedEndpointCommandReportsLocalErrorWithoutLegacyFallback) {
+TEST(QuicCoreEndpointTest, EndpointCommandUsesConnectionHandleWithoutLegacyFallback) {
     coquic::quic::QuicCore core(make_client_endpoint_config());
 
     static_cast<void>(core.advance_endpoint(
@@ -59,7 +59,7 @@ TEST(QuicCoreEndpointTest, UnsupportedEndpointCommandReportsLocalErrorWithoutLeg
 
     EXPECT_TRUE(result.local_error.has_value());
     EXPECT_EQ(local_error.connection, std::optional<coquic::quic::QuicConnectionHandle>{1u});
-    EXPECT_EQ(local_error.code, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation);
+    EXPECT_EQ(local_error.code, coquic::quic::QuicCoreLocalErrorCode::invalid_stream_id);
     EXPECT_EQ(result.next_wakeup, core.next_wakeup());
     EXPECT_TRUE(core.active_local_connection_ids().empty());
     EXPECT_FALSE(core.is_handshake_complete());

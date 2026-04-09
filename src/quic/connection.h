@@ -29,6 +29,11 @@ enum class HandshakeStatus : std::uint8_t {
     failed,
 };
 
+enum class QuicConnectionTerminalState : std::uint8_t {
+    closed,
+    failed,
+};
+
 struct PacketSpaceState {
     std::uint64_t next_send_packet_number = 0;
     std::optional<std::uint64_t> largest_authenticated_packet_number;
@@ -239,6 +244,7 @@ class QuicConnection {
     std::optional<QuicCorePeerPreferredAddressAvailable> take_peer_preferred_address_available();
     std::optional<QuicCoreResumptionStateAvailable> take_resumption_state_available();
     std::optional<QuicCoreZeroRttStatusEvent> take_zero_rtt_status_event();
+    std::optional<QuicConnectionTerminalState> take_terminal_state();
     std::optional<QuicPathId> last_drained_path_id() const;
     QuicEcnCodepoint last_drained_ecn_codepoint() const;
     std::optional<QuicCoreTimePoint> next_wakeup() const;
@@ -403,6 +409,7 @@ class QuicConnection {
     std::optional<QuicCorePeerPreferredAddressAvailable> pending_preferred_address_effect_;
     std::optional<QuicCoreResumptionStateAvailable> pending_resumption_state_effect_;
     std::optional<QuicCoreZeroRttStatusEvent> pending_zero_rtt_status_event_;
+    std::optional<QuicConnectionTerminalState> pending_terminal_state_;
     std::vector<NewConnectionIdFrame> pending_new_connection_id_frames_;
     std::vector<RetireConnectionIdFrame> pending_retire_connection_id_frames_;
     std::optional<StoredClientResumptionState> decoded_resumption_state_;

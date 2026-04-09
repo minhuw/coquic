@@ -11,12 +11,6 @@
 
 namespace coquic::quic {
 
-struct QuicCore::ConnectionEntry {
-    QuicConnectionHandle handle = 0;
-    std::optional<QuicRouteHandle> default_route_handle;
-    std::unique_ptr<QuicConnection> connection;
-};
-
 namespace {
 
 template <typename... Ts> struct overloaded : Ts... {
@@ -42,6 +36,99 @@ QuicCoreLocalError stream_state_error_to_local_error(const StreamStateError &err
         .code = kStreamStateErrorMap[static_cast<std::size_t>(error.code)],
         .stream_id = error.stream_id,
     };
+}
+
+QuicCoreResult drain_connection_effects(
+    QuicConnectionHandle handle, const std::optional<QuicRouteHandle> &default_route_handle,
+    const std::unordered_map<QuicPathId, QuicRouteHandle> &route_handle_by_path_id,
+    QuicConnection &connection, QuicCoreTimePoint now) {
+    QuicCoreResult result;
+
+    while (true) {
+        auto datagram = connection.drain_outbound_datagram(now);
+        if (datagram.empty()) {
+            break;
+        }
+
+        const auto path_id = connection.last_drained_path_id();
+        const auto route_it = path_id.has_value() ? route_handle_by_path_id.find(*path_id)
+                                                  : route_handle_by_path_id.end();
+        result.effects.emplace_back(QuicCoreSendDatagram{
+            .connection = handle,
+            .path_id = path_id,
+            .route_handle = route_it != route_handle_by_path_id.end()
+                                ? std::optional<QuicRouteHandle>(route_it->second)
+                                : default_route_handle,
+            .bytes = std::move(datagram),
+            .ecn = connection.last_drained_ecn_codepoint(),
+        });
+    }
+
+    while (const auto received = connection.take_received_stream_data()) {
+        result.effects.emplace_back(QuicCoreReceiveStreamData{
+            .connection = handle,
+            .stream_id = received->stream_id,
+            .bytes = std::move(received->bytes),
+            .fin = received->fin,
+        });
+    }
+    while (const auto reset = connection.take_peer_reset_stream()) {
+        result.effects.emplace_back(QuicCorePeerResetStream{
+            .connection = handle,
+            .stream_id = reset->stream_id,
+            .application_error_code = reset->application_error_code,
+            .final_size = reset->final_size,
+        });
+    }
+    while (const auto stop = connection.take_peer_stop_sending()) {
+        result.effects.emplace_back(QuicCorePeerStopSending{
+            .connection = handle,
+            .stream_id = stop->stream_id,
+            .application_error_code = stop->application_error_code,
+        });
+    }
+    while (const auto event = connection.take_state_change()) {
+        result.effects.emplace_back(QuicCoreStateEvent{
+            .connection = handle,
+            .change = *event,
+        });
+    }
+    while (const auto preferred = connection.take_peer_preferred_address_available()) {
+        result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
+            .connection = handle,
+            .preferred_address = preferred->preferred_address,
+        });
+    }
+    while (const auto state = connection.take_resumption_state_available()) {
+        result.effects.emplace_back(QuicCoreResumptionStateAvailable{
+            .connection = handle,
+            .state = state->state,
+        });
+    }
+    while (const auto status = connection.take_zero_rtt_status_event()) {
+        result.effects.emplace_back(QuicCoreZeroRttStatusEvent{
+            .connection = handle,
+            .status = status->status,
+        });
+    }
+    if (const auto terminal = connection.take_terminal_state()) {
+        if (*terminal == QuicConnectionTerminalState::closed) {
+            result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+                .connection = handle,
+                .event = QuicCoreConnectionLifecycle::closed,
+            });
+        }
+    }
+
+    result.next_wakeup = connection.next_wakeup();
+    return result;
+}
+
+bool has_closed_lifecycle_event(const QuicCoreResult &result) {
+    return std::any_of(result.effects.begin(), result.effects.end(), [](const auto &effect) {
+        const auto *event = std::get_if<QuicCoreConnectionLifecycleEvent>(&effect);
+        return event != nullptr && event->event == QuicCoreConnectionLifecycle::closed;
+    });
 }
 
 std::uint32_t read_u32_be_at(std::span<const std::byte> bytes, std::size_t offset) {
@@ -286,6 +373,8 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .default_route_handle = open->initial_route_handle,
             .connection = std::make_unique<QuicConnection>(std::move(config)),
         };
+        entry.path_id_by_route_handle.emplace(open->initial_route_handle, 0);
+        entry.route_handle_by_path_id.emplace(0, open->initial_route_handle);
         entry.connection->start(now);
 
         QuicCoreResult result;
@@ -308,6 +397,126 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .event = QuicCoreConnectionLifecycle::created,
         });
         connections_.emplace(handle, std::move(entry));
+        result.next_wakeup = next_wakeup();
+        return result;
+    }
+
+    if (const auto *command = std::get_if<QuicCoreConnectionCommand>(&input)) {
+        auto entry_it = connections_.find(command->connection);
+        if (entry_it == connections_.end()) {
+            return QuicCoreResult{
+                .next_wakeup = next_wakeup(),
+                .local_error =
+                    QuicCoreLocalError{
+                        .connection = command->connection,
+                        .code = QuicCoreLocalErrorCode::unsupported_operation,
+                        .stream_id = std::nullopt,
+                    },
+            };
+        }
+
+        auto &entry = entry_it->second;
+        QuicCoreResult result;
+        std::visit(
+            overloaded{
+                [&](const QuicCoreSendStreamData &in) {
+                    const auto queued =
+                        entry.connection->queue_stream_send(in.stream_id, in.bytes, in.fin);
+                    if (!queued.has_value()) {
+                        result.local_error = stream_state_error_to_local_error(queued.error());
+                        result.local_error->connection = entry.handle;
+                    }
+                },
+                [&](const QuicCoreResetStream &in) {
+                    const auto queued = entry.connection->queue_stream_reset(LocalResetCommand{
+                        .stream_id = in.stream_id,
+                        .application_error_code = in.application_error_code,
+                    });
+                    if (!queued.has_value()) {
+                        result.local_error = stream_state_error_to_local_error(queued.error());
+                        result.local_error->connection = entry.handle;
+                    }
+                },
+                [&](const QuicCoreStopSending &in) {
+                    const auto queued =
+                        entry.connection->queue_stop_sending(LocalStopSendingCommand{
+                            .stream_id = in.stream_id,
+                            .application_error_code = in.application_error_code,
+                        });
+                    if (!queued.has_value()) {
+                        result.local_error = stream_state_error_to_local_error(queued.error());
+                        result.local_error->connection = entry.handle;
+                    }
+                },
+                [&](const QuicCoreCloseConnection &in) {
+                    static_cast<void>(
+                        entry.connection->queue_application_close(LocalApplicationCloseCommand{
+                            .application_error_code = in.application_error_code,
+                            .reason_phrase = in.reason_phrase,
+                        }));
+                },
+                [&](const QuicCoreRequestKeyUpdate &) { entry.connection->request_key_update(); },
+                [&](const QuicCoreRequestConnectionMigration &in) {
+                    QuicPathId path_id = in.path_id;
+                    if (in.route_handle.has_value()) {
+                        const auto route_it = entry.path_id_by_route_handle.find(*in.route_handle);
+                        if (route_it != entry.path_id_by_route_handle.end()) {
+                            path_id = route_it->second;
+                        }
+                    }
+
+                    const auto requested =
+                        entry.connection->request_connection_migration(path_id, in.reason);
+                    if (!requested.has_value()) {
+                        result.local_error = QuicCoreLocalError{
+                            .connection = entry.handle,
+                            .code = QuicCoreLocalErrorCode::unsupported_operation,
+                            .stream_id = std::nullopt,
+                        };
+                    }
+                },
+                [&](const auto &) {},
+            },
+            command->input);
+
+        auto drained =
+            drain_connection_effects(entry.handle, entry.default_route_handle,
+                                     entry.route_handle_by_path_id, *entry.connection, now);
+        result.effects.insert(result.effects.end(),
+                              std::make_move_iterator(drained.effects.begin()),
+                              std::make_move_iterator(drained.effects.end()));
+        if (entry.connection->has_failed() || has_closed_lifecycle_event(result)) {
+            connections_.erase(entry_it);
+        }
+        result.next_wakeup = next_wakeup();
+        return result;
+    }
+
+    if (std::holds_alternative<QuicCoreTimerExpired>(input)) {
+        QuicCoreResult result;
+        std::vector<QuicConnectionHandle> erase_after;
+        for (auto &[handle, entry] : connections_) {
+            (void)handle;
+            const auto wakeup = entry.connection->next_wakeup();
+            if (!wakeup.has_value() || *wakeup > now) {
+                continue;
+            }
+
+            entry.connection->on_timeout(now);
+            auto drained =
+                drain_connection_effects(entry.handle, entry.default_route_handle,
+                                         entry.route_handle_by_path_id, *entry.connection, now);
+            result.effects.insert(result.effects.end(),
+                                  std::make_move_iterator(drained.effects.begin()),
+                                  std::make_move_iterator(drained.effects.end()));
+            if (entry.connection->has_failed() || has_closed_lifecycle_event(drained)) {
+                erase_after.push_back(entry.handle);
+            }
+        }
+
+        for (const auto handle : erase_after) {
+            connections_.erase(handle);
+        }
         result.next_wakeup = next_wakeup();
         return result;
     }

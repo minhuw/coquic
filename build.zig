@@ -282,6 +282,7 @@ pub fn build(b: *std.Build) void {
         "tests/core/connection/retry_version_test.cpp",
         "tests/core/connection/key_update_test.cpp",
         "tests/core/endpoint/open_test.cpp",
+        "tests/core/endpoint/multiplex_test.cpp",
     };
     const http09_test_files = &.{
         "tests/http09/protocol/http09_test.cpp",

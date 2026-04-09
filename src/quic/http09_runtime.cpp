@@ -41,9 +41,16 @@
 
 namespace coquic::quic {
 
+namespace test {
+SocketIoBackendOpsOverride &socket_io_backend_ops_for_runtime_tests();
+void socket_io_backend_apply_ops_override_for_runtime_tests(
+    const SocketIoBackendOpsOverride &override_ops);
+bool socket_io_backend_has_legacy_sendto_override_for_runtime_tests();
+bool socket_io_backend_has_legacy_recvfrom_override_for_runtime_tests();
+} // namespace test
+
 namespace {
 
-constexpr std::size_t kMaxDatagramBytes = 65535;
 constexpr std::size_t kMinimumClientInitialDatagramBytes = 1200;
 constexpr std::size_t kRuntimeConnectionIdLength = 8;
 constexpr int kDefaultClientReceiveTimeoutMs = 30000;
@@ -68,106 +75,28 @@ int client_receive_timeout_ms(const Http09RuntimeConfig &config) {
     return kDefaultClientReceiveTimeoutMs;
 }
 
-test::Http09RuntimeOpsOverride make_default_runtime_ops() {
-    return test::Http09RuntimeOpsOverride{
-        .socket_fn = ::socket,
-        .bind_fn = ::bind,
-        .poll_fn = ::poll,
-        .setsockopt_fn = ::setsockopt,
-        .sendto_fn = ::sendto,
-        .sendmsg_fn = ::sendmsg,
-        .recvfrom_fn = ::recvfrom,
-        .recvmsg_fn = ::recvmsg,
-        .getaddrinfo_fn = ::getaddrinfo,
-        .freeaddrinfo_fn = ::freeaddrinfo,
-        .gethostname_fn = ::gethostname,
-    };
-}
-
 test::Http09RuntimeOpsOverride &runtime_ops() {
-    static thread_local auto ops = make_default_runtime_ops();
-    return ops;
+    return test::socket_io_backend_ops_for_runtime_tests();
 }
 
 void apply_runtime_ops_override(const test::Http09RuntimeOpsOverride &override_ops) {
-    auto &ops = runtime_ops();
-    if (override_ops.socket_fn != nullptr) {
-        ops.socket_fn = override_ops.socket_fn;
-    }
-    if (override_ops.bind_fn != nullptr) {
-        ops.bind_fn = override_ops.bind_fn;
-    }
-    if (override_ops.poll_fn != nullptr) {
-        ops.poll_fn = override_ops.poll_fn;
-    }
-    if (override_ops.setsockopt_fn != nullptr) {
-        ops.setsockopt_fn = override_ops.setsockopt_fn;
-    }
-    if (override_ops.sendto_fn != nullptr) {
-        ops.sendto_fn = override_ops.sendto_fn;
-    }
-    if (override_ops.sendmsg_fn != nullptr) {
-        ops.sendmsg_fn = override_ops.sendmsg_fn;
-    }
-    if (override_ops.recvfrom_fn != nullptr) {
-        ops.recvfrom_fn = override_ops.recvfrom_fn;
-    }
-    if (override_ops.recvmsg_fn != nullptr) {
-        ops.recvmsg_fn = override_ops.recvmsg_fn;
-    }
-    if (override_ops.getaddrinfo_fn != nullptr) {
-        ops.getaddrinfo_fn = override_ops.getaddrinfo_fn;
-    }
-    if (override_ops.freeaddrinfo_fn != nullptr) {
-        ops.freeaddrinfo_fn = override_ops.freeaddrinfo_fn;
-    }
-    if (override_ops.gethostname_fn != nullptr) {
-        ops.gethostname_fn = override_ops.gethostname_fn;
-    }
+    test::socket_io_backend_apply_ops_override_for_runtime_tests(override_ops);
 }
 
 bool has_legacy_sendto_override() {
-    const auto defaults = make_default_runtime_ops();
-    return runtime_ops().sendto_fn != defaults.sendto_fn &&
-           runtime_ops().sendmsg_fn == defaults.sendmsg_fn;
+    return test::socket_io_backend_has_legacy_sendto_override_for_runtime_tests();
 }
 
 bool has_legacy_recvfrom_override() {
-    const auto defaults = make_default_runtime_ops();
-    return runtime_ops().recvfrom_fn != defaults.recvfrom_fn &&
-           runtime_ops().recvmsg_fn == defaults.recvmsg_fn;
-}
-
-bool is_ect_codepoint(QuicEcnCodepoint ecn) {
-    return ecn == QuicEcnCodepoint::ect0 || ecn == QuicEcnCodepoint::ect1;
+    return test::socket_io_backend_has_legacy_recvfrom_override_for_runtime_tests();
 }
 
 int linux_traffic_class_for_ecn(QuicEcnCodepoint ecn) {
-    switch (ecn) {
-    case QuicEcnCodepoint::ect0:
-        return 0x02;
-    case QuicEcnCodepoint::ect1:
-        return 0x01;
-    case QuicEcnCodepoint::ce:
-        return 0x03;
-    case QuicEcnCodepoint::unavailable:
-    case QuicEcnCodepoint::not_ect:
-        return 0x00;
-    }
-    return 0x00;
+    return test::socket_io_backend_linux_traffic_class_for_ecn_for_runtime_tests(ecn);
 }
 
 QuicEcnCodepoint ecn_from_linux_traffic_class(int traffic_class) {
-    switch (traffic_class & 0x03) {
-    case 0x01:
-        return QuicEcnCodepoint::ect1;
-    case 0x02:
-        return QuicEcnCodepoint::ect0;
-    case 0x03:
-        return QuicEcnCodepoint::ce;
-    default:
-        return QuicEcnCodepoint::not_ect;
-    }
+    return test::socket_io_backend_ecn_from_linux_traffic_class_for_runtime_tests(traffic_class);
 }
 
 struct LinuxSocketDescriptor {
@@ -175,59 +104,16 @@ struct LinuxSocketDescriptor {
 };
 
 bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family) {
-#if defined(__linux__)
-    const auto set_bool_socket_option = [&](int level, int name) {
-        const int enabled = 1;
-        return runtime_ops().setsockopt_fn(socket.fd, level, name, &enabled, sizeof(enabled)) == 0;
-    };
-
-    if (family == AF_INET || family == AF_INET6) {
-        if (!set_bool_socket_option(IPPROTO_IP, IP_RECVTOS)) {
-            return false;
-        }
-    }
-    if (family == AF_INET6) {
-        if (!set_bool_socket_option(IPPROTO_IPV6, IPV6_RECVTCLASS)) {
-            return false;
-        }
-    }
-#else
-    static_cast<void>(fd);
-    static_cast<void>(family);
-#endif
-    return true;
+    return test::socket_io_backend_configure_linux_ecn_socket_options_for_runtime_tests(socket.fd,
+                                                                                        family);
 }
 
 bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_len) {
-    if (peer.ss_family != AF_INET6 || peer_len < static_cast<socklen_t>(sizeof(sockaddr_in6))) {
-        return false;
-    }
-
-    const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(&peer);
-    return IN6_IS_ADDR_V4MAPPED(&ipv6->sin6_addr);
+    return test::socket_io_backend_is_ipv4_mapped_ipv6_address_for_runtime_tests(peer, peer_len);
 }
 
 QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message) {
-#if defined(__linux__)
-    if ((message.msg_flags & MSG_CTRUNC) != 0) {
-        return QuicEcnCodepoint::unavailable;
-    }
-    for (auto *control = CMSG_FIRSTHDR(&message); control != nullptr;
-         control = CMSG_NXTHDR(const_cast<msghdr *>(&message), control)) {
-        if ((control->cmsg_level == IPPROTO_IP && control->cmsg_type == IP_TOS) ||
-            (control->cmsg_level == IPPROTO_IPV6 && control->cmsg_type == IPV6_TCLASS)) {
-            int traffic_class = 0;
-            const auto payload_size =
-                control->cmsg_len > CMSG_LEN(0) ? control->cmsg_len - CMSG_LEN(0) : 0;
-            std::memcpy(&traffic_class, CMSG_DATA(control),
-                        std::min<std::size_t>(sizeof(traffic_class), payload_size));
-            return ecn_from_linux_traffic_class(traffic_class);
-        }
-    }
-#else
-    static_cast<void>(message);
-#endif
-    return QuicEcnCodepoint::unavailable;
+    return test::socket_io_backend_recvmsg_ecn_from_control_for_runtime_tests(message);
 }
 
 class ScopedFd {
@@ -439,19 +325,7 @@ struct UdpAddressResolutionQuery {
 };
 
 int preferred_udp_address_family(std::string_view host) {
-    const auto host_string = std::string(host);
-
-    in_addr ipv4_address{};
-    if (::inet_pton(AF_INET, host_string.c_str(), &ipv4_address) == 1) {
-        return AF_INET;
-    }
-
-    in6_addr ipv6_address{};
-    if (::inet_pton(AF_INET6, host_string.c_str(), &ipv6_address) == 1) {
-        return AF_INET6;
-    }
-
-    return AF_UNSPEC;
+    return test::socket_io_backend_preferred_udp_address_family_for_runtime_tests(host);
 }
 
 bool host_is_unspecified(std::string_view host) {
@@ -494,78 +368,17 @@ std::optional<std::string> preferred_address_host_for_server(std::string_view ho
     return std::string(hostname.data());
 }
 
-bool copy_udp_address(const addrinfo &result, ResolvedUdpAddress &resolved) {
-    if (result.ai_addr == nullptr || result.ai_addrlen <= 0 ||
-        result.ai_addrlen > static_cast<socklen_t>(sizeof(sockaddr_storage))) {
-        return false;
-    }
-    if (result.ai_family != AF_INET && result.ai_family != AF_INET6) {
-        return false;
-    }
-
-    resolved = {};
-    std::memcpy(&resolved.address, result.ai_addr, static_cast<std::size_t>(result.ai_addrlen));
-    resolved.address_len = result.ai_addrlen;
-    resolved.family = result.ai_family;
-    return true;
-}
-
 bool resolve_udp_address(UdpAddressResolutionQuery query, ResolvedUdpAddress &resolved) {
-    const int preferred_family =
-        query.family != AF_UNSPEC ? query.family : preferred_udp_address_family(query.host);
-
-    addrinfo hints{};
-    hints.ai_family = preferred_family;
-    hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_protocol = IPPROTO_UDP;
-    hints.ai_flags = AI_NUMERICSERV | query.extra_flags;
-
-    addrinfo *results = nullptr;
-    const auto service = std::to_string(query.port);
-    const auto host_string = std::string(query.host);
-    const char *node = query.host.empty() ? nullptr : host_string.c_str();
-    const int status = runtime_ops().getaddrinfo_fn(node, service.c_str(), &hints, &results);
-    const bool resolution_failed = status != 0;
-    const bool missing_results = results == nullptr;
-    if (resolution_failed || missing_results) {
-        if (results != nullptr) {
-            runtime_ops().freeaddrinfo_fn(results);
-        }
+    test::SocketIoBackendResolvedUdpAddressForTests backend_resolved{};
+    if (!test::socket_io_backend_resolve_udp_address_for_runtime_tests(
+            query.host, query.port, query.extra_flags, query.family, backend_resolved)) {
         return false;
     }
 
-    const bool prefer_ipv4_result = preferred_family == AF_UNSPEC;
-    addrinfo *selected = nullptr;
-    if (prefer_ipv4_result) {
-        for (auto *result = results; result != nullptr; result = result->ai_next) {
-            if (result->ai_family == AF_INET) {
-                selected = result;
-                break;
-            }
-        }
-    }
-    if (selected == nullptr) {
-        selected = results;
-    }
-
-    for (auto *result = selected; result != nullptr; result = result->ai_next) {
-        if (copy_udp_address(*result, resolved)) {
-            runtime_ops().freeaddrinfo_fn(results);
-            return true;
-        }
-    }
-
-    if (selected != results) {
-        for (auto *result = results; result != selected; result = result->ai_next) {
-            if (copy_udp_address(*result, resolved)) {
-                runtime_ops().freeaddrinfo_fn(results);
-                return true;
-            }
-        }
-    }
-
-    runtime_ops().freeaddrinfo_fn(results);
-    return false;
+    resolved.address = backend_resolved.address;
+    resolved.address_len = backend_resolved.address_len;
+    resolved.family = backend_resolved.family;
+    return true;
 }
 
 PreferredAddress preferred_address_from_resolved_udp_address(const ResolvedUdpAddress &resolved,
@@ -698,30 +511,7 @@ derive_http09_client_remote_impl(const Http09RuntimeConfig &config,
 }
 
 int open_udp_socket(int family) {
-    const int fd = runtime_ops().socket_fn(family, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        return fd;
-    }
-
-    if (family == AF_INET6) {
-        const int disabled = 0;
-        if (runtime_ops().setsockopt_fn(fd, IPPROTO_IPV6, IPV6_V6ONLY, &disabled,
-                                        sizeof(disabled)) != 0) {
-            const int option_errno = errno;
-            ::close(fd);
-            errno = option_errno;
-            return -1;
-        }
-    }
-
-    if (!configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = fd}, family)) {
-        const int option_errno = errno;
-        ::close(fd);
-        errno = option_errno;
-        return -1;
-    }
-
-    return fd;
+    return test::socket_io_backend_open_udp_socket_for_runtime_tests(family);
 }
 
 int open_and_bind_udp_socket(const ResolvedUdpAddress &bind_address, std::string_view role_name) {
@@ -1140,54 +930,8 @@ bool send_version_negotiation_for_probe(int fd, std::span<const std::byte> datag
 
 bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer,
                    socklen_t peer_len, std::string_view role_name, QuicEcnCodepoint ecn) {
-    const auto *buffer = reinterpret_cast<const void *>(datagram.data());
-    const bool use_sendmsg = !has_legacy_sendto_override() && is_ect_codepoint(ecn) &&
-                             peer_len > 0 &&
-                             (peer.ss_family == AF_INET || peer.ss_family == AF_INET6);
-    if (!use_sendmsg) {
-        const ssize_t sent = runtime_ops().sendto_fn(
-            fd, buffer, datagram.size(), 0, reinterpret_cast<const sockaddr *>(&peer), peer_len);
-        if (sent >= 0) {
-            return true;
-        }
-
-        std::cerr << "http09-" << role_name << " failed: sendto error: " << std::strerror(errno)
-                  << '\n';
-        return false;
-    }
-
-    iovec iov{
-        .iov_base = const_cast<void *>(buffer),
-        .iov_len = datagram.size(),
-    };
-    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
-    msghdr message{};
-    message.msg_name = const_cast<sockaddr *>(reinterpret_cast<const sockaddr *>(&peer));
-    message.msg_namelen = peer_len;
-    message.msg_iov = &iov;
-    message.msg_iovlen = 1;
-    message.msg_control = control.data();
-    message.msg_controllen = control.size();
-
-    auto *header = reinterpret_cast<cmsghdr *>(control.data());
-
-    const bool use_ipv4_traffic_class =
-        peer.ss_family == AF_INET || is_ipv4_mapped_ipv6_address(peer, peer_len);
-    header->cmsg_level = use_ipv4_traffic_class ? IPPROTO_IP : IPPROTO_IPV6;
-    header->cmsg_type = use_ipv4_traffic_class ? IP_TOS : IPV6_TCLASS;
-    header->cmsg_len = CMSG_LEN(sizeof(int));
-    const int traffic_class = linux_traffic_class_for_ecn(ecn);
-    std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
-    message.msg_controllen = header->cmsg_len;
-
-    const ssize_t sent = runtime_ops().sendmsg_fn(fd, &message, 0);
-    if (sent >= 0) {
-        return true;
-    }
-
-    std::cerr << "http09-" << role_name << " failed: sendmsg error: " << std::strerror(errno)
-              << '\n';
-    return false;
+    return test::socket_io_backend_send_datagram_for_runtime_tests(fd, datagram, peer, peer_len,
+                                                                   role_name, ecn);
 }
 
 struct RuntimeSendRoute {
@@ -1285,57 +1029,24 @@ struct ClientLoopIo {
 };
 
 ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name, int flags) {
-    std::vector<std::byte> inbound(kMaxDatagramBytes);
-    sockaddr_storage source{};
-    socklen_t source_len = sizeof(source);
-    QuicEcnCodepoint inbound_ecn = QuicEcnCodepoint::unavailable;
-    ssize_t bytes_read = 0;
-    do {
-        if (has_legacy_recvfrom_override()) {
-            bytes_read =
-                runtime_ops().recvfrom_fn(socket_fd, inbound.data(), inbound.size(), flags,
-                                          reinterpret_cast<sockaddr *>(&source), &source_len);
-        } else {
-            std::array<std::byte, 256> control{};
-            iovec iov{
-                .iov_base = inbound.data(),
-                .iov_len = inbound.size(),
-            };
-            msghdr message{};
-            message.msg_name = &source;
-            message.msg_namelen = sizeof(source);
-            message.msg_iov = &iov;
-            message.msg_iovlen = 1;
-            message.msg_control = control.data();
-            message.msg_controllen = control.size();
-            bytes_read = runtime_ops().recvmsg_fn(socket_fd, &message, flags);
-            source_len = static_cast<socklen_t>(message.msg_namelen);
-            if (bytes_read >= 0) {
-                inbound_ecn = recvmsg_ecn_from_control(message);
-            }
-        }
-    } while (bytes_read < 0 && errno == EINTR);
-
-    if (bytes_read < 0) {
-        const bool would_block = (errno == EAGAIN) | (errno == EWOULDBLOCK);
-        if (would_block) {
-            return ReceiveDatagramResult{
-                .status = ReceiveDatagramStatus::would_block,
-            };
-        }
-
-        std::cerr << "http09-" << role_name << " failed: recvmsg error: " << std::strerror(errno)
-                  << '\n';
+    auto received =
+        test::socket_io_backend_receive_datagram_for_runtime_tests(socket_fd, role_name, flags);
+    if (received.status == test::SocketIoBackendReceiveDatagramStatusForTests::would_block) {
+        return ReceiveDatagramResult{
+            .status = ReceiveDatagramStatus::would_block,
+        };
+    }
+    if (received.status == test::SocketIoBackendReceiveDatagramStatusForTests::error) {
         return ReceiveDatagramResult{
             .status = ReceiveDatagramStatus::error,
         };
     }
 
-    inbound.resize(static_cast<std::size_t>(bytes_read));
     with_runtime_trace([&](std::ostream &stream) {
         stream << "http09-" << role_name << " trace: recv-dgram fd=" << socket_fd
-               << " bytes=" << inbound.size()
-               << " source=" << format_sockaddr_for_trace(source, source_len) << '\n';
+               << " bytes=" << received.bytes.size()
+               << " source=" << format_sockaddr_for_trace(received.source, received.source_len)
+               << '\n';
     });
     return ReceiveDatagramResult{
         .status = ReceiveDatagramStatus::ok,
@@ -1343,13 +1054,13 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
             RuntimeWaitStep{
                 .input =
                     QuicCoreInboundDatagram{
-                        .bytes = std::move(inbound),
-                        .ecn = inbound_ecn,
+                        .bytes = std::move(received.bytes),
+                        .ecn = received.ecn,
                     },
                 .input_time = now(),
                 .socket_fd = socket_fd,
-                .source = source,
-                .source_len = source_len,
+                .source = received.source,
+                .source_len = received.source_len,
                 .has_source = true,
             },
     };
@@ -3725,16 +3436,6 @@ bool core_version_negotiation_restart_preserves_inbound_path_ids_case_for_tests(
 bool core_retry_restart_preserves_inbound_path_ids_case_for_tests(
     bool force_integrity_failure, bool force_serialization_failure,
     bool force_path_id_mismatch = false);
-
-ScopedHttp09RuntimeOpsOverride::ScopedHttp09RuntimeOpsOverride(
-    Http09RuntimeOpsOverride override_ops)
-    : previous_(runtime_ops()) {
-    apply_runtime_ops_override(override_ops);
-}
-
-ScopedHttp09RuntimeOpsOverride::~ScopedHttp09RuntimeOpsOverride() {
-    runtime_ops() = previous_;
-}
 
 bool runtime_trace_enabled_for_tests() {
     return runtime_trace_enabled();

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "src/quic/http09_runtime.h"
+#include "src/quic/io_backend_test_hooks.h"
 #include "src/quic/packet.h"
 
 namespace coquic::quic::test {
@@ -117,31 +118,8 @@ struct RuntimePathSeedForTests {
     socklen_t peer_len = 0;
 };
 
-struct Http09RuntimeOpsOverride {
-    int (*socket_fn)(int, int, int) = nullptr;
-    int (*bind_fn)(int, const sockaddr *, socklen_t) = nullptr;
-    int (*poll_fn)(pollfd *, nfds_t, int) = nullptr;
-    int (*setsockopt_fn)(int, int, int, const void *, socklen_t) = nullptr;
-    ssize_t (*sendto_fn)(int, const void *, size_t, int, const sockaddr *, socklen_t) = nullptr;
-    ssize_t (*sendmsg_fn)(int, const msghdr *, int) = nullptr;
-    ssize_t (*recvfrom_fn)(int, void *, size_t, int, sockaddr *, socklen_t *) = nullptr;
-    ssize_t (*recvmsg_fn)(int, msghdr *, int) = nullptr;
-    int (*getaddrinfo_fn)(const char *, const char *, const addrinfo *, addrinfo **) = nullptr;
-    void (*freeaddrinfo_fn)(addrinfo *) = nullptr;
-    int (*gethostname_fn)(char *, size_t) = nullptr;
-};
-
-class ScopedHttp09RuntimeOpsOverride {
-  public:
-    explicit ScopedHttp09RuntimeOpsOverride(Http09RuntimeOpsOverride override_ops);
-    ~ScopedHttp09RuntimeOpsOverride();
-
-    ScopedHttp09RuntimeOpsOverride(const ScopedHttp09RuntimeOpsOverride &) = delete;
-    ScopedHttp09RuntimeOpsOverride &operator=(const ScopedHttp09RuntimeOpsOverride &) = delete;
-
-  private:
-    Http09RuntimeOpsOverride previous_;
-};
+using Http09RuntimeOpsOverride = SocketIoBackendOpsOverride;
+using ScopedHttp09RuntimeOpsOverride = ScopedSocketIoBackendOpsOverride;
 
 bool runtime_trace_enabled_for_tests();
 std::string format_connection_id_hex_for_tests(std::span<const std::byte> connection_id);

@@ -118,9 +118,6 @@ struct RuntimePathSeedForTests {
     socklen_t peer_len = 0;
 };
 
-using Http09RuntimeOpsOverride = SocketIoBackendOpsOverride;
-using ScopedHttp09RuntimeOpsOverride = ScopedSocketIoBackendOpsOverride;
-
 bool runtime_trace_enabled_for_tests();
 std::string format_connection_id_hex_for_tests(std::span<const std::byte> connection_id);
 std::string format_connection_id_key_hex_for_tests(std::string_view connection_id_key);

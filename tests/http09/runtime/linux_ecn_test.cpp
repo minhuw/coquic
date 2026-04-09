@@ -7,7 +7,7 @@ using namespace coquic::quic::test_support;
 
 TEST(QuicHttp09RuntimeTest, ClientPrefersIpv4AddrinfoWhenHostnameIsNonNumeric) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
-    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .socket_fn = &record_socket_family_then_fail,
             .getaddrinfo_fn = &prefer_ipv4_mixed_getaddrinfo,
@@ -30,7 +30,7 @@ TEST(QuicHttp09RuntimeTest, ClientPrefersIpv4AddrinfoWhenHostnameIsNonNumeric) {
 TEST(QuicHttp09RuntimeTest, ClientConnectionUsesIpv6ResolutionAndSocketFamilyForIpv6Remote) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
     const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
-    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .socket_fn = &record_socket_family_then_fail,
             .getaddrinfo_fn = &ipv6_only_getaddrinfo,
@@ -59,7 +59,7 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionUsesIpv6ResolutionAndSocketFamilyFor
 TEST(QuicHttp09RuntimeTest, ClientFallsBackToEarlierValidAddrinfoWhenPreferredResultIsInvalid) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
     const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
-    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .socket_fn = &record_socket_family_then_fail,
             .getaddrinfo_fn = &fallback_to_earlier_valid_result_getaddrinfo,
@@ -82,7 +82,7 @@ TEST(QuicHttp09RuntimeTest, ClientFallsBackToEarlierValidAddrinfoWhenPreferredRe
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenAllResolvedAddrinfoEntriesAreInvalid) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
     const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
-    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .socket_fn = &record_socket_family_then_fail,
             .getaddrinfo_fn = &no_valid_result_getaddrinfo,
@@ -105,7 +105,7 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenAllResolvedAddrinfoEntriesAreInvalid)
 
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenAddrinfoFamilyIsUnsupported) {
     const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
-    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .getaddrinfo_fn = &unsupported_family_getaddrinfo,
             .freeaddrinfo_fn = &counting_freeaddrinfo,
@@ -125,7 +125,7 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenAddrinfoFamilyIsUnsupported) {
 
 TEST(QuicHttp09RuntimeTest, ClientUsesRealIpv6SocketSetupBeforeInitialSend) {
     const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
-    const coquic::quic::test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .sendto_fn = &fail_sendto,
             .getaddrinfo_fn = &ipv6_only_getaddrinfo,

@@ -244,12 +244,21 @@ TEST(SocketIoBackendTest, WaitPollsAllActiveRouteSocketsAndReturnsSecondRouteDat
     EXPECT_EQ(g_multi_socket_backend_test_trace.last_poll_descriptor_count, 2u);
 }
 
-TEST(SocketIoBackendTest, LinuxEcnHooksStayCoveredAfterExtraction) {
+TEST(SocketIoBackendTest, ConfiguresLinuxSocketsForReceivingEcnMetadata) {
     EXPECT_TRUE(
         coquic::quic::test::socket_io_backend_configures_linux_ecn_socket_options_for_tests());
+}
+
+TEST(SocketIoBackendTest, UsesSendmsgToApplyOutboundEcnMarkings) {
     EXPECT_TRUE(coquic::quic::test::socket_io_backend_sendmsg_uses_outbound_ecn_for_tests());
+}
+
+TEST(SocketIoBackendTest, UsesIpTosForIpv4MappedIpv6OutboundEcnMarkings) {
     EXPECT_TRUE(coquic::quic::test::
                     socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests());
+}
+
+TEST(SocketIoBackendTest, MapsRecvmsgEcnMetadataIntoEvents) {
     EXPECT_TRUE(coquic::quic::test::socket_io_backend_recvmsg_maps_ecn_for_tests());
 }
 

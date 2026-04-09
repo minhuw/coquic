@@ -43,6 +43,9 @@
 namespace coquic::quic {
 
 namespace test {
+using Http09RuntimeOpsOverride = SocketIoBackendOpsOverride;
+using ScopedHttp09RuntimeOpsOverride = ScopedSocketIoBackendOpsOverride;
+
 SocketIoBackendOpsOverride &socket_io_backend_ops_for_runtime_tests();
 void socket_io_backend_apply_ops_override_for_runtime_tests(
     const SocketIoBackendOpsOverride &override_ops);
@@ -76,11 +79,11 @@ int client_receive_timeout_ms(const Http09RuntimeConfig &config) {
     return kDefaultClientReceiveTimeoutMs;
 }
 
-test::Http09RuntimeOpsOverride &runtime_ops() {
+test::SocketIoBackendOpsOverride &runtime_ops() {
     return test::socket_io_backend_ops_for_runtime_tests();
 }
 
-void apply_runtime_ops_override(const test::Http09RuntimeOpsOverride &override_ops) {
+void apply_runtime_ops_override(const test::SocketIoBackendOpsOverride &override_ops) {
     test::socket_io_backend_apply_ops_override_for_runtime_tests(override_ops);
 }
 

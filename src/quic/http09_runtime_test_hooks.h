@@ -16,19 +16,6 @@
 
 namespace coquic::quic::test {
 
-enum class ParsedServerDatagramKind : std::uint8_t {
-    short_header,
-    supported_initial,
-    supported_long_header,
-    unsupported_version_long_header,
-};
-
-struct ParsedServerDatagramForTests {
-    ParsedServerDatagramKind kind;
-    ConnectionId destination_connection_id;
-    std::optional<ConnectionId> source_connection_id;
-};
-
 struct RuntimeWaitStepForTests {
     bool has_input = false;
     bool idle_timeout = false;
@@ -182,16 +169,11 @@ ClientConnectionLoopResultForTests
 run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_id);
 bool existing_server_session_failure_cleans_up_for_tests();
 bool existing_server_session_missing_input_fails_for_tests();
-bool supported_long_header_routes_via_initial_destination_for_tests();
 bool preferred_address_routes_to_existing_server_session_for_tests();
 bool expired_server_timer_failure_cleans_up_for_tests();
 bool expired_server_timer_success_preserves_session_for_tests();
 bool pending_server_work_failure_cleans_up_for_tests();
-bool retry_context_lookup_for_tests();
-bool invalid_retry_token_server_datagram_path_for_tests();
 bool resumed_client_warmup_failure_exits_early_for_tests();
-bool retry_trace_paths_for_tests();
-bool send_retry_for_initial_failures_for_tests();
 bool zero_rtt_request_allowance_for_tests();
 bool version_negotiation_without_source_connection_id_fails_for_tests();
 bool runtime_assigns_stable_path_ids_for_tests();
@@ -211,6 +193,8 @@ bool runtime_sendmsg_uses_outbound_ecn_for_tests();
 bool runtime_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests();
 bool runtime_recvmsg_maps_ecn_to_core_input_for_tests();
 bool runtime_registers_all_server_core_connection_ids_for_tests();
+bool runtime_server_route_handles_are_stable_per_peer_tuple_for_tests();
+bool runtime_server_send_effect_uses_route_handle_for_tests();
 bool runtime_misc_internal_coverage_for_tests();
 bool runtime_additional_internal_coverage_for_tests();
 bool runtime_low_level_socket_and_ecn_coverage_for_tests();
@@ -229,7 +213,5 @@ ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_d
     const sockaddr_storage &inbound_peer, socklen_t inbound_peer_len, std::vector<std::byte> bytes,
     QuicCoreTimePoint input_time);
 ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests case_id);
-std::optional<ParsedServerDatagramForTests>
-parse_server_datagram_for_routing_for_tests(std::span<const std::byte> bytes);
 
 } // namespace coquic::quic::test

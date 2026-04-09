@@ -53,15 +53,8 @@ TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossR
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverRetryAndZeroRttBranches) {
-    testing::internal::CaptureStderr();
-    EXPECT_TRUE(coquic::quic::test::retry_context_lookup_for_tests());
-    EXPECT_TRUE(coquic::quic::test::invalid_retry_token_server_datagram_path_for_tests());
     EXPECT_TRUE(coquic::quic::test::resumed_client_warmup_failure_exits_early_for_tests());
-    ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
-    EXPECT_TRUE(coquic::quic::test::retry_trace_paths_for_tests());
-    EXPECT_TRUE(coquic::quic::test::send_retry_for_initial_failures_for_tests());
     EXPECT_TRUE(coquic::quic::test::zero_rtt_request_allowance_for_tests());
-    static_cast<void>(testing::internal::GetCapturedStderr());
 }
 
 TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {

@@ -400,8 +400,6 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
 
     EXPECT_TRUE(coquic::quic::test::existing_server_session_failure_cleans_up_for_tests());
     EXPECT_TRUE(coquic::quic::test::existing_server_session_missing_input_fails_for_tests());
-    EXPECT_TRUE(
-        coquic::quic::test::supported_long_header_routes_via_initial_destination_for_tests());
     EXPECT_TRUE(coquic::quic::test::expired_server_timer_failure_cleans_up_for_tests());
     EXPECT_TRUE(coquic::quic::test::expired_server_timer_success_preserves_session_for_tests());
     EXPECT_TRUE(coquic::quic::test::pending_server_work_failure_cleans_up_for_tests());
@@ -494,6 +492,15 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
               1U);
     EXPECT_EQ(pending_endpoint_without_transport_progress_waits_instead_of_spinning.wait_calls, 1U);
     EXPECT_EQ(pending_endpoint_without_transport_progress_waits_instead_of_spinning.pump_calls, 2U);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeServerRouteHandlesAreStablePerPeerTuple) {
+    EXPECT_TRUE(
+        coquic::quic::test::runtime_server_route_handles_are_stable_per_peer_tuple_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeUsesRouteHandleForServerSendEffects) {
+    EXPECT_TRUE(coquic::quic::test::runtime_server_send_effect_uses_route_handle_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeLowLevelHooksExerciseSocketAndEcnFallbacks) {

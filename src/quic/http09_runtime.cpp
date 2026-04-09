@@ -1511,6 +1511,7 @@ std::optional<int> ensure_client_socket_for_family(ClientSocketSet &sockets, int
 bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
                          const sockaddr_storage *fallback_peer, socklen_t fallback_peer_len,
                          const std::unordered_map<QuicPathId, RuntimeSendRoute> &path_routes,
+                         const std::unordered_map<QuicRouteHandle, RuntimeSendRoute> &route_routes,
                          std::string_view role_name) {
     for (const auto &effect : result.effects) {
         const auto *send = std::get_if<QuicCoreSendDatagram>(&effect);
@@ -1521,7 +1522,18 @@ bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
         int socket_fd = fallback_socket_fd;
         const sockaddr_storage *peer = fallback_peer;
         socklen_t peer_len = fallback_peer_len;
-        if (send->path_id.has_value()) {
+        if (send->route_handle.has_value()) {
+            const auto route_it = route_routes.find(*send->route_handle);
+            if (route_it == route_routes.end()) {
+                std::cerr << "http09-" << role_name
+                          << " failed: missing route for route_handle=" << *send->route_handle
+                          << '\n';
+                return false;
+            }
+            socket_fd = route_it->second.socket_fd;
+            peer = &route_it->second.peer;
+            peer_len = route_it->second.peer_len;
+        } else if (send->path_id.has_value()) {
             const auto route_it = path_routes.find(*send->path_id);
             if (route_it == path_routes.end()) {
                 std::cerr << "http09-" << role_name
@@ -1532,11 +1544,19 @@ bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
             peer = &route_it->second.peer;
             peer_len = route_it->second.peer_len;
         }
+        if (socket_fd < 0 || peer == nullptr) {
+            std::cerr << "http09-" << role_name
+                      << " failed: missing fallback route for send effect\n";
+            return false;
+        }
 
         with_runtime_trace([&](std::ostream &stream) {
             stream << "http09-" << role_name << " trace: send_effect path_id="
                    << (send->path_id.has_value() ? std::to_string(*send->path_id)
                                                  : std::string{"-"})
+                   << " route_handle="
+                   << (send->route_handle.has_value() ? std::to_string(*send->route_handle)
+                                                      : std::string{"-"})
                    << " socket_fd=" << socket_fd << " peer_len=" << peer_len;
             stream << " peer=" << format_sockaddr_for_trace(*peer, peer_len);
             stream << " bytes=" << send->bytes.size() << '\n';
@@ -1620,7 +1640,10 @@ struct EndpointDriveState {
     std::optional<QuicResumptionState> last_resumption_state;
     std::unordered_map<std::string, QuicPathId> path_ids_by_peer_tuple;
     std::unordered_map<QuicPathId, RuntimeSendRoute> path_routes;
+    std::unordered_map<std::string, QuicRouteHandle> route_handles_by_peer_tuple;
+    std::unordered_map<QuicRouteHandle, RuntimeSendRoute> route_routes;
     QuicPathId next_path_id = 1;
+    QuicRouteHandle next_route_handle = 1;
 };
 
 struct ClientRuntimePolicyState {
@@ -1661,6 +1684,25 @@ QuicPathId remember_runtime_path(EndpointDriveState &state, const sockaddr_stora
     return path_id;
 }
 
+QuicRouteHandle remember_runtime_route_handle(EndpointDriveState &state,
+                                              const sockaddr_storage &peer, socklen_t peer_len,
+                                              int socket_fd) {
+    const auto peer_key = runtime_peer_tuple_key(socket_fd, peer, peer_len);
+    const auto existing = state.route_handles_by_peer_tuple.find(peer_key);
+    const auto route_handle = existing != state.route_handles_by_peer_tuple.end()
+                                  ? existing->second
+                                  : state.next_route_handle++;
+    if (existing == state.route_handles_by_peer_tuple.end()) {
+        state.route_handles_by_peer_tuple.emplace(peer_key, route_handle);
+    }
+    state.route_routes[route_handle] = RuntimeSendRoute{
+        .socket_fd = socket_fd,
+        .peer = peer,
+        .peer_len = peer_len,
+    };
+    return route_handle;
+}
+
 std::optional<QuicPathId> assign_runtime_path_for_inbound_step(EndpointDriveState &state,
                                                                RuntimeWaitStep &step) {
     if (!step.input.has_value() || !step.has_source || step.source_len <= 0) {
@@ -1673,6 +1715,8 @@ std::optional<QuicPathId> assign_runtime_path_for_inbound_step(EndpointDriveStat
 
     const auto path_id = remember_runtime_path(state, step.source, step.source_len, step.socket_fd);
     inbound->path_id = path_id;
+    inbound->route_handle =
+        remember_runtime_route_handle(state, step.source, step.source_len, step.socket_fd);
     return path_id;
 }
 
@@ -1988,7 +2032,7 @@ bool drive_endpoint_until_blocked(const EndpointDriver &endpoint, QuicCore &core
             *observed_send_effects = true;
         }
         if (!handle_core_effects(fd, current_result, peer, peer_len, state.path_routes,
-                                 role_name)) {
+                                 state.route_routes, role_name)) {
             state.terminal_failure = true;
             return false;
         }
@@ -2590,6 +2634,310 @@ bool has_pending_server_endpoint_work(const ServerSessionMap &sessions) {
     });
 }
 
+struct ServerConnectionEndpointState {
+    QuicHttp09ServerEndpoint endpoint;
+    bool has_pending_work = false;
+};
+
+using ServerConnectionEndpointMap =
+    std::unordered_map<QuicConnectionHandle, ServerConnectionEndpointState>;
+
+QuicCoreEndpointConfig make_runtime_server_endpoint_config(const Http09RuntimeConfig &config,
+                                                           TlsIdentity identity) {
+    auto core_config = make_http09_server_core_config_with_identity(config, std::move(identity));
+    return QuicCoreEndpointConfig{
+        .role = core_config.role,
+        .supported_versions = std::move(core_config.supported_versions),
+        .verify_peer = core_config.verify_peer,
+        .retry_enabled = config.retry_enabled,
+        .application_protocol = std::move(core_config.application_protocol),
+        .identity = std::move(core_config.identity),
+        .transport = std::move(core_config.transport),
+        .allowed_tls_cipher_suites = std::move(core_config.allowed_tls_cipher_suites),
+        .zero_rtt = std::move(core_config.zero_rtt),
+        .qlog = std::move(core_config.qlog),
+        .tls_keylog_path = std::move(core_config.tls_keylog_path),
+    };
+}
+
+bool result_has_send_effects(const QuicCoreResult &result) {
+    return std::any_of(result.effects.begin(), result.effects.end(), [](const auto &effect) {
+        return std::holds_alternative<QuicCoreSendDatagram>(effect);
+    });
+}
+
+QuicConnectionHandle effect_connection_handle(const QuicCoreEffect &effect) {
+    return std::visit([](const auto &value) { return value.connection; }, effect);
+}
+
+bool result_has_connection_lifecycle(const QuicCoreResult &result, QuicConnectionHandle connection,
+                                     QuicCoreConnectionLifecycle lifecycle) {
+    return std::any_of(result.effects.begin(), result.effects.end(), [&](const auto &effect) {
+        const auto *event = std::get_if<QuicCoreConnectionLifecycleEvent>(&effect);
+        return event != nullptr && event->connection == connection && event->event == lifecycle;
+    });
+}
+
+std::vector<QuicConnectionHandle> result_connection_handles(const QuicCoreResult &result) {
+    std::vector<QuicConnectionHandle> handles;
+    const auto remember = [&](QuicConnectionHandle connection) {
+        if (connection == 0 ||
+            std::find(handles.begin(), handles.end(), connection) != handles.end()) {
+            return;
+        }
+        handles.push_back(connection);
+    };
+
+    if (result.local_error.has_value() && result.local_error->connection.has_value()) {
+        remember(*result.local_error->connection);
+    }
+    for (const auto &effect : result.effects) {
+        remember(effect_connection_handle(effect));
+    }
+    return handles;
+}
+
+QuicCoreResult slice_result_for_connection(const QuicCoreResult &result,
+                                           QuicConnectionHandle connection) {
+    QuicCoreResult sliced{
+        .next_wakeup = result.next_wakeup,
+    };
+    if (result.local_error.has_value() && result.local_error->connection == connection) {
+        sliced.local_error = result.local_error;
+    }
+    for (const auto &effect : result.effects) {
+        if (effect_connection_handle(effect) == connection) {
+            sliced.effects.push_back(effect);
+        }
+    }
+    return sliced;
+}
+
+void ensure_server_connection_endpoints_for_accepts(ServerConnectionEndpointMap &endpoints,
+                                                    const QuicCoreResult &result,
+                                                    const std::filesystem::path &document_root) {
+    for (const auto &effect : result.effects) {
+        const auto *event = std::get_if<QuicCoreConnectionLifecycleEvent>(&effect);
+        if (event == nullptr || event->event != QuicCoreConnectionLifecycle::accepted ||
+            endpoints.contains(event->connection)) {
+            continue;
+        }
+
+        endpoints.emplace(event->connection,
+                          ServerConnectionEndpointState{
+                              .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                  .document_root = document_root,
+                              }),
+                          });
+    }
+}
+
+void erase_closed_server_connection_endpoints(ServerConnectionEndpointMap &endpoints,
+                                              const QuicCoreResult &result) {
+    for (const auto &effect : result.effects) {
+        const auto *event = std::get_if<QuicCoreConnectionLifecycleEvent>(&effect);
+        if (event != nullptr && event->event == QuicCoreConnectionLifecycle::closed) {
+            endpoints.erase(event->connection);
+        }
+    }
+}
+
+std::optional<QuicCoreConnectionInput> to_connection_command_input(const QuicCoreInput &input) {
+    return std::visit(
+        [](const auto &value) -> std::optional<QuicCoreConnectionInput> {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, QuicCoreSendStreamData> ||
+                          std::is_same_v<T, QuicCoreResetStream> ||
+                          std::is_same_v<T, QuicCoreStopSending> ||
+                          std::is_same_v<T, QuicCoreCloseConnection> ||
+                          std::is_same_v<T, QuicCoreRequestKeyUpdate> ||
+                          std::is_same_v<T, QuicCoreRequestConnectionMigration>) {
+                return value;
+            }
+            return std::nullopt;
+        },
+        input);
+}
+
+QuicCoreResult advance_endpoint_connection_inputs(QuicCore &core, QuicConnectionHandle connection,
+                                                  std::span<const QuicCoreInput> inputs,
+                                                  QuicCoreTimePoint step_time) {
+    QuicCoreResult combined;
+    for (const auto &input : inputs) {
+        auto command_input = to_connection_command_input(input);
+        if (!command_input.has_value()) {
+            combined.local_error = QuicCoreLocalError{
+                .connection = connection,
+                .code = QuicCoreLocalErrorCode::unsupported_operation,
+                .stream_id = std::nullopt,
+            };
+            combined.next_wakeup = core.next_wakeup();
+            break;
+        }
+
+        auto step = core.advance_endpoint(
+            QuicCoreConnectionCommand{
+                .connection = connection,
+                .input = std::move(command_input).value(),
+            },
+            step_time);
+        combined.effects.insert(combined.effects.end(),
+                                std::make_move_iterator(step.effects.begin()),
+                                std::make_move_iterator(step.effects.end()));
+        combined.next_wakeup = step.next_wakeup;
+        if (step.local_error.has_value()) {
+            combined.local_error = step.local_error;
+            break;
+        }
+        if (result_has_connection_lifecycle(step, connection,
+                                            QuicCoreConnectionLifecycle::closed)) {
+            break;
+        }
+    }
+    return combined;
+}
+
+bool process_server_endpoint_core_result(QuicCore &core, EndpointDriveState &transport_state,
+                                         ServerConnectionEndpointMap &endpoints,
+                                         const std::filesystem::path &document_root,
+                                         QuicCoreResult initial_result, int fallback_socket_fd,
+                                         const sockaddr_storage *fallback_peer,
+                                         socklen_t fallback_peer_len,
+                                         bool *observed_send_effects = nullptr) {
+    std::deque<QuicCoreResult> pending_results;
+    pending_results.push_back(std::move(initial_result));
+    if (observed_send_effects != nullptr) {
+        *observed_send_effects = false;
+    }
+
+    while (!pending_results.empty()) {
+        auto current_result = std::move(pending_results.front());
+        pending_results.pop_front();
+
+        if (current_result.local_error.has_value() &&
+            !current_result.local_error->connection.has_value()) {
+            return false;
+        }
+        if (observed_send_effects != nullptr && result_has_send_effects(current_result)) {
+            *observed_send_effects = true;
+        }
+        if (!handle_core_effects(fallback_socket_fd, current_result, fallback_peer,
+                                 fallback_peer_len, transport_state.path_routes,
+                                 transport_state.route_routes, "server")) {
+            return false;
+        }
+
+        ensure_server_connection_endpoints_for_accepts(endpoints, current_result, document_root);
+        const auto connections = result_connection_handles(current_result);
+        for (const auto connection : connections) {
+            auto endpoint_it = endpoints.find(connection);
+            if (endpoint_it == endpoints.end()) {
+                continue;
+            }
+
+            const bool connection_closed = result_has_connection_lifecycle(
+                current_result, connection, QuicCoreConnectionLifecycle::closed);
+            auto connection_result = slice_result_for_connection(current_result, connection);
+            auto update = endpoint_it->second.endpoint.on_core_result(connection_result, now());
+            endpoint_it->second.has_pending_work = update.has_pending_work;
+
+            if (connection_result.local_error.has_value()) {
+                endpoint_it->second.has_pending_work = false;
+                endpoints.erase(endpoint_it);
+                continue;
+            }
+            if (connection_closed) {
+                endpoint_it->second.has_pending_work = false;
+                continue;
+            }
+            if (update.terminal_failure) {
+                endpoint_it->second.has_pending_work = false;
+                pending_results.push_back(core.advance_endpoint(
+                    QuicCoreConnectionCommand{
+                        .connection = connection,
+                        .input = QuicCoreCloseConnection{},
+                    },
+                    now()));
+                continue;
+            }
+            if (update.core_inputs.empty()) {
+                continue;
+            }
+
+            pending_results.push_back(
+                advance_endpoint_connection_inputs(core, connection, update.core_inputs, now()));
+        }
+
+        erase_closed_server_connection_endpoints(endpoints, current_result);
+    }
+
+    transport_state.next_wakeup = core.next_wakeup();
+    return true;
+}
+
+bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transport_state,
+                                      ServerConnectionEndpointMap &endpoints,
+                                      const std::filesystem::path &document_root,
+                                      bool &made_progress) {
+    made_progress = false;
+    std::vector<QuicConnectionHandle> pending_connections;
+    for (const auto &[connection, endpoint] : endpoints) {
+        if (endpoint.has_pending_work) {
+            pending_connections.push_back(connection);
+        }
+    }
+
+    for (const auto connection : pending_connections) {
+        auto endpoint_it = endpoints.find(connection);
+        if (endpoint_it == endpoints.end()) {
+            continue;
+        }
+
+        auto update = endpoint_it->second.endpoint.poll(now());
+        endpoint_it->second.has_pending_work = update.has_pending_work;
+
+        if (update.terminal_failure) {
+            endpoint_it->second.has_pending_work = false;
+            const auto close_result = core.advance_endpoint(
+                QuicCoreConnectionCommand{
+                    .connection = connection,
+                    .input = QuicCoreCloseConnection{},
+                },
+                now());
+            bool observed_send_effects = false;
+            if (!process_server_endpoint_core_result(
+                    core, transport_state, endpoints, document_root, close_result,
+                    /*fallback_socket_fd=*/-1,
+                    /*fallback_peer=*/nullptr,
+                    /*fallback_peer_len=*/0, &observed_send_effects)) {
+                return false;
+            }
+            made_progress = made_progress | observed_send_effects;
+            continue;
+        }
+        if (update.core_inputs.empty()) {
+            continue;
+        }
+
+        bool observed_send_effects = false;
+        if (!process_server_endpoint_core_result(
+                core, transport_state, endpoints, document_root,
+                advance_endpoint_connection_inputs(core, connection, update.core_inputs, now()),
+                /*fallback_socket_fd=*/-1, /*fallback_peer=*/nullptr, /*fallback_peer_len=*/0,
+                &observed_send_effects)) {
+            return false;
+        }
+        made_progress = made_progress | observed_send_effects;
+    }
+
+    return true;
+}
+
+bool has_pending_shared_server_endpoint_work(const ServerConnectionEndpointMap &endpoints) {
+    return std::any_of(endpoints.begin(), endpoints.end(),
+                       [](const auto &entry) { return entry.second.has_pending_work; });
+}
+
 struct ServerLoopIo {
     std::function<QuicCoreTimePoint()> current_time;
     std::function<ReceiveDatagramResult(int, int, std::string_view)> receive_datagram;
@@ -2604,6 +2952,7 @@ struct ServerLoopDriver {
     std::function<bool()> pump_endpoint_work;
     std::function<bool()> has_pending_endpoint_work;
     std::function<bool(RuntimeWaitStep)> process_datagram;
+    std::function<bool()> has_failed = [] { return false; };
 };
 
 ServerLoopIo make_runtime_server_loop_io() {
@@ -2624,9 +2973,15 @@ ServerLoopIo make_runtime_server_loop_io() {
 int run_http09_server_loop(const ServerSocketSet &sockets, const ServerLoopIo &io,
                            const ServerLoopDriver &driver) {
     for (;;) {
+        if (driver.has_failed()) {
+            return 1;
+        }
         for (;;) {
             bool processed_timers = false;
             driver.process_expired_timers(io.current_time(), processed_timers);
+            if (driver.has_failed()) {
+                return 1;
+            }
             if (processed_timers) {
                 continue;
             }
@@ -2667,6 +3022,9 @@ int run_http09_server_loop(const ServerSocketSet &sockets, const ServerLoopIo &i
             }
 
             const bool pump_made_progress = driver.pump_endpoint_work();
+            if (driver.has_failed()) {
+                return 1;
+            }
             if (pump_made_progress & driver.has_pending_endpoint_work()) {
                 continue;
             }
@@ -2675,11 +3033,17 @@ int run_http09_server_loop(const ServerSocketSet &sockets, const ServerLoopIo &i
 
         bool processed_timers = false;
         driver.process_expired_timers(io.current_time(), processed_timers);
+        if (driver.has_failed()) {
+            return 1;
+        }
         if (processed_timers) {
             continue;
         }
 
         const bool pump_made_progress = driver.pump_endpoint_work();
+        if (driver.has_failed()) {
+            return 1;
+        }
         if (pump_made_progress & driver.has_pending_endpoint_work()) {
             continue;
         }
@@ -2773,170 +3137,66 @@ int run_http09_server(const Http09RuntimeConfig &config) {
         .certificate_pem = std::move(*certificate_pem),
         .private_key_pem = std::move(*private_key_pem),
     };
-
-    ServerSessionMap sessions;
-    ServerConnectionIdRouteMap connection_id_routes;
-    std::unordered_map<std::string, std::string> initial_destination_routes;
-    RetryTokenStore retry_tokens;
-    std::uint64_t next_connection_index = 1;
-
-    const EraseServerSessionFn erase_session = [&](const std::string &local_connection_id_key) {
-        erase_server_session_with_routes(sessions, connection_id_routes, initial_destination_routes,
-                                         local_connection_id_key);
-    };
-
-    auto create_session =
-        [&](const ConnectionId &initial_destination_connection_id, const sockaddr_storage &peer,
-            socklen_t peer_len, int socket_fd,
-            const std::optional<PendingRetryToken> &retry_context) -> ServerSession & {
-        auto core_config =
-            make_runtime_server_core_config(config, identity, next_connection_index++);
-        if (retry_context.has_value()) {
-            core_config.source_connection_id = retry_context->retry_source_connection_id;
-            core_config.initial_destination_connection_id =
-                retry_context->retry_source_connection_id;
-            core_config.original_destination_connection_id =
-                retry_context->original_destination_connection_id;
-            core_config.retry_source_connection_id = retry_context->retry_source_connection_id;
-            core_config.original_version = retry_context->original_version;
-            core_config.initial_version = retry_context->original_version;
-        }
-        const auto local_connection_id_key = connection_id_key(core_config.source_connection_id);
-        const auto &trace_original_destination_connection_id =
-            retry_context.has_value() ? retry_context->original_destination_connection_id
-                                      : initial_destination_connection_id;
-        if (runtime_trace_enabled()) {
-            std::cerr << "http09-server trace: create-session scid="
-                      << format_connection_id_hex(core_config.source_connection_id) << " odcid="
-                      << format_connection_id_hex(trace_original_destination_connection_id) << '\n';
-        }
-        auto session = std::make_unique<ServerSession>(ServerSession{
-            .core = QuicCore(std::move(core_config)),
-            .endpoint = QuicHttp09ServerEndpoint(
-                QuicHttp09ServerConfig{.document_root = config.document_root}),
-            .state = EndpointDriveState{},
-            .socket_fd = socket_fd,
-            .peer = peer,
-            .peer_len = peer_len,
-            .local_connection_id_key = local_connection_id_key,
-            .initial_destination_connection_id_key =
-                connection_id_key(initial_destination_connection_id),
-        });
-        auto *session_ptr = session.get();
-        refresh_server_session_connection_id_routes(*session_ptr, connection_id_routes);
-        initial_destination_routes.emplace(session_ptr->initial_destination_connection_id_key,
-                                           local_connection_id_key);
-        sessions.emplace(local_connection_id_key, std::move(session));
-        return *session_ptr;
-    };
+    QuicCore core(make_runtime_server_endpoint_config(config, identity));
+    EndpointDriveState transport_state;
+    ServerConnectionEndpointMap endpoints;
+    bool server_failed = false;
 
     const auto process_server_datagram = [&](RuntimeWaitStep step) -> bool {
-        const auto &inbound = std::get<QuicCoreInboundDatagram>(*step.input);
-
-        const auto parsed = parse_server_datagram_for_routing(inbound.bytes);
-        if (!parsed.has_value()) {
-            with_runtime_trace([&](std::ostream &stream) {
-                stream << "http09-server trace: ignored-unparseable-datagram bytes="
-                       << inbound.bytes.size() << '\n';
-            });
-            return true;
+        if (!step.input.has_value()) {
+            std::cerr << "http09-server failed: runtime step missing input\n";
+            return false;
         }
 
-        with_runtime_trace([&](std::ostream &stream) {
-            stream << "http09-server trace: route-lookup kind="
-                   << static_cast<unsigned>(parsed->kind)
-                   << " dcid=" << format_connection_id_hex(parsed->destination_connection_id)
-                   << " bytes=" << inbound.bytes.size()
-                   << " source=" << format_sockaddr_for_trace(step.source, step.source_len) << '\n';
-        });
-
-        auto session_it = find_server_session_for_datagram(sessions, connection_id_routes,
-                                                           initial_destination_routes, *parsed);
-
-        if (session_it != sessions.end()) {
-            with_runtime_trace([&](std::ostream &stream) {
-                stream << "http09-server trace: route-hit scid="
-                       << format_connection_id_key_hex(session_it->second->local_connection_id_key)
-                       << " dcid=" << format_connection_id_hex(parsed->destination_connection_id)
-                       << '\n';
-            });
-            return process_existing_server_session_datagram(
-                *session_it->second, step, connection_id_routes, *parsed, erase_session);
+        static_cast<void>(assign_runtime_path_for_inbound_step(transport_state, step));
+        auto *inbound = std::get_if<QuicCoreInboundDatagram>(&*step.input);
+        if (inbound == nullptr) {
+            std::cerr << "http09-server failed: runtime step missing inbound datagram\n";
+            return false;
         }
-
-        with_runtime_trace([&](std::ostream &stream) {
-            stream << "http09-server trace: route-miss dcid="
-                   << format_connection_id_hex(parsed->destination_connection_id)
-                   << " short_header="
-                   << static_cast<int>(parsed->kind == ParsedServerDatagram::Kind::short_header)
-                   << '\n';
-        });
-
-        if (parsed->kind == ParsedServerDatagram::Kind::unsupported_version_long_header) {
-            return send_version_negotiation_for_probe(step.socket_fd, inbound.bytes, *parsed,
-                                                      step.source, step.source_len);
-        }
-
-        if (parsed->kind != ParsedServerDatagram::Kind::supported_initial) {
-            return true;
-        }
-
-        auto retry_preparation = prepare_supported_initial_retry_handling(
-            config.retry_enabled, step.socket_fd, *parsed, step.source, step.source_len,
-            retry_tokens, next_connection_index);
-        if (retry_preparation.immediate_result.has_value()) {
-            return *retry_preparation.immediate_result;
-        }
-        auto retry_context = std::move(retry_preparation.retry_context);
-
-        const auto &trace_original_destination_connection_id =
-            retry_context.has_value() ? retry_context->original_destination_connection_id
-                                      : parsed->destination_connection_id;
-        with_runtime_trace([&](std::ostream &stream) {
-            stream << "http09-server trace: new-initial odcid="
-                   << format_connection_id_hex(trace_original_destination_connection_id)
-                   << " len=" << parsed->destination_connection_id.size() << '\n';
-        });
-
-        auto &session = create_session(parsed->destination_connection_id, step.source,
-                                       step.source_len, step.socket_fd, retry_context);
-        static_cast<void>(assign_runtime_path_for_inbound_step(session.state, step));
-        auto session_input = std::move(*step.input);
-        const auto session_result = session.core.advance(std::move(session_input), step.input_time);
-        const bool endpoint_failed = !drive_endpoint_until_blocked(
-            make_endpoint_driver(session.endpoint), session.core, session.socket_fd, &session.peer,
-            session.peer_len, session_result, session.state, "server");
-        refresh_server_session_connection_id_routes(session, connection_id_routes);
-        const bool core_failed = session.core.has_failed();
-        if (endpoint_failed | core_failed) {
-            with_runtime_trace([&](std::ostream &stream) {
-                stream << "http09-server trace: new-session-failed scid="
-                       << format_connection_id_key_hex(session.local_connection_id_key)
-                       << " odcid=" << format_connection_id_hex(parsed->destination_connection_id)
-                       << '\n';
-            });
-            erase_session(session.local_connection_id_key);
-        }
-        return true;
+        auto result = core.advance_endpoint(std::move(*inbound), step.input_time);
+        return process_server_endpoint_core_result(
+            core, transport_state, endpoints, config.document_root, std::move(result),
+            step.socket_fd, step.has_source ? &step.source : nullptr,
+            step.has_source ? step.source_len : 0);
     };
 
     return run_http09_server_loop(
         sockets, make_runtime_server_loop_io(),
         ServerLoopDriver{
-            .earliest_wakeup = [&] { return earliest_server_session_wakeup(sessions); },
+            .earliest_wakeup = [&] { return core.next_wakeup(); },
             .process_expired_timers =
                 [&](QuicCoreTimePoint current, bool &processed_any) {
-                    process_expired_server_sessions(sessions, current, connection_id_routes,
-                                                    erase_session, processed_any);
+                    processed_any = false;
+                    const auto next_wakeup = core.next_wakeup();
+                    if (!next_wakeup.has_value() || next_wakeup.value() > current) {
+                        return;
+                    }
+
+                    processed_any = true;
+                    if (!process_server_endpoint_core_result(
+                            core, transport_state, endpoints, config.document_root,
+                            core.advance_endpoint(QuicCoreTimerExpired{}, current),
+                            /*fallback_socket_fd=*/-1, /*fallback_peer=*/nullptr,
+                            /*fallback_peer_len=*/0)) {
+                        server_failed = true;
+                    }
                 },
             .pump_endpoint_work =
                 [&] {
-                    return pump_server_pending_endpoint_work(sessions, connection_id_routes,
-                                                             erase_session);
+                    bool made_progress = false;
+                    if (!pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                          config.document_root, made_progress)) {
+                        server_failed = true;
+                        return false;
+                    }
+                    return made_progress;
                 },
-            .has_pending_endpoint_work = [&] { return has_pending_server_endpoint_work(sessions); },
+            .has_pending_endpoint_work =
+                [&] { return has_pending_shared_server_endpoint_work(endpoints); },
             .process_datagram =
                 [&](RuntimeWaitStep step) { return process_server_datagram(std::move(step)); },
+            .has_failed = [&] { return server_failed; },
         });
 }
 
@@ -4010,39 +4270,6 @@ bool existing_server_session_missing_input_fails_for_tests() {
     return !processed & erased_key.empty();
 }
 
-bool supported_long_header_routes_via_initial_destination_for_tests() {
-    const ConnectionId initial_destination_connection_id = {std::byte{0x69}};
-    const auto initial_destination_connection_id_key =
-        connection_id_key(initial_destination_connection_id);
-
-    ServerSessionMap sessions;
-    sessions.emplace(
-        "existing-session",
-        std::make_unique<ServerSession>(ServerSession{
-            .core = make_failed_server_core_for_tests(),
-            .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
-                .document_root = std::filesystem::temp_directory_path(),
-            }),
-            .state = EndpointDriveState{},
-            .peer = {},
-            .peer_len = 0,
-            .local_connection_id_key = "existing-session",
-            .initial_destination_connection_id_key = initial_destination_connection_id_key,
-        }));
-
-    std::unordered_map<std::string, std::string> initial_destination_routes;
-    initial_destination_routes.emplace(initial_destination_connection_id_key, "existing-session");
-
-    const ParsedServerDatagram parsed{
-        .kind = ParsedServerDatagram::Kind::supported_long_header,
-        .destination_connection_id = initial_destination_connection_id,
-    };
-
-    ServerConnectionIdRouteMap connection_id_routes;
-    return find_server_session_for_datagram(sessions, connection_id_routes,
-                                            initial_destination_routes, parsed) != sessions.end();
-}
-
 bool preferred_address_routes_to_existing_server_session_for_tests() {
     const ConnectionId preferred_connection_id = make_runtime_connection_id(std::byte{0x5a}, 1);
     const auto preferred_connection_id_key = connection_id_key(preferred_connection_id);
@@ -4158,110 +4385,6 @@ bool pending_server_work_failure_cleans_up_for_tests() {
     return update.has_pending_work & sessions.empty();
 }
 
-bool retry_context_lookup_for_tests() {
-    const auto make_peer = [](std::uint16_t port) {
-        sockaddr_storage peer{};
-        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
-        ipv4.sin_family = AF_INET;
-        ipv4.sin_port = htons(port);
-        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        return peer;
-    };
-
-    const auto peer = make_peer(4433);
-    const auto mismatched_peer = make_peer(4434);
-    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
-    const auto token = make_runtime_retry_token(7);
-    const auto retry_source_connection_id = make_runtime_connection_id(std::byte{0x73}, 7);
-    const auto original_destination_connection_id = make_runtime_connection_id(std::byte{0x83}, 7);
-
-    const auto make_retry_tokens = [&] {
-        RetryTokenStore retry_tokens;
-        retry_tokens.emplace(
-            connection_id_key(token),
-            PendingRetryToken{
-                .original_destination_connection_id = original_destination_connection_id,
-                .retry_source_connection_id = retry_source_connection_id,
-                .original_version = kQuicVersion1,
-                .peer = peer,
-                .peer_len = peer_len,
-            });
-        return retry_tokens;
-    };
-
-    const ParsedServerDatagram matching{
-        .kind = ParsedServerDatagram::Kind::supported_initial,
-        .version = kQuicVersion1,
-        .destination_connection_id = retry_source_connection_id,
-        .source_connection_id = ConnectionId{std::byte{0x01}},
-        .token = token,
-    };
-
-    auto missing_token_store = make_retry_tokens();
-    auto missing_token = matching;
-    missing_token.token = {std::byte{0x00}};
-    const bool missing_token_rejected =
-        !lookup_retry_context(missing_token, peer, peer_len, missing_token_store).has_value() &
-        (missing_token_store.size() == 1);
-
-    auto mismatched_peer_store = make_retry_tokens();
-    const bool mismatched_peer_rejected =
-        !lookup_retry_context(matching, mismatched_peer, peer_len, mismatched_peer_store)
-             .has_value() &
-        (mismatched_peer_store.size() == 1);
-
-    auto mismatched_dcid_store = make_retry_tokens();
-    auto mismatched_dcid = matching;
-    mismatched_dcid.destination_connection_id = make_runtime_connection_id(std::byte{0x74}, 7);
-    const bool mismatched_dcid_rejected =
-        !lookup_retry_context(mismatched_dcid, peer, peer_len, mismatched_dcid_store).has_value() &
-        (mismatched_dcid_store.size() == 1);
-
-    auto mismatched_version_store = make_retry_tokens();
-    auto mismatched_version = matching;
-    mismatched_version.version = kQuicVersion2;
-    const bool mismatched_version_rejected =
-        !lookup_retry_context(mismatched_version, peer, peer_len, mismatched_version_store)
-             .has_value() &
-        (mismatched_version_store.size() == 1);
-
-    auto matched_store = make_retry_tokens();
-    const auto matched = lookup_retry_context(matching, peer, peer_len, matched_store);
-    const auto matched_value = matched.value_or(PendingRetryToken{});
-    const bool matched_and_erased =
-        matched.has_value() &
-        (matched_value.original_destination_connection_id == original_destination_connection_id) &
-        (matched_value.retry_source_connection_id == retry_source_connection_id) &
-        (matched_value.original_version == kQuicVersion1) & matched_store.empty();
-    return missing_token_rejected & mismatched_peer_rejected & mismatched_dcid_rejected &
-           mismatched_version_rejected & matched_and_erased;
-}
-
-bool invalid_retry_token_server_datagram_path_for_tests() {
-    sockaddr_storage peer{};
-    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
-    ipv4.sin_family = AF_INET;
-    ipv4.sin_port = htons(4433);
-    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
-
-    RetryTokenStore retry_tokens;
-    std::uint64_t next_connection_index = 1;
-    const ParsedServerDatagram invalid_retry{
-        .kind = ParsedServerDatagram::Kind::supported_initial,
-        .version = kQuicVersion1,
-        .destination_connection_id = make_runtime_connection_id(std::byte{0x91}, 9),
-        .source_connection_id = ConnectionId{std::byte{0x02}},
-        .token = make_runtime_retry_token(9),
-    };
-
-    const auto preparation = prepare_supported_initial_retry_handling(
-        /*retry_enabled=*/true, /*socket_fd=*/-1, invalid_retry, peer, peer_len, retry_tokens,
-        next_connection_index);
-    return preparation.immediate_result.value_or(false) & !preparation.retry_context.has_value() &
-           retry_tokens.empty() & (next_connection_index == 1);
-}
-
 bool resumed_client_warmup_failure_exits_early_for_tests() {
     const auto requests = parse_http09_requests_env("https://localhost/warmup.txt").value();
     Http09RuntimeConfig config{
@@ -4285,79 +4408,6 @@ bool resumed_client_warmup_failure_exits_early_for_tests() {
             };
         });
     return (exit_code == 7) & (calls == 1);
-}
-
-bool retry_trace_paths_for_tests() {
-    sockaddr_storage peer{};
-    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
-    ipv4.sin_family = AF_INET;
-    ipv4.sin_port = htons(4433);
-    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
-
-    RetryTokenStore retry_tokens;
-    std::uint64_t next_connection_index = 1;
-    const ParsedServerDatagram retry_initial{
-        .kind = ParsedServerDatagram::Kind::supported_initial,
-        .version = kQuicVersion1,
-        .destination_connection_id = make_runtime_connection_id(std::byte{0x83}, 1),
-        .source_connection_id = ConnectionId{std::byte{0x01}},
-        .token = {},
-    };
-    const auto retry_result = maybe_send_retry_for_supported_initial(
-        true, /*socket_fd=*/-1, retry_initial, peer, peer_len, retry_tokens, next_connection_index);
-    const bool retry_send_failed = retry_result.has_value() & !retry_result.value_or(true) &
-                                   (retry_tokens.size() == 1) & (next_connection_index == 2);
-
-    std::optional<PendingRetryToken> retry_context;
-    const ParsedServerDatagram invalid_retry{
-        .kind = ParsedServerDatagram::Kind::supported_initial,
-        .version = kQuicVersion1,
-        .destination_connection_id = make_runtime_connection_id(std::byte{0x91}, 9),
-        .source_connection_id = ConnectionId{std::byte{0x02}},
-        .token = make_runtime_retry_token(9),
-    };
-    const bool invalid_retry_ignored =
-        !populate_retry_context_if_required(true, invalid_retry, peer, peer_len, retry_tokens,
-                                            retry_context) &
-        !retry_context.has_value();
-    return retry_send_failed & invalid_retry_ignored;
-}
-
-bool send_retry_for_initial_failures_for_tests() {
-    sockaddr_storage peer{};
-    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
-    ipv4.sin_family = AF_INET;
-    ipv4.sin_port = htons(4433);
-    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
-
-    RetryTokenStore missing_source_tokens;
-    const ParsedServerDatagram missing_source_connection_id{
-        .kind = ParsedServerDatagram::Kind::supported_initial,
-        .version = kQuicVersion1,
-        .destination_connection_id = make_runtime_connection_id(std::byte{0x83}, 1),
-        .source_connection_id = std::nullopt,
-        .token = {},
-    };
-    const bool missing_source_rejected =
-        !send_retry_for_initial(/*fd=*/-1, missing_source_connection_id, peer, peer_len,
-                                missing_source_tokens, 1) &
-        missing_source_tokens.empty();
-
-    RetryTokenStore oversized_source_tokens;
-    const ParsedServerDatagram oversized_source_connection_id{
-        .kind = ParsedServerDatagram::Kind::supported_initial,
-        .version = kQuicVersion1,
-        .destination_connection_id = make_runtime_connection_id(std::byte{0x83}, 2),
-        .source_connection_id = ConnectionId(21, std::byte{0xaa}),
-        .token = {},
-    };
-    const bool oversized_source_rejected =
-        !send_retry_for_initial(/*fd=*/-1, oversized_source_connection_id, peer, peer_len,
-                                oversized_source_tokens, 2) &
-        (oversized_source_tokens.size() == 1);
-    return missing_source_rejected & oversized_source_rejected;
 }
 
 bool zero_rtt_request_allowance_for_tests() {
@@ -4434,6 +4484,63 @@ bool runtime_assigns_stable_path_ids_for_tests() {
            (first_path != 0) & (first_path == second_path) & (first_path != third_path) &
            (state.path_routes.at(first_path).socket_fd == 4) &
            (state.path_routes.at(third_path).socket_fd == 7);
+}
+
+bool runtime_server_route_handles_are_stable_per_peer_tuple_for_tests() {
+    const auto make_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+    EndpointDriveState state;
+    RuntimeWaitStep first{
+        .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x01}}},
+        .input_time = now(),
+        .socket_fd = 4,
+        .source = make_peer(4444),
+        .source_len = peer_len,
+        .has_source = true,
+    };
+    RuntimeWaitStep second{
+        .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x02}}},
+        .input_time = now(),
+        .socket_fd = 4,
+        .source = make_peer(4444),
+        .source_len = peer_len,
+        .has_source = true,
+    };
+    RuntimeWaitStep third{
+        .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x03}}},
+        .input_time = now(),
+        .socket_fd = 7,
+        .source = make_peer(4444),
+        .source_len = peer_len,
+        .has_source = true,
+    };
+
+    static_cast<void>(assign_runtime_path_for_inbound_step(state, first));
+    static_cast<void>(assign_runtime_path_for_inbound_step(state, second));
+    static_cast<void>(assign_runtime_path_for_inbound_step(state, third));
+
+    const auto first_route = std::get<QuicCoreInboundDatagram>(*first.input).route_handle;
+    const auto second_route = std::get<QuicCoreInboundDatagram>(*second.input).route_handle;
+    const auto third_route = std::get<QuicCoreInboundDatagram>(*third.input).route_handle;
+    if (!first_route.has_value() || !second_route.has_value() || !third_route.has_value()) {
+        return false;
+    }
+
+    const auto first_route_value = first_route.value_or(0);
+    const auto second_route_value = second_route.value_or(0);
+    const auto third_route_value = third_route.value_or(0);
+    return first_route_value != 0 && first_route_value == second_route_value &&
+           first_route_value != third_route_value &&
+           state.route_routes.at(first_route_value).socket_fd == 4 &&
+           state.route_routes.at(third_route_value).socket_fd == 7;
 }
 
 bool runtime_configures_linux_ecn_socket_options_for_tests() {
@@ -4586,6 +4693,57 @@ bool drive_endpoint_uses_transport_selected_path_for_tests() {
     return drove & (g_recorded_sendto_for_tests.calls == 1) &
            (g_recorded_sendto_for_tests.socket_fd == selected_socket_fd) &
            (g_recorded_sendto_for_tests.peer_port == 9443);
+}
+
+bool runtime_server_send_effect_uses_route_handle_for_tests() {
+    g_recorded_sendto_for_tests = {};
+    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        Http09RuntimeOpsOverride{
+            .sendto_fn = &record_sendto_for_tests,
+        },
+    };
+
+    const auto make_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+    const int fallback_socket_fd = 31;
+    const int path_socket_fd = 55;
+    const int route_socket_fd = 77;
+    const auto fallback_peer = make_peer(8443);
+    const auto path_peer = make_peer(9443);
+    const auto route_peer = make_peer(10443);
+
+    QuicCoreResult result;
+    result.effects.emplace_back(QuicCoreSendDatagram{
+        .path_id = 9,
+        .route_handle = 5,
+        .bytes = {std::byte{0xaa}},
+    });
+
+    EndpointDriveState state;
+    state.path_routes.emplace(9, RuntimeSendRoute{
+                                     .socket_fd = path_socket_fd,
+                                     .peer = path_peer,
+                                     .peer_len = peer_len,
+                                 });
+    state.route_routes.emplace(5, RuntimeSendRoute{
+                                      .socket_fd = route_socket_fd,
+                                      .peer = route_peer,
+                                      .peer_len = peer_len,
+                                  });
+
+    const bool handled = handle_core_effects(fallback_socket_fd, result, &fallback_peer, peer_len,
+                                             state.path_routes, state.route_routes, "server");
+    return handled & (g_recorded_sendto_for_tests.calls == 1) &
+           (g_recorded_sendto_for_tests.socket_fd == route_socket_fd) &
+           (g_recorded_sendto_for_tests.peer_port == 10443);
 }
 
 bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests() {
@@ -6448,26 +6606,6 @@ ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests c
         .wait_calls = wait_calls,
         .process_expired_calls = process_expired_calls,
         .pump_calls = pump_calls,
-    };
-}
-
-std::optional<ParsedServerDatagramForTests>
-parse_server_datagram_for_routing_for_tests(std::span<const std::byte> bytes) {
-    const auto parsed = parse_server_datagram_for_routing(bytes);
-    if (!parsed.has_value()) {
-        return std::nullopt;
-    }
-
-    return ParsedServerDatagramForTests{
-        .kind =
-            std::array{
-                ParsedServerDatagramKind::short_header,
-                ParsedServerDatagramKind::supported_initial,
-                ParsedServerDatagramKind::supported_long_header,
-                ParsedServerDatagramKind::unsupported_version_long_header,
-            }[static_cast<std::size_t>(parsed->kind)],
-        .destination_connection_id = parsed->destination_connection_id,
-        .source_connection_id = parsed->source_connection_id,
     };
 }
 

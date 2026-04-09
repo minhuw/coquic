@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -77,6 +78,7 @@ struct QuicCoreEndpointConfig {
     std::optional<TlsIdentity> identity;
     QuicTransportConfig transport;
     std::vector<CipherSuite> allowed_tls_cipher_suites;
+    QuicZeroRttConfig zero_rtt;
     std::optional<QuicQlogConfig> qlog;
     std::optional<std::filesystem::path> tls_keylog_path;
 };
@@ -289,6 +291,32 @@ class QuicCore {
         std::unique_ptr<QuicConnection> connection;
         std::unordered_map<QuicRouteHandle, QuicPathId> path_id_by_route_handle;
         std::unordered_map<QuicPathId, QuicRouteHandle> route_handle_by_path_id;
+        std::vector<std::string> active_connection_id_keys;
+        std::optional<std::string> initial_destination_connection_id_key;
+        QuicPathId next_path_id = 1;
+    };
+
+    struct ParsedEndpointDatagram {
+        enum class Kind : std::uint8_t {
+            short_header,
+            supported_initial,
+            supported_long_header,
+            unsupported_version_long_header,
+        };
+
+        Kind kind = Kind::short_header;
+        ConnectionId destination_connection_id;
+        std::optional<ConnectionId> source_connection_id;
+        std::uint32_t version = kQuicVersion1;
+        std::vector<std::byte> token;
+    };
+
+    struct PendingRetryToken {
+        ConnectionId original_destination_connection_id;
+        ConnectionId retry_source_connection_id;
+        std::uint32_t original_version = kQuicVersion1;
+        std::vector<std::byte> token;
+        std::optional<QuicRouteHandle> route_handle;
     };
 
     struct LegacyConnectionView {
@@ -311,12 +339,34 @@ class QuicCore {
     const ConnectionEntry *legacy_entry() const;
     ConnectionEntry *ensure_legacy_entry();
     void set_legacy_connection(std::unique_ptr<QuicConnection> connection);
+    static std::string connection_id_key(std::span<const std::byte> connection_id);
+    static std::optional<ParsedEndpointDatagram>
+    parse_endpoint_datagram(std::span<const std::byte> bytes);
+    static std::vector<std::byte> make_endpoint_retry_token(std::uint64_t sequence);
+    std::optional<PendingRetryToken>
+    take_retry_context(const ParsedEndpointDatagram &parsed,
+                       const std::optional<QuicRouteHandle> &route_handle);
+    static std::vector<std::byte>
+    make_version_negotiation_packet_bytes(const ParsedEndpointDatagram &parsed,
+                                          std::span<const std::uint32_t> supported_versions);
+    static std::vector<std::byte> make_retry_packet_bytes(const ParsedEndpointDatagram &parsed,
+                                                          const PendingRetryToken &pending);
+    std::optional<QuicConnectionHandle>
+    find_endpoint_connection_for_datagram(const ParsedEndpointDatagram &parsed) const;
+    void erase_endpoint_connection_routes(const ConnectionEntry &entry);
+    void refresh_server_connection_routes(ConnectionEntry &entry);
+    QuicPathId remember_inbound_path(ConnectionEntry &entry,
+                                     const QuicCoreInboundDatagram &inbound);
 
     QuicCoreEndpointConfig endpoint_config_;
     std::optional<QuicCoreConfig> legacy_config_;
     std::unordered_map<QuicConnectionHandle, ConnectionEntry> connections_;
+    std::unordered_map<std::string, QuicConnectionHandle> connection_id_routes_;
+    std::unordered_map<std::string, QuicConnectionHandle> initial_destination_routes_;
+    std::unordered_map<std::string, PendingRetryToken> retry_tokens_;
     std::optional<QuicConnectionHandle> legacy_connection_handle_;
     QuicConnectionHandle next_connection_handle_ = 1;
+    std::uint64_t next_server_connection_id_sequence_ = 1;
     LegacyConnectionView connection_;
 };
 

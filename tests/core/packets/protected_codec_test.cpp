@@ -11,8 +11,9 @@
 
 #include <gtest/gtest.h>
 
-#include "src/coquic.h"
 #include "src/quic/packet_crypto_test_hooks.h"
+#include "src/quic/core.h"
+#include "src/quic/protected_codec.h"
 #include "src/quic/protected_codec_test_hooks.h"
 
 namespace {

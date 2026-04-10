@@ -106,7 +106,7 @@ void init_runtime_logging() {
     runtime_logging_ready_flag() = spdlog::default_logger() != nullptr;
 }
 
-bool runtime_openssl_available() {
+bool runtime_has_openssl() {
     return OpenSSL_version_num() != 0;
 }
 
@@ -7566,7 +7566,7 @@ int run_http09_runtime(const Http09RuntimeConfig &config) {
     init_runtime_logging();
 
     if (config.mode == Http09RuntimeMode::health_check) {
-        return kProjectName.empty() | !runtime_openssl_available() | !runtime_logging_ready_flag();
+        return kProjectName.empty() | !runtime_has_openssl() | !runtime_logging_ready_flag();
     }
     if (config.mode == Http09RuntimeMode::client) {
         return run_http09_client(config);
@@ -7591,7 +7591,7 @@ bool runtime_logging_ready_for_tests() {
 }
 
 bool runtime_openssl_available_for_tests() {
-    return runtime_openssl_available();
+    return runtime_has_openssl();
 }
 
 } // namespace coquic::http09::test

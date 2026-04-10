@@ -3,7 +3,8 @@
 
 #include <gtest/gtest.h>
 
-#include "src/coquic.h"
+#include "src/quic/core.h"
+#include "src/quic/plaintext_codec.h"
 
 namespace {
 

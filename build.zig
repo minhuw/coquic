@@ -127,7 +127,6 @@ fn addProjectLibrary(
     lib.addIncludePath(.{ .cwd_relative = fmt_include_dir });
     var files = std.ArrayList([]const u8).init(b.allocator);
     files.appendSlice(&.{
-        "src/coquic.cpp",
         "src/quic/buffer.cpp",
         "src/quic/congestion.cpp",
         "src/quic/connection.cpp",

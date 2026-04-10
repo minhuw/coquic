@@ -104,6 +104,13 @@ enum class ServerLoopCaseForTests : std::uint8_t {
     pending_endpoint_without_transport_progress_waits_instead_of_spinning,
 };
 
+enum class ServerBackendLoopCaseForTests : std::uint8_t {
+    wait_failure,
+    shutdown,
+    missing_rx_datagram,
+    idle_timeout_then_shutdown,
+};
+
 struct ServerLoopResultForTests {
     int exit_code = 0;
     std::size_t current_time_calls = 0;
@@ -204,5 +211,7 @@ ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_d
     const sockaddr_storage &inbound_peer, socklen_t inbound_peer_len, std::vector<std::byte> bytes,
     QuicCoreTimePoint input_time);
 ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests case_id);
+ServerLoopResultForTests
+run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id);
 
 } // namespace coquic::quic::test

@@ -561,6 +561,29 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(pending_endpoint_without_transport_progress_waits_instead_of_spinning.pump_calls, 2U);
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveServerBackendLoopCases) {
+    const auto wait_failure = coquic::quic::test::run_server_backend_loop_case_for_tests(
+        coquic::quic::test::ServerBackendLoopCaseForTests::wait_failure);
+    EXPECT_EQ(wait_failure.exit_code, 1);
+    EXPECT_EQ(wait_failure.wait_calls, 1U);
+
+    const auto shutdown = coquic::quic::test::run_server_backend_loop_case_for_tests(
+        coquic::quic::test::ServerBackendLoopCaseForTests::shutdown);
+    EXPECT_EQ(shutdown.exit_code, 1);
+    EXPECT_EQ(shutdown.wait_calls, 1U);
+
+    const auto missing_rx_datagram = coquic::quic::test::run_server_backend_loop_case_for_tests(
+        coquic::quic::test::ServerBackendLoopCaseForTests::missing_rx_datagram);
+    EXPECT_EQ(missing_rx_datagram.exit_code, 1);
+    EXPECT_EQ(missing_rx_datagram.wait_calls, 1U);
+
+    const auto idle_timeout_then_shutdown =
+        coquic::quic::test::run_server_backend_loop_case_for_tests(
+            coquic::quic::test::ServerBackendLoopCaseForTests::idle_timeout_then_shutdown);
+    EXPECT_EQ(idle_timeout_then_shutdown.exit_code, 1);
+    EXPECT_EQ(idle_timeout_then_shutdown.wait_calls, 2U);
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeServerRouteHandlesAreStablePerPeerTuple) {
     EXPECT_TRUE(
         coquic::quic::test::runtime_server_route_handles_are_stable_per_peer_tuple_for_tests());

@@ -3244,43 +3244,10 @@ int run_http09_server_loop(const ServerSocketSet &sockets, const ServerLoopIo &i
     }
 }
 
-int run_http09_server(const Http09RuntimeConfig &config) {
-    auto socket_backend = std::make_unique<SocketIoBackend>(SocketIoBackendConfig{
-        .role_name = "server",
-        .idle_timeout_ms = kServerIdleTimeoutMs,
-    });
-    if (!socket_backend->open_listener(config.host, config.port)) {
-        return 1;
-    }
-    if (config.testcase == QuicHttp09Testcase::connectionmigration) {
-        if (!socket_backend->open_listener(config.host,
-                                           static_cast<std::uint16_t>(config.port + 1))) {
-            return 1;
-        }
-    }
-    ServerIoContext io_context{
-        .backend = std::move(socket_backend),
-    };
-
-    auto certificate_pem =
-        read_required_text_file(config.certificate_chain_path, "certificate chain");
-    if (!certificate_pem.has_value()) {
-        return 1;
-    }
-    auto private_key_pem = read_required_text_file(config.private_key_path, "private key");
-    if (!private_key_pem.has_value()) {
-        return 1;
-    }
-
-    const TlsIdentity identity{
-        .certificate_pem = std::move(*certificate_pem),
-        .private_key_pem = std::move(*private_key_pem),
-    };
-    QuicCore core(make_runtime_server_endpoint_config(config, identity));
-    EndpointDriveState transport_state;
-    ServerConnectionEndpointMap endpoints;
+int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &core,
+                                   EndpointDriveState &transport_state,
+                                   ServerConnectionEndpointMap &endpoints, QuicIoBackend &backend) {
     bool server_failed = false;
-    auto &backend = *io_context.backend;
 
     const auto process_server_datagram = [&](const QuicIoRxDatagram &datagram,
                                              QuicCoreTimePoint input_time) -> bool {
@@ -3349,6 +3316,45 @@ int run_http09_server(const Http09RuntimeConfig &config) {
             continue;
         }
     }
+}
+
+int run_http09_server(const Http09RuntimeConfig &config) {
+    auto socket_backend = std::make_unique<SocketIoBackend>(SocketIoBackendConfig{
+        .role_name = "server",
+        .idle_timeout_ms = kServerIdleTimeoutMs,
+    });
+    if (!socket_backend->open_listener(config.host, config.port)) {
+        return 1;
+    }
+    if (config.testcase == QuicHttp09Testcase::connectionmigration) {
+        if (!socket_backend->open_listener(config.host,
+                                           static_cast<std::uint16_t>(config.port + 1))) {
+            return 1;
+        }
+    }
+    ServerIoContext io_context{
+        .backend = std::move(socket_backend),
+    };
+
+    auto certificate_pem =
+        read_required_text_file(config.certificate_chain_path, "certificate chain");
+    if (!certificate_pem.has_value()) {
+        return 1;
+    }
+    auto private_key_pem = read_required_text_file(config.private_key_path, "private key");
+    if (!private_key_pem.has_value()) {
+        return 1;
+    }
+
+    const TlsIdentity identity{
+        .certificate_pem = std::move(*certificate_pem),
+        .private_key_pem = std::move(*private_key_pem),
+    };
+    QuicCore core(make_runtime_server_endpoint_config(config, identity));
+    EndpointDriveState transport_state;
+    ServerConnectionEndpointMap endpoints;
+    return run_http09_server_backend_loop(config, core, transport_state, endpoints,
+                                          *io_context.backend);
 }
 
 } // namespace
@@ -6865,6 +6871,53 @@ ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests c
         .wait_calls = wait_calls,
         .process_expired_calls = process_expired_calls,
         .pump_calls = pump_calls,
+    };
+}
+
+ServerLoopResultForTests
+run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id) {
+    ScopedRuntimeTempDirForTests document_root;
+    const Http09RuntimeConfig config{
+        .mode = Http09RuntimeMode::server,
+        .document_root = document_root.path(),
+    };
+
+    auto backend = std::make_unique<ScriptedIoBackendForTests>();
+    auto *backend_ptr = backend.get();
+    switch (case_id) {
+    case ServerBackendLoopCaseForTests::wait_failure:
+        break;
+    case ServerBackendLoopCaseForTests::shutdown:
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::shutdown,
+            .now = now(),
+        });
+        break;
+    case ServerBackendLoopCaseForTests::missing_rx_datagram:
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::rx_datagram,
+            .now = now(),
+        });
+        break;
+    case ServerBackendLoopCaseForTests::idle_timeout_then_shutdown:
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::idle_timeout,
+            .now = now(),
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::shutdown,
+            .now = now(),
+        });
+        break;
+    }
+
+    QuicCore core = make_failing_server_core_for_tests();
+    EndpointDriveState transport_state;
+    ServerConnectionEndpointMap endpoints;
+    return ServerLoopResultForTests{
+        .exit_code =
+            run_http09_server_backend_loop(config, core, transport_state, endpoints, *backend_ptr),
+        .wait_calls = backend_ptr->wait_requests.size(),
     };
 }
 

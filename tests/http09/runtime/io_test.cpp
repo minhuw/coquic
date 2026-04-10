@@ -457,6 +457,51 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_TRUE(rx_datagram_then_terminal_success_after_elapsed_drain_window.terminal_success);
     EXPECT_FALSE(rx_datagram_then_terminal_success_after_elapsed_drain_window.terminal_failure);
     EXPECT_EQ(rx_datagram_then_terminal_success_after_elapsed_drain_window.wait_calls, 1U);
+
+    const auto pending_work_terminal_failure =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                pending_work_terminal_failure);
+    EXPECT_EQ(pending_work_terminal_failure.exit_code, 1);
+    EXPECT_FALSE(pending_work_terminal_failure.terminal_success);
+    EXPECT_TRUE(pending_work_terminal_failure.terminal_failure);
+    EXPECT_EQ(pending_work_terminal_failure.wait_calls, 0U);
+
+    const auto pending_work_default_poll_then_wait_failure =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                pending_work_default_poll_then_wait_failure);
+    EXPECT_EQ(pending_work_default_poll_then_wait_failure.exit_code, 1);
+    EXPECT_FALSE(pending_work_default_poll_then_wait_failure.terminal_success);
+    EXPECT_FALSE(pending_work_default_poll_then_wait_failure.terminal_failure);
+    EXPECT_EQ(pending_work_default_poll_then_wait_failure.wait_calls, 1U);
+
+    const auto pending_work_no_inputs_then_idle_timeout =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                pending_work_no_inputs_then_idle_timeout);
+    EXPECT_EQ(pending_work_no_inputs_then_idle_timeout.exit_code, 1);
+    EXPECT_FALSE(pending_work_no_inputs_then_idle_timeout.terminal_success);
+    EXPECT_FALSE(pending_work_no_inputs_then_idle_timeout.terminal_failure);
+    EXPECT_EQ(pending_work_no_inputs_then_idle_timeout.wait_calls, 1U);
+
+    const auto outer_pump_terminal_failure =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                outer_pump_terminal_failure);
+    EXPECT_EQ(outer_pump_terminal_failure.exit_code, 1);
+    EXPECT_FALSE(outer_pump_terminal_failure.terminal_success);
+    EXPECT_TRUE(outer_pump_terminal_failure.terminal_failure);
+    EXPECT_EQ(outer_pump_terminal_failure.wait_calls, 1U);
+
+    const auto outer_pump_terminal_success =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                outer_pump_terminal_success);
+    EXPECT_EQ(outer_pump_terminal_success.exit_code, 0);
+    EXPECT_TRUE(outer_pump_terminal_success.terminal_success);
+    EXPECT_FALSE(outer_pump_terminal_success.terminal_failure);
+    EXPECT_EQ(outer_pump_terminal_success.wait_calls, 1U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCases) {

@@ -4509,6 +4509,64 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
                 },
         });
         break;
+    case ClientConnectionBackendLoopCaseForTests::pending_work_terminal_failure:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_failure = true,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::pending_work_default_poll_then_wait_failure:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::pending_work_no_inputs_then_idle_timeout:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::idle_timeout,
+            .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::outer_pump_terminal_failure:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_failure = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::timer_expired,
+            .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::outer_pump_terminal_success:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::timer_expired,
+            .now = event_time,
+        });
+        break;
     }
 
     const int exit_code = run_http09_client_connection_backend_loop(

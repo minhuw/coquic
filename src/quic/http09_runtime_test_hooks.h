@@ -79,6 +79,11 @@ enum class ClientConnectionBackendLoopCaseForTests : std::uint8_t {
     timer_event_then_terminal_success,
     rx_datagram_then_drive_failure,
     rx_datagram_then_terminal_success_after_elapsed_drain_window,
+    pending_work_terminal_failure,
+    pending_work_default_poll_then_wait_failure,
+    pending_work_no_inputs_then_idle_timeout,
+    outer_pump_terminal_failure,
+    outer_pump_terminal_success,
 };
 
 struct ClientConnectionLoopResultForTests {

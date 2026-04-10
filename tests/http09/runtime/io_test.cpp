@@ -189,7 +189,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksSelectEarliestWakeupAcrossEntries)
         std::nullopt,
         std::nullopt,
     };
-    EXPECT_FALSE(coquic::http09::test::earliest_runtime_wakeup_for_tests(empty_wakeups).has_value());
+    EXPECT_FALSE(
+        coquic::http09::test::earliest_runtime_wakeup_for_tests(empty_wakeups).has_value());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveEndpointUntilBlockedFailureCases) {
@@ -209,7 +210,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveEndpointUntilBlockedFailureCa
 
     const auto initial_local_error_handled =
         coquic::http09::test::drive_endpoint_until_blocked_case_for_tests(
-            coquic::http09::test::DriveEndpointUntilBlockedCaseForTests::initial_local_error_handled);
+            coquic::http09::test::DriveEndpointUntilBlockedCaseForTests::
+                initial_local_error_handled);
     EXPECT_TRUE(initial_local_error_handled.returned);
     EXPECT_FALSE(initial_local_error_handled.terminal_failure);
     EXPECT_FALSE(initial_local_error_handled.terminal_success);
@@ -299,7 +301,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionLoopCases) {
 
     const auto receive_input_then_drive_failure =
         coquic::http09::test::run_client_connection_loop_case_for_tests(
-            coquic::http09::test::ClientConnectionLoopCaseForTests::receive_input_then_drive_failure);
+            coquic::http09::test::ClientConnectionLoopCaseForTests::
+                receive_input_then_drive_failure);
     EXPECT_EQ(receive_input_then_drive_failure.exit_code, 1);
     EXPECT_TRUE(receive_input_then_drive_failure.terminal_failure);
 
@@ -323,7 +326,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionLoopCases) {
 
     const auto wait_input_then_terminal_success =
         coquic::http09::test::run_client_connection_loop_case_for_tests(
-            coquic::http09::test::ClientConnectionLoopCaseForTests::wait_input_then_terminal_success);
+            coquic::http09::test::ClientConnectionLoopCaseForTests::
+                wait_input_then_terminal_success);
     EXPECT_EQ(wait_input_then_terminal_success.exit_code, 0);
     EXPECT_TRUE(wait_input_then_terminal_success.terminal_success);
     EXPECT_FALSE(wait_input_then_terminal_success.terminal_failure);
@@ -378,21 +382,24 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionLoopCases) {
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCases) {
     const auto initial_terminal_success =
         coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
-            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::initial_terminal_success);
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
+                initial_terminal_success);
     EXPECT_EQ(initial_terminal_success.exit_code, 0);
     EXPECT_TRUE(initial_terminal_success.terminal_success);
     EXPECT_FALSE(initial_terminal_success.terminal_failure);
     EXPECT_EQ(initial_terminal_success.wait_calls, 0U);
 
-    const auto wait_failure = coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
-        coquic::http09::test::ClientConnectionBackendLoopCaseForTests::wait_failure);
+    const auto wait_failure =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::wait_failure);
     EXPECT_EQ(wait_failure.exit_code, 1);
     EXPECT_FALSE(wait_failure.terminal_success);
     EXPECT_FALSE(wait_failure.terminal_failure);
     EXPECT_EQ(wait_failure.wait_calls, 1U);
 
-    const auto idle_timeout = coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
-        coquic::http09::test::ClientConnectionBackendLoopCaseForTests::idle_timeout);
+    const auto idle_timeout =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::idle_timeout);
     EXPECT_EQ(idle_timeout.exit_code, 1);
     EXPECT_FALSE(idle_timeout.terminal_success);
     EXPECT_FALSE(idle_timeout.terminal_failure);
@@ -663,7 +670,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveServerBackendLoopCases) {
 
     const auto pending_work_failure_then_shutdown =
         coquic::http09::test::run_server_backend_loop_case_for_tests(
-            coquic::http09::test::ServerBackendLoopCaseForTests::pending_work_failure_then_shutdown);
+            coquic::http09::test::ServerBackendLoopCaseForTests::
+                pending_work_failure_then_shutdown);
     EXPECT_EQ(pending_work_failure_then_shutdown.exit_code, 1);
     EXPECT_EQ(pending_work_failure_then_shutdown.initial_endpoints, 1U);
     EXPECT_EQ(pending_work_failure_then_shutdown.wait_calls, 1U);
@@ -695,7 +703,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeUsesRouteHandleForServerSendEffects) {
 
 TEST(QuicHttp09RuntimeTest, RuntimeLowLevelHooksExerciseSocketAndEcnFallbacks) {
     testing::internal::CaptureStderr();
-    const bool covered = coquic::http09::test::runtime_low_level_socket_and_ecn_coverage_for_tests();
+    const bool covered =
+        coquic::http09::test::runtime_low_level_socket_and_ecn_coverage_for_tests();
     const auto stderr_output = testing::internal::GetCapturedStderr();
     EXPECT_TRUE(covered) << stderr_output;
 }

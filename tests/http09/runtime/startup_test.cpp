@@ -221,8 +221,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeReturnsFailureForUnknownMode) {
         .mode = invalid_runtime_mode(),
     };
 
-    EXPECT_EXIT(std::exit(coquic::http09::run_http09_runtime(runtime)), ::testing::ExitedWithCode(1),
-                "");
+    EXPECT_EXIT(std::exit(coquic::http09::run_http09_runtime(runtime)),
+                ::testing::ExitedWithCode(1), "");
 }
 
 TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTransfersFile) {

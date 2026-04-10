@@ -16,6 +16,10 @@
 
 namespace {
 
+using coquic::http09::QuicHttp09ClientConfig;
+using coquic::http09::QuicHttp09ClientEndpoint;
+using coquic::http09::QuicHttp09EndpointUpdate;
+using coquic::http09::QuicHttp09Request;
 using coquic::quic::QuicCoreEffect;
 using coquic::quic::QuicCoreLocalErrorCode;
 using coquic::quic::QuicCoreReceiveStreamData;
@@ -23,10 +27,6 @@ using coquic::quic::QuicCoreResult;
 using coquic::quic::QuicCoreSendStreamData;
 using coquic::quic::QuicCoreStateChange;
 using coquic::quic::QuicCoreStateEvent;
-using coquic::http09::QuicHttp09ClientConfig;
-using coquic::http09::QuicHttp09ClientEndpoint;
-using coquic::http09::QuicHttp09EndpointUpdate;
-using coquic::http09::QuicHttp09Request;
 
 QuicCoreResult handshake_ready_result() {
     QuicCoreResult result;

@@ -64,7 +64,8 @@ TEST(QuicHttp09RuntimeTest, DeferredReplayKeepsDistinctPathsForIdenticalPayloads
 }
 
 TEST(QuicHttp09RuntimeTest, CoreVersionNegotiationRestartPreservesInboundPathIds) {
-    EXPECT_TRUE(coquic::http09::test::core_version_negotiation_restart_preserves_inbound_path_ids_for_tests());
+    EXPECT_TRUE(coquic::http09::test::
+                    core_version_negotiation_restart_preserves_inbound_path_ids_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, CoreRetryRestartPreservesInboundPathIds) {
@@ -77,8 +78,8 @@ TEST(QuicHttp09RuntimeTest, DriveEndpointRejectsUnknownTransportSelectedPath) {
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeProcessesPolicyInputsBeforeTerminalSuccess) {
-    EXPECT_TRUE(
-        coquic::http09::test::runtime_policy_core_inputs_advance_before_terminal_success_for_tests());
+    EXPECT_TRUE(coquic::http09::test::
+                    runtime_policy_core_inputs_advance_before_terminal_success_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeRegistersAllServerCoreConnectionIdsForRouting) {

@@ -130,7 +130,8 @@ TEST(QuicHttp3ProtocolTest, RejectsDuplicateSettingsAndBadPseudoHeaderOrdering) 
         coquic::http3::Http3Field{":status", "200"},
         coquic::http3::Http3Field{"", "1"},
     };
-    const auto empty_name_result = coquic::http3::validate_http3_response_headers(empty_name_fields);
+    const auto empty_name_result =
+        coquic::http3::validate_http3_response_headers(empty_name_fields);
     ASSERT_FALSE(empty_name_result.has_value());
     EXPECT_EQ(empty_name_result.error().code, coquic::http3::Http3ErrorCode::message_error);
 }
@@ -175,18 +176,18 @@ TEST(QuicHttp3ProtocolTest, EncodesAndDecodesDataAndHeadersFrames) {
 
     EXPECT_TRUE(
         coquic::http3::http3_frame_allowed_on_control_stream(Http3Frame{Http3SettingsFrame{}}));
-    EXPECT_TRUE(
-        coquic::http3::http3_frame_allowed_on_control_stream(Http3Frame{Http3GoawayFrame{.id = 0}}));
+    EXPECT_TRUE(coquic::http3::http3_frame_allowed_on_control_stream(
+        Http3Frame{Http3GoawayFrame{.id = 0}}));
     EXPECT_FALSE(coquic::http3::http3_frame_allowed_on_control_stream(
         Http3Frame{Http3HeadersFrame{.field_section = {}}}));
 }
 
 TEST(QuicHttp3ProtocolTest, RejectsFramesThatCannotBeSerializedAsVarints) {
-    using coquic::quic::CodecErrorCode;
     using coquic::http3::Http3Frame;
     using coquic::http3::Http3GoawayFrame;
     using coquic::http3::Http3Setting;
     using coquic::http3::Http3SettingsFrame;
+    using coquic::quic::CodecErrorCode;
 
     constexpr std::uint64_t kTooLargeVarInt = (1ull << 62);
 

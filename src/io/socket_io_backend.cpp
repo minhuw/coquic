@@ -374,7 +374,7 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
             return true;
         }
 
-        std::cerr << "http09-" << role_name << " failed: sendto error: " << std::strerror(errno)
+        std::cerr << "io-" << role_name << " failed: sendto error: " << std::strerror(errno)
                   << '\n';
         return false;
     }
@@ -408,8 +408,7 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
         return true;
     }
 
-    std::cerr << "http09-" << role_name << " failed: sendmsg error: " << std::strerror(errno)
-              << '\n';
+    std::cerr << "io-" << role_name << " failed: sendmsg error: " << std::strerror(errno) << '\n';
     return false;
 }
 
@@ -453,7 +452,7 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
             };
         }
 
-        std::cerr << "http09-" << role_name << " failed: recvmsg error: " << std::strerror(errno)
+        std::cerr << "io-" << role_name << " failed: recvmsg error: " << std::strerror(errno)
                   << '\n';
         return ReceiveDatagramResult{
             .status = ReceiveDatagramStatus::error,
@@ -692,13 +691,13 @@ bool SocketIoBackend::open_listener(std::string_view host, std::uint16_t port) {
                 .family = preferred_udp_address_family(host),
             },
             bind_address)) {
-        std::cerr << "http09-" << impl_->config.role_name << " failed: invalid host address\n";
+        std::cerr << "io-" << impl_->config.role_name << " failed: invalid host address\n";
         return false;
     }
 
     const int socket_fd = open_udp_socket(bind_address.family);
     if (socket_fd < 0) {
-        std::cerr << "http09-" << impl_->config.role_name
+        std::cerr << "io-" << impl_->config.role_name
                   << " failed: unable to create UDP socket: " << std::strerror(errno) << '\n';
         return false;
     }
@@ -709,7 +708,7 @@ bool SocketIoBackend::open_listener(std::string_view host, std::uint16_t port) {
         const int bind_errno = errno;
         ::close(socket_fd);
         errno = bind_errno;
-        std::cerr << "http09-" << impl_->config.role_name
+        std::cerr << "io-" << impl_->config.role_name
                   << " failed: unable to bind UDP socket: " << std::strerror(errno) << '\n';
         return false;
     }

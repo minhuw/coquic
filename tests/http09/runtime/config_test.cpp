@@ -250,10 +250,12 @@ TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidAndEmptyPortStringsFromEnvironm
     ScopedEnvVar role("ROLE", "client");
     ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
     ScopedEnvVar invalid_port("PORT", "70000");
-    EXPECT_FALSE(coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv)).has_value());
+    EXPECT_FALSE(
+        coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv)).has_value());
 
     ScopedEnvVar empty_port("PORT", "");
-    EXPECT_FALSE(coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv)).has_value());
+    EXPECT_FALSE(
+        coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv)).has_value());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeRejectsUnknownTestcaseNamesFromEnvironmentAndCli) {
@@ -262,8 +264,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeRejectsUnknownTestcaseNamesFromEnvironmentAnd
         ScopedEnvVar role("ROLE", "client");
         ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
         ScopedEnvVar testcase("TESTCASE", "unknown-case");
-        EXPECT_FALSE(
-            coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(env_argv)).has_value());
+        EXPECT_FALSE(coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(env_argv))
+                         .has_value());
     }
 
     {
@@ -272,8 +274,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeRejectsUnknownTestcaseNamesFromEnvironmentAnd
         ScopedEnvVar testcase("TESTCASE", std::nullopt);
         const char *cli_argv[] = {"coquic",       "interop-client", "--testcase",
                                   "unknown-case", "--requests",     "https://localhost/a.txt"};
-        EXPECT_FALSE(
-            coquic::http09::parse_http09_runtime_args(6, const_cast<char **>(cli_argv)).has_value());
+        EXPECT_FALSE(coquic::http09::parse_http09_runtime_args(6, const_cast<char **>(cli_argv))
+                         .has_value());
     }
 }
 
@@ -281,8 +283,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidRoleAndUsageDispatchFailures) {
     {
         const char *role_argv[] = {"coquic"};
         ScopedEnvVar role("ROLE", "invalid");
-        EXPECT_FALSE(
-            coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(role_argv)).has_value());
+        EXPECT_FALSE(coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(role_argv))
+                         .has_value());
     }
 
     ScopedEnvVar role("ROLE", std::nullopt);
@@ -293,19 +295,22 @@ TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidRoleAndUsageDispatchFailures) {
             .has_value());
 
     const char *missing_value_argv[] = {"coquic", "interop-client", "--host"};
-    EXPECT_FALSE(coquic::http09::parse_http09_runtime_args(3, const_cast<char **>(missing_value_argv))
-                     .has_value());
+    EXPECT_FALSE(
+        coquic::http09::parse_http09_runtime_args(3, const_cast<char **>(missing_value_argv))
+            .has_value());
 
     const char *unknown_flag_argv[] = {"coquic", "interop-client", "--invalid"};
-    EXPECT_FALSE(coquic::http09::parse_http09_runtime_args(3, const_cast<char **>(unknown_flag_argv))
-                     .has_value());
+    EXPECT_FALSE(
+        coquic::http09::parse_http09_runtime_args(3, const_cast<char **>(unknown_flag_argv))
+            .has_value());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeRejectsClientStartupWithoutRequests) {
     const char *argv[] = {"coquic", "interop-client"};
     ScopedEnvVar role("ROLE", std::nullopt);
     ScopedEnvVar requests("REQUESTS", std::nullopt);
-    EXPECT_FALSE(coquic::http09::parse_http09_runtime_args(2, const_cast<char **>(argv)).has_value());
+    EXPECT_FALSE(
+        coquic::http09::parse_http09_runtime_args(2, const_cast<char **>(argv)).has_value());
 }
 
 TEST(QuicHttp09RuntimeTest, RejectsMalformedBracketedAuthority) {
@@ -640,7 +645,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesInteropServerSubcommandFlags) {
                           "/tls/cert.pem",   "--private-key",   "/tls/key.pem",
                           "--server-name",   "interop.example", "--verify-peer"};
     const auto parsed = coquic::http09::parse_http09_runtime_args(static_cast<int>(std::size(argv)),
-                                                                const_cast<char **>(argv));
+                                                                  const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     const auto &runtime = optional_ref_or_terminate(parsed);
     EXPECT_EQ(runtime.mode, coquic::http09::Http09RuntimeMode::server);
@@ -659,7 +664,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesRetryFlagFromEnvironmentAndCli) {
     ScopedEnvVar retry("RETRY", "1");
 
     const auto parsed = coquic::http09::parse_http09_runtime_args(static_cast<int>(std::size(argv)),
-                                                                const_cast<char **>(argv));
+                                                                  const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     const auto &runtime = optional_ref_or_terminate(parsed);
     EXPECT_TRUE(runtime.retry_enabled);
@@ -725,7 +730,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeCliFlagsOverrideEnvironmentAndKeepExplicitCli
     ScopedEnvVar server_name("SERVER_NAME", "env.example");
 
     const auto parsed = coquic::http09::parse_http09_runtime_args(static_cast<int>(std::size(argv)),
-                                                                const_cast<char **>(argv));
+                                                                  const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     const auto &runtime = optional_ref_or_terminate(parsed);
     EXPECT_EQ(runtime.mode, coquic::http09::Http09RuntimeMode::client);
@@ -744,7 +749,8 @@ TEST(QuicHttp09RuntimeTest, RuntimeCliFlagsOverrideEnvironmentAndKeepExplicitCli
 TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidCliPortString) {
     const char *argv[] = {"coquic",      "interop-client", "--port",
                           "forty-three", "--requests",     "https://localhost/a.txt"};
-    EXPECT_FALSE(coquic::http09::parse_http09_runtime_args(6, const_cast<char **>(argv)).has_value());
+    EXPECT_FALSE(
+        coquic::http09::parse_http09_runtime_args(6, const_cast<char **>(argv)).has_value());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialChacha20TestcaseAndConstrainsCipherSuites) {

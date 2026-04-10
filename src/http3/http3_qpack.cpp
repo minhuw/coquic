@@ -24,8 +24,7 @@ constexpr std::array<StaticTableEntry, 10> kStaticTable = {{
     {"server", "coquic"},
 }};
 
-std::optional<std::size_t>
-lookup_http3_qpack_static_entry(const coquic::http3::Http3Field &field) {
+std::optional<std::size_t> lookup_http3_qpack_static_entry(const coquic::http3::Http3Field &field) {
     for (std::size_t index = 0; index < kStaticTable.size(); ++index) {
         if (kStaticTable[index].name == field.name && kStaticTable[index].value == field.value) {
             return index;

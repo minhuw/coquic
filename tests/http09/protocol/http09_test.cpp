@@ -18,8 +18,8 @@ std::vector<std::byte> bytes_from_ascii(std::string_view text) {
 }
 
 TEST(QuicHttp09Test, ParsesRequestsEnvAsSpaceSeparatedAbsoluteUrls) {
-    const auto parsed =
-        coquic::http09::parse_http09_requests_env("https://example.test/a https://example.test/b/c");
+    const auto parsed = coquic::http09::parse_http09_requests_env(
+        "https://example.test/a https://example.test/b/c");
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(parsed.value().size(), 2u);
     EXPECT_EQ(parsed.value()[0].request_target, "/a");
@@ -216,7 +216,8 @@ TEST(QuicHttp09Test, ParsesOnlyFirstRequestLineWhenBufferHasTrailingBytes) {
 }
 
 TEST(QuicHttp09Test, ReportsTruncatedInputForPartialRequestLine) {
-    const auto parsed = coquic::http09::parse_http09_request_target(bytes_from_ascii("GET /partial"));
+    const auto parsed =
+        coquic::http09::parse_http09_request_target(bytes_from_ascii("GET /partial"));
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, coquic::quic::CodecErrorCode::truncated_input);
 }

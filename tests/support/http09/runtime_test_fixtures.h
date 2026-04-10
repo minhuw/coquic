@@ -37,6 +37,7 @@
 
 #include "src/quic/packet.h"
 #define private public
+#include "src/io/io_backend_test_hooks.h"
 #include "src/http09/http09_runtime.h"
 #include "src/quic/connection.h"
 #undef private

@@ -81,9 +81,10 @@ struct Http3ConnectionState {
 
 quic::CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame);
 quic::CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> bytes);
-quic::CodecResult<quic::VarIntDecoded> parse_http3_uni_stream_type(std::span<const std::byte> bytes);
-quic::CodecResult<std::vector<std::byte>> serialize_http3_uni_stream_prefix(
-    Http3UniStreamType type);
+quic::CodecResult<quic::VarIntDecoded>
+parse_http3_uni_stream_type(std::span<const std::byte> bytes);
+quic::CodecResult<std::vector<std::byte>>
+serialize_http3_uni_stream_prefix(Http3UniStreamType type);
 quic::CodecResult<std::vector<std::byte>>
 serialize_http3_control_stream(std::span<const Http3Setting> settings);
 

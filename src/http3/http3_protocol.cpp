@@ -15,10 +15,10 @@ using quic::BufferReader;
 using quic::BufferWriter;
 using quic::CodecErrorCode;
 using quic::CodecResult;
-using quic::VarIntDecoded;
 using quic::decode_varint;
 using quic::decode_varint_bytes;
 using quic::encode_varint;
+using quic::VarIntDecoded;
 
 namespace {
 

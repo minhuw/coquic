@@ -31,6 +31,7 @@
 #include <iterator>
 #include <iomanip>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <span>
@@ -3364,6 +3365,38 @@ int run_http09_server(const Http09RuntimeConfig &config) {
 #endif
 
 namespace test {
+
+struct QuicCoreTestAccess {
+    static bool seed_legacy_route_handle_path(QuicCore &core, QuicRouteHandle route_handle,
+                                              QuicPathId path_id) {
+        auto *entry = core.ensure_legacy_entry();
+        if (entry == nullptr) {
+            return false;
+        }
+
+        if (!entry->default_route_handle.has_value()) {
+            entry->default_route_handle = route_handle;
+        }
+
+        const auto existing_by_handle = entry->path_id_by_route_handle.find(route_handle);
+        if (existing_by_handle != entry->path_id_by_route_handle.end()) {
+            return existing_by_handle->second == path_id;
+        }
+
+        const auto existing_by_path = entry->route_handle_by_path_id.find(path_id);
+        if (existing_by_path != entry->route_handle_by_path_id.end()) {
+            return existing_by_path->second == route_handle;
+        }
+
+        if (path_id == std::numeric_limits<QuicPathId>::max()) {
+            return false;
+        }
+        entry->path_id_by_route_handle.emplace(route_handle, path_id);
+        entry->route_handle_by_path_id.emplace(path_id, route_handle);
+        entry->next_path_id = std::max(entry->next_path_id, static_cast<QuicPathId>(path_id + 1));
+        return true;
+    }
+};
 
 namespace {
 
@@ -6860,7 +6893,11 @@ ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_d
         }
         const auto seeded_route_handle =
             remember_runtime_route_handle(session.state, seed.peer, seed.peer_len, seed.socket_fd);
-        session.core.seed_legacy_route_handle_path_for_tests(seeded_route_handle, seeded_path_id);
+        if (!QuicCoreTestAccess::seed_legacy_route_handle_path(session.core, seeded_route_handle,
+                                                               seeded_path_id)) {
+            core = std::move(session.core);
+            return result;
+        }
     }
 
     RuntimeWaitStep step{

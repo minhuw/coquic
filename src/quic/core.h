@@ -262,6 +262,10 @@ struct QuicCoreResult {
 
 class QuicConnection;
 
+namespace test {
+struct QuicCoreTestAccess;
+}
+
 class QuicCore {
   public:
     explicit QuicCore(QuicCoreEndpointConfig config);
@@ -275,7 +279,6 @@ class QuicCore {
 
     QuicCoreResult advance_endpoint(QuicCoreEndpointInput input, QuicCoreTimePoint now);
     QuicCoreResult advance(QuicCoreInput input, QuicCoreTimePoint now);
-    void seed_legacy_route_handle_path_for_tests(QuicRouteHandle route_handle, QuicPathId path_id);
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     std::size_t connection_count() const;
     std::vector<ConnectionId> active_local_connection_ids() const;
@@ -336,6 +339,7 @@ class QuicCore {
     ConnectionEntry *legacy_entry();
     const ConnectionEntry *legacy_entry() const;
     ConnectionEntry *ensure_legacy_entry();
+    friend struct test::QuicCoreTestAccess;
     void set_legacy_connection(std::unique_ptr<QuicConnection> connection);
     static std::string connection_id_key(std::span<const std::byte> connection_id);
     static std::optional<ParsedEndpointDatagram>

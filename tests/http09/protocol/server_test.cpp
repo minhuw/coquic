@@ -10,10 +10,10 @@
 #include <variant>
 #include <vector>
 
-#include "src/quic/http09_server.h"
+#include "src/http09/http09_server.h"
 #include "tests/support/quic_test_utils.h"
 
-namespace coquic::quic::test {
+namespace coquic::http09::test {
 
 struct QuicHttp09ServerEndpointTestPeer {
     static std::size_t pending_request_count(const QuicHttp09ServerEndpoint &endpoint) {
@@ -43,7 +43,7 @@ struct QuicHttp09ServerEndpointTestPeer {
     }
 };
 
-} // namespace coquic::quic::test
+} // namespace coquic::http09::test
 
 namespace {
 
@@ -52,9 +52,9 @@ using coquic::quic::QuicCoreEffect;
 using coquic::quic::QuicCoreReceiveStreamData;
 using coquic::quic::QuicCoreResult;
 using coquic::quic::QuicCoreSendStreamData;
-using coquic::quic::QuicHttp09EndpointUpdate;
-using coquic::quic::QuicHttp09ServerConfig;
-using coquic::quic::QuicHttp09ServerEndpoint;
+using coquic::http09::QuicHttp09EndpointUpdate;
+using coquic::http09::QuicHttp09ServerConfig;
+using coquic::http09::QuicHttp09ServerEndpoint;
 
 template <typename T> T optional_value_or_terminate(const std::optional<T> &value) {
     if (!value.has_value()) {
@@ -363,7 +363,7 @@ TEST(QuicHttp09ServerTest, AcceptsFinOnlyChunkAfterResponseFinIsQueued) {
 TEST(QuicHttp09ServerTest, RejectsAdditionalDataAfterClosedStreamWasFullyHandled) {
     QuicHttp09ServerEndpoint endpoint(
         QuicHttp09ServerConfig{.document_root = std::filesystem::temp_directory_path()});
-    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::mark_closed_stream(endpoint, 0);
+    coquic::http09::test::QuicHttp09ServerEndpointTestPeer::mark_closed_stream(endpoint, 0);
 
     const auto update = endpoint.on_core_result(single_receive_result(0, "extra", false),
                                                 coquic::quic::test::test_time(1));
@@ -375,7 +375,7 @@ TEST(QuicHttp09ServerTest, RejectsAdditionalDataAfterClosedStreamWasFullyHandled
 TEST(QuicHttp09ServerTest, RejectsNonFinChunkAfterClosedStreamWasFullyHandled) {
     QuicHttp09ServerEndpoint endpoint(
         QuicHttp09ServerConfig{.document_root = std::filesystem::temp_directory_path()});
-    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::mark_closed_stream(endpoint, 0);
+    coquic::http09::test::QuicHttp09ServerEndpointTestPeer::mark_closed_stream(endpoint, 0);
 
     const auto update = endpoint.on_core_result(single_receive_result(0, "", false),
                                                 coquic::quic::test::test_time(1));
@@ -387,7 +387,7 @@ TEST(QuicHttp09ServerTest, RejectsNonFinChunkAfterClosedStreamWasFullyHandled) {
 TEST(QuicHttp09ServerTest, RejectsAdditionalDataWhileResponseIsStillPending) {
     QuicHttp09ServerEndpoint endpoint(
         QuicHttp09ServerConfig{.document_root = std::filesystem::temp_directory_path()});
-    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::create_pending_response(endpoint, 0);
+    coquic::http09::test::QuicHttp09ServerEndpointTestPeer::create_pending_response(endpoint, 0);
 
     const auto update = endpoint.on_core_result(single_receive_result(0, "extra", false),
                                                 coquic::quic::test::test_time(1));
@@ -399,7 +399,7 @@ TEST(QuicHttp09ServerTest, RejectsAdditionalDataWhileResponseIsStillPending) {
 TEST(QuicHttp09ServerTest, RejectsNonFinChunkWhileResponseIsStillPending) {
     QuicHttp09ServerEndpoint endpoint(
         QuicHttp09ServerConfig{.document_root = std::filesystem::temp_directory_path()});
-    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::create_pending_response(endpoint, 0);
+    coquic::http09::test::QuicHttp09ServerEndpointTestPeer::create_pending_response(endpoint, 0);
 
     const auto update = endpoint.on_core_result(single_receive_result(0, "", false),
                                                 coquic::quic::test::test_time(1));
@@ -476,7 +476,7 @@ TEST(QuicHttp09ServerTest, RejectsOverlongRequestWithoutTerminator) {
 
     EXPECT_TRUE(endpoint.has_failed());
     EXPECT_TRUE(update.terminal_failure);
-    EXPECT_EQ(coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
+    EXPECT_EQ(coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
               0u);
 }
 
@@ -502,7 +502,7 @@ TEST(QuicHttp09ServerTest, ErasesPendingRequestStateAfterCompletedRequest) {
         first, server, coquic::quic::test::test_time(1));
     drive_server_endpoint_on_result(endpoint, server, first_on_server,
                                     coquic::quic::test::test_time(2));
-    ASSERT_EQ(coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
+    ASSERT_EQ(coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
               1u);
 
     const auto second = client.advance(
@@ -518,7 +518,7 @@ TEST(QuicHttp09ServerTest, ErasesPendingRequestStateAfterCompletedRequest) {
                                     coquic::quic::test::test_time(4));
 
     EXPECT_FALSE(endpoint.has_failed());
-    EXPECT_EQ(coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
+    EXPECT_EQ(coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
               0u);
 }
 
@@ -544,7 +544,7 @@ TEST(QuicHttp09ServerTest, ErasesPendingRequestStateWhenStreamFails) {
         first, server, coquic::quic::test::test_time(1));
     drive_server_endpoint_on_result(endpoint, server, first_on_server,
                                     coquic::quic::test::test_time(2));
-    ASSERT_EQ(coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
+    ASSERT_EQ(coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
               1u);
 
     const auto second = client.advance(
@@ -560,7 +560,7 @@ TEST(QuicHttp09ServerTest, ErasesPendingRequestStateWhenStreamFails) {
                                     coquic::quic::test::test_time(4));
 
     EXPECT_TRUE(endpoint.has_failed());
-    EXPECT_EQ(coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
+    EXPECT_EQ(coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
               0u);
 }
 
@@ -708,7 +708,7 @@ TEST(QuicHttp09ServerTest, KeepsPendingRequestOpenAcrossEmptyNonFinChunks) {
 
     EXPECT_FALSE(update.terminal_failure);
     EXPECT_FALSE(endpoint.has_failed());
-    EXPECT_EQ(coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
+    EXPECT_EQ(coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
               1u);
 }
 
@@ -876,7 +876,7 @@ TEST(QuicHttp09ServerTest, PollProcessesAtMostOnePendingResponsePerCall) {
     const auto initial = endpoint.on_core_result(result, coquic::quic::test::test_time(1));
     EXPECT_FALSE(initial.terminal_failure);
     EXPECT_EQ(
-        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 2u);
+        coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 2u);
 
     const auto update = endpoint.poll(coquic::quic::test::test_time(2));
     const auto sends = send_stream_inputs_from(update);
@@ -884,7 +884,7 @@ TEST(QuicHttp09ServerTest, PollProcessesAtMostOnePendingResponsePerCall) {
     EXPECT_FALSE(sends[0].fin);
     EXPECT_TRUE(update.has_pending_work);
     EXPECT_EQ(
-        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 2u);
+        coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 2u);
 }
 
 TEST(QuicHttp09ServerTest, RejectsMoreRequestDataWhileResponseRemainsPending) {
@@ -900,7 +900,7 @@ TEST(QuicHttp09ServerTest, RejectsMoreRequestDataWhileResponseRemainsPending) {
                                                coquic::quic::test::test_time(1));
     EXPECT_FALSE(first.terminal_failure);
     EXPECT_EQ(
-        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
+        coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
 
     const auto second = endpoint.on_core_result(single_receive_result(0, "late-data", false),
                                                 coquic::quic::test::test_time(2));
@@ -922,7 +922,7 @@ TEST(QuicHttp09ServerTest, AcceptsFinOnlyChunkAfterResponseStartsStreaming) {
         single_receive_result(0, "GET /large.bin\r\n", false), coquic::quic::test::test_time(1));
     EXPECT_FALSE(first.terminal_failure);
     EXPECT_EQ(
-        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
+        coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
 
     const auto second = endpoint.on_core_result(single_receive_result(0, "", true),
                                                 coquic::quic::test::test_time(2));
@@ -930,7 +930,7 @@ TEST(QuicHttp09ServerTest, AcceptsFinOnlyChunkAfterResponseStartsStreaming) {
     EXPECT_FALSE(second.terminal_success);
     EXPECT_FALSE(endpoint.has_failed());
     EXPECT_EQ(
-        coquic::quic::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
+        coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint), 1u);
 }
 
 TEST(QuicHttp09ServerTest, PollQueuesStreamLocalErrorForBadPendingResponse) {
@@ -939,7 +939,7 @@ TEST(QuicHttp09ServerTest, PollQueuesStreamLocalErrorForBadPendingResponse) {
 
     QuicHttp09ServerEndpoint endpoint(
         QuicHttp09ServerConfig{.document_root = document_root.path()});
-    coquic::quic::test::QuicHttp09ServerEndpointTestPeer::inject_bad_pending_response(
+    coquic::http09::test::QuicHttp09ServerEndpointTestPeer::inject_bad_pending_response(
         endpoint, 0, document_root.path() / "hello.txt");
 
     const auto update = endpoint.poll(coquic::quic::test::test_time(1));

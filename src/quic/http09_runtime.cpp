@@ -43,6 +43,19 @@
 
 namespace coquic::quic {
 
+using http09::http09_client_transport_for_testcase;
+using http09::http09_server_transport_for_testcase;
+using http09::http09_tls_cipher_suites_for_testcase;
+using http09::http09_zero_rtt_application_context;
+using http09::parse_http09_requests_env;
+using http09::QuicHttp09ClientConfig;
+using http09::QuicHttp09ClientEndpoint;
+using http09::QuicHttp09EndpointUpdate;
+using http09::QuicHttp09Request;
+using http09::QuicHttp09ServerConfig;
+using http09::QuicHttp09ServerEndpoint;
+using http09::QuicHttp09Testcase;
+
 using io::QuicIoBackend;
 using io::QuicIoEvent;
 using io::QuicIoRemote;

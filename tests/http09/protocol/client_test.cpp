@@ -10,7 +10,7 @@
 #include <vector>
 
 #define private public
-#include "src/quic/http09_client.h"
+#include "src/http09/http09_client.h"
 #undef private
 #include "tests/support/quic_test_utils.h"
 
@@ -23,10 +23,10 @@ using coquic::quic::QuicCoreResult;
 using coquic::quic::QuicCoreSendStreamData;
 using coquic::quic::QuicCoreStateChange;
 using coquic::quic::QuicCoreStateEvent;
-using coquic::quic::QuicHttp09ClientConfig;
-using coquic::quic::QuicHttp09ClientEndpoint;
-using coquic::quic::QuicHttp09EndpointUpdate;
-using coquic::quic::QuicHttp09Request;
+using coquic::http09::QuicHttp09ClientConfig;
+using coquic::http09::QuicHttp09ClientEndpoint;
+using coquic::http09::QuicHttp09EndpointUpdate;
+using coquic::http09::QuicHttp09Request;
 
 QuicCoreResult handshake_ready_result() {
     QuicCoreResult result;

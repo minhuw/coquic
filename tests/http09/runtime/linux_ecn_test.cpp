@@ -43,7 +43,7 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionUsesIpv6ResolutionAndSocketFamilyFor
         .host = "",
         .server_name = "",
     };
-    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+    const std::vector<coquic::http09::QuicHttp09Request> requests = {
         {.url = "https://[::1]:9443/a.txt",
          .authority = "[::1]:9443",
          .request_target = "/a.txt",
@@ -138,7 +138,7 @@ TEST(QuicHttp09RuntimeTest, ClientUsesRealIpv6SocketSetupBeforeInitialSend) {
         .host = "",
         .server_name = "",
     };
-    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+    const std::vector<coquic::http09::QuicHttp09Request> requests = {
         {.url = "https://[::1]:9443/a.txt",
          .authority = "[::1]:9443",
          .request_target = "/a.txt",

@@ -24,7 +24,7 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerBindsPreferredSocketAndPoll
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::connectionmigration,
+        .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -49,7 +49,7 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigIncludesPreferredAddr
             .mode = coquic::quic::Http09RuntimeMode::server,
             .host = "127.0.0.1",
             .port = 443,
-            .testcase = coquic::quic::QuicHttp09Testcase::connectionmigration,
+            .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
         });
 
     ASSERT_TRUE(core.transport.preferred_address.has_value());
@@ -75,7 +75,7 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigUsesConcreteAddressFo
             .mode = coquic::quic::Http09RuntimeMode::server,
             .host = "::",
             .port = 443,
-            .testcase = coquic::quic::QuicHttp09Testcase::connectionmigration,
+            .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
         });
 
     ASSERT_TRUE(core.transport.preferred_address.has_value());
@@ -180,7 +180,7 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesLiveLikeMigrationRetransm
             .mode = coquic::quic::Http09RuntimeMode::server,
             .host = "127.0.0.1",
             .port = 443,
-            .testcase = coquic::quic::QuicHttp09Testcase::rebind_addr,
+            .testcase = coquic::http09::QuicHttp09Testcase::rebind_addr,
         });
     core_config.source_connection_id = make_runtime_connection_id(std::byte{0x53}, 1);
 
@@ -380,7 +380,7 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindToLatestIpv6P
             .mode = coquic::quic::Http09RuntimeMode::server,
             .host = "::1",
             .port = 443,
-            .testcase = coquic::quic::QuicHttp09Testcase::rebind_port,
+            .testcase = coquic::http09::QuicHttp09Testcase::rebind_port,
         });
     core_config.source_connection_id = make_runtime_connection_id(std::byte{0x53}, 1);
 
@@ -614,7 +614,7 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindToLatestV4Map
             .mode = coquic::quic::Http09RuntimeMode::server,
             .host = "::",
             .port = 443,
-            .testcase = coquic::quic::QuicHttp09Testcase::rebind_port,
+            .testcase = coquic::http09::QuicHttp09Testcase::rebind_port,
         });
     core_config.source_connection_id = make_runtime_connection_id(std::byte{0x53}, 1);
 
@@ -863,7 +863,7 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindAddrToLatestV
             .mode = coquic::quic::Http09RuntimeMode::server,
             .host = "::",
             .port = 443,
-            .testcase = coquic::quic::QuicHttp09Testcase::rebind_addr,
+            .testcase = coquic::http09::QuicHttp09Testcase::rebind_addr,
         });
     core_config.source_connection_id = make_runtime_connection_id(std::byte{0x53}, 1);
 

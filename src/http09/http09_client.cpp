@@ -1,11 +1,21 @@
-#include "src/quic/http09_client.h"
+#include "src/http09/http09_client.h"
 
 #include <cstddef>
 #include <fstream>
 #include <system_error>
 #include <utility>
 
-namespace coquic::quic {
+namespace coquic::http09 {
+
+using quic::QuicCoreLocalError;
+using quic::QuicCoreLocalErrorCode;
+using quic::QuicCoreReceiveStreamData;
+using quic::QuicCoreRequestKeyUpdate;
+using quic::QuicCoreResult;
+using quic::QuicCoreSendStreamData;
+using quic::QuicCoreStateChange;
+using quic::QuicCoreStateEvent;
+using quic::QuicCoreTimePoint;
 
 QuicHttp09ClientEndpoint::QuicHttp09ClientEndpoint(QuicHttp09ClientConfig config)
     : config_(std::move(config)) {
@@ -255,4 +265,4 @@ void QuicHttp09ClientEndpoint::clear_state() {
     pending_core_inputs_.clear();
 }
 
-} // namespace coquic::quic
+} // namespace coquic::http09

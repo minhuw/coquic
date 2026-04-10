@@ -1,10 +1,15 @@
-#include "src/quic/http09.h"
+#include "src/http09/http09.h"
 
 #include <algorithm>
 #include <string_view>
 #include <utility>
 
-namespace coquic::quic {
+namespace coquic::http09 {
+
+using quic::CipherSuite;
+using quic::CodecErrorCode;
+using quic::CodecResult;
+using quic::QuicTransportConfig;
 
 namespace {
 
@@ -250,4 +255,4 @@ std::vector<CipherSuite> http09_tls_cipher_suites_for_testcase(QuicHttp09Testcas
     return {};
 }
 
-} // namespace coquic::quic
+} // namespace coquic::http09

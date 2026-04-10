@@ -15,7 +15,7 @@ TEST(QuicHttp09RuntimeTest, ServerDoesNotExitAfterMalformedTraffic) {
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -237,7 +237,7 @@ TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTrans
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -246,7 +246,7 @@ TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTrans
         .mode = coquic::quic::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/hello.txt",
     };
@@ -327,7 +327,7 @@ TEST(QuicHttp09RuntimeTest, ServerIgnoresUnsupportedVersionProbeBelowMinimumInit
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -365,7 +365,7 @@ TEST(QuicHttp09RuntimeTest, ServerIgnoresSupportedLongHeaderWithoutSession) {
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -410,7 +410,7 @@ TEST(QuicHttp09RuntimeTest, ServerFailsWhenVersionNegotiationSendFails) {
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -455,7 +455,7 @@ TEST(QuicHttp09RuntimeTest, TraceEnabledServerDropsMalformedSupportedInitialAndS
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -464,7 +464,7 @@ TEST(QuicHttp09RuntimeTest, TraceEnabledServerDropsMalformedSupportedInitialAndS
         .mode = coquic::quic::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/hello.txt",
     };

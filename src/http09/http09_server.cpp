@@ -1,4 +1,4 @@
-#include "src/quic/http09_server.h"
+#include "src/http09/http09_server.h"
 
 #include <algorithm>
 #include <array>
@@ -11,7 +11,20 @@
 
 #include "src/quic/streams.h"
 
-namespace coquic::quic {
+namespace coquic::http09 {
+
+using quic::classify_stream_id;
+using quic::EndpointRole;
+using quic::QuicCoreInput;
+using quic::QuicCoreReceiveStreamData;
+using quic::QuicCoreResetStream;
+using quic::QuicCoreResult;
+using quic::QuicCoreSendStreamData;
+using quic::QuicCoreStopSending;
+using quic::QuicCoreTimePoint;
+using quic::StreamDirection;
+using quic::StreamInitiator;
+
 namespace {
 
 constexpr std::size_t kResponseChunkSize = static_cast<std::size_t>(16) * 1024U;
@@ -252,4 +265,4 @@ void QuicHttp09ServerEndpoint::clear_state() {
     pending_core_inputs_.clear();
 }
 
-} // namespace coquic::quic
+} // namespace coquic::http09

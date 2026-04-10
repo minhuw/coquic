@@ -886,7 +886,7 @@ inline RuntimeHandshakeObservation run_retry_enabled_runtime_handshake_observati
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .retry_enabled = true,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -912,7 +912,7 @@ inline RuntimeHandshakeObservation run_retry_enabled_runtime_handshake_observati
         .mode = coquic::quic::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .requests_env = "https://localhost/hello.txt",
     };
     coquic::quic::QuicCore client(coquic::quic::make_http09_client_core_config(client_runtime));
@@ -1155,14 +1155,14 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
     InMemoryHttp09TransferResult observed;
 
     const auto requests =
-        coquic::quic::parse_http09_requests_env(transfer_config.client_config.requests_env);
+        coquic::http09::parse_http09_requests_env(transfer_config.client_config.requests_env);
     if (!requests.has_value()) {
         observed.client_failed = true;
         return observed;
     }
 
     struct ClientSession {
-        coquic::quic::QuicHttp09ClientEndpoint endpoint;
+        coquic::http09::QuicHttp09ClientEndpoint endpoint;
         coquic::quic::QuicCore core;
         std::optional<coquic::quic::QuicCoreTimePoint> next_wakeup;
         bool terminal_success = false;
@@ -1170,14 +1170,14 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
     };
 
     struct ServerSession {
-        coquic::quic::QuicHttp09ServerEndpoint endpoint;
+        coquic::http09::QuicHttp09ServerEndpoint endpoint;
         coquic::quic::QuicCore core;
         std::optional<coquic::quic::QuicCoreTimePoint> next_wakeup;
         bool terminal_failure = false;
     };
 
     ClientSession client{
-        .endpoint = coquic::quic::QuicHttp09ClientEndpoint(coquic::quic::QuicHttp09ClientConfig{
+        .endpoint = coquic::http09::QuicHttp09ClientEndpoint(coquic::http09::QuicHttp09ClientConfig{
             .requests = requests.value(),
             .download_root = transfer_config.client_config.download_root,
         }),
@@ -1188,7 +1188,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
         .terminal_failure = false,
     };
     ServerSession server{
-        .endpoint = coquic::quic::QuicHttp09ServerEndpoint(coquic::quic::QuicHttp09ServerConfig{
+        .endpoint = coquic::http09::QuicHttp09ServerEndpoint(coquic::http09::QuicHttp09ServerConfig{
             .document_root = transfer_config.server_config.document_root}),
         .core = coquic::quic::QuicCore(
             coquic::quic::make_http09_server_core_config(transfer_config.server_config)),
@@ -1427,7 +1427,7 @@ run_observing_http09_server(const coquic::quic::Http09RuntimeConfig &config) {
     }
 
     struct Session {
-        coquic::quic::QuicHttp09ServerEndpoint endpoint;
+        coquic::http09::QuicHttp09ServerEndpoint endpoint;
         coquic::quic::QuicCore core;
         std::optional<coquic::quic::QuicCoreTimePoint> next_wakeup;
         bool endpoint_has_pending_work = false;
@@ -1580,8 +1580,8 @@ run_observing_http09_server(const coquic::quic::Http09RuntimeConfig &config) {
         auto core_config = make_session_core_config(next_connection_index++);
         const auto local_connection_id_key = connection_id_key(core_config.source_connection_id);
         auto session = std::make_unique<Session>(Session{
-            .endpoint = coquic::quic::QuicHttp09ServerEndpoint(
-                coquic::quic::QuicHttp09ServerConfig{.document_root = config.document_root}),
+            .endpoint = coquic::http09::QuicHttp09ServerEndpoint(
+                coquic::http09::QuicHttp09ServerConfig{.document_root = config.document_root}),
             .core = coquic::quic::QuicCore(std::move(core_config)),
             .next_wakeup = std::nullopt,
             .peer = peer,

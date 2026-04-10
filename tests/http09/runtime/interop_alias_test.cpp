@@ -12,7 +12,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialRunnerAliasesViaCliFlags) {
         coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(multiconnect_argv));
     ASSERT_TRUE(multiconnect.has_value());
     const auto multiconnect_runtime = multiconnect.value_or(coquic::quic::Http09RuntimeConfig{});
-    EXPECT_EQ(multiconnect_runtime.testcase, coquic::quic::QuicHttp09Testcase::multiconnect);
+    EXPECT_EQ(multiconnect_runtime.testcase, coquic::http09::QuicHttp09Testcase::multiconnect);
 
     const char *chacha20_argv[] = {"coquic",   "interop-client", "--testcase",
                                    "chacha20", "--requests",     "https://localhost/a.txt"};
@@ -20,7 +20,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialRunnerAliasesViaCliFlags) {
         coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(chacha20_argv));
     ASSERT_TRUE(chacha20.has_value());
     const auto chacha20_runtime = chacha20.value_or(coquic::quic::Http09RuntimeConfig{});
-    EXPECT_EQ(chacha20_runtime.testcase, coquic::quic::QuicHttp09Testcase::chacha20);
+    EXPECT_EQ(chacha20_runtime.testcase, coquic::http09::QuicHttp09Testcase::chacha20);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialMulticonnectTestcase) {
@@ -41,7 +41,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialV2Testcase) {
 
     const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::quic::QuicHttp09Testcase::v2);
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::http09::QuicHttp09Testcase::v2);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialEcnTestcase) {
@@ -52,7 +52,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialEcnTestcase) {
 
     const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::quic::QuicHttp09Testcase::ecn);
+    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::http09::QuicHttp09Testcase::ecn);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeTreatsAmplificationLimitEnvironmentAliasAsTransfer) {
@@ -64,7 +64,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeTreatsAmplificationLimitEnvironmentAliasAsTra
     const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::quic::QuicHttp09Testcase::transfer);
+              coquic::http09::QuicHttp09Testcase::transfer);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeTreatsAmplificationLimitCliAliasAsTransfer) {
@@ -75,7 +75,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeTreatsAmplificationLimitCliAliasAsTransfer) {
     const auto parsed = coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::quic::QuicHttp09Testcase::transfer);
+              coquic::http09::QuicHttp09Testcase::transfer);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases) {
@@ -88,7 +88,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases)
         const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-                  coquic::quic::QuicHttp09Testcase::resumption);
+                  coquic::http09::QuicHttp09Testcase::resumption);
     }
 
     {
@@ -100,7 +100,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases)
         const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-                  coquic::quic::QuicHttp09Testcase::zerortt);
+                  coquic::http09::QuicHttp09Testcase::zerortt);
     }
 }
 
@@ -113,7 +113,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialKeyUpdateTestcase) {
     const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::quic::QuicHttp09Testcase::keyupdate);
+              coquic::http09::QuicHttp09Testcase::keyupdate);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsKeyUpdateCliFlag) {
@@ -123,7 +123,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsKeyUpdateCliFlag) {
     const auto parsed = coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::quic::QuicHttp09Testcase::keyupdate);
+              coquic::http09::QuicHttp09Testcase::keyupdate);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialRebindPortTestcase) {
@@ -135,7 +135,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialRebindPortTestcase) {
     const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::quic::QuicHttp09Testcase::rebind_port);
+              coquic::http09::QuicHttp09Testcase::rebind_port);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsRebindAddrCliFlag) {
@@ -145,7 +145,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsRebindAddrCliFlag) {
     const auto parsed = coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::quic::QuicHttp09Testcase::rebind_addr);
+              coquic::http09::QuicHttp09Testcase::rebind_addr);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialConnectionMigrationTestcase) {
@@ -157,7 +157,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialConnectionMigrationTestcase) {
     const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::quic::QuicHttp09Testcase::connectionmigration);
+              coquic::http09::QuicHttp09Testcase::connectionmigration);
 }
 
 } // namespace

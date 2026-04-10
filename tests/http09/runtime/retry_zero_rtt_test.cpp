@@ -65,7 +65,7 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -86,7 +86,7 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {
         .mode = coquic::quic::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .requests_env = "https://localhost/hello.txt",
     };
     coquic::quic::QuicCore client(coquic::quic::make_http09_client_core_config(client_runtime));
@@ -169,7 +169,7 @@ TEST(QuicHttp09RuntimeTest, V2CaseStartsInQuicV1AndNegotiatesQuicV2LongHeaders) 
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::v2,
+        .testcase = coquic::http09::QuicHttp09Testcase::v2,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -190,7 +190,7 @@ TEST(QuicHttp09RuntimeTest, V2CaseStartsInQuicV1AndNegotiatesQuicV2LongHeaders) 
         .mode = coquic::quic::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::v2,
+        .testcase = coquic::http09::QuicHttp09Testcase::v2,
         .requests_env = "https://localhost/hello.txt",
     };
     coquic::quic::QuicCore client(coquic::quic::make_http09_client_core_config(client_runtime));

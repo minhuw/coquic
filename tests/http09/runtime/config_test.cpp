@@ -17,7 +17,7 @@ TEST(QuicHttp09RuntimeTest, ClientDerivesPeerAddressAndServerNameFromRequests) {
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -26,7 +26,7 @@ TEST(QuicHttp09RuntimeTest, ClientDerivesPeerAddressAndServerNameFromRequests) {
         .mode = coquic::quic::Http09RuntimeMode::client,
         .host = "",
         .port = 443,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .server_name = "",
         .requests_env = "https://localhost:" + std::to_string(port) + "/hello.txt",
@@ -46,7 +46,7 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionRejectsInvalidDerivedRequestAuthorit
         .host = "",
         .server_name = "",
     };
-    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+    const std::vector<coquic::http09::QuicHttp09Request> requests = {
         {.url = "https://[::1/a.txt",
          .authority = "[::1",
          .request_target = "/a.txt",
@@ -366,7 +366,7 @@ TEST(QuicHttp09RuntimeTest, DerivesHostPortAndServerNameFromRequestWhenUnset) {
         .port = 443,
         .server_name = "",
     };
-    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+    const std::vector<coquic::http09::QuicHttp09Request> requests = {
         {.url = "https://127.0.0.1:8443/a.txt",
          .authority = "127.0.0.1:8443",
          .request_target = "/a.txt",
@@ -387,7 +387,7 @@ TEST(QuicHttp09RuntimeTest, DerivesOnlyServerNameWhenHostAlreadySpecified) {
         .port = 9443,
         .server_name = "",
     };
-    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+    const std::vector<coquic::http09::QuicHttp09Request> requests = {
         {.url = "https://localhost/a.txt",
          .authority = "localhost",
          .request_target = "/a.txt",
@@ -408,7 +408,7 @@ TEST(QuicHttp09RuntimeTest, DerivesOnlyHostWhenServerNameAlreadySpecified) {
         .port = 9443,
         .server_name = "example.test",
     };
-    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+    const std::vector<coquic::http09::QuicHttp09Request> requests = {
         {.url = "https://localhost/a.txt",
          .authority = "localhost",
          .request_target = "/a.txt",
@@ -453,7 +453,7 @@ TEST(QuicHttp09RuntimeTest, DerivationFailsForInvalidRequestAuthority) {
         .host = "",
         .server_name = "",
     };
-    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+    const std::vector<coquic::http09::QuicHttp09Request> requests = {
         {.url = "https://[::1/a.txt",
          .authority = "[::1",
          .request_target = "/a.txt",
@@ -465,22 +465,22 @@ TEST(QuicHttp09RuntimeTest, DerivationFailsForInvalidRequestAuthority) {
 TEST(QuicHttp09RuntimeTest, MigrationCasesUseTransferTransportProfile) {
     const auto transfer = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .requests_env = "https://localhost/hello.txt",
     };
     const auto rebind_port = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::rebind_port,
+        .testcase = coquic::http09::QuicHttp09Testcase::rebind_port,
         .requests_env = "https://localhost/hello.txt",
     };
     const auto rebind_addr = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::rebind_addr,
+        .testcase = coquic::http09::QuicHttp09Testcase::rebind_addr,
         .requests_env = "https://localhost/hello.txt",
     };
     const auto migration = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::connectionmigration,
+        .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
         .requests_env = "https://localhost/hello.txt",
     };
 
@@ -508,12 +508,12 @@ TEST(QuicHttp09RuntimeTest, MigrationCasesUseTransferTransportProfile) {
 TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfile) {
     const auto keyupdate = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::keyupdate,
+        .testcase = coquic::http09::QuicHttp09Testcase::keyupdate,
         .requests_env = "https://localhost/hello.txt",
     };
     const auto transfer = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .requests_env = "https://localhost/hello.txt",
     };
 
@@ -545,17 +545,17 @@ TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfile) {
 TEST(QuicHttp09RuntimeTest, KeyUpdateRuntimeEnablesClientKeyUpdatePolicy) {
     const auto keyupdate = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::keyupdate,
+        .testcase = coquic::http09::QuicHttp09Testcase::keyupdate,
         .download_root = std::filesystem::path("/downloads"),
         .requests_env = "https://localhost/hello.txt",
     };
     const auto transfer = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = std::filesystem::path("/downloads"),
         .requests_env = "https://localhost/hello.txt",
     };
-    const auto requests = coquic::quic::parse_http09_requests_env("https://localhost/hello.txt");
+    const auto requests = coquic::http09::parse_http09_requests_env("https://localhost/hello.txt");
     ASSERT_TRUE(requests.has_value());
 
     const auto keyupdate_client_config =
@@ -572,13 +572,13 @@ TEST(QuicHttp09RuntimeTest, KeyUpdateRuntimeEnablesClientKeyUpdatePolicy) {
 TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfileOnServerPath) {
     const auto keyupdate = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::server,
-        .testcase = coquic::quic::QuicHttp09Testcase::keyupdate,
+        .testcase = coquic::http09::QuicHttp09Testcase::keyupdate,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
     const auto transfer = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::server,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -625,7 +625,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeReadsServerEnvironmentOverrides) {
     EXPECT_EQ(runtime.mode, coquic::quic::Http09RuntimeMode::server);
     EXPECT_EQ(runtime.host, "0.0.0.0");
     EXPECT_EQ(runtime.port, 8443);
-    EXPECT_EQ(runtime.testcase, coquic::quic::QuicHttp09Testcase::handshake);
+    EXPECT_EQ(runtime.testcase, coquic::http09::QuicHttp09Testcase::handshake);
     EXPECT_EQ(runtime.document_root, std::filesystem::path("/srv/http09"));
     EXPECT_EQ(runtime.download_root, std::filesystem::path("/srv/downloads"));
     EXPECT_EQ(runtime.certificate_chain_path, std::filesystem::path("/tls/cert.pem"));
@@ -675,7 +675,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeTreatsRetryTestcaseAliasAsHandshakeWithRetryE
             coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(env_argv));
         ASSERT_TRUE(parsed.has_value());
         const auto &runtime = optional_ref_or_terminate(parsed);
-        EXPECT_EQ(runtime.testcase, coquic::quic::QuicHttp09Testcase::handshake);
+        EXPECT_EQ(runtime.testcase, coquic::http09::QuicHttp09Testcase::handshake);
         EXPECT_TRUE(runtime.retry_enabled);
     }
 
@@ -686,7 +686,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeTreatsRetryTestcaseAliasAsHandshakeWithRetryE
             coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(cli_argv));
         ASSERT_TRUE(parsed.has_value());
         const auto &runtime = optional_ref_or_terminate(parsed);
-        EXPECT_EQ(runtime.testcase, coquic::quic::QuicHttp09Testcase::handshake);
+        EXPECT_EQ(runtime.testcase, coquic::http09::QuicHttp09Testcase::handshake);
         EXPECT_TRUE(runtime.retry_enabled);
     }
 }
@@ -731,7 +731,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeCliFlagsOverrideEnvironmentAndKeepExplicitCli
     EXPECT_EQ(runtime.mode, coquic::quic::Http09RuntimeMode::client);
     EXPECT_EQ(runtime.host, "198.51.100.20");
     EXPECT_EQ(runtime.port, 9443);
-    EXPECT_EQ(runtime.testcase, coquic::quic::QuicHttp09Testcase::chacha20);
+    EXPECT_EQ(runtime.testcase, coquic::http09::QuicHttp09Testcase::chacha20);
     EXPECT_EQ(runtime.requests_env, "https://cli.example/a.txt https://cli.example/b.txt");
     EXPECT_EQ(runtime.document_root, std::filesystem::path("/unused/server-root"));
     EXPECT_EQ(runtime.download_root, std::filesystem::path("/cli/downloads"));
@@ -758,7 +758,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialChacha20TestcaseAndConstrainsC
         FAIL() << "expected runtime config";
     }
     const auto &runtime = *parsed;
-    EXPECT_EQ(runtime.testcase, coquic::quic::QuicHttp09Testcase::chacha20);
+    EXPECT_EQ(runtime.testcase, coquic::http09::QuicHttp09Testcase::chacha20);
 
     const auto client_core = coquic::quic::make_http09_client_core_config(runtime);
     EXPECT_EQ(client_core.allowed_tls_cipher_suites,
@@ -780,7 +780,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialChacha20TestcaseAndConstrainsC
 TEST(QuicHttp09RuntimeTest, RuntimeBuildsV2CoreConfigsWithCompatibleVersionSupport) {
     const auto runtime = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::v2,
+        .testcase = coquic::http09::QuicHttp09Testcase::v2,
         .requests_env = "https://localhost/a.txt",
     };
 
@@ -804,7 +804,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsV2CoreConfigsWithCompatibleVersionSuppo
 TEST(QuicHttp09RuntimeTest, RuntimeBuildsServerCoreConfigWithExtendedIdleTimeoutForMulticonnect) {
     const auto server_runtime = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::server,
-        .testcase = coquic::quic::QuicHttp09Testcase::multiconnect,
+        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -867,7 +867,7 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionWithoutRequestsCompletesAfterHandsha
         .mode = coquic::quic::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -875,7 +875,7 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionWithoutRequestsCompletesAfterHandsha
         .mode = coquic::quic::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::quic::QuicHttp09Testcase::handshake,
+        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .server_name = "localhost",
     };
 

@@ -15,7 +15,7 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionFailsWhenSocketCreationFailsAfterRem
         .host = "",
         .server_name = "",
     };
-    const std::vector<coquic::quic::QuicHttp09Request> requests = {
+    const std::vector<coquic::http09::QuicHttp09Request> requests = {
         {.url = "https://127.0.0.1:9443/a.txt",
          .authority = "127.0.0.1:9443",
          .request_target = "/a.txt",
@@ -130,11 +130,11 @@ TEST(QuicHttp09RuntimeTest, ServerContinuesAfterIdlePollTimeoutThenFailsOnPollEr
 TEST(QuicHttp09RuntimeTest, RuntimeHelperExtendsClientReceiveTimeoutForMulticonnect) {
     const auto transfer = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::transfer,
+        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
     };
     const auto multiconnect = coquic::quic::Http09RuntimeConfig{
         .mode = coquic::quic::Http09RuntimeMode::client,
-        .testcase = coquic::quic::QuicHttp09Testcase::multiconnect,
+        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
     };
 
     EXPECT_EQ(coquic::quic::test::client_receive_timeout_ms_for_tests(transfer), 30000);

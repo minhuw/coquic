@@ -11,7 +11,7 @@
 #include "src/quic/core.h"
 #include "src/quic/varint.h"
 
-namespace coquic::quic {
+namespace coquic::http09 {
 
 enum class QuicHttp09Testcase : std::uint8_t {
     handshake,
@@ -36,26 +36,26 @@ struct QuicHttp09Request {
 };
 
 struct QuicHttp09EndpointUpdate {
-    std::vector<QuicCoreInput> core_inputs;
+    std::vector<quic::QuicCoreInput> core_inputs;
     bool has_pending_work = false;
     bool terminal_success = false;
     bool terminal_failure = false;
     bool handled_local_error = false;
 };
 
-CodecResult<std::vector<QuicHttp09Request>>
+quic::CodecResult<std::vector<QuicHttp09Request>>
 parse_http09_requests_env(std::string_view requests_env);
 
-CodecResult<std::string> parse_http09_request_target(std::span<const std::byte> bytes);
+quic::CodecResult<std::string> parse_http09_request_target(std::span<const std::byte> bytes);
 
-CodecResult<std::filesystem::path> resolve_http09_path_under_root(const std::filesystem::path &root,
-                                                                  std::string_view request_target);
+quic::CodecResult<std::filesystem::path>
+resolve_http09_path_under_root(const std::filesystem::path &root, std::string_view request_target);
 
 std::vector<std::byte>
 http09_zero_rtt_application_context(std::span<const QuicHttp09Request> requests);
 
-QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase);
-QuicTransportConfig http09_server_transport_for_testcase(QuicHttp09Testcase testcase);
-std::vector<CipherSuite> http09_tls_cipher_suites_for_testcase(QuicHttp09Testcase testcase);
+quic::QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase);
+quic::QuicTransportConfig http09_server_transport_for_testcase(QuicHttp09Testcase testcase);
+std::vector<quic::CipherSuite> http09_tls_cipher_suites_for_testcase(QuicHttp09Testcase testcase);
 
-} // namespace coquic::quic
+} // namespace coquic::http09

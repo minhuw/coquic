@@ -176,7 +176,7 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRouteHelperErasesFailedSession)
             .mode = coquic::quic::Http09RuntimeMode::server,
             .host = "127.0.0.1",
             .port = 443,
-            .testcase = coquic::quic::QuicHttp09Testcase::rebind_addr,
+            .testcase = coquic::http09::QuicHttp09Testcase::rebind_addr,
         });
     core_config.source_connection_id = make_runtime_connection_id(std::byte{0x53}, 1);
 

@@ -8,9 +8,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "src/quic/http09.h"
+#include "src/http09/http09.h"
 
-namespace coquic::quic {
+namespace coquic::http09 {
 
 struct QuicHttp09ClientConfig {
     std::vector<QuicHttp09Request> requests;
@@ -23,8 +23,9 @@ class QuicHttp09ClientEndpoint {
   public:
     explicit QuicHttp09ClientEndpoint(QuicHttp09ClientConfig config);
 
-    QuicHttp09EndpointUpdate on_core_result(const QuicCoreResult &result, QuicCoreTimePoint now);
-    QuicHttp09EndpointUpdate poll(QuicCoreTimePoint now);
+    QuicHttp09EndpointUpdate on_core_result(const quic::QuicCoreResult &result,
+                                            quic::QuicCoreTimePoint now);
+    QuicHttp09EndpointUpdate poll(quic::QuicCoreTimePoint now);
 
     bool is_complete() const;
     bool has_failed() const;
@@ -43,12 +44,12 @@ class QuicHttp09ClientEndpoint {
     QuicHttp09EndpointUpdate make_failure_update() const;
     QuicHttp09EndpointUpdate fail_endpoint();
     QuicHttp09EndpointUpdate drain_pending_inputs();
-    bool handle_local_error(const QuicCoreLocalError &error);
+    bool handle_local_error(const quic::QuicCoreLocalError &error);
     void activate_pending_request();
     bool requests_may_be_issued() const;
     bool can_issue_next_request() const;
     std::size_t active_request_count() const;
-    bool process_receive_stream_data(const QuicCoreReceiveStreamData &received);
+    bool process_receive_stream_data(const quic::QuicCoreReceiveStreamData &received);
     bool all_streams_complete() const;
     void clear_state();
 
@@ -62,7 +63,7 @@ class QuicHttp09ClientEndpoint {
     std::optional<std::size_t> max_concurrent_requests_;
     std::optional<PendingOpenRequest> pending_open_request_;
     std::unordered_map<std::uint64_t, RequestState> request_streams_;
-    std::deque<QuicCoreInput> pending_core_inputs_;
+    std::deque<quic::QuicCoreInput> pending_core_inputs_;
 };
 
-} // namespace coquic::quic
+} // namespace coquic::http09

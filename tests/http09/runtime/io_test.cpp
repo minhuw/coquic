@@ -375,6 +375,45 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionLoopCases) {
     EXPECT_EQ(nonblocking_drain_repeats_pending_endpoint_progress.receive_calls, 2u);
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCases) {
+    const auto initial_terminal_success =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::initial_terminal_success);
+    EXPECT_EQ(initial_terminal_success.exit_code, 0);
+    EXPECT_TRUE(initial_terminal_success.terminal_success);
+    EXPECT_FALSE(initial_terminal_success.terminal_failure);
+    EXPECT_EQ(initial_terminal_success.wait_calls, 0U);
+
+    const auto wait_failure = coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+        coquic::quic::test::ClientConnectionBackendLoopCaseForTests::wait_failure);
+    EXPECT_EQ(wait_failure.exit_code, 1);
+    EXPECT_FALSE(wait_failure.terminal_success);
+    EXPECT_FALSE(wait_failure.terminal_failure);
+    EXPECT_EQ(wait_failure.wait_calls, 1U);
+
+    const auto idle_timeout = coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+        coquic::quic::test::ClientConnectionBackendLoopCaseForTests::idle_timeout);
+    EXPECT_EQ(idle_timeout.exit_code, 1);
+    EXPECT_FALSE(idle_timeout.terminal_success);
+    EXPECT_FALSE(idle_timeout.terminal_failure);
+    EXPECT_EQ(idle_timeout.wait_calls, 1U);
+
+    const auto shutdown = coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+        coquic::quic::test::ClientConnectionBackendLoopCaseForTests::shutdown);
+    EXPECT_EQ(shutdown.exit_code, 1);
+    EXPECT_FALSE(shutdown.terminal_success);
+    EXPECT_FALSE(shutdown.terminal_failure);
+    EXPECT_EQ(shutdown.wait_calls, 1U);
+
+    const auto missing_rx_datagram =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::missing_rx_datagram);
+    EXPECT_EQ(missing_rx_datagram.exit_code, 1);
+    EXPECT_FALSE(missing_rx_datagram.terminal_success);
+    EXPECT_FALSE(missing_rx_datagram.terminal_failure);
+    EXPECT_EQ(missing_rx_datagram.wait_calls, 1U);
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCases) {
     {
         ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "trace");

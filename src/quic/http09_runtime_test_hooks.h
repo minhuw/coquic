@@ -68,6 +68,14 @@ enum class ClientConnectionLoopCaseForTests : std::uint8_t {
     timer_due_emits_send_trace_with_future_wakeup,
 };
 
+enum class ClientConnectionBackendLoopCaseForTests : std::uint8_t {
+    initial_terminal_success,
+    wait_failure,
+    idle_timeout,
+    shutdown,
+    missing_rx_datagram,
+};
+
 struct ClientConnectionLoopResultForTests {
     int exit_code = 0;
     bool terminal_success = false;
@@ -142,6 +150,8 @@ DriveEndpointUntilBlockedResultForTests
 drive_endpoint_until_blocked_case_for_tests(DriveEndpointUntilBlockedCaseForTests case_id);
 ClientConnectionLoopResultForTests
 run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_id);
+ClientConnectionLoopResultForTests
+run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCaseForTests case_id);
 bool existing_server_session_failure_cleans_up_for_tests();
 bool existing_server_session_missing_input_fails_for_tests();
 bool preferred_address_routes_to_existing_server_session_for_tests();

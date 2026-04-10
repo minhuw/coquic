@@ -4399,6 +4399,67 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
     };
 }
 
+ClientConnectionLoopResultForTests
+run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCaseForTests case_id) {
+    ScriptedEndpointForTests endpoint;
+    auto backend = std::make_unique<ScriptedIoBackendForTests>();
+    auto *backend_ptr = backend.get();
+    QuicCore core = make_local_error_client_core_for_tests();
+    EndpointDriveState state;
+    ClientRuntimePolicyState client_policy;
+    ClientIoContext io_context{
+        .backend = std::move(backend),
+        .primary_route_handle = QuicRouteHandle{17},
+    };
+    QuicCoreResult start_result;
+    const auto event_time = now();
+
+    switch (case_id) {
+    case ClientConnectionBackendLoopCaseForTests::initial_terminal_success:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::wait_failure:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        break;
+    case ClientConnectionBackendLoopCaseForTests::idle_timeout:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::idle_timeout,
+            .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::shutdown:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::shutdown,
+            .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::missing_rx_datagram:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::rx_datagram,
+            .now = event_time,
+        });
+        break;
+    }
+
+    const int exit_code = run_http09_client_connection_backend_loop(
+        Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        },
+        make_endpoint_driver(endpoint), core, io_context, state, client_policy, start_result);
+    return ClientConnectionLoopResultForTests{
+        .exit_code = exit_code,
+        .terminal_success = state.terminal_success,
+        .terminal_failure = state.terminal_failure,
+        .endpoint_has_pending_work = state.endpoint_has_pending_work,
+        .wait_calls = backend_ptr->wait_requests.size(),
+    };
+}
+
 void record_erased_server_session_key_for_tests(std::string *erased_key,
                                                 const std::string &local_connection_id_key) {
     *erased_key = local_connection_id_key;

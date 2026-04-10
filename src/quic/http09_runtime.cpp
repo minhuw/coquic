@@ -3877,6 +3877,20 @@ std::vector<std::byte> bytes_from_string_for_runtime_tests(std::string_view text
     return bytes;
 }
 
+std::vector<std::byte> make_unsupported_version_long_header_datagram_for_tests() {
+    std::vector<std::byte> bytes(kMinimumClientInitialDatagramBytes, std::byte{0x00});
+    bytes[0] = std::byte{0xc0};
+    bytes[1] = std::byte{0xfa};
+    bytes[2] = std::byte{0xce};
+    bytes[3] = std::byte{0xb0};
+    bytes[4] = std::byte{0x0c};
+    bytes[5] = std::byte{0x01};
+    bytes[6] = std::byte{0x80};
+    bytes[7] = std::byte{0x01};
+    bytes[8] = std::byte{0x81};
+    return bytes;
+}
+
 struct ScopedRuntimeTempDirForTests {
     ScopedRuntimeTempDirForTests() {
         path_ = std::filesystem::temp_directory_path() /
@@ -7019,6 +7033,31 @@ run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id) {
             .now = now(),
         });
         break;
+    case ServerBackendLoopCaseForTests::timer_event_then_shutdown:
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::timer_expired,
+            .now = now(),
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::shutdown,
+            .now = now(),
+        });
+        break;
+    case ServerBackendLoopCaseForTests::rx_datagram_then_shutdown:
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::rx_datagram,
+            .now = now(),
+            .datagram =
+                QuicIoRxDatagram{
+                    .route_handle = QuicRouteHandle{17},
+                    .bytes = make_unsupported_version_long_header_datagram_for_tests(),
+                },
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::shutdown,
+            .now = now(),
+        });
+        break;
     }
 
     QuicCore core = make_failing_server_core_for_tests();
@@ -7028,6 +7067,7 @@ run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id) {
         .exit_code =
             run_http09_server_backend_loop(config, core, transport_state, endpoints, *backend_ptr),
         .wait_calls = backend_ptr->wait_requests.size(),
+        .send_calls = backend_ptr->sent_datagrams.size(),
     };
 }
 

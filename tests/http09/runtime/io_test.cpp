@@ -645,6 +645,21 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveServerBackendLoopCases) {
             coquic::quic::test::ServerBackendLoopCaseForTests::idle_timeout_then_shutdown);
     EXPECT_EQ(idle_timeout_then_shutdown.exit_code, 1);
     EXPECT_EQ(idle_timeout_then_shutdown.wait_calls, 2U);
+    EXPECT_EQ(idle_timeout_then_shutdown.send_calls, 0U);
+
+    const auto timer_event_then_shutdown =
+        coquic::quic::test::run_server_backend_loop_case_for_tests(
+            coquic::quic::test::ServerBackendLoopCaseForTests::timer_event_then_shutdown);
+    EXPECT_EQ(timer_event_then_shutdown.exit_code, 1);
+    EXPECT_EQ(timer_event_then_shutdown.wait_calls, 2U);
+    EXPECT_EQ(timer_event_then_shutdown.send_calls, 0U);
+
+    const auto rx_datagram_then_shutdown =
+        coquic::quic::test::run_server_backend_loop_case_for_tests(
+            coquic::quic::test::ServerBackendLoopCaseForTests::rx_datagram_then_shutdown);
+    EXPECT_EQ(rx_datagram_then_shutdown.exit_code, 1);
+    EXPECT_EQ(rx_datagram_then_shutdown.wait_calls, 2U);
+    EXPECT_EQ(rx_datagram_then_shutdown.send_calls, 1U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeServerRouteHandlesAreStablePerPeerTuple) {

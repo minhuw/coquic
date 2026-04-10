@@ -11,28 +11,30 @@ TEST(QuicHttp09RuntimeTest, PreferredAddressCidRoutesToExistingServerSession) {
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeQueuesPreferredAddressMigrationRequestAfterHandshakeConfirmed) {
-    EXPECT_TRUE(coquic::quic::test::runtime_connectionmigration_request_flow_for_tests());
+    EXPECT_TRUE(coquic::quic::test::runtime_backend_connectionmigration_request_flow_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest,
      OfficialConnectionMigrationClientRequestQueuesPreferredAddressMigration) {
-    EXPECT_TRUE(
-        coquic::quic::test::runtime_official_connectionmigration_client_request_flow_for_tests());
-}
-
-TEST(QuicHttp09RuntimeTest, CrossFamilyPreferredAddressUsesCompatibleSocket) {
     EXPECT_TRUE(coquic::quic::test::
-                    runtime_cross_family_preferred_address_uses_compatible_socket_for_tests());
+                    runtime_backend_official_connectionmigration_client_request_flow_for_tests());
 }
 
-TEST(QuicHttp09RuntimeTest, ClientLoopUsesAllActiveSocketsForPreferredAddress) {
-    EXPECT_TRUE(coquic::quic::test::runtime_client_loop_uses_all_active_sockets_for_tests());
+TEST(QuicHttp09RuntimeTest, CrossFamilyPreferredAddressRequestsIpv6BackendRoute) {
+    EXPECT_TRUE(
+        coquic::quic::test::
+            runtime_backend_cross_family_preferred_address_requests_backend_route_for_tests());
+}
+
+TEST(QuicHttp09RuntimeTest, ClientLoopRequestsPreferredAddressRouteFromBackend) {
+    EXPECT_TRUE(coquic::quic::test::
+                    runtime_client_loop_requests_preferred_address_route_from_backend_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, RegularTransferDoesNotQueuePreferredAddressMigration) {
     EXPECT_TRUE(
         coquic::quic::test::
-            runtime_regular_transfer_does_not_queue_preferred_address_migration_for_tests());
+            runtime_backend_regular_transfer_does_not_queue_preferred_address_migration_for_tests());
 }
 
 } // namespace

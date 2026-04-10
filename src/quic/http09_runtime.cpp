@@ -3577,6 +3577,94 @@ struct WaitCaptureClientLoopIoForTests {
     std::array<int, 2> wait_socket_fds = {-1, -1};
 };
 
+class ScriptedIoBackendForTests final : public QuicIoBackend {
+  public:
+    std::vector<QuicIoRemote> ensure_route_calls;
+    std::vector<std::optional<QuicRouteHandle>> ensure_route_results;
+    std::size_t next_ensure_route_result_index = 0;
+    std::vector<std::optional<QuicCoreTimePoint>> wait_requests;
+    std::vector<std::optional<QuicIoEvent>> wait_results;
+    std::size_t next_wait_result_index = 0;
+    std::vector<QuicIoTxDatagram> sent_datagrams;
+
+    std::optional<QuicRouteHandle> ensure_route(const QuicIoRemote &remote) override {
+        ensure_route_calls.push_back(remote);
+        if (next_ensure_route_result_index >= ensure_route_results.size()) {
+            return std::nullopt;
+        }
+        return ensure_route_results[next_ensure_route_result_index++];
+    }
+
+    std::optional<QuicIoEvent> wait(std::optional<QuicCoreTimePoint> next_wakeup) override {
+        wait_requests.push_back(next_wakeup);
+        if (next_wait_result_index >= wait_results.size()) {
+            return std::nullopt;
+        }
+        return wait_results[next_wait_result_index++];
+    }
+
+    bool send(const QuicIoTxDatagram &datagram) override {
+        sent_datagrams.push_back(datagram);
+        return true;
+    }
+};
+
+std::uint16_t peer_port_for_remote_for_tests(const QuicIoRemote &remote) {
+    if (remote.family == AF_INET &&
+        remote.peer_len >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
+        const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(&remote.peer);
+        return ntohs(ipv4->sin_port);
+    }
+    if (remote.family == AF_INET6 &&
+        remote.peer_len >= static_cast<socklen_t>(sizeof(sockaddr_in6))) {
+        const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(&remote.peer);
+        return ntohs(ipv6->sin6_port);
+    }
+    return 0;
+}
+
+QuicCorePeerPreferredAddressAvailable
+make_ipv4_preferred_address_effect_for_tests(std::uint16_t port = 4444) {
+    return QuicCorePeerPreferredAddressAvailable{
+        .preferred_address =
+            PreferredAddress{
+                .ipv4_address = {std::byte{127}, std::byte{0}, std::byte{0}, std::byte{2}},
+                .ipv4_port = port,
+                .connection_id = make_runtime_connection_id(std::byte{0x5a}, 1),
+            },
+    };
+}
+
+QuicCorePeerPreferredAddressAvailable
+make_ipv6_preferred_address_effect_for_tests(std::uint16_t port = 4444) {
+    return QuicCorePeerPreferredAddressAvailable{
+        .preferred_address =
+            PreferredAddress{
+                .ipv6_address =
+                    {
+                        std::byte{0x20},
+                        std::byte{0x01},
+                        std::byte{0x0d},
+                        std::byte{0xb8},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x00},
+                        std::byte{0x46},
+                    },
+                .ipv6_port = port,
+                .connection_id = make_runtime_connection_id(std::byte{0x5a}, 1),
+            },
+    };
+}
+
 QuicCoreTimePoint wait_capture_client_loop_now_for_tests(void *) {
     return now();
 }
@@ -4440,6 +4528,171 @@ bool preferred_address_routes_to_existing_server_session_for_tests() {
 
     return find_server_session_for_datagram(sessions, connection_id_routes,
                                             initial_destination_routes, parsed) != sessions.end();
+}
+
+bool runtime_backend_connectionmigration_request_flow_case_for_tests(bool official_alias) {
+    const Http09RuntimeConfig config{
+        .mode = Http09RuntimeMode::client,
+        .testcase =
+            official_alias ? QuicHttp09Testcase::transfer : QuicHttp09Testcase::connectionmigration,
+        .requests_env = official_alias ? "https://server46:443/file.bin" : "",
+    };
+
+    auto backend = std::make_unique<ScriptedIoBackendForTests>();
+    auto *backend_ptr = backend.get();
+    backend_ptr->ensure_route_results.push_back(QuicRouteHandle{41});
+
+    EndpointDriveState state;
+    ClientRuntimePolicyState policy;
+    ClientIoContext io_context{
+        .backend = std::move(backend),
+        .primary_route_handle = QuicRouteHandle{17},
+    };
+    QuicCoreResult result;
+    result.effects.emplace_back(QuicCoreStateEvent{
+        .change = QuicCoreStateChange::handshake_ready,
+    });
+    result.effects.emplace_back(QuicCoreStateEvent{
+        .change = QuicCoreStateChange::handshake_confirmed,
+    });
+    result.effects.emplace_back(make_ipv4_preferred_address_effect_for_tests());
+
+    if (!observe_client_runtime_policy_effects_with_backend(result, state, policy, io_context,
+                                                            "client")) {
+        return false;
+    }
+
+    std::vector<QuicCoreInput> core_inputs;
+    maybe_queue_client_runtime_policy_inputs(config, policy, core_inputs);
+
+    if (backend_ptr->ensure_route_calls.size() != 1 || core_inputs.size() != 1 ||
+        !policy.preferred_address_route_handle.has_value() ||
+        !io_context.preferred_route_handle.has_value()) {
+        return false;
+    }
+
+    const auto route_handle = policy.preferred_address_route_handle.value_or(QuicRouteHandle{});
+    const auto &request = std::get<QuicCoreRequestConnectionMigration>(core_inputs.front());
+    const auto &remote = backend_ptr->ensure_route_calls.front();
+    return policy.handshake_ready_seen && policy.handshake_confirmed_seen &&
+           policy.preferred_address_request_queued && (route_handle == QuicRouteHandle{41}) &&
+           (io_context.preferred_route_handle.value_or(0) == QuicRouteHandle{41}) &&
+           (request.route_handle == QuicRouteHandle{41}) &&
+           (request.reason == QuicMigrationRequestReason::preferred_address) &&
+           (remote.family == AF_INET) && (peer_port_for_remote_for_tests(remote) == 4444);
+}
+
+bool runtime_backend_connectionmigration_request_flow_for_tests() {
+    return runtime_backend_connectionmigration_request_flow_case_for_tests(
+        /*official_alias=*/false);
+}
+
+bool runtime_backend_official_connectionmigration_client_request_flow_for_tests() {
+    return runtime_backend_connectionmigration_request_flow_case_for_tests(
+        /*official_alias=*/true);
+}
+
+bool runtime_backend_cross_family_preferred_address_requests_backend_route_for_tests() {
+    auto backend = std::make_unique<ScriptedIoBackendForTests>();
+    auto *backend_ptr = backend.get();
+    backend_ptr->ensure_route_results.push_back(QuicRouteHandle{23});
+
+    EndpointDriveState state;
+    ClientRuntimePolicyState policy;
+    ClientIoContext io_context{
+        .backend = std::move(backend),
+        .primary_route_handle = QuicRouteHandle{17},
+    };
+    QuicCoreResult result;
+    result.effects.emplace_back(make_ipv6_preferred_address_effect_for_tests());
+
+    if (!observe_client_runtime_policy_effects_with_backend(result, state, policy, io_context,
+                                                            "client")) {
+        return false;
+    }
+    if (backend_ptr->ensure_route_calls.size() != 1 ||
+        !policy.preferred_address_route_handle.has_value() ||
+        !io_context.preferred_route_handle.has_value()) {
+        return false;
+    }
+
+    const auto &remote = backend_ptr->ensure_route_calls.front();
+    return (policy.preferred_address_route_handle.value_or(0) == QuicRouteHandle{23}) &&
+           (io_context.preferred_route_handle.value_or(0) == QuicRouteHandle{23}) &&
+           (remote.family == AF_INET6) && (peer_port_for_remote_for_tests(remote) == 4444);
+}
+
+bool runtime_client_loop_requests_preferred_address_route_from_backend_for_tests() {
+    ScriptedEndpointForTests endpoint;
+    endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+
+    auto backend = std::make_unique<ScriptedIoBackendForTests>();
+    auto *backend_ptr = backend.get();
+    backend_ptr->ensure_route_results.push_back(QuicRouteHandle{59});
+
+    QuicCore core = make_local_error_client_core_for_tests();
+    EndpointDriveState state;
+    ClientRuntimePolicyState policy;
+    ClientIoContext io_context{
+        .backend = std::move(backend),
+        .primary_route_handle = QuicRouteHandle{17},
+    };
+    QuicCoreResult start_result;
+    start_result.effects.emplace_back(make_ipv6_preferred_address_effect_for_tests());
+
+    const int exit_code = run_http09_client_connection_backend_loop(
+        Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::connectionmigration,
+        },
+        make_endpoint_driver(endpoint), core, io_context, state, policy, start_result);
+
+    return exit_code == 1 && backend_ptr->ensure_route_calls.size() == 1 &&
+           backend_ptr->wait_requests.size() == 1 &&
+           (peer_port_for_remote_for_tests(backend_ptr->ensure_route_calls.front()) == 4444) &&
+           (policy.preferred_address_route_handle.value_or(0) == QuicRouteHandle{59}) &&
+           (io_context.preferred_route_handle.value_or(0) == QuicRouteHandle{59});
+}
+
+bool runtime_backend_regular_transfer_does_not_queue_preferred_address_migration_for_tests() {
+    const Http09RuntimeConfig config{
+        .mode = Http09RuntimeMode::client,
+        .testcase = QuicHttp09Testcase::transfer,
+        .requests_env = "https://localhost:443/file.bin",
+    };
+
+    auto backend = std::make_unique<ScriptedIoBackendForTests>();
+    auto *backend_ptr = backend.get();
+    backend_ptr->ensure_route_results.push_back(QuicRouteHandle{43});
+
+    EndpointDriveState state;
+    ClientRuntimePolicyState policy;
+    ClientIoContext io_context{
+        .backend = std::move(backend),
+        .primary_route_handle = QuicRouteHandle{17},
+    };
+    QuicCoreResult result;
+    result.effects.emplace_back(QuicCoreStateEvent{
+        .change = QuicCoreStateChange::handshake_ready,
+    });
+    result.effects.emplace_back(QuicCoreStateEvent{
+        .change = QuicCoreStateChange::handshake_confirmed,
+    });
+    result.effects.emplace_back(make_ipv4_preferred_address_effect_for_tests());
+
+    if (!observe_client_runtime_policy_effects_with_backend(result, state, policy, io_context,
+                                                            "client")) {
+        return false;
+    }
+
+    std::vector<QuicCoreInput> core_inputs;
+    maybe_queue_client_runtime_policy_inputs(config, policy, core_inputs);
+
+    return backend_ptr->ensure_route_calls.size() == 1 && policy.handshake_ready_seen &&
+           policy.handshake_confirmed_seen &&
+           (policy.preferred_address_route_handle.value_or(0) == QuicRouteHandle{43}) &&
+           (io_context.preferred_route_handle.value_or(0) == QuicRouteHandle{43}) &&
+           !policy.preferred_address_request_queued && core_inputs.empty();
 }
 
 bool expired_server_timer_failure_cleans_up_for_tests() {

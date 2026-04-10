@@ -7008,6 +7008,7 @@ run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id) {
 
     auto backend = std::make_unique<ScriptedIoBackendForTests>();
     auto *backend_ptr = backend.get();
+    ServerConnectionEndpointMap endpoints;
     switch (case_id) {
     case ServerBackendLoopCaseForTests::wait_failure:
         break;
@@ -7058,16 +7059,36 @@ run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id) {
             .now = now(),
         });
         break;
+    case ServerBackendLoopCaseForTests::pending_work_failure_then_shutdown: {
+        document_root.write_file("large.bin",
+                                 std::string(static_cast<std::size_t>(20) * 1024U, 'x'));
+        QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
+            .document_root = document_root.path(),
+        });
+        const auto update = endpoint.on_core_result(
+            single_receive_result_for_runtime_tests(0, "GET /large.bin\r\n", true), now());
+        endpoints.emplace(QuicConnectionHandle{7}, ServerConnectionEndpointState{
+                                                       .endpoint = std::move(endpoint),
+                                                       .has_pending_work = update.has_pending_work,
+                                                   });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::shutdown,
+            .now = now(),
+        });
+        break;
+    }
     }
 
     QuicCore core = make_failing_server_core_for_tests();
     EndpointDriveState transport_state;
-    ServerConnectionEndpointMap endpoints;
+    const auto initial_endpoints = endpoints.size();
     return ServerLoopResultForTests{
         .exit_code =
             run_http09_server_backend_loop(config, core, transport_state, endpoints, *backend_ptr),
         .wait_calls = backend_ptr->wait_requests.size(),
         .send_calls = backend_ptr->sent_datagrams.size(),
+        .initial_endpoints = initial_endpoints,
+        .remaining_endpoints = endpoints.size(),
     };
 }
 

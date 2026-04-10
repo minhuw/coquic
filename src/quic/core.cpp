@@ -1,8 +1,10 @@
 #include "src/quic/core.h"
+#include "src/quic/core_test_hooks.h"
 
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <limits>
 #include <utility>
 
 #include "src/quic/buffer.h"
@@ -566,6 +568,47 @@ QuicCore::route_handle_for_path(const ConnectionEntry &entry,
         }
     }
     return entry.default_route_handle;
+}
+
+bool test::seed_legacy_route_handle_path_for_tests(QuicCore &core, QuicRouteHandle route_handle,
+                                                   QuicPathId path_id) {
+    auto *entry = core.ensure_legacy_entry();
+    if (entry == nullptr) {
+        return false;
+    }
+
+    if (!entry->default_route_handle.has_value()) {
+        entry->default_route_handle = route_handle;
+    }
+
+    const auto existing_by_handle = entry->path_id_by_route_handle.find(route_handle);
+    if (existing_by_handle != entry->path_id_by_route_handle.end() &&
+        existing_by_handle->second == path_id) {
+        return true;
+    }
+
+    if (path_id == std::numeric_limits<QuicPathId>::max()) {
+        return false;
+    }
+
+    if (existing_by_handle != entry->path_id_by_route_handle.end()) {
+        entry->route_handle_by_path_id.erase(existing_by_handle->second);
+    }
+
+    const auto existing_by_path = entry->route_handle_by_path_id.find(path_id);
+    if (existing_by_path != entry->route_handle_by_path_id.end() &&
+        existing_by_path->second != route_handle) {
+        const auto displaced_route_handle = existing_by_path->second;
+        entry->path_id_by_route_handle.erase(displaced_route_handle);
+        if (entry->default_route_handle == displaced_route_handle) {
+            entry->default_route_handle = route_handle;
+        }
+    }
+
+    entry->path_id_by_route_handle[route_handle] = path_id;
+    entry->route_handle_by_path_id[path_id] = route_handle;
+    entry->next_path_id = std::max(entry->next_path_id, static_cast<QuicPathId>(path_id + 1));
+    return true;
 }
 
 QuicCore::QuicCore(QuicCoreEndpointConfig config)

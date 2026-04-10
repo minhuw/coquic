@@ -7,12 +7,12 @@
 #include "src/quic/packet_crypto.h"
 #include "src/quic/version.h"
 
-#include "src/coquic.h"
-
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <openssl/crypto.h>
 #include <poll.h>
+#include <spdlog/spdlog.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -83,6 +83,7 @@ constexpr int kDefaultClientReceiveTimeoutMs = 30000;
 constexpr int kMulticonnectClientReceiveTimeoutMs = 180000;
 constexpr int kClientSuccessDrainWindowMs = 500;
 constexpr int kServerIdleTimeoutMs = 1000;
+constexpr std::string_view kProjectName = "coquic";
 constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
@@ -93,6 +94,21 @@ constexpr std::string_view kUsageLine =
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
     "[--server-name NAME] [--verify-peer] [--retry]";
+
+bool &runtime_logging_ready_flag() {
+    static bool ready = false;
+    return ready;
+}
+
+void init_runtime_logging() {
+    spdlog::set_level(spdlog::level::info);
+    spdlog::set_pattern("[%H:%M:%S] [%^%l%$] %v");
+    runtime_logging_ready_flag() = spdlog::default_logger() != nullptr;
+}
+
+bool runtime_openssl_available() {
+    return OpenSSL_version_num() != 0;
+}
 
 int client_receive_timeout_ms(const Http09RuntimeConfig &config) {
     if (config.testcase == QuicHttp09Testcase::multiconnect) {
@@ -7547,11 +7563,10 @@ QuicCoreConfig make_http09_server_core_config(const Http09RuntimeConfig &config)
 }
 
 int run_http09_runtime(const Http09RuntimeConfig &config) {
-    coquic::init_logging();
+    init_runtime_logging();
 
     if (config.mode == Http09RuntimeMode::health_check) {
-        return coquic::project_name().empty() | !coquic::openssl_available() |
-               !coquic::logging_ready();
+        return kProjectName.empty() | !runtime_openssl_available() | !runtime_logging_ready_flag();
     }
     if (config.mode == Http09RuntimeMode::client) {
         return run_http09_client(config);
@@ -7564,3 +7579,19 @@ int run_http09_runtime(const Http09RuntimeConfig &config) {
 }
 
 } // namespace coquic::http09
+
+namespace coquic::http09::test {
+
+void reset_runtime_logging_state_for_tests() {
+    runtime_logging_ready_flag() = false;
+}
+
+bool runtime_logging_ready_for_tests() {
+    return runtime_logging_ready_flag();
+}
+
+bool runtime_openssl_available_for_tests() {
+    return runtime_openssl_available();
+}
+
+} // namespace coquic::http09::test

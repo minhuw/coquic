@@ -17,6 +17,10 @@
 
 namespace coquic::http09::test {
 
+void reset_runtime_logging_state_for_tests();
+bool runtime_logging_ready_for_tests();
+bool runtime_openssl_available_for_tests();
+
 struct RuntimeWaitStepForTests {
     bool has_input = false;
     bool idle_timeout = false;

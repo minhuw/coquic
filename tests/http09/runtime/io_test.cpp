@@ -412,6 +412,51 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_FALSE(missing_rx_datagram.terminal_success);
     EXPECT_FALSE(missing_rx_datagram.terminal_failure);
     EXPECT_EQ(missing_rx_datagram.wait_calls, 1U);
+
+    const auto timer_event_then_wait_failure =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                timer_event_then_wait_failure);
+    EXPECT_EQ(timer_event_then_wait_failure.exit_code, 1);
+    EXPECT_FALSE(timer_event_then_wait_failure.terminal_success);
+    EXPECT_FALSE(timer_event_then_wait_failure.terminal_failure);
+    EXPECT_EQ(timer_event_then_wait_failure.wait_calls, 2U);
+
+    const auto timer_event_then_drive_failure =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                timer_event_then_drive_failure);
+    EXPECT_EQ(timer_event_then_drive_failure.exit_code, 1);
+    EXPECT_FALSE(timer_event_then_drive_failure.terminal_success);
+    EXPECT_TRUE(timer_event_then_drive_failure.terminal_failure);
+    EXPECT_EQ(timer_event_then_drive_failure.wait_calls, 1U);
+
+    const auto timer_event_then_terminal_success =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                timer_event_then_terminal_success);
+    EXPECT_EQ(timer_event_then_terminal_success.exit_code, 0);
+    EXPECT_TRUE(timer_event_then_terminal_success.terminal_success);
+    EXPECT_FALSE(timer_event_then_terminal_success.terminal_failure);
+    EXPECT_EQ(timer_event_then_terminal_success.wait_calls, 1U);
+
+    const auto rx_datagram_then_drive_failure =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                rx_datagram_then_drive_failure);
+    EXPECT_EQ(rx_datagram_then_drive_failure.exit_code, 1);
+    EXPECT_FALSE(rx_datagram_then_drive_failure.terminal_success);
+    EXPECT_TRUE(rx_datagram_then_drive_failure.terminal_failure);
+    EXPECT_EQ(rx_datagram_then_drive_failure.wait_calls, 1U);
+
+    const auto rx_datagram_then_terminal_success_after_elapsed_drain_window =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                rx_datagram_then_terminal_success_after_elapsed_drain_window);
+    EXPECT_EQ(rx_datagram_then_terminal_success_after_elapsed_drain_window.exit_code, 0);
+    EXPECT_TRUE(rx_datagram_then_terminal_success_after_elapsed_drain_window.terminal_success);
+    EXPECT_FALSE(rx_datagram_then_terminal_success_after_elapsed_drain_window.terminal_failure);
+    EXPECT_EQ(rx_datagram_then_terminal_success_after_elapsed_drain_window.wait_calls, 1U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCases) {

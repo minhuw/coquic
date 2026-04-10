@@ -4444,6 +4444,65 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
             .now = event_time,
         });
         break;
+    case ClientConnectionBackendLoopCaseForTests::timer_event_then_wait_failure:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::timer_expired,
+            .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::timer_event_then_drive_failure:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_failure = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::timer_expired,
+            .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::timer_event_then_terminal_success:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::timer_expired,
+            .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::rx_datagram_then_drive_failure:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_failure = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::rx_datagram,
+            .now = event_time,
+            .datagram =
+                QuicIoRxDatagram{
+                    .route_handle = QuicRouteHandle{17},
+                    .bytes = {std::byte{0x01}},
+                },
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::
+        rx_datagram_then_terminal_success_after_elapsed_drain_window:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::rx_datagram,
+            .now = event_time - std::chrono::milliseconds(kClientSuccessDrainWindowMs + 1),
+            .datagram =
+                QuicIoRxDatagram{
+                    .route_handle = QuicRouteHandle{17},
+                    .bytes = {std::byte{0x01}},
+                },
+        });
+        break;
     }
 
     const int exit_code = run_http09_client_connection_backend_loop(

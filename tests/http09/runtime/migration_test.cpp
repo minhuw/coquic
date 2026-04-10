@@ -3,7 +3,7 @@
 #include "tests/support/http09/runtime_test_fixtures.h"
 
 namespace {
-using namespace coquic::quic::test_support;
+using namespace coquic::http09::test_support;
 
 TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerBindsPreferredSocketAndPollsBothSockets) {
     const auto port = allocate_udp_loopback_port();
@@ -20,8 +20,8 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerBindsPreferredSocketAndPoll
         },
     };
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
@@ -29,7 +29,7 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerBindsPreferredSocketAndPoll
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(server), 1);
     ASSERT_EQ(g_server_socket_poll_trace.opened_sockets.size(), 2u);
     ASSERT_EQ(g_server_socket_poll_trace.bound_ports.size(), 2u);
     EXPECT_EQ(g_server_socket_poll_trace.bound_ports[0], port);
@@ -40,13 +40,13 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerBindsPreferredSocketAndPoll
 
 TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigAdvertisesPreferredAddress) {
     EXPECT_TRUE(
-        coquic::quic::test::server_connectionmigration_preferred_address_config_for_tests());
+        coquic::http09::test::server_connectionmigration_preferred_address_config_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigIncludesPreferredAddressResetToken) {
     const auto core =
-        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
-            .mode = coquic::quic::Http09RuntimeMode::server,
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
             .host = "127.0.0.1",
             .port = 443,
             .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
@@ -71,8 +71,8 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigUsesConcreteAddressFo
         });
 
     const auto core =
-        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
-            .mode = coquic::quic::Http09RuntimeMode::server,
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
             .host = "::",
             .port = 443,
             .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
@@ -105,7 +105,7 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigUsesConcreteAddressFo
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeConnectionMigrationFailureHooksExerciseFalseBranches) {
-    EXPECT_TRUE(coquic::quic::test::runtime_connectionmigration_failure_paths_for_tests());
+    EXPECT_TRUE(coquic::http09::test::runtime_connectionmigration_failure_paths_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesLiveLikeMigrationRetransmitOnNewPath) {
@@ -176,8 +176,8 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesLiveLikeMigrationRetransm
         };
 
     auto core_config =
-        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
-            .mode = coquic::quic::Http09RuntimeMode::server,
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
             .host = "127.0.0.1",
             .port = 443,
             .testcase = coquic::http09::QuicHttp09Testcase::rebind_addr,
@@ -279,7 +279,7 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesLiveLikeMigrationRetransm
     const auto old_peer = make_peer(39968);
     const auto new_peer = make_peer(38910);
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
-    const auto route = coquic::quic::test::route_existing_server_session_datagram_for_tests(
+    const auto route = coquic::http09::test::route_existing_server_session_datagram_for_tests(
         server, /*established_socket_fd=*/31, old_peer, peer_len, local_connection_id,
         initial_destination_connection_id, /*inbound_socket_fd=*/77, new_peer, peer_len,
         encoded.value(), coquic::quic::test::test_time(101));
@@ -376,8 +376,8 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindToLatestIpv6P
         };
 
     auto core_config =
-        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
-            .mode = coquic::quic::Http09RuntimeMode::server,
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
             .host = "::1",
             .port = 443,
             .testcase = coquic::http09::QuicHttp09Testcase::rebind_port,
@@ -444,18 +444,18 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindToLatestIpv6P
     const auto second_rebind_peer = make_peer(40926);
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6));
     const std::array seeded_paths{
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 31,
             .peer = original_peer,
             .peer_len = peer_len,
         },
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 77,
             .peer = first_rebind_peer,
             .peer_len = peer_len,
         },
     };
-    const auto route = coquic::quic::test::route_existing_server_session_datagram_for_tests(
+    const auto route = coquic::http09::test::route_existing_server_session_datagram_for_tests(
         server, seeded_paths, local_connection_id, initial_destination_connection_id,
         /*inbound_socket_fd=*/77, second_rebind_peer, peer_len, encoded.value(),
         coquic::quic::test::test_time(2));
@@ -501,24 +501,24 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindToLatestIpv6P
     ASSERT_TRUE(path_response_encoded.has_value());
 
     const std::array seeded_paths_after_second_rebind{
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 31,
             .peer = original_peer,
             .peer_len = peer_len,
         },
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 77,
             .peer = first_rebind_peer,
             .peer_len = peer_len,
         },
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 77,
             .peer = second_rebind_peer,
             .peer_len = peer_len,
         },
     };
     const auto path_response_route =
-        coquic::quic::test::route_existing_server_session_datagram_for_tests(
+        coquic::http09::test::route_existing_server_session_datagram_for_tests(
             server, seeded_paths_after_second_rebind, local_connection_id,
             initial_destination_connection_id, /*inbound_socket_fd=*/77, second_rebind_peer,
             peer_len, path_response_encoded.value(), coquic::quic::test::test_time(3));
@@ -610,8 +610,8 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindToLatestV4Map
         };
 
     auto core_config =
-        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
-            .mode = coquic::quic::Http09RuntimeMode::server,
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
             .host = "::",
             .port = 443,
             .testcase = coquic::http09::QuicHttp09Testcase::rebind_port,
@@ -678,18 +678,18 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindToLatestV4Map
     const auto second_rebind_peer = make_peer({193, 167, 0, 100}, 59022);
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6));
     const std::array seeded_paths{
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 31,
             .peer = original_peer,
             .peer_len = peer_len,
         },
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 77,
             .peer = first_rebind_peer,
             .peer_len = peer_len,
         },
     };
-    const auto route = coquic::quic::test::route_existing_server_session_datagram_for_tests(
+    const auto route = coquic::http09::test::route_existing_server_session_datagram_for_tests(
         server, seeded_paths, local_connection_id, initial_destination_connection_id,
         /*inbound_socket_fd=*/77, second_rebind_peer, peer_len, encoded.value(),
         coquic::quic::test::test_time(2));
@@ -742,24 +742,24 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindToLatestV4Map
     ASSERT_TRUE(path_response_encoded.has_value());
 
     const std::array seeded_paths_after_second_rebind{
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 31,
             .peer = original_peer,
             .peer_len = peer_len,
         },
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 77,
             .peer = first_rebind_peer,
             .peer_len = peer_len,
         },
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 77,
             .peer = second_rebind_peer,
             .peer_len = peer_len,
         },
     };
     const auto path_response_route =
-        coquic::quic::test::route_existing_server_session_datagram_for_tests(
+        coquic::http09::test::route_existing_server_session_datagram_for_tests(
             server, seeded_paths_after_second_rebind, local_connection_id,
             initial_destination_connection_id, /*inbound_socket_fd=*/77, second_rebind_peer,
             peer_len, path_response_encoded.value(), coquic::quic::test::test_time(3));
@@ -859,8 +859,8 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindAddrToLatestV
         };
 
     auto core_config =
-        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
-            .mode = coquic::quic::Http09RuntimeMode::server,
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
             .host = "::",
             .port = 443,
             .testcase = coquic::http09::QuicHttp09Testcase::rebind_addr,
@@ -927,18 +927,18 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindAddrToLatestV
     const auto second_rebind_peer = make_peer({193, 167, 0, 3}, 38910);
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6));
     const std::array seeded_paths{
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 31,
             .peer = original_peer,
             .peer_len = peer_len,
         },
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 77,
             .peer = first_rebind_peer,
             .peer_len = peer_len,
         },
     };
-    const auto route = coquic::quic::test::route_existing_server_session_datagram_for_tests(
+    const auto route = coquic::http09::test::route_existing_server_session_datagram_for_tests(
         server, seeded_paths, local_connection_id, initial_destination_connection_id,
         /*inbound_socket_fd=*/77, second_rebind_peer, peer_len, encoded.value(),
         coquic::quic::test::test_time(2));
@@ -991,24 +991,24 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesSecondRebindAddrToLatestV
     ASSERT_TRUE(path_response_encoded.has_value());
 
     const std::array seeded_paths_after_second_rebind{
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 31,
             .peer = original_peer,
             .peer_len = peer_len,
         },
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 77,
             .peer = first_rebind_peer,
             .peer_len = peer_len,
         },
-        coquic::quic::test::RuntimePathSeedForTests{
+        coquic::http09::test::RuntimePathSeedForTests{
             .socket_fd = 77,
             .peer = second_rebind_peer,
             .peer_len = peer_len,
         },
     };
     const auto path_response_route =
-        coquic::quic::test::route_existing_server_session_datagram_for_tests(
+        coquic::http09::test::route_existing_server_session_datagram_for_tests(
             server, seeded_paths_after_second_rebind, local_connection_id,
             initial_destination_connection_id, /*inbound_socket_fd=*/77, second_rebind_peer,
             peer_len, path_response_encoded.value(), coquic::quic::test::test_time(3));

@@ -136,7 +136,7 @@ fn addProjectLibrary(
         "src/quic/frame.cpp",
         "src/http09/http09.cpp",
         "src/http09/http09_client.cpp",
-        "src/quic/http09_runtime.cpp",
+        "src/http09/http09_runtime.cpp",
         "src/http09/http09_server.cpp",
         "src/http3/http3_protocol.cpp",
         "src/http3/http3_qpack.cpp",

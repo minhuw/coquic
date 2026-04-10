@@ -3,23 +3,23 @@
 #include "tests/support/http09/runtime_test_fixtures.h"
 
 namespace {
-using namespace coquic::quic::test_support;
+using namespace coquic::http09::test_support;
 
 TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialRunnerAliasesViaCliFlags) {
     const char *multiconnect_argv[] = {"coquic",       "interop-client", "--testcase",
                                        "multiconnect", "--requests",     "https://localhost/a.txt"};
     const auto multiconnect =
-        coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(multiconnect_argv));
+        coquic::http09::parse_http09_runtime_args(6, const_cast<char **>(multiconnect_argv));
     ASSERT_TRUE(multiconnect.has_value());
-    const auto multiconnect_runtime = multiconnect.value_or(coquic::quic::Http09RuntimeConfig{});
+    const auto multiconnect_runtime = multiconnect.value_or(coquic::http09::Http09RuntimeConfig{});
     EXPECT_EQ(multiconnect_runtime.testcase, coquic::http09::QuicHttp09Testcase::multiconnect);
 
     const char *chacha20_argv[] = {"coquic",   "interop-client", "--testcase",
                                    "chacha20", "--requests",     "https://localhost/a.txt"};
     const auto chacha20 =
-        coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(chacha20_argv));
+        coquic::http09::parse_http09_runtime_args(6, const_cast<char **>(chacha20_argv));
     ASSERT_TRUE(chacha20.has_value());
-    const auto chacha20_runtime = chacha20.value_or(coquic::quic::Http09RuntimeConfig{});
+    const auto chacha20_runtime = chacha20.value_or(coquic::http09::Http09RuntimeConfig{});
     EXPECT_EQ(chacha20_runtime.testcase, coquic::http09::QuicHttp09Testcase::chacha20);
 }
 
@@ -29,7 +29,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialMulticonnectTestcase) {
     ScopedEnvVar testcase("TESTCASE", "multiconnect");
     ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt https://localhost/b.txt");
 
-    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
 }
 
@@ -39,7 +39,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialV2Testcase) {
     ScopedEnvVar testcase("TESTCASE", "v2");
     ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
 
-    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::http09::QuicHttp09Testcase::v2);
 }
@@ -50,7 +50,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialEcnTestcase) {
     ScopedEnvVar testcase("TESTCASE", "ecn");
     ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
 
-    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::http09::QuicHttp09Testcase::ecn);
 }
@@ -61,7 +61,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeTreatsAmplificationLimitEnvironmentAliasAsTra
     ScopedEnvVar testcase("TESTCASE", "amplificationlimit");
     ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
 
-    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
               coquic::http09::QuicHttp09Testcase::transfer);
@@ -72,7 +72,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeTreatsAmplificationLimitCliAliasAsTransfer) {
                           "--testcase", "amplificationlimit",
                           "--requests", "https://localhost/a.txt"};
 
-    const auto parsed = coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(argv));
+    const auto parsed = coquic::http09::parse_http09_runtime_args(6, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
               coquic::http09::QuicHttp09Testcase::transfer);
@@ -85,7 +85,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases)
         ScopedEnvVar testcase("TESTCASE", "resumption");
         ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
 
-        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
                   coquic::http09::QuicHttp09Testcase::resumption);
@@ -97,7 +97,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases)
         ScopedEnvVar testcase("TESTCASE", "zerortt");
         ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
 
-        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
                   coquic::http09::QuicHttp09Testcase::zerortt);
@@ -110,7 +110,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialKeyUpdateTestcase) {
     ScopedEnvVar testcase("TESTCASE", "keyupdate");
     ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
 
-    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
               coquic::http09::QuicHttp09Testcase::keyupdate);
@@ -120,7 +120,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsKeyUpdateCliFlag) {
     const char *argv[] = {"coquic",    "interop-client", "--testcase",
                           "keyupdate", "--requests",     "https://localhost/hello.txt"};
 
-    const auto parsed = coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(argv));
+    const auto parsed = coquic::http09::parse_http09_runtime_args(6, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
               coquic::http09::QuicHttp09Testcase::keyupdate);
@@ -132,7 +132,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialRebindPortTestcase) {
     ScopedEnvVar testcase("TESTCASE", "rebind-port");
     ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
 
-    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
               coquic::http09::QuicHttp09Testcase::rebind_port);
@@ -142,7 +142,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsRebindAddrCliFlag) {
     const char *argv[] = {"coquic",      "interop-client", "--testcase",
                           "rebind-addr", "--requests",     "https://localhost/hello.txt"};
 
-    const auto parsed = coquic::quic::parse_http09_runtime_args(6, const_cast<char **>(argv));
+    const auto parsed = coquic::http09::parse_http09_runtime_args(6, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
               coquic::http09::QuicHttp09Testcase::rebind_addr);
@@ -154,7 +154,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeAcceptsOfficialConnectionMigrationTestcase) {
     ScopedEnvVar testcase("TESTCASE", "connectionmigration");
     ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
 
-    const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+    const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
               coquic::http09::QuicHttp09Testcase::connectionmigration);

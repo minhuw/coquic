@@ -3,7 +3,7 @@
 #include "tests/support/http09/runtime_test_fixtures.h"
 
 namespace {
-using namespace coquic::quic::test_support;
+using namespace coquic::http09::test_support;
 
 TEST(QuicHttp09RuntimeTest, ServerDoesNotExitAfterMalformedTraffic) {
     ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
@@ -11,8 +11,8 @@ TEST(QuicHttp09RuntimeTest, ServerDoesNotExitAfterMalformedTraffic) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::handshake,
@@ -49,8 +49,8 @@ TEST(QuicHttp09RuntimeTest, ServerFailsFastWhenTlsFilesMissing) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .certificate_chain_path = "/no/such/cert.pem",
@@ -71,15 +71,15 @@ TEST(QuicHttp09RuntimeTest, ServerFailsFastWhenPrivateKeyFileMissing) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "/no/such/key.pem",
     };
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(server), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, ServerFailsWhenSocketCreationFails) {
@@ -90,15 +90,15 @@ TEST(QuicHttp09RuntimeTest, ServerFailsWhenSocketCreationFails) {
         {.socket_fn = &fail_socket},
     };
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(server), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, ServerFailsWhenSocketBindFails) {
@@ -109,27 +109,27 @@ TEST(QuicHttp09RuntimeTest, ServerFailsWhenSocketBindFails) {
         {.bind_fn = &fail_bind},
     };
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(server), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, ServerFailsWhenConfiguredHostIsNotIpv4) {
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "not-an-ipv4-address",
         .port = 443,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(server), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, ServerUsesIpv6SocketFamilyForIpv6Host) {
@@ -138,15 +138,15 @@ TEST(QuicHttp09RuntimeTest, ServerUsesIpv6SocketFamilyForIpv6Host) {
         {.socket_fn = &record_socket_family_then_fail},
     };
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "::1",
         .port = 443,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(server), 1);
     EXPECT_EQ(g_last_socket_family, AF_INET6);
 }
 
@@ -155,14 +155,14 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenPeerResolutionFails) {
         {.getaddrinfo_fn = &fail_getaddrinfo},
     };
 
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = 443,
         .requests_env = "https://localhost/hello.txt",
     };
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenResolutionSucceedsWithoutAnyAddrinfoResults) {
@@ -174,14 +174,14 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenResolutionSucceedsWithoutAnyAddrinfoR
         },
     };
 
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "localhost",
         .port = 443,
         .server_name = "localhost",
     };
 
-    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(coquic::http09::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
     EXPECT_EQ(g_last_getaddrinfo_family, AF_UNSPEC);
     EXPECT_EQ(g_last_socket_family, AF_UNSPEC);
 }
@@ -196,32 +196,32 @@ TEST(QuicHttp09RuntimeTest, ServerResolutionPassesNullNodeForWildcardHost) {
         },
     };
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "",
         .port = 443,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(server), 1);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(server), 1);
     EXPECT_EQ(g_last_getaddrinfo_family, AF_UNSPEC);
     EXPECT_EQ(g_last_socket_family, AF_INET);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHealthCheckSucceedsWhenDependenciesAreAvailable) {
-    const auto runtime = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::health_check,
+    const auto runtime = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::health_check,
     };
-    EXPECT_EQ(coquic::quic::run_http09_runtime(runtime), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(runtime), 0);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeReturnsFailureForUnknownMode) {
-    const auto runtime = coquic::quic::Http09RuntimeConfig{
+    const auto runtime = coquic::http09::Http09RuntimeConfig{
         .mode = invalid_runtime_mode(),
     };
 
-    EXPECT_EXIT(std::exit(coquic::quic::run_http09_runtime(runtime)), ::testing::ExitedWithCode(1),
+    EXPECT_EXIT(std::exit(coquic::http09::run_http09_runtime(runtime)), ::testing::ExitedWithCode(1),
                 "");
 }
 
@@ -233,8 +233,8 @@ TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTrans
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -242,8 +242,8 @@ TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTrans
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -313,7 +313,7 @@ TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTrans
                         version_negotiation.supported_versions.end(), 0x6b3343cfu),
               version_negotiation.supported_versions.end());
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"),
               "hello-after-version-negotiation");
@@ -323,8 +323,8 @@ TEST(QuicHttp09RuntimeTest, ServerIgnoresUnsupportedVersionProbeBelowMinimumInit
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::handshake,
@@ -361,8 +361,8 @@ TEST(QuicHttp09RuntimeTest, ServerIgnoresSupportedLongHeaderWithoutSession) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::handshake,
@@ -406,8 +406,8 @@ TEST(QuicHttp09RuntimeTest, ServerFailsWhenVersionNegotiationSendFails) {
     const ScopedFailSendtoAfterReset sendto_reset;
     g_fail_sendto_after_calls.store(1);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::handshake,
@@ -451,8 +451,8 @@ TEST(QuicHttp09RuntimeTest, TraceEnabledServerDropsMalformedSupportedInitialAndS
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -460,8 +460,8 @@ TEST(QuicHttp09RuntimeTest, TraceEnabledServerDropsMalformedSupportedInitialAndS
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -493,7 +493,7 @@ TEST(QuicHttp09RuntimeTest, TraceEnabledServerDropsMalformedSupportedInitialAndS
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(100)).has_value());
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-after-malformed-initial");
 }

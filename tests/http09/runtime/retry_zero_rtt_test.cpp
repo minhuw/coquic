@@ -3,7 +3,7 @@
 #include "tests/support/http09/runtime_test_fixtures.h"
 
 namespace {
-using namespace coquic::quic::test_support;
+using namespace coquic::http09::test_support;
 
 TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossResumedConnection) {
     coquic::quic::test::ScopedTempDir document_root;
@@ -14,7 +14,7 @@ TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossR
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    coquic::quic::Http09RuntimeConfig server;
+    coquic::http09::Http09RuntimeConfig server;
     {
         const char *argv[] = {"coquic"};
         ScopedEnvVar role("ROLE", "server");
@@ -25,12 +25,12 @@ TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossR
         ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", "tests/fixtures/quic-server-cert.pem");
         ScopedEnvVar private_key("PRIVATE_KEY_PATH", "tests/fixtures/quic-server-key.pem");
 
-        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         server = optional_value_or_terminate(parsed);
     }
 
-    coquic::quic::Http09RuntimeConfig client;
+    coquic::http09::Http09RuntimeConfig client;
     {
         const char *argv[] = {"coquic"};
         ScopedEnvVar role("ROLE", "client");
@@ -40,7 +40,7 @@ TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossR
         ScopedEnvVar download_root_env("DOWNLOAD_ROOT", download_root.path().string());
         ScopedEnvVar requests("REQUESTS", "https://localhost/seed.txt https://localhost/final.txt");
 
-        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         client = optional_value_or_terminate(parsed);
     }
@@ -48,21 +48,21 @@ TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossR
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_EQ(read_file_bytes(download_root.path() / "final.txt"), "final-body");
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverRetryAndZeroRttBranches) {
-    EXPECT_TRUE(coquic::quic::test::resumed_client_warmup_failure_exits_early_for_tests());
-    EXPECT_TRUE(coquic::quic::test::zero_rtt_request_allowance_for_tests());
+    EXPECT_TRUE(coquic::http09::test::resumed_client_warmup_failure_exits_early_for_tests());
+    EXPECT_TRUE(coquic::http09::test::zero_rtt_request_allowance_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server_runtime = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server_runtime = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::handshake,
@@ -82,14 +82,14 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {
     server_address.sin_port = htons(port);
     ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
 
-    auto client_runtime = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    auto client_runtime = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .requests_env = "https://localhost/hello.txt",
     };
-    coquic::quic::QuicCore client(coquic::quic::make_http09_client_core_config(client_runtime));
+    coquic::quic::QuicCore client(coquic::http09::make_http09_client_core_config(client_runtime));
 
     const auto start =
         client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
@@ -165,8 +165,8 @@ TEST(QuicHttp09RuntimeTest, V2CaseStartsInQuicV1AndNegotiatesQuicV2LongHeaders) 
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server_runtime = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server_runtime = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::v2,
@@ -186,14 +186,14 @@ TEST(QuicHttp09RuntimeTest, V2CaseStartsInQuicV1AndNegotiatesQuicV2LongHeaders) 
     server_address.sin_port = htons(port);
     ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
 
-    auto client_runtime = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    auto client_runtime = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::v2,
         .requests_env = "https://localhost/hello.txt",
     };
-    coquic::quic::QuicCore client(coquic::quic::make_http09_client_core_config(client_runtime));
+    coquic::quic::QuicCore client(coquic::http09::make_http09_client_core_config(client_runtime));
 
     const auto start =
         client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());

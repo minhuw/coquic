@@ -10,7 +10,7 @@
 #include "src/http09/http09_client.h"
 #include "src/http09/http09_server.h"
 
-namespace coquic::quic {
+namespace coquic::http09 {
 
 enum class Http09RuntimeMode : std::uint8_t { health_check, client, server };
 
@@ -18,7 +18,7 @@ struct Http09RuntimeConfig {
     Http09RuntimeMode mode = Http09RuntimeMode::health_check;
     std::string host = "127.0.0.1";
     std::uint16_t port = 443;
-    http09::QuicHttp09Testcase testcase = http09::QuicHttp09Testcase::handshake;
+    QuicHttp09Testcase testcase = QuicHttp09Testcase::handshake;
     bool retry_enabled = false;
     std::filesystem::path document_root = "/www";
     std::filesystem::path download_root = "/downloads";
@@ -46,10 +46,10 @@ struct Http09ClientRemote {
 std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view authority);
 std::optional<Http09ClientRemote>
 derive_http09_client_remote(const Http09RuntimeConfig &config,
-                            const std::vector<http09::QuicHttp09Request> &requests);
+                            const std::vector<QuicHttp09Request> &requests);
 std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **argv);
-QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config);
-QuicCoreConfig make_http09_server_core_config(const Http09RuntimeConfig &config);
+quic::QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config);
+quic::QuicCoreConfig make_http09_server_core_config(const Http09RuntimeConfig &config);
 int run_http09_runtime(const Http09RuntimeConfig &config);
 
-} // namespace coquic::quic
+} // namespace coquic::http09

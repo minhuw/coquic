@@ -3,14 +3,14 @@
 #include "tests/support/http09/runtime_test_fixtures.h"
 
 namespace {
-using namespace coquic::quic::test_support;
+using namespace coquic::http09::test_support;
 
 TEST(QuicHttp09RuntimeTest, RuntimeAssignsStablePathIdsPerPeerTuple) {
-    EXPECT_TRUE(coquic::quic::test::runtime_assigns_stable_path_ids_for_tests());
+    EXPECT_TRUE(coquic::http09::test::runtime_assigns_stable_path_ids_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, DriveEndpointUsesTransportSelectedPathAndSocket) {
-    EXPECT_TRUE(coquic::quic::test::drive_endpoint_uses_transport_selected_path_for_tests());
+    EXPECT_TRUE(coquic::http09::test::drive_endpoint_uses_transport_selected_path_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, DeferredReplayPreservesIndividualBufferedPathIds) {
@@ -64,44 +64,43 @@ TEST(QuicHttp09RuntimeTest, DeferredReplayKeepsDistinctPathsForIdenticalPayloads
 }
 
 TEST(QuicHttp09RuntimeTest, CoreVersionNegotiationRestartPreservesInboundPathIds) {
-    EXPECT_TRUE(coquic::quic::test::
-                    core_version_negotiation_restart_preserves_inbound_path_ids_for_tests());
+    EXPECT_TRUE(coquic::http09::test::core_version_negotiation_restart_preserves_inbound_path_ids_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, CoreRetryRestartPreservesInboundPathIds) {
-    EXPECT_TRUE(coquic::quic::test::core_retry_restart_preserves_inbound_path_ids_for_tests());
+    EXPECT_TRUE(coquic::http09::test::core_retry_restart_preserves_inbound_path_ids_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, DriveEndpointRejectsUnknownTransportSelectedPath) {
     EXPECT_TRUE(
-        coquic::quic::test::drive_endpoint_rejects_unknown_transport_selected_path_for_tests());
+        coquic::http09::test::drive_endpoint_rejects_unknown_transport_selected_path_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeProcessesPolicyInputsBeforeTerminalSuccess) {
     EXPECT_TRUE(
-        coquic::quic::test::runtime_policy_core_inputs_advance_before_terminal_success_for_tests());
+        coquic::http09::test::runtime_policy_core_inputs_advance_before_terminal_success_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeRegistersAllServerCoreConnectionIdsForRouting) {
-    EXPECT_TRUE(coquic::quic::test::runtime_registers_all_server_core_connection_ids_for_tests());
+    EXPECT_TRUE(coquic::http09::test::runtime_registers_all_server_core_connection_ids_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeMiscInternalCoverageHooksExerciseFallbackPaths) {
     testing::internal::CaptureStderr();
-    const bool covered = coquic::quic::test::runtime_misc_internal_coverage_for_tests();
+    const bool covered = coquic::http09::test::runtime_misc_internal_coverage_for_tests();
     const auto stderr_output = testing::internal::GetCapturedStderr();
     EXPECT_TRUE(covered) << stderr_output;
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeInternalCoverageHooksExerciseRemainingBranches) {
     testing::internal::CaptureStderr();
-    const bool covered = coquic::quic::test::runtime_additional_internal_coverage_for_tests();
+    const bool covered = coquic::http09::test::runtime_additional_internal_coverage_for_tests();
     const auto stderr_output = testing::internal::GetCapturedStderr();
     EXPECT_TRUE(covered) << stderr_output;
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeRestartFailureHooksExerciseRestartFailures) {
-    EXPECT_TRUE(coquic::quic::test::runtime_restart_failure_paths_for_tests());
+    EXPECT_TRUE(coquic::http09::test::runtime_restart_failure_paths_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, ExistingServerSessionRouteHelperErasesFailedSession) {
@@ -172,8 +171,8 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRouteHelperErasesFailedSession)
         };
 
     auto core_config =
-        coquic::quic::make_http09_server_core_config(coquic::quic::Http09RuntimeConfig{
-            .mode = coquic::quic::Http09RuntimeMode::server,
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
             .host = "127.0.0.1",
             .port = 443,
             .testcase = coquic::http09::QuicHttp09Testcase::rebind_addr,
@@ -216,7 +215,7 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRouteHelperErasesFailedSession)
 
     const auto peer = make_peer(39968);
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
-    const auto route = coquic::quic::test::route_existing_server_session_datagram_for_tests(
+    const auto route = coquic::http09::test::route_existing_server_session_datagram_for_tests(
         server, /*established_socket_fd=*/31, peer, peer_len, local_connection_id,
         initial_destination_connection_id, /*inbound_socket_fd=*/31, peer, peer_len,
         encoded.value(), coquic::quic::test::test_time(1));

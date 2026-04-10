@@ -37,13 +37,13 @@
 
 #include "src/quic/packet.h"
 #define private public
-#include "src/quic/http09_runtime.h"
+#include "src/http09/http09_runtime.h"
 #include "src/quic/connection.h"
 #undef private
-#include "src/quic/http09_runtime_test_hooks.h"
+#include "src/http09/http09_runtime_test_hooks.h"
 #include "tests/support/quic_test_utils.h"
 
-namespace coquic::quic::test_support {
+namespace coquic::http09::test_support {
 
 class ScopedEnvVar {
   public:
@@ -121,9 +121,9 @@ template <typename T> T &optional_ref_or_terminate(std::optional<T> &value) {
     return *value;
 }
 
-inline coquic::quic::Http09RuntimeMode invalid_runtime_mode() {
+inline coquic::http09::Http09RuntimeMode invalid_runtime_mode() {
     constexpr std::uint8_t raw = 0xff;
-    coquic::quic::Http09RuntimeMode mode{};
+    coquic::http09::Http09RuntimeMode mode{};
     std::memcpy(&mode, &raw, sizeof(raw));
     return mode;
 }
@@ -194,7 +194,7 @@ inline void wake_runtime_server(std::string_view host, std::uint16_t port) {
 }
 
 inline int run_http09_runtime_child_process(
-    const coquic::quic::Http09RuntimeConfig &config,
+    const coquic::http09::Http09RuntimeConfig &config,
     const std::shared_ptr<std::atomic<bool>> &stop_requested,
     coquic::io::test::SocketIoBackendOpsOverride override_ops) noexcept {
     try {
@@ -205,7 +205,7 @@ inline int run_http09_runtime_child_process(
         const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
             override_ops,
         };
-        return coquic::quic::run_http09_runtime(config);
+        return coquic::http09::run_http09_runtime(config);
     } catch (...) {
         std::abort();
     }
@@ -213,7 +213,7 @@ inline int run_http09_runtime_child_process(
 
 class ScopedChildProcess {
   public:
-    explicit ScopedChildProcess(const coquic::quic::Http09RuntimeConfig &config,
+    explicit ScopedChildProcess(const coquic::http09::Http09RuntimeConfig &config,
                                 coquic::io::test::SocketIoBackendOpsOverride override_ops = {})
         : host_(config.host), port_(config.port),
           stop_requested_(std::make_shared<std::atomic<bool>>(false)),
@@ -795,12 +795,12 @@ inline ssize_t drop_nth_small_ack_datagram_after_request(int fd, const void *buf
 }
 
 inline ScopedChildProcess
-launch_runtime_server_process(const coquic::quic::Http09RuntimeConfig &config) {
+launch_runtime_server_process(const coquic::http09::Http09RuntimeConfig &config) {
     return ScopedChildProcess(config);
 }
 
 inline ScopedChildProcess
-launch_runtime_server_process(const coquic::quic::Http09RuntimeConfig &config,
+launch_runtime_server_process(const coquic::http09::Http09RuntimeConfig &config,
                               coquic::io::test::SocketIoBackendOpsOverride override_ops) {
     return ScopedChildProcess(config, override_ops);
 }
@@ -882,8 +882,8 @@ inline RuntimeHandshakeObservation run_retry_enabled_runtime_handshake_observati
         return observed;
     }
 
-    const auto server_runtime = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server_runtime = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::handshake,
@@ -908,14 +908,14 @@ inline RuntimeHandshakeObservation run_retry_enabled_runtime_handshake_observati
         return observed;
     }
 
-    auto client_runtime = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    auto client_runtime = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .requests_env = "https://localhost/hello.txt",
     };
-    coquic::quic::QuicCore client(coquic::quic::make_http09_client_core_config(client_runtime));
+    coquic::quic::QuicCore client(coquic::http09::make_http09_client_core_config(client_runtime));
 
     const auto start =
         client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
@@ -1144,8 +1144,8 @@ struct InMemoryHttp09TransferResult {
 };
 
 struct InMemoryHttp09TransferConfig {
-    coquic::quic::Http09RuntimeConfig client_config;
-    coquic::quic::Http09RuntimeConfig server_config;
+    coquic::http09::Http09RuntimeConfig client_config;
+    coquic::http09::Http09RuntimeConfig server_config;
     std::unordered_set<std::size_t> dropped_client_datagrams;
     std::unordered_set<std::size_t> dropped_server_datagrams;
 };
@@ -1182,7 +1182,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
             .download_root = transfer_config.client_config.download_root,
         }),
         .core = coquic::quic::QuicCore(
-            coquic::quic::make_http09_client_core_config(transfer_config.client_config)),
+            coquic::http09::make_http09_client_core_config(transfer_config.client_config)),
         .next_wakeup = std::nullopt,
         .terminal_success = false,
         .terminal_failure = false,
@@ -1191,7 +1191,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
         .endpoint = coquic::http09::QuicHttp09ServerEndpoint(coquic::http09::QuicHttp09ServerConfig{
             .document_root = transfer_config.server_config.document_root}),
         .core = coquic::quic::QuicCore(
-            coquic::quic::make_http09_server_core_config(transfer_config.server_config)),
+            coquic::http09::make_http09_server_core_config(transfer_config.server_config)),
         .next_wakeup = std::nullopt,
         .terminal_failure = false,
     };
@@ -1405,7 +1405,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
 }
 
 inline ObservingServerResult
-run_observing_http09_server(const coquic::quic::Http09RuntimeConfig &config) {
+run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     ObservingServerResult observed;
     constexpr std::size_t kTimerSpinLimit = 100000;
 
@@ -1438,7 +1438,7 @@ run_observing_http09_server(const coquic::quic::Http09RuntimeConfig &config) {
     };
 
     const auto make_session_core_config = [&](std::uint64_t connection_index) {
-        auto core_config = coquic::quic::make_http09_server_core_config(config);
+        auto core_config = coquic::http09::make_http09_server_core_config(config);
         core_config.source_connection_id =
             make_runtime_connection_id(std::byte{0x53}, connection_index);
         return core_config;
@@ -1784,4 +1784,4 @@ run_observing_http09_server(const coquic::quic::Http09RuntimeConfig &config) {
     }
 }
 
-} // namespace coquic::quic::test_support
+} // namespace coquic::http09::test_support

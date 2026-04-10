@@ -1,5 +1,5 @@
-#include "src/quic/http09_runtime.h"
-#include "src/quic/http09_runtime_test_hooks.h"
+#include "src/http09/http09_runtime.h"
+#include "src/http09/http09_runtime_test_hooks.h"
 #include "src/quic/buffer.h"
 #include "src/quic/core_test_hooks.h"
 #include "src/io/socket_io_backend.h"
@@ -41,20 +41,10 @@
 #include <utility>
 #include <variant>
 
-namespace coquic::quic {
+namespace coquic::http09 {
 
-using http09::http09_client_transport_for_testcase;
-using http09::http09_server_transport_for_testcase;
-using http09::http09_tls_cipher_suites_for_testcase;
-using http09::http09_zero_rtt_application_context;
-using http09::parse_http09_requests_env;
-using http09::QuicHttp09ClientConfig;
-using http09::QuicHttp09ClientEndpoint;
-using http09::QuicHttp09EndpointUpdate;
-using http09::QuicHttp09Request;
-using http09::QuicHttp09ServerConfig;
-using http09::QuicHttp09ServerEndpoint;
-using http09::QuicHttp09Testcase;
+using namespace quic;
+using quic::test::seed_legacy_route_handle_path_for_tests;
 
 using io::QuicIoBackend;
 using io::QuicIoEvent;
@@ -7573,4 +7563,4 @@ int run_http09_runtime(const Http09RuntimeConfig &config) {
     return 1;
 }
 
-} // namespace coquic::quic
+} // namespace coquic::http09

@@ -3,7 +3,7 @@
 #include "tests/support/http09/runtime_test_fixtures.h"
 
 namespace {
-using namespace coquic::quic::test_support;
+using namespace coquic::http09::test_support;
 
 TEST(QuicHttp09RuntimeTest, ClientPrefersIpv4AddrinfoWhenHostnameIsNonNumeric) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
@@ -15,14 +15,14 @@ TEST(QuicHttp09RuntimeTest, ClientPrefersIpv4AddrinfoWhenHostnameIsNonNumeric) {
         },
     };
 
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "localhost",
         .port = 443,
         .server_name = "localhost",
     };
 
-    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(coquic::http09::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
     EXPECT_EQ(g_last_getaddrinfo_family, AF_UNSPEC);
     EXPECT_EQ(g_last_socket_family, AF_INET);
 }
@@ -38,8 +38,8 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionUsesIpv6ResolutionAndSocketFamilyFor
         },
     };
 
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "",
         .server_name = "",
     };
@@ -50,7 +50,7 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionUsesIpv6ResolutionAndSocketFamilyFor
          .relative_output_path = "a.txt"},
     };
 
-    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, requests, 1), 1);
+    EXPECT_EQ(coquic::http09::test::run_http09_client_connection_for_tests(client, requests, 1), 1);
     EXPECT_EQ(g_last_getaddrinfo_family, AF_INET6);
     EXPECT_EQ(g_last_socket_family, AF_INET6);
     EXPECT_EQ(g_freeaddrinfo_calls, 1);
@@ -67,14 +67,14 @@ TEST(QuicHttp09RuntimeTest, ClientFallsBackToEarlierValidAddrinfoWhenPreferredRe
         },
     };
 
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "localhost",
         .port = 443,
         .server_name = "localhost",
     };
 
-    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(coquic::http09::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
     EXPECT_EQ(g_last_socket_family, AF_INET6);
     EXPECT_EQ(g_freeaddrinfo_calls, 1);
 }
@@ -90,14 +90,14 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenAllResolvedAddrinfoEntriesAreInvalid)
         },
     };
 
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "localhost",
         .port = 443,
         .server_name = "localhost",
     };
 
-    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(coquic::http09::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
     EXPECT_EQ(g_last_getaddrinfo_family, AF_UNSPEC);
     EXPECT_EQ(g_last_socket_family, AF_UNSPEC);
     EXPECT_EQ(g_freeaddrinfo_calls, 1);
@@ -112,14 +112,14 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenAddrinfoFamilyIsUnsupported) {
         },
     };
 
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "localhost",
         .port = 443,
         .server_name = "localhost",
     };
 
-    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
+    EXPECT_EQ(coquic::http09::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
     EXPECT_EQ(g_freeaddrinfo_calls, 1);
 }
 
@@ -133,8 +133,8 @@ TEST(QuicHttp09RuntimeTest, ClientUsesRealIpv6SocketSetupBeforeInitialSend) {
         },
     };
 
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "",
         .server_name = "",
     };
@@ -145,7 +145,7 @@ TEST(QuicHttp09RuntimeTest, ClientUsesRealIpv6SocketSetupBeforeInitialSend) {
          .relative_output_path = "a.txt"},
     };
 
-    EXPECT_EQ(coquic::quic::test::run_http09_client_connection_for_tests(client, requests, 1), 1);
+    EXPECT_EQ(coquic::http09::test::run_http09_client_connection_for_tests(client, requests, 1), 1);
     EXPECT_EQ(g_freeaddrinfo_calls, 1);
 }
 

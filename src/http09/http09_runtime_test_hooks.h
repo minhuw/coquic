@@ -12,10 +12,10 @@
 #include <vector>
 
 #include "src/io/io_backend_test_hooks.h"
-#include "src/quic/http09_runtime.h"
+#include "src/http09/http09_runtime.h"
 #include "src/quic/packet.h"
 
-namespace coquic::quic::test {
+namespace coquic::http09::test {
 
 struct RuntimeWaitStepForTests {
     bool has_input = false;
@@ -160,21 +160,21 @@ std::string format_connection_id_hex_for_tests(std::span<const std::byte> connec
 std::string format_connection_id_key_hex_for_tests(std::string_view connection_id_key);
 std::string connection_id_key_for_tests(std::span<const std::byte> connection_id);
 int client_receive_timeout_ms_for_tests(const Http09RuntimeConfig &config);
-http09::QuicHttp09ClientConfig make_http09_client_endpoint_config_for_tests(
-    const Http09RuntimeConfig &config, const std::vector<http09::QuicHttp09Request> &requests,
-    bool attempt_zero_rtt_requests, const QuicCoreResult &start_result);
-QuicCoreConfig
+QuicHttp09ClientConfig make_http09_client_endpoint_config_for_tests(
+    const Http09RuntimeConfig &config, const std::vector<QuicHttp09Request> &requests,
+    bool attempt_zero_rtt_requests, const quic::QuicCoreResult &start_result);
+quic::QuicCoreConfig
 make_http09_server_core_config_with_identity_for_tests(const Http09RuntimeConfig &config,
-                                                       TlsIdentity identity);
+                                                       quic::TlsIdentity identity);
 int run_http09_client_connection_for_tests(const Http09RuntimeConfig &config,
-                                           const std::vector<http09::QuicHttp09Request> &requests,
+                                           const std::vector<QuicHttp09Request> &requests,
                                            std::uint64_t connection_index);
 std::optional<RuntimeWaitStepForTests>
 wait_for_socket_or_deadline_for_tests(int socket_fd, int idle_timeout_ms,
                                       std::string_view role_name,
-                                      const std::optional<QuicCoreTimePoint> &next_wakeup);
-std::optional<QuicCoreTimePoint>
-earliest_runtime_wakeup_for_tests(std::span<const std::optional<QuicCoreTimePoint>> wakeups);
+                                      const std::optional<quic::QuicCoreTimePoint> &next_wakeup);
+std::optional<quic::QuicCoreTimePoint>
+earliest_runtime_wakeup_for_tests(std::span<const std::optional<quic::QuicCoreTimePoint>> wakeups);
 DriveEndpointUntilBlockedResultForTests
 drive_endpoint_until_blocked_case_for_tests(DriveEndpointUntilBlockedCaseForTests case_id);
 ClientConnectionLoopResultForTests
@@ -216,19 +216,19 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests();
 bool runtime_connectionmigration_failure_paths_for_tests();
 bool runtime_restart_failure_paths_for_tests();
 ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_datagram_for_tests(
-    QuicCore &core, std::span<const RuntimePathSeedForTests> seeded_paths,
+    quic::QuicCore &core, std::span<const RuntimePathSeedForTests> seeded_paths,
     std::span<const std::byte> local_connection_id,
     std::span<const std::byte> initial_destination_connection_id, int inbound_socket_fd,
     const sockaddr_storage &inbound_peer, socklen_t inbound_peer_len, std::vector<std::byte> bytes,
-    QuicCoreTimePoint input_time);
+    quic::QuicCoreTimePoint input_time);
 ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_datagram_for_tests(
-    QuicCore &core, int established_socket_fd, const sockaddr_storage &established_peer,
+    quic::QuicCore &core, int established_socket_fd, const sockaddr_storage &established_peer,
     socklen_t established_peer_len, std::span<const std::byte> local_connection_id,
     std::span<const std::byte> initial_destination_connection_id, int inbound_socket_fd,
     const sockaddr_storage &inbound_peer, socklen_t inbound_peer_len, std::vector<std::byte> bytes,
-    QuicCoreTimePoint input_time);
+    quic::QuicCoreTimePoint input_time);
 ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests case_id);
 ServerLoopResultForTests
 run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id);
 
-} // namespace coquic::quic::test
+} // namespace coquic::http09::test

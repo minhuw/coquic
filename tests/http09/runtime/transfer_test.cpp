@@ -3,7 +3,7 @@
 #include "tests/support/http09/runtime_test_fixtures.h"
 
 namespace {
-using namespace coquic::quic::test_support;
+using namespace coquic::http09::test_support;
 
 TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
     coquic::quic::test::ScopedTempDir document_root;
@@ -13,8 +13,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -22,8 +22,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -34,7 +34,7 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-over-udp");
 }
@@ -47,8 +47,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileAfterConnectionMigr
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
@@ -56,8 +56,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileAfterConnectionMigr
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
@@ -68,7 +68,7 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileAfterConnectionMigr
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-after-migration");
 }
@@ -80,8 +80,8 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferLargeFile) {
     const std::string large_body(kLargeBodyBytes, 'L');
     document_root.write_file("large.bin", large_body);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -89,8 +89,8 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferLargeFile) {
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = 443,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -131,8 +131,8 @@ TEST(QuicHttp09RuntimeTest,
     const std::string large_body(kLargeBodyBytes, 'L');
     document_root.write_file("large.bin", large_body);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -140,8 +140,8 @@ TEST(QuicHttp09RuntimeTest,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = 443,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -183,8 +183,8 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferMediumFile) {
     const std::string body(kMediumBodyBytes, 'M');
     document_root.write_file("medium.bin", body);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -192,8 +192,8 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferMediumFile) {
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = 443,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -244,8 +244,8 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferManyFilesAcrossRefres
         file_names.push_back(file_name);
     }
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -253,8 +253,8 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferManyFilesAcrossRefres
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = 443,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -300,8 +300,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferLargeFileOverUdpSockets) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -309,8 +309,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferLargeFileOverUdpSockets) {
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -321,7 +321,7 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferLargeFileOverUdpSockets) {
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "large.bin"), large_body);
 }
@@ -335,8 +335,8 @@ TEST(QuicHttp09RuntimeTest,
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -344,8 +344,8 @@ TEST(QuicHttp09RuntimeTest,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -365,7 +365,7 @@ TEST(QuicHttp09RuntimeTest,
                 .sendto_fn = &drop_nth_small_ack_datagram_after_request,
             },
         };
-        EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+        EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     }
 
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "ack-retry-body");
@@ -381,8 +381,8 @@ TEST(QuicHttp09RuntimeTest, TransferCaseUsesSingleConnectionAndMultipleStreams) 
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -390,8 +390,8 @@ TEST(QuicHttp09RuntimeTest, TransferCaseUsesSingleConnectionAndMultipleStreams) 
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -402,7 +402,7 @@ TEST(QuicHttp09RuntimeTest, TransferCaseUsesSingleConnectionAndMultipleStreams) 
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "alpha.txt"), "alpha-bytes");
     EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-bytes");
@@ -417,8 +417,8 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseUsesSeparateConnectionPerRequest) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
@@ -426,8 +426,8 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseUsesSeparateConnectionPerRequest) {
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
@@ -438,7 +438,7 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseUsesSeparateConnectionPerRequest) {
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "alpha.txt"), "alpha-bytes");
     EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-bytes");
@@ -454,8 +454,8 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingC
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
@@ -463,8 +463,8 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingC
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
@@ -476,7 +476,7 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingC
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "alpha.txt"), "alpha-bytes");
     EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-bytes");
@@ -491,7 +491,7 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionTestc
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    coquic::quic::Http09RuntimeConfig server;
+    coquic::http09::Http09RuntimeConfig server;
     {
         const char *argv[] = {"coquic"};
         ScopedEnvVar role("ROLE", "server");
@@ -502,12 +502,12 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionTestc
         ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", "tests/fixtures/quic-server-cert.pem");
         ScopedEnvVar private_key("PRIVATE_KEY_PATH", "tests/fixtures/quic-server-key.pem");
 
-        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         server = optional_value_or_terminate(parsed);
     }
 
-    coquic::quic::Http09RuntimeConfig client;
+    coquic::http09::Http09RuntimeConfig client;
     {
         const char *argv[] = {"coquic"};
         ScopedEnvVar role("ROLE", "client");
@@ -517,7 +517,7 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionTestc
         ScopedEnvVar download_root_env("DOWNLOAD_ROOT", download_root.path().string());
         ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
 
-        const auto parsed = coquic::quic::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         client = optional_value_or_terminate(parsed);
     }
@@ -525,13 +525,13 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionTestc
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello-after-resumption");
 }
 
 TEST(QuicHttp09RuntimeTest, ClientMulticonnectStopsWhenAConnectionFails) {
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "invalid-host-name",
         .port = 443,
         .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
@@ -539,7 +539,7 @@ TEST(QuicHttp09RuntimeTest, ClientMulticonnectStopsWhenAConnectionFails) {
         .requests_env = "https://localhost/a.txt https://localhost/b.txt",
     };
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 1);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerTransferLargeFileOverUdpSockets) {
@@ -552,8 +552,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerTransferLargeFileOverUdpSocket
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -561,8 +561,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerTransferLargeFileOverUdpSocket
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::transfer,
@@ -573,7 +573,7 @@ TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerTransferLargeFileOverUdpSocket
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "runtime-large.bin"), large_body);
 }
@@ -589,8 +589,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerMulticonnectThreeFilesOverUdpS
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::server,
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
@@ -598,8 +598,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerMulticonnectThreeFilesOverUdpS
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto client = coquic::quic::Http09RuntimeConfig{
-        .mode = coquic::quic::Http09RuntimeMode::client,
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
         .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
@@ -611,7 +611,7 @@ TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerMulticonnectThreeFilesOverUdpS
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    EXPECT_EQ(coquic::quic::run_http09_runtime(client), 0);
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
     EXPECT_EQ(read_file_bytes(download_root.path() / "alpha.txt"), "alpha-runtime");
     EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-runtime");

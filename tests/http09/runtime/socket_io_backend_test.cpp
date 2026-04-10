@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "src/quic/io_backend_test_hooks.h"
-#include "src/quic/socket_io_backend.h"
+#include "src/io/io_backend_test_hooks.h"
+#include "src/io/socket_io_backend.h"
 #include "tests/support/core/connection_test_fixtures.h"
 
 namespace {
@@ -85,7 +85,7 @@ void reset_multi_socket_backend_test_trace() {
 }
 
 TEST(SocketIoBackendTest, PublicShellTypesCompileAndConstruct) {
-    using namespace coquic::quic;
+    using namespace coquic::io;
 
     QuicIoRemote remote{};
     remote.family = AF_INET;
@@ -103,7 +103,7 @@ TEST(SocketIoBackendTest, PublicShellTypesCompileAndConstruct) {
     EXPECT_TRUE(event.datagram.has_value());
     EXPECT_EQ(event.datagram->route_handle, 7u);
 
-    auto backend = coquic::quic::make_socket_io_backend(coquic::quic::SocketIoBackendConfig{
+    auto backend = coquic::io::make_socket_io_backend(coquic::io::SocketIoBackendConfig{
         .role_name = "client",
         .idle_timeout_ms = 5,
     });
@@ -118,19 +118,19 @@ TEST(SocketIoBackendTest, PublicShellTypesCompileAndConstruct) {
 
 TEST(SocketIoBackendTest, RouteHandlesStayStablePerPeerTuple) {
     EXPECT_TRUE(
-        coquic::quic::test::socket_io_backend_route_handles_are_stable_per_peer_tuple_for_tests());
+        coquic::io::test::socket_io_backend_route_handles_are_stable_per_peer_tuple_for_tests());
 }
 
 TEST(SocketIoBackendTest, SendUsesRouteHandleRouting) {
-    EXPECT_TRUE(coquic::quic::test::socket_io_backend_send_uses_route_handle_for_tests());
+    EXPECT_TRUE(coquic::io::test::socket_io_backend_send_uses_route_handle_for_tests());
 }
 
 TEST(SocketIoBackendTest, EnsureRouteOpensAdditionalSocketForIncompatibleFamily) {
-    using namespace coquic::quic;
+    using namespace coquic::io;
 
     reset_multi_socket_backend_test_trace();
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
-        coquic::quic::test::SocketIoBackendOpsOverride{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+        coquic::io::test::SocketIoBackendOpsOverride{
             .socket_fn = &record_socket_family_and_open,
             .sendto_fn = &record_sendto_socket_fd_for_backend_tests,
         },
@@ -186,11 +186,11 @@ TEST(SocketIoBackendTest, EnsureRouteOpensAdditionalSocketForIncompatibleFamily)
 }
 
 TEST(SocketIoBackendTest, WaitPollsAllActiveRouteSocketsAndReturnsSecondRouteDatagram) {
-    using namespace coquic::quic;
+    using namespace coquic::io;
 
     reset_multi_socket_backend_test_trace();
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
-        coquic::quic::test::SocketIoBackendOpsOverride{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+        coquic::io::test::SocketIoBackendOpsOverride{
             .socket_fn = &record_socket_family_and_open,
             .poll_fn = &record_poll_descriptor_count_and_second_readable,
             .recvmsg_fn = &recvmsg_for_backend_tests,
@@ -246,20 +246,20 @@ TEST(SocketIoBackendTest, WaitPollsAllActiveRouteSocketsAndReturnsSecondRouteDat
 
 TEST(SocketIoBackendTest, ConfiguresLinuxSocketsForReceivingEcnMetadata) {
     EXPECT_TRUE(
-        coquic::quic::test::socket_io_backend_configures_linux_ecn_socket_options_for_tests());
+        coquic::io::test::socket_io_backend_configures_linux_ecn_socket_options_for_tests());
 }
 
 TEST(SocketIoBackendTest, UsesSendmsgToApplyOutboundEcnMarkings) {
-    EXPECT_TRUE(coquic::quic::test::socket_io_backend_sendmsg_uses_outbound_ecn_for_tests());
+    EXPECT_TRUE(coquic::io::test::socket_io_backend_sendmsg_uses_outbound_ecn_for_tests());
 }
 
 TEST(SocketIoBackendTest, UsesIpTosForIpv4MappedIpv6OutboundEcnMarkings) {
-    EXPECT_TRUE(coquic::quic::test::
+    EXPECT_TRUE(coquic::io::test::
                     socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests());
 }
 
 TEST(SocketIoBackendTest, MapsRecvmsgEcnMetadataIntoEvents) {
-    EXPECT_TRUE(coquic::quic::test::socket_io_backend_recvmsg_maps_ecn_for_tests());
+    EXPECT_TRUE(coquic::io::test::socket_io_backend_recvmsg_maps_ecn_for_tests());
 }
 
 } // namespace

@@ -10,9 +10,11 @@
 #include <string_view>
 #include <vector>
 
-#include "src/quic/io_backend.h"
+#include "src/io/io_backend.h"
 
-namespace coquic::quic::test {
+namespace coquic::io::test {
+
+using quic::QuicEcnCodepoint;
 
 struct SocketIoBackendOpsOverride {
     int (*socket_fn)(int, int, int) = nullptr;
@@ -97,4 +99,4 @@ bool socket_io_backend_sendmsg_uses_outbound_ecn_for_tests();
 bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests();
 bool socket_io_backend_recvmsg_maps_ecn_for_tests();
 
-} // namespace coquic::quic::test
+} // namespace coquic::io::test

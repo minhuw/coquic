@@ -2,9 +2,9 @@
 #include "src/quic/http09_runtime_test_hooks.h"
 #include "src/quic/buffer.h"
 #include "src/quic/core_test_hooks.h"
+#include "src/io/socket_io_backend.h"
 #include "src/quic/packet.h"
 #include "src/quic/packet_crypto.h"
-#include "src/quic/socket_io_backend.h"
 #include "src/quic/version.h"
 
 #include "src/coquic.h"
@@ -43,15 +43,33 @@
 
 namespace coquic::quic {
 
-namespace test {
-using Http09RuntimeOpsOverride = SocketIoBackendOpsOverride;
-using ScopedHttp09RuntimeOpsOverride = ScopedSocketIoBackendOpsOverride;
+using io::QuicIoBackend;
+using io::QuicIoEvent;
+using io::QuicIoRemote;
+using io::QuicIoRxDatagram;
+using io::QuicIoTxDatagram;
+using io::SocketIoBackend;
+using io::SocketIoBackendConfig;
 
-SocketIoBackendOpsOverride &socket_io_backend_ops_for_runtime_tests();
-void socket_io_backend_apply_ops_override_for_runtime_tests(
-    const SocketIoBackendOpsOverride &override_ops);
-bool socket_io_backend_has_legacy_sendto_override_for_runtime_tests();
-bool socket_io_backend_has_legacy_recvfrom_override_for_runtime_tests();
+namespace test {
+using Http09RuntimeOpsOverride = io::test::SocketIoBackendOpsOverride;
+using io::test::SocketIoBackendReceiveDatagramStatusForTests;
+using io::test::SocketIoBackendResolvedUdpAddressForTests;
+using ScopedHttp09RuntimeOpsOverride = io::test::ScopedSocketIoBackendOpsOverride;
+using io::test::socket_io_backend_apply_ops_override_for_runtime_tests;
+using io::test::socket_io_backend_configure_linux_ecn_socket_options_for_runtime_tests;
+using io::test::socket_io_backend_ecn_from_linux_traffic_class_for_runtime_tests;
+using io::test::socket_io_backend_has_legacy_recvfrom_override_for_runtime_tests;
+using io::test::socket_io_backend_has_legacy_sendto_override_for_runtime_tests;
+using io::test::socket_io_backend_is_ipv4_mapped_ipv6_address_for_runtime_tests;
+using io::test::socket_io_backend_linux_traffic_class_for_ecn_for_runtime_tests;
+using io::test::socket_io_backend_open_udp_socket_for_runtime_tests;
+using io::test::socket_io_backend_ops_for_runtime_tests;
+using io::test::socket_io_backend_preferred_udp_address_family_for_runtime_tests;
+using io::test::socket_io_backend_receive_datagram_for_runtime_tests;
+using io::test::socket_io_backend_recvmsg_ecn_from_control_for_runtime_tests;
+using io::test::socket_io_backend_resolve_udp_address_for_runtime_tests;
+using io::test::socket_io_backend_send_datagram_for_runtime_tests;
 } // namespace test
 
 namespace {
@@ -80,11 +98,11 @@ int client_receive_timeout_ms(const Http09RuntimeConfig &config) {
     return kDefaultClientReceiveTimeoutMs;
 }
 
-test::SocketIoBackendOpsOverride &runtime_ops() {
+test::Http09RuntimeOpsOverride &runtime_ops() {
     return test::socket_io_backend_ops_for_runtime_tests();
 }
 
-void apply_runtime_ops_override(const test::SocketIoBackendOpsOverride &override_ops) {
+void apply_runtime_ops_override(const test::Http09RuntimeOpsOverride &override_ops) {
     test::socket_io_backend_apply_ops_override_for_runtime_tests(override_ops);
 }
 

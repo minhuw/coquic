@@ -1,6 +1,6 @@
-#include "src/quic/socket_io_backend.h"
+#include "src/io/socket_io_backend.h"
 
-#include "src/quic/io_backend_test_hooks.h"
+#include "src/io/io_backend_test_hooks.h"
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -19,7 +19,12 @@
 #include <utility>
 #include <vector>
 
-namespace coquic::quic {
+namespace coquic::io {
+
+using quic::QuicCoreClock;
+using quic::QuicCoreTimePoint;
+using quic::QuicEcnCodepoint;
+using quic::QuicRouteHandle;
 
 namespace {
 
@@ -1120,4 +1125,4 @@ bool socket_io_backend_recvmsg_maps_ecn_for_tests() {
 
 } // namespace test
 
-} // namespace coquic::quic
+} // namespace coquic::io

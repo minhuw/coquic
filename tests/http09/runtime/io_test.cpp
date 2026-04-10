@@ -6,7 +6,7 @@ namespace {
 using namespace coquic::quic::test_support;
 
 TEST(QuicHttp09RuntimeTest, ClientConnectionFailsWhenSocketCreationFailsAfterRemoteDerivation) {
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.socket_fn = &fail_socket},
     };
 
@@ -27,7 +27,7 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionFailsWhenSocketCreationFailsAfterRem
 
 TEST(QuicHttp09RuntimeTest, ClientConnectionFreesResolverResultsWhenResolutionFails) {
     const ScopedFreeaddrinfoCounterReset freeaddrinfo_counter_reset;
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .getaddrinfo_fn = &fail_getaddrinfo_with_results,
             .freeaddrinfo_fn = &counting_freeaddrinfo,
@@ -45,7 +45,7 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionFreesResolverResultsWhenResolutionFa
 }
 
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenInitialSendFails) {
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.sendto_fn = &fail_sendto},
     };
 
@@ -60,7 +60,7 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenInitialSendFails) {
 }
 
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenPollErrors) {
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.poll_fn = &fail_poll},
     };
 
@@ -75,7 +75,7 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenPollErrors) {
 }
 
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenSocketBecomesUnreadable) {
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.poll_fn = &unreadable_poll},
     };
 
@@ -90,7 +90,7 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenSocketBecomesUnreadable) {
 }
 
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenRecvfromFailsAfterReadablePoll) {
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .poll_fn = &readable_poll,
             .recvfrom_fn = &fail_recvfrom,
@@ -112,7 +112,7 @@ TEST(QuicHttp09RuntimeTest, ServerContinuesAfterIdlePollTimeoutThenFailsOnPollEr
     ASSERT_NE(port, 0);
 
     const ScopedTimeoutThenErrorPollReset poll_reset;
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.poll_fn = &timeout_then_error_poll},
     };
 
@@ -142,7 +142,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperExtendsClientReceiveTimeoutForMulticonn
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperReturnsIdleTimeoutWithoutWakeup) {
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.poll_fn = &timeout_poll},
     };
 
@@ -157,7 +157,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperReturnsIdleTimeoutWithoutWakeup) {
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperReturnsTimerInputWhenWakeupIsDue) {
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.poll_fn = &timeout_poll},
     };
 
@@ -731,7 +731,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeTraceHooksCoverIdleTimeoutAndServerFailureBra
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperFailsWhenReadableSocketRecvfromFails) {
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .poll_fn = &readable_poll,
             .recvfrom_fn = &fail_recvfrom,
@@ -746,7 +746,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperFailsWhenReadableSocketRecvfromFail
 TEST(QuicHttp09RuntimeTest,
      RuntimeWaitHelperRetriesRecvfromAfterEintrThenTreatsEwouldblockAsNoStep) {
     g_eintr_then_ewouldblock_recvfrom_calls = 0;
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .poll_fn = &readable_poll,
             .recvfrom_fn = &eintr_then_ewouldblock_recvfrom,
@@ -761,7 +761,7 @@ TEST(QuicHttp09RuntimeTest,
 
 TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperRetriesPollAfterEintrBeforeIdleTimeout) {
     g_eintr_then_timeout_poll_calls = 0;
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .poll_fn = &eintr_then_timeout_poll,
         },

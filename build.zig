@@ -147,7 +147,7 @@ fn addProjectLibrary(
         "src/quic/qlog/session.cpp",
         "src/quic/qlog/sink.cpp",
         "src/quic/recovery.cpp",
-        "src/quic/socket_io_backend.cpp",
+        "src/io/socket_io_backend.cpp",
         "src/quic/protected_codec.cpp",
         "src/quic/streams.cpp",
         "src/quic/transport_parameters.cpp",

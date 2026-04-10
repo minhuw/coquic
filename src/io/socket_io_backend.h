@@ -6,9 +6,9 @@
 #include <string>
 #include <string_view>
 
-#include "src/quic/io_backend.h"
+#include "src/io/io_backend.h"
 
-namespace coquic::quic {
+namespace coquic::io {
 
 struct SocketIoBackendConfig {
     std::string role_name;
@@ -37,4 +37,4 @@ class SocketIoBackend final : public QuicIoBackend {
 
 std::unique_ptr<QuicIoBackend> make_socket_io_backend(SocketIoBackendConfig config);
 
-} // namespace coquic::quic
+} // namespace coquic::io

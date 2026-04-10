@@ -360,7 +360,7 @@ TEST(QuicHttp09RuntimeTest,
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     {
-        const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+        const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
             {
                 .sendto_fn = &drop_nth_small_ack_datagram_after_request,
             },

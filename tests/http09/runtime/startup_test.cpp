@@ -86,7 +86,7 @@ TEST(QuicHttp09RuntimeTest, ServerFailsWhenSocketCreationFails) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.socket_fn = &fail_socket},
     };
 
@@ -105,7 +105,7 @@ TEST(QuicHttp09RuntimeTest, ServerFailsWhenSocketBindFails) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.bind_fn = &fail_bind},
     };
 
@@ -134,7 +134,7 @@ TEST(QuicHttp09RuntimeTest, ServerFailsWhenConfiguredHostIsNotIpv4) {
 
 TEST(QuicHttp09RuntimeTest, ServerUsesIpv6SocketFamilyForIpv6Host) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.socket_fn = &record_socket_family_then_fail},
     };
 
@@ -151,7 +151,7 @@ TEST(QuicHttp09RuntimeTest, ServerUsesIpv6SocketFamilyForIpv6Host) {
 }
 
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenPeerResolutionFails) {
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {.getaddrinfo_fn = &fail_getaddrinfo},
     };
 
@@ -167,7 +167,7 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenPeerResolutionFails) {
 
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenResolutionSucceedsWithoutAnyAddrinfoResults) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .socket_fn = &record_socket_family_then_fail,
             .getaddrinfo_fn = &missing_results_getaddrinfo,
@@ -188,7 +188,7 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenResolutionSucceedsWithoutAnyAddrinfoR
 
 TEST(QuicHttp09RuntimeTest, ServerResolutionPassesNullNodeForWildcardHost) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .socket_fn = &record_socket_family_then_fail,
             .getaddrinfo_fn = &wildcard_ipv4_getaddrinfo,

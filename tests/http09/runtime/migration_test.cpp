@@ -10,7 +10,7 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerBindsPreferredSocketAndPoll
     ASSERT_NE(port, 0);
 
     const ScopedServerSocketPollTraceReset trace_reset;
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
         {
             .socket_fn = &record_server_socket_then_succeed,
             .bind_fn = &record_server_bind_then_succeed,
@@ -64,8 +64,8 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigUsesConcreteAddressFo
     ScopedEnvVar hostname("HOSTNAME", "interop-server-host");
     ScopedFreeaddrinfoCounterReset freeaddrinfo_counter;
     ScopedRuntimeAddressFamilyReset address_family_reset;
-    const coquic::quic::test::ScopedSocketIoBackendOpsOverride runtime_ops(
-        coquic::quic::test::SocketIoBackendOpsOverride{
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops(
+        coquic::io::test::SocketIoBackendOpsOverride{
             .getaddrinfo_fn = hostname_ipv6_getaddrinfo,
             .freeaddrinfo_fn = counting_freeaddrinfo,
         });

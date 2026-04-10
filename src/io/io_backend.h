@@ -9,7 +9,11 @@
 
 #include "src/quic/core.h"
 
-namespace coquic::quic {
+namespace coquic::io {
+
+using quic::QuicCoreTimePoint;
+using quic::QuicEcnCodepoint;
+using quic::QuicRouteHandle;
 
 struct QuicIoRemote {
     sockaddr_storage peer{};
@@ -51,4 +55,4 @@ class QuicIoBackend {
     virtual bool send(const QuicIoTxDatagram &datagram) = 0;
 };
 
-} // namespace coquic::quic
+} // namespace coquic::io

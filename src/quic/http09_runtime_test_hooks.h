@@ -11,8 +11,8 @@
 #include <string_view>
 #include <vector>
 
+#include "src/io/io_backend_test_hooks.h"
 #include "src/quic/http09_runtime.h"
-#include "src/quic/io_backend_test_hooks.h"
 #include "src/quic/packet.h"
 
 namespace coquic::quic::test {

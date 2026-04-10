@@ -31,6 +31,12 @@ TEST(QuicHttp09RuntimeTest, ClientLoopRequestsPreferredAddressRouteFromBackend) 
                     runtime_client_loop_requests_preferred_address_route_from_backend_for_tests());
 }
 
+TEST(QuicHttp09RuntimeTest, PreferredAddressRouteCreationFailureStopsMigrationRequest) {
+    EXPECT_TRUE(
+        coquic::quic::test::
+            runtime_backend_preferred_address_route_failure_stops_migration_request_for_tests());
+}
+
 TEST(QuicHttp09RuntimeTest, RegularTransferDoesNotQueuePreferredAddressMigration) {
     EXPECT_TRUE(
         coquic::quic::test::

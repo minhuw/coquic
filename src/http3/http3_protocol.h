@@ -7,10 +7,10 @@
 #include <variant>
 #include <vector>
 
-#include "src/quic/http3.h"
+#include "src/http3/http3.h"
 #include "src/quic/varint.h"
 
-namespace coquic::quic {
+namespace coquic::http3 {
 
 enum class Http3UniStreamType : std::uint8_t {
     control = 0x00,
@@ -79,11 +79,12 @@ struct Http3ConnectionState {
     std::optional<std::uint64_t> goaway_id;
 };
 
-CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame);
-CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> bytes);
-CodecResult<VarIntDecoded> parse_http3_uni_stream_type(std::span<const std::byte> bytes);
-CodecResult<std::vector<std::byte>> serialize_http3_uni_stream_prefix(Http3UniStreamType type);
-CodecResult<std::vector<std::byte>>
+quic::CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame);
+quic::CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> bytes);
+quic::CodecResult<quic::VarIntDecoded> parse_http3_uni_stream_type(std::span<const std::byte> bytes);
+quic::CodecResult<std::vector<std::byte>> serialize_http3_uni_stream_prefix(
+    Http3UniStreamType type);
+quic::CodecResult<std::vector<std::byte>>
 serialize_http3_control_stream(std::span<const Http3Setting> settings);
 
 Http3Result<bool> validate_http3_settings_frame(const Http3SettingsFrame &frame);
@@ -94,4 +95,4 @@ Http3Result<Http3Headers> validate_http3_trailers(std::span<const Http3Field> fi
 bool http3_frame_allowed_on_control_stream(const Http3Frame &frame);
 bool http3_frame_allowed_on_request_stream(const Http3Frame &frame);
 
-} // namespace coquic::quic
+} // namespace coquic::http3

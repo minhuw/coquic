@@ -10,7 +10,7 @@
 
 #include "src/quic/core.h"
 
-namespace coquic::quic {
+namespace coquic::http3 {
 
 inline constexpr std::string_view kHttp3ApplicationProtocol = "h3";
 
@@ -101,10 +101,10 @@ struct Http3ResponseHead {
 };
 
 struct Http3EndpointUpdate {
-    std::vector<QuicCoreInput> core_inputs;
+    std::vector<quic::QuicCoreInput> core_inputs;
     bool has_pending_work = false;
     bool terminal_success = false;
     bool terminal_failure = false;
 };
 
-} // namespace coquic::quic
+} // namespace coquic::http3

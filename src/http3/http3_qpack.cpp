@@ -1,4 +1,4 @@
-#include "src/quic/http3_qpack.h"
+#include "src/http3/http3_qpack.h"
 
 #include <array>
 #include <optional>
@@ -24,7 +24,8 @@ constexpr std::array<StaticTableEntry, 10> kStaticTable = {{
     {"server", "coquic"},
 }};
 
-std::optional<std::size_t> lookup_http3_qpack_static_entry(const coquic::quic::Http3Field &field) {
+std::optional<std::size_t>
+lookup_http3_qpack_static_entry(const coquic::http3::Http3Field &field) {
     for (std::size_t index = 0; index < kStaticTable.size(); ++index) {
         if (kStaticTable[index].name == field.name && kStaticTable[index].value == field.value) {
             return index;
@@ -39,7 +40,7 @@ void append_indexed_field(std::vector<std::byte> &out, std::size_t index) {
     out.insert(out.end(), encoded.value().begin(), encoded.value().end());
 }
 
-void append_literal_field(std::vector<std::byte> &out, const coquic::quic::Http3Field &field) {
+void append_literal_field(std::vector<std::byte> &out, const coquic::http3::Http3Field &field) {
     out.push_back(std::byte{0x20});
     out.push_back(static_cast<std::byte>(field.name.size()));
     out.insert(out.end(), reinterpret_cast<const std::byte *>(field.name.data()),
@@ -51,7 +52,11 @@ void append_literal_field(std::vector<std::byte> &out, const coquic::quic::Http3
 
 } // namespace
 
-namespace coquic::quic {
+namespace coquic::http3 {
+
+using quic::CodecErrorCode;
+using quic::CodecResult;
+using quic::decode_varint_bytes;
 
 CodecResult<std::vector<std::byte>> encode_http3_field_section(std::span<const Http3Field> fields) {
     std::vector<std::byte> out;
@@ -147,4 +152,4 @@ Http3Result<bool> validate_http3_qpack_decoder_stream(std::span<const std::byte>
     return Http3Result<bool>::success(true);
 }
 
-} // namespace coquic::quic
+} // namespace coquic::http3

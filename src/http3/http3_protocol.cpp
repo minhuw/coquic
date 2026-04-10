@@ -1,4 +1,4 @@
-#include "src/quic/http3_protocol.h"
+#include "src/http3/http3_protocol.h"
 
 #include <charconv>
 #include <cctype>
@@ -9,7 +9,16 @@
 
 #include "src/quic/buffer.h"
 
-namespace coquic::quic {
+namespace coquic::http3 {
+
+using quic::BufferReader;
+using quic::BufferWriter;
+using quic::CodecErrorCode;
+using quic::CodecResult;
+using quic::VarIntDecoded;
+using quic::decode_varint;
+using quic::decode_varint_bytes;
+using quic::encode_varint;
 
 namespace {
 
@@ -374,4 +383,4 @@ bool http3_frame_allowed_on_request_stream(const Http3Frame &frame) {
            std::holds_alternative<Http3HeadersFrame>(frame);
 }
 
-} // namespace coquic::quic
+} // namespace coquic::http3

@@ -18,7 +18,7 @@
 #include "src/quic/qlog/types.h"
 #include "tests/support/core/connection_test_fixtures.h"
 #include "tests/support/quic_test_utils.h"
-#include "src/quic/http3.h"
+#include "src/http3/http3.h"
 #include "src/quic/qlog/session.h"
 
 namespace coquic::quic {

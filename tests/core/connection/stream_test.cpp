@@ -18,7 +18,7 @@
 #include "src/quic/qlog/types.h"
 #include "tests/support/core/connection_test_fixtures.h"
 #include "tests/support/quic_test_utils.h"
-#include "src/quic/http3.h"
+#include "src/http3/http3.h"
 #include "src/quic/qlog/session.h"
 
 namespace coquic::quic {
@@ -509,7 +509,7 @@ TEST(QuicCoreTest, LocalApplicationCloseQueuesApplicationConnectionCloseFrame) {
     const auto closed = client.advance(
         coquic::quic::QuicCoreCloseConnection{
             .application_error_code =
-                static_cast<std::uint64_t>(coquic::quic::Http3ErrorCode::missing_settings),
+                static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::missing_settings),
             .reason_phrase = "http3 missing settings",
         },
         coquic::quic::test::test_time(1));
@@ -536,7 +536,7 @@ TEST(QuicCoreTest, LocalApplicationCloseQueuesApplicationConnectionCloseFrame) {
                 saw_application_close = true;
                 EXPECT_EQ(
                     close_frame->error_code,
-                    static_cast<std::uint64_t>(coquic::quic::Http3ErrorCode::missing_settings));
+                    static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::missing_settings));
                 EXPECT_EQ(coquic::quic::test::string_from_bytes(close_frame->reason.bytes),
                           "http3 missing settings");
             }

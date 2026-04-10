@@ -119,6 +119,7 @@ enum class ServerBackendLoopCaseForTests : std::uint8_t {
     timer_event_then_shutdown,
     rx_datagram_then_shutdown,
     pending_work_failure_then_shutdown,
+    live_pending_work_sends_response_then_shutdown,
 };
 
 struct ServerLoopResultForTests {
@@ -128,9 +129,12 @@ struct ServerLoopResultForTests {
     std::size_t wait_calls = 0;
     std::size_t process_expired_calls = 0;
     std::size_t pump_calls = 0;
+    std::size_t initial_send_calls = 0;
     std::size_t send_calls = 0;
     std::size_t initial_endpoints = 0;
+    std::size_t initial_pending_endpoints = 0;
     std::size_t remaining_endpoints = 0;
+    std::size_t remaining_pending_endpoints = 0;
 };
 
 struct ExistingServerSessionDatagramRouteResultForTests {

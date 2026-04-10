@@ -669,6 +669,19 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveServerBackendLoopCases) {
     EXPECT_EQ(pending_work_failure_then_shutdown.wait_calls, 1U);
     EXPECT_EQ(pending_work_failure_then_shutdown.send_calls, 0U);
     EXPECT_EQ(pending_work_failure_then_shutdown.remaining_endpoints, 0U);
+
+    const auto live_pending_work_sends_response_then_shutdown =
+        coquic::quic::test::run_server_backend_loop_case_for_tests(
+            coquic::quic::test::ServerBackendLoopCaseForTests::
+                live_pending_work_sends_response_then_shutdown);
+    EXPECT_EQ(live_pending_work_sends_response_then_shutdown.exit_code, 1);
+    EXPECT_EQ(live_pending_work_sends_response_then_shutdown.initial_endpoints, 1U);
+    EXPECT_EQ(live_pending_work_sends_response_then_shutdown.initial_pending_endpoints, 1U);
+    EXPECT_EQ(live_pending_work_sends_response_then_shutdown.wait_calls, 1U);
+    EXPECT_GT(live_pending_work_sends_response_then_shutdown.send_calls,
+              live_pending_work_sends_response_then_shutdown.initial_send_calls);
+    EXPECT_EQ(live_pending_work_sends_response_then_shutdown.remaining_endpoints, 1U);
+    EXPECT_EQ(live_pending_work_sends_response_then_shutdown.remaining_pending_endpoints, 0U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeServerRouteHandlesAreStablePerPeerTuple) {

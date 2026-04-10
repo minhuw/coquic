@@ -3931,6 +3931,155 @@ QuicCoreResult single_receive_result_for_runtime_tests(std::uint64_t stream_id,
     return result;
 }
 
+void append_result_for_runtime_tests(QuicCoreResult &combined, QuicCoreResult step) {
+    combined.effects.insert(combined.effects.end(), std::make_move_iterator(step.effects.begin()),
+                            std::make_move_iterator(step.effects.end()));
+    combined.next_wakeup = step.next_wakeup;
+    if (step.local_error.has_value()) {
+        combined.local_error = step.local_error;
+    }
+}
+
+bool result_has_send_datagrams_for_runtime_tests(const QuicCoreResult &result) {
+    return std::any_of(result.effects.begin(), result.effects.end(), [](const auto &effect) {
+        return std::holds_alternative<QuicCoreSendDatagram>(effect);
+    });
+}
+
+QuicCoreResult relay_send_datagrams_to_endpoint_core_for_tests(const QuicCoreResult &result,
+                                                               QuicCore &server,
+                                                               QuicRouteHandle route_handle,
+                                                               QuicCoreTimePoint now) {
+    QuicCoreResult combined;
+    for (const auto &effect : result.effects) {
+        const auto *send = std::get_if<QuicCoreSendDatagram>(&effect);
+        if (send == nullptr) {
+            continue;
+        }
+
+        append_result_for_runtime_tests(combined, server.advance_endpoint(
+                                                      QuicCoreInboundDatagram{
+                                                          .bytes = send->bytes,
+                                                          .route_handle = route_handle,
+                                                          .ecn = send->ecn,
+                                                      },
+                                                      now));
+        if (combined.local_error.has_value()) {
+            break;
+        }
+    }
+    return combined;
+}
+
+QuicCoreResult relay_send_datagrams_to_client_core_for_tests(const QuicCoreResult &result,
+                                                             QuicCore &client,
+                                                             QuicCoreTimePoint now) {
+    QuicCoreResult combined;
+    for (const auto &effect : result.effects) {
+        const auto *send = std::get_if<QuicCoreSendDatagram>(&effect);
+        if (send == nullptr) {
+            continue;
+        }
+
+        append_result_for_runtime_tests(combined, client.advance(
+                                                      QuicCoreInboundDatagram{
+                                                          .bytes = send->bytes,
+                                                          .route_handle = std::nullopt,
+                                                          .ecn = send->ecn,
+                                                      },
+                                                      now));
+        if (combined.local_error.has_value()) {
+            break;
+        }
+    }
+    return combined;
+}
+
+QuicCoreResult
+relay_backend_sent_datagrams_to_client_core_for_tests(std::span<const QuicIoTxDatagram> datagrams,
+                                                      QuicCore &client, QuicCoreTimePoint now) {
+    QuicCoreResult combined;
+    for (const auto &datagram : datagrams) {
+        append_result_for_runtime_tests(combined, client.advance(
+                                                      QuicCoreInboundDatagram{
+                                                          .bytes = datagram.bytes,
+                                                          .route_handle = std::nullopt,
+                                                          .ecn = datagram.ecn,
+                                                      },
+                                                      now));
+        if (combined.local_error.has_value()) {
+            break;
+        }
+    }
+    return combined;
+}
+
+std::optional<QuicConnectionHandle>
+accepted_connection_handle_from_result_for_runtime_tests(const QuicCoreResult &result) {
+    for (const auto connection : result_connection_handles(result)) {
+        if (result_has_connection_lifecycle(result, connection,
+                                            QuicCoreConnectionLifecycle::accepted)) {
+            return connection;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<QuicConnectionHandle>
+drive_live_server_endpoint_handshake_for_tests(QuicCore &client, QuicRouteHandle route_handle,
+                                               QuicCore &server, QuicCoreTimePoint &step_now) {
+    auto to_server = client.advance(QuicCoreStart{}, step_now);
+    QuicCoreResult to_client;
+    std::optional<QuicConnectionHandle> accepted_connection;
+
+    for (int i = 0; i < 32; ++i) {
+        if (result_has_send_datagrams_for_runtime_tests(to_server)) {
+            step_now += std::chrono::milliseconds(1);
+            to_client = relay_send_datagrams_to_endpoint_core_for_tests(to_server, server,
+                                                                        route_handle, step_now);
+            if (!accepted_connection.has_value()) {
+                accepted_connection =
+                    accepted_connection_handle_from_result_for_runtime_tests(to_client);
+            }
+            to_server.effects.clear();
+            continue;
+        }
+
+        if (result_has_send_datagrams_for_runtime_tests(to_client)) {
+            step_now += std::chrono::milliseconds(1);
+            to_server = relay_send_datagrams_to_client_core_for_tests(to_client, client, step_now);
+            to_client.effects.clear();
+            continue;
+        }
+
+        std::optional<QuicCoreTimePoint> next;
+        if (to_server.next_wakeup.has_value()) {
+            next = to_server.next_wakeup;
+        }
+        if (to_client.next_wakeup.has_value()) {
+            next = std::min(next.value_or(*to_client.next_wakeup), *to_client.next_wakeup);
+        }
+        if (!next.has_value()) {
+            break;
+        }
+
+        if (to_server.next_wakeup.has_value() && *to_server.next_wakeup == *next) {
+            to_server = client.advance(QuicCoreTimerExpired{}, *next);
+            continue;
+        }
+
+        if (to_client.next_wakeup.has_value() && *to_client.next_wakeup == *next) {
+            to_client = server.advance_endpoint(QuicCoreTimerExpired{}, *next);
+            continue;
+        }
+    }
+
+    if (!client.is_handshake_complete()) {
+        return std::nullopt;
+    }
+    return accepted_connection;
+}
+
 QuicCore make_failed_server_core_for_tests() {
     auto core = make_failing_server_core_for_tests();
     static_cast<void>(core.advance(
@@ -7008,6 +7157,8 @@ run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id) {
 
     auto backend = std::make_unique<ScriptedIoBackendForTests>();
     auto *backend_ptr = backend.get();
+    QuicCore core = make_failing_server_core_for_tests();
+    EndpointDriveState transport_state;
     ServerConnectionEndpointMap endpoints;
     switch (case_id) {
     case ServerBackendLoopCaseForTests::wait_failure:
@@ -7077,18 +7228,78 @@ run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id) {
         });
         break;
     }
+    case ServerBackendLoopCaseForTests::live_pending_work_sends_response_then_shutdown: {
+        document_root.write_file("large.bin",
+                                 std::string(static_cast<std::size_t>(20) * 1024U, 'x'));
+        core = QuicCore(make_runtime_server_endpoint_config(
+            config, TlsIdentity{
+                        .certificate_pem = read_text_file("tests/fixtures/quic-server-cert.pem"),
+                        .private_key_pem = read_text_file("tests/fixtures/quic-server-key.pem"),
+                    }));
+
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        QuicCoreTimePoint step_now = now();
+        constexpr QuicRouteHandle kLiveRouteHandle = 17;
+        const auto accepted_connection = drive_live_server_endpoint_handshake_for_tests(
+            client, kLiveRouteHandle, core, step_now);
+        if (!accepted_connection.has_value()) {
+            break;
+        }
+
+        step_now += std::chrono::milliseconds(1);
+        const auto request_result = client.advance(
+            QuicCoreSendStreamData{
+                .stream_id = 0,
+                .bytes = bytes_from_string_for_runtime_tests("GET /large.bin\r\n"),
+                .fin = true,
+            },
+            step_now);
+        step_now += std::chrono::milliseconds(1);
+        const auto request_on_server = relay_send_datagrams_to_endpoint_core_for_tests(
+            request_result, core, kLiveRouteHandle, step_now);
+        endpoints.emplace(*accepted_connection,
+                          ServerConnectionEndpointState{
+                              .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                  .document_root = document_root.path(),
+                              }),
+                          });
+        static_cast<void>(process_server_endpoint_core_result_with_backend(
+            core, transport_state, endpoints, config.document_root, request_on_server,
+            kLiveRouteHandle, *backend_ptr));
+        step_now += std::chrono::milliseconds(1);
+        const auto response_on_client = relay_backend_sent_datagrams_to_client_core_for_tests(
+            backend_ptr->sent_datagrams, client, step_now);
+        step_now += std::chrono::milliseconds(1);
+        static_cast<void>(relay_send_datagrams_to_endpoint_core_for_tests(
+            response_on_client, core, kLiveRouteHandle, step_now));
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::shutdown,
+            .now = now(),
+        });
+        break;
+    }
     }
 
-    QuicCore core = make_failing_server_core_for_tests();
-    EndpointDriveState transport_state;
+    const auto count_pending_endpoints = [&](const ServerConnectionEndpointMap &map) {
+        return static_cast<std::size_t>(
+            std::count_if(map.begin(), map.end(),
+                          [](const auto &entry) { return entry.second.has_pending_work; }));
+    };
     const auto initial_endpoints = endpoints.size();
+    const auto initial_pending_endpoints = count_pending_endpoints(endpoints);
+    const auto initial_send_calls = backend_ptr->sent_datagrams.size();
     return ServerLoopResultForTests{
         .exit_code =
             run_http09_server_backend_loop(config, core, transport_state, endpoints, *backend_ptr),
         .wait_calls = backend_ptr->wait_requests.size(),
+        .initial_send_calls = initial_send_calls,
         .send_calls = backend_ptr->sent_datagrams.size(),
         .initial_endpoints = initial_endpoints,
+        .initial_pending_endpoints = initial_pending_endpoints,
         .remaining_endpoints = endpoints.size(),
+        .remaining_pending_endpoints = count_pending_endpoints(endpoints),
     };
 }
 

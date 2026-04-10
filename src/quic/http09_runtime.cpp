@@ -6852,11 +6852,15 @@ ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_d
     };
     for (std::size_t index = 0; index < seeded_paths.size(); ++index) {
         const auto &seed = seeded_paths[index];
-        if (remember_runtime_path(session.state, seed.peer, seed.peer_len, seed.socket_fd) !=
-            static_cast<QuicPathId>(index + 1)) {
+        const auto seeded_path_id =
+            remember_runtime_path(session.state, seed.peer, seed.peer_len, seed.socket_fd);
+        if (seeded_path_id != static_cast<QuicPathId>(index + 1)) {
             core = std::move(session.core);
             return result;
         }
+        const auto seeded_route_handle =
+            remember_runtime_route_handle(session.state, seed.peer, seed.peer_len, seed.socket_fd);
+        session.core.seed_legacy_route_handle_path_for_tests(seeded_route_handle, seeded_path_id);
     }
 
     RuntimeWaitStep step{

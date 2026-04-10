@@ -4509,6 +4509,36 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
                 },
         });
         break;
+    case ClientConnectionBackendLoopCaseForTests::
+        rx_datagram_then_terminal_success_with_followup_input:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
+        });
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::rx_datagram,
+            .now = event_time,
+            .datagram =
+                QuicIoRxDatagram{
+                    .route_handle = QuicRouteHandle{17},
+                    .bytes = {std::byte{0x01}},
+                },
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::rx_datagram,
+            .now = event_time + std::chrono::milliseconds(1),
+            .datagram =
+                QuicIoRxDatagram{
+                    .route_handle = QuicRouteHandle{17},
+                    .bytes = {std::byte{0x02}},
+                },
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::idle_timeout,
+            .now = event_time + std::chrono::milliseconds(2),
+        });
+        break;
     case ClientConnectionBackendLoopCaseForTests::pending_work_terminal_failure:
         endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
             .has_pending_work = true,
@@ -4565,6 +4595,28 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
         backend_ptr->wait_results.push_back(QuicIoEvent{
             .kind = QuicIoEvent::Kind::timer_expired,
             .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::peer_input_then_outer_pump_terminal_success:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::rx_datagram,
+            .now = event_time,
+            .datagram =
+                QuicIoRxDatagram{
+                    .route_handle = QuicRouteHandle{17},
+                    .bytes = {std::byte{0x01}},
+                },
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::idle_timeout,
+            .now = event_time + std::chrono::milliseconds(1),
         });
         break;
     }

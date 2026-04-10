@@ -458,6 +458,15 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_FALSE(rx_datagram_then_terminal_success_after_elapsed_drain_window.terminal_failure);
     EXPECT_EQ(rx_datagram_then_terminal_success_after_elapsed_drain_window.wait_calls, 1U);
 
+    const auto rx_datagram_then_terminal_success_with_followup_input =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                rx_datagram_then_terminal_success_with_followup_input);
+    EXPECT_EQ(rx_datagram_then_terminal_success_with_followup_input.exit_code, 0);
+    EXPECT_TRUE(rx_datagram_then_terminal_success_with_followup_input.terminal_success);
+    EXPECT_FALSE(rx_datagram_then_terminal_success_with_followup_input.terminal_failure);
+    EXPECT_EQ(rx_datagram_then_terminal_success_with_followup_input.wait_calls, 3U);
+
     const auto pending_work_terminal_failure =
         coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
             coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
@@ -502,6 +511,15 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_TRUE(outer_pump_terminal_success.terminal_success);
     EXPECT_FALSE(outer_pump_terminal_success.terminal_failure);
     EXPECT_EQ(outer_pump_terminal_success.wait_calls, 1U);
+
+    const auto peer_input_then_outer_pump_terminal_success =
+        coquic::quic::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::quic::test::ClientConnectionBackendLoopCaseForTests::
+                peer_input_then_outer_pump_terminal_success);
+    EXPECT_EQ(peer_input_then_outer_pump_terminal_success.exit_code, 0);
+    EXPECT_TRUE(peer_input_then_outer_pump_terminal_success.terminal_success);
+    EXPECT_FALSE(peer_input_then_outer_pump_terminal_success.terminal_failure);
+    EXPECT_EQ(peer_input_then_outer_pump_terminal_success.wait_calls, 2U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCases) {

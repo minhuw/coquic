@@ -219,6 +219,7 @@ struct SharedUdpBackendCore::Impl {
     QuicUdpBackendConfig config;
     std::unique_ptr<QuicIoEngine> engine;
     std::vector<internal::SocketIoSocket> sockets;
+    std::vector<int> socket_fds;
     internal::SocketIoRouteState route_state;
 };
 
@@ -289,6 +290,7 @@ bool SharedUdpBackendCore::open_listener(std::string_view host, std::uint16_t po
         .fd = socket_fd,
         .family = bind_address.family,
     });
+    impl_->socket_fds.push_back(socket_fd);
     return true;
 }
 
@@ -317,6 +319,7 @@ std::optional<QuicRouteHandle> SharedUdpBackendCore::ensure_route(const QuicIoRe
             .fd = socket_fd,
             .family = route_family,
         });
+        impl_->socket_fds.push_back(socket_fd);
     }
 
     return internal::remember_route_handle(impl_->route_state, remote.peer, remote.peer_len,
@@ -329,13 +332,7 @@ SharedUdpBackendCore::wait(std::optional<QuicCoreTimePoint> next_wakeup) {
         return std::nullopt;
     }
 
-    std::vector<int> socket_fds;
-    socket_fds.reserve(impl_->sockets.size());
-    for (const auto &socket : impl_->sockets) {
-        socket_fds.push_back(socket.fd);
-    }
-
-    auto event = impl_->engine->wait(socket_fds, impl_->config.idle_timeout_ms, next_wakeup,
+    auto event = impl_->engine->wait(impl_->socket_fds, impl_->config.idle_timeout_ms, next_wakeup,
                                      impl_->config.role_name);
     if (!event.has_value()) {
         return std::nullopt;

@@ -29,4 +29,12 @@ TEST(IoUringBackendTest, FailsFastWhenRingInitFails) {
     EXPECT_EQ(backend, nullptr);
 }
 
+TEST(IoUringBackendTest, RearmsReceiveAfterCompletion) {
+    EXPECT_TRUE(coquic::io::test::io_uring_backend_rearms_receive_after_completion_for_tests());
+}
+
+TEST(IoUringBackendTest, CompletionErrorBecomesFailure) {
+    EXPECT_TRUE(coquic::io::test::io_uring_backend_completion_error_is_fatal_for_tests());
+}
+
 } // namespace

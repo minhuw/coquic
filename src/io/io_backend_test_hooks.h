@@ -13,6 +13,8 @@
 #include "src/io/io_backend.h"
 
 struct io_uring;
+struct io_uring_sqe;
+struct io_uring_cqe;
 
 namespace coquic::io::test {
 
@@ -47,6 +49,10 @@ class ScopedSocketIoBackendOpsOverride {
 struct IoUringBackendOpsOverride {
     int (*queue_init_fn)(unsigned, io_uring *, unsigned) = nullptr;
     void (*queue_exit_fn)(io_uring *) = nullptr;
+    io_uring_sqe *(*get_sqe_fn)(io_uring *) = nullptr;
+    int (*submit_fn)(io_uring *) = nullptr;
+    int (*wait_cqe_fn)(io_uring *, io_uring_cqe **) = nullptr;
+    void (*cqe_seen_fn)(io_uring *, io_uring_cqe *) = nullptr;
 };
 
 class ScopedIoUringBackendOpsOverride {
@@ -122,6 +128,12 @@ bool socket_io_backend_configures_linux_ecn_socket_options_for_tests();
 bool socket_io_backend_sendmsg_uses_outbound_ecn_for_tests();
 bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests();
 bool socket_io_backend_recvmsg_maps_ecn_for_tests();
+
+bool io_uring_backend_rearms_receive_after_completion_for_tests();
+bool io_uring_backend_completion_error_is_fatal_for_tests();
+bool io_uring_backend_route_handles_are_stable_per_peer_tuple_for_tests();
+bool io_uring_backend_send_uses_route_handle_for_tests();
+bool io_uring_backend_wait_returns_second_route_datagram_for_tests();
 
 bool io_backend_route_handles_are_stable_for_tests(QuicIoBackendKind kind);
 bool io_backend_send_uses_route_handle_for_tests(QuicIoBackendKind kind);

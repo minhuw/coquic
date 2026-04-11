@@ -360,7 +360,7 @@ bool io_backend_route_handles_are_stable_for_tests(QuicIoBackendKind kind) {
     case QuicIoBackendKind::socket:
         return socket_io_backend_route_handles_are_stable_per_peer_tuple_for_tests();
     case QuicIoBackendKind::io_uring:
-        return false;
+        return io_uring_backend_route_handles_are_stable_per_peer_tuple_for_tests();
     }
     return false;
 }
@@ -370,7 +370,7 @@ bool io_backend_send_uses_route_handle_for_tests(QuicIoBackendKind kind) {
     case QuicIoBackendKind::socket:
         return socket_io_backend_send_uses_route_handle_for_tests();
     case QuicIoBackendKind::io_uring:
-        return false;
+        return io_uring_backend_send_uses_route_handle_for_tests();
     }
     return false;
 }
@@ -380,7 +380,7 @@ bool io_backend_wait_returns_second_route_datagram_for_tests(QuicIoBackendKind k
     case QuicIoBackendKind::socket:
         return socket_io_backend_wait_returns_second_route_datagram_for_tests();
     case QuicIoBackendKind::io_uring:
-        return false;
+        return io_uring_backend_wait_returns_second_route_datagram_for_tests();
     }
     return false;
 }

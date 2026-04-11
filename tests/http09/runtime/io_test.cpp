@@ -629,6 +629,14 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
               1U);
     EXPECT_EQ(pending_endpoint_without_transport_progress_waits_instead_of_spinning.wait_calls, 1U);
     EXPECT_EQ(pending_endpoint_without_transport_progress_waits_instead_of_spinning.pump_calls, 2U);
+
+    const auto ready_datagram_preempts_repeated_due_timers =
+        coquic::http09::test::run_server_backend_scheduling_case_for_tests(
+            coquic::http09::test::ServerBackendSchedulingCaseForTests::
+                ready_datagram_preempts_repeated_due_timers);
+    EXPECT_EQ(ready_datagram_preempts_repeated_due_timers.exit_code, 1);
+    EXPECT_EQ(ready_datagram_preempts_repeated_due_timers.wait_calls, 1U);
+    EXPECT_EQ(ready_datagram_preempts_repeated_due_timers.process_datagram_calls, 1U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveServerBackendLoopCases) {

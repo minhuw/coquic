@@ -126,12 +126,17 @@ enum class ServerBackendLoopCaseForTests : std::uint8_t {
     live_pending_work_sends_response_then_shutdown,
 };
 
+enum class ServerBackendSchedulingCaseForTests : std::uint8_t {
+    ready_datagram_preempts_repeated_due_timers,
+};
+
 struct ServerLoopResultForTests {
     int exit_code = 0;
     std::size_t current_time_calls = 0;
     std::size_t receive_calls = 0;
     std::size_t wait_calls = 0;
     std::size_t process_expired_calls = 0;
+    std::size_t process_datagram_calls = 0;
     std::size_t pump_calls = 0;
     std::size_t initial_send_calls = 0;
     std::size_t send_calls = 0;
@@ -234,5 +239,7 @@ ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_d
 ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests case_id);
 ServerLoopResultForTests
 run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id);
+ServerLoopResultForTests
+run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests case_id);
 
 } // namespace coquic::http09::test

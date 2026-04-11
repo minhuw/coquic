@@ -3163,6 +3163,17 @@ struct ServerLoopDriver {
     std::function<bool()> has_failed = [] { return false; };
 };
 
+struct ServerBackendLoopDriver {
+    std::function<QuicCoreTimePoint()> current_time;
+    std::function<std::optional<QuicCoreTimePoint>()> next_wakeup;
+    std::function<bool(QuicCoreTimePoint)> process_expired_timer;
+    std::function<bool(bool &)> pump_endpoint_work;
+    std::function<bool()> has_pending_endpoint_work;
+    std::function<std::optional<QuicIoEvent>(const std::optional<QuicCoreTimePoint> &)> wait;
+    std::function<bool(QuicCoreTimePoint)> process_wait_timer;
+    std::function<bool(const QuicIoRxDatagram &, QuicCoreTimePoint)> process_datagram;
+};
+
 ServerLoopIo make_runtime_server_loop_io() {
     return ServerLoopIo{
         .current_time = [] { return now(); },
@@ -3286,53 +3297,58 @@ int run_http09_server_loop(const ServerSocketSet &sockets, const ServerLoopIo &i
     }
 }
 
-int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &core,
-                                   EndpointDriveState &transport_state,
-                                   ServerConnectionEndpointMap &endpoints, QuicIoBackend &backend) {
+int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
     bool server_failed = false;
-
-    const auto process_server_datagram = [&](const QuicIoRxDatagram &datagram,
-                                             QuicCoreTimePoint input_time) -> bool {
-        auto inbound = make_inbound_datagram_from_io_event(datagram);
-        auto result = core.advance_endpoint(std::move(inbound), input_time);
-        return process_server_endpoint_core_result_with_backend(
-            core, transport_state, endpoints, config.document_root, std::move(result),
-            datagram.route_handle, backend);
-    };
+    std::optional<QuicIoEvent> buffered_event;
 
     for (;;) {
         if (server_failed) {
             return 1;
         }
 
-        bool processed_timers = false;
-        const auto current = now();
-        const auto next_wakeup = core.next_wakeup();
-        if (next_wakeup.has_value() && next_wakeup.value() <= current) {
-            processed_timers = true;
-            if (!process_server_endpoint_core_result_with_backend(
-                    core, transport_state, endpoints, config.document_root,
-                    core.advance_endpoint(QuicCoreTimerExpired{}, current), std::nullopt,
-                    backend)) {
-                server_failed = true;
-                continue;
+        const auto current = driver.current_time();
+        const auto next_wakeup = driver.next_wakeup();
+        if (!buffered_event.has_value() && next_wakeup.has_value() &&
+            next_wakeup.value() <= current) {
+            const auto event = driver.wait(next_wakeup);
+            if (!event.has_value()) {
+                return 1;
             }
-        }
-        if (processed_timers) {
-            continue;
+            switch (event->kind) {
+            case QuicIoEvent::Kind::rx_datagram:
+                if (!event->datagram.has_value() ||
+                    !driver.process_datagram(*event->datagram, event->now)) {
+                    server_failed = true;
+                }
+                continue;
+            case QuicIoEvent::Kind::timer_expired:
+                if (!driver.process_wait_timer(event->now)) {
+                    server_failed = true;
+                }
+                continue;
+            case QuicIoEvent::Kind::shutdown:
+            case QuicIoEvent::Kind::idle_timeout:
+                buffered_event = event;
+                break;
+            }
         }
 
         bool made_progress = false;
-        if (!pump_shared_server_endpoint_work_with_backend(
-                core, transport_state, endpoints, config.document_root, backend, made_progress)) {
+        if (!driver.pump_endpoint_work(made_progress)) {
             server_failed = true;
             continue;
         }
-        if (made_progress && has_pending_shared_server_endpoint_work(endpoints)) {
+        if (made_progress && driver.has_pending_endpoint_work()) {
             continue;
         }
 
-        const auto event = backend.wait(core.next_wakeup());
+        std::optional<QuicIoEvent> event;
+        if (buffered_event.has_value()) {
+            event = buffered_event;
+            buffered_event.reset();
+        } else {
+            event = driver.wait(driver.next_wakeup());
+        }
         if (!event.has_value()) {
             return 1;
         }
@@ -3343,21 +3359,60 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
         case QuicIoEvent::Kind::shutdown:
             return 1;
         case QuicIoEvent::Kind::timer_expired:
-            if (!process_server_endpoint_core_result_with_backend(
-                    core, transport_state, endpoints, config.document_root,
-                    core.advance_endpoint(QuicCoreTimerExpired{}, event->now), std::nullopt,
-                    backend)) {
+            if (!driver.process_wait_timer(event->now)) {
                 server_failed = true;
             }
             continue;
         case QuicIoEvent::Kind::rx_datagram:
             if (!event->datagram.has_value() ||
-                !process_server_datagram(*event->datagram, event->now)) {
+                !driver.process_datagram(*event->datagram, event->now)) {
                 server_failed = true;
             }
             continue;
         }
     }
+}
+
+int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &core,
+                                   EndpointDriveState &transport_state,
+                                   ServerConnectionEndpointMap &endpoints, QuicIoBackend &backend) {
+    const auto process_server_datagram = [&](const QuicIoRxDatagram &datagram,
+                                             QuicCoreTimePoint input_time) -> bool {
+        auto inbound = make_inbound_datagram_from_io_event(datagram);
+        auto result = core.advance_endpoint(std::move(inbound), input_time);
+        return process_server_endpoint_core_result_with_backend(
+            core, transport_state, endpoints, config.document_root, std::move(result),
+            datagram.route_handle, backend);
+    };
+
+    return run_server_backend_loop_with_driver(ServerBackendLoopDriver{
+        .current_time = [] { return now(); },
+        .next_wakeup = [&] { return core.next_wakeup(); },
+        .process_expired_timer =
+            [&](QuicCoreTimePoint current) {
+                return process_server_endpoint_core_result_with_backend(
+                    core, transport_state, endpoints, config.document_root,
+                    core.advance_endpoint(QuicCoreTimerExpired{}, current), std::nullopt, backend);
+            },
+        .pump_endpoint_work =
+            [&](bool &made_progress) {
+                return pump_shared_server_endpoint_work_with_backend(
+                    core, transport_state, endpoints, config.document_root, backend, made_progress);
+            },
+        .has_pending_endpoint_work =
+            [&] { return has_pending_shared_server_endpoint_work(endpoints); },
+        .wait =
+            [&](const std::optional<QuicCoreTimePoint> &next_wakeup) {
+                return backend.wait(next_wakeup);
+            },
+        .process_wait_timer =
+            [&](QuicCoreTimePoint current) {
+                return process_server_endpoint_core_result_with_backend(
+                    core, transport_state, endpoints, config.document_root,
+                    core.advance_endpoint(QuicCoreTimerExpired{}, current), std::nullopt, backend);
+            },
+        .process_datagram = process_server_datagram,
+    });
 }
 
 int run_http09_server(const Http09RuntimeConfig &config) {
@@ -3760,6 +3815,17 @@ struct ScriptedServerLoopCaseForTests {
     bool process_datagram_result = true;
 };
 
+struct ScriptedServerBackendSchedulingCaseForTests {
+    std::vector<QuicCoreTimePoint> current_times;
+    std::vector<std::optional<QuicCoreTimePoint>> next_wakeup_results;
+    std::vector<bool> process_expired_timer_results;
+    std::vector<bool> pending_work_after_pump;
+    std::vector<bool> pump_made_progress;
+    std::vector<std::optional<QuicIoEvent>> wait_results;
+    bool process_timer_event_result = true;
+    bool process_datagram_result = true;
+};
+
 ScriptedServerLoopCaseForTests
 make_nonblocking_processed_timers_then_receive_error_case_for_tests() {
     return ScriptedServerLoopCaseForTests{
@@ -3915,6 +3981,47 @@ ServerLoopCaseFactoryForTests server_loop_case_factories_for_tests[] = {
     &make_outer_pump_repeats_pending_endpoint_progress_case_for_tests,
     &make_ready_datagram_preempts_next_pending_work_pump_case_for_tests,
     &make_pending_endpoint_without_transport_progress_waits_instead_of_spinning_case_for_tests,
+};
+
+ScriptedServerBackendSchedulingCaseForTests
+make_ready_datagram_preempts_repeated_due_timers_case_for_tests() {
+    const auto base_time = now();
+    return ScriptedServerBackendSchedulingCaseForTests{
+        .current_times =
+            {
+                base_time,
+                base_time,
+                base_time,
+                base_time,
+            },
+        .next_wakeup_results =
+            {
+                base_time,
+                base_time,
+                base_time,
+            },
+        .process_expired_timer_results = {true, true, false},
+        .wait_results =
+            {
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::rx_datagram,
+                    .now = base_time,
+                    .datagram =
+                        QuicIoRxDatagram{
+                            .route_handle = QuicRouteHandle{17},
+                            .bytes = {std::byte{0x01}},
+                        },
+                },
+            },
+        .process_datagram_result = false,
+    };
+}
+
+using ServerBackendSchedulingCaseFactoryForTests =
+    ScriptedServerBackendSchedulingCaseForTests (*)();
+
+ServerBackendSchedulingCaseFactoryForTests server_backend_scheduling_case_factories_for_tests[] = {
+    &make_ready_datagram_preempts_repeated_due_timers_case_for_tests,
 };
 
 std::vector<std::byte> bytes_from_string_for_runtime_tests(std::string_view text) {
@@ -7200,6 +7307,91 @@ ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests c
         .receive_calls = receive_calls,
         .wait_calls = wait_calls,
         .process_expired_calls = process_expired_calls,
+        .pump_calls = pump_calls,
+    };
+}
+
+ServerLoopResultForTests
+run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests case_id) {
+    auto script =
+        server_backend_scheduling_case_factories_for_tests[static_cast<std::size_t>(case_id)]();
+    std::size_t current_time_calls = 0;
+    std::size_t next_wakeup_calls = 0;
+    std::size_t wait_calls = 0;
+    std::size_t process_expired_calls = 0;
+    std::size_t process_datagram_calls = 0;
+    std::size_t pump_calls = 0;
+    bool endpoint_has_pending_work = false;
+
+    const auto driver = ServerBackendLoopDriver{
+        .current_time =
+            [&] {
+                const auto index =
+                    script.current_times.empty()
+                        ? std::size_t{0}
+                        : std::min(current_time_calls, script.current_times.size() - 1);
+                current_time_calls += 1;
+                return script.current_times.empty() ? now() : script.current_times[index];
+            },
+        .next_wakeup =
+            [&] {
+                if (script.next_wakeup_results.empty()) {
+                    return std::optional<QuicCoreTimePoint>{};
+                }
+                const auto index =
+                    std::min(next_wakeup_calls, script.next_wakeup_results.size() - 1);
+                next_wakeup_calls += 1;
+                return script.next_wakeup_results[index];
+            },
+        .process_expired_timer =
+            [&](QuicCoreTimePoint) {
+                if (script.process_expired_timer_results.empty()) {
+                    process_expired_calls += 1;
+                    return false;
+                }
+                const auto index = std::min(process_expired_calls,
+                                            script.process_expired_timer_results.size() - 1);
+                process_expired_calls += 1;
+                return static_cast<bool>(script.process_expired_timer_results[index]);
+            },
+        .pump_endpoint_work =
+            [&](bool &made_progress) {
+                endpoint_has_pending_work = pump_calls < script.pending_work_after_pump.size()
+                                                ? script.pending_work_after_pump[pump_calls]
+                                                : false;
+                made_progress = pump_calls < script.pump_made_progress.size()
+                                    ? script.pump_made_progress[pump_calls]
+                                    : endpoint_has_pending_work;
+                pump_calls += 1;
+                return true;
+            },
+        .has_pending_endpoint_work = [&] { return endpoint_has_pending_work; },
+        .wait =
+            [&](const std::optional<QuicCoreTimePoint> &) {
+                wait_calls += 1;
+                if (wait_calls > script.wait_results.size()) {
+                    return std::optional<QuicIoEvent>{};
+                }
+                return script.wait_results[wait_calls - 1];
+            },
+        .process_wait_timer =
+            [&](QuicCoreTimePoint) {
+                process_expired_calls += 1;
+                return script.process_timer_event_result;
+            },
+        .process_datagram =
+            [&](const QuicIoRxDatagram &, QuicCoreTimePoint) {
+                process_datagram_calls += 1;
+                return script.process_datagram_result;
+            },
+    };
+
+    return ServerLoopResultForTests{
+        .exit_code = run_server_backend_loop_with_driver(driver),
+        .current_time_calls = current_time_calls,
+        .wait_calls = wait_calls,
+        .process_expired_calls = process_expired_calls,
+        .process_datagram_calls = process_datagram_calls,
         .pump_calls = pump_calls,
     };
 }

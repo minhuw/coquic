@@ -160,6 +160,33 @@ TEST(QuicHttp3ProtocolTest, RejectsReservedHttp2SettingsAndDuplicateHostAuthorit
     EXPECT_EQ(request.error().detail, "mismatched :authority and host");
 }
 
+TEST(QuicHttp3ProtocolTest, RejectsRequestsWithEmptyAuthorityOrHostWhenPresent) {
+    const std::array empty_authority_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", ""},
+        coquic::http3::Http3Field{":path", "/"},
+        coquic::http3::Http3Field{"host", "example.test"},
+    };
+    const auto empty_authority =
+        coquic::http3::validate_http3_request_headers(empty_authority_fields);
+    ASSERT_FALSE(empty_authority.has_value());
+    EXPECT_EQ(empty_authority.error().code, coquic::http3::Http3ErrorCode::message_error);
+    EXPECT_EQ(empty_authority.error().detail, "empty :authority pseudo header");
+
+    const std::array empty_host_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/"},
+        coquic::http3::Http3Field{"host", ""},
+    };
+    const auto empty_host = coquic::http3::validate_http3_request_headers(empty_host_fields);
+    ASSERT_FALSE(empty_host.has_value());
+    EXPECT_EQ(empty_host.error().code, coquic::http3::Http3ErrorCode::message_error);
+    EXPECT_EQ(empty_host.error().detail, "empty host header");
+}
+
 TEST(QuicHttp3ProtocolTest, EncodesAndDecodesMaxPushIdAndValidatesServerGoawayIds) {
     using coquic::http3::Http3Frame;
     using coquic::http3::Http3MaxPushIdFrame;
@@ -178,6 +205,18 @@ TEST(QuicHttp3ProtocolTest, EncodesAndDecodesMaxPushIdAndValidatesServerGoawayId
         coquic::http3::validate_http3_goaway_id(coquic::http3::Http3ConnectionRole::client, 2);
     ASSERT_FALSE(invalid_goaway.has_value());
     EXPECT_EQ(invalid_goaway.error().code, coquic::http3::Http3ErrorCode::id_error);
+}
+
+TEST(QuicHttp3ProtocolTest, ControlStreamMaxPushIdAllowanceDependsOnReceiverRole) {
+    using coquic::http3::Http3ConnectionRole;
+    using coquic::http3::Http3Frame;
+    using coquic::http3::Http3MaxPushIdFrame;
+
+    const auto max_push_id = Http3Frame{Http3MaxPushIdFrame{.push_id = 0}};
+    EXPECT_TRUE(coquic::http3::http3_frame_allowed_on_control_stream(Http3ConnectionRole::server,
+                                                                     max_push_id));
+    EXPECT_FALSE(coquic::http3::http3_frame_allowed_on_control_stream(Http3ConnectionRole::client,
+                                                                      max_push_id));
 }
 
 TEST(QuicHttp3ProtocolTest, EncodesAndDecodesDataAndHeadersFrames) {
@@ -218,11 +257,12 @@ TEST(QuicHttp3ProtocolTest, EncodesAndDecodesDataAndHeadersFrames) {
     EXPECT_FALSE(
         coquic::http3::http3_frame_allowed_on_request_stream(Http3Frame{Http3SettingsFrame{}}));
 
-    EXPECT_TRUE(
-        coquic::http3::http3_frame_allowed_on_control_stream(Http3Frame{Http3SettingsFrame{}}));
     EXPECT_TRUE(coquic::http3::http3_frame_allowed_on_control_stream(
-        Http3Frame{Http3GoawayFrame{.id = 0}}));
+        coquic::http3::Http3ConnectionRole::client, Http3Frame{Http3SettingsFrame{}}));
+    EXPECT_TRUE(coquic::http3::http3_frame_allowed_on_control_stream(
+        coquic::http3::Http3ConnectionRole::client, Http3Frame{Http3GoawayFrame{.id = 0}}));
     EXPECT_FALSE(coquic::http3::http3_frame_allowed_on_control_stream(
+        coquic::http3::Http3ConnectionRole::client,
         Http3Frame{Http3HeadersFrame{.field_section = {}}}));
 }
 

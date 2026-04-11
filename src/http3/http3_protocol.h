@@ -102,7 +102,7 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
 Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const Http3Field> fields);
 Http3Result<Http3Headers> validate_http3_trailers(std::span<const Http3Field> fields);
 
-bool http3_frame_allowed_on_control_stream(const Http3Frame &frame);
+bool http3_frame_allowed_on_control_stream(Http3ConnectionRole role, const Http3Frame &frame);
 bool http3_frame_allowed_on_request_stream(const Http3Frame &frame);
 
 } // namespace coquic::http3

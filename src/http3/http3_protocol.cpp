@@ -288,6 +288,10 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
         if (!is_pseudo) {
             saw_regular_header = true;
             if (field.name == "host") {
+                if (field.value.empty()) {
+                    return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
+                                                           "empty host header");
+                }
                 host_header = field.value;
             }
             head.headers.push_back(field);
@@ -317,6 +321,10 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
                 return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                        "duplicate request pseudo header");
             }
+            if (field.value.empty()) {
+                return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
+                                                       "empty :authority pseudo header");
+            }
             saw_authority = true;
             head.authority = field.value;
             continue;
@@ -339,7 +347,7 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "missing required request pseudo header");
     }
-    if (!head.authority.empty() && host_header.has_value() && *host_header != head.authority) {
+    if (saw_authority && host_header.has_value() && *host_header != head.authority) {
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "mismatched :authority and host");
     }
@@ -422,10 +430,15 @@ Http3Result<Http3Headers> validate_http3_trailers(std::span<const Http3Field> fi
     return Http3Result<Http3Headers>::success(std::move(trailers));
 }
 
-bool http3_frame_allowed_on_control_stream(const Http3Frame &frame) {
-    return std::holds_alternative<Http3SettingsFrame>(frame) ||
-           std::holds_alternative<Http3GoawayFrame>(frame) ||
-           std::holds_alternative<Http3MaxPushIdFrame>(frame);
+bool http3_frame_allowed_on_control_stream(Http3ConnectionRole role, const Http3Frame &frame) {
+    if (std::holds_alternative<Http3SettingsFrame>(frame) ||
+        std::holds_alternative<Http3GoawayFrame>(frame)) {
+        return true;
+    }
+    if (std::holds_alternative<Http3MaxPushIdFrame>(frame)) {
+        return role == Http3ConnectionRole::server;
+    }
+    return false;
 }
 
 bool http3_frame_allowed_on_request_stream(const Http3Frame &frame) {

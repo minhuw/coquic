@@ -5,6 +5,22 @@
 namespace {
 using namespace coquic::http09::test_support;
 
+thread_local int g_io_uring_queue_init_calls = 0;
+thread_local int g_io_uring_queue_exit_calls = 0;
+
+int fail_io_uring_queue_init(unsigned, io_uring *, unsigned) {
+    return -EPERM;
+}
+
+int record_io_uring_queue_init(unsigned, io_uring *, unsigned) {
+    g_io_uring_queue_init_calls += 1;
+    return 0;
+}
+
+void record_io_uring_queue_exit(io_uring *) {
+    g_io_uring_queue_exit_calls += 1;
+}
+
 TEST(QuicHttp09RuntimeTest, ServerDoesNotExitAfterMalformedTraffic) {
     ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
 
@@ -165,6 +181,24 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenPeerResolutionFails) {
     EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
 }
 
+TEST(QuicHttp09RuntimeTest, ClientReportsInvalidHostWhenSocketBootstrapCannotResolveRemote) {
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+        {.getaddrinfo_fn = &fail_getaddrinfo},
+    };
+
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
+    const std::string stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_NE(stderr_output.find("io-client failed: invalid host address"), std::string::npos);
+}
+
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenResolutionSucceedsWithoutAnyAddrinfoResults) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
     const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
@@ -184,6 +218,72 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenResolutionSucceedsWithoutAnyAddrinfoR
     EXPECT_EQ(coquic::http09::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
     EXPECT_EQ(g_last_getaddrinfo_family, AF_UNSPEC);
     EXPECT_EQ(g_last_socket_family, AF_UNSPEC);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFailsFastWhenIoUringInitializationFails) {
+    const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+        coquic::io::test::IoUringBackendOpsOverride{
+            .queue_init_fn = &fail_io_uring_queue_init,
+            .queue_exit_fn = &record_io_uring_queue_exit,
+        },
+    };
+
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
+        .io_backend = coquic::io::QuicIoBackendKind::io_uring,
+        .host = "127.0.0.1",
+        .port = 443,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ServerFailsFastWhenIoUringInitializationFails) {
+    const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+        coquic::io::test::IoUringBackendOpsOverride{
+            .queue_init_fn = &fail_io_uring_queue_init,
+            .queue_exit_fn = &record_io_uring_queue_exit,
+        },
+    };
+
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
+        .io_backend = coquic::io::QuicIoBackendKind::io_uring,
+        .host = "127.0.0.1",
+        .port = 443,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    EXPECT_EQ(coquic::http09::run_http09_runtime(server), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeUsesIoUringBackendWhenSelected) {
+    g_io_uring_queue_init_calls = 0;
+    g_io_uring_queue_exit_calls = 0;
+
+    const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+        coquic::io::test::IoUringBackendOpsOverride{
+            .queue_init_fn = &record_io_uring_queue_init,
+            .queue_exit_fn = &record_io_uring_queue_exit,
+        },
+    };
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+        {.socket_fn = &fail_socket},
+    };
+
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
+        .io_backend = coquic::io::QuicIoBackendKind::io_uring,
+        .host = "127.0.0.1",
+        .port = 443,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
+    EXPECT_EQ(g_io_uring_queue_init_calls, 1);
+    EXPECT_EQ(g_io_uring_queue_exit_calls, 1);
 }
 
 TEST(QuicHttp09RuntimeTest, ServerResolutionPassesNullNodeForWildcardHost) {

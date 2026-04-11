@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "src/quic/core.h"
@@ -14,6 +15,16 @@ namespace coquic::io {
 using quic::QuicCoreTimePoint;
 using quic::QuicEcnCodepoint;
 using quic::QuicRouteHandle;
+
+enum class QuicIoBackendKind : std::uint8_t {
+    socket,
+    io_uring,
+};
+
+struct QuicUdpBackendConfig {
+    std::string role_name;
+    int idle_timeout_ms = 0;
+};
 
 struct QuicIoRemote {
     sockaddr_storage peer{};

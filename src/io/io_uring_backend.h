@@ -3,24 +3,23 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <string>
 #include <string_view>
 
 #include "src/io/io_backend.h"
 
 namespace coquic::io {
 
-using SocketIoBackendConfig = QuicUdpBackendConfig;
-
+class QuicIoEngine;
 class SharedUdpBackendCore;
 
-class SocketIoBackend final : public QuicIoBackend {
+class IoUringBackend final : public QuicIoBackend {
   public:
-    explicit SocketIoBackend(QuicUdpBackendConfig config);
-    ~SocketIoBackend() override;
+    ~IoUringBackend() override;
 
-    SocketIoBackend(const SocketIoBackend &) = delete;
-    SocketIoBackend &operator=(const SocketIoBackend &) = delete;
+    IoUringBackend(const IoUringBackend &) = delete;
+    IoUringBackend &operator=(const IoUringBackend &) = delete;
+
+    static std::unique_ptr<IoUringBackend> create(QuicUdpBackendConfig config);
 
     std::optional<QuicIoRemote> resolve_remote(std::string_view host, std::uint16_t port);
     bool open_listener(std::string_view host, std::uint16_t port);
@@ -30,9 +29,11 @@ class SocketIoBackend final : public QuicIoBackend {
     bool send(const QuicIoTxDatagram &datagram) override;
 
   private:
+    IoUringBackend(QuicUdpBackendConfig config, std::unique_ptr<QuicIoEngine> engine);
+
     std::unique_ptr<SharedUdpBackendCore> core_;
 };
 
-std::unique_ptr<QuicIoBackend> make_socket_io_backend(SocketIoBackendConfig config);
+std::unique_ptr<IoUringBackend> make_io_uring_backend(QuicUdpBackendConfig config);
 
 } // namespace coquic::io

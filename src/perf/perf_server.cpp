@@ -182,7 +182,8 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                                          });
         }
 
-        if (session.start->mode == QuicPerfMode::rr && received.fin) {
+        if ((session.start->mode == QuicPerfMode::rr || session.start->mode == QuicPerfMode::crr) &&
+            received.fin) {
             const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
             const auto send_result = core_.advance_endpoint(
                 quic::QuicCoreConnectionCommand{
@@ -200,7 +201,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                 return false;
             }
             session.bytes_sent += response_bytes;
-            if (session.start->requests.has_value() &&
+            if (session.start->mode == QuicPerfMode::rr && session.start->requests.has_value() &&
                 session.requests_completed >= *session.start->requests) {
                 return send_control(session, QuicPerfSessionComplete{
                                                  .bytes_sent = session.bytes_sent,

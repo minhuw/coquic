@@ -343,6 +343,7 @@ pub fn build(b: *std.Build) void {
         "tests/perf/server_test.cpp",
         "tests/perf/bulk_test.cpp",
         "tests/perf/rr_test.cpp",
+        "tests/perf/crr_test.cpp",
     };
 
     const exe = b.addExecutable(.{

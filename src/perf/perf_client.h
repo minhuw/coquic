@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "src/io/io_backend_factory.h"
@@ -33,6 +34,7 @@ class QuicPerfClient {
         quic::QuicRouteHandle route_handle = 0;
         bool session_ready = false;
         bool control_complete = false;
+        bool close_requested = false;
         std::vector<std::byte> control_bytes;
         std::unordered_map<std::uint64_t, OutstandingRequest> outstanding_requests;
         std::uint64_t next_stream_id = kQuicPerfFirstDataStreamId;
@@ -48,8 +50,9 @@ class QuicPerfClient {
     bool run_complete() const;
     void maybe_start_bulk_streams(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_issue_rr_requests(ConnectionState &connection, quic::QuicCoreTimePoint now);
+    bool maybe_issue_crr_request(ConnectionState &connection, quic::QuicCoreTimePoint now);
     quic::QuicCoreClientConnectionConfig make_client_open_config(std::uint64_t index) const;
-    void maybe_open_crr_connections(quic::QuicCoreTimePoint now);
+    bool maybe_open_crr_connections(quic::QuicCoreTimePoint now);
     bool flush_json_result() const;
 
     QuicPerfConfig config_;
@@ -57,7 +60,10 @@ class QuicPerfClient {
     std::unique_ptr<io::QuicIoBackend> backend_;
     quic::QuicRouteHandle primary_route_handle_ = 0;
     std::unordered_map<quic::QuicConnectionHandle, ConnectionState> connections_;
+    std::unordered_set<quic::QuicConnectionHandle> closing_connections_;
     std::size_t requests_started_ = 0;
+    std::size_t crr_requests_opened_ = 0;
+    std::uint64_t next_connection_index_ = 0;
     QuicPerfRunSummary summary_;
 };
 

@@ -23,6 +23,24 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
+      # Remove this when GitHub runner gets docker engine >= v28.1.0.
+      - uses: docker/setup-docker-action@v5
+        with:
+          version: version=v28.3.0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.12
+
+      - name: Enable IPv6 support
+        run: sudo modprobe ip6table_filter
+
+      - name: Install Wireshark
+        run: |
+          sudo add-apt-repository ppa:wireshark-dev/nightly
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tshark
+
       - name: Show Docker Version
         run: |
           docker version
@@ -33,7 +51,7 @@ jobs:
           INTEROP_TESTCASES: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
           INTEROP_PEER_IMPL: quic-go
           INTEROP_PEER_IMAGE: martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424
-        run: nix develop -c bash interop/run-official.sh
+        run: bash interop/run-official.sh
 
       - name: Upload Interop Logs
         if: always()
@@ -57,6 +75,24 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
+      # Remove this when GitHub runner gets docker engine >= v28.1.0.
+      - uses: docker/setup-docker-action@v5
+        with:
+          version: version=v28.3.0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.12
+
+      - name: Enable IPv6 support
+        run: sudo modprobe ip6table_filter
+
+      - name: Install Wireshark
+        run: |
+          sudo add-apt-repository ppa:wireshark-dev/nightly
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tshark
+
       - name: Show Docker Version
         run: |
           docker version
@@ -67,7 +103,7 @@ jobs:
           INTEROP_TESTCASES: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,v2,amplificationlimit,rebind-port,rebind-addr,connectionmigration
           INTEROP_PEER_IMPL: picoquic
           INTEROP_PEER_IMAGE: privateoctopus/picoquic@sha256:7e4110e3260cd9d4f815ad63ca1d93e020e94d3a8d3cb6cb9cc5c59d97999b05
-        run: nix develop -c bash interop/run-official.sh
+        run: bash interop/run-official.sh
 
       - name: Upload Interop Logs
         if: always()
@@ -91,6 +127,24 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
+      # Remove this when GitHub runner gets docker engine >= v28.1.0.
+      - uses: docker/setup-docker-action@v5
+        with:
+          version: version=v28.3.0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.12
+
+      - name: Enable IPv6 support
+        run: sudo modprobe ip6table_filter
+
+      - name: Install Wireshark
+        run: |
+          sudo add-apt-repository ppa:wireshark-dev/nightly
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tshark
+
       - name: Show Docker Version
         run: |
           docker version
@@ -102,7 +156,7 @@ jobs:
           INTEROP_PEER_IMPL: coquic
           INTEROP_PEER_IMAGE: coquic-interop:quictls-musl
           INTEROP_DIRECTIONS: coquic-server
-        run: nix develop -c bash interop/run-official.sh
+        run: bash interop/run-official.sh
 
       - name: Upload Interop Logs
         if: always()

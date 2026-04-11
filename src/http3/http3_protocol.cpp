@@ -98,7 +98,7 @@ CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &fram
                 }
 
                 return serialize_http3_payload_frame(kHttp3FrameTypeSettings, writer.bytes());
-            } else {
+            } else if constexpr (std::is_same_v<T, Http3GoawayFrame>) {
                 const auto encoded_id = encode_varint(typed_frame.id);
                 if (!encoded_id.has_value()) {
                     return codec_failure<std::vector<std::byte>>(encoded_id.error().code,
@@ -106,6 +106,15 @@ CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &fram
                 }
 
                 return serialize_http3_payload_frame(kHttp3FrameTypeGoaway, encoded_id.value());
+            } else {
+                const auto encoded_push_id = encode_varint(typed_frame.push_id);
+                if (!encoded_push_id.has_value()) {
+                    return codec_failure<std::vector<std::byte>>(encoded_push_id.error().code,
+                                                                 encoded_push_id.error().offset);
+                }
+
+                return serialize_http3_payload_frame(kHttp3FrameTypeMaxPushId,
+                                                     encoded_push_id.value());
             }
         },
         frame);
@@ -175,6 +184,19 @@ CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> byte
         frame = Http3GoawayFrame{
             .id = id.value(),
         };
+    } else if (frame_type.value() == kHttp3FrameTypeMaxPushId) {
+        BufferReader payload_reader(payload);
+        const auto push_id = read_varint(payload_reader);
+        if (!push_id.has_value()) {
+            return codec_failure<Http3DecodedFrame>(push_id.error().code, push_id.error().offset);
+        }
+        if (payload_reader.remaining() != 0) {
+            return codec_failure<Http3DecodedFrame>(CodecErrorCode::http3_parse_error,
+                                                    payload_reader.offset());
+        }
+        frame = Http3MaxPushIdFrame{
+            .push_id = push_id.value(),
+        };
     } else {
         return codec_failure<Http3DecodedFrame>(CodecErrorCode::http3_parse_error, reader.offset());
     }
@@ -210,11 +232,30 @@ serialize_http3_control_stream(std::span<const Http3Setting> settings) {
 }
 
 Http3Result<bool> validate_http3_settings_frame(const Http3SettingsFrame &frame) {
+    static const std::unordered_set<std::uint64_t> kReservedHttp2Settings = {
+        0x02,
+        0x03,
+        0x04,
+        0x05,
+    };
+
     std::unordered_set<std::uint64_t> ids;
     for (const auto &setting : frame.settings) {
         if (!ids.insert(setting.id).second) {
             return http3_failure<bool>(Http3ErrorCode::settings_error, "duplicate setting");
         }
+        if (kReservedHttp2Settings.contains(setting.id)) {
+            return http3_failure<bool>(Http3ErrorCode::settings_error,
+                                       "reserved setting identifier");
+        }
+    }
+
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool> validate_http3_goaway_id(Http3ConnectionRole role, std::uint64_t id) {
+    if (role == Http3ConnectionRole::client && ((id & 0x03u) != 0u)) {
+        return http3_failure<bool>(Http3ErrorCode::id_error, "invalid server goaway stream id");
     }
 
     return Http3Result<bool>::success(true);
@@ -222,6 +263,7 @@ Http3Result<bool> validate_http3_settings_frame(const Http3SettingsFrame &frame)
 
 Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Http3Field> fields) {
     Http3RequestHead head;
+    std::optional<std::string_view> host_header;
     bool saw_regular_header = false;
     bool saw_method = false;
     bool saw_scheme = false;
@@ -245,6 +287,9 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
 
         if (!is_pseudo) {
             saw_regular_header = true;
+            if (field.name == "host") {
+                host_header = field.value;
+            }
             head.headers.push_back(field);
             continue;
         }
@@ -293,6 +338,10 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
     if (head.method.empty() || head.scheme.empty() || head.path.empty()) {
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "missing required request pseudo header");
+    }
+    if (!head.authority.empty() && host_header.has_value() && *host_header != head.authority) {
+        return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
+                                               "mismatched :authority and host");
     }
 
     return Http3Result<Http3RequestHead>::success(std::move(head));
@@ -375,7 +424,8 @@ Http3Result<Http3Headers> validate_http3_trailers(std::span<const Http3Field> fi
 
 bool http3_frame_allowed_on_control_stream(const Http3Frame &frame) {
     return std::holds_alternative<Http3SettingsFrame>(frame) ||
-           std::holds_alternative<Http3GoawayFrame>(frame);
+           std::holds_alternative<Http3GoawayFrame>(frame) ||
+           std::holds_alternative<Http3MaxPushIdFrame>(frame);
 }
 
 bool http3_frame_allowed_on_request_stream(const Http3Frame &frame) {

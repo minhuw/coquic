@@ -21,8 +21,10 @@ enum class Http3UniStreamType : std::uint8_t {
 
 inline constexpr std::uint64_t kHttp3FrameTypeData = 0x00;
 inline constexpr std::uint64_t kHttp3FrameTypeHeaders = 0x01;
+inline constexpr std::uint64_t kHttp3FrameTypeCancelPush = 0x03;
 inline constexpr std::uint64_t kHttp3FrameTypeSettings = 0x04;
 inline constexpr std::uint64_t kHttp3FrameTypeGoaway = 0x07;
+inline constexpr std::uint64_t kHttp3FrameTypeMaxPushId = 0x0d;
 
 inline constexpr std::uint64_t kHttp3SettingsQpackMaxTableCapacity = 0x01;
 inline constexpr std::uint64_t kHttp3SettingsMaxFieldSectionSize = 0x06;
@@ -59,8 +61,14 @@ struct Http3GoawayFrame {
     bool operator==(const Http3GoawayFrame &) const = default;
 };
 
-using Http3Frame =
-    std::variant<Http3DataFrame, Http3HeadersFrame, Http3SettingsFrame, Http3GoawayFrame>;
+struct Http3MaxPushIdFrame {
+    std::uint64_t push_id = 0;
+
+    bool operator==(const Http3MaxPushIdFrame &) const = default;
+};
+
+using Http3Frame = std::variant<Http3DataFrame, Http3HeadersFrame, Http3SettingsFrame,
+                                Http3GoawayFrame, Http3MaxPushIdFrame>;
 
 struct Http3DecodedFrame {
     Http3Frame frame;
@@ -89,6 +97,7 @@ quic::CodecResult<std::vector<std::byte>>
 serialize_http3_control_stream(std::span<const Http3Setting> settings);
 
 Http3Result<bool> validate_http3_settings_frame(const Http3SettingsFrame &frame);
+Http3Result<bool> validate_http3_goaway_id(Http3ConnectionRole role, std::uint64_t id);
 Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Http3Field> fields);
 Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const Http3Field> fields);
 Http3Result<Http3Headers> validate_http3_trailers(std::span<const Http3Field> fields);

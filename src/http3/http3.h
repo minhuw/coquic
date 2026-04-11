@@ -14,6 +14,11 @@ namespace coquic::http3 {
 
 inline constexpr std::string_view kHttp3ApplicationProtocol = "h3";
 
+enum class Http3ConnectionRole : std::uint8_t {
+    client,
+    server,
+};
+
 enum class Http3ErrorCode : std::uint16_t {
     no_error = 0x0100,
     general_protocol_error = 0x0101,
@@ -98,6 +103,12 @@ struct Http3RequestHead {
 struct Http3ResponseHead {
     std::uint16_t status = 200;
     Http3Headers headers;
+};
+
+struct Http3SettingsSnapshot {
+    std::uint64_t qpack_max_table_capacity = 4096;
+    std::uint64_t qpack_blocked_streams = 16;
+    std::optional<std::uint64_t> max_field_section_size = 64 * 1024;
 };
 
 struct Http3EndpointUpdate {

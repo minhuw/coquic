@@ -136,6 +136,50 @@ TEST(QuicHttp3ProtocolTest, RejectsDuplicateSettingsAndBadPseudoHeaderOrdering) 
     EXPECT_EQ(empty_name_result.error().code, coquic::http3::Http3ErrorCode::message_error);
 }
 
+TEST(QuicHttp3ProtocolTest, RejectsReservedHttp2SettingsAndDuplicateHostAuthorityPairs) {
+    const auto reserved_settings =
+        coquic::http3::validate_http3_settings_frame(coquic::http3::Http3SettingsFrame{
+            .settings =
+                {
+                    {.id = 0x02, .value = 0},
+                },
+        });
+    ASSERT_FALSE(reserved_settings.has_value());
+    EXPECT_EQ(reserved_settings.error().code, coquic::http3::Http3ErrorCode::settings_error);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/"},
+        coquic::http3::Http3Field{"host", "other.test"},
+    };
+    const auto request = coquic::http3::validate_http3_request_headers(request_fields);
+    ASSERT_FALSE(request.has_value());
+    EXPECT_EQ(request.error().code, coquic::http3::Http3ErrorCode::message_error);
+    EXPECT_EQ(request.error().detail, "mismatched :authority and host");
+}
+
+TEST(QuicHttp3ProtocolTest, EncodesAndDecodesMaxPushIdAndValidatesServerGoawayIds) {
+    using coquic::http3::Http3Frame;
+    using coquic::http3::Http3MaxPushIdFrame;
+
+    const auto encoded =
+        coquic::http3::serialize_http3_frame(Http3Frame{Http3MaxPushIdFrame{.push_id = 0}});
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::http3::parse_http3_frame(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+    const auto *max_push = std::get_if<Http3MaxPushIdFrame>(&decoded.value().frame);
+    ASSERT_NE(max_push, nullptr);
+    EXPECT_EQ(max_push->push_id, 0u);
+
+    const auto invalid_goaway =
+        coquic::http3::validate_http3_goaway_id(coquic::http3::Http3ConnectionRole::client, 2);
+    ASSERT_FALSE(invalid_goaway.has_value());
+    EXPECT_EQ(invalid_goaway.error().code, coquic::http3::Http3ErrorCode::id_error);
+}
+
 TEST(QuicHttp3ProtocolTest, EncodesAndDecodesDataAndHeadersFrames) {
     using coquic::http3::Http3DataFrame;
     using coquic::http3::Http3Frame;

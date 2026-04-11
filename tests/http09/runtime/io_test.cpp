@@ -637,6 +637,24 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(ready_datagram_preempts_repeated_due_timers.exit_code, 1);
     EXPECT_EQ(ready_datagram_preempts_repeated_due_timers.wait_calls, 1U);
     EXPECT_EQ(ready_datagram_preempts_repeated_due_timers.process_datagram_calls, 1U);
+
+    const auto ready_datagram_preempts_repeated_pending_work_pumps =
+        coquic::http09::test::run_server_backend_scheduling_case_for_tests(
+            coquic::http09::test::ServerBackendSchedulingCaseForTests::
+                ready_datagram_preempts_repeated_pending_work_pumps);
+    EXPECT_EQ(ready_datagram_preempts_repeated_pending_work_pumps.exit_code, 1);
+    EXPECT_EQ(ready_datagram_preempts_repeated_pending_work_pumps.wait_calls, 1U);
+    EXPECT_EQ(ready_datagram_preempts_repeated_pending_work_pumps.process_datagram_calls, 1U);
+    EXPECT_EQ(ready_datagram_preempts_repeated_pending_work_pumps.pump_calls, 1U);
+
+    const auto pending_work_yields_to_wait_after_immediate_poll_miss =
+        coquic::http09::test::run_server_backend_scheduling_case_for_tests(
+            coquic::http09::test::ServerBackendSchedulingCaseForTests::
+                pending_work_yields_to_wait_after_immediate_poll_miss);
+    EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.exit_code, 1);
+    EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.wait_calls, 2U);
+    EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.process_datagram_calls, 1U);
+    EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.pump_calls, 1U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveServerBackendLoopCases) {

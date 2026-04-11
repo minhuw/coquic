@@ -128,6 +128,8 @@ enum class ServerBackendLoopCaseForTests : std::uint8_t {
 
 enum class ServerBackendSchedulingCaseForTests : std::uint8_t {
     ready_datagram_preempts_repeated_due_timers,
+    ready_datagram_preempts_repeated_pending_work_pumps,
+    pending_work_yields_to_wait_after_immediate_poll_miss,
 };
 
 struct ServerLoopResultForTests {

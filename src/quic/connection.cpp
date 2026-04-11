@@ -6076,15 +6076,16 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             return frames;
         };
         const auto take_stream_fragments =
-            [](auto &connection_flow, auto &streams, std::size_t max_bytes,
-               auto &last_stream_id) -> std::vector<StreamFrameSendFragment> {
+            [](auto &connection_flow, auto &streams, std::size_t max_bytes, auto &last_stream_id,
+               bool prefer_fresh_data = false) -> std::vector<StreamFrameSendFragment> {
             std::vector<StreamFrameSendFragment> fragments;
             auto remaining_bytes = max_bytes;
             auto remaining_connection_credit =
                 connection_flow.peer_max_data > connection_flow.highest_sent
                     ? connection_flow.peer_max_data - connection_flow.highest_sent
                     : 0;
-            auto loss_phase = true;
+            auto loss_phase = !prefer_fresh_data;
+            auto switched_phase = false;
             auto allow_zero_byte_round = true;
 
             for (;;) {
@@ -6103,17 +6104,19 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                         continue;
                     }
 
-                    const auto active = loss_phase ? stream.send_buffer.has_lost_data() ||
-                                                         stream_fin_sendable(stream)
-                                                   : stream.sendable_bytes() != 0;
+                    const auto fin_sendable = stream_fin_sendable(stream);
+                    const auto active = loss_phase
+                                            ? stream.send_buffer.has_lost_data() || fin_sendable
+                                            : (stream.sendable_bytes() != 0) || fin_sendable;
                     if (active) {
                         active_stream_ids.push_back(stream_id);
                     }
                 }
 
                 if (active_stream_ids.empty()) {
-                    if (loss_phase) {
-                        loss_phase = false;
+                    if (!switched_phase) {
+                        loss_phase = !loss_phase;
+                        switched_phase = true;
                         continue;
                     }
 
@@ -6137,6 +6140,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     auto stream_fragments = stream.take_send_fragments(StreamSendBudget{
                         .packet_bytes = std::min(remaining_bytes, packet_share),
                         .new_bytes = new_byte_share,
+                        .prefer_fresh_data = !loss_phase,
                     });
                     const auto new_bytes_sent =
                         stream.flow_control.highest_sent - highest_sent_before;
@@ -6414,6 +6418,28 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
             return false;
         };
+        const auto has_pending_fresh_application_stream_send = [&]() {
+            const auto connection_send_credit = saturating_subtract(
+                connection_flow_control_.peer_max_data, connection_flow_control_.highest_sent);
+            for (const auto &[stream_id, stream] : streams_) {
+                static_cast<void>(stream_id);
+                if (stream.reset_state != StreamControlFrameState::none) {
+                    continue;
+                }
+
+                if (stream_fin_sendable(stream)) {
+                    return true;
+                }
+                if ((connection_send_credit != 0) & (stream.sendable_bytes() != 0)) {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+        const bool prefer_fresh_application_stream_data =
+            (pending_application_probe != nullptr) & (remaining_pto_probe_datagrams_ == 1) &
+            has_pending_fresh_application_stream_send();
         const auto should_send_application_probe_first = [&]() {
             const auto validation_only_path_id = [&]() -> std::optional<QuicPathId> {
                 const auto response_path =
@@ -6470,7 +6496,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 // On the last datagram of a PTO burst, spend the remaining probe credit on
                 // fresh queued stream data instead of retransmitting the same stream fragment
                 // again.
-                if (remaining_pto_probe_datagrams_ == 1) {
+                if (prefer_fresh_application_stream_data) {
                     return false;
                 }
             }
@@ -6943,7 +6969,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 (force_ack_only || send_application_close_only)
                     ? std::vector<StreamFrameSendFragment>{}
                     : take_stream_fragments(connection_flow_control_, streams_,
-                                            max_outbound_datagram_size, candidate_last_stream_id);
+                                            max_outbound_datagram_size, candidate_last_stream_id,
+                                            prefer_fresh_application_stream_data);
             auto selected_ack_frame =
                 send_application_close_only
                     ? std::optional<AckFrame>{}
@@ -7083,9 +7110,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     stop_sending_frames = take_stop_sending_frames(streams_);
                     stream_data_blocked_frames = take_stream_data_blocked_frames(streams_);
                     candidate_last_stream_id = last_application_send_stream_id_;
-                    stream_fragments =
-                        take_stream_fragments(connection_flow_control_, streams_,
-                                              max_outbound_datagram_size, candidate_last_stream_id);
+                    stream_fragments = take_stream_fragments(
+                        connection_flow_control_, streams_, max_outbound_datagram_size,
+                        candidate_last_stream_id, prefer_fresh_application_stream_data);
                     selected_ack_frame = std::nullopt;
                     candidate_datagram = serialize_application_candidate(
                         application_candidate_crypto_ranges, include_handshake_done,

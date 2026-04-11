@@ -94,6 +94,7 @@ struct StreamFrameSendFragment {
 struct StreamSendBudget {
     std::size_t packet_bytes = 0;
     std::uint64_t new_bytes = std::numeric_limits<std::uint64_t>::max();
+    bool prefer_fresh_data = false;
 };
 
 StreamIdInfo classify_stream_id(std::uint64_t stream_id, EndpointRole local_role);

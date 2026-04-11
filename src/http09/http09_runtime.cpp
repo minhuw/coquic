@@ -3339,7 +3339,37 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
             continue;
         }
         if (made_progress && driver.has_pending_endpoint_work()) {
-            continue;
+            if (!buffered_event.has_value()) {
+                const auto poll_current = driver.current_time();
+                const auto poll_next_wakeup = driver.next_wakeup();
+                // Probe for ready RX without blocking. A zero-timeout wait reports
+                // timer_expired even when no core timer was due, so only treat
+                // that event as real when the wakeup is already due.
+                const auto ready_event = driver.wait(poll_current);
+                if (!ready_event.has_value()) {
+                    return 1;
+                }
+                switch (ready_event->kind) {
+                case QuicIoEvent::Kind::rx_datagram:
+                    if (!ready_event->datagram.has_value() ||
+                        !driver.process_datagram(*ready_event->datagram, ready_event->now)) {
+                        server_failed = true;
+                    }
+                    continue;
+                case QuicIoEvent::Kind::timer_expired:
+                    if (poll_next_wakeup.has_value() && poll_next_wakeup.value() <= poll_current) {
+                        if (!driver.process_wait_timer(ready_event->now)) {
+                            server_failed = true;
+                        }
+                        continue;
+                    }
+                    break;
+                case QuicIoEvent::Kind::shutdown:
+                    return 1;
+                case QuicIoEvent::Kind::idle_timeout:
+                    break;
+                }
+            }
         }
 
         std::optional<QuicIoEvent> event;
@@ -4017,11 +4047,82 @@ make_ready_datagram_preempts_repeated_due_timers_case_for_tests() {
     };
 }
 
+ScriptedServerBackendSchedulingCaseForTests
+make_ready_datagram_preempts_repeated_pending_work_pumps_case_for_tests() {
+    const auto base_time = now();
+    return ScriptedServerBackendSchedulingCaseForTests{
+        .current_times =
+            {
+                base_time,
+                base_time,
+                base_time,
+                base_time,
+                base_time,
+            },
+        .pending_work_after_pump = {true, true, true, false},
+        .pump_made_progress = {true, true, true, true},
+        .wait_results =
+            {
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::rx_datagram,
+                    .now = base_time,
+                    .datagram =
+                        QuicIoRxDatagram{
+                            .route_handle = QuicRouteHandle{17},
+                            .bytes = {std::byte{0x01}},
+                        },
+                },
+            },
+        .process_datagram_result = false,
+    };
+}
+
+ScriptedServerBackendSchedulingCaseForTests
+make_pending_work_yields_to_wait_after_immediate_poll_miss_case_for_tests() {
+    const auto base_time = now();
+    return ScriptedServerBackendSchedulingCaseForTests{
+        .current_times =
+            {
+                base_time,
+                base_time,
+                base_time,
+                base_time,
+            },
+        .next_wakeup_results =
+            {
+                base_time + std::chrono::milliseconds(5),
+                base_time + std::chrono::milliseconds(5),
+                base_time + std::chrono::milliseconds(5),
+            },
+        .pending_work_after_pump = {true, false},
+        .pump_made_progress = {true, false},
+        .wait_results =
+            {
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::timer_expired,
+                    .now = base_time,
+                },
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::rx_datagram,
+                    .now = base_time + std::chrono::milliseconds(1),
+                    .datagram =
+                        QuicIoRxDatagram{
+                            .route_handle = QuicRouteHandle{17},
+                            .bytes = {std::byte{0x01}},
+                        },
+                },
+            },
+        .process_datagram_result = false,
+    };
+}
+
 using ServerBackendSchedulingCaseFactoryForTests =
     ScriptedServerBackendSchedulingCaseForTests (*)();
 
 ServerBackendSchedulingCaseFactoryForTests server_backend_scheduling_case_factories_for_tests[] = {
     &make_ready_datagram_preempts_repeated_due_timers_case_for_tests,
+    &make_ready_datagram_preempts_repeated_pending_work_pumps_case_for_tests,
+    &make_pending_work_yields_to_wait_after_immediate_poll_miss_case_for_tests,
 };
 
 std::vector<std::byte> bytes_from_string_for_runtime_tests(std::string_view text) {

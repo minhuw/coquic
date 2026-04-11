@@ -478,20 +478,31 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
         }
     };
 
-    for (auto &range : send_buffer.take_lost_ranges(remaining_bytes)) {
-        remaining_bytes -= range.bytes.size();
-        append_fragment(std::move(range), /*consumes_flow_control=*/false);
-    }
+    const auto append_lost_ranges = [&]() {
+        for (auto &range : send_buffer.take_lost_ranges(remaining_bytes)) {
+            remaining_bytes -= range.bytes.size();
+            append_fragment(std::move(range), /*consumes_flow_control=*/false);
+        }
+    };
+    const auto append_new_ranges = [&]() {
+        const auto capped_new_bytes =
+            std::min<std::uint64_t>(budget.new_bytes, static_cast<std::uint64_t>(remaining_bytes));
+        auto new_ranges = send_buffer.take_unsent_ranges(static_cast<std::size_t>(capped_new_bytes),
+                                                         flow_control.peer_max_stream_data);
+        for (auto &range : new_ranges) {
+            const auto range_end = saturating_add(range.offset, range.bytes.size());
+            flow_control.highest_sent = std::max(flow_control.highest_sent, range_end);
+            remaining_bytes -= range.bytes.size();
+            append_fragment(std::move(range), /*consumes_flow_control=*/true);
+        }
+    };
 
-    const auto capped_new_bytes =
-        std::min<std::uint64_t>(budget.new_bytes, static_cast<std::uint64_t>(remaining_bytes));
-    auto new_ranges = send_buffer.take_unsent_ranges(static_cast<std::size_t>(capped_new_bytes),
-                                                     flow_control.peer_max_stream_data);
-    for (auto &range : new_ranges) {
-        const auto range_end = saturating_add(range.offset, range.bytes.size());
-        flow_control.highest_sent = std::max(flow_control.highest_sent, range_end);
-        remaining_bytes -= range.bytes.size();
-        append_fragment(std::move(range), /*consumes_flow_control=*/true);
+    if (budget.prefer_fresh_data) {
+        append_new_ranges();
+        append_lost_ranges();
+    } else {
+        append_lost_ranges();
+        append_new_ranges();
     }
 
     bool fin_only_sendable = false;

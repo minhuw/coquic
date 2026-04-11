@@ -861,6 +861,114 @@ TEST(QuicCoreTest, ApplicationPtoBurstUsesFreshStreamDataAfterFirstProbe) {
     EXPECT_NE(second_probe_offsets.front(), optional_value_or_terminate(last_sent_offset));
 }
 
+TEST(QuicCoreTest,
+     ApplicationPtoBurstPrefersFreshStreamDataOverOlderLostRangesOnLastProbeDatagram) {
+    auto connection = make_connected_client_connection();
+    const auto payload =
+        std::vector<std::byte>(static_cast<std::size_t>(64) * 1024u, std::byte{0x52});
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    struct SentStreamPacket {
+        std::uint64_t packet_number;
+        std::uint64_t first_stream_offset;
+    };
+    std::vector<SentStreamPacket> sent_stream_packets;
+    std::uint64_t next_unsent_offset = 0;
+    while (true) {
+        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        if (datagram.empty()) {
+            break;
+        }
+
+        const auto packet_number =
+            std::prev(connection.application_space_.sent_packets.end())->first;
+        const auto &sent_packet = connection.application_space_.sent_packets.at(packet_number);
+        ASSERT_FALSE(sent_packet.stream_fragments.empty());
+        sent_stream_packets.push_back(SentStreamPacket{
+            .packet_number = packet_number,
+            .first_stream_offset = sent_packet.stream_fragments.front().offset,
+        });
+        for (const auto &fragment : sent_packet.stream_fragments) {
+            next_unsent_offset =
+                std::max(next_unsent_offset,
+                         fragment.offset + static_cast<std::uint64_t>(fragment.bytes.size()));
+        }
+    }
+
+    ASSERT_GE(sent_stream_packets.size(), 2u);
+    const auto lost_packet =
+        connection.application_space_.sent_packets.at(sent_stream_packets.front().packet_number);
+    const auto lost_offset = sent_stream_packets.front().first_stream_offset;
+    const auto probe_packet_number = sent_stream_packets.back().packet_number;
+    const auto probe_offset = sent_stream_packets.back().first_stream_offset;
+
+    connection.mark_lost_packet(connection.application_space_, lost_packet);
+
+    ASSERT_TRUE(connection.streams_.contains(0));
+    ASSERT_TRUE(connection.streams_.at(0).send_buffer.has_lost_data());
+    ASSERT_TRUE(connection.application_space_.sent_packets.contains(probe_packet_number));
+    ASSERT_TRUE(connection.has_pending_application_send());
+
+    const auto deadline = connection.pto_deadline();
+    ASSERT_TRUE(deadline.has_value());
+    const auto timeout = optional_value_or_terminate(deadline);
+    connection.on_timeout(timeout);
+
+    const auto &pending_probe_packet =
+        optional_ref_or_terminate(connection.application_space_.pending_probe_packet);
+    ASSERT_FALSE(pending_probe_packet.stream_fragments.empty());
+    EXPECT_EQ(pending_probe_packet.packet_number, probe_packet_number);
+    EXPECT_EQ(pending_probe_packet.stream_fragments.front().offset, probe_offset);
+
+    const auto first_probe_datagram = connection.drain_outbound_datagram(timeout);
+    ASSERT_FALSE(first_probe_datagram.empty());
+
+    const auto first_probe_packets = decode_sender_datagram(connection, first_probe_datagram);
+    ASSERT_EQ(first_probe_packets.size(), 1u);
+    const auto *first_application =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&first_probe_packets[0]);
+    ASSERT_NE(first_application, nullptr);
+
+    std::vector<std::uint64_t> first_probe_offsets;
+    for (const auto &frame : first_application->frames) {
+        const auto *stream = std::get_if<coquic::quic::StreamFrame>(&frame);
+        if (stream == nullptr) {
+            continue;
+        }
+
+        ASSERT_TRUE(stream->offset.has_value());
+        first_probe_offsets.push_back(optional_value_or_terminate(stream->offset));
+    }
+
+    ASSERT_FALSE(first_probe_offsets.empty());
+    EXPECT_EQ(first_probe_offsets.front(), probe_offset);
+
+    const auto second_probe_datagram = connection.drain_outbound_datagram(timeout);
+    ASSERT_FALSE(second_probe_datagram.empty());
+
+    const auto second_probe_packets = decode_sender_datagram(connection, second_probe_datagram);
+    ASSERT_EQ(second_probe_packets.size(), 1u);
+    const auto *second_application =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&second_probe_packets[0]);
+    ASSERT_NE(second_application, nullptr);
+
+    std::vector<std::uint64_t> second_probe_offsets;
+    for (const auto &frame : second_application->frames) {
+        const auto *stream = std::get_if<coquic::quic::StreamFrame>(&frame);
+        if (stream == nullptr) {
+            continue;
+        }
+
+        ASSERT_TRUE(stream->offset.has_value());
+        second_probe_offsets.push_back(optional_value_or_terminate(stream->offset));
+    }
+
+    ASSERT_FALSE(second_probe_offsets.empty());
+    EXPECT_EQ(second_probe_offsets.front(), next_unsent_offset);
+    EXPECT_NE(second_probe_offsets.front(), lost_offset);
+    EXPECT_NE(second_probe_offsets.front(), probe_offset);
+}
+
 TEST(QuicCoreTest, ApplicationPtoPrefersPendingStreamDataOverControlOnlyProbe) {
     auto connection = make_connected_server_connection();
     connection.handshake_confirmed_ = false;

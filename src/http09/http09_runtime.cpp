@@ -1,8 +1,8 @@
 #include "src/http09/http09_runtime.h"
 #include "src/http09/http09_runtime_test_hooks.h"
+#include "src/io/io_backend_factory.h"
 #include "src/quic/buffer.h"
 #include "src/quic/core_test_hooks.h"
-#include "src/io/socket_io_backend.h"
 #include "src/quic/packet.h"
 #include "src/quic/packet_crypto.h"
 #include "src/quic/version.h"
@@ -51,8 +51,6 @@ using io::QuicIoEvent;
 using io::QuicIoRemote;
 using io::QuicIoRxDatagram;
 using io::QuicIoTxDatagram;
-using io::SocketIoBackend;
-using io::SocketIoBackendConfig;
 
 namespace test {
 using Http09RuntimeOpsOverride = io::test::SocketIoBackendOpsOverride;
@@ -2484,29 +2482,24 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
         };
     }
 
-    auto socket_backend = std::make_unique<SocketIoBackend>(SocketIoBackendConfig{
-        .role_name = "client",
-        .idle_timeout_ms = client_receive_timeout_ms(config),
-    });
-    const auto remote_address = socket_backend->resolve_remote(remote->host, remote->port);
-    if (!remote_address.has_value()) {
-        std::cerr << "http09-client failed: invalid host address\n";
-        return ClientConnectionRunResult{
-            .exit_code = 1,
-        };
-    }
-
-    const auto primary_route_handle = socket_backend->ensure_route(*remote_address);
-    if (!primary_route_handle.has_value()) {
-        std::cerr << "http09-client failed: unable to create UDP socket: " << std::strerror(errno)
-                  << '\n';
+    auto bootstrap = io::bootstrap_client_io_backend(
+        io::QuicIoBackendBootstrapConfig{
+            .kind = config.io_backend,
+            .backend =
+                io::QuicUdpBackendConfig{
+                    .role_name = "client",
+                    .idle_timeout_ms = client_receive_timeout_ms(config),
+                },
+        },
+        remote->host, remote->port);
+    if (!bootstrap.has_value()) {
         return ClientConnectionRunResult{
             .exit_code = 1,
         };
     }
     ClientIoContext io_context{
-        .backend = std::move(socket_backend),
-        .primary_route_handle = primary_route_handle,
+        .backend = std::move(bootstrap->backend),
+        .primary_route_handle = bootstrap->primary_route_handle,
     };
 
     const bool attempt_zero_rtt_requests = core_config.zero_rtt.attempt;
@@ -3368,21 +3361,28 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
 }
 
 int run_http09_server(const Http09RuntimeConfig &config) {
-    auto socket_backend = std::make_unique<SocketIoBackend>(SocketIoBackendConfig{
-        .role_name = "server",
-        .idle_timeout_ms = kServerIdleTimeoutMs,
-    });
-    if (!socket_backend->open_listener(config.host, config.port)) {
+    const std::array<std::uint16_t, 2> ports = {
+        config.port,
+        static_cast<std::uint16_t>(config.port + 1),
+    };
+    auto bootstrap = io::bootstrap_server_io_backend(
+        io::QuicIoBackendBootstrapConfig{
+            .kind = config.io_backend,
+            .backend =
+                io::QuicUdpBackendConfig{
+                    .role_name = "server",
+                    .idle_timeout_ms = kServerIdleTimeoutMs,
+                },
+        },
+        config.host,
+        config.testcase == QuicHttp09Testcase::connectionmigration
+            ? std::span<const std::uint16_t>(ports)
+            : std::span<const std::uint16_t>(ports.data(), 1));
+    if (!bootstrap.has_value()) {
         return 1;
     }
-    if (config.testcase == QuicHttp09Testcase::connectionmigration) {
-        if (!socket_backend->open_listener(config.host,
-                                           static_cast<std::uint16_t>(config.port + 1))) {
-            return 1;
-        }
-    }
     ServerIoContext io_context{
-        .backend = std::move(socket_backend),
+        .backend = std::move(bootstrap->backend),
     };
 
     auto certificate_pem =

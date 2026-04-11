@@ -129,7 +129,6 @@ bool QuicPerfServer::handle_result(const quic::QuicCoreResult &result,
 bool QuicPerfServer::handle_stream_data(Session &session,
                                         const quic::QuicCoreReceiveStreamData &received,
                                         quic::QuicCoreTimePoint now) {
-    (void)now;
     if (received.stream_id != kQuicPerfControlStreamId) {
         if (!session.start.has_value()) {
             return true;
@@ -162,9 +161,10 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                 !flush_send_effects(*backend_, send_result)) {
                 return false;
             }
+            session.bytes_sent += target_bytes;
             if (session.requests_completed >= session.start->streams) {
                 return send_control(session, QuicPerfSessionComplete{
-                                                 .bytes_sent = total_bytes,
+                                                 .bytes_sent = session.bytes_sent,
                                                  .bytes_received = session.bytes_received,
                                                  .requests_completed = session.requests_completed,
                                              });
@@ -176,10 +176,38 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             session.start->direction == QuicPerfDirection::upload &&
             session.requests_completed >= session.start->streams) {
             return send_control(session, QuicPerfSessionComplete{
-                                             .bytes_sent = 0,
+                                             .bytes_sent = session.bytes_sent,
                                              .bytes_received = session.bytes_received,
                                              .requests_completed = session.requests_completed,
                                          });
+        }
+
+        if (session.start->mode == QuicPerfMode::rr && received.fin) {
+            const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
+            const auto send_result = core_.advance_endpoint(
+                quic::QuicCoreConnectionCommand{
+                    .connection = session.connection,
+                    .input =
+                        quic::QuicCoreSendStreamData{
+                            .stream_id = received.stream_id,
+                            .bytes = make_payload(response_bytes),
+                            .fin = true,
+                        },
+                },
+                now);
+            if (send_result.local_error.has_value() ||
+                !flush_send_effects(*backend_, send_result)) {
+                return false;
+            }
+            session.bytes_sent += response_bytes;
+            if (session.start->requests.has_value() &&
+                session.requests_completed >= *session.start->requests) {
+                return send_control(session, QuicPerfSessionComplete{
+                                                 .bytes_sent = session.bytes_sent,
+                                                 .bytes_received = session.bytes_received,
+                                                 .requests_completed = session.requests_completed,
+                                             });
+            }
         }
         return true;
     }

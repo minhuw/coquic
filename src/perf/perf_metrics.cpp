@@ -138,6 +138,10 @@ std::string render_perf_json(const QuicPerfRunSummary &summary) {
          << "\"bytes_received\":" << summary.server_bytes_received << ','
          << "\"requests_completed\":" << summary.server_requests_completed << "},"
          << "\"requests_completed\":" << summary.requests_completed << ','
+         << "\"streams\":" << summary.streams << ',' << "\"connections\":" << summary.connections
+         << ',' << "\"requests_in_flight\":" << summary.requests_in_flight << ','
+         << "\"request_bytes\":" << summary.request_bytes << ','
+         << "\"response_bytes\":" << summary.response_bytes << ','
          << "\"throughput_mib_per_s\":" << std::fixed << std::setprecision(3)
          << summary.throughput_mib_per_s << ',' << "\"throughput_gbit_per_s\":" << std::fixed
          << std::setprecision(3) << summary.throughput_gbit_per_s << ','

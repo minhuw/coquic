@@ -27,6 +27,7 @@ class QuicPerfServer {
         std::vector<std::byte> control_bytes;
         std::optional<QuicPerfSessionStart> start;
         bool ready_sent = false;
+        std::uint64_t bytes_sent = 0;
         std::uint64_t bytes_received = 0;
         std::uint64_t requests_completed = 0;
     };

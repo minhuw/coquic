@@ -5710,7 +5710,7 @@ TEST(QuicCoreTest, ConnectionPersistentCongestionPathsAreExercised) {
               ack_connection.congestion_controller_.minimum_window());
 }
 
-TEST(QuicCoreTest, AckTriggeredLossUsesLostPacketSentTimeForRecoveryBoundary) {
+TEST(QuicCoreTest, AckTriggeredLossUsesLossDetectionTimeForRecoveryBoundary) {
     auto connection = make_connected_client_connection();
     auto &rtt = connection.application_space_.recovery.rtt_state();
     rtt.latest_rtt = std::chrono::milliseconds(10);
@@ -5743,7 +5743,7 @@ TEST(QuicCoreTest, AckTriggeredLossUsesLostPacketSentTimeForRecoveryBoundary) {
         coquic::quic::test::test_time(120), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
         /*suppress_pto_reset=*/false);
     ASSERT_TRUE(processed.has_value());
-    EXPECT_EQ(connection.congestion_controller_.congestion_window(), 7200u);
+    EXPECT_EQ(connection.congestion_controller_.congestion_window(), 6000u);
     EXPECT_EQ(connection.congestion_controller_.bytes_in_flight(), 0u);
 }
 

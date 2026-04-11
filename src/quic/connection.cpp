@@ -2138,9 +2138,7 @@ void QuicConnection::detect_lost_packets(PacketSpaceState &packet_space, QuicCor
         const auto application_max_ack_delay = std::chrono::milliseconds(
             peer_transport_parameters_.has_value() ? peer_transport_parameters_->max_ack_delay
                                                    : TransportParameters{}.max_ack_delay);
-        const auto latest_lost_packet =
-            std::ranges::max_element(ack_eliciting_lost_packets, {}, &SentPacketRecord::sent_time);
-        congestion_controller_.on_loss_event(latest_lost_packet->sent_time);
+        congestion_controller_.on_loss_event(now);
         if (establishes_persistent_congestion(ack_eliciting_lost_packets, shared_rtt_state,
                                               application_max_ack_delay)) {
             congestion_controller_.on_persistent_congestion();
@@ -3486,16 +3484,14 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         const auto ack_eliciting_lost_packets =
             ack_eliciting_in_flight_losses(ack_result.lost_packets);
         if (!ack_eliciting_lost_packets.empty()) {
-            const auto latest_lost_packet = std::ranges::max_element(ack_eliciting_lost_packets, {},
-                                                                     &SentPacketRecord::sent_time);
-            congestion_controller_.on_loss_event(latest_lost_packet->sent_time);
+            congestion_controller_.on_loss_event(now);
             if (establishes_persistent_congestion(ack_eliciting_lost_packets, shared_rtt_state,
                                                   std::chrono::milliseconds(max_ack_delay_ms))) {
                 congestion_controller_.on_persistent_congestion();
             }
         }
         if (latest_ecn_ce_sent_time.has_value()) {
-            congestion_controller_.on_loss_event(*latest_ecn_ce_sent_time);
+            congestion_controller_.on_loss_event(now);
         }
         congestion_controller_.on_packets_acked(ack_result.acked_packets,
                                                 !has_pending_application_send());

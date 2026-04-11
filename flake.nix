@@ -399,6 +399,15 @@
           cp ${./interop/entrypoint.sh} $out/entrypoint.sh
           chmod +x $out/entrypoint.sh
         '';
+      mkPerfEndpointOverlay =
+        {
+          name,
+          coquicPackage,
+        }:
+        pkgs.runCommand "${name}-overlay" { } ''
+          mkdir -p $out/usr/local/bin
+          ln -s ${coquicPackage}/bin/coquic-perf $out/usr/local/bin/coquic-perf
+        '';
       mkCoquicShell =
         {
           profile,
@@ -446,6 +455,21 @@
         ];
         config = {
           Entrypoint = [ "/entrypoint.sh" ];
+          WorkingDir = "/";
+        };
+      };
+      quictlsMuslPerfImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-perf";
+        tag = "quictls-musl";
+        fromImage = simulatorEndpointBase;
+        contents = [
+          (mkPerfEndpointOverlay {
+            name = "coquic-perf-quictls-musl";
+            coquicPackage = quictlsMuslPackage;
+          })
+        ];
+        config = {
+          Entrypoint = [ "/usr/local/bin/coquic-perf" ];
           WorkingDir = "/";
         };
       };
@@ -552,6 +576,7 @@
         coquic-boringssl-musl = boringsslMuslPackage;
         interop-image-quictls-musl = quictlsMuslImage;
         interop-image-boringssl-musl = boringsslMuslImage;
+        perf-image-quictls-musl = quictlsMuslPerfImage;
       };
 
       apps.${system} = {
@@ -563,9 +588,17 @@
           type = "app";
           program = "${quictlsPackage}/bin/coquic";
         };
+        coquic-perf-quictls = {
+          type = "app";
+          program = "${quictlsPackage}/bin/coquic-perf";
+        };
         coquic-quictls-musl = {
           type = "app";
           program = "${quictlsMuslPackage}/bin/coquic";
+        };
+        coquic-perf-quictls-musl = {
+          type = "app";
+          program = "${quictlsMuslPackage}/bin/coquic-perf";
         };
         coquic-boringssl = {
           type = "app";

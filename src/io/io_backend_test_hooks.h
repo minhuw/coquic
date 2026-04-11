@@ -131,6 +131,7 @@ bool socket_io_backend_recvmsg_maps_ecn_for_tests();
 
 bool io_uring_backend_rearms_receive_after_completion_for_tests();
 bool io_uring_backend_completion_error_is_fatal_for_tests();
+bool io_uring_backend_send_falls_back_after_recv_einval_for_tests();
 bool io_uring_backend_route_handles_are_stable_per_peer_tuple_for_tests();
 bool io_uring_backend_send_uses_route_handle_for_tests();
 bool io_uring_backend_wait_returns_second_route_datagram_for_tests();

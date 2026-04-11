@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <iostream>
 #include <utility>
 
 namespace coquic::perf {
@@ -98,10 +99,15 @@ QuicPerfClient::QuicPerfClient(const QuicPerfConfig &config)
     summary_.requests_in_flight = config.requests_in_flight;
     summary_.request_bytes = config.request_bytes;
     summary_.response_bytes = config.response_bytes;
+    summary_.warmup = config.warmup;
 }
 
 int QuicPerfClient::run() {
     const auto start = quic::QuicCoreClock::now();
+    const auto emit_results = [&]() {
+        std::cout << render_perf_summary(summary_) << '\n';
+        return flush_json_result();
+    };
     const auto fail = [&](std::string reason) {
         summary_.status = "failed";
         if (!summary_.failure_reason.has_value()) {
@@ -109,7 +115,7 @@ int QuicPerfClient::run() {
         }
         summary_.elapsed = elapsed_ms_since(start);
         finalize_perf_run_summary(summary_);
-        (void)flush_json_result();
+        (void)emit_results();
         return 1;
     };
 
@@ -138,7 +144,7 @@ int QuicPerfClient::run() {
             summary_.status = "ok";
             summary_.elapsed = elapsed_ms_since(start);
             finalize_perf_run_summary(summary_);
-            return flush_json_result() ? 0 : 1;
+            return emit_results() ? 0 : 1;
         }
 
         const auto current = quic::QuicCoreClock::now();

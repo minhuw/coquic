@@ -77,4 +77,45 @@ TEST(QuicPerfRrTest, HonorsRequestsInFlightLimit) {
     const auto json = read_result_text(json_path);
     EXPECT_NE(json.find("\"requests_in_flight\":2"), std::string::npos);
 }
+
+TEST(QuicPerfRrTest, PrintsHumanReadableSummaryToStdout) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const QuicPerfConfig server{
+        .role = QuicPerfRole::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    ScopedPerfProcess server_process(server);
+
+    const auto json_path =
+        std::filesystem::temp_directory_path() / "coquic-perf-rr-stdout-summary.json";
+    std::filesystem::remove(json_path);
+
+    const QuicPerfConfig client{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::rr,
+        .host = "127.0.0.1",
+        .port = port,
+        .request_bytes = 24,
+        .response_bytes = 24,
+        .requests = 8,
+        .requests_in_flight = 2,
+        .duration = std::chrono::milliseconds{500},
+        .json_out = json_path,
+    };
+
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(run_perf_runtime(client), 0);
+    const auto stdout_output = testing::internal::GetCapturedStdout();
+
+    EXPECT_NE(stdout_output.find("status=ok"), std::string::npos);
+    EXPECT_NE(stdout_output.find("mode=rr"), std::string::npos);
+    EXPECT_NE(stdout_output.find("requests/s="), std::string::npos);
+    EXPECT_FALSE(read_result_text(json_path).empty());
+}
+
 } // namespace

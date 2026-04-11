@@ -37,4 +37,8 @@ TEST(IoUringBackendTest, CompletionErrorBecomesFailure) {
     EXPECT_TRUE(coquic::io::test::io_uring_backend_completion_error_is_fatal_for_tests());
 }
 
+TEST(IoUringBackendTest, RecvEinvalFallsBackToSocketSendPath) {
+    EXPECT_TRUE(coquic::io::test::io_uring_backend_send_falls_back_after_recv_einval_for_tests());
+}
+
 } // namespace

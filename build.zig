@@ -146,6 +146,7 @@ fn addProjectLibrary(
         "src/perf/perf_metrics.cpp",
         "src/perf/perf_loop.cpp",
         "src/perf/perf_server.cpp",
+        "src/perf/perf_client.cpp",
         "src/quic/packet.cpp",
         "src/quic/packet_number.cpp",
         "src/quic/plaintext_codec.cpp",
@@ -340,6 +341,7 @@ pub fn build(b: *std.Build) void {
         "tests/perf/protocol_test.cpp",
         "tests/perf/metrics_test.cpp",
         "tests/perf/server_test.cpp",
+        "tests/perf/bulk_test.cpp",
     };
 
     const exe = b.addExecutable(.{

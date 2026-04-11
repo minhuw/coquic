@@ -731,6 +731,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         entry.path_id_by_route_handle.emplace(open->initial_route_handle, 0);
         entry.route_handle_by_path_id.emplace(0, open->initial_route_handle);
         entry.connection->start(now);
+        refresh_server_connection_routes(entry);
 
         auto result =
             drain_connection_effects(handle, entry.default_route_handle,
@@ -743,8 +744,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         return result;
     }
 
-    if (const auto *inbound = std::get_if<QuicCoreInboundDatagram>(&input);
-        inbound != nullptr && endpoint_config_.role == EndpointRole::server) {
+    if (const auto *inbound = std::get_if<QuicCoreInboundDatagram>(&input); inbound != nullptr) {
         QuicCoreResult result;
         const auto parsed = parse_endpoint_datagram(inbound->bytes);
         if (!parsed.has_value()) {
@@ -780,6 +780,11 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                 result.next_wakeup = next_wakeup();
                 return result;
             }
+        }
+
+        if (endpoint_config_.role != EndpointRole::server) {
+            result.next_wakeup = next_wakeup();
+            return result;
         }
 
         const bool endpoint_supports_version =
@@ -985,13 +990,9 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         result.effects.insert(result.effects.end(),
                               std::make_move_iterator(drained.effects.begin()),
                               std::make_move_iterator(drained.effects.end()));
-        if (endpoint_config_.role == EndpointRole::server) {
-            refresh_server_connection_routes(entry);
-        }
+        refresh_server_connection_routes(entry);
         if (entry.connection->has_failed() || has_closed_lifecycle_event(drained)) {
-            if (endpoint_config_.role == EndpointRole::server) {
-                erase_endpoint_connection_routes(entry);
-            }
+            erase_endpoint_connection_routes(entry);
             connections_.erase(entry_it);
         }
         result.next_wakeup = next_wakeup();
@@ -1015,9 +1016,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             result.effects.insert(result.effects.end(),
                                   std::make_move_iterator(drained.effects.begin()),
                                   std::make_move_iterator(drained.effects.end()));
-            if (endpoint_config_.role == EndpointRole::server) {
-                refresh_server_connection_routes(entry);
-            }
+            refresh_server_connection_routes(entry);
             if (entry.connection->has_failed() || has_closed_lifecycle_event(drained)) {
                 erase_after.push_back(entry.handle);
             }
@@ -1028,9 +1027,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             if (entry_it == connections_.end()) {
                 continue;
             }
-            if (endpoint_config_.role == EndpointRole::server) {
-                erase_endpoint_connection_routes(entry_it->second);
-            }
+            erase_endpoint_connection_routes(entry_it->second);
             connections_.erase(entry_it);
         }
         result.next_wakeup = next_wakeup();

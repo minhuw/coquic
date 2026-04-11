@@ -1,10 +1,15 @@
 #include "src/perf/perf_server.h"
 
-#include <iostream>
 #include <span>
-#include <utility>
 
 namespace coquic::perf {
+namespace {
+
+std::vector<std::byte> make_payload(std::size_t bytes) {
+    return std::vector<std::byte>(bytes, std::byte{0x5a});
+}
+
+} // namespace
 
 std::optional<std::string> validate_perf_session_start(const QuicPerfSessionStart &start) {
     if (start.protocol_version != kQuicPerfProtocolVersion) {
@@ -126,8 +131,55 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                                         quic::QuicCoreTimePoint now) {
     (void)now;
     if (received.stream_id != kQuicPerfControlStreamId) {
+        if (!session.start.has_value()) {
+            return true;
+        }
+
+        session.bytes_received += received.bytes.size();
         if (received.fin) {
-            session.bytes_received += received.bytes.size();
+            ++session.requests_completed;
+        }
+
+        if (session.start->mode == QuicPerfMode::bulk &&
+            session.start->direction == QuicPerfDirection::download && received.fin) {
+            const auto stream_index = session.requests_completed - 1;
+            const auto total_bytes = session.start->total_bytes.value_or(0);
+            const auto per_stream = total_bytes / session.start->streams;
+            const auto remainder = total_bytes % session.start->streams;
+            const auto target_bytes = per_stream + (stream_index < remainder ? 1u : 0u);
+            const auto send_result = core_.advance_endpoint(
+                quic::QuicCoreConnectionCommand{
+                    .connection = session.connection,
+                    .input =
+                        quic::QuicCoreSendStreamData{
+                            .stream_id = received.stream_id,
+                            .bytes = make_payload(static_cast<std::size_t>(target_bytes)),
+                            .fin = true,
+                        },
+                },
+                now);
+            if (send_result.local_error.has_value() ||
+                !flush_send_effects(*backend_, send_result)) {
+                return false;
+            }
+            if (session.requests_completed >= session.start->streams) {
+                return send_control(session, QuicPerfSessionComplete{
+                                                 .bytes_sent = total_bytes,
+                                                 .bytes_received = session.bytes_received,
+                                                 .requests_completed = session.requests_completed,
+                                             });
+            }
+            return true;
+        }
+
+        if (session.start->mode == QuicPerfMode::bulk &&
+            session.start->direction == QuicPerfDirection::upload &&
+            session.requests_completed >= session.start->streams) {
+            return send_control(session, QuicPerfSessionComplete{
+                                             .bytes_sent = 0,
+                                             .bytes_received = session.bytes_received,
+                                             .requests_completed = session.requests_completed,
+                                         });
         }
         return true;
     }

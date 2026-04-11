@@ -1,9 +1,11 @@
 #include "src/perf/perf_runtime.h"
 
 #include "src/perf/perf_server.h"
+#include "src/perf/perf_client.h"
 
 #include <charconv>
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <string_view>
@@ -21,6 +23,11 @@ constexpr std::string_view kPerfUsageLine =
 
 void print_usage() {
     std::cerr << kPerfUsageLine << '\n';
+}
+
+std::string read_text_file(const std::filesystem::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 }
 
 std::optional<std::size_t> parse_size_arg(std::string_view value) {
@@ -350,8 +357,7 @@ int run_perf_runtime(const QuicPerfConfig &config) {
         return run_perf_server(config);
     }
 
-    std::cerr << "coquic-perf client runtime not implemented yet\n";
-    return 1;
+    return run_perf_client(config);
 }
 
 quic::QuicCoreEndpointConfig make_perf_client_endpoint_config(const QuicPerfConfig &config) {
@@ -367,6 +373,11 @@ quic::QuicCoreEndpointConfig make_perf_server_endpoint_config(const QuicPerfConf
         .role = quic::EndpointRole::server,
         .verify_peer = config.verify_peer,
         .application_protocol = "coquic-perf/1",
+        .identity =
+            quic::TlsIdentity{
+                .certificate_pem = read_text_file(config.certificate_chain_path),
+                .private_key_pem = read_text_file(config.private_key_path),
+            },
     };
 }
 

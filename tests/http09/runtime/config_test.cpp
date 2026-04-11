@@ -279,6 +279,37 @@ TEST(QuicHttp09RuntimeTest, RuntimeRejectsUnknownTestcaseNamesFromEnvironmentAnd
     }
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeDefaultsToSocketIoBackendAndParsesCliSelection) {
+    const char *default_argv[] = {
+        "coquic",
+        "interop-client",
+        "--requests",
+        "https://localhost/a.txt",
+    };
+    const auto default_parsed = coquic::http09::parse_http09_runtime_args(
+        static_cast<int>(std::size(default_argv)), const_cast<char **>(default_argv));
+    ASSERT_TRUE(default_parsed.has_value());
+    EXPECT_EQ(default_parsed->io_backend, coquic::io::QuicIoBackendKind::socket);
+
+    const char *uring_argv[] = {
+        "coquic",       "interop-client", "--requests", "https://localhost/a.txt",
+        "--io-backend", "io_uring",
+    };
+    const auto uring_parsed = coquic::http09::parse_http09_runtime_args(
+        static_cast<int>(std::size(uring_argv)), const_cast<char **>(uring_argv));
+    ASSERT_TRUE(uring_parsed.has_value());
+    EXPECT_EQ(uring_parsed->io_backend, coquic::io::QuicIoBackendKind::io_uring);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidIoBackendFlag) {
+    const char *argv[] = {
+        "coquic", "interop-client", "--requests", "https://localhost/a.txt", "--io-backend", "dpdk",
+    };
+    EXPECT_FALSE(coquic::http09::parse_http09_runtime_args(static_cast<int>(std::size(argv)),
+                                                           const_cast<char **>(argv))
+                     .has_value());
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidRoleAndUsageDispatchFailures) {
     {
         const char *role_argv[] = {"coquic"};

@@ -87,6 +87,7 @@ constexpr std::string_view kProjectName = "coquic";
 constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
+    "[--io-backend socket|io_uring] "
     "[--testcase "
     "handshake|transfer|keyupdate|amplificationlimit|rebind-port|rebind-addr|"
     "connectionmigration|ecn|multiconnect|chacha20|retry|resumption|zerortt|v2] "
@@ -311,6 +312,16 @@ std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
     }
     if (value == "v2") {
         return QuicHttp09Testcase::v2;
+    }
+    return std::nullopt;
+}
+
+std::optional<io::QuicIoBackendKind> parse_io_backend_kind(std::string_view value) {
+    if (value == "socket") {
+        return io::QuicIoBackendKind::socket;
+    }
+    if (value == "io_uring") {
+        return io::QuicIoBackendKind::io_uring;
     }
     return std::nullopt;
 }
@@ -7455,10 +7466,10 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
             continue;
         }
 
-        const bool expects_value = arg == "--host" || arg == "--port" || arg == "--testcase" ||
-                                   arg == "--requests" || arg == "--document-root" ||
-                                   arg == "--download-root" || arg == "--certificate-chain" ||
-                                   arg == "--private-key" || arg == "--server-name";
+        const bool expects_value =
+            arg == "--host" || arg == "--port" || arg == "--io-backend" || arg == "--testcase" ||
+            arg == "--requests" || arg == "--document-root" || arg == "--download-root" ||
+            arg == "--certificate-chain" || arg == "--private-key" || arg == "--server-name";
         if (!expects_value) {
             std::cerr << kUsageLine << '\n';
             return std::nullopt;
@@ -7480,6 +7491,15 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
                 return std::nullopt;
             }
             config.port = *parsed;
+            continue;
+        }
+        if (arg == "--io-backend") {
+            const auto parsed = parse_io_backend_kind(*value);
+            if (!parsed.has_value()) {
+                std::cerr << kUsageLine << '\n';
+                return std::nullopt;
+            }
+            config.io_backend = *parsed;
             continue;
         }
         if (arg == "--testcase") {

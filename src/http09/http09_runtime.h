@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/io/io_backend.h"
 #include "src/http09/http09_client.h"
 #include "src/http09/http09_server.h"
 
@@ -16,6 +17,7 @@ enum class Http09RuntimeMode : std::uint8_t { health_check, client, server };
 
 struct Http09RuntimeConfig {
     Http09RuntimeMode mode = Http09RuntimeMode::health_check;
+    io::QuicIoBackendKind io_backend = io::QuicIoBackendKind::socket;
     std::string host = "127.0.0.1";
     std::uint16_t port = 443;
     QuicHttp09Testcase testcase = QuicHttp09Testcase::handshake;

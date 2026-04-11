@@ -1,5 +1,7 @@
 #include "src/perf/perf_runtime.h"
 
+#include "src/perf/perf_server.h"
+
 #include <charconv>
 #include <chrono>
 #include <iostream>
@@ -343,8 +345,12 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
     return config;
 }
 
-int run_perf_runtime(const QuicPerfConfig &) {
-    std::cerr << "coquic-perf runtime not implemented yet\n";
+int run_perf_runtime(const QuicPerfConfig &config) {
+    if (config.role == QuicPerfRole::server) {
+        return run_perf_server(config);
+    }
+
+    std::cerr << "coquic-perf client runtime not implemented yet\n";
     return 1;
 }
 

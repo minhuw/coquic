@@ -165,6 +165,24 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenPeerResolutionFails) {
     EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
 }
 
+TEST(QuicHttp09RuntimeTest, ClientReportsInvalidHostWhenSocketBootstrapCannotResolveRemote) {
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
+        {.getaddrinfo_fn = &fail_getaddrinfo},
+    };
+
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
+    const std::string stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_NE(stderr_output.find("io-client failed: invalid host address"), std::string::npos);
+}
+
 TEST(QuicHttp09RuntimeTest, ClientFailsWhenResolutionSucceedsWithoutAnyAddrinfoResults) {
     const ScopedRuntimeAddressFamilyReset address_family_reset;
     const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops{
@@ -184,6 +202,31 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenResolutionSucceedsWithoutAnyAddrinfoR
     EXPECT_EQ(coquic::http09::test::run_http09_client_connection_for_tests(client, {}, 1), 1);
     EXPECT_EQ(g_last_getaddrinfo_family, AF_UNSPEC);
     EXPECT_EQ(g_last_socket_family, AF_UNSPEC);
+}
+
+TEST(QuicHttp09RuntimeTest, ClientFailsFastWhenIoUringBackendUnavailable) {
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = 443,
+        .requests_env = "https://localhost/hello.txt",
+        .io_backend = coquic::io::QuicIoBackendKind::io_uring,
+    };
+
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
+}
+
+TEST(QuicHttp09RuntimeTest, ServerFailsFastWhenIoUringBackendUnavailable) {
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = 443,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+        .io_backend = coquic::io::QuicIoBackendKind::io_uring,
+    };
+
+    EXPECT_EQ(coquic::http09::run_http09_runtime(server), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, ServerResolutionPassesNullNodeForWildcardHost) {

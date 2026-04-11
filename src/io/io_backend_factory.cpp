@@ -2,6 +2,8 @@
 
 #include "src/io/socket_io_backend.h"
 
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 
 namespace coquic::io {
@@ -17,10 +19,13 @@ bootstrap_client_io_backend(const QuicIoBackendBootstrapConfig &config, std::str
         });
         const auto remote = backend->resolve_remote(host, port);
         if (!remote.has_value()) {
+            std::cerr << "io-" << config.backend.role_name << " failed: invalid host address\n";
             return std::nullopt;
         }
         const auto route_handle = backend->ensure_route(*remote);
         if (!route_handle.has_value()) {
+            std::cerr << "io-" << config.backend.role_name
+                      << " failed: unable to create UDP socket: " << std::strerror(errno) << '\n';
             return std::nullopt;
         }
         return QuicClientIoBootstrap{

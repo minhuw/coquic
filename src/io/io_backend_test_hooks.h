@@ -12,6 +12,8 @@
 
 #include "src/io/io_backend.h"
 
+struct io_uring;
+
 namespace coquic::io::test {
 
 using quic::QuicEcnCodepoint;
@@ -41,6 +43,27 @@ class ScopedSocketIoBackendOpsOverride {
   private:
     SocketIoBackendOpsOverride previous_;
 };
+
+struct IoUringBackendOpsOverride {
+    int (*queue_init_fn)(unsigned, io_uring *, unsigned) = nullptr;
+    void (*queue_exit_fn)(io_uring *) = nullptr;
+};
+
+class ScopedIoUringBackendOpsOverride {
+  public:
+    explicit ScopedIoUringBackendOpsOverride(IoUringBackendOpsOverride override_ops);
+    ~ScopedIoUringBackendOpsOverride();
+
+    ScopedIoUringBackendOpsOverride(const ScopedIoUringBackendOpsOverride &) = delete;
+    ScopedIoUringBackendOpsOverride &operator=(const ScopedIoUringBackendOpsOverride &) = delete;
+
+  private:
+    IoUringBackendOpsOverride previous_;
+};
+
+IoUringBackendOpsOverride &io_uring_backend_ops_for_runtime_tests();
+void io_uring_backend_apply_ops_override_for_runtime_tests(
+    const IoUringBackendOpsOverride &override_ops);
 
 SocketIoBackendOpsOverride &socket_io_backend_ops_for_runtime_tests();
 void socket_io_backend_apply_ops_override_for_runtime_tests(

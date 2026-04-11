@@ -115,6 +115,7 @@ fn addProjectLibrary(
     tls_include_dir: []const u8,
     spdlog_include_dir: []const u8,
     fmt_include_dir: []const u8,
+    liburing_include_dir: []const u8,
 ) *std.Build.Step.Compile {
     const lib = b.addStaticLibrary(.{
         .name = name,
@@ -125,6 +126,7 @@ fn addProjectLibrary(
     lib.addIncludePath(.{ .cwd_relative = tls_include_dir });
     lib.addIncludePath(.{ .cwd_relative = spdlog_include_dir });
     lib.addIncludePath(.{ .cwd_relative = fmt_include_dir });
+    lib.addIncludePath(.{ .cwd_relative = liburing_include_dir });
     var files = std.ArrayList([]const u8).init(b.allocator);
     files.appendSlice(&.{
         "src/quic/buffer.cpp",
@@ -147,6 +149,8 @@ fn addProjectLibrary(
         "src/quic/qlog/sink.cpp",
         "src/quic/recovery.cpp",
         "src/io/io_backend_factory.cpp",
+        "src/io/io_uring_backend.cpp",
+        "src/io/io_uring_io_engine.cpp",
         "src/io/poll_io_engine.cpp",
         "src/io/shared_udp_backend_core.cpp",
         "src/io/socket_io_backend.cpp",
@@ -191,6 +195,12 @@ fn linkTlsBackend(
 
 fn linkSpdlog(compile: *std.Build.Step.Compile) void {
     compile.linkSystemLibrary2("spdlog", .{
+        .use_pkg_config = .force,
+    });
+}
+
+fn linkLiburing(compile: *std.Build.Step.Compile) void {
+    compile.linkSystemLibrary2("liburing", .{
         .use_pkg_config = .force,
     });
 }
@@ -258,6 +268,7 @@ pub fn build(b: *std.Build) void {
     const tls_lib_dir = tlsLibDir(b, tls_backend);
     const spdlog_include_dir = requireEnv(b, "SPDLOG_INCLUDE_DIR");
     const fmt_include_dir = requireEnv(b, "FMT_INCLUDE_DIR");
+    const liburing_include_dir = requireEnv(b, "LIBURING_INCLUDE_DIR");
     const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");
     const smoke_test_files = &.{
         "tests/smoke/smoke_test.cpp",
@@ -305,6 +316,7 @@ pub fn build(b: *std.Build) void {
         "tests/http09/runtime/io_backend_contract_test.cpp",
         "tests/http09/runtime/socket_io_backend_test.cpp",
         "tests/http09/runtime/io_backend_factory_test.cpp",
+        "tests/http09/runtime/io_uring_backend_test.cpp",
     };
     const http3_test_files = &.{
         "tests/http3/protocol_test.cpp",
@@ -335,6 +347,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         spdlog_include_dir,
         fmt_include_dir,
+        liburing_include_dir,
     );
     exe.addCSourceFiles(.{
         .root = b.path("."),
@@ -344,6 +357,7 @@ pub fn build(b: *std.Build) void {
     exe.linkLibrary(project_lib);
     linkTlsBackend(b, exe, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(exe);
+    linkLiburing(exe);
     exe.linkLibCpp();
     b.installArtifact(exe);
 
@@ -417,21 +431,27 @@ pub fn build(b: *std.Build) void {
     );
     linkTlsBackend(b, smoke_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(smoke_tests);
+    linkLiburing(smoke_tests);
     const smoke_tests_run = b.addRunArtifact(smoke_tests);
     linkTlsBackend(b, core_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(core_tests);
+    linkLiburing(core_tests);
     const core_tests_run = b.addRunArtifact(core_tests);
     linkTlsBackend(b, http09_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(http09_tests);
+    linkLiburing(http09_tests);
     const http09_tests_run = b.addRunArtifact(http09_tests);
     linkTlsBackend(b, http3_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(http3_tests);
+    linkLiburing(http3_tests);
     const http3_tests_run = b.addRunArtifact(http3_tests);
     linkTlsBackend(b, qlog_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(qlog_tests);
+    linkLiburing(qlog_tests);
     const qlog_tests_run = b.addRunArtifact(qlog_tests);
     linkTlsBackend(b, tls_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(tls_tests);
+    linkLiburing(tls_tests);
     const tls_tests_run = b.addRunArtifact(tls_tests);
     if (b.args) |args| {
         smoke_tests_run.addArgs(args);
@@ -470,6 +490,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         spdlog_include_dir,
         fmt_include_dir,
+        liburing_include_dir,
     );
     const smoke_coverage_tests = addTestBinary(
         b,
@@ -533,26 +554,32 @@ pub fn build(b: *std.Build) void {
     );
     linkTlsBackend(b, smoke_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(smoke_coverage_tests);
+    linkLiburing(smoke_coverage_tests);
     smoke_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     smoke_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
     linkTlsBackend(b, core_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(core_coverage_tests);
+    linkLiburing(core_coverage_tests);
     core_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     core_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
     linkTlsBackend(b, http09_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(http09_coverage_tests);
+    linkLiburing(http09_coverage_tests);
     http09_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     http09_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
     linkTlsBackend(b, http3_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(http3_coverage_tests);
+    linkLiburing(http3_coverage_tests);
     http3_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     http3_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
     linkTlsBackend(b, qlog_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(qlog_coverage_tests);
+    linkLiburing(qlog_coverage_tests);
     qlog_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     qlog_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
     linkTlsBackend(b, tls_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(tls_coverage_tests);
+    linkLiburing(tls_coverage_tests);
     tls_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     tls_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
     const coverage_cmd = b.addSystemCommand(&.{ "bash" });

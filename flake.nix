@@ -204,6 +204,7 @@
           tlsExtraLinkFlags ? [ ],
           spdlogPackage,
           fmtPackage,
+          ioUringPackage,
           zigTarget ? null,
           spdlogShared ? true,
           pkgConfigAllStatic ? false,
@@ -217,6 +218,7 @@
             tlsExtraLinkFlags
             spdlogPackage
             fmtPackage
+            ioUringPackage
             zigTarget
             spdlogShared
             pkgConfigAllStatic
@@ -224,6 +226,7 @@
           pkgConfigPath = lib.makeSearchPath "lib/pkgconfig" [
             spdlogPackage.dev
             fmtPackage.dev
+            ioUringPackage.dev
           ];
         };
       quictlsProfile = mkProfile {
@@ -233,6 +236,7 @@
         tlsLinkage = "static";
         spdlogPackage = spdlogStatic;
         fmtPackage = fmtStatic;
+        ioUringPackage = pkgs.liburing;
         spdlogShared = false;
         pkgConfigAllStatic = true;
       };
@@ -243,6 +247,7 @@
         tlsLinkage = "static";
         spdlogPackage = muslSpdlogStatic;
         fmtPackage = muslFmtStatic;
+        ioUringPackage = staticPkgs.liburing;
         zigTarget = "x86_64-linux-musl";
         spdlogShared = false;
         pkgConfigAllStatic = true;
@@ -254,6 +259,7 @@
         tlsLinkage = "static";
         spdlogPackage = spdlogStatic;
         fmtPackage = fmtStatic;
+        ioUringPackage = pkgs.liburing;
         spdlogShared = false;
       };
       boringsslMuslProfile = mkProfile {
@@ -263,6 +269,7 @@
         tlsLinkage = "static";
         spdlogPackage = muslSpdlogStatic;
         fmtPackage = muslFmtStatic;
+        ioUringPackage = staticPkgs.liburing;
         zigTarget = "x86_64-linux-musl";
         spdlogShared = false;
         pkgConfigAllStatic = true;
@@ -288,6 +295,7 @@
         }
         export SPDLOG_INCLUDE_DIR="${profile.spdlogPackage.dev}/include"
         export FMT_INCLUDE_DIR="${profile.fmtPackage.dev}/include"
+        export LIBURING_INCLUDE_DIR="${profile.ioUringPackage.dev}/include"
         export PKG_CONFIG_PATH="${profile.pkgConfigPath}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
         ${lib.optionalString profile.pkgConfigAllStatic ''
           export PKG_CONFIG_ALL_STATIC=1
@@ -324,6 +332,7 @@
             profile.tlsPackage
             profile.spdlogPackage
             profile.fmtPackage
+            profile.ioUringPackage
           ];
           dontConfigure = true;
           doCheck = false;
@@ -360,6 +369,7 @@
             profile.tlsPackage
             profile.spdlogPackage
             profile.fmtPackage
+            profile.ioUringPackage
           ];
           dontConfigure = true;
           doCheck = false;
@@ -406,6 +416,7 @@
               profile.tlsPackage
               profile.spdlogPackage
               profile.fmtPackage
+              profile.ioUringPackage
               pkgs.pkg-config
             ]
             ++ extraPackages

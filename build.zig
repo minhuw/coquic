@@ -141,6 +141,7 @@ fn addProjectLibrary(
         "src/http09/http09_server.cpp",
         "src/http3/http3_protocol.cpp",
         "src/http3/http3_qpack.cpp",
+        "src/perf/perf_runtime.cpp",
         "src/quic/packet.cpp",
         "src/quic/packet_number.cpp",
         "src/quic/plaintext_codec.cpp",
@@ -330,6 +331,9 @@ pub fn build(b: *std.Build) void {
         "tests/tls/packet_crypto_test.cpp",
         "tests/tls/tls_adapter_contract_test.cpp",
     };
+    const perf_test_files = &.{
+        "tests/perf/config_test.cpp",
+    };
 
     const exe = b.addExecutable(.{
         .name = "coquic",
@@ -360,6 +364,24 @@ pub fn build(b: *std.Build) void {
     linkLiburing(exe);
     exe.linkLibCpp();
     b.installArtifact(exe);
+
+    const perf_exe = b.addExecutable(.{
+        .name = "coquic-perf",
+        .target = target,
+        .optimize = optimize,
+    });
+    perf_exe.addIncludePath(b.path("."));
+    perf_exe.addCSourceFiles(.{
+        .root = b.path("."),
+        .files = &.{"src/main_perf.cpp"},
+        .flags = cpp_flags,
+    });
+    perf_exe.linkLibrary(project_lib);
+    linkTlsBackend(b, perf_exe, tls_backend, tls_lib_dir, tls_linkage);
+    linkSpdlog(perf_exe);
+    linkLiburing(perf_exe);
+    perf_exe.linkLibCpp();
+    b.installArtifact(perf_exe);
 
     const run_exe = b.addRunArtifact(exe);
     if (b.args) |args| {
@@ -429,6 +451,16 @@ pub fn build(b: *std.Build) void {
         gtest_root,
         tls_test_files,
     );
+    const perf_tests = addTestBinary(
+        b,
+        "coquic-tests-perf",
+        target,
+        optimize,
+        cpp_flags,
+        project_lib,
+        gtest_root,
+        perf_test_files,
+    );
     linkTlsBackend(b, smoke_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(smoke_tests);
     linkLiburing(smoke_tests);
@@ -453,6 +485,10 @@ pub fn build(b: *std.Build) void {
     linkSpdlog(tls_tests);
     linkLiburing(tls_tests);
     const tls_tests_run = b.addRunArtifact(tls_tests);
+    linkTlsBackend(b, perf_tests, tls_backend, tls_lib_dir, tls_linkage);
+    linkSpdlog(perf_tests);
+    linkLiburing(perf_tests);
+    const perf_tests_run = b.addRunArtifact(perf_tests);
     if (b.args) |args| {
         smoke_tests_run.addArgs(args);
         core_tests_run.addArgs(args);
@@ -460,6 +496,7 @@ pub fn build(b: *std.Build) void {
         http3_tests_run.addArgs(args);
         qlog_tests_run.addArgs(args);
         tls_tests_run.addArgs(args);
+        perf_tests_run.addArgs(args);
     }
     const test_step = b.step("test", "Run the GoogleTest suite");
     test_step.dependOn(&smoke_tests_run.step);
@@ -468,17 +505,20 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&http3_tests_run.step);
     test_step.dependOn(&qlog_tests_run.step);
     test_step.dependOn(&tls_tests_run.step);
+    test_step.dependOn(&perf_tests_run.step);
     const compdb_step = b.step(
         "compdb",
         "Build the main executable and GoogleTest binaries without running them",
     );
     compdb_step.dependOn(&exe.step);
+    compdb_step.dependOn(&perf_exe.step);
     compdb_step.dependOn(&smoke_tests.step);
     compdb_step.dependOn(&core_tests.step);
     compdb_step.dependOn(&http09_tests.step);
     compdb_step.dependOn(&http3_tests.step);
     compdb_step.dependOn(&qlog_tests.step);
     compdb_step.dependOn(&tls_tests.step);
+    compdb_step.dependOn(&perf_tests.step);
 
     const coverage_lib = addProjectLibrary(
         b,

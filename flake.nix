@@ -349,6 +349,7 @@
             runHook preInstall
             mkdir -p $out/bin
             cp zig-out/bin/coquic $out/bin/coquic
+            cp zig-out/bin/coquic-perf $out/bin/coquic-perf
             runHook postInstall
           '';
         };

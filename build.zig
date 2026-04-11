@@ -142,6 +142,8 @@ fn addProjectLibrary(
         "src/http3/http3_protocol.cpp",
         "src/http3/http3_qpack.cpp",
         "src/perf/perf_runtime.cpp",
+        "src/perf/perf_protocol.cpp",
+        "src/perf/perf_metrics.cpp",
         "src/quic/packet.cpp",
         "src/quic/packet_number.cpp",
         "src/quic/plaintext_codec.cpp",
@@ -333,6 +335,8 @@ pub fn build(b: *std.Build) void {
     };
     const perf_test_files = &.{
         "tests/perf/config_test.cpp",
+        "tests/perf/protocol_test.cpp",
+        "tests/perf/metrics_test.cpp",
     };
 
     const exe = b.addExecutable(.{

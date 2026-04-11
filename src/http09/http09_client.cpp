@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "src/http09/http09_client.h"
 
 #include <cstddef>
@@ -33,10 +34,11 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
         if (!handled_local_error) {
             return fail_endpoint();
         }
-    } else if (blocked_on_stream_limit_) {
+    } else {
         blocked_on_stream_limit_ = false;
-    } else if (pending_open_request_.has_value()) {
-        activate_pending_request();
+        while (!pending_open_requests_.empty()) {
+            activate_pending_request();
+        }
     }
 
     for (const auto &effect : result.effects) {
@@ -59,7 +61,7 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
         }
     }
 
-    if (!complete_ && next_request_index_ >= config_.requests.size() && !pending_open_request_ &&
+    if (!complete_ && !has_unissued_requests() && pending_open_requests_.empty() &&
         all_streams_complete()) {
         complete_ = true;
     }
@@ -76,24 +78,23 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::poll(QuicCoreTimePoint /*now*
     }
 
     if (requests_may_be_issued() && !complete_) {
-        if (config_.requests.empty()) {
+        if (!has_unissued_requests() && pending_open_requests_.empty() && all_streams_complete()) {
             complete_ = true;
-        } else if (can_issue_next_request()) {
-            const auto request_index = next_request_index_;
-            const auto stream_id = static_cast<std::uint64_t>(request_index) * 4u;
-            const auto &request = config_.requests[request_index];
-            const std::string line = "GET " + request.request_target + "\r\n";
-            pending_core_inputs_.emplace_back(QuicCoreSendStreamData{
-                .stream_id = stream_id,
-                .bytes = std::vector<std::byte>(reinterpret_cast<const std::byte *>(line.data()),
-                                                reinterpret_cast<const std::byte *>(line.data()) +
-                                                    line.size()),
-                .fin = true,
-            });
-            pending_open_request_ = PendingOpenRequest{
-                .request_index = request_index,
-                .stream_id = stream_id,
-            };
+        } else {
+            const bool batch_zero_rtt_requests =
+                config_.allow_requests_before_handshake_ready && !handshake_ready_;
+            do {
+                if (!can_issue_next_request()) {
+                    break;
+                }
+
+                const auto next_request = take_next_request_to_issue();
+                if (!next_request.has_value()) {
+                    break;
+                }
+
+                queue_request_send(*next_request);
+            } while (batch_zero_rtt_requests);
         }
     }
 
@@ -138,8 +139,27 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::drain_pending_inputs() {
 
 bool QuicHttp09ClientEndpoint::handle_local_error(const QuicCoreLocalError &error) {
     if (error.code != QuicCoreLocalErrorCode::invalid_stream_id || !error.stream_id.has_value() ||
-        !pending_open_request_.has_value() ||
-        *error.stream_id != pending_open_request_->stream_id) {
+        pending_open_requests_.empty()) {
+        return false;
+    }
+
+    const auto failed_stream_id = *error.stream_id;
+    const auto failed_request =
+        std::find_if(pending_open_requests_.begin(), pending_open_requests_.end(),
+                     [failed_stream_id](const PendingOpenRequest &request) {
+                         return request.stream_id == failed_stream_id;
+                     });
+    if (failed_request == pending_open_requests_.end()) {
+        return false;
+    }
+
+    while (!pending_open_requests_.empty() &&
+           pending_open_requests_.front().stream_id != failed_stream_id) {
+        activate_pending_request();
+    }
+
+    if (pending_open_requests_.empty() ||
+        pending_open_requests_.front().stream_id != failed_stream_id) {
         return false;
     }
 
@@ -151,17 +171,20 @@ bool QuicHttp09ClientEndpoint::handle_local_error(const QuicCoreLocalError &erro
         max_concurrent_requests_ = active_requests;
     }
     blocked_on_stream_limit_ = true;
-    pending_open_request_.reset();
+    while (!pending_open_requests_.empty()) {
+        retry_open_requests_.push_back(pending_open_requests_.front());
+        pending_open_requests_.pop_front();
+    }
     return true;
 }
 
 void QuicHttp09ClientEndpoint::activate_pending_request() {
-    if (!pending_open_request_.has_value()) {
+    if (pending_open_requests_.empty()) {
         return;
     }
 
-    const auto request_index = pending_open_request_->request_index;
-    const auto stream_id = pending_open_request_->stream_id;
+    const auto request_index = pending_open_requests_.front().request_index;
+    const auto stream_id = pending_open_requests_.front().stream_id;
     request_streams_.insert_or_assign(
         stream_id, RequestState{
                        .request_target = config_.requests[request_index].request_target,
@@ -173,8 +196,12 @@ void QuicHttp09ClientEndpoint::activate_pending_request() {
         pending_core_inputs_.emplace_back(QuicCoreRequestKeyUpdate{});
         key_update_requested_ = true;
     }
-    next_request_index_ = request_index + 1;
-    pending_open_request_.reset();
+    next_request_index_ = std::max(next_request_index_, request_index + 1);
+    pending_open_requests_.pop_front();
+}
+
+bool QuicHttp09ClientEndpoint::has_unissued_requests() const {
+    return !retry_open_requests_.empty() || next_request_index_ < config_.requests.size();
 }
 
 bool QuicHttp09ClientEndpoint::requests_may_be_issued() const {
@@ -183,11 +210,11 @@ bool QuicHttp09ClientEndpoint::requests_may_be_issued() const {
 
 bool QuicHttp09ClientEndpoint::can_issue_next_request() const {
     if (!requests_may_be_issued() || failed_ || complete_ || blocked_on_stream_limit_ ||
-        pending_open_request_.has_value() || next_request_index_ >= config_.requests.size()) {
+        !has_unissued_requests()) {
         return false;
     }
     if (max_concurrent_requests_.has_value() &&
-        active_request_count() >= *max_concurrent_requests_) {
+        in_flight_request_count() >= *max_concurrent_requests_) {
         return false;
     }
     return true;
@@ -202,6 +229,41 @@ std::size_t QuicHttp09ClientEndpoint::active_request_count() const {
         }
     }
     return active;
+}
+
+std::size_t QuicHttp09ClientEndpoint::in_flight_request_count() const {
+    return active_request_count() + pending_open_requests_.size();
+}
+
+std::optional<QuicHttp09ClientEndpoint::PendingOpenRequest>
+QuicHttp09ClientEndpoint::take_next_request_to_issue() {
+    if (!retry_open_requests_.empty()) {
+        auto request = retry_open_requests_.front();
+        retry_open_requests_.pop_front();
+        return request;
+    }
+    if (next_request_index_ >= config_.requests.size()) {
+        return std::nullopt;
+    }
+
+    const auto request_index = next_request_index_++;
+    return PendingOpenRequest{
+        .request_index = request_index,
+        .stream_id = static_cast<std::uint64_t>(request_index) * 4u,
+    };
+}
+
+void QuicHttp09ClientEndpoint::queue_request_send(const PendingOpenRequest &request) {
+    const auto &target = config_.requests[request.request_index].request_target;
+    const std::string line = "GET " + target + "\r\n";
+    pending_core_inputs_.emplace_back(QuicCoreSendStreamData{
+        .stream_id = request.stream_id,
+        .bytes =
+            std::vector<std::byte>(reinterpret_cast<const std::byte *>(line.data()),
+                                   reinterpret_cast<const std::byte *>(line.data()) + line.size()),
+        .fin = true,
+    });
+    pending_open_requests_.push_back(request);
 }
 
 bool QuicHttp09ClientEndpoint::process_receive_stream_data(
@@ -260,7 +322,8 @@ bool QuicHttp09ClientEndpoint::all_streams_complete() const {
 
 void QuicHttp09ClientEndpoint::clear_state() {
     blocked_on_stream_limit_ = false;
-    pending_open_request_.reset();
+    pending_open_requests_.clear();
+    retry_open_requests_.clear();
     request_streams_.clear();
     pending_core_inputs_.clear();
 }

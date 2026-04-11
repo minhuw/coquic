@@ -46,9 +46,13 @@ class QuicHttp09ClientEndpoint {
     QuicHttp09EndpointUpdate drain_pending_inputs();
     bool handle_local_error(const quic::QuicCoreLocalError &error);
     void activate_pending_request();
+    bool has_unissued_requests() const;
     bool requests_may_be_issued() const;
     bool can_issue_next_request() const;
     std::size_t active_request_count() const;
+    std::size_t in_flight_request_count() const;
+    std::optional<PendingOpenRequest> take_next_request_to_issue();
+    void queue_request_send(const PendingOpenRequest &request);
     bool process_receive_stream_data(const quic::QuicCoreReceiveStreamData &received);
     bool all_streams_complete() const;
     void clear_state();
@@ -61,7 +65,8 @@ class QuicHttp09ClientEndpoint {
     bool blocked_on_stream_limit_ = false;
     std::size_t next_request_index_ = 0;
     std::optional<std::size_t> max_concurrent_requests_;
-    std::optional<PendingOpenRequest> pending_open_request_;
+    std::deque<PendingOpenRequest> pending_open_requests_;
+    std::deque<PendingOpenRequest> retry_open_requests_;
     std::unordered_map<std::uint64_t, RequestState> request_streams_;
     std::deque<quic::QuicCoreInput> pending_core_inputs_;
 };

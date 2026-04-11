@@ -93,10 +93,14 @@ struct IoUringTestHarness {
 
 thread_local IoUringTestHarness g_io_uring_test_harness;
 thread_local std::vector<int> g_opened_fds_for_tests;
+thread_local int g_fallback_sendto_calls_for_tests = 0;
+thread_local int g_fallback_poll_calls_for_tests = 0;
 
 void reset_io_uring_test_harness() {
     g_io_uring_test_harness = {};
     g_opened_fds_for_tests.clear();
+    g_fallback_sendto_calls_for_tests = 0;
+    g_fallback_poll_calls_for_tests = 0;
 }
 
 std::uint16_t peer_port_from_msghdr(const msghdr *message) {
@@ -271,6 +275,20 @@ int record_socket_family_and_open_for_tests(int family, int type, int protocol) 
         g_opened_fds_for_tests.push_back(fd);
     }
     return fd;
+}
+
+ssize_t sendto_success_for_tests(int, const void *, size_t length, int, const sockaddr *,
+                                 socklen_t) {
+    g_fallback_sendto_calls_for_tests += 1;
+    return static_cast<ssize_t>(length);
+}
+
+int poll_idle_for_tests(pollfd *fds, nfds_t count, int) {
+    g_fallback_poll_calls_for_tests += 1;
+    for (nfds_t index = 0; index < count; ++index) {
+        fds[index].revents = 0;
+    }
+    return 0;
 }
 
 sockaddr_storage make_ipv4_loopback_peer(std::uint16_t port) {
@@ -458,6 +476,46 @@ bool io_uring_backend_completion_error_is_fatal_for_tests() {
     };
     const auto event = engine->wait(sockets, 5, std::nullopt, "client");
     return !event.has_value() && !engine->register_socket(socket_fd + 1);
+}
+
+bool io_uring_backend_send_falls_back_after_recv_einval_for_tests() {
+    reset_io_uring_test_harness();
+    const ScopedIoUringBackendOpsOverride io_uring_ops{io_uring_ops_for_tests()};
+    const ScopedSocketIoBackendOpsOverride socket_ops{
+        SocketIoBackendOpsOverride{
+            .poll_fn = &poll_idle_for_tests,
+            .sendto_fn = &sendto_success_for_tests,
+        },
+    };
+
+    auto engine = IoUringIoEngine::create();
+    if (engine == nullptr) {
+        return false;
+    }
+
+    constexpr int socket_fd = 99;
+    if (!engine->register_socket(socket_fd)) {
+        return false;
+    }
+
+    enqueue_receive_error_completion_for_tests(socket_fd, -EINVAL);
+
+    const std::array<int, 1> sockets = {
+        socket_fd,
+    };
+    const auto event = engine->wait(sockets, 5, std::nullopt, "client");
+    if (!event.has_value() || event->kind != QuicIoEngineEvent::Kind::idle_timeout ||
+        g_fallback_poll_calls_for_tests != 1) {
+        return false;
+    }
+
+    constexpr std::array<std::byte, 1> kPayload = {
+        std::byte{0x5a},
+    };
+    const auto peer = make_ipv4_loopback_peer(9443);
+    return engine->send(socket_fd, peer, sizeof(sockaddr_in), kPayload, "client",
+                        QuicEcnCodepoint::not_ect) &&
+           g_fallback_sendto_calls_for_tests == 1 && g_io_uring_test_harness.send_submit_calls == 0;
 }
 
 } // namespace test

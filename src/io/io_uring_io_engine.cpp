@@ -1,13 +1,17 @@
 #include "src/io/io_uring_io_engine.h"
 
 #include "src/io/io_backend_test_hooks.h"
+#include "src/io/poll_io_engine.h"
 
 #include <netinet/in.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <array>
 #include <cstring>
 #include <limits>
+#include <iostream>
 #include <memory>
 #include <utility>
 
@@ -46,6 +50,15 @@ test::IoUringBackendOpsOverride make_default_io_uring_backend_ops() {
 test::IoUringBackendOpsOverride &io_uring_backend_ops_state() {
     static thread_local auto ops = make_default_io_uring_backend_ops();
     return ops;
+}
+
+bool using_default_io_uring_backend_ops() {
+    const auto defaults = make_default_io_uring_backend_ops();
+    const auto &ops = io_uring_backend_ops_state();
+    return ops.queue_init_fn == defaults.queue_init_fn &&
+           ops.queue_exit_fn == defaults.queue_exit_fn && ops.get_sqe_fn == defaults.get_sqe_fn &&
+           ops.submit_fn == defaults.submit_fn && ops.wait_cqe_fn == defaults.wait_cqe_fn &&
+           ops.cqe_seen_fn == defaults.cqe_seen_fn;
 }
 
 void apply_io_uring_backend_ops_override(const test::IoUringBackendOpsOverride &override_ops) {
@@ -90,13 +103,24 @@ std::unique_ptr<IoUringIoEngine> IoUringIoEngine::create() {
 }
 
 bool IoUringIoEngine::initialize() {
-    if (ring_ == nullptr || internal::io_uring_backend_ops_state().queue_init_fn(
-                                kIoUringQueueEntries, ring_.get(), 0) != 0) {
+    if (ring_ == nullptr) {
+        return false;
+    }
+
+    const int rc =
+        internal::io_uring_backend_ops_state().queue_init_fn(kIoUringQueueEntries, ring_.get(), 0);
+    if (rc != 0) {
+        std::cerr << "io-uring queue_init failed rc=" << rc;
+        if (rc < 0) {
+            std::cerr << " err=" << std::strerror(-rc);
+        }
+        std::cerr << "\n";
         return false;
     }
 
     initialized_ = true;
     healthy_ = true;
+    probe_recvmsg_support();
     return true;
 }
 
@@ -116,12 +140,19 @@ bool IoUringIoEngine::arm_receive(ReceiveState &state) {
 
     auto *sqe = internal::io_uring_backend_ops_state().get_sqe_fn(ring_.get());
     if (sqe == nullptr) {
+        std::cerr << "io-uring arm_receive failed: get_sqe returned null\n";
         return false;
     }
 
     io_uring_prep_recvmsg(sqe, state.socket_fd, &state.message, 0);
     io_uring_sqe_set_data64(sqe, static_cast<std::uint64_t>(state.socket_fd));
-    return internal::io_uring_backend_ops_state().submit_fn(ring_.get()) >= 0;
+    const int rc = internal::io_uring_backend_ops_state().submit_fn(ring_.get());
+    if (rc < 0) {
+        std::cerr << "io-uring arm_receive failed: submit rc=" << rc
+                  << " err=" << std::strerror(-rc) << " errno=" << errno << "\n";
+        return false;
+    }
+    return true;
 }
 
 QuicEcnCodepoint IoUringIoEngine::decode_linux_ecn_from_control(const msghdr &message) const {
@@ -183,6 +214,9 @@ bool IoUringIoEngine::drain_one_completion(Completion &completion) {
 }
 
 bool IoUringIoEngine::register_socket(int socket_fd) {
+    if (use_poll_receive_) {
+        return receive_fallback_ != nullptr && receive_fallback_->register_socket(socket_fd);
+    }
     if (!initialized_ || !healthy_) {
         return false;
     }
@@ -205,6 +239,10 @@ bool IoUringIoEngine::register_socket(int socket_fd) {
 bool IoUringIoEngine::send(int socket_fd, const sockaddr_storage &peer, socklen_t peer_len,
                            std::span<const std::byte> datagram, std::string_view role_name,
                            quic::QuicEcnCodepoint ecn) {
+    if (use_poll_receive_) {
+        return receive_fallback_ != nullptr &&
+               receive_fallback_->send(socket_fd, peer, peer_len, datagram, role_name, ecn);
+    }
     static_cast<void>(role_name);
     if (!initialized_ || !healthy_) {
         return false;
@@ -257,6 +295,11 @@ std::optional<QuicIoEngineEvent>
 IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
                       std::optional<quic::QuicCoreTimePoint> next_wakeup,
                       std::string_view role_name) {
+    if (use_poll_receive_) {
+        return receive_fallback_ != nullptr
+                   ? receive_fallback_->wait(socket_fds, idle_timeout_ms, next_wakeup, role_name)
+                   : std::nullopt;
+    }
     static_cast<void>(idle_timeout_ms);
     static_cast<void>(role_name);
     if (socket_fds.empty()) {
@@ -276,12 +319,15 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
 
     Completion completion{};
     if (!drain_one_completion(completion)) {
+        std::cerr << "io-uring wait failed: no completion available\n";
         return std::nullopt;
     }
 
     const auto now = QuicCoreClock::now();
     if (completion.user_data == kSendCompletionUserData) {
         if (completion.res < 0) {
+            std::cerr << "io-uring send completion failed res=" << completion.res
+                      << " err=" << std::strerror(-completion.res) << "\n";
             healthy_ = false;
             return std::nullopt;
         }
@@ -293,10 +339,19 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
 
     auto receive_it = receives_.find(static_cast<int>(completion.user_data));
     if (receive_it == receives_.end()) {
+        std::cerr << "io-uring wait failed: unknown completion user_data=" << completion.user_data
+                  << "\n";
         healthy_ = false;
         return std::nullopt;
     }
     if (completion.res < 0) {
+        if (completion.res == -EINVAL) {
+            std::cerr << "io-uring recv completion failed with EINVAL; falling back to poll I/O\n";
+            enable_receive_fallback();
+            return receive_fallback_->wait(socket_fds, idle_timeout_ms, next_wakeup, role_name);
+        }
+        std::cerr << "io-uring recv completion failed res=" << completion.res
+                  << " err=" << std::strerror(-completion.res) << "\n";
         healthy_ = false;
         return std::nullopt;
     }
@@ -327,6 +382,87 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
                 .now = now,
             },
     };
+}
+
+void IoUringIoEngine::probe_recvmsg_support() {
+    if (!internal::using_default_io_uring_backend_ops()) {
+        return;
+    }
+
+    const int socket_fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
+    if (socket_fd < 0) {
+        return;
+    }
+
+    const int enabled = 1;
+    if (::setsockopt(socket_fd, IPPROTO_IP, IP_RECVTOS, &enabled, sizeof(enabled)) != 0) {
+        ::close(socket_fd);
+        return;
+    }
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(0);
+    if (::bind(socket_fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+        ::close(socket_fd);
+        return;
+    }
+
+    sockaddr_in bound_address{};
+    socklen_t bound_length = sizeof(bound_address);
+    if (::getsockname(socket_fd, reinterpret_cast<sockaddr *>(&bound_address), &bound_length) !=
+        0) {
+        ::close(socket_fd);
+        return;
+    }
+
+    ReceiveState probe_state;
+    probe_state.socket_fd = socket_fd;
+    probe_state.data.resize(kMaxDatagramBytes);
+    if (!arm_receive(probe_state)) {
+        ::close(socket_fd);
+        return;
+    }
+
+    const int sender_fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
+    if (sender_fd < 0) {
+        ::close(socket_fd);
+        return;
+    }
+
+    constexpr std::array<std::byte, 1> kProbePayload = {
+        std::byte{0x01},
+    };
+    const auto *payload = reinterpret_cast<const void *>(kProbePayload.data());
+    const auto sent =
+        ::sendto(sender_fd, payload, kProbePayload.size(), 0,
+                 reinterpret_cast<const sockaddr *>(&bound_address), sizeof(bound_address));
+    ::close(sender_fd);
+    if (sent < 0) {
+        ::close(socket_fd);
+        return;
+    }
+
+    Completion completion{};
+    if (!drain_one_completion(completion)) {
+        ::close(socket_fd);
+        return;
+    }
+
+    if (completion.res == -EINVAL) {
+        std::cerr << "io-uring recv probe hit EINVAL; enabling poll fallback\n";
+        enable_receive_fallback();
+    }
+    ::close(socket_fd);
+}
+
+void IoUringIoEngine::enable_receive_fallback() {
+    if (receive_fallback_ == nullptr) {
+        receive_fallback_ = std::make_unique<PollIoEngine>();
+    }
+    use_poll_receive_ = true;
+    pending_completions_.clear();
 }
 
 std::unique_ptr<QuicIoEngine> make_io_uring_io_engine() {

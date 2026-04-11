@@ -34,7 +34,7 @@ class IoUringIoEngine final : public QuicIoEngine {
     struct ReceiveState {
         int socket_fd = -1;
         std::vector<std::byte> data;
-        std::array<std::byte, 128> control{};
+        alignas(cmsghdr) std::array<std::byte, 128> control{};
         sockaddr_storage peer{};
         iovec iov{};
         msghdr message{};
@@ -53,13 +53,17 @@ class IoUringIoEngine final : public QuicIoEngine {
         msghdr &message, std::array<std::byte, CMSG_SPACE(sizeof(int))> &control_storage,
         quic::QuicEcnCodepoint ecn, const sockaddr_storage &peer, socklen_t peer_len) const;
     bool drain_one_completion(Completion &completion);
+    void enable_receive_fallback();
+    void probe_recvmsg_support();
 
     std::unique_ptr<io_uring> ring_;
     bool initialized_ = false;
     bool healthy_ = false;
+    bool use_poll_receive_ = false;
+    std::unique_ptr<QuicIoEngine> receive_fallback_;
     std::unordered_map<int, ReceiveState> receives_;
     std::deque<Completion> pending_completions_;
-    std::array<std::byte, CMSG_SPACE(sizeof(int))> send_control_{};
+    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> send_control_{};
 };
 
 std::unique_ptr<QuicIoEngine> make_io_uring_io_engine();

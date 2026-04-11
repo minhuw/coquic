@@ -103,7 +103,7 @@ TEST(SocketIoBackendTest, PublicShellTypesCompileAndConstruct) {
     EXPECT_TRUE(event.datagram.has_value());
     EXPECT_EQ(event.datagram->route_handle, 7u);
 
-    auto backend = coquic::io::make_socket_io_backend(coquic::io::SocketIoBackendConfig{
+    auto backend = coquic::io::make_socket_io_backend(coquic::io::QuicUdpBackendConfig{
         .role_name = "client",
         .idle_timeout_ms = 5,
     });
@@ -136,7 +136,7 @@ TEST(SocketIoBackendTest, EnsureRouteOpensAdditionalSocketForIncompatibleFamily)
         },
     };
 
-    SocketIoBackend backend(SocketIoBackendConfig{
+    SocketIoBackend backend(QuicUdpBackendConfig{
         .role_name = "server",
     });
 
@@ -197,7 +197,7 @@ TEST(SocketIoBackendTest, WaitPollsAllActiveRouteSocketsAndReturnsSecondRouteDat
         },
     };
 
-    SocketIoBackend backend(SocketIoBackendConfig{
+    SocketIoBackend backend(QuicUdpBackendConfig{
         .role_name = "client",
         .idle_timeout_ms = 5,
     });
@@ -242,6 +242,10 @@ TEST(SocketIoBackendTest, WaitPollsAllActiveRouteSocketsAndReturnsSecondRouteDat
         coquic::quic::test_support::optional_ref_or_terminate(event_value.datagram);
     EXPECT_EQ(datagram.route_handle, second_handle);
     EXPECT_EQ(g_multi_socket_backend_test_trace.last_poll_descriptor_count, 2u);
+}
+
+TEST(SocketIoBackendTest, WaitReturnsSecondRouteDatagramForHooks) {
+    EXPECT_TRUE(coquic::io::test::socket_io_backend_wait_returns_second_route_datagram_for_tests());
 }
 
 TEST(SocketIoBackendTest, ConfiguresLinuxSocketsForReceivingEcnMetadata) {

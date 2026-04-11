@@ -147,6 +147,8 @@ fn addProjectLibrary(
         "src/quic/qlog/sink.cpp",
         "src/quic/recovery.cpp",
         "src/io/io_backend_factory.cpp",
+        "src/io/poll_io_engine.cpp",
+        "src/io/shared_udp_backend_core.cpp",
         "src/io/socket_io_backend.cpp",
         "src/quic/protected_codec.cpp",
         "src/quic/streams.cpp",
@@ -300,6 +302,7 @@ pub fn build(b: *std.Build) void {
         "tests/http09/runtime/retry_zero_rtt_test.cpp",
         "tests/http09/runtime/interop_alias_test.cpp",
         "tests/http09/runtime/linux_ecn_test.cpp",
+        "tests/http09/runtime/io_backend_contract_test.cpp",
         "tests/http09/runtime/socket_io_backend_test.cpp",
         "tests/http09/runtime/io_backend_factory_test.cpp",
     };

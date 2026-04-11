@@ -10,14 +10,13 @@
 
 namespace coquic::io {
 
-struct SocketIoBackendConfig {
-    std::string role_name;
-    int idle_timeout_ms = 0;
-};
+using SocketIoBackendConfig = QuicUdpBackendConfig;
+
+class SharedUdpBackendCore;
 
 class SocketIoBackend final : public QuicIoBackend {
   public:
-    explicit SocketIoBackend(SocketIoBackendConfig config);
+    explicit SocketIoBackend(QuicUdpBackendConfig config);
     ~SocketIoBackend() override;
 
     SocketIoBackend(const SocketIoBackend &) = delete;
@@ -31,8 +30,7 @@ class SocketIoBackend final : public QuicIoBackend {
     bool send(const QuicIoTxDatagram &datagram) override;
 
   private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::unique_ptr<SharedUdpBackendCore> core_;
 };
 
 std::unique_ptr<QuicIoBackend> make_socket_io_backend(SocketIoBackendConfig config);

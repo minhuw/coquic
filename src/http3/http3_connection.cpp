@@ -599,7 +599,8 @@ Http3Result<bool> Http3Connection::submit_response_trailers(std::uint64_t stream
     return Http3Result<bool>::success(true);
 }
 
-Http3Result<bool> Http3Connection::finish_response(std::uint64_t stream_id) {
+Http3Result<bool> Http3Connection::finish_response(std::uint64_t stream_id,
+                                                   bool enforce_content_length) {
     if (closed_) {
         return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
                                          "connection is closed", stream_id);
@@ -628,7 +629,7 @@ Http3Result<bool> Http3Connection::finish_response(std::uint64_t stream_id) {
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
                                          "final response headers not sent", stream_id);
     }
-    if (response.expected_content_length.has_value() &&
+    if (enforce_content_length && response.expected_content_length.has_value() &&
         response.body_bytes_sent != *response.expected_content_length) {
         return local_http3_failure<bool>(Http3ErrorCode::message_error,
                                          "response body does not match content-length", stream_id);

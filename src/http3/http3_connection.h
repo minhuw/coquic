@@ -33,7 +33,7 @@ class Http3Connection {
     Http3Result<bool> submit_response_trailers(std::uint64_t stream_id,
                                                std::span<const Http3Field> trailers,
                                                bool fin = true);
-    Http3Result<bool> finish_response(std::uint64_t stream_id);
+    Http3Result<bool> finish_response(std::uint64_t stream_id, bool enforce_content_length = true);
 
     const Http3ConnectionState &state() const;
     const Http3SettingsSnapshot &local_settings() const;

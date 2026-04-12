@@ -142,6 +142,7 @@ fn addProjectLibrary(
         "src/http3/http3_connection.cpp",
         "src/http3/http3_protocol.cpp",
         "src/http3/http3_qpack.cpp",
+        "src/http3/http3_server.cpp",
         "src/perf/perf_runtime.cpp",
         "src/perf/perf_protocol.cpp",
         "src/perf/perf_metrics.cpp",
@@ -330,6 +331,7 @@ pub fn build(b: *std.Build) void {
         "tests/http3/protocol_test.cpp",
         "tests/http3/qpack_test.cpp",
         "tests/http3/qpack_dynamic_test.cpp",
+        "tests/http3/server_test.cpp",
     };
     const qlog_test_files = &.{
         "tests/qlog/qlog_test.cpp",

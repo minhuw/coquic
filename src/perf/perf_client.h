@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -17,6 +18,7 @@
 namespace coquic::perf {
 
 int run_perf_client(const QuicPerfConfig &config);
+std::size_t initial_connection_target_for_test(const QuicPerfConfig &config);
 
 class QuicPerfClient {
   public:
@@ -24,9 +26,16 @@ class QuicPerfClient {
     int run();
 
   private:
+    enum class BenchmarkPhase : std::uint8_t {
+        warmup,
+        measure,
+        drain,
+    };
+
     struct OutstandingRequest {
         quic::QuicCoreTimePoint started_at{};
         std::size_t received_bytes = 0;
+        bool counts_toward_measurement = false;
     };
 
     struct ConnectionState {
@@ -43,6 +52,12 @@ class QuicPerfClient {
     };
 
     bool open_initial_connection(quic::QuicCoreTimePoint now);
+    void advance_benchmark_phase(quic::QuicCoreTimePoint now);
+    void enter_measure_phase(quic::QuicCoreTimePoint now);
+    void enter_drain_phase(quic::QuicCoreTimePoint now);
+    bool timed_rr_mode() const;
+    bool timed_crr_mode() const;
+    bool benchmark_accepts_new_work() const;
     bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now);
     bool handle_stream_data(ConnectionState &connection,
                             const quic::QuicCoreReceiveStreamData &received,
@@ -51,6 +66,9 @@ class QuicPerfClient {
     void maybe_start_bulk_streams(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_issue_rr_requests(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_issue_crr_request(ConnectionState &connection, quic::QuicCoreTimePoint now);
+    bool maybe_close_rr_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
+    bool maybe_close_crr_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
+    std::chrono::milliseconds result_elapsed(quic::QuicCoreTimePoint now) const;
     quic::QuicCoreClientConnectionConfig make_client_open_config(std::uint64_t index) const;
     bool maybe_open_crr_connections(quic::QuicCoreTimePoint now);
     bool flush_json_result() const;
@@ -64,6 +82,10 @@ class QuicPerfClient {
     std::size_t requests_started_ = 0;
     std::size_t crr_requests_opened_ = 0;
     std::uint64_t next_connection_index_ = 0;
+    BenchmarkPhase phase_ = BenchmarkPhase::warmup;
+    quic::QuicCoreTimePoint run_started_at_{};
+    quic::QuicCoreTimePoint measure_started_at_{};
+    quic::QuicCoreTimePoint measure_deadline_{};
     QuicPerfRunSummary summary_;
 };
 

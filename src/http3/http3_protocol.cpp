@@ -22,6 +22,10 @@ using quic::VarIntDecoded;
 
 namespace {
 
+bool is_reserved_http2_derived_frame_type(std::uint64_t type) {
+    return type == 0x02u || type == 0x06u || type == 0x08u || type == 0x09u;
+}
+
 template <typename T>
 Http3Result<T> http3_failure(Http3ErrorCode code, std::string detail,
                              std::optional<std::uint64_t> stream_id = std::nullopt) {
@@ -47,12 +51,21 @@ CodecResult<std::uint64_t> read_varint(BufferReader &reader) {
 
 CodecResult<std::vector<std::byte>>
 serialize_http3_payload_frame(std::uint64_t type, std::span<const std::byte> payload) {
-    const auto encoded_type = encode_varint(type).value();
-    const auto encoded_length = encode_varint(payload.size()).value();
+    const auto encoded_type = encode_varint(type);
+    if (!encoded_type.has_value()) {
+        return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
+                                                     encoded_type.error().offset);
+    }
+
+    const auto encoded_length = encode_varint(payload.size());
+    if (!encoded_length.has_value()) {
+        return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
+                                                     encoded_length.error().offset);
+    }
 
     BufferWriter writer;
-    writer.write_bytes(encoded_type);
-    writer.write_bytes(encoded_length);
+    writer.write_bytes(encoded_type.value());
+    writer.write_bytes(encoded_length.value());
     writer.write_bytes(payload);
     return CodecResult<std::vector<std::byte>>::success(writer.bytes());
 }
@@ -106,7 +119,7 @@ CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &fram
                 }
 
                 return serialize_http3_payload_frame(kHttp3FrameTypeGoaway, encoded_id.value());
-            } else {
+            } else if constexpr (std::is_same_v<T, Http3MaxPushIdFrame>) {
                 const auto encoded_push_id = encode_varint(typed_frame.push_id);
                 if (!encoded_push_id.has_value()) {
                     return codec_failure<std::vector<std::byte>>(encoded_push_id.error().code,
@@ -115,6 +128,8 @@ CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &fram
 
                 return serialize_http3_payload_frame(kHttp3FrameTypeMaxPushId,
                                                      encoded_push_id.value());
+            } else {
+                return serialize_http3_payload_frame(typed_frame.type, typed_frame.payload);
             }
         },
         frame);
@@ -198,7 +213,10 @@ CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> byte
             .push_id = push_id.value(),
         };
     } else {
-        return codec_failure<Http3DecodedFrame>(CodecErrorCode::http3_parse_error, reader.offset());
+        frame = Http3UnknownFrame{
+            .type = frame_type.value(),
+            .payload = std::vector<std::byte>(payload.begin(), payload.end()),
+        };
     }
 
     return CodecResult<Http3DecodedFrame>::success(Http3DecodedFrame{
@@ -438,12 +456,21 @@ bool http3_frame_allowed_on_control_stream(Http3ConnectionRole role, const Http3
     if (std::holds_alternative<Http3MaxPushIdFrame>(frame)) {
         return role == Http3ConnectionRole::server;
     }
+    if (const auto *unknown = std::get_if<Http3UnknownFrame>(&frame)) {
+        return !is_reserved_http2_derived_frame_type(unknown->type);
+    }
     return false;
 }
 
 bool http3_frame_allowed_on_request_stream(const Http3Frame &frame) {
-    return std::holds_alternative<Http3DataFrame>(frame) ||
-           std::holds_alternative<Http3HeadersFrame>(frame);
+    if (std::holds_alternative<Http3DataFrame>(frame) ||
+        std::holds_alternative<Http3HeadersFrame>(frame)) {
+        return true;
+    }
+    if (const auto *unknown = std::get_if<Http3UnknownFrame>(&frame)) {
+        return !is_reserved_http2_derived_frame_type(unknown->type);
+    }
+    return false;
 }
 
 } // namespace coquic::http3

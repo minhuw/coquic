@@ -139,6 +139,7 @@ fn addProjectLibrary(
         "src/http09/http09_client.cpp",
         "src/http09/http09_runtime.cpp",
         "src/http09/http09_server.cpp",
+        "src/http3/http3_connection.cpp",
         "src/http3/http3_protocol.cpp",
         "src/http3/http3_qpack.cpp",
         "src/perf/perf_runtime.cpp",
@@ -325,6 +326,7 @@ pub fn build(b: *std.Build) void {
         "tests/http09/runtime/io_uring_backend_test.cpp",
     };
     const http3_test_files = &.{
+        "tests/http3/connection_test.cpp",
         "tests/http3/protocol_test.cpp",
         "tests/http3/qpack_test.cpp",
         "tests/http3/qpack_dynamic_test.cpp",

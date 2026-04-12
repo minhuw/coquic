@@ -264,6 +264,16 @@ TEST(QuicHttp3ProtocolTest, EncodesAndDecodesDataAndHeadersFrames) {
     EXPECT_FALSE(coquic::http3::http3_frame_allowed_on_control_stream(
         coquic::http3::Http3ConnectionRole::client,
         Http3Frame{Http3HeadersFrame{.field_section = {}}}));
+    EXPECT_TRUE(coquic::http3::http3_frame_allowed_on_control_stream(
+        coquic::http3::Http3ConnectionRole::client,
+        Http3Frame{coquic::http3::Http3UnknownFrame{.type = 0x21, .payload = {}}}));
+    EXPECT_FALSE(coquic::http3::http3_frame_allowed_on_control_stream(
+        coquic::http3::Http3ConnectionRole::client,
+        Http3Frame{coquic::http3::Http3UnknownFrame{.type = 0x02, .payload = {}}}));
+    EXPECT_TRUE(coquic::http3::http3_frame_allowed_on_request_stream(
+        Http3Frame{coquic::http3::Http3UnknownFrame{.type = 0x21, .payload = {}}}));
+    EXPECT_FALSE(coquic::http3::http3_frame_allowed_on_request_stream(
+        Http3Frame{coquic::http3::Http3UnknownFrame{.type = 0x02, .payload = {}}}));
 }
 
 TEST(QuicHttp3ProtocolTest, RejectsFramesThatCannotBeSerializedAsVarints) {
@@ -271,6 +281,7 @@ TEST(QuicHttp3ProtocolTest, RejectsFramesThatCannotBeSerializedAsVarints) {
     using coquic::http3::Http3GoawayFrame;
     using coquic::http3::Http3Setting;
     using coquic::http3::Http3SettingsFrame;
+    using coquic::http3::Http3UnknownFrame;
     using coquic::quic::CodecErrorCode;
 
     constexpr std::uint64_t kTooLargeVarInt = (1ull << 62);
@@ -290,6 +301,11 @@ TEST(QuicHttp3ProtocolTest, RejectsFramesThatCannotBeSerializedAsVarints) {
         coquic::http3::serialize_http3_frame(Http3Frame{Http3GoawayFrame{.id = kTooLargeVarInt}});
     ASSERT_FALSE(invalid_goaway.has_value());
     EXPECT_EQ(invalid_goaway.error().code, CodecErrorCode::invalid_varint);
+
+    const auto invalid_unknown = coquic::http3::serialize_http3_frame(
+        Http3Frame{Http3UnknownFrame{.type = kTooLargeVarInt, .payload = {}}});
+    ASSERT_FALSE(invalid_unknown.has_value());
+    EXPECT_EQ(invalid_unknown.error().code, CodecErrorCode::invalid_varint);
 
     const auto invalid_control_stream = coquic::http3::serialize_http3_control_stream(
         std::array{Http3Setting{.id = 0, .value = kTooLargeVarInt}});
@@ -315,9 +331,13 @@ TEST(QuicHttp3ProtocolTest, RejectsMalformedFrameEncodings) {
     EXPECT_EQ(short_payload.error().code, CodecErrorCode::http3_parse_error);
     EXPECT_EQ(short_payload.error().offset, 2u);
 
-    const auto unknown_frame = coquic::http3::parse_http3_frame(bytes_from_ints({0x02, 0x00}));
-    ASSERT_FALSE(unknown_frame.has_value());
-    EXPECT_EQ(unknown_frame.error().code, CodecErrorCode::http3_parse_error);
+    const auto unknown_frame = coquic::http3::parse_http3_frame(bytes_from_ints({0x21, 0x00}));
+    ASSERT_TRUE(unknown_frame.has_value());
+    const auto *parsed_unknown =
+        std::get_if<coquic::http3::Http3UnknownFrame>(&unknown_frame.value().frame);
+    ASSERT_NE(parsed_unknown, nullptr);
+    EXPECT_EQ(parsed_unknown->type, 0x21u);
+    EXPECT_TRUE(parsed_unknown->payload.empty());
 
     const auto truncated_setting_id =
         coquic::http3::parse_http3_frame(bytes_from_ints({0x04, 0x01, 0x40}));

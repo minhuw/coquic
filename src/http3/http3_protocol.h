@@ -67,8 +67,15 @@ struct Http3MaxPushIdFrame {
     bool operator==(const Http3MaxPushIdFrame &) const = default;
 };
 
+struct Http3UnknownFrame {
+    std::uint64_t type = 0;
+    std::vector<std::byte> payload;
+
+    bool operator==(const Http3UnknownFrame &) const = default;
+};
+
 using Http3Frame = std::variant<Http3DataFrame, Http3HeadersFrame, Http3SettingsFrame,
-                                Http3GoawayFrame, Http3MaxPushIdFrame>;
+                                Http3GoawayFrame, Http3MaxPushIdFrame, Http3UnknownFrame>;
 
 struct Http3DecodedFrame {
     Http3Frame frame;

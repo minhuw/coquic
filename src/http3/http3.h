@@ -104,6 +104,7 @@ struct Http3RequestHead {
 
 struct Http3ResponseHead {
     std::uint16_t status = 200;
+    std::optional<std::uint64_t> content_length;
     Http3Headers headers;
 };
 

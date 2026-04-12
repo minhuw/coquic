@@ -27,6 +27,13 @@ class Http3Connection {
     Http3EndpointUpdate on_core_result(const quic::QuicCoreResult &result,
                                        quic::QuicCoreTimePoint now);
     Http3EndpointUpdate poll(quic::QuicCoreTimePoint now);
+    Http3Result<bool> submit_response_head(std::uint64_t stream_id, const Http3ResponseHead &head);
+    Http3Result<bool> submit_response_body(std::uint64_t stream_id, std::span<const std::byte> body,
+                                           bool fin = false);
+    Http3Result<bool> submit_response_trailers(std::uint64_t stream_id,
+                                               std::span<const Http3Field> trailers,
+                                               bool fin = true);
+    Http3Result<bool> finish_response(std::uint64_t stream_id);
 
     const Http3ConnectionState &state() const;
     const Http3SettingsSnapshot &local_settings() const;
@@ -66,6 +73,14 @@ class Http3Connection {
         std::uint64_t body_bytes_received = 0;
     };
 
+    struct LocalResponseStreamState {
+        bool final_response_started = false;
+        bool trailers_sent = false;
+        bool finished = false;
+        std::optional<std::uint64_t> expected_content_length;
+        std::uint64_t body_bytes_sent = 0;
+    };
+
     Http3EndpointUpdate drain_pending_inputs(bool terminal_failure = false);
     void queue_startup_streams();
     void flush_qpack_decoder_instructions();
@@ -93,7 +108,7 @@ class Http3Connection {
     void finalize_request_stream(std::uint64_t stream_id);
     void handle_control_frame(std::uint64_t stream_id, const Http3Frame &frame);
     void apply_remote_settings(const Http3SettingsFrame &frame);
-    void queue_send(std::uint64_t stream_id, std::span<const std::byte> bytes);
+    void queue_send(std::uint64_t stream_id, std::span<const std::byte> bytes, bool fin = false);
     std::uint64_t next_local_uni_stream_id() const;
     bool is_remote_critical_stream(std::uint64_t stream_id) const;
     bool is_local_critical_stream(std::uint64_t stream_id) const;
@@ -110,6 +125,7 @@ class Http3Connection {
     std::deque<Http3EndpointEvent> pending_events_;
     std::unordered_map<std::uint64_t, PeerUniStreamState> peer_uni_streams_;
     std::unordered_map<std::uint64_t, PeerRequestStreamState> peer_request_streams_;
+    std::unordered_map<std::uint64_t, LocalResponseStreamState> local_response_streams_;
     std::unordered_set<std::uint64_t> terminated_peer_request_streams_;
 };
 

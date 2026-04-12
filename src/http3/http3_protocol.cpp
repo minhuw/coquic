@@ -502,6 +502,19 @@ Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const H
                 return http3_failure<Http3ResponseHead>(
                     Http3ErrorCode::message_error, "connection-specific header is not permitted");
             }
+            if (field.name == "content-length") {
+                const auto content_length = parse_content_length_value(field.value);
+                if (!content_length.has_value()) {
+                    return http3_failure<Http3ResponseHead>(content_length.error().code,
+                                                            content_length.error().detail);
+                }
+                if (head.content_length.has_value() &&
+                    *head.content_length != content_length.value()) {
+                    return http3_failure<Http3ResponseHead>(Http3ErrorCode::message_error,
+                                                            "invalid content-length header");
+                }
+                head.content_length = content_length.value();
+            }
             head.headers.push_back(field);
             continue;
         }

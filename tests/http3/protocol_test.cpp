@@ -691,4 +691,33 @@ TEST(QuicHttp3ProtocolTest, RejectsResponseStatusParseFailuresAndEmptyTrailerNam
     EXPECT_EQ(empty_name_trailer.error().detail, "trailers must not contain pseudo headers");
 }
 
+TEST(QuicHttp3ProtocolTest, ResponseContentLengthParsesIntoResponseHead) {
+    const std::array fields{
+        coquic::http3::Http3Field{":status", "200"},
+        coquic::http3::Http3Field{"content-length", "4"},
+        coquic::http3::Http3Field{"server", "coquic"},
+    };
+
+    const auto response = coquic::http3::validate_http3_response_headers(fields);
+    ASSERT_TRUE(response.has_value());
+    EXPECT_EQ(response.value().status, 200);
+    EXPECT_EQ(response.value().content_length, std::optional<std::uint64_t>(4u));
+    ASSERT_EQ(response.value().headers.size(), 2u);
+    EXPECT_EQ(response.value().headers[0].name, "content-length");
+    EXPECT_EQ(response.value().headers[1].name, "server");
+}
+
+TEST(QuicHttp3ProtocolTest, ResponseContentLengthRejectsMismatchedDuplicateValues) {
+    const std::array fields{
+        coquic::http3::Http3Field{":status", "200"},
+        coquic::http3::Http3Field{"content-length", "4"},
+        coquic::http3::Http3Field{"content-length", "5"},
+    };
+
+    const auto response = coquic::http3::validate_http3_response_headers(fields);
+    ASSERT_FALSE(response.has_value());
+    EXPECT_EQ(response.error().code, coquic::http3::Http3ErrorCode::message_error);
+    EXPECT_EQ(response.error().detail, "invalid content-length header");
+}
+
 } // namespace

@@ -4327,7 +4327,7 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
         drain_burst(coquic::quic::test::test_time(5));
     ASSERT_GT(third_burst_packets, 0u);
     EXPECT_GT(third_largest_sent, second_largest_sent);
-    EXPECT_GT(expected_offset, 60000u);
+    EXPECT_GT(expected_offset, 50000u);
 }
 
 TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossRepeatedCumulativeAcks) {
@@ -4455,6 +4455,39 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossRepeatedCumulativeAcks
         << " sent_packets=" << connection.application_space_.sent_packets.size()
         << " queued_bytes=" << connection.total_queued_stream_bytes()
         << " pending_send=" << connection.has_pending_application_send();
+}
+
+TEST(QuicCoreTest, ApplicationSendYieldsAfterBoundedBurstUntilResumeDeadline) {
+    auto connection = make_connected_client_connection();
+    const auto payload =
+        std::vector<std::byte>(static_cast<std::size_t>(256u) * 1024u, std::byte{0x52});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    const auto burst_time = coquic::quic::test::test_time(1);
+    constexpr auto resume_delay = std::chrono::milliseconds(1);
+    constexpr std::size_t kExpectedBurstDatagrams = 21;
+
+    std::size_t emitted_packets = 0;
+    for (;;) {
+        const auto datagram = connection.drain_outbound_datagram(burst_time);
+        if (datagram.empty()) {
+            break;
+        }
+        ++emitted_packets;
+    }
+
+    EXPECT_EQ(emitted_packets, kExpectedBurstDatagrams);
+    EXPECT_TRUE(connection.has_pending_application_send());
+    EXPECT_EQ(connection.next_wakeup(), std::optional{burst_time + resume_delay});
+
+    const auto resumed_datagram = connection.drain_outbound_datagram(burst_time + resume_delay);
+    EXPECT_FALSE(resumed_datagram.empty());
 }
 
 TEST(QuicCoreTest, ApplicationProbePacketDoesNotLeaveRetransmittedFragmentPending) {

@@ -347,6 +347,7 @@ class QuicConnection {
     CodecResult<StreamState *> get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id);
     PeerStreamOpenLimits peer_stream_open_limits() const;
     bool has_pending_application_send() const;
+    bool has_pending_fresh_application_stream_send() const;
     std::uint64_t total_queued_stream_bytes() const;
     void maybe_queue_connection_blocked_frame();
     void maybe_queue_stream_blocked_frame(StreamState &stream);
@@ -442,6 +443,9 @@ class QuicConnection {
     std::vector<DeferredProtectedDatagram> deferred_protected_packets_;
     std::optional<QuicCoreTimePoint> last_peer_activity_time_;
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
+    std::optional<QuicCoreTimePoint> send_burst_resume_deadline_;
+    std::optional<QuicCoreTimePoint> send_burst_reference_time_;
+    std::size_t send_burst_datagrams_sent_ = 0;
     std::optional<QuicCoreTimePoint> server_zero_rtt_discard_deadline_;
     std::optional<QuicPathId> last_validated_path_id_;
     std::optional<QuicPathId> previous_path_id_;

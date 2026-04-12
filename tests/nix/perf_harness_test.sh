@@ -51,6 +51,38 @@ grep -F -- 'ci)' "${script}" >/dev/null || {
   exit 1
 }
 
+smoke_runs=(
+  '"socket bulk download 65536 0 0 1 1 1 0ms 5s"'
+  '"io_uring bulk download 65536 0 0 1 1 1 0ms 5s"'
+  '"socket rr stay 32 48 32 1 1 4 0ms 5s"'
+  '"io_uring rr stay 32 48 32 1 1 4 0ms 5s"'
+  '"socket crr stay 24 24 8 1 2 1 0ms 5s"'
+  '"io_uring crr stay 24 24 8 1 2 1 0ms 5s"'
+)
+
+for run in "${smoke_runs[@]}"; do
+  grep -F -- "${run}" "${script}" >/dev/null || {
+    echo "missing smoke run tuple: ${run}" >&2
+    exit 1
+  }
+done
+
+ci_runs=(
+  '"socket bulk download 0 1048576 none 4 1 1 5s 60s"'
+  '"io_uring bulk download 0 1048576 none 4 1 1 5s 60s"'
+  '"socket rr stay 32 32 none 1 256 16 5s 45s"'
+  '"io_uring rr stay 32 32 none 1 256 16 5s 45s"'
+  '"socket crr stay 32 32 none 1 512 1 5s 45s"'
+  '"io_uring crr stay 32 32 none 1 512 1 5s 45s"'
+)
+
+for run in "${ci_runs[@]}"; do
+  grep -F -- "${run}" "${script}" >/dev/null || {
+    echo "missing ci run tuple: ${run}" >&2
+    exit 1
+  }
+done
+
 grep -F -- 'perf-image-quictls-musl' "${flake}" >/dev/null || {
   echo 'missing perf image package export in flake.nix' >&2
   exit 1

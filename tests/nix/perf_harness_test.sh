@@ -41,6 +41,16 @@ grep -F -- '.bench-results/manifest.json' "${script}" >/dev/null || {
   exit 1
 }
 
+grep -F -- 'usage: bash bench/run-host-matrix.sh [--preset smoke|ci]' "${script}" >/dev/null || {
+  echo 'missing ci preset in harness usage' >&2
+  exit 1
+}
+
+grep -F -- 'ci)' "${script}" >/dev/null || {
+  echo 'missing ci preset case in harness script' >&2
+  exit 1
+}
+
 grep -F -- 'perf-image-quictls-musl' "${flake}" >/dev/null || {
   echo 'missing perf image package export in flake.nix' >&2
   exit 1

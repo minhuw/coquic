@@ -54,8 +54,8 @@ grep -F 'bash tests/nix/perf_harness_test.sh' "${workflow}" >/dev/null || {
   exit 1
 }
 
-grep -F 'bash bench/run-host-matrix.sh --preset smoke' "${workflow}" >/dev/null || {
-  echo 'missing smoke harness step' >&2
+grep -F 'bash bench/run-host-matrix.sh --preset ci' "${workflow}" >/dev/null || {
+  echo 'missing ci harness step' >&2
   exit 1
 }
 

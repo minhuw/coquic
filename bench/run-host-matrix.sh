@@ -15,7 +15,7 @@ preset="smoke"
 
 usage() {
   cat <<'USAGE'
-usage: bash bench/run-host-matrix.sh [--preset smoke]
+usage: bash bench/run-host-matrix.sh [--preset smoke|ci]
 
 environment overrides:
   PERF_RESULTS_ROOT  result directory (default: .bench-results)
@@ -52,12 +52,22 @@ done
 case "${preset}" in
   smoke)
     runs=(
-      "socket bulk download 65536 0 0 1 1 1"
-      "io_uring bulk download 65536 0 0 1 1 1"
-      "socket rr stay 32 48 32 1 1 4"
-      "io_uring rr stay 32 48 32 1 1 4"
-      "socket crr stay 24 24 8 1 2 1"
-      "io_uring crr stay 24 24 8 1 2 1"
+      "socket bulk download 65536 0 0 1 1 1 0ms 5s"
+      "io_uring bulk download 65536 0 0 1 1 1 0ms 5s"
+      "socket rr stay 32 48 32 1 1 4 0ms 5s"
+      "io_uring rr stay 32 48 32 1 1 4 0ms 5s"
+      "socket crr stay 24 24 8 1 2 1 0ms 5s"
+      "io_uring crr stay 24 24 8 1 2 1 0ms 5s"
+    )
+    ;;
+  ci)
+    runs=(
+      "socket bulk download 0 1048576 none 4 1 1 5s 60s"
+      "io_uring bulk download 0 1048576 none 4 1 1 5s 60s"
+      "socket rr stay 32 32 none 1 256 16 5s 45s"
+      "io_uring rr stay 32 32 none 1 256 16 5s 45s"
+      "socket crr stay 32 32 none 1 512 1 5s 45s"
+      "io_uring crr stay 32 32 none 1 512 1 5s 45s"
     )
     ;;
   *)
@@ -78,7 +88,7 @@ image_path="$(nix build --print-out-paths ".#${image_attr}")"
 docker load -i "${image_path}" >/dev/null
 
 for run in "${runs[@]}"; do
-  read -r backend mode direction request_bytes response_bytes limit streams connections inflight <<<"${run}"
+  read -r backend mode direction request_bytes response_bytes limit streams connections inflight warmup duration <<<"${run}"
   run_name="${preset}-${backend}-${mode}-s${streams}-c${connections}-q${inflight}"
   json_path="${results_root}/${run_name}.json"
   txt_path="${results_root}/${run_name}.txt"
@@ -111,12 +121,17 @@ for run in "${runs[@]}"; do
     --streams "${streams}"
     --connections "${connections}"
     --requests-in-flight "${inflight}"
+    --warmup "${warmup}"
+    --duration "${duration}"
     --json-out "/results/${run_name}.json"
   )
 
   if [ "${mode}" = 'bulk' ]; then
-    client_args+=(--direction "${direction}" --total-bytes "${limit}")
-  else
+    client_args+=(--direction "${direction}")
+    if [ "${limit}" != 'none' ]; then
+      client_args+=(--total-bytes "${limit}")
+    fi
+  elif [ "${limit}" != 'none' ]; then
     client_args+=(--requests "${limit}")
   fi
 

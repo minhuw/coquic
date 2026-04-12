@@ -57,6 +57,17 @@ coquic::quic::QuicCoreResult receive_result(std::uint64_t stream_id,
     return result;
 }
 
+coquic::quic::QuicCoreResult reset_result(std::uint64_t stream_id, std::uint64_t error_code = 0) {
+    coquic::quic::QuicCoreResult result;
+    result.effects.push_back(coquic::quic::QuicCoreEffect{
+        coquic::quic::QuicCorePeerResetStream{
+            .stream_id = stream_id,
+            .application_error_code = error_code,
+        },
+    });
+    return result;
+}
+
 std::vector<coquic::quic::QuicCoreSendStreamData>
 send_stream_inputs_from(const coquic::http3::Http3ServerEndpointUpdate &update) {
     std::vector<coquic::quic::QuicCoreSendStreamData> sends;
@@ -344,6 +355,56 @@ TEST(QuicHttp3ServerTest, HeadRequestSuppressesResponseBodyButKeepsHeaders) {
     ASSERT_EQ(sends.size(), 1u);
     EXPECT_EQ(sends[0].bytes, expected_headers);
     EXPECT_TRUE(sends[0].fin);
+}
+
+TEST(QuicHttp3ServerTest, PeerResetDropsBufferedRequestAndEmitsCancellationEvent) {
+    bool handler_called = false;
+    coquic::http3::Http3ServerEndpoint endpoint(coquic::http3::Http3ServerConfig{
+        .request_handler =
+            [&](const coquic::http3::Http3Request &) {
+                handler_called = true;
+                return coquic::http3::Http3Response{
+                    .head = {.status = 204},
+                };
+            },
+    });
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "POST"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/upload"},
+        coquic::http3::Http3Field{"content-length", "8"},
+    };
+
+    const auto headers_update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields)),
+                                coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(headers_update.terminal_failure);
+
+    const auto body_update = endpoint.on_core_result(receive_result(0, data_frame_bytes("ping")),
+                                                     coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(body_update.terminal_failure);
+
+    const auto cancel_update = endpoint.on_core_result(
+        reset_result(0,
+                     static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled)),
+        coquic::quic::QuicCoreTimePoint{});
+
+    EXPECT_FALSE(cancel_update.terminal_failure);
+    EXPECT_FALSE(handler_called);
+    ASSERT_EQ(cancel_update.request_cancelled_events.size(), 1u);
+    const auto &cancelled = cancel_update.request_cancelled_events[0];
+    EXPECT_EQ(cancelled.stream_id, 0u);
+    ASSERT_TRUE(cancelled.head.has_value());
+    if (cancelled.head.has_value()) {
+        EXPECT_EQ(cancelled.head.value().path, "/upload");
+    }
+    EXPECT_EQ(cancelled.body, bytes_from_text("ping"));
+    EXPECT_EQ(cancelled.application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled));
 }
 
 } // namespace

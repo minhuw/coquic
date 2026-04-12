@@ -15,8 +15,17 @@ struct Http3ServerConfig {
     std::function<Http3Response(const Http3Request &)> request_handler;
 };
 
+struct Http3ServerRequestCancelledEvent {
+    std::uint64_t stream_id = 0;
+    std::optional<Http3RequestHead> head;
+    std::vector<std::byte> body;
+    Http3Headers trailers;
+    std::uint64_t application_error_code = 0;
+};
+
 struct Http3ServerEndpointUpdate {
     std::vector<quic::QuicCoreInput> core_inputs;
+    std::vector<Http3ServerRequestCancelledEvent> request_cancelled_events;
     bool has_pending_work = false;
     bool terminal_failure = false;
     bool handled_local_error = false;

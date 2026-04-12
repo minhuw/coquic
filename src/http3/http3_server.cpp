@@ -198,6 +198,23 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             continue;
         }
 
+        if (const auto *reset = std::get_if<Http3PeerRequestResetEvent>(&event)) {
+            const auto pending_it = pending_requests_.find(reset->stream_id);
+            if (pending_it == pending_requests_.end()) {
+                continue;
+            }
+
+            update.request_cancelled_events.push_back(Http3ServerRequestCancelledEvent{
+                .stream_id = reset->stream_id,
+                .head = std::move(pending_it->second.head),
+                .body = std::move(pending_it->second.body),
+                .trailers = std::move(pending_it->second.trailers),
+                .application_error_code = reset->application_error_code,
+            });
+            pending_requests_.erase(pending_it);
+            continue;
+        }
+
         const auto *complete = std::get_if<Http3PeerRequestCompleteEvent>(&event);
         if (complete == nullptr) {
             continue;

@@ -1176,6 +1176,10 @@ void Http3Connection::handle_peer_reset_stream(const quic::QuicCorePeerResetStre
             return;
         }
     }
+    pending_events_.push_back(Http3PeerRequestResetEvent{
+        .stream_id = reset.stream_id,
+        .application_error_code = reset.application_error_code,
+    });
     peer_request_streams_.erase(request);
 }
 
@@ -1183,7 +1187,19 @@ void Http3Connection::handle_peer_stop_sending(const quic::QuicCorePeerStopSendi
     if (is_local_critical_stream(stop.stream_id)) {
         queue_connection_close(Http3ErrorCode::closed_critical_stream,
                                "peer requested stop sending on critical stream");
+        return;
     }
+
+    const auto response = local_response_streams_.find(stop.stream_id);
+    if (response == local_response_streams_.end()) {
+        return;
+    }
+
+    pending_core_inputs_.push_back(quic::QuicCoreResetStream{
+        .stream_id = stop.stream_id,
+        .application_error_code = stop.application_error_code,
+    });
+    local_response_streams_.erase(response);
 }
 
 void Http3Connection::handle_peer_bidi_stream(std::uint64_t stream_id,

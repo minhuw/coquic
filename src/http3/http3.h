@@ -140,6 +140,11 @@ struct Http3PeerRequestCompleteEvent {
     std::uint64_t stream_id = 0;
 };
 
+struct Http3PeerRequestResetEvent {
+    std::uint64_t stream_id = 0;
+    std::uint64_t application_error_code = 0;
+};
+
 struct Http3PeerInformationalResponseEvent {
     std::uint64_t stream_id = 0;
     Http3ResponseHead head;
@@ -169,12 +174,11 @@ struct Http3PeerResponseResetEvent {
     std::uint64_t application_error_code = 0;
 };
 
-using Http3EndpointEvent =
-    std::variant<Http3PeerRequestHeadEvent, Http3PeerRequestBodyEvent,
-                 Http3PeerRequestTrailersEvent, Http3PeerRequestCompleteEvent,
-                 Http3PeerInformationalResponseEvent, Http3PeerResponseHeadEvent,
-                 Http3PeerResponseBodyEvent, Http3PeerResponseTrailersEvent,
-                 Http3PeerResponseCompleteEvent, Http3PeerResponseResetEvent>;
+using Http3EndpointEvent = std::variant<
+    Http3PeerRequestHeadEvent, Http3PeerRequestBodyEvent, Http3PeerRequestTrailersEvent,
+    Http3PeerRequestCompleteEvent, Http3PeerRequestResetEvent, Http3PeerInformationalResponseEvent,
+    Http3PeerResponseHeadEvent, Http3PeerResponseBodyEvent, Http3PeerResponseTrailersEvent,
+    Http3PeerResponseCompleteEvent, Http3PeerResponseResetEvent>;
 
 struct Http3SettingsSnapshot {
     std::uint64_t qpack_max_table_capacity = 4096;

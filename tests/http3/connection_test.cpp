@@ -68,6 +68,18 @@ coquic::quic::QuicCoreResult reset_result(std::uint64_t stream_id, std::uint64_t
     return result;
 }
 
+coquic::quic::QuicCoreResult stop_sending_result(std::uint64_t stream_id,
+                                                 std::uint64_t error_code = 0) {
+    coquic::quic::QuicCoreResult result;
+    result.effects.push_back(coquic::quic::QuicCoreEffect{
+        coquic::quic::QuicCorePeerStopSending{
+            .stream_id = stream_id,
+            .application_error_code = error_code,
+        },
+    });
+    return result;
+}
+
 std::vector<coquic::quic::QuicCoreSendStreamData>
 send_stream_inputs_from(const coquic::http3::Http3EndpointUpdate &update) {
     std::vector<coquic::quic::QuicCoreSendStreamData> sends;
@@ -1561,6 +1573,81 @@ TEST(QuicHttp3ConnectionTest, ClientRolePeerResetEmitsResponseResetEvent) {
     EXPECT_EQ(reset->stream_id, 0u);
     EXPECT_EQ(reset->application_error_code,
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_rejected));
+}
+
+TEST(QuicHttp3ConnectionTest, ServerRolePeerResetEmitsRequestResetEvent) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    prime_server_transport(connection);
+    receive_peer_settings(connection, {});
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "POST"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/upload"},
+        coquic::http3::Http3Field{"content-length", "8"},
+    };
+
+    const auto headers_update =
+        connection.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields)),
+                                  coquic::quic::QuicCoreTimePoint{});
+    ASSERT_EQ(headers_update.events.size(), 1u);
+
+    const auto reset_update = connection.on_core_result(
+        reset_result(0,
+                     static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled)),
+        coquic::quic::QuicCoreTimePoint{});
+
+    ASSERT_EQ(reset_update.events.size(), 1u);
+    const auto *reset =
+        std::get_if<coquic::http3::Http3PeerRequestResetEvent>(&reset_update.events[0]);
+    ASSERT_NE(reset, nullptr);
+    EXPECT_EQ(reset->stream_id, 0u);
+    EXPECT_EQ(reset->application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled));
+}
+
+TEST(QuicHttp3ConnectionTest, ServerRolePeerStopSendingResetsLocalResponseStream) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    prime_server_transport(connection);
+    receive_peer_settings(connection, {});
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/hello"},
+    };
+
+    const auto headers_update =
+        connection.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields)),
+                                  coquic::quic::QuicCoreTimePoint{});
+    ASSERT_EQ(headers_update.events.size(), 1u);
+    ASSERT_TRUE(connection
+                    .submit_response_head(0,
+                                          coquic::http3::Http3ResponseHead{
+                                              .status = 200,
+                                          })
+                    .has_value());
+
+    const auto stop_update = connection.on_core_result(
+        stop_sending_result(
+            0, static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled)),
+        coquic::quic::QuicCoreTimePoint{});
+    const auto resets = reset_stream_inputs_from(stop_update);
+
+    ASSERT_EQ(resets.size(), 1u);
+    EXPECT_EQ(resets[0].stream_id, 0u);
+    EXPECT_EQ(resets[0].application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled));
+    EXPECT_FALSE(
+        connection.submit_response_body(0, bytes_from_text("late body"), true).has_value());
 }
 
 } // namespace

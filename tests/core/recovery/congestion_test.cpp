@@ -68,7 +68,7 @@ TEST(QuicCongestionTest, AppLimitedAckSaturatesBytesInFlightWithoutGrowingWindow
 TEST(QuicCongestionTest, RecoveryAckTransitionsToCongestionAvoidance) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     controller.on_packet_sent(/*bytes_sent=*/6000, /*ack_eliciting=*/true);
-    controller.on_loss_event(coquic::quic::test::test_time(1));
+    controller.on_loss_event(coquic::quic::test::test_time(1), coquic::quic::test::test_time(1));
     ASSERT_EQ(controller.congestion_window(), 6000u);
 
     controller.on_packet_sent(/*bytes_sent=*/6000, /*ack_eliciting=*/true);
@@ -100,11 +100,11 @@ TEST(QuicCongestionTest, LossAccountingIgnoresNonInflightPacketsAndSaturatesToZe
 TEST(QuicCongestionTest, LossEventDoesNotReduceWindowTwiceWithinRecoveryEpoch) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     controller.on_packet_sent(/*bytes_sent=*/1200, /*ack_eliciting=*/true);
-    controller.on_loss_event(coquic::quic::test::test_time(5));
+    controller.on_loss_event(coquic::quic::test::test_time(5), coquic::quic::test::test_time(1));
     const auto first_reduction = controller.congestion_window();
 
-    controller.on_loss_event(coquic::quic::test::test_time(5));
-    controller.on_loss_event(coquic::quic::test::test_time(4));
+    controller.on_loss_event(coquic::quic::test::test_time(5), coquic::quic::test::test_time(1));
+    controller.on_loss_event(coquic::quic::test::test_time(4), coquic::quic::test::test_time(1));
 
     EXPECT_EQ(controller.congestion_window(), first_reduction);
 }
@@ -112,11 +112,11 @@ TEST(QuicCongestionTest, LossEventDoesNotReduceWindowTwiceWithinRecoveryEpoch) {
 TEST(QuicCongestionTest, LaterLossEventStartsANewRecoveryEpoch) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     controller.on_packet_sent(/*bytes_sent=*/12000, /*ack_eliciting=*/true);
-    controller.on_loss_event(coquic::quic::test::test_time(5));
+    controller.on_loss_event(coquic::quic::test::test_time(5), coquic::quic::test::test_time(1));
     const auto first_reduction = controller.congestion_window();
 
     controller.on_packet_sent(/*bytes_sent=*/first_reduction, /*ack_eliciting=*/true);
-    controller.on_loss_event(coquic::quic::test::test_time(6));
+    controller.on_loss_event(coquic::quic::test::test_time(6), coquic::quic::test::test_time(6));
 
     EXPECT_LT(controller.congestion_window(), first_reduction);
     EXPECT_EQ(controller.congestion_window(), 3000u);

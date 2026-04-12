@@ -5833,6 +5833,56 @@ TEST(QuicCoreTest, AckTriggeredLossUsesLossDetectionTimeForRecoveryBoundary) {
     EXPECT_EQ(connection.congestion_controller_.bytes_in_flight(), 0u);
 }
 
+TEST(QuicCoreTest, AckTriggeredLossDoesNotRestartRecoveryForOlderPackets) {
+    auto connection = make_connected_client_connection();
+    auto &rtt = connection.application_space_.recovery.rtt_state();
+    rtt.latest_rtt = std::chrono::milliseconds(10);
+    rtt.min_rtt = std::chrono::milliseconds(10);
+    rtt.smoothed_rtt = std::chrono::milliseconds(10);
+    rtt.rttvar = std::chrono::milliseconds(1);
+
+    for (std::uint64_t packet_number = 1; packet_number <= 12; ++packet_number) {
+        connection.track_sent_packet(connection.application_space_,
+                                     coquic::quic::SentPacketRecord{
+                                         .packet_number = packet_number,
+                                         .sent_time = coquic::quic::test::test_time(
+                                             static_cast<std::int64_t>(100u + packet_number)),
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .bytes_in_flight = 1200,
+                                     });
+    }
+
+    const auto first_ack = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 8,
+            .first_ack_range = 4,
+        },
+        coquic::quic::test::test_time(120), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+        /*suppress_pto_reset=*/false);
+    ASSERT_TRUE(first_ack.has_value());
+    ASSERT_EQ(connection.congestion_controller_.congestion_window(), 6000u);
+
+    const auto second_ack = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 12,
+            .first_ack_range = 2,
+            .additional_ranges =
+                {
+                    coquic::quic::AckRange{
+                        .gap = 0,
+                        .range_length = 4,
+                    },
+                },
+        },
+        coquic::quic::test::test_time(130), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+        /*suppress_pto_reset=*/false);
+    ASSERT_TRUE(second_ack.has_value());
+    EXPECT_EQ(connection.congestion_controller_.congestion_window(), 6000u);
+}
+
 TEST(QuicCoreTest, LossDetectionSkipsCongestionResponseForNonAckElicitingLoss) {
     auto connection = make_connected_client_connection();
     connection.application_space_.recovery.largest_acked_packet_number_ = 5;

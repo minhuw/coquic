@@ -33,6 +33,8 @@ constexpr std::size_t kMaximumDeferredProtectedPackets = 32;
 constexpr std::uint8_t kDefaultInitialPacketNumberLength = 2;
 constexpr std::uint64_t kCompatibilityStreamId = 0;
 constexpr std::uint32_t kPersistentCongestionThreshold = 3;
+constexpr std::size_t kMaximumImmediateApplicationDatagramsPerBurst = 21;
+constexpr auto kApplicationBurstResumeDelay = std::chrono::milliseconds(1);
 
 bool is_ect_codepoint(QuicEcnCodepoint ecn) {
     return ecn == QuicEcnCodepoint::ect0 || ecn == QuicEcnCodepoint::ect1;
@@ -1786,6 +1788,40 @@ std::vector<std::byte> QuicConnection::drain_outbound_datagram(QuicCoreTimePoint
     last_drained_path_id_.reset();
     last_drained_ecn_codepoint_ = QuicEcnCodepoint::not_ect;
 
+    if (send_burst_resume_deadline_.has_value() && now >= *send_burst_resume_deadline_) {
+        send_burst_resume_deadline_.reset();
+        send_burst_reference_time_.reset();
+        send_burst_datagrams_sent_ = 0;
+    }
+
+    const auto has_urgent_application_control_send = [&]() {
+        if (application_space_.pending_probe_packet.has_value()) {
+            return true;
+        }
+        return std::any_of(paths_.begin(), paths_.end(), [](const auto &entry) {
+            return entry.second.pending_response.has_value() || entry.second.challenge_pending;
+        });
+    };
+    const auto should_limit_stream_send_burst = [&]() {
+        return status_ == HandshakeStatus::connected &&
+               has_pending_fresh_application_stream_send() &&
+               !has_urgent_application_control_send();
+    };
+
+    if (send_burst_resume_deadline_.has_value() && now < *send_burst_resume_deadline_ &&
+        should_limit_stream_send_burst()) {
+        return {};
+    }
+    if (!send_burst_reference_time_.has_value() || *send_burst_reference_time_ != now) {
+        send_burst_reference_time_ = now;
+        send_burst_datagrams_sent_ = 0;
+    }
+    if (should_limit_stream_send_burst() &&
+        send_burst_datagrams_sent_ >= kMaximumImmediateApplicationDatagramsPerBurst) {
+        send_burst_resume_deadline_ = now + kApplicationBurstResumeDelay;
+        return {};
+    }
+
     const auto synced = sync_tls_state();
     if (!synced.has_value()) {
         log_codec_failure("sync_tls_state", synced.error());
@@ -1800,7 +1836,29 @@ std::vector<std::byte> QuicConnection::drain_outbound_datagram(QuicCoreTimePoint
         }
     }
 
-    return flush_outbound_datagram(now);
+    auto datagram = flush_outbound_datagram(now);
+    if (datagram.empty()) {
+        if (!has_pending_fresh_application_stream_send()) {
+            send_burst_resume_deadline_.reset();
+            send_burst_reference_time_.reset();
+            send_burst_datagrams_sent_ = 0;
+        }
+        return {};
+    }
+
+    if (should_limit_stream_send_burst()) {
+        ++send_burst_datagrams_sent_;
+        if (send_burst_datagrams_sent_ >= kMaximumImmediateApplicationDatagramsPerBurst &&
+            has_pending_fresh_application_stream_send()) {
+            send_burst_resume_deadline_ = now + kApplicationBurstResumeDelay;
+        }
+    } else {
+        send_burst_resume_deadline_.reset();
+        send_burst_reference_time_.reset();
+        send_burst_datagrams_sent_ = 0;
+    }
+
+    return datagram;
 }
 
 void QuicConnection::on_timeout(QuicCoreTimePoint now) {
@@ -1954,8 +2012,8 @@ std::optional<QuicCoreTimePoint> QuicConnection::next_wakeup() const {
         return std::nullopt;
     }
 
-    return earliest_of(
-        {loss_deadline(), pto_deadline(), ack_deadline(), zero_rtt_discard_deadline()});
+    return earliest_of({loss_deadline(), pto_deadline(), ack_deadline(),
+                        send_burst_resume_deadline_, zero_rtt_discard_deadline()});
 }
 
 std::vector<ConnectionId> QuicConnection::active_local_connection_ids() const {
@@ -4973,6 +5031,26 @@ bool QuicConnection::has_pending_application_send() const {
     return false;
 }
 
+bool QuicConnection::has_pending_fresh_application_stream_send() const {
+    const auto connection_send_credit = saturating_subtract(connection_flow_control_.peer_max_data,
+                                                            connection_flow_control_.highest_sent);
+    for (const auto &[stream_id, stream] : streams_) {
+        static_cast<void>(stream_id);
+        if (stream.reset_state != StreamControlFrameState::none) {
+            continue;
+        }
+
+        if (stream_fin_sendable(stream)) {
+            return true;
+        }
+        if ((connection_send_credit != 0) & (stream.sendable_bytes() != 0)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 std::uint64_t QuicConnection::total_queued_stream_bytes() const {
     std::uint64_t total = 0;
     for (const auto &[stream_id, stream] : streams_) {
@@ -6409,25 +6487,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 }
 
                 if (stream.send_buffer.has_lost_data() | stream_fin_sendable(stream)) {
-                    return true;
-                }
-                if ((connection_send_credit != 0) & (stream.sendable_bytes() != 0)) {
-                    return true;
-                }
-            }
-
-            return false;
-        };
-        const auto has_pending_fresh_application_stream_send = [&]() {
-            const auto connection_send_credit = saturating_subtract(
-                connection_flow_control_.peer_max_data, connection_flow_control_.highest_sent);
-            for (const auto &[stream_id, stream] : streams_) {
-                static_cast<void>(stream_id);
-                if (stream.reset_state != StreamControlFrameState::none) {
-                    continue;
-                }
-
-                if (stream_fin_sendable(stream)) {
                     return true;
                 }
                 if ((connection_send_credit != 0) & (stream.sendable_bytes() != 0)) {

@@ -27,6 +27,13 @@ class Http3Connection {
     Http3EndpointUpdate on_core_result(const quic::QuicCoreResult &result,
                                        quic::QuicCoreTimePoint now);
     Http3EndpointUpdate poll(quic::QuicCoreTimePoint now);
+    Http3Result<bool> submit_request_head(std::uint64_t stream_id, const Http3RequestHead &head);
+    Http3Result<bool> submit_request_body(std::uint64_t stream_id, std::span<const std::byte> body,
+                                          bool fin = false);
+    Http3Result<bool> submit_request_trailers(std::uint64_t stream_id,
+                                              std::span<const Http3Field> trailers,
+                                              bool fin = true);
+    Http3Result<bool> finish_request(std::uint64_t stream_id);
     Http3Result<bool> submit_response_head(std::uint64_t stream_id, const Http3ResponseHead &head);
     Http3Result<bool> submit_response_body(std::uint64_t stream_id, std::span<const std::byte> body,
                                            bool fin = false);
@@ -57,6 +64,11 @@ class Http3Connection {
         trailers,
     };
 
+    enum class ResponseFieldSectionKind : std::uint8_t {
+        informational_or_final_headers,
+        trailers,
+    };
+
     struct PeerUniStreamState {
         std::vector<std::byte> buffer;
         std::optional<PeerUniStreamKind> kind;
@@ -81,6 +93,22 @@ class Http3Connection {
         std::uint64_t body_bytes_sent = 0;
     };
 
+    struct LocalRequestStreamState {
+        std::vector<std::byte> buffer;
+        bool fin_received = false;
+        bool head_request = false;
+        bool final_request_headers_sent = false;
+        bool request_trailers_sent = false;
+        bool request_finished = false;
+        bool final_response_received = false;
+        bool response_trailers_received = false;
+        std::optional<ResponseFieldSectionKind> blocked_field_section;
+        std::optional<std::uint64_t> expected_request_content_length;
+        std::optional<std::uint64_t> expected_response_content_length;
+        std::uint64_t request_body_bytes_sent = 0;
+        std::uint64_t response_body_bytes_received = 0;
+    };
+
     Http3EndpointUpdate drain_pending_inputs(bool terminal_failure = false);
     void queue_startup_streams();
     void flush_qpack_decoder_instructions();
@@ -99,13 +127,21 @@ class Http3Connection {
     void process_qpack_encoder_stream(std::uint64_t stream_id, PeerUniStreamState &stream);
     void process_qpack_decoder_stream(std::uint64_t stream_id, PeerUniStreamState &stream);
     void process_request_stream(std::uint64_t stream_id);
+    void process_response_stream(std::uint64_t stream_id);
     void handle_request_frame(std::uint64_t stream_id, const Http3Frame &frame);
+    void handle_response_frame(std::uint64_t stream_id, const Http3Frame &frame);
     void handle_request_headers_frame(std::uint64_t stream_id, const Http3HeadersFrame &frame);
+    void handle_response_headers_frame(std::uint64_t stream_id, const Http3HeadersFrame &frame);
     void handle_request_data_frame(std::uint64_t stream_id, const Http3DataFrame &frame);
+    void handle_response_data_frame(std::uint64_t stream_id, const Http3DataFrame &frame);
     void apply_request_field_section(std::uint64_t stream_id, RequestFieldSectionKind kind,
                                      Http3Headers headers);
+    void apply_response_field_section(std::uint64_t stream_id, ResponseFieldSectionKind kind,
+                                      Http3Headers headers);
     void handle_unblocked_request_field_section(const Http3DecodedFieldSection &decoded);
+    void handle_unblocked_response_field_section(const Http3DecodedFieldSection &decoded);
     void finalize_request_stream(std::uint64_t stream_id);
+    void finalize_response_stream(std::uint64_t stream_id);
     void handle_control_frame(std::uint64_t stream_id, const Http3Frame &frame);
     void apply_remote_settings(const Http3SettingsFrame &frame);
     void queue_send(std::uint64_t stream_id, std::span<const std::byte> bytes, bool fin = false);
@@ -126,6 +162,7 @@ class Http3Connection {
     std::unordered_map<std::uint64_t, PeerUniStreamState> peer_uni_streams_;
     std::unordered_map<std::uint64_t, PeerRequestStreamState> peer_request_streams_;
     std::unordered_map<std::uint64_t, LocalResponseStreamState> local_response_streams_;
+    std::unordered_map<std::uint64_t, LocalRequestStreamState> local_request_streams_;
     std::unordered_set<std::uint64_t> terminated_peer_request_streams_;
 };
 

@@ -290,6 +290,13 @@ void prime_server_transport(coquic::http3::Http3Connection &connection) {
     EXPECT_EQ(send_stream_inputs_from(startup).size(), 3u);
 }
 
+void prime_client_transport(coquic::http3::Http3Connection &connection) {
+    const auto startup =
+        connection.on_core_result(handshake_ready_result(), coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(startup).has_value());
+    EXPECT_EQ(send_stream_inputs_from(startup).size(), 3u);
+}
+
 void receive_completed_get_request(coquic::http3::Http3Connection &connection,
                                    std::uint64_t stream_id) {
     const std::array request_fields{
@@ -1386,6 +1393,140 @@ TEST(QuicHttp3ConnectionTest, DynamicTableResponseHeadersQueueEncoderInstruction
     EXPECT_EQ(sends[1].stream_id, 0u);
     EXPECT_EQ(sends[1].bytes, expected_headers);
     EXPECT_TRUE(sends[1].fin);
+}
+
+TEST(QuicHttp3ConnectionTest, ClientRoleQueuesRequestHeadersBodyAndTrailersWithFin) {
+    const coquic::http3::Http3SettingsSnapshot peer_settings{
+        .qpack_max_table_capacity = 220,
+        .qpack_blocked_streams = 1,
+    };
+    const std::array request_trailers{
+        coquic::http3::Http3Field{"etag", "done"},
+    };
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    prime_client_transport(connection);
+    receive_peer_settings(connection, peer_settings);
+
+    const auto head = connection.submit_request_head(0, coquic::http3::Http3RequestHead{
+                                                            .method = "POST",
+                                                            .scheme = "https",
+                                                            .authority = "example.test",
+                                                            .path = "/upload",
+                                                            .content_length = 4,
+                                                        });
+    ASSERT_TRUE(head.has_value());
+    EXPECT_TRUE(head.value());
+
+    const auto body = connection.submit_request_body(0, bytes_from_text("ping"));
+    ASSERT_TRUE(body.has_value());
+    EXPECT_TRUE(body.value());
+
+    const auto trailers = connection.submit_request_trailers(0, request_trailers);
+    ASSERT_TRUE(trailers.has_value());
+    EXPECT_TRUE(trailers.value());
+
+    const auto update = connection.poll(coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+
+    ASSERT_EQ(sends.size(), 3u);
+    EXPECT_EQ(sends[0].stream_id, 0u);
+    EXPECT_FALSE(sends[0].bytes.empty());
+    EXPECT_FALSE(sends[0].fin);
+    EXPECT_EQ(sends[1].stream_id, 0u);
+    EXPECT_FALSE(sends[1].bytes.empty());
+    EXPECT_FALSE(sends[1].fin);
+    EXPECT_EQ(sends[2].stream_id, 0u);
+    EXPECT_FALSE(sends[2].bytes.empty());
+    EXPECT_TRUE(sends[2].fin);
+}
+
+TEST(QuicHttp3ConnectionTest, ClientRoleEmitsInterimFinalBodyTrailersAndCompleteResponseEvents) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    prime_client_transport(connection);
+    receive_peer_settings(connection, {});
+
+    ASSERT_TRUE(connection
+                    .submit_request_head(0,
+                                         coquic::http3::Http3RequestHead{
+                                             .method = "GET",
+                                             .scheme = "https",
+                                             .authority = "example.test",
+                                             .path = "/resource",
+                                         })
+                    .has_value());
+    ASSERT_TRUE(connection.finish_request(0).has_value());
+    EXPECT_FALSE(
+        send_stream_inputs_from(connection.poll(coquic::quic::QuicCoreTimePoint{})).empty());
+
+    const std::array interim_headers{
+        coquic::http3::Http3Field{":status", "103"},
+        coquic::http3::Http3Field{"link", "</style.css>; rel=preload"},
+    };
+    const std::array final_headers{
+        coquic::http3::Http3Field{":status", "200"},
+        coquic::http3::Http3Field{"content-length", "4"},
+        coquic::http3::Http3Field{"content-type", "text/plain"},
+    };
+    const std::array trailer_headers{
+        coquic::http3::Http3Field{"etag", "done"},
+    };
+
+    auto response_bytes = headers_frame_bytes(0, interim_headers);
+    const auto final_frame = headers_frame_bytes(0, final_headers);
+    response_bytes.insert(response_bytes.end(), final_frame.begin(), final_frame.end());
+    const auto body_frame = data_frame_bytes("pong");
+    response_bytes.insert(response_bytes.end(), body_frame.begin(), body_frame.end());
+    const auto trailers_frame = headers_frame_bytes(0, trailer_headers);
+    response_bytes.insert(response_bytes.end(), trailers_frame.begin(), trailers_frame.end());
+
+    const auto update = connection.on_core_result(receive_result(0, response_bytes, true),
+                                                  coquic::quic::QuicCoreTimePoint{});
+
+    ASSERT_EQ(update.events.size(), 5u);
+    EXPECT_NE(std::get_if<coquic::http3::Http3PeerInformationalResponseEvent>(&update.events[0]),
+              nullptr);
+    EXPECT_NE(std::get_if<coquic::http3::Http3PeerResponseHeadEvent>(&update.events[1]), nullptr);
+    EXPECT_NE(std::get_if<coquic::http3::Http3PeerResponseBodyEvent>(&update.events[2]), nullptr);
+    EXPECT_NE(std::get_if<coquic::http3::Http3PeerResponseTrailersEvent>(&update.events[3]),
+              nullptr);
+    EXPECT_NE(std::get_if<coquic::http3::Http3PeerResponseCompleteEvent>(&update.events[4]),
+              nullptr);
+}
+
+TEST(QuicHttp3ConnectionTest, ClientRoleRejectsResponseDataBeforeHeaders) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    prime_client_transport(connection);
+    receive_peer_settings(connection, {});
+
+    ASSERT_TRUE(connection
+                    .submit_request_head(0,
+                                         coquic::http3::Http3RequestHead{
+                                             .method = "GET",
+                                             .scheme = "https",
+                                             .authority = "example.test",
+                                             .path = "/resource",
+                                         })
+                    .has_value());
+    ASSERT_TRUE(connection.finish_request(0).has_value());
+    EXPECT_FALSE(
+        send_stream_inputs_from(connection.poll(coquic::quic::QuicCoreTimePoint{})).empty());
+
+    const auto update = connection.on_core_result(
+        receive_result(0, data_frame_bytes("oops"), false), coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    ASSERT_TRUE(close.has_value());
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::frame_unexpected));
 }
 
 } // namespace

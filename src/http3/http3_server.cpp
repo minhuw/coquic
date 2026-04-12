@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace coquic::http3 {
@@ -140,6 +141,58 @@ Http3Response default_route_response(const Http3Request &request) {
     };
 }
 
+Http3Result<bool> submit_response(Http3Connection &connection, std::uint64_t stream_id,
+                                  const Http3RequestHead &request_head,
+                                  const Http3Response &response) {
+    for (const auto &interim : response.interim_heads) {
+        const auto submitted = connection.submit_response_head(stream_id, interim);
+        if (!submitted.has_value()) {
+            return submitted;
+        }
+    }
+
+    auto final_head = response.head;
+    const bool head_request = request_head.method == "HEAD";
+    if (head_request && !final_head.content_length.has_value()) {
+        if (response.body.size() >
+            static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
+            return Http3Result<bool>::failure(Http3Error{
+                .code = Http3ErrorCode::internal_error,
+                .detail = "response body exceeds representable content-length",
+                .stream_id = stream_id,
+            });
+        }
+        final_head.content_length = static_cast<std::uint64_t>(response.body.size());
+    }
+
+    auto head_submit = connection.submit_response_head(stream_id, final_head);
+    if (!head_submit.has_value()) {
+        return head_submit;
+    }
+
+    if (head_request) {
+        return connection.finish_response(stream_id, /*enforce_content_length=*/false);
+    }
+
+    if (!response.body.empty()) {
+        const auto body_submit =
+            connection.submit_response_body(stream_id, response.body, response.trailers.empty());
+        if (!body_submit.has_value()) {
+            return body_submit;
+        }
+    }
+
+    if (!response.trailers.empty()) {
+        return connection.submit_response_trailers(stream_id, response.trailers);
+    }
+
+    if (response.body.empty()) {
+        return connection.finish_response(stream_id);
+    }
+
+    return Http3Result<bool>::success(true);
+}
+
 bool merge_connection_update(Http3ServerEndpointUpdate &out, Http3EndpointUpdate &update) {
     for (auto &input : update.core_inputs) {
         out.core_inputs.push_back(std::move(input));
@@ -179,28 +232,94 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
         return update;
     }
 
+    std::unordered_set<std::uint64_t> completed_request_streams;
+    for (const auto &event : connection_update.events) {
+        if (const auto *complete = std::get_if<Http3PeerRequestCompleteEvent>(&event)) {
+            completed_request_streams.insert(complete->stream_id);
+        }
+    }
+
     bool dispatched_response = false;
+    std::unordered_set<std::uint64_t> ignored_request_streams;
     for (const auto &event : connection_update.events) {
         if (const auto *head = std::get_if<Http3PeerRequestHeadEvent>(&event)) {
             auto &pending = pending_requests_[head->stream_id];
             pending.head = head->head;
+
+            if (!config_.request_head_handler) {
+                continue;
+            }
+
+            const auto response = config_.request_head_handler(head->head);
+            if (!response.has_value()) {
+                continue;
+            }
+
+            const auto submitted =
+                submit_response(connection_, head->stream_id, head->head, response.value());
+            if (!submitted.has_value()) {
+                failed_ = true;
+                pending_requests_.clear();
+                return make_failure_update();
+            }
+
+            pending.early_response_committed = true;
+            ignored_request_streams.insert(head->stream_id);
+            if (!completed_request_streams.contains(head->stream_id)) {
+                const auto aborted = connection_.abort_request_body(
+                    head->stream_id, static_cast<std::uint64_t>(Http3ErrorCode::no_error));
+                if (!aborted.has_value()) {
+                    failed_ = true;
+                    pending_requests_.clear();
+                    return make_failure_update();
+                }
+            }
+            dispatched_response = true;
             continue;
         }
 
         if (const auto *body = std::get_if<Http3PeerRequestBodyEvent>(&event)) {
+            if (ignored_request_streams.contains(body->stream_id)) {
+                continue;
+            }
+
+            const auto pending_it = pending_requests_.find(body->stream_id);
+            if (pending_it != pending_requests_.end() &&
+                pending_it->second.early_response_committed) {
+                continue;
+            }
+
             auto &pending = pending_requests_[body->stream_id];
             pending.body.insert(pending.body.end(), body->body.begin(), body->body.end());
             continue;
         }
 
         if (const auto *trailers = std::get_if<Http3PeerRequestTrailersEvent>(&event)) {
+            if (ignored_request_streams.contains(trailers->stream_id)) {
+                continue;
+            }
+
+            const auto pending_it = pending_requests_.find(trailers->stream_id);
+            if (pending_it != pending_requests_.end() &&
+                pending_it->second.early_response_committed) {
+                continue;
+            }
+
             pending_requests_[trailers->stream_id].trailers = trailers->trailers;
             continue;
         }
 
         if (const auto *reset = std::get_if<Http3PeerRequestResetEvent>(&event)) {
             const auto pending_it = pending_requests_.find(reset->stream_id);
+            if (ignored_request_streams.contains(reset->stream_id)) {
+                pending_requests_.erase(reset->stream_id);
+                continue;
+            }
             if (pending_it == pending_requests_.end()) {
+                continue;
+            }
+            if (pending_it->second.early_response_committed) {
+                pending_requests_.erase(pending_it);
                 continue;
             }
 
@@ -221,10 +340,18 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
         }
 
         const auto pending_it = pending_requests_.find(complete->stream_id);
+        if (ignored_request_streams.contains(complete->stream_id)) {
+            pending_requests_.erase(complete->stream_id);
+            continue;
+        }
         if (pending_it == pending_requests_.end() || !pending_it->second.head.has_value()) {
             failed_ = true;
             pending_requests_.clear();
             return make_failure_update();
+        }
+        if (pending_it->second.early_response_committed) {
+            pending_requests_.erase(pending_it);
+            continue;
         }
 
         Http3Request request;
@@ -242,78 +369,20 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
         auto response = config_.request_handler ? config_.request_handler(request)
                                                 : default_route_response(request);
 
-        for (const auto &interim : response.interim_heads) {
-            const auto submitted = connection_.submit_response_head(complete->stream_id, interim);
-            if (!submitted.has_value()) {
-                failed_ = true;
-                pending_requests_.clear();
-                return make_failure_update();
-            }
-        }
-
-        auto final_head = response.head;
-        const bool head_request = request.head.method == "HEAD";
-        if (head_request && !final_head.content_length.has_value()) {
-            if (response.body.size() >
-                static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
-                failed_ = true;
-                pending_requests_.clear();
-                return make_failure_update();
-            }
-            final_head.content_length = static_cast<std::uint64_t>(response.body.size());
-        }
-
-        const auto head_submit = connection_.submit_response_head(complete->stream_id, final_head);
-        if (!head_submit.has_value()) {
+        const auto submitted =
+            submit_response(connection_, complete->stream_id, request.head, response);
+        if (!submitted.has_value()) {
             failed_ = true;
             pending_requests_.clear();
             return make_failure_update();
         }
 
-        if (head_request) {
-            const auto finished = connection_.finish_response(complete->stream_id,
-                                                              /*enforce_content_length=*/false);
-            if (!finished.has_value()) {
-                failed_ = true;
-                pending_requests_.clear();
-                return make_failure_update();
-            }
-        } else if (!response.body.empty()) {
-            const auto body_submit = connection_.submit_response_body(
-                complete->stream_id, response.body, response.trailers.empty());
-            if (!body_submit.has_value()) {
-                failed_ = true;
-                pending_requests_.clear();
-                return make_failure_update();
-            }
-            if (!response.trailers.empty()) {
-                const auto trailers_submit =
-                    connection_.submit_response_trailers(complete->stream_id, response.trailers);
-                if (!trailers_submit.has_value()) {
-                    failed_ = true;
-                    pending_requests_.clear();
-                    return make_failure_update();
-                }
-            }
-        } else if (!response.trailers.empty()) {
-            const auto trailers_submit =
-                connection_.submit_response_trailers(complete->stream_id, response.trailers);
-            if (!trailers_submit.has_value()) {
-                failed_ = true;
-                pending_requests_.clear();
-                return make_failure_update();
-            }
-        } else {
-            const auto finished = connection_.finish_response(complete->stream_id);
-            if (!finished.has_value()) {
-                failed_ = true;
-                pending_requests_.clear();
-                return make_failure_update();
-            }
-        }
-
         pending_requests_.erase(pending_it);
         dispatched_response = true;
+    }
+
+    for (const auto stream_id : ignored_request_streams) {
+        pending_requests_.erase(stream_id);
     }
 
     if (dispatched_response) {

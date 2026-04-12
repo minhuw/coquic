@@ -12,6 +12,7 @@ namespace coquic::http3 {
 
 struct Http3ServerConfig {
     Http3SettingsSnapshot local_settings;
+    std::function<std::optional<Http3Response>(const Http3RequestHead &)> request_head_handler;
     std::function<Http3Response(const Http3Request &)> request_handler;
 };
 
@@ -46,6 +47,7 @@ class Http3ServerEndpoint {
         std::optional<Http3RequestHead> head;
         std::vector<std::byte> body;
         Http3Headers trailers;
+        bool early_response_committed = false;
     };
 
     Http3ServerConfig config_;

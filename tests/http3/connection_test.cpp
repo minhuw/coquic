@@ -1610,6 +1610,50 @@ TEST(QuicHttp3ConnectionTest, ServerRolePeerResetEmitsRequestResetEvent) {
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled));
 }
 
+TEST(QuicHttp3ConnectionTest, ServerRoleAbortRequestBodyStopsSendingAndIgnoresLaterRequestFrames) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    prime_server_transport(connection);
+    receive_peer_settings(connection, {});
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "POST"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/too-large"},
+        coquic::http3::Http3Field{"content-length", "8"},
+    };
+
+    const auto headers_update =
+        connection.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields)),
+                                  coquic::quic::QuicCoreTimePoint{});
+    ASSERT_EQ(headers_update.events.size(), 1u);
+    ASSERT_NE(std::get_if<coquic::http3::Http3PeerRequestHeadEvent>(&headers_update.events[0]),
+              nullptr);
+
+    ASSERT_TRUE(connection
+                    .abort_request_body(
+                        0, static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::no_error))
+                    .has_value());
+
+    const auto abort_update = connection.poll(coquic::quic::QuicCoreTimePoint{});
+    const auto stops = stop_sending_inputs_from(abort_update);
+    ASSERT_EQ(stops.size(), 1u);
+    EXPECT_EQ(stops[0].stream_id, 0u);
+    EXPECT_EQ(stops[0].application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::no_error));
+
+    const auto late_update = connection.on_core_result(
+        receive_result(0, data_frame_bytes("ignored"), true), coquic::quic::QuicCoreTimePoint{});
+
+    EXPECT_FALSE(close_input_from(late_update).has_value());
+    EXPECT_TRUE(late_update.events.empty());
+    EXPECT_TRUE(reset_stream_inputs_from(late_update).empty());
+    EXPECT_TRUE(stop_sending_inputs_from(late_update).empty());
+}
+
 TEST(QuicHttp3ConnectionTest, ServerRolePeerStopSendingResetsLocalResponseStream) {
     coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
         .role = coquic::http3::Http3ConnectionRole::server,

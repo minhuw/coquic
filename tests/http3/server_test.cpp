@@ -79,6 +79,17 @@ send_stream_inputs_from(const coquic::http3::Http3ServerEndpointUpdate &update) 
     return sends;
 }
 
+std::vector<coquic::quic::QuicCoreStopSending>
+stop_sending_inputs_from(const coquic::http3::Http3ServerEndpointUpdate &update) {
+    std::vector<coquic::quic::QuicCoreStopSending> stops;
+    for (const auto &input : update.core_inputs) {
+        if (const auto *stop = std::get_if<coquic::quic::QuicCoreStopSending>(&input)) {
+            stops.push_back(*stop);
+        }
+    }
+    return stops;
+}
+
 std::vector<coquic::http3::Http3Field>
 response_fields(std::uint16_t status, std::span<const coquic::http3::Http3Field> headers,
                 std::optional<std::uint64_t> content_length = std::nullopt) {
@@ -355,6 +366,116 @@ TEST(QuicHttp3ServerTest, HeadRequestSuppressesResponseBodyButKeepsHeaders) {
     ASSERT_EQ(sends.size(), 1u);
     EXPECT_EQ(sends[0].bytes, expected_headers);
     EXPECT_TRUE(sends[0].fin);
+}
+
+TEST(QuicHttp3ServerTest, EarlyRequestHandlerSendsFinalResponseAndStopsRequestBody) {
+    std::optional<coquic::http3::Http3RequestHead> captured_head;
+    bool buffered_handler_called = false;
+    coquic::http3::Http3ServerEndpoint endpoint(coquic::http3::Http3ServerConfig{
+        .request_head_handler = [&](const coquic::http3::Http3RequestHead &head)
+            -> std::optional<coquic::http3::Http3Response> {
+            captured_head = head;
+            return coquic::http3::Http3Response{
+                .head =
+                    {
+                        .status = 413,
+                        .content_length = 0,
+                        .headers = {{"x-early", "1"}},
+                    },
+            };
+        },
+        .request_handler =
+            [&](const coquic::http3::Http3Request &) {
+                buffered_handler_called = true;
+                return coquic::http3::Http3Response{
+                    .head = {.status = 204},
+                };
+            },
+    });
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "POST"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/too-large"},
+        coquic::http3::Http3Field{"content-length", "8"},
+    };
+
+    const auto early_update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields)),
+                                coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(early_update);
+    const auto stops = stop_sending_inputs_from(early_update);
+
+    ASSERT_TRUE(captured_head.has_value());
+    if (captured_head.has_value()) {
+        EXPECT_EQ(captured_head.value().path, "/too-large");
+    }
+    EXPECT_FALSE(buffered_handler_called);
+
+    const auto expected_headers = headers_frame_bytes(
+        0, response_fields(413, std::array{coquic::http3::Http3Field{"x-early", "1"}}, 0u));
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends[0].bytes, expected_headers);
+    EXPECT_TRUE(sends[0].fin);
+
+    ASSERT_EQ(stops.size(), 1u);
+    EXPECT_EQ(stops[0].stream_id, 0u);
+    EXPECT_EQ(stops[0].application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::no_error));
+
+    const auto late_update = endpoint.on_core_result(
+        receive_result(0, data_frame_bytes("ignored"), true), coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(late_update.terminal_failure);
+    EXPECT_FALSE(buffered_handler_called);
+    EXPECT_TRUE(send_stream_inputs_from(late_update).empty());
+    EXPECT_TRUE(late_update.request_cancelled_events.empty());
+}
+
+TEST(QuicHttp3ServerTest, EarlyHeadResponseSuppressesBodyButKeepsContentLength) {
+    coquic::http3::Http3ServerEndpoint endpoint(coquic::http3::Http3ServerConfig{
+        .request_head_handler = [](const coquic::http3::Http3RequestHead &head)
+            -> std::optional<coquic::http3::Http3Response> {
+            EXPECT_EQ(head.method, "HEAD");
+            return coquic::http3::Http3Response{
+                .head =
+                    {
+                        .status = 200,
+                        .content_length = 4,
+                        .headers = {{"content-type", "text/plain"}},
+                    },
+                .body = bytes_from_text("pong"),
+            };
+        },
+    });
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "HEAD"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/head"},
+    };
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields), true),
+                                coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+    const auto stops = stop_sending_inputs_from(update);
+
+    const std::array response_headers{
+        coquic::http3::Http3Field{"content-type", "text/plain"},
+    };
+    const auto expected_headers =
+        headers_frame_bytes(0, response_fields(200, response_headers, 4u));
+
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends[0].bytes, expected_headers);
+    EXPECT_TRUE(sends[0].fin);
+    EXPECT_TRUE(stops.empty());
 }
 
 TEST(QuicHttp3ServerTest, PeerResetDropsBufferedRequestAndEmitsCancellationEvent) {

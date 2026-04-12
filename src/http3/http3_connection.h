@@ -34,6 +34,9 @@ class Http3Connection {
                                               std::span<const Http3Field> trailers,
                                               bool fin = true);
     Http3Result<bool> finish_request(std::uint64_t stream_id);
+    Http3Result<bool> abort_request_body(std::uint64_t stream_id,
+                                         std::uint64_t application_error_code =
+                                             static_cast<std::uint64_t>(Http3ErrorCode::no_error));
     Http3Result<bool> submit_response_head(std::uint64_t stream_id, const Http3ResponseHead &head);
     Http3Result<bool> submit_response_body(std::uint64_t stream_id, std::span<const std::byte> body,
                                            bool fin = false);

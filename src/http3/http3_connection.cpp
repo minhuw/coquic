@@ -662,6 +662,51 @@ Http3Result<bool> Http3Connection::finish_request(std::uint64_t stream_id) {
     return Http3Result<bool>::success(true);
 }
 
+Http3Result<bool> Http3Connection::abort_request_body(std::uint64_t stream_id,
+                                                      std::uint64_t application_error_code) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed", stream_id);
+    }
+    if (config_.role != Http3ConnectionRole::server) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "request abort requires server role", stream_id);
+    }
+    if (!transport_ready_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready", stream_id);
+    }
+    if (terminated_peer_request_streams_.contains(stream_id)) {
+        return Http3Result<bool>::success(true);
+    }
+
+    const auto request_it = peer_request_streams_.find(stream_id);
+    if (request_it == peer_request_streams_.end()) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "request stream is not available", stream_id);
+    }
+
+    if (request_it->second.blocked_field_section.has_value()) {
+        const auto cancelled = cancel_http3_qpack_stream(decoder_, stream_id);
+        if (!cancelled.has_value()) {
+            return Http3Result<bool>::failure(cancelled.error());
+        }
+        flush_qpack_decoder_instructions();
+        if (closed_) {
+            return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                             "connection closed while aborting request", stream_id);
+        }
+    }
+
+    peer_request_streams_.erase(request_it);
+    terminated_peer_request_streams_.insert(stream_id);
+    pending_core_inputs_.push_back(quic::QuicCoreStopSending{
+        .stream_id = stream_id,
+        .application_error_code = application_error_code,
+    });
+    return Http3Result<bool>::success(true);
+}
+
 Http3Result<bool> Http3Connection::submit_response_head(std::uint64_t stream_id,
                                                         const Http3ResponseHead &head) {
     if (closed_) {

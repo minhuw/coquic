@@ -134,6 +134,29 @@ TEST(QuicHttp3QpackDynamicTest, RejectsCapacityUpdateThatWouldEvictBlockedRefere
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_encoder_stream_error);
 }
 
+TEST(QuicHttp3QpackDynamicTest, RejectsInsertThatWouldEvictBlockedReferences) {
+    auto decoder = make_decoder(100, 1);
+
+    const auto blocked = coquic::http3::decode_http3_field_section(
+        decoder, 4, bytes_from_ints({0x03, 0x81}), bytes_from_ints({0x10, 0x11}));
+    ASSERT_TRUE(blocked.has_value());
+    EXPECT_EQ(blocked.value().status, coquic::http3::Http3QpackDecodeStatus::blocked);
+
+    auto first_insert = bytes_from_ints({0x3f, 0x45, 0xc0, 0x0f});
+    append_ascii_bytes(first_insert, "www.example.com");
+    const auto inserted =
+        coquic::http3::process_http3_qpack_encoder_instructions(decoder, first_insert);
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_TRUE(inserted.value().empty());
+
+    auto second_insert = bytes_from_ints({0xc1, 0x0c});
+    append_ascii_bytes(second_insert, "/sample/path");
+    const auto result =
+        coquic::http3::process_http3_qpack_encoder_instructions(decoder, second_insert);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_encoder_stream_error);
+}
+
 TEST(QuicHttp3QpackDynamicTest, CancelsBlockedFieldSectionAndEmitsStreamCancellation) {
     auto decoder = make_decoder(220, 1);
 

@@ -106,6 +106,24 @@ TEST(QuicHttp3QpackTest, RejectsMalformedFieldSectionPrefix) {
     EXPECT_EQ(decoded.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
 }
 
+TEST(QuicHttp3QpackTest, RejectsIndexedFieldLineWithInvalidStaticIndex) {
+    auto decoder = make_decoder();
+    const auto decoded = coquic::http3::decode_http3_field_section(
+        decoder, 0, bytes_from_ints({0x00, 0x00}), bytes_from_ints({0xff, 0x25}));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
+    EXPECT_EQ(decoded.error().detail, "invalid static table index");
+}
+
+TEST(QuicHttp3QpackTest, RejectsLiteralNameReferenceWithInvalidStaticIndex) {
+    auto decoder = make_decoder();
+    const auto decoded = coquic::http3::decode_http3_field_section(
+        decoder, 0, bytes_from_ints({0x00, 0x00}), bytes_from_ints({0x5f, 0x55}));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
+    EXPECT_EQ(decoded.error().detail, "invalid static table name reference");
+}
+
 TEST(QuicHttp3QpackTest, RejectsDecoderStreamIncrementBeyondSentInsertCount) {
     auto encoder = make_encoder(220, 8);
     const auto result =

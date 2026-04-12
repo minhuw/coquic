@@ -84,4 +84,9 @@ grep -F 'path: .bench-results' "${workflow}" >/dev/null || {
   exit 1
 }
 
+grep -F 'include-hidden-files: true' "${workflow}" >/dev/null || {
+  echo 'missing hidden benchmark artifact upload setting' >&2
+  exit 1
+}
+
 echo 'perf workflow contract looks correct'

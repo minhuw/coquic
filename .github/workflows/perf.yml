@@ -52,4 +52,5 @@ jobs:
         with:
           name: quic-perf-results
           path: .bench-results
+          include-hidden-files: true
           if-no-files-found: warn

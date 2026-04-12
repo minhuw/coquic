@@ -41,4 +41,9 @@ TEST(IoUringBackendTest, RecvEinvalFallsBackToSocketSendPath) {
     EXPECT_TRUE(coquic::io::test::io_uring_backend_send_falls_back_after_recv_einval_for_tests());
 }
 
+TEST(IoUringBackendTest, WaitWithoutCompletionYieldsIdleTimeout) {
+    EXPECT_TRUE(
+        coquic::io::test::io_uring_backend_wait_without_completion_yields_idle_timeout_for_tests());
+}
+
 } // namespace

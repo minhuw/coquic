@@ -28,6 +28,18 @@ constexpr unsigned kIoUringQueueEntries = 256;
 constexpr std::size_t kMaxDatagramBytes = 65535;
 constexpr std::uint64_t kSendCompletionUserData = std::numeric_limits<std::uint64_t>::max();
 
+int wait_cqe_timeout_ms(io_uring *ring, io_uring_cqe **cqe, int timeout_ms) {
+    if (timeout_ms < 0) {
+        return ::io_uring_wait_cqe(ring, cqe);
+    }
+
+    __kernel_timespec timeout{
+        .tv_sec = timeout_ms / 1000,
+        .tv_nsec = static_cast<long>((timeout_ms % 1000) * 1000000),
+    };
+    return ::io_uring_wait_cqe_timeout(ring, cqe, &timeout);
+}
+
 bool should_apply_ecn_control(QuicEcnCodepoint ecn) {
     return ecn != QuicEcnCodepoint::not_ect && ecn != QuicEcnCodepoint::unavailable;
 }
@@ -43,6 +55,7 @@ test::IoUringBackendOpsOverride make_default_io_uring_backend_ops() {
         .get_sqe_fn = ::io_uring_get_sqe,
         .submit_fn = ::io_uring_submit,
         .wait_cqe_fn = ::io_uring_wait_cqe,
+        .wait_cqe_timeout_ms_fn = &wait_cqe_timeout_ms,
         .cqe_seen_fn = ::io_uring_cqe_seen,
     };
 }
@@ -58,6 +71,7 @@ bool using_default_io_uring_backend_ops() {
     return ops.queue_init_fn == defaults.queue_init_fn &&
            ops.queue_exit_fn == defaults.queue_exit_fn && ops.get_sqe_fn == defaults.get_sqe_fn &&
            ops.submit_fn == defaults.submit_fn && ops.wait_cqe_fn == defaults.wait_cqe_fn &&
+           ops.wait_cqe_timeout_ms_fn == defaults.wait_cqe_timeout_ms_fn &&
            ops.cqe_seen_fn == defaults.cqe_seen_fn;
 }
 
@@ -77,6 +91,9 @@ void apply_io_uring_backend_ops_override(const test::IoUringBackendOpsOverride &
     }
     if (override_ops.wait_cqe_fn != nullptr) {
         ops.wait_cqe_fn = override_ops.wait_cqe_fn;
+    }
+    if (override_ops.wait_cqe_timeout_ms_fn != nullptr) {
+        ops.wait_cqe_timeout_ms_fn = override_ops.wait_cqe_timeout_ms_fn;
     }
     if (override_ops.cqe_seen_fn != nullptr) {
         ops.cqe_seen_fn = override_ops.cqe_seen_fn;
@@ -300,7 +317,6 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
                    ? receive_fallback_->wait(socket_fds, idle_timeout_ms, next_wakeup, role_name)
                    : std::nullopt;
     }
-    static_cast<void>(idle_timeout_ms);
     static_cast<void>(role_name);
     if (socket_fds.empty()) {
         return std::nullopt;
@@ -317,10 +333,53 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
         };
     }
 
+    int wait_timeout_ms = idle_timeout_ms;
+    if (next_wakeup.has_value()) {
+        const auto until_wakeup =
+            std::chrono::duration_cast<std::chrono::milliseconds>(*next_wakeup - current);
+        const auto wakeup_timeout_ms = static_cast<int>(std::clamp(
+            until_wakeup.count(), 0LL, static_cast<long long>(std::numeric_limits<int>::max())));
+        if (wait_timeout_ms < 0 || wakeup_timeout_ms < wait_timeout_ms) {
+            wait_timeout_ms = wakeup_timeout_ms;
+        }
+    }
+
     Completion completion{};
-    if (!drain_one_completion(completion)) {
-        std::cerr << "io-uring wait failed: no completion available\n";
-        return std::nullopt;
+    if (!pending_completions_.empty()) {
+        completion = pending_completions_.front();
+        pending_completions_.pop_front();
+    } else {
+        io_uring_cqe *cqe = nullptr;
+        int wait_rc = 0;
+        wait_rc = internal::io_uring_backend_ops_state().wait_cqe_timeout_ms_fn(ring_.get(), &cqe,
+                                                                                wait_timeout_ms);
+        if (wait_rc == -ETIME) {
+            const auto now = QuicCoreClock::now();
+            if (next_wakeup.has_value() && now >= *next_wakeup) {
+                return QuicIoEngineEvent{
+                    .kind = QuicIoEngineEvent::Kind::timer_expired,
+                    .now = now,
+                };
+            }
+            return QuicIoEngineEvent{
+                .kind = QuicIoEngineEvent::Kind::idle_timeout,
+                .now = now,
+            };
+        }
+        if (wait_rc < 0 || cqe == nullptr) {
+            std::cerr << "io-uring wait failed rc=" << wait_rc;
+            if (wait_rc < 0) {
+                std::cerr << " err=" << std::strerror(-wait_rc);
+            }
+            std::cerr << "\n";
+            return std::nullopt;
+        }
+
+        completion = Completion{
+            .user_data = io_uring_cqe_get_data64(cqe),
+            .res = cqe->res,
+        };
+        internal::io_uring_backend_ops_state().cqe_seen_fn(ring_.get(), cqe);
     }
 
     const auto now = QuicCoreClock::now();

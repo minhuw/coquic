@@ -255,6 +255,14 @@ int wait_cqe_for_tests(io_uring *, io_uring_cqe **cqe_ptr) {
     return 0;
 }
 
+int wait_cqe_timeout_for_tests(io_uring *ring, io_uring_cqe **cqe_ptr, int) {
+    if (g_io_uring_test_harness.completions.empty()) {
+        errno = ETIME;
+        return -ETIME;
+    }
+    return wait_cqe_for_tests(ring, cqe_ptr);
+}
+
 void cqe_seen_noop_for_tests(io_uring *, io_uring_cqe *) {
 }
 
@@ -265,6 +273,7 @@ IoUringBackendOpsOverride io_uring_ops_for_tests() {
         .get_sqe_fn = &get_sqe_for_tests,
         .submit_fn = &submit_for_tests,
         .wait_cqe_fn = &wait_cqe_for_tests,
+        .wait_cqe_timeout_ms_fn = &wait_cqe_timeout_for_tests,
         .cqe_seen_fn = &cqe_seen_noop_for_tests,
     };
 }
@@ -516,6 +525,27 @@ bool io_uring_backend_send_falls_back_after_recv_einval_for_tests() {
     return engine->send(socket_fd, peer, sizeof(sockaddr_in), kPayload, "client",
                         QuicEcnCodepoint::not_ect) &&
            g_fallback_sendto_calls_for_tests == 1 && g_io_uring_test_harness.send_submit_calls == 0;
+}
+
+bool io_uring_backend_wait_without_completion_yields_idle_timeout_for_tests() {
+    reset_io_uring_test_harness();
+    const ScopedIoUringBackendOpsOverride io_uring_ops{io_uring_ops_for_tests()};
+
+    auto engine = IoUringIoEngine::create();
+    if (engine == nullptr) {
+        return false;
+    }
+
+    constexpr int socket_fd = 111;
+    if (!engine->register_socket(socket_fd)) {
+        return false;
+    }
+
+    const std::array<int, 1> sockets = {
+        socket_fd,
+    };
+    const auto event = engine->wait(sockets, 5, std::nullopt, "client");
+    return event.has_value() && event->kind == QuicIoEngineEvent::Kind::idle_timeout;
 }
 
 } // namespace test

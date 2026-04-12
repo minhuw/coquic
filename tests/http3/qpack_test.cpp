@@ -1,5 +1,9 @@
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <initializer_list>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -8,144 +12,129 @@
 
 namespace {
 
-std::vector<std::byte> bytes_from_ints(std::initializer_list<unsigned int> values) {
+std::vector<std::byte> bytes_from_ints(std::initializer_list<std::uint8_t> values) {
     std::vector<std::byte> bytes;
     bytes.reserve(values.size());
-    for (const unsigned int value : values) {
+    for (const auto value : values) {
         bytes.push_back(static_cast<std::byte>(value));
     }
     return bytes;
 }
 
+void append_ascii_bytes(std::vector<std::byte> &bytes, std::string_view text) {
+    bytes.insert(bytes.end(), reinterpret_cast<const std::byte *>(text.data()),
+                 reinterpret_cast<const std::byte *>(text.data()) + text.size());
+}
+
+coquic::http3::Http3QpackEncoderContext make_encoder(std::uint64_t max_table_capacity = 0,
+                                                     std::uint64_t blocked_streams = 0) {
+    return coquic::http3::Http3QpackEncoderContext{
+        .peer_settings =
+            {
+                .max_table_capacity = max_table_capacity,
+                .blocked_streams = blocked_streams,
+            },
+    };
+}
+
+coquic::http3::Http3QpackDecoderContext make_decoder(std::uint64_t max_table_capacity = 0,
+                                                     std::uint64_t blocked_streams = 0) {
+    return coquic::http3::Http3QpackDecoderContext{
+        .local_settings =
+            {
+                .max_table_capacity = max_table_capacity,
+                .blocked_streams = blocked_streams,
+            },
+    };
+}
+
+} // namespace
+
 TEST(QuicHttp3QpackTest, EncodesAndDecodesStaticTableRequestHeaders) {
+    auto encoder = make_encoder();
+    auto decoder = make_decoder();
     const coquic::http3::Http3Headers headers = {
         {":method", "GET"},
         {":scheme", "https"},
-        {":authority", "example.test"},
-        {":path", "/index.html"},
+        {":path", "/"},
+        {"accept-encoding", "gzip, deflate, br"},
     };
 
-    const auto encoded = coquic::http3::encode_http3_field_section(headers);
+    const auto encoded = coquic::http3::encode_http3_field_section(encoder, 0, headers);
     ASSERT_TRUE(encoded.has_value());
+    EXPECT_TRUE(encoded.value().encoder_instructions.empty());
+    EXPECT_EQ(encoded.value().prefix, bytes_from_ints({0x00, 0x00}));
 
-    const auto decoded = coquic::http3::decode_http3_field_section(encoded.value());
+    const auto decoded = coquic::http3::decode_http3_field_section(
+        decoder, 0, encoded.value().prefix, encoded.value().payload);
     ASSERT_TRUE(decoded.has_value());
-    EXPECT_EQ(decoded.value(), headers);
+    EXPECT_EQ(decoded.value().status, coquic::http3::Http3QpackDecodeStatus::complete);
+    EXPECT_EQ(decoded.value().headers, headers);
 }
 
-TEST(QuicHttp3QpackTest, RejectsDynamicTableInstructionsWhenCapacityIsZero) {
-    const std::array encoder_bytes{
-        std::byte{0x3f},
-        std::byte{0xe1},
-        std::byte{0x1f},
-    };
-    const auto result = coquic::http3::validate_http3_qpack_encoder_stream(
-        encoder_bytes,
-        coquic::http3::Http3QpackSettings{.max_table_capacity = 0, .blocked_streams = 0});
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_encoder_stream_error);
+TEST(QuicHttp3QpackTest, DecodesHuffmanLiteralWithStaticNameReference) {
+    auto decoder = make_decoder();
+    const auto decoded =
+        coquic::http3::decode_http3_field_section(decoder, 0, bytes_from_ints({0x00, 0x00}),
+                                                  bytes_from_ints({
+                                                      0x50,
+                                                      0x8c,
+                                                      0xf1,
+                                                      0xe3,
+                                                      0xc2,
+                                                      0xe5,
+                                                      0xf2,
+                                                      0x3a,
+                                                      0x6b,
+                                                      0xa0,
+                                                      0xab,
+                                                      0x90,
+                                                      0xf4,
+                                                      0xff,
+                                                  }));
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().status, coquic::http3::Http3QpackDecodeStatus::complete);
+    EXPECT_EQ(decoded.value().headers,
+              (coquic::http3::Http3Headers{{":authority", "www.example.com"}}));
 }
 
-TEST(QuicHttp3QpackTest, RejectsDecoderInstructionsWhenBlockedStreamsIsZero) {
-    const std::array decoder_bytes{
-        std::byte{0x80},
-    };
-    const auto result = coquic::http3::validate_http3_qpack_decoder_stream(
-        decoder_bytes,
-        coquic::http3::Http3QpackSettings{.max_table_capacity = 0, .blocked_streams = 0});
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decoder_stream_error);
-}
-
-TEST(QuicHttp3QpackTest, RejectsMalformedLiteralFieldSection) {
-    const std::array malformed{std::byte{0xff}, std::byte{0xff}};
-    const auto decoded = coquic::http3::decode_http3_field_section(malformed);
+TEST(QuicHttp3QpackTest, RejectsMalformedFieldSectionPrefix) {
+    auto decoder = make_decoder();
+    const auto decoded =
+        coquic::http3::decode_http3_field_section(decoder, 0, bytes_from_ints({0x00}), {});
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
 }
 
-TEST(QuicHttp3QpackTest, RejectsLiteralFieldsLongerThanSingleByteLengthPrefix) {
-    const coquic::http3::Http3Headers long_name_headers = {{
-        .name = std::string(256, 'n'),
-        .value = "value",
-    }};
-
-    const auto encoded_long_name = coquic::http3::encode_http3_field_section(long_name_headers);
-    ASSERT_FALSE(encoded_long_name.has_value());
-    EXPECT_EQ(encoded_long_name.error().code, coquic::quic::CodecErrorCode::http3_parse_error);
-    EXPECT_EQ(encoded_long_name.error().offset, 0);
-
-    const coquic::http3::Http3Headers long_value_headers = {{
-        .name = "name",
-        .value = std::string(256, 'v'),
-    }};
-
-    const auto encoded_long_value = coquic::http3::encode_http3_field_section(long_value_headers);
-    ASSERT_FALSE(encoded_long_value.has_value());
-    EXPECT_EQ(encoded_long_value.error().code, coquic::quic::CodecErrorCode::http3_parse_error);
-    EXPECT_EQ(encoded_long_value.error().offset, 0);
+TEST(QuicHttp3QpackTest, RejectsDecoderStreamIncrementBeyondSentInsertCount) {
+    auto encoder = make_encoder(220, 8);
+    const auto result =
+        coquic::http3::process_http3_qpack_decoder_instructions(encoder, bytes_from_ints({0x01}));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decoder_stream_error);
 }
 
-TEST(QuicHttp3QpackTest, AcceptsEmptyInstructionsWhenDynamicTableAndBlockedStreamsAreZero) {
-    const std::array<std::byte, 0> empty_bytes{};
-    const auto settings =
-        coquic::http3::Http3QpackSettings{.max_table_capacity = 0, .blocked_streams = 0};
+TEST(QuicHttp3QpackTest, AcceptsDecoderStreamIncrementForMirroredEncoderState) {
+    auto encoder = make_encoder(220, 8);
+    auto decoder = make_decoder(220, 8);
 
-    const auto encoder = coquic::http3::validate_http3_qpack_encoder_stream(empty_bytes, settings);
-    ASSERT_TRUE(encoder.has_value());
-    EXPECT_TRUE(encoder.value());
+    const coquic::http3::Http3Headers headers = {
+        {"custom-key", "custom-value"},
+    };
+    const auto encoded = coquic::http3::encode_http3_field_section(encoder, 0, headers);
+    ASSERT_TRUE(encoded.has_value());
 
-    const auto decoder = coquic::http3::validate_http3_qpack_decoder_stream(empty_bytes, settings);
-    ASSERT_TRUE(decoder.has_value());
-    EXPECT_TRUE(decoder.value());
+    const auto inserted = coquic::http3::process_http3_qpack_encoder_instructions(
+        decoder, encoded.value().encoder_instructions);
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_TRUE(inserted.value().empty());
+
+    const auto decoder_feedback = coquic::http3::take_http3_qpack_decoder_instructions(decoder);
+    ASSERT_TRUE(decoder_feedback.has_value());
+    EXPECT_EQ(decoder_feedback.value(), bytes_from_ints({0x01}));
+
+    const auto result =
+        coquic::http3::process_http3_qpack_decoder_instructions(encoder, decoder_feedback.value());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(encoder.known_received_count, 1u);
 }
-
-TEST(QuicHttp3QpackTest, RejectsMalformedAndTruncatedLiteralFieldSections) {
-    for (const auto &[bytes, detail] : std::array{
-             std::pair{bytes_from_ints({0x20, 0x00}), std::string_view{"malformed literal field"}},
-             std::pair{bytes_from_ints({0x20, 0x01, 'n'}),
-                       std::string_view{"truncated literal field name"}},
-             std::pair{bytes_from_ints({0x20, 0x01, 'n', 0x02, 'v'}),
-                       std::string_view{"truncated literal field value"}},
-         }) {
-        const auto decoded = coquic::http3::decode_http3_field_section(bytes);
-        ASSERT_FALSE(decoded.has_value());
-        EXPECT_EQ(decoded.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
-        EXPECT_EQ(decoded.error().detail, detail);
-    }
-}
-
-TEST(QuicHttp3QpackTest, RejectsWrongLiteralPrefixesAndOutOfRangeStaticIndexes) {
-    const auto wrong_prefix = coquic::http3::decode_http3_field_section(bytes_from_ints({
-        0x00,
-        0x01,
-        'n',
-        0x01,
-        'v',
-    }));
-    ASSERT_FALSE(wrong_prefix.has_value());
-    EXPECT_EQ(wrong_prefix.error().detail, "malformed literal field");
-
-    const auto out_of_range = coquic::http3::decode_http3_field_section(bytes_from_ints({
-        0x80,
-        0x0a,
-    }));
-    ASSERT_FALSE(out_of_range.has_value());
-    EXPECT_EQ(out_of_range.error().detail, "invalid static table index");
-}
-
-TEST(QuicHttp3QpackTest, AcceptsNonEmptyEncoderAndDecoderInstructionsWhenSettingsAllowThem) {
-    const auto encoder = coquic::http3::validate_http3_qpack_encoder_stream(
-        bytes_from_ints({0x3f, 0xe1, 0x1f}),
-        coquic::http3::Http3QpackSettings{.max_table_capacity = 32, .blocked_streams = 0});
-    ASSERT_TRUE(encoder.has_value());
-    EXPECT_TRUE(encoder.value());
-
-    const auto decoder = coquic::http3::validate_http3_qpack_decoder_stream(
-        bytes_from_ints({0x80}),
-        coquic::http3::Http3QpackSettings{.max_table_capacity = 0, .blocked_streams = 1});
-    ASSERT_TRUE(decoder.has_value());
-    EXPECT_TRUE(decoder.value());
-}
-
-} // namespace

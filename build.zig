@@ -327,6 +327,7 @@ pub fn build(b: *std.Build) void {
     const http3_test_files = &.{
         "tests/http3/protocol_test.cpp",
         "tests/http3/qpack_test.cpp",
+        "tests/http3/qpack_dynamic_test.cpp",
     };
     const qlog_test_files = &.{
         "tests/qlog/qlog_test.cpp",

@@ -140,6 +140,29 @@ bool QuicPerfServer::handle_stream_data(Session &session,
         }
 
         if (session.start->mode == QuicPerfMode::bulk &&
+            session.start->direction == QuicPerfDirection::download &&
+            !session.start->total_bytes.has_value() && received.fin) {
+            const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
+            const auto send_result = core_.advance_endpoint(
+                quic::QuicCoreConnectionCommand{
+                    .connection = session.connection,
+                    .input =
+                        quic::QuicCoreSendStreamData{
+                            .stream_id = received.stream_id,
+                            .bytes = make_payload(response_bytes),
+                            .fin = true,
+                        },
+                },
+                now);
+            if (send_result.local_error.has_value() ||
+                !flush_send_effects(*backend_, send_result)) {
+                return false;
+            }
+            session.bytes_sent += response_bytes;
+            return true;
+        }
+
+        if (session.start->mode == QuicPerfMode::bulk &&
             session.start->direction == QuicPerfDirection::download && received.fin) {
             const auto stream_index = session.requests_completed - 1;
             const auto total_bytes = session.start->total_bytes.value_or(0);

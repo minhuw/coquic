@@ -46,6 +46,7 @@ class QuicPerfClient {
         bool close_requested = false;
         std::vector<std::byte> control_bytes;
         std::unordered_map<std::uint64_t, OutstandingRequest> outstanding_requests;
+        std::unordered_map<std::uint64_t, bool> active_bulk_streams;
         std::uint64_t next_stream_id = kQuicPerfFirstDataStreamId;
         std::uint64_t bytes_sent = 0;
         std::uint64_t bytes_received = 0;
@@ -57,13 +58,17 @@ class QuicPerfClient {
     void enter_drain_phase(quic::QuicCoreTimePoint now);
     bool timed_rr_mode() const;
     bool timed_crr_mode() const;
+    bool timed_bulk_download_mode() const;
+    bool open_bulk_stream(ConnectionState &connection, quic::QuicCoreTimePoint now,
+                          bool counts_toward_measurement);
+    bool maybe_close_bulk_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool benchmark_accepts_new_work() const;
     bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now);
     bool handle_stream_data(ConnectionState &connection,
                             const quic::QuicCoreReceiveStreamData &received,
                             quic::QuicCoreTimePoint now);
     bool run_complete() const;
-    void maybe_start_bulk_streams(ConnectionState &connection, quic::QuicCoreTimePoint now);
+    bool maybe_start_bulk_streams(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_issue_rr_requests(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_issue_crr_request(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_close_rr_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);

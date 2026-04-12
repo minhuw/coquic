@@ -109,12 +109,17 @@ bool QuicPerfClient::timed_crr_mode() const {
     return config_.mode == QuicPerfMode::crr && !config_.requests.has_value();
 }
 
+bool QuicPerfClient::timed_bulk_download_mode() const {
+    return config_.mode == QuicPerfMode::bulk && config_.direction == QuicPerfDirection::download &&
+           !config_.total_bytes.has_value();
+}
+
 bool QuicPerfClient::benchmark_accepts_new_work() const {
     return phase_ != BenchmarkPhase::drain;
 }
 
 std::chrono::milliseconds QuicPerfClient::result_elapsed(quic::QuicCoreTimePoint now) const {
-    if (timed_rr_mode() || timed_crr_mode()) {
+    if (timed_rr_mode() || timed_crr_mode() || timed_bulk_download_mode()) {
         if (phase_ == BenchmarkPhase::warmup) {
             return std::chrono::milliseconds{0};
         }
@@ -134,6 +139,10 @@ void QuicPerfClient::enter_measure_phase(quic::QuicCoreTimePoint now) {
         for (auto &[stream_id, request] : connection.outstanding_requests) {
             (void)stream_id;
             request.counts_toward_measurement = false;
+        }
+        for (auto &[stream_id, counts_toward_measurement] : connection.active_bulk_streams) {
+            (void)stream_id;
+            counts_toward_measurement = false;
         }
     }
 }
@@ -161,11 +170,17 @@ void QuicPerfClient::enter_drain_phase(quic::QuicCoreTimePoint now) {
                 (void)maybe_close_crr_connection(it->second, now);
             }
         }
+    } else if (timed_bulk_download_mode()) {
+        for (auto &[_, connection] : connections_) {
+            if (connection.active_bulk_streams.empty()) {
+                (void)maybe_close_bulk_connection(connection, now);
+            }
+        }
     }
 }
 
 void QuicPerfClient::advance_benchmark_phase(quic::QuicCoreTimePoint now) {
-    if (!(timed_rr_mode() || timed_crr_mode())) {
+    if (!(timed_rr_mode() || timed_crr_mode() || timed_bulk_download_mode())) {
         return;
     }
     if (phase_ == BenchmarkPhase::warmup && now - run_started_at_ >= config_.warmup) {
@@ -181,7 +196,8 @@ int QuicPerfClient::run() {
     run_started_at_ = start;
     measure_started_at_ = start;
     phase_ = BenchmarkPhase::warmup;
-    if ((timed_rr_mode() || timed_crr_mode()) && config_.warmup == std::chrono::milliseconds{0}) {
+    if ((timed_rr_mode() || timed_crr_mode() || timed_bulk_download_mode()) &&
+        config_.warmup == std::chrono::milliseconds{0}) {
         enter_measure_phase(start);
     }
 
@@ -409,8 +425,8 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
             if (const auto *ready = std::get_if<QuicPerfSessionReady>(&*decoded)) {
                 (void)ready;
                 connection.session_ready = true;
-                maybe_start_bulk_streams(connection, now);
-                if (!maybe_issue_rr_requests(connection, now) ||
+                if (!maybe_start_bulk_streams(connection, now) ||
+                    !maybe_issue_rr_requests(connection, now) ||
                     !maybe_issue_crr_request(connection, now)) {
                     return false;
                 }
@@ -437,6 +453,33 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
     }
 
     connection.bytes_received += received.bytes.size();
+
+    if (timed_bulk_download_mode()) {
+        const auto stream_it = connection.active_bulk_streams.find(received.stream_id);
+        if (stream_it != connection.active_bulk_streams.end() && stream_it->second) {
+            summary_.bytes_received += received.bytes.size();
+        }
+
+        if (!received.fin) {
+            return true;
+        }
+
+        if (stream_it != connection.active_bulk_streams.end()) {
+            connection.active_bulk_streams.erase(stream_it);
+        }
+
+        while (benchmark_accepts_new_work() &&
+               connection.active_bulk_streams.size() < config_.streams) {
+            if (!open_bulk_stream(connection, now, phase_ == BenchmarkPhase::measure)) {
+                return false;
+            }
+        }
+
+        if (phase_ == BenchmarkPhase::drain && connection.active_bulk_streams.empty()) {
+            return maybe_close_bulk_connection(connection, now);
+        }
+        return true;
+    }
 
     if (config_.mode == QuicPerfMode::rr || config_.mode == QuicPerfMode::crr) {
         const auto request_it = connection.outstanding_requests.find(received.stream_id);
@@ -505,6 +548,14 @@ bool QuicPerfClient::run_complete() const {
         if (!control_complete) {
             return false;
         }
+        if (timed_bulk_download_mode()) {
+            if (phase_ != BenchmarkPhase::drain) {
+                return false;
+            }
+            return std::all_of(connections_.begin(), connections_.end(), [](const auto &entry) {
+                return entry.second.active_bulk_streams.empty();
+            });
+        }
         if (config_.total_bytes.has_value()) {
             if (config_.direction == QuicPerfDirection::download) {
                 return summary_.bytes_received >= *config_.total_bytes;
@@ -538,11 +589,50 @@ bool QuicPerfClient::run_complete() const {
     return false;
 }
 
-void QuicPerfClient::maybe_start_bulk_streams(ConnectionState &connection,
+bool QuicPerfClient::open_bulk_stream(ConnectionState &connection, quic::QuicCoreTimePoint now,
+                                      bool counts_toward_measurement) {
+    const auto stream_id = connection.next_stream_id;
+    connection.next_stream_id = next_client_perf_stream_id(stream_id);
+    connection.active_bulk_streams.emplace(stream_id, counts_toward_measurement);
+
+    const auto send_result = core_.advance_endpoint(
+        quic::QuicCoreConnectionCommand{
+            .connection = connection.handle,
+            .input =
+                quic::QuicCoreSendStreamData{
+                    .stream_id = stream_id,
+                    .bytes = {},
+                    .fin = true,
+                },
+        },
+        now);
+    if (send_result.local_error.has_value() || !flush_send_effects(*backend_, send_result)) {
+        connection.active_bulk_streams.erase(stream_id);
+        summary_.failure_reason = "client timed bulk request flush failed";
+        return false;
+    }
+    return true;
+}
+
+bool QuicPerfClient::maybe_start_bulk_streams(ConnectionState &connection,
                                               quic::QuicCoreTimePoint now) {
     if (config_.mode != QuicPerfMode::bulk || !connection.session_ready ||
-        connection.control_complete || connection.next_stream_id != kQuicPerfFirstDataStreamId) {
-        return;
+        connection.control_complete) {
+        return true;
+    }
+
+    if (timed_bulk_download_mode()) {
+        while (connection.active_bulk_streams.size() < config_.streams &&
+               benchmark_accepts_new_work()) {
+            if (!open_bulk_stream(connection, now, phase_ == BenchmarkPhase::measure)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (connection.next_stream_id != kQuicPerfFirstDataStreamId) {
+        return true;
     }
 
     const auto total_bytes = config_.total_bytes.value_or(0);
@@ -573,6 +663,7 @@ void QuicPerfClient::maybe_start_bulk_streams(ConnectionState &connection,
             summary_.bytes_sent += target_bytes;
         }
     }
+    return true;
 }
 
 bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
@@ -696,6 +787,27 @@ bool QuicPerfClient::maybe_close_rr_connection(ConnectionState &connection,
                 quic::QuicCoreCloseConnection{
                     .application_error_code = 0,
                     .reason_phrase = "timed rr drain complete",
+                },
+        },
+        now);
+    return handle_result(close_result, now);
+}
+
+bool QuicPerfClient::maybe_close_bulk_connection(ConnectionState &connection,
+                                                 quic::QuicCoreTimePoint now) {
+    if (connection.close_requested || !connection.active_bulk_streams.empty()) {
+        return true;
+    }
+
+    connection.close_requested = true;
+    closing_connections_.insert(connection.handle);
+    const auto close_result = core_.advance_endpoint(
+        quic::QuicCoreConnectionCommand{
+            .connection = connection.handle,
+            .input =
+                quic::QuicCoreCloseConnection{
+                    .application_error_code = 0,
+                    .reason_phrase = "timed bulk drain complete",
                 },
         },
         now);

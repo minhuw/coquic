@@ -1,0 +1,55 @@
+name: Perf
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    name: Advisory QUIC Perf
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Perf Harness Contract
+        run: bash tests/nix/perf_harness_test.sh
+
+      - name: Run QUIC Perf Smoke Matrix
+        run: bash bench/run-host-matrix.sh --preset smoke
+
+      - name: Publish Perf Summary
+        if: always()
+        run: |
+          if [ -f .bench-results/manifest.json ]; then
+            python3 scripts/render-perf-summary.py               --manifest .bench-results/manifest.json               --event-name "${GITHUB_EVENT_NAME}"               --commit "${GITHUB_SHA}" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            {
+              echo '## Advisory QUIC Perf'
+              echo
+              echo "Event: \`${GITHUB_EVENT_NAME}\`"
+              echo "Commit: \`${GITHUB_SHA}\`"
+              echo
+              echo 'Benchmark run did not produce `.bench-results/manifest.json`.'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload Perf Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quic-perf-results
+          path: .bench-results
+          if-no-files-found: warn

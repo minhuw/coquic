@@ -1529,4 +1529,38 @@ TEST(QuicHttp3ConnectionTest, ClientRoleRejectsResponseDataBeforeHeaders) {
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::frame_unexpected));
 }
 
+TEST(QuicHttp3ConnectionTest, ClientRolePeerResetEmitsResponseResetEvent) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    prime_client_transport(connection);
+    receive_peer_settings(connection, {});
+
+    ASSERT_TRUE(connection
+                    .submit_request_head(0,
+                                         coquic::http3::Http3RequestHead{
+                                             .method = "GET",
+                                             .scheme = "https",
+                                             .authority = "example.test",
+                                             .path = "/resource",
+                                         })
+                    .has_value());
+    ASSERT_TRUE(connection.finish_request(0).has_value());
+    EXPECT_FALSE(
+        send_stream_inputs_from(connection.poll(coquic::quic::QuicCoreTimePoint{})).empty());
+
+    const auto update = connection.on_core_result(
+        reset_result(0,
+                     static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_rejected)),
+        coquic::quic::QuicCoreTimePoint{});
+
+    ASSERT_EQ(update.events.size(), 1u);
+    const auto *reset = std::get_if<coquic::http3::Http3PeerResponseResetEvent>(&update.events[0]);
+    ASSERT_NE(reset, nullptr);
+    EXPECT_EQ(reset->stream_id, 0u);
+    EXPECT_EQ(reset->application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_rejected));
+}
+
 } // namespace

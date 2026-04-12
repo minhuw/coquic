@@ -1138,7 +1138,27 @@ void Http3Connection::handle_peer_reset_stream(const quic::QuicCorePeerResetStre
     peer_uni_streams_.erase(reset.stream_id);
     terminated_peer_request_streams_.erase(reset.stream_id);
     local_response_streams_.erase(reset.stream_id);
-    local_request_streams_.erase(reset.stream_id);
+
+    const auto local_request = local_request_streams_.find(reset.stream_id);
+    if (local_request != local_request_streams_.end()) {
+        if (local_request->second.blocked_field_section.has_value()) {
+            const auto cancelled = cancel_http3_qpack_stream(decoder_, reset.stream_id);
+            if (!cancelled.has_value()) {
+                queue_connection_close(cancelled.error().code, cancelled.error().detail);
+                return;
+            }
+            flush_qpack_decoder_instructions();
+            if (closed_) {
+                return;
+            }
+        }
+        pending_events_.push_back(Http3PeerResponseResetEvent{
+            .stream_id = reset.stream_id,
+            .application_error_code = reset.application_error_code,
+        });
+        local_request_streams_.erase(local_request);
+        return;
+    }
 
     const auto request = peer_request_streams_.find(reset.stream_id);
     if (request == peer_request_streams_.end()) {

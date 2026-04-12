@@ -193,6 +193,22 @@ bool Http3ClientEndpoint::handle_connection_events(Http3ClientEndpointUpdate &up
             continue;
         }
 
+        if (const auto *reset = std::get_if<Http3PeerResponseResetEvent>(&event)) {
+            const auto request_it = active_requests_.find(reset->stream_id);
+            pending_responses_.erase(reset->stream_id);
+            if (request_it == active_requests_.end()) {
+                continue;
+            }
+
+            update.request_error_events.push_back(Http3ClientRequestErrorEvent{
+                .stream_id = reset->stream_id,
+                .request = std::move(request_it->second),
+                .application_error_code = reset->application_error_code,
+            });
+            active_requests_.erase(request_it);
+            continue;
+        }
+
         const auto *complete = std::get_if<Http3PeerResponseCompleteEvent>(&event);
         if (complete == nullptr) {
             continue;

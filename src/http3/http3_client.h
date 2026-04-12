@@ -21,9 +21,16 @@ struct Http3ClientResponseEvent {
     Http3Response response;
 };
 
+struct Http3ClientRequestErrorEvent {
+    std::uint64_t stream_id = 0;
+    Http3Request request;
+    std::uint64_t application_error_code = 0;
+};
+
 struct Http3ClientEndpointUpdate {
     std::vector<quic::QuicCoreInput> core_inputs;
     std::vector<Http3ClientResponseEvent> events;
+    std::vector<Http3ClientRequestErrorEvent> request_error_events;
     bool has_pending_work = false;
     bool terminal_failure = false;
     bool handled_local_error = false;

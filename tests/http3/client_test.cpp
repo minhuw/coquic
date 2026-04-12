@@ -57,6 +57,17 @@ coquic::quic::QuicCoreResult receive_result(std::uint64_t stream_id,
     return result;
 }
 
+coquic::quic::QuicCoreResult reset_result(std::uint64_t stream_id, std::uint64_t error_code = 0) {
+    coquic::quic::QuicCoreResult result;
+    result.effects.push_back(coquic::quic::QuicCoreEffect{
+        coquic::quic::QuicCorePeerResetStream{
+            .stream_id = stream_id,
+            .application_error_code = error_code,
+        },
+    });
+    return result;
+}
+
 std::vector<coquic::quic::QuicCoreSendStreamData>
 send_stream_inputs_from(const coquic::http3::Http3ClientEndpointUpdate &update) {
     std::vector<coquic::quic::QuicCoreSendStreamData> sends;
@@ -261,6 +272,74 @@ TEST(QuicHttp3ClientTest, RejectsSubmissionAtOrAbovePeerGoawayBoundary) {
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code, coquic::http3::Http3ErrorCode::request_rejected);
     EXPECT_EQ(rejected.error().stream_id, std::optional<std::uint64_t>(4u));
+}
+
+TEST(QuicHttp3ClientTest, PeerResetRejectedRequestEmitsRequestErrorEvent) {
+    coquic::http3::Http3ClientEndpoint endpoint;
+
+    prime_client_transport(endpoint);
+
+    const auto submitted = endpoint.submit_request(coquic::http3::Http3Request{
+        .head =
+            {
+                .method = "GET",
+                .scheme = "https",
+                .authority = "example.test",
+                .path = "/reject",
+            },
+    });
+    ASSERT_TRUE(submitted.has_value());
+
+    EXPECT_FALSE(send_stream_inputs_from(endpoint.poll(coquic::quic::QuicCoreTimePoint{})).empty());
+
+    const auto update = endpoint.on_core_result(
+        reset_result(0,
+                     static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_rejected)),
+        coquic::quic::QuicCoreTimePoint{});
+
+    EXPECT_FALSE(update.terminal_failure);
+    ASSERT_TRUE(update.events.empty());
+    ASSERT_EQ(update.request_error_events.size(), 1u);
+    EXPECT_EQ(update.request_error_events[0].stream_id, 0u);
+    EXPECT_EQ(update.request_error_events[0].request.head.path, "/reject");
+    EXPECT_EQ(update.request_error_events[0].application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_rejected));
+}
+
+TEST(QuicHttp3ClientTest, PeerResetAfterCompletedResponseIsIgnored) {
+    coquic::http3::Http3ClientEndpoint endpoint;
+
+    prime_client_transport(endpoint);
+
+    ASSERT_TRUE(endpoint
+                    .submit_request(coquic::http3::Http3Request{
+                        .head =
+                            {
+                                .method = "GET",
+                                .scheme = "https",
+                                .authority = "example.test",
+                                .path = "/complete",
+                            },
+                    })
+                    .has_value());
+    EXPECT_FALSE(send_stream_inputs_from(endpoint.poll(coquic::quic::QuicCoreTimePoint{})).empty());
+
+    const std::array response_headers{
+        coquic::http3::Http3Field{":status", "200"},
+    };
+    const auto response_update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, response_headers), true),
+                                coquic::quic::QuicCoreTimePoint{});
+    ASSERT_EQ(response_update.events.size(), 1u);
+    ASSERT_TRUE(response_update.request_error_events.empty());
+
+    const auto reset_update = endpoint.on_core_result(
+        reset_result(0,
+                     static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled)),
+        coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(reset_update.terminal_failure);
+    EXPECT_TRUE(reset_update.events.empty());
+    EXPECT_TRUE(reset_update.request_error_events.empty());
 }
 
 } // namespace

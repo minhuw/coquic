@@ -2066,6 +2066,13 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
                                                : TransportParameters{}.max_ack_delay);
     const auto allow_application_pto = config_.role == EndpointRole::server || handshake_confirmed_;
     const auto &shared_rtt_state = shared_recovery_rtt_state();
+    const auto effective_pto_count = [&](const PacketSpaceState &packet_space) {
+        if (config_.role != EndpointRole::client || handshake_confirmed_ ||
+            &packet_space != &initial_space_) {
+            return pto_count_;
+        }
+        return std::min(pto_count_, 2u);
+    };
     const auto packet_space_pto_deadline =
         [&](const PacketSpaceState &packet_space,
             std::chrono::milliseconds max_ack_delay) -> std::optional<QuicCoreTimePoint> {
@@ -2087,7 +2094,7 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
         }
 
         return compute_pto_deadline(shared_rtt_state, max_ack_delay, *last_ack_eliciting_sent_time,
-                                    pto_count_);
+                                    effective_pto_count(packet_space));
     };
 
     const auto regular_deadline =
@@ -2214,8 +2221,9 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
                                                : TransportParameters{}.max_ack_delay);
     const auto allow_application_pto = config_.role == EndpointRole::server || handshake_confirmed_;
     const auto &shared_rtt_state = shared_recovery_rtt_state();
-    const auto effective_pto_count = [&](const PacketSpaceState & /*packet_space*/) {
-        if (config_.role != EndpointRole::client || handshake_confirmed_) {
+    const auto effective_pto_count = [&](const PacketSpaceState &packet_space) {
+        if (config_.role != EndpointRole::client || handshake_confirmed_ ||
+            &packet_space != &initial_space_) {
             return pto_count_;
         }
         return std::min(pto_count_, 2u);

@@ -917,6 +917,32 @@ TEST(QuicCoreTest, HandshakePtoUsesConnectionRttSampleFromInitialSpace) {
     EXPECT_EQ(connection.pto_deadline(), std::optional{coquic::quic::test::test_time(340)});
 }
 
+TEST(QuicCoreTest, HandshakePtoProbeDoesNotCapClientBackoffOutsideInitialSpace) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.pto_count_ = 3;
+
+    connection.initial_space_.recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
+    connection.initial_space_.recovery.rtt_state().min_rtt = std::chrono::milliseconds(10);
+    connection.initial_space_.recovery.rtt_state().smoothed_rtt = std::chrono::milliseconds(10);
+    connection.initial_space_.recovery.rtt_state().rttvar = std::chrono::milliseconds(5);
+
+    connection.track_sent_packet(connection.handshake_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 0,
+                                     .sent_time = coquic::quic::test::test_time(100),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .has_ping = true,
+                                 });
+
+    connection.arm_pto_probe(coquic::quic::test::test_time(220));
+
+    EXPECT_EQ(connection.pto_count_, 3u);
+    EXPECT_FALSE(connection.handshake_space_.pending_probe_packet.has_value());
+}
+
 TEST(QuicCoreTest, DiscardingInitialPacketSpaceResetsPtoBackoff) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.started_ = true;
@@ -2176,6 +2202,33 @@ TEST(QuicCoreTest, ClientHandshakePtoBackoffCapsBeforeHandshakeConfirmation) {
 
     EXPECT_EQ(connection.pto_count_, 5u);
     ASSERT_TRUE(connection.initial_space_.pending_probe_packet.has_value());
+}
+
+TEST(QuicCoreTest, ClientHandshakePtoDeadlineCapsBeforeHandshakeConfirmation) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.track_sent_packet(connection.initial_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 1,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .has_ping = true,
+                                 });
+    connection.pto_count_ = 4;
+
+    const auto capped_deadline = std::optional{coquic::quic::compute_pto_deadline(
+        connection.recovery_rtt_state_, std::chrono::milliseconds(0),
+        coquic::quic::test::test_time(0), 2)};
+    const auto uncapped_deadline = std::optional{coquic::quic::compute_pto_deadline(
+        connection.recovery_rtt_state_, std::chrono::milliseconds(0),
+        coquic::quic::test::test_time(0), connection.pto_count_)};
+
+    EXPECT_EQ(connection.pto_deadline(), capped_deadline);
+    EXPECT_EQ(connection.next_wakeup(), capped_deadline);
+    EXPECT_NE(connection.pto_deadline(), uncapped_deadline);
 }
 
 TEST(QuicCoreTest, ClientHandshakeKeepalivePtoUsesPeerActivityBeforeHandshakeKeysAreReady) {

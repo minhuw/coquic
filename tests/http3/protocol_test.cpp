@@ -503,6 +503,105 @@ TEST(QuicHttp3ProtocolTest, RejectsRequestsMissingMethodOrSchemeIndividually) {
     }
 }
 
+TEST(QuicHttp3ProtocolTest, RejectsHttpRequestsWithoutAuthorityOrHost) {
+    const std::array fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":path", "/"},
+    };
+
+    const auto result = coquic::http3::validate_http3_request_headers(fields);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::message_error);
+    EXPECT_EQ(result.error().detail, "missing required authority information");
+}
+
+TEST(QuicHttp3ProtocolTest, RejectsConnectionSpecificRequestHeadersAndInvalidTe) {
+    struct RequestCase {
+        std::vector<coquic::http3::Http3Field> fields;
+        std::string_view detail;
+    };
+
+    for (const auto &test_case : std::array{
+             RequestCase{
+                 .fields =
+                     {
+                         {":method", "GET"},
+                         {":scheme", "https"},
+                         {":authority", "example.test"},
+                         {":path", "/"},
+                         {"connection", "keep-alive"},
+                     },
+                 .detail = "connection-specific header is not permitted",
+             },
+             RequestCase{
+                 .fields =
+                     {
+                         {":method", "GET"},
+                         {":scheme", "https"},
+                         {":authority", "example.test"},
+                         {":path", "/"},
+                         {"keep-alive", "timeout=5"},
+                     },
+                 .detail = "connection-specific header is not permitted",
+             },
+             RequestCase{
+                 .fields =
+                     {
+                         {":method", "GET"},
+                         {":scheme", "https"},
+                         {":authority", "example.test"},
+                         {":path", "/"},
+                         {"proxy-connection", "keep-alive"},
+                     },
+                 .detail = "connection-specific header is not permitted",
+             },
+             RequestCase{
+                 .fields =
+                     {
+                         {":method", "GET"},
+                         {":scheme", "https"},
+                         {":authority", "example.test"},
+                         {":path", "/"},
+                         {"upgrade", "websocket"},
+                     },
+                 .detail = "connection-specific header is not permitted",
+             },
+             RequestCase{
+                 .fields =
+                     {
+                         {":method", "GET"},
+                         {":scheme", "https"},
+                         {":authority", "example.test"},
+                         {":path", "/"},
+                         {"te", "gzip"},
+                     },
+                 .detail = "invalid te header",
+             },
+         }) {
+        const auto result = coquic::http3::validate_http3_request_headers(test_case.fields);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::message_error);
+        EXPECT_EQ(result.error().detail, test_case.detail);
+    }
+}
+
+TEST(QuicHttp3ProtocolTest, AcceptsRequestTeTrailersHeader) {
+    const std::array fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/"},
+        coquic::http3::Http3Field{"te", "trailers"},
+    };
+
+    const auto result = coquic::http3::validate_http3_request_headers(fields);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value().headers.size(), 1u);
+    EXPECT_EQ(result.value().headers.front().name, "te");
+    EXPECT_EQ(result.value().headers.front().value, "trailers");
+}
+
 TEST(QuicHttp3ProtocolTest, RejectsInvalidResponseHeadersAndTrailers) {
     struct HeaderCase {
         std::vector<coquic::http3::Http3Field> fields;

@@ -2,6 +2,8 @@
 
 #include <charconv>
 #include <cctype>
+#include <cstdint>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <unordered_set>
@@ -78,6 +80,74 @@ bool header_name_has_uppercase(std::string_view name) {
     }
 
     return false;
+}
+
+std::string_view trim_ows(std::string_view value) {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+bool is_connection_specific_header(std::string_view name) {
+    return name == "connection" || name == "keep-alive" || name == "proxy-connection" ||
+           name == "upgrade" || name == "transfer-encoding";
+}
+
+bool iequals_ascii(std::string_view lhs, std::string_view rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < lhs.size(); ++index) {
+        if (std::tolower(static_cast<unsigned char>(lhs[index])) !=
+            std::tolower(static_cast<unsigned char>(rhs[index]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
+    std::optional<std::uint64_t> parsed_value;
+
+    while (true) {
+        const auto comma = value.find(',');
+        const auto token = trim_ows(value.substr(0, comma));
+        if (token.empty()) {
+            return http3_failure<std::uint64_t>(Http3ErrorCode::message_error,
+                                                "invalid content-length header");
+        }
+
+        std::uint64_t current = 0;
+        const auto *begin = token.data();
+        const auto *end = begin + token.size();
+        const auto parsed = std::from_chars(begin, end, current);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+            return http3_failure<std::uint64_t>(Http3ErrorCode::message_error,
+                                                "invalid content-length header");
+        }
+
+        if (parsed_value.has_value() && *parsed_value != current) {
+            return http3_failure<std::uint64_t>(Http3ErrorCode::message_error,
+                                                "invalid content-length header");
+        }
+        parsed_value = current;
+
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        value.remove_prefix(comma + 1);
+    }
+
+    if (!parsed_value.has_value()) {
+        return http3_failure<std::uint64_t>(Http3ErrorCode::message_error,
+                                            "invalid content-length header");
+    }
+    return Http3Result<std::uint64_t>::success(*parsed_value);
 }
 
 } // namespace
@@ -305,12 +375,33 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
 
         if (!is_pseudo) {
             saw_regular_header = true;
+            if (is_connection_specific_header(field.name)) {
+                return http3_failure<Http3RequestHead>(
+                    Http3ErrorCode::message_error, "connection-specific header is not permitted");
+            }
             if (field.name == "host") {
                 if (field.value.empty()) {
                     return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                            "empty host header");
                 }
                 host_header = field.value;
+            }
+            if (field.name == "te" && !iequals_ascii(trim_ows(field.value), "trailers")) {
+                return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
+                                                       "invalid te header");
+            }
+            if (field.name == "content-length") {
+                const auto content_length = parse_content_length_value(field.value);
+                if (!content_length.has_value()) {
+                    return http3_failure<Http3RequestHead>(content_length.error().code,
+                                                           content_length.error().detail);
+                }
+                if (head.content_length.has_value() &&
+                    *head.content_length != content_length.value()) {
+                    return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
+                                                           "invalid content-length header");
+                }
+                head.content_length = content_length.value();
             }
             head.headers.push_back(field);
             continue;
@@ -365,9 +456,17 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "missing required request pseudo header");
     }
+    if ((head.scheme == "http" || head.scheme == "https") && head.authority.empty() &&
+        !host_header.has_value()) {
+        return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
+                                               "missing required authority information");
+    }
     if (saw_authority && host_header.has_value() && *host_header != head.authority) {
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "mismatched :authority and host");
+    }
+    if (head.authority.empty() && host_header.has_value()) {
+        head.authority = std::string(*host_header);
     }
 
     return Http3Result<Http3RequestHead>::success(std::move(head));
@@ -395,6 +494,14 @@ Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const H
 
         if (!is_pseudo) {
             saw_regular_header = true;
+            if (is_connection_specific_header(field.name)) {
+                return http3_failure<Http3ResponseHead>(
+                    Http3ErrorCode::message_error, "connection-specific header is not permitted");
+            }
+            if (field.name == "te") {
+                return http3_failure<Http3ResponseHead>(
+                    Http3ErrorCode::message_error, "connection-specific header is not permitted");
+            }
             head.headers.push_back(field);
             continue;
         }

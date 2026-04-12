@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -97,6 +98,7 @@ struct Http3RequestHead {
     std::string scheme;
     std::string authority;
     std::string path;
+    std::optional<std::uint64_t> content_length;
     Http3Headers headers;
 };
 
@@ -104,6 +106,29 @@ struct Http3ResponseHead {
     std::uint16_t status = 200;
     Http3Headers headers;
 };
+
+struct Http3PeerRequestHeadEvent {
+    std::uint64_t stream_id = 0;
+    Http3RequestHead head;
+};
+
+struct Http3PeerRequestBodyEvent {
+    std::uint64_t stream_id = 0;
+    std::vector<std::byte> body;
+};
+
+struct Http3PeerRequestTrailersEvent {
+    std::uint64_t stream_id = 0;
+    Http3Headers trailers;
+};
+
+struct Http3PeerRequestCompleteEvent {
+    std::uint64_t stream_id = 0;
+};
+
+using Http3EndpointEvent =
+    std::variant<Http3PeerRequestHeadEvent, Http3PeerRequestBodyEvent,
+                 Http3PeerRequestTrailersEvent, Http3PeerRequestCompleteEvent>;
 
 struct Http3SettingsSnapshot {
     std::uint64_t qpack_max_table_capacity = 4096;
@@ -113,6 +138,7 @@ struct Http3SettingsSnapshot {
 
 struct Http3EndpointUpdate {
     std::vector<quic::QuicCoreInput> core_inputs;
+    std::vector<Http3EndpointEvent> events;
     bool has_pending_work = false;
     bool terminal_success = false;
     bool terminal_failure = false;

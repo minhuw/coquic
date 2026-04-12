@@ -7580,7 +7580,7 @@ run_server_backend_loop_case_for_tests(ServerBackendLoopCaseForTests case_id) {
     }
     case ServerBackendLoopCaseForTests::live_pending_work_sends_response_then_shutdown: {
         document_root.write_file("large.bin",
-                                 std::string(static_cast<std::size_t>(20) * 1024U, 'x'));
+                                 std::string(static_cast<std::size_t>(5) * 1024U, 'x'));
         core = QuicCore(make_runtime_server_endpoint_config(
             config, TlsIdentity{
                         .certificate_pem = read_text_file("tests/fixtures/quic-server-cert.pem"),

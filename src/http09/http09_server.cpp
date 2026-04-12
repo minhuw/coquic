@@ -27,7 +27,9 @@ using quic::StreamInitiator;
 
 namespace {
 
-constexpr std::size_t kResponseChunkSize = static_cast<std::size_t>(16) * 1024U;
+// Keep application writes small enough that runtime loops can re-check for
+// migration traffic between response bursts during long transfers.
+constexpr std::size_t kResponseChunkSize = static_cast<std::size_t>(4) * 1024U;
 constexpr std::size_t kMaxBufferedRequestBytes = static_cast<std::size_t>(8) * 1024U;
 constexpr std::uint64_t kHttp09FileReadErrorCode = 1;
 

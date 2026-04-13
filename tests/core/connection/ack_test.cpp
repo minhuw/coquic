@@ -5679,6 +5679,61 @@ TEST(QuicCoreTest, AckOnlyOneRttPacketDoesNotScheduleApplicationAckDeadline) {
     EXPECT_FALSE(connection.application_space_.pending_ack_deadline.has_value());
 }
 
+TEST(QuicCoreTest, FirstAckElicitingOneRttPacketSchedulesDelayedApplicationAckDeadline) {
+    auto connection = make_connected_client_connection();
+    connection.application_space_.pending_ack_deadline = std::nullopt;
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 2,
+            .packet_number = 4,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(processed.has_value());
+    ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+    EXPECT_EQ(
+        optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
+        coquic::quic::test::test_time(
+            1 + static_cast<std::int64_t>(connection.local_transport_parameters_.max_ack_delay)));
+    EXPECT_FALSE(connection.application_space_.force_ack_send);
+}
+
+TEST(QuicCoreTest, SecondAckElicitingOneRttPacketKeepsDelayedApplicationAckDeadline) {
+    auto connection = make_connected_client_connection();
+    connection.application_space_.pending_ack_deadline = std::nullopt;
+
+    const auto first_processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 2,
+            .packet_number = 4,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(first_processed.has_value());
+    ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+
+    const auto second_processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 2,
+            .packet_number = 5,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(2));
+
+    ASSERT_TRUE(second_processed.has_value());
+    ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+    EXPECT_EQ(
+        optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
+        coquic::quic::test::test_time(
+            1 + static_cast<std::int64_t>(connection.local_transport_parameters_.max_ack_delay)));
+    EXPECT_FALSE(connection.application_space_.force_ack_send);
+}
+
 TEST(QuicCoreTest, ApplicationSendOversizeWithoutExistingPacketsReturnsEmptyAtAmplificationBudget) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;

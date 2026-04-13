@@ -483,6 +483,19 @@ TEST(QuicCoreTest, PreferredAddressCountsTowardIssuedConnectionIdLimit) {
     EXPECT_EQ(connection.pending_new_connection_id_frames_.size(), 6u);
 }
 
+TEST(QuicCoreTest, ClientSkipsSpareConnectionIdsWhenActiveMigrationIsDisabled) {
+    auto connection = make_connected_client_connection();
+    connection.pending_new_connection_id_frames_.clear();
+    connection.local_transport_parameters_.disable_active_migration = true;
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 8;
+    const auto next_sequence_number = connection.next_local_connection_id_sequence_;
+
+    connection.issue_spare_connection_ids();
+
+    EXPECT_EQ(connection.next_local_connection_id_sequence_, next_sequence_number);
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+}
+
 TEST(QuicCoreTest, PreferredAddressReservesSequenceOneInLocalConnectionIdInventory) {
     auto config = coquic::quic::test::make_server_core_config();
     config.transport.preferred_address = make_test_preferred_address();

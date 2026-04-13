@@ -1,3 +1,4 @@
+#include <array>
 #include <filesystem>
 
 #include <gtest/gtest.h>
@@ -77,6 +78,41 @@ TEST(QuicPerfRrTest, HonorsRequestsInFlightLimit) {
     EXPECT_EQ(run_perf_runtime(client), 0);
     const auto json = read_result_text(json_path);
     EXPECT_NE(json.find("\"requests_in_flight\":2"), std::string::npos);
+}
+
+TEST(QuicPerfRrTest, HighRequestsInFlightReservesCapacityForControlStream) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const QuicPerfConfig server{
+        .role = QuicPerfRole::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    ScopedPerfProcess server_process(server);
+
+    const auto json_path =
+        std::filesystem::temp_directory_path() / "coquic-perf-rr-control-stream-budget.json";
+    std::filesystem::remove(json_path);
+
+    const QuicPerfConfig client{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::rr,
+        .host = "127.0.0.1",
+        .port = port,
+        .request_bytes = 32,
+        .response_bytes = 32,
+        .requests = 16,
+        .requests_in_flight = 16,
+        .duration = std::chrono::milliseconds{500},
+        .json_out = json_path,
+    };
+
+    EXPECT_EQ(run_perf_runtime(client), 0);
+    const auto json = read_result_text(json_path);
+    EXPECT_NE(json.find("\"requests_completed\":16"), std::string::npos);
 }
 
 TEST(QuicPerfRrTest, FixedRequestCompletesWithMultipleConfiguredConnections) {
@@ -181,6 +217,26 @@ TEST(QuicPerfRrTest, TimedWindowUsesMeasurementOnly) {
     EXPECT_GT(server_bytes_sent_value, 0u);
     EXPECT_GT(server_bytes_received_value, 0u);
     EXPECT_EQ(server_requests_completed_value, requests_completed_value);
+}
+
+TEST(QuicPerfRrTest, TimedDrainCompletesAfterCloseRequestsDrainOutstandingResponses) {
+    std::array<QuicPerfDrainStateSnapshot, 2> connections{{
+        QuicPerfDrainStateSnapshot{
+            .control_complete = false,
+            .close_requested = true,
+            .outstanding_requests = 0,
+        },
+        QuicPerfDrainStateSnapshot{
+            .control_complete = true,
+            .close_requested = true,
+            .outstanding_requests = 0,
+        },
+    }};
+
+    EXPECT_TRUE(timed_rr_drain_complete_for_test(connections));
+
+    connections[1].outstanding_requests = 1;
+    EXPECT_FALSE(timed_rr_drain_complete_for_test(connections));
 }
 
 TEST(QuicPerfRrTest, TimedModeUsesConfiguredInitialConnectionFanout) {

@@ -1,8 +1,10 @@
+#include <array>
 #include <charconv>
 #include <filesystem>
 
 #include <gtest/gtest.h>
 
+#include "src/perf/perf_client.h"
 #include "tests/support/perf/perf_test_fixtures.h"
 
 namespace {
@@ -103,6 +105,26 @@ TEST(QuicPerfBulkTest, UploadRunReportsServerReceivedByteCount) {
     EXPECT_NE(json.find("\"direction\":\"upload\""), std::string::npos);
     EXPECT_NE(json.find("\"bytes_sent\":32768"), std::string::npos);
     EXPECT_NE(json.find("\"bytes_received\":0"), std::string::npos);
+}
+
+TEST(QuicPerfBulkTest, TimedDrainCompletesAfterCloseRequestsDrainActiveStreams) {
+    std::array<QuicPerfDrainStateSnapshot, 2> connections{{
+        QuicPerfDrainStateSnapshot{
+            .control_complete = false,
+            .close_requested = true,
+            .active_bulk_streams = 0,
+        },
+        QuicPerfDrainStateSnapshot{
+            .control_complete = true,
+            .close_requested = true,
+            .active_bulk_streams = 0,
+        },
+    }};
+
+    EXPECT_TRUE(timed_bulk_download_drain_complete_for_test(connections));
+
+    connections[1].active_bulk_streams = 1;
+    EXPECT_FALSE(timed_bulk_download_drain_complete_for_test(connections));
 }
 
 TEST(QuicPerfBulkTest, TimedDownloadUsesMeasurementWindow) {

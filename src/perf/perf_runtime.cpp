@@ -3,6 +3,7 @@
 #include "src/perf/perf_server.h"
 #include "src/perf/perf_client.h"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <fstream>
@@ -87,6 +88,8 @@ std::optional<QuicPerfDirection> parse_direction_arg(std::string_view value) {
     }
     return std::nullopt;
 }
+
+constexpr std::uint64_t kPerfServerInitialMaxBidirectionalStreams = 4096;
 
 } // namespace
 
@@ -369,7 +372,7 @@ quic::QuicCoreEndpointConfig make_perf_client_endpoint_config(const QuicPerfConf
 }
 
 quic::QuicCoreEndpointConfig make_perf_server_endpoint_config(const QuicPerfConfig &config) {
-    return quic::QuicCoreEndpointConfig{
+    auto endpoint_config = quic::QuicCoreEndpointConfig{
         .role = quic::EndpointRole::server,
         .verify_peer = config.verify_peer,
         .application_protocol = "coquic-perf/1",
@@ -379,6 +382,10 @@ quic::QuicCoreEndpointConfig make_perf_server_endpoint_config(const QuicPerfConf
                 .private_key_pem = read_text_file(config.private_key_path),
             },
     };
+    endpoint_config.transport.initial_max_streams_bidi =
+        std::max(endpoint_config.transport.initial_max_streams_bidi,
+                 kPerfServerInitialMaxBidirectionalStreams);
+    return endpoint_config;
 }
 
 } // namespace coquic::perf

@@ -1,7 +1,9 @@
+#include <array>
 #include <filesystem>
 
 #include <gtest/gtest.h>
 
+#include "src/perf/perf_client.h"
 #include "tests/support/perf/perf_test_fixtures.h"
 
 namespace {
@@ -78,6 +80,39 @@ TEST(QuicPerfCrrTest, HonorsParallelConnectionLimit) {
     EXPECT_EQ(run_perf_runtime(client), 0);
     const auto json = read_result_text(json_path);
     EXPECT_NE(json.find("\"connections\":3"), std::string::npos);
+}
+
+TEST(QuicPerfCrrTest, ClientOpenConfigUsesDistinctConnectionIdsBeyond256Connections) {
+    const QuicPerfConfig client{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::crr,
+    };
+
+    const auto first = make_client_open_config_for_test(client, 0);
+    const auto wrapped = make_client_open_config_for_test(client, 256);
+
+    EXPECT_NE(first.source_connection_id, wrapped.source_connection_id);
+    EXPECT_NE(first.initial_destination_connection_id, wrapped.initial_destination_connection_id);
+}
+
+TEST(QuicPerfCrrTest, TimedDrainCompletesAfterCloseRequestsDrainOutstandingResponses) {
+    std::array<QuicPerfDrainStateSnapshot, 2> connections{{
+        QuicPerfDrainStateSnapshot{
+            .control_complete = false,
+            .close_requested = true,
+            .outstanding_requests = 0,
+        },
+        QuicPerfDrainStateSnapshot{
+            .control_complete = true,
+            .close_requested = true,
+            .outstanding_requests = 0,
+        },
+    }};
+
+    EXPECT_TRUE(timed_crr_drain_complete_for_test(connections));
+
+    connections[0].outstanding_requests = 1;
+    EXPECT_FALSE(timed_crr_drain_complete_for_test(connections));
 }
 
 TEST(QuicPerfCrrTest, TimedWindowUsesMeasurementOnly) {

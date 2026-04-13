@@ -117,4 +117,39 @@ TEST(QuicCoreEndpointTest, RouteHandleMigrationCommandTargetsSelectedConnection)
 
     EXPECT_FALSE(result.local_error.has_value());
 }
+
+TEST(QuicCoreEndpointTest, CloseConnectionCommandEmitsClosedLifecycleEvent) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(1),
+            .initial_route_handle = 11,
+        },
+        coquic::quic::test::test_time(0)));
+
+    *core.connections_.at(1).connection = make_connected_client_connection();
+    core.connections_.at(1).route_handle_by_path_id.emplace(0, 11);
+    core.connections_.at(1).path_id_by_route_handle.emplace(11, 0);
+
+    const auto result = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreCloseConnection{
+                    .application_error_code = 0,
+                    .reason_phrase = "done",
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    const auto lifecycle = lifecycle_events_from(result);
+    ASSERT_EQ(lifecycle.size(), 1u);
+    EXPECT_EQ(lifecycle.front().connection, 1u);
+    EXPECT_EQ(lifecycle.front().event, coquic::quic::QuicCoreConnectionLifecycle::closed);
+    EXPECT_EQ(coquic::quic::test::count_state_change(coquic::quic::test::state_changes_from(result),
+                                                     coquic::quic::QuicCoreStateChange::failed),
+              1u);
+    EXPECT_FALSE(send_effects_from(result).empty());
+}
 } // namespace

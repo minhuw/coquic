@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -19,6 +20,20 @@ namespace coquic::perf {
 
 int run_perf_client(const QuicPerfConfig &config);
 std::size_t initial_connection_target_for_test(const QuicPerfConfig &config);
+quic::QuicCoreClientConnectionConfig make_client_open_config_for_test(const QuicPerfConfig &config,
+                                                                      std::uint64_t index);
+
+struct QuicPerfDrainStateSnapshot {
+    bool control_complete = false;
+    bool close_requested = false;
+    std::size_t outstanding_requests = 0;
+    std::size_t active_bulk_streams = 0;
+};
+
+bool timed_bulk_download_drain_complete_for_test(
+    std::span<const QuicPerfDrainStateSnapshot> connections);
+bool timed_rr_drain_complete_for_test(std::span<const QuicPerfDrainStateSnapshot> connections);
+bool timed_crr_drain_complete_for_test(std::span<const QuicPerfDrainStateSnapshot> connections);
 
 class QuicPerfClient {
   public:

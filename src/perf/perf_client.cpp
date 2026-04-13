@@ -74,6 +74,25 @@ std::size_t initial_connection_target(const QuicPerfConfig &config) {
     return config.connections;
 }
 
+bool timed_bulk_download_drain_connection_complete(bool close_requested,
+                                                   std::size_t active_bulk_streams) {
+    return close_requested && active_bulk_streams == 0;
+}
+
+bool timed_rr_drain_connection_complete(bool close_requested, std::size_t outstanding_requests) {
+    return close_requested && outstanding_requests == 0;
+}
+
+quic::QuicCoreClientConnectionConfig make_client_open_config_for_index(const QuicPerfConfig &config,
+                                                                       std::uint64_t index) {
+    const auto id = index + 1;
+    return quic::QuicCoreClientConnectionConfig{
+        .source_connection_id = make_connection_id(std::byte{0xc1}, id),
+        .initial_destination_connection_id = make_connection_id(std::byte{0x83}, 0x40u + id),
+        .server_name = config.server_name,
+    };
+}
+
 } // namespace
 
 int run_perf_client(const QuicPerfConfig &config) {
@@ -83,6 +102,33 @@ int run_perf_client(const QuicPerfConfig &config) {
 
 std::size_t initial_connection_target_for_test(const QuicPerfConfig &config) {
     return initial_connection_target(config);
+}
+
+quic::QuicCoreClientConnectionConfig make_client_open_config_for_test(const QuicPerfConfig &config,
+                                                                      std::uint64_t index) {
+    return make_client_open_config_for_index(config, index);
+}
+
+bool timed_bulk_download_drain_complete_for_test(
+    std::span<const QuicPerfDrainStateSnapshot> connections) {
+    return std::all_of(connections.begin(), connections.end(), [](const auto &connection) {
+        return timed_bulk_download_drain_connection_complete(connection.close_requested,
+                                                             connection.active_bulk_streams);
+    });
+}
+
+bool timed_rr_drain_complete_for_test(std::span<const QuicPerfDrainStateSnapshot> connections) {
+    return std::all_of(connections.begin(), connections.end(), [](const auto &connection) {
+        return timed_rr_drain_connection_complete(connection.close_requested,
+                                                  connection.outstanding_requests);
+    });
+}
+
+bool timed_crr_drain_complete_for_test(std::span<const QuicPerfDrainStateSnapshot> connections) {
+    return std::all_of(connections.begin(), connections.end(), [](const auto &connection) {
+        return timed_rr_drain_connection_complete(connection.close_requested,
+                                                  connection.outstanding_requests);
+    });
 }
 
 QuicPerfClient::QuicPerfClient(const QuicPerfConfig &config)
@@ -362,7 +408,8 @@ bool QuicPerfClient::handle_result(const quic::QuicCoreResult &result,
                 if (closing_connections_.contains(state->connection)) {
                     continue;
                 }
-                summary_.failure_reason = "client core state failed";
+                summary_.failure_reason =
+                    "client core state failed connection=" + std::to_string(state->connection);
                 return false;
             }
             if (state->change == quic::QuicCoreStateChange::handshake_ready) {
@@ -553,7 +600,8 @@ bool QuicPerfClient::run_complete() const {
                 return false;
             }
             return std::all_of(connections_.begin(), connections_.end(), [](const auto &entry) {
-                return entry.second.active_bulk_streams.empty();
+                return timed_bulk_download_drain_connection_complete(
+                    entry.second.close_requested, entry.second.active_bulk_streams.size());
             });
         }
         if (config_.total_bytes.has_value()) {
@@ -570,7 +618,8 @@ bool QuicPerfClient::run_complete() const {
                 return false;
             }
             return std::all_of(connections_.begin(), connections_.end(), [](const auto &entry) {
-                return entry.second.control_complete && entry.second.outstanding_requests.empty();
+                return timed_rr_drain_connection_complete(entry.second.close_requested,
+                                                          entry.second.outstanding_requests.size());
             });
         }
         if (!config_.requests.has_value() || summary_.requests_completed < *config_.requests) {
@@ -581,7 +630,13 @@ bool QuicPerfClient::run_complete() const {
         });
     case QuicPerfMode::crr:
         if (timed_crr_mode()) {
-            return phase_ == BenchmarkPhase::drain && connections_.empty();
+            if (phase_ != BenchmarkPhase::drain) {
+                return false;
+            }
+            return std::all_of(connections_.begin(), connections_.end(), [](const auto &entry) {
+                return timed_rr_drain_connection_complete(entry.second.close_requested,
+                                                          entry.second.outstanding_requests.size());
+            });
         }
         return config_.requests.has_value() && summary_.requests_completed >= *config_.requests &&
                connections_.empty();
@@ -837,13 +892,7 @@ bool QuicPerfClient::maybe_close_crr_connection(ConnectionState &connection,
 
 quic::QuicCoreClientConnectionConfig
 QuicPerfClient::make_client_open_config(std::uint64_t index) const {
-    const auto id = static_cast<std::uint8_t>(index + 1);
-    return quic::QuicCoreClientConnectionConfig{
-        .source_connection_id = make_connection_id(std::byte{0xc1}, static_cast<std::uint64_t>(id)),
-        .initial_destination_connection_id =
-            make_connection_id(std::byte{0x83}, static_cast<std::uint64_t>(0x40u + id)),
-        .server_name = config_.server_name,
-    };
+    return make_client_open_config_for_index(config_, index);
 }
 
 bool QuicPerfClient::maybe_open_crr_connections(quic::QuicCoreTimePoint now) {

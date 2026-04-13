@@ -3299,7 +3299,7 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                     if (!suppress_keepalive_peer_activity) {
                         last_peer_activity_time_ = now;
                     }
-                    if (ack_eliciting && !should_defer_client_standalone_handshake_ack()) {
+                    if (ack_eliciting) {
                         handshake_space_.pending_ack_deadline = now;
                         handshake_space_.force_ack_send |= ecn == QuicEcnCodepoint::ce;
                     }
@@ -4719,13 +4719,6 @@ bool QuicConnection::packet_targets_discarded_long_header_space(
     return false;
 }
 
-bool QuicConnection::should_defer_client_standalone_handshake_ack() const {
-    return (config_.role == EndpointRole::client) & (status_ == HandshakeStatus::in_progress) &
-           !handshake_confirmed_ & !initial_packet_space_discarded_ &
-           !handshake_space_.send_crypto.has_pending_data() &
-           !handshake_space_.pending_probe_packet.has_value();
-}
-
 void QuicConnection::discard_initial_packet_space() {
     recovery_rtt_state_ = shared_recovery_rtt_state();
     initial_packet_space_discarded_ = true;
@@ -5807,8 +5800,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
     const auto handshake_ack_frame =
         handshake_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now);
-    const bool defer_client_standalone_handshake_ack =
-        should_defer_client_standalone_handshake_ack();
     const auto max_handshake_crypto_bytes =
         std::numeric_limits<std::size_t>::max() *
         static_cast<std::size_t>(!defer_server_compatible_negotiation_crypto);
@@ -5822,8 +5813,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                        (handshake_space_.pending_probe_packet.has_value()
                             ? handshake_space_.pending_probe_packet->crypto_ranges.size() + 1u
                             : 0u));
-        const bool suppress_ack_only_handshake_packet = defer_client_standalone_handshake_ack;
-        if (handshake_ack_frame.has_value() && !suppress_ack_only_handshake_packet) {
+        if (handshake_ack_frame.has_value()) {
             frames.emplace_back(*handshake_ack_frame);
         }
         for (const auto &range : crypto_ranges) {
@@ -5978,8 +5968,12 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                                 status_ != HandshakeStatus::connected &&
                                                 zero_rtt_space_.write_secret.has_value();
     const bool can_send_one_rtt_packets = application_space_.write_secret.has_value();
+    const bool application_ack_due_now =
+        application_space_.received_packets.has_ack_to_send() &&
+        (application_space_.force_ack_send ||
+         application_space_.pending_ack_deadline.value_or(QuicCoreTimePoint::max()) <= now);
     const bool has_pending_application_payload =
-        application_space_.received_packets.has_ack_to_send() | has_pending_application_send() |
+        application_ack_due_now | has_pending_application_send() |
         application_space_.pending_probe_packet.has_value() |
         !pending_new_connection_id_frames_.empty() | !pending_retire_connection_id_frames_.empty() |
         !application_crypto_frames.empty();

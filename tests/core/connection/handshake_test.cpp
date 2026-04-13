@@ -1875,7 +1875,7 @@ TEST(QuicCoreTest, ProcessCapturedQuicGoServerInitialInstallsHandshakeSecrets) {
     EXPECT_FALSE(connection.initial_packet_space_discarded_);
 }
 
-TEST(QuicCoreTest, ClientDefersStandaloneHandshakeAckPacketsUntilItCanSendHandshakeFlight) {
+TEST(QuicCoreTest, ClientSendsStandaloneHandshakeAckBeforeHandshakeFlight) {
     auto config = coquic::quic::test::make_client_core_config();
     config.source_connection_id = bytes_from_hex("c100000000000025");
     config.initial_destination_connection_id = bytes_from_hex("8300000000000024");
@@ -1917,15 +1917,16 @@ TEST(QuicCoreTest, ClientDefersStandaloneHandshakeAckPacketsUntilItCanSendHandsh
     ASSERT_TRUE(processed.has_value());
 
     const auto response = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
-    EXPECT_TRUE(response.empty());
-    EXPECT_FALSE(connection.initial_packet_space_discarded_);
+    ASSERT_FALSE(response.empty());
+    EXPECT_TRUE(connection.initial_packet_space_discarded_);
 
-    connection.on_timeout(coquic::quic::test::test_time(1000));
-
-    ASSERT_TRUE(connection.initial_space_.pending_probe_packet.has_value());
-    EXPECT_TRUE(optional_ref_or_terminate(connection.initial_space_.pending_probe_packet).has_ping);
-    EXPECT_FALSE(connection.handshake_space_.pending_probe_packet.has_value());
-    EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1000)).empty());
+    const auto response_packets = decode_sender_datagram(connection, response);
+    EXPECT_NE(std::find_if(
+                  response_packets.begin(), response_packets.end(),
+                  [](const auto &packet) {
+                      return std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(packet);
+                  }),
+              response_packets.end());
 }
 
 TEST(QuicCoreTest, ClientKeepsPtoArmedAfterServerInitialAckWithoutHandshakeFlight) {

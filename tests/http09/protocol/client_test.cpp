@@ -186,6 +186,59 @@ TEST(QuicHttp09ClientTest, PollBeforeHandshakeQueuesAllZeroRttRequestsInSingleUp
     EXPECT_TRUE(sends[2].fin);
 }
 
+TEST(QuicHttp09ClientTest, PollBeforeHandshakeCapsLargeZeroRttBurst) {
+    std::vector<QuicHttp09Request> requests;
+    requests.reserve(40);
+    for (std::size_t i = 0; i < 40; ++i) {
+        requests.push_back(
+            request_for_target("/" + std::string(250, static_cast<char>('a' + (i % 26)))));
+    }
+
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = std::move(requests),
+        .download_root = std::filesystem::path("/downloads"),
+        .allow_requests_before_handshake_ready = true,
+    });
+
+    const auto update = endpoint.poll(coquic::quic::test::test_time());
+    const auto sends = send_stream_inputs_from(update);
+
+    ASSERT_EQ(sends.size(), 24u);
+    EXPECT_EQ(sends.front().stream_id, 0u);
+    EXPECT_EQ(sends.back().stream_id, 92u);
+}
+
+TEST(QuicHttp09ClientTest, PollAfterHandshakeBatchesRemainingZeroRttRequests) {
+    const auto now = coquic::quic::test::test_time();
+    std::vector<QuicHttp09Request> requests;
+    requests.reserve(40);
+    for (std::size_t i = 0; i < 40; ++i) {
+        requests.push_back(
+            request_for_target("/" + std::string(250, static_cast<char>('a' + (i % 26)))));
+    }
+
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = std::move(requests),
+        .download_root = std::filesystem::path("/downloads"),
+        .allow_requests_before_handshake_ready = true,
+    });
+
+    const auto pre_handshake = endpoint.poll(now);
+    const auto pre_handshake_sends = send_stream_inputs_from(pre_handshake);
+    ASSERT_EQ(pre_handshake_sends.size(), 24u);
+
+    const auto on_handshake =
+        endpoint.on_core_result(handshake_ready_result(), coquic::quic::test::test_time(1));
+    EXPECT_TRUE(on_handshake.has_pending_work);
+
+    const auto post_handshake = endpoint.poll(coquic::quic::test::test_time(1));
+    const auto post_handshake_sends = send_stream_inputs_from(post_handshake);
+
+    ASSERT_EQ(post_handshake_sends.size(), 16u);
+    EXPECT_EQ(post_handshake_sends.front().stream_id, 96u);
+    EXPECT_EQ(post_handshake_sends.back().stream_id, 156u);
+}
+
 TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesSingleRequestAfterFirstRequestActivation) {
     const auto now = coquic::quic::test::test_time();
     QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{

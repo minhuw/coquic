@@ -8,6 +8,12 @@
 
 namespace coquic::http09 {
 
+namespace {
+
+constexpr std::size_t kZeroRttPreHandshakeRequestBurstLimit = 24;
+
+} // namespace
+
 using quic::QuicCoreLocalError;
 using quic::QuicCoreLocalErrorCode;
 using quic::QuicCoreReceiveStreamData;
@@ -81,8 +87,7 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::poll(QuicCoreTimePoint /*now*
         if (!has_unissued_requests() && pending_open_requests_.empty() && all_streams_complete()) {
             complete_ = true;
         } else {
-            const bool batch_zero_rtt_requests =
-                config_.allow_requests_before_handshake_ready && !handshake_ready_;
+            const bool batch_resumed_requests = config_.allow_requests_before_handshake_ready;
             do {
                 if (!can_issue_next_request()) {
                     break;
@@ -94,7 +99,7 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::poll(QuicCoreTimePoint /*now*
                 }
 
                 queue_request_send(*next_request);
-            } while (batch_zero_rtt_requests);
+            } while (batch_resumed_requests);
         }
     }
 
@@ -213,8 +218,13 @@ bool QuicHttp09ClientEndpoint::can_issue_next_request() const {
         !has_unissued_requests()) {
         return false;
     }
-    if (max_concurrent_requests_.has_value() &&
-        in_flight_request_count() >= *max_concurrent_requests_) {
+
+    const auto in_flight_requests = in_flight_request_count();
+    if (config_.allow_requests_before_handshake_ready && !handshake_ready_ &&
+        in_flight_requests >= kZeroRttPreHandshakeRequestBurstLimit) {
+        return false;
+    }
+    if (max_concurrent_requests_.has_value() && in_flight_requests >= *max_concurrent_requests_) {
         return false;
     }
     return true;

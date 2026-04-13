@@ -330,7 +330,6 @@ class QuicConnection {
     bool should_reset_client_handshake_peer_state(const ConnectionId &source_connection_id) const;
     void reset_client_handshake_peer_state_for_new_source_connection_id();
     bool packet_targets_discarded_long_header_space(std::span<const std::byte> packet_bytes) const;
-    bool should_defer_client_standalone_handshake_ack() const;
     void discard_initial_packet_space();
     void discard_handshake_packet_space();
     std::optional<TransportParametersValidationContext>

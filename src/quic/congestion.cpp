@@ -74,6 +74,7 @@ void NewRenoCongestionController::on_packets_lost(std::span<const SentPacketReco
     }
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 void NewRenoCongestionController::on_loss_event(QuicCoreTimePoint loss_detection_time,
                                                 QuicCoreTimePoint largest_lost_sent_time) {
     if (recovery_start_time_.has_value() && largest_lost_sent_time <= *recovery_start_time_) {

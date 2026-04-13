@@ -17,6 +17,7 @@ class NewRenoCongestionController {
     void on_packet_sent(std::size_t bytes_sent, bool ack_eliciting);
     void on_packets_acked(std::span<const SentPacketRecord> packets, bool app_limited);
     void on_packets_lost(std::span<const SentPacketRecord> packets);
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     void on_loss_event(QuicCoreTimePoint loss_detection_time,
                        QuicCoreTimePoint largest_lost_sent_time);
     void on_persistent_congestion();

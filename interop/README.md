@@ -3,15 +3,16 @@
 Interop-specific repo assets now live under [`interop/`](/home/minhu/projects/coquic/interop).
 The GitHub Actions workflow stays in [`.github/workflows/interop.yml`](/home/minhu/projects/coquic/.github/workflows/interop.yml) because GitHub requires that location.
 
-This repository now exposes a runner-oriented HTTP/0.9 surface above `QuicCore`.
-The current slice targets:
+This repository now exposes runner-oriented HTTP/0.9 and HTTP/3 surfaces above
+`QuicCore`. The current slice targets:
 
 - `handshake`
 - ideal-case `transfer`
 - `chacha20`
+- `http3`
 
 It does not yet target lossy recovery, congestion-control competition, or full
-interop-runner scenario coverage beyond those three cases.
+interop-runner scenario coverage beyond those core lanes.
 
 ## Runner Contract
 
@@ -40,6 +41,14 @@ hooks with:
 ```bash
 COQUIC_SKIP_SETUP=1 COQUIC_SKIP_WAIT=1
 ```
+
+## HTTP/3 Testcase Dispatch
+
+`interop-server` and `interop-client` remain the HTTP/0.9 interop surface.
+For `TESTCASE=http3`, the wrapper dispatches to `h3-interop-server` and
+`h3-interop-client` instead. This split is handled inside
+[`interop/entrypoint.sh`](/home/minhu/projects/coquic/interop/entrypoint.sh), while all
+non-`http3` testcases continue to use the HTTP/0.9 commands.
 
 ## Local Manual Runs
 
@@ -143,6 +152,27 @@ INTEROP_PEER_IMPL=quic-go \
 INTEROP_PEER_IMAGE=martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424 \
 nix develop -c bash interop/run-official.sh
 ```
+
+To run only the HTTP/3 testcase locally with the pinned `quic-go` image:
+
+```bash
+INTEROP_TESTCASES=http3 \
+INTEROP_PEER_IMPL=quic-go \
+INTEROP_PEER_IMAGE=martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424 \
+INTEROP_DIRECTIONS=both \
+nix develop -c bash interop/run-official.sh
+```
+
+To run Chromium-as-client against `coquic` as server for the official `http3`
+case only, use the repo-owned wrapper:
+
+```bash
+nix develop -c bash tests/nix/chrome_http3_interop_smoke_test.sh
+```
+
+That wrapper pins the current `martenseemann/chrome-quic-interop-runner`
+digest, forces `INTEROP_TESTCASES=http3`, and forces
+`INTEROP_DIRECTIONS=coquic-server` because the Chrome runner is client-only.
 
 That script builds and loads `coquic-interop:quictls-musl`, pulls the pinned
 official `quic-go`, simulator, and iperf images, and runs the requested

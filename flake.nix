@@ -422,6 +422,7 @@
               pkgs.gtest
               pkgs.gawk
               pkgs.binutils
+              pkgs.curlHTTP3
               llvmPkgs.llvm
               profile.tlsPackage
               profile.spdlogPackage
@@ -512,6 +513,7 @@
           llvmPkgs.clang
           llvmPkgs.clang-tools
           pkgs.lldb
+          pkgs.mkcert
           boringssl
           pkgs.python3
           pkgs.qdrant
@@ -574,6 +576,7 @@
         coquic-quictls-musl = quictlsMuslPackage;
         coquic-boringssl = boringsslPackage;
         coquic-boringssl-musl = boringsslMuslPackage;
+        curl-http3 = pkgs.curlHTTP3;
         interop-image-quictls-musl = quictlsMuslImage;
         interop-image-boringssl-musl = boringsslMuslImage;
         perf-image-quictls-musl = quictlsMuslPerfImage;
@@ -607,6 +610,10 @@
         coquic-boringssl-musl = {
           type = "app";
           program = "${boringsslMuslPackage}/bin/coquic";
+        };
+        curl-http3 = {
+          type = "app";
+          program = "${pkgs.curlHTTP3}/bin/curl";
         };
       };
 

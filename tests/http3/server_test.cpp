@@ -23,6 +23,36 @@ std::vector<std::byte> bytes_from_ints(std::initializer_list<std::uint8_t> value
     return bytes;
 }
 
+std::optional<std::uint8_t> hex_digit_value(char ch) {
+    if (ch >= '0' && ch <= '9') {
+        return static_cast<std::uint8_t>(ch - '0');
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return static_cast<std::uint8_t>(10 + (ch - 'a'));
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return static_cast<std::uint8_t>(10 + (ch - 'A'));
+    }
+    return std::nullopt;
+}
+
+std::vector<std::byte> bytes_from_hex(std::string_view hex) {
+    EXPECT_EQ(hex.size() % 2u, 0u);
+    std::vector<std::byte> bytes;
+    bytes.reserve(hex.size() / 2u);
+    for (std::size_t index = 0; index + 1 < hex.size(); index += 2) {
+        const auto high = hex_digit_value(hex[index]);
+        const auto low = hex_digit_value(hex[index + 1]);
+        EXPECT_TRUE(high.has_value());
+        EXPECT_TRUE(low.has_value());
+        if (!high.has_value() || !low.has_value()) {
+            return {};
+        }
+        bytes.push_back(static_cast<std::byte>((*high << 4u) | *low));
+    }
+    return bytes;
+}
+
 void append_ascii_bytes(std::vector<std::byte> &bytes, std::string_view text) {
     bytes.insert(bytes.end(), reinterpret_cast<const std::byte *>(text.data()),
                  reinterpret_cast<const std::byte *>(text.data()) + text.size());
@@ -54,6 +84,27 @@ coquic::quic::QuicCoreResult receive_result(std::uint64_t stream_id,
             .fin = fin,
         },
     });
+    return result;
+}
+
+struct ReceivedStreamChunk {
+    std::uint64_t stream_id = 0;
+    std::vector<std::byte> bytes;
+    bool fin = false;
+};
+
+coquic::quic::QuicCoreResult
+multi_receive_result(std::initializer_list<ReceivedStreamChunk> chunks) {
+    coquic::quic::QuicCoreResult result;
+    for (const auto &chunk : chunks) {
+        result.effects.push_back(coquic::quic::QuicCoreEffect{
+            coquic::quic::QuicCoreReceiveStreamData{
+                .stream_id = chunk.stream_id,
+                .bytes = chunk.bytes,
+                .fin = chunk.fin,
+            },
+        });
+    }
     return result;
 }
 
@@ -325,6 +376,76 @@ TEST(QuicHttp3ServerTest, UnknownRouteReturns404) {
     ASSERT_EQ(sends.size(), 1u);
     EXPECT_EQ(sends[0].bytes, expected_headers);
     EXPECT_TRUE(sends[0].fin);
+}
+
+TEST(QuicHttp3ServerTest,
+     AcceptsQuicGoStyleHttp3GetWhenRequestAndSettingsArriveInTheSameCoreResult) {
+    std::optional<coquic::http3::Http3Request> captured_request;
+    coquic::http3::Http3ServerEndpoint endpoint(coquic::http3::Http3ServerConfig{
+        .request_handler =
+            [&](const coquic::http3::Http3Request &request) {
+                captured_request = request;
+                return coquic::http3::Http3Response{
+                    .head =
+                        {
+                            .status = 200,
+                            .content_length = 2,
+                            .headers = {{"content-type", "text/plain"}},
+                        },
+                    .body = bytes_from_text("ok"),
+                };
+            },
+    });
+
+    prime_server_transport(endpoint);
+
+    const auto update = endpoint.on_core_result(
+        multi_receive_result({
+            {
+                .stream_id = 0,
+                .bytes = bytes_from_hex(
+                    "013500005089416cee5b1ab8d34cffd1519060b6d739ec31161d844988b583aa62d9d75f"
+                    "10839bd9ab5f508bed6988b4c7531efdfad867"),
+                .fin = true,
+            },
+            {
+                .stream_id = 2,
+                .bytes = bytes_from_hex("0004050680a00000"),
+                .fin = false,
+            },
+        }),
+        coquic::quic::QuicCoreTimePoint{});
+
+    if (!captured_request.has_value()) {
+        FAIL() << "expected server handler to capture the request";
+    }
+    const auto &request = *captured_request;
+    EXPECT_FALSE(update.terminal_failure);
+    EXPECT_TRUE(update.request_cancelled_events.empty());
+    EXPECT_EQ(request.head.method, "GET");
+    EXPECT_EQ(request.head.scheme, "https");
+    EXPECT_EQ(request.head.authority, "server4:443");
+    EXPECT_EQ(request.head.path, "/euphoric-arctic-ranger");
+    EXPECT_EQ(request.head.headers, (coquic::http3::Http3Headers{
+                                        {"accept-encoding", "gzip"},
+                                        {"user-agent", "quic-go HTTP/3"},
+                                    }));
+
+    const auto sends = send_stream_inputs_from(update);
+    coquic::http3::Http3QpackEncoderContext encoder;
+    const auto expected_headers = headers_frame_bytes(
+        encoder, 0,
+        response_fields(200, std::array{coquic::http3::Http3Field{"content-type", "text/plain"}},
+                        2u));
+    const auto expected_body = data_frame_bytes("ok");
+
+    ASSERT_EQ(sends.size(), 2u);
+    EXPECT_EQ(sends[0].stream_id, 0u);
+    EXPECT_EQ(sends[0].bytes, expected_headers);
+    EXPECT_FALSE(sends[0].fin);
+    EXPECT_EQ(sends[1].stream_id, 0u);
+    EXPECT_EQ(sends[1].bytes, expected_body);
+    EXPECT_TRUE(sends[1].fin);
 }
 
 TEST(QuicHttp3ServerTest, HeadRequestSuppressesResponseBodyButKeepsHeaders) {

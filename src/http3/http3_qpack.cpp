@@ -509,11 +509,16 @@ const std::vector<HuffmanNode> &hpack_huffman_trie() {
             int node = 0;
             for (int bit_index = static_cast<int>(length) - 1; bit_index >= 0; --bit_index) {
                 const bool bit = ((bits >> bit_index) & 1u) != 0u;
-                int &child = bit ? nodes[static_cast<std::size_t>(node)].one
-                                 : nodes[static_cast<std::size_t>(node)].zero;
+                int child = bit ? nodes[static_cast<std::size_t>(node)].one
+                                : nodes[static_cast<std::size_t>(node)].zero;
                 if (child == -1) {
                     child = static_cast<int>(nodes.size());
                     nodes.push_back(HuffmanNode{});
+                    if (bit) {
+                        nodes[static_cast<std::size_t>(node)].one = child;
+                    } else {
+                        nodes[static_cast<std::size_t>(node)].zero = child;
+                    }
                 }
                 node = child;
             }

@@ -8,9 +8,10 @@ empty_manifest="$(mktemp)"
 invalid_json_manifest="$(mktemp)"
 invalid_runs_manifest="$(mktemp)"
 invalid_metric_manifest="$(mktemp)"
+failure_manifest="$(mktemp)"
 output="$(mktemp)"
 stderr_output="$(mktemp)"
-trap 'rm -f "${output}" "${stderr_output}" "${empty_manifest}" "${invalid_json_manifest}" "${invalid_runs_manifest}" "${invalid_metric_manifest}"' EXIT
+trap 'rm -f "${output}" "${stderr_output}" "${empty_manifest}" "${invalid_json_manifest}" "${invalid_runs_manifest}" "${invalid_metric_manifest}" "${failure_manifest}"' EXIT
 
 python3 "${script}"   --manifest "${manifest}"   --event-name pull_request   --commit 0123456789abcdef0123456789abcdef01234567   > "${output}"
 
@@ -39,13 +40,18 @@ grep -F 'Image: `coquic-perf:quictls-musl`' "${output}" >/dev/null || {
   exit 1
 }
 
-grep -F '| socket | rr | ok | 98 | 0.025 | 326.531 | 5565 | 21820 | smoke-socket-rr-s1-c1-q4.json |' "${output}" >/dev/null || {
-  echo 'missing success row' >&2
+grep -F '| socket | bulk | ok | 42 | 1.234 | 0.000 | 0 | 0 | smoke-socket-bulk-s1-c1-q1.json |' "${output}" >/dev/null || {
+  echo 'missing bulk row' >&2
   exit 1
 }
 
-grep -F '| io_uring | crr | failed | 17 | 0.000 | 0.000 | 0 | 0 | smoke-io_uring-crr-s1-c2-q1.json |' "${output}" >/dev/null || {
-  echo 'missing failure row' >&2
+grep -F '| socket | rr | ok | 98 | 0.025 | 326.531 | 5565 | 21820 | smoke-socket-rr-s1-c1-q4.json |' "${output}" >/dev/null || {
+  echo 'missing rr row' >&2
+  exit 1
+}
+
+grep -F '| socket | crr | ok | 64 | 0.018 | 125.000 | 7400 | 9800 | smoke-socket-crr-s1-c2-q1.json |' "${output}" >/dev/null || {
+  echo 'missing crr row' >&2
   exit 1
 }
 
@@ -54,12 +60,45 @@ grep -F 'Benchmark data from GitHub-hosted runners is advisory and may vary betw
   exit 1
 }
 
+if grep -F '### Failures' "${output}" >/dev/null; then
+  echo 'unexpected failures header for all-green manifest' >&2
+  exit 1
+fi
+
+printf '%s
+' \
+'{' \
+'  "preset": "smoke",' \
+'  "image_tag": "coquic-perf:quictls-musl",' \
+'  "runs": [' \
+'    {' \
+'      "status": "failed",' \
+'      "mode": "crr",' \
+'      "backend": "socket",' \
+'      "elapsed_ms": 17,' \
+'      "throughput_mib_per_s": 0.0,' \
+'      "requests_per_s": 0.0,' \
+'      "latency": {' \
+'        "p50_us": 0,' \
+'        "p99_us": 0' \
+'      },' \
+'      "result_file": "smoke-socket-crr-s1-c2-q1.json",' \
+'      "failure_reason": "client wait failed"' \
+'    }' \
+'  ]' \
+'}' > "${failure_manifest}"
+python3 "${script}" --manifest "${failure_manifest}" --event-name pull_request --commit 0123456789abcdef0123456789abcdef01234567 > "${output}"
+grep -F '| socket | crr | failed | 17 | 0.000 | 0.000 | 0 | 0 | smoke-socket-crr-s1-c2-q1.json |' "${output}" >/dev/null || {
+  echo 'missing failure row' >&2
+  exit 1
+}
+
 grep -F '### Failures' "${output}" >/dev/null || {
   echo 'missing failures header' >&2
   exit 1
 }
 
-grep -F -- '- `io_uring/crr`: client wait failed' "${output}" >/dev/null || {
+grep -F -- '- `socket/crr`: client wait failed' "${output}" >/dev/null || {
   echo 'missing failure reason section' >&2
   exit 1
 }

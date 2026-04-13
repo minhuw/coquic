@@ -12,7 +12,8 @@ std::vector<std::byte> make_payload(std::size_t bytes) {
 } // namespace
 
 std::optional<std::string> validate_perf_session_start(const QuicPerfSessionStart &start) {
-    if (start.protocol_version != kQuicPerfProtocolVersion) {
+    if (start.protocol_version != kQuicPerfProtocolVersion &&
+        start.protocol_version != kQuicPerfProtocolVersionLegacy) {
         return "unsupported protocol version";
     }
     if (start.streams == 0) {

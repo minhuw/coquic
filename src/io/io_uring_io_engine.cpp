@@ -289,20 +289,28 @@ bool IoUringIoEngine::send(int socket_fd, const sockaddr_storage &peer, socklen_
         return false;
     }
 
+    std::deque<Completion> deferred_completions;
     while (true) {
         Completion completion{};
-        if (!drain_one_completion(completion)) {
+        if (!pending_completions_.empty()) {
+            completion = pending_completions_.front();
+            pending_completions_.pop_front();
+        } else if (!drain_one_completion(completion)) {
             healthy_ = false;
             return false;
         }
 
         if (completion.user_data != kSendCompletionUserData) {
-            pending_completions_.push_back(completion);
+            deferred_completions.push_back(completion);
             continue;
         }
         if (completion.res < 0) {
             healthy_ = false;
             return false;
+        }
+        while (!deferred_completions.empty()) {
+            pending_completions_.push_front(deferred_completions.back());
+            deferred_completions.pop_back();
         }
         return true;
     }

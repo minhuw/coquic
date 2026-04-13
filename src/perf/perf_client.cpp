@@ -735,7 +735,8 @@ bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
         const auto [request_it, inserted] = connection.outstanding_requests.emplace(
             stream_id, OutstandingRequest{
                            .started_at = now,
-                           .counts_toward_measurement = phase_ == BenchmarkPhase::measure,
+                           .counts_toward_measurement =
+                               config_.requests.has_value() || phase_ == BenchmarkPhase::measure,
                        });
         if (!inserted) {
             summary_.failure_reason = "client duplicate rr stream id";
@@ -791,7 +792,8 @@ bool QuicPerfClient::maybe_issue_crr_request(ConnectionState &connection,
     const auto [request_it, inserted] = connection.outstanding_requests.emplace(
         stream_id, OutstandingRequest{
                        .started_at = now,
-                       .counts_toward_measurement = phase_ == BenchmarkPhase::measure,
+                       .counts_toward_measurement =
+                           config_.requests.has_value() || phase_ == BenchmarkPhase::measure,
                    });
     if (!inserted) {
         summary_.failure_reason = "client duplicate crr stream id";

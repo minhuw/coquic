@@ -34,6 +34,33 @@ TEST(QuicPerfProtocolTest, RoundTripsSessionStartFrame) {
     EXPECT_EQ(decoded_start->requests_in_flight, 4u);
 }
 
+TEST(QuicPerfProtocolTest, RoundTripsZeroValuedOptionalSessionStartFields) {
+    const QuicPerfSessionStart start{
+        .protocol_version = kQuicPerfProtocolVersion,
+        .mode = QuicPerfMode::bulk,
+        .direction = QuicPerfDirection::download,
+        .request_bytes = 65536,
+        .response_bytes = 0,
+        .total_bytes = 0,
+        .requests = 0,
+        .warmup_ms = 0,
+        .duration_ms = 5000,
+        .streams = 1,
+        .connections = 1,
+        .requests_in_flight = 1,
+    };
+
+    const auto bytes = encode_perf_control_message(QuicPerfControlMessage{start});
+    const auto decoded = decode_perf_control_message(bytes);
+
+    ASSERT_TRUE(decoded.has_value());
+    const auto decoded_value = decoded.value_or(QuicPerfControlMessage{QuicPerfSessionReady{}});
+    const auto *decoded_start = std::get_if<QuicPerfSessionStart>(&decoded_value);
+    ASSERT_NE(decoded_start, nullptr);
+    EXPECT_EQ(decoded_start->total_bytes, std::optional<std::uint64_t>{0u});
+    EXPECT_EQ(decoded_start->requests, std::optional<std::uint64_t>{0u});
+}
+
 TEST(QuicPerfProtocolTest, RejectsUnknownMessageTypeAndTruncatedPayload) {
     const std::vector<std::byte> unknown_type = {
         std::byte{0x7f}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},

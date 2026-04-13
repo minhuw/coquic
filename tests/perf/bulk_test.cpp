@@ -70,6 +70,50 @@ TEST(QuicPerfBulkTest, DownloadRunWritesJsonSummary) {
     EXPECT_NE(json.find("\"bytes_received\":"), std::string::npos);
 }
 
+TEST(QuicPerfBulkTest, ZeroByteDownloadTargetCompletesAndWritesJsonSummary) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const QuicPerfConfig server{
+        .role = QuicPerfRole::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    ScopedPerfProcess server_process(server);
+
+    const auto json_path =
+        std::filesystem::temp_directory_path() / "coquic-perf-bulk-download-zero-target.json";
+    std::filesystem::remove(json_path);
+
+    const QuicPerfConfig client{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::bulk,
+        .direction = QuicPerfDirection::download,
+        .host = "127.0.0.1",
+        .port = port,
+        .request_bytes = 65536,
+        .response_bytes = 0,
+        .streams = 1,
+        .connections = 1,
+        .requests_in_flight = 1,
+        .total_bytes = 0,
+        .duration = std::chrono::seconds{5},
+        .json_out = json_path,
+    };
+    ScopedPerfProcess client_process(client);
+
+    const auto exit_code = client_process.wait_for_exit(std::chrono::seconds{2});
+    EXPECT_EQ(exit_code, std::optional<int>{0});
+
+    const auto json = read_result_text(json_path);
+    EXPECT_NE(json.find("\"mode\":\"bulk\""), std::string::npos);
+    EXPECT_NE(json.find("\"direction\":\"download\""), std::string::npos);
+    EXPECT_NE(json.find("\"status\":\"ok\""), std::string::npos);
+    EXPECT_NE(json.find("\"bytes_received\":0"), std::string::npos);
+}
+
 TEST(QuicPerfBulkTest, UploadRunReportsServerReceivedByteCount) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);

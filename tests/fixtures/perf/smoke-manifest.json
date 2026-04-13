@@ -7,79 +7,50 @@
     {
       "schema_version": 1,
       "status": "ok",
+      "mode": "bulk",
+      "direction": "download",
+      "backend": "socket",
+      "elapsed_ms": 42,
+      "throughput_mib_per_s": 1.234,
+      "requests_per_s": 0.0,
+      "latency": {
+        "p50_us": 0,
+        "p99_us": 0
+      },
+      "result_file": "smoke-socket-bulk-s1-c1-q1.json",
+      "summary_file": "smoke-socket-bulk-s1-c1-q1.txt"
+    },
+    {
+      "schema_version": 1,
+      "status": "ok",
       "mode": "rr",
       "direction": "download",
       "backend": "socket",
-      "remote_host": "127.0.0.1",
-      "remote_port": 9443,
-      "alpn": "coquic-perf/1",
       "elapsed_ms": 98,
-      "warmup_ms": 0,
-      "bytes_sent": 1024,
-      "bytes_received": 1536,
-      "server_counters": {
-        "bytes_sent": 1536,
-        "bytes_received": 1024,
-        "requests_completed": 32
-      },
-      "requests_completed": 32,
-      "streams": 1,
-      "connections": 1,
-      "requests_in_flight": 4,
-      "request_bytes": 32,
-      "response_bytes": 48,
       "throughput_mib_per_s": 0.025,
-      "throughput_gbit_per_s": 0.0,
       "requests_per_s": 326.531,
       "latency": {
-        "min_us": 3237,
-        "avg_us": 8851,
         "p50_us": 5565,
-        "p90_us": 21676,
-        "p99_us": 21820,
-        "max_us": 21820
+        "p99_us": 21820
       },
       "result_file": "smoke-socket-rr-s1-c1-q4.json",
       "summary_file": "smoke-socket-rr-s1-c1-q4.txt"
     },
     {
       "schema_version": 1,
-      "status": "failed",
+      "status": "ok",
       "mode": "crr",
       "direction": "download",
-      "backend": "io_uring",
-      "remote_host": "127.0.0.1",
-      "remote_port": 9443,
-      "alpn": "coquic-perf/1",
-      "elapsed_ms": 17,
-      "warmup_ms": 0,
-      "bytes_sent": 0,
-      "bytes_received": 0,
-      "server_counters": {
-        "bytes_sent": 0,
-        "bytes_received": 0,
-        "requests_completed": 0
-      },
-      "requests_completed": 0,
-      "streams": 1,
-      "connections": 2,
-      "requests_in_flight": 1,
-      "request_bytes": 24,
-      "response_bytes": 24,
-      "throughput_mib_per_s": 0.0,
-      "throughput_gbit_per_s": 0.0,
-      "requests_per_s": 0.0,
+      "backend": "socket",
+      "elapsed_ms": 64,
+      "throughput_mib_per_s": 0.018,
+      "requests_per_s": 125.0,
       "latency": {
-        "min_us": 0,
-        "avg_us": 0,
-        "p50_us": 0,
-        "p90_us": 0,
-        "p99_us": 0,
-        "max_us": 0
+        "p50_us": 7400,
+        "p99_us": 9800
       },
-      "failure_reason": "client wait failed",
-      "result_file": "smoke-io_uring-crr-s1-c2-q1.json",
-      "summary_file": "smoke-io_uring-crr-s1-c2-q1.txt"
+      "result_file": "smoke-socket-crr-s1-c2-q1.json",
+      "summary_file": "smoke-socket-crr-s1-c2-q1.txt"
     }
   ]
 }

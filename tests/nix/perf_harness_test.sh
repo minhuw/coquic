@@ -22,7 +22,7 @@ grep -F -- '--cpuset-cpus' "${script}" >/dev/null || {
 }
 
 grep -F -- '--security-opt seccomp=unconfined' "${script}" >/dev/null || {
-  echo 'missing io_uring seccomp override in harness script' >&2
+  echo 'missing seccomp override in harness script' >&2
   exit 1
 }
 
@@ -53,11 +53,8 @@ grep -F -- 'ci)' "${script}" >/dev/null || {
 
 smoke_runs=(
   '"socket bulk download 65536 0 0 1 1 1 0ms 5s"'
-  '"io_uring bulk download 65536 0 0 1 1 1 0ms 5s"'
   '"socket rr stay 32 48 32 1 1 4 0ms 5s"'
-  '"io_uring rr stay 32 48 32 1 1 4 0ms 5s"'
   '"socket crr stay 24 24 8 1 2 1 0ms 5s"'
-  '"io_uring crr stay 24 24 8 1 2 1 0ms 5s"'
 )
 
 for run in "${smoke_runs[@]}"; do
@@ -69,11 +66,8 @@ done
 
 ci_runs=(
   '"socket bulk download 0 1048576 none 4 1 1 5s 60s"'
-  '"io_uring bulk download 0 1048576 none 4 1 1 5s 60s"'
   '"socket rr stay 32 32 none 1 256 16 5s 45s"'
-  '"io_uring rr stay 32 32 none 1 256 16 5s 45s"'
   '"socket crr stay 32 32 none 1 512 1 5s 45s"'
-  '"io_uring crr stay 32 32 none 1 512 1 5s 45s"'
 )
 
 for run in "${ci_runs[@]}"; do
@@ -82,6 +76,11 @@ for run in "${ci_runs[@]}"; do
     exit 1
   }
 done
+
+if grep -F -- '"io_uring ' "${script}" >/dev/null; then
+  echo 'unexpected io_uring run tuple in harness script' >&2
+  exit 1
+fi
 
 grep -F -- 'perf-image-quictls-musl' "${flake}" >/dev/null || {
   echo 'missing perf image package export in flake.nix' >&2

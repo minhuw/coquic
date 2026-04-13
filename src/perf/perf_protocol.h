@@ -13,7 +13,8 @@
 
 namespace coquic::perf {
 
-constexpr std::uint32_t kQuicPerfProtocolVersion = 1;
+constexpr std::uint32_t kQuicPerfProtocolVersionLegacy = 1;
+constexpr std::uint32_t kQuicPerfProtocolVersion = 2;
 constexpr std::uint64_t kQuicPerfControlStreamId = 0;
 constexpr std::uint64_t kQuicPerfFirstDataStreamId = 4;
 constexpr std::string_view kQuicPerfApplicationProtocol = "coquic-perf/1";

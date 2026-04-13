@@ -853,7 +853,7 @@ TEST(QuicHttp09ServerTest, StreamsLargeFileIncrementallyAcrossPollCalls) {
     EXPECT_EQ(total, body.size());
 }
 
-TEST(QuicHttp09ServerTest, StreamsLargeFileUsingSmallResponseChunks) {
+TEST(QuicHttp09ServerTest, StreamsLargeFileUsingInteropSizedResponseChunks) {
     coquic::quic::test::ScopedTempDir document_root;
     std::string body;
     body.append(static_cast<std::string::size_type>(64u * 1024u), 'x');
@@ -862,19 +862,19 @@ TEST(QuicHttp09ServerTest, StreamsLargeFileUsingSmallResponseChunks) {
     QuicHttp09ServerEndpoint endpoint(
         QuicHttp09ServerConfig{.document_root = document_root.path()});
 
-    constexpr std::size_t kExpectedMaxChunkBytes = static_cast<std::size_t>(4) * 1024U;
+    constexpr std::size_t kExpectedChunkBytes = static_cast<std::size_t>(32) * 1024U;
 
     auto update = endpoint.on_core_result(single_receive_result(0, "GET /large.bin\r\n", true),
                                           coquic::quic::test::test_time(1));
     ASSERT_FALSE(endpoint.has_failed());
     auto sends = send_stream_inputs_from(update);
     ASSERT_EQ(sends.size(), 1u);
-    EXPECT_LE(sends[0].bytes.size(), kExpectedMaxChunkBytes);
+    EXPECT_EQ(sends[0].bytes.size(), kExpectedChunkBytes);
     EXPECT_FALSE(sends[0].fin);
     EXPECT_TRUE(update.has_pending_work);
 
     bool saw_fin = false;
-    for (int i = 0; i < 32 && !saw_fin; ++i) {
+    for (int i = 0; i < 4 && !saw_fin; ++i) {
         update = endpoint.poll(coquic::quic::test::test_time(2 + i));
         sends = send_stream_inputs_from(update);
         ASSERT_LE(sends.size(), 1u);
@@ -882,17 +882,18 @@ TEST(QuicHttp09ServerTest, StreamsLargeFileUsingSmallResponseChunks) {
             continue;
         }
 
-        EXPECT_LE(sends[0].bytes.size(), kExpectedMaxChunkBytes);
+        if (!sends[0].fin) {
+            EXPECT_EQ(sends[0].bytes.size(), kExpectedChunkBytes);
+        }
         saw_fin = saw_fin || sends[0].fin;
     }
 
     EXPECT_TRUE(saw_fin);
 }
-
 TEST(QuicHttp09ServerTest, PollProcessesAtMostOnePendingResponsePerCall) {
     coquic::quic::test::ScopedTempDir document_root;
     std::string body;
-    body.append(static_cast<std::string::size_type>(64u * 1024u), 'x');
+    body.append(static_cast<std::string::size_type>(96u * 1024u), 'x');
     document_root.write_file("alpha.bin", body);
     document_root.write_file("beta.bin", body);
 

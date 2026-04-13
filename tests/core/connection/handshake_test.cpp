@@ -1990,6 +1990,41 @@ TEST(QuicCoreTest, ClientKeepsPtoArmedAfterServerInitialAckWithoutHandshakeFligh
     ASSERT_TRUE(next_wakeup.has_value());
 }
 
+TEST(QuicCoreTest, ClientKeepsHandshakeKeepaliveArmedAfterAckOnlyHandshakeDiscardedInitialSpace) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.initial_packet_space_discarded_ = true;
+    connection.last_peer_activity_time_ = coquic::quic::test::test_time(4);
+    connection.pto_count_ = 4;
+    connection.handshake_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x51});
+
+    const auto deadline_opt = connection.pto_deadline();
+    ASSERT_TRUE(deadline_opt.has_value());
+    const auto deadline = deadline_opt.value_or(coquic::quic::test::test_time());
+
+    connection.arm_pto_probe(deadline);
+
+    ASSERT_TRUE(connection.handshake_space_.pending_probe_packet.has_value());
+    EXPECT_FALSE(connection.initial_space_.pending_probe_packet.has_value());
+
+    const auto probe = connection.drain_outbound_datagram(deadline);
+    ASSERT_FALSE(probe.empty());
+
+    const auto probe_packets = decode_sender_datagram(connection, probe);
+    ASSERT_EQ(probe_packets.size(), 1u);
+    const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&probe_packets[0]);
+    ASSERT_NE(handshake, nullptr);
+    EXPECT_NE(std::find_if(handshake->frames.begin(), handshake->frames.end(),
+                           [](const auto &frame) {
+                               return std::holds_alternative<coquic::quic::PingFrame>(frame);
+                           }),
+              handshake->frames.end());
+    EXPECT_EQ(connection.last_client_handshake_keepalive_probe_time_, std::optional{deadline});
+}
+
 TEST(QuicCoreTest, ProcessInboundDatagramDefersLaterMissingContextPacketAfterValidInitial) {
     auto config = coquic::quic::test::make_client_core_config();
     config.source_connection_id = bytes_from_hex("c100000000000025");

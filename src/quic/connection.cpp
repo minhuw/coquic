@@ -2149,7 +2149,10 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
 
         return reference_time;
     }();
-    if (!client_handshake_keepalive_reference_time.has_value() || initial_packet_space_discarded_) {
+    const bool client_handshake_keepalive_space_available =
+        client_handshake_keepalive_reference_time.has_value() &&
+        (!initial_packet_space_discarded_ || handshake_space_.write_secret.has_value());
+    if (!client_handshake_keepalive_space_available) {
         const auto client_receive_keepalive_reference_time =
             [this]() -> std::optional<QuicCoreTimePoint> {
             const bool has_receive_interest = std::ranges::any_of(
@@ -2272,11 +2275,14 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         return reference_time;
     }();
     const bool client_handshake_keepalive_eligible =
-        client_handshake_keepalive_reference_time.has_value() & !initial_packet_space_discarded_;
+        client_handshake_keepalive_reference_time.has_value() &&
+        (!initial_packet_space_discarded_ || handshake_space_.write_secret.has_value());
     PacketSpaceState *client_handshake_keepalive_space =
-        client_handshake_keepalive_eligible ? &initial_space_ : nullptr;
+        !client_handshake_keepalive_eligible
+            ? nullptr
+            : (initial_packet_space_discarded_ ? &handshake_space_ : &initial_space_);
     auto client_handshake_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
-    if (client_handshake_keepalive_reference_time.has_value() && !initial_packet_space_discarded_) {
+    if (client_handshake_keepalive_eligible) {
         client_handshake_keepalive_deadline = compute_pto_deadline(
             shared_rtt_state, std::chrono::milliseconds(0),
             *client_handshake_keepalive_reference_time, std::min(pto_count_, 2u));

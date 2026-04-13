@@ -156,3 +156,26 @@ TEST(QuicHttp3QpackTest, AcceptsDecoderStreamIncrementForMirroredEncoderState) {
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(encoder.known_received_count, 1u);
 }
+
+TEST(QuicHttp3QpackTest, DecodesQuicGoStaticTableRequestHeaderBlock) {
+    auto decoder = make_decoder();
+    const auto decoded = coquic::http3::decode_http3_field_section(
+        decoder, 0, bytes_from_ints({0x00, 0x00}),
+        bytes_from_ints({
+            0x50, 0x89, 0x41, 0x6c, 0xee, 0x5b, 0x1a, 0xb8, 0xd3, 0x4c, 0xff, 0xd1, 0x51,
+            0x90, 0x60, 0xb6, 0xd7, 0x39, 0xec, 0x31, 0x16, 0x1d, 0x84, 0x49, 0x88, 0xb5,
+            0x83, 0xaa, 0x62, 0xd9, 0xd7, 0x5f, 0x10, 0x83, 0x9b, 0xd9, 0xab, 0x5f, 0x50,
+            0x8b, 0xed, 0x69, 0x88, 0xb4, 0xc7, 0x53, 0x1e, 0xfd, 0xfa, 0xd8, 0x67,
+        }));
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().status, coquic::http3::Http3QpackDecodeStatus::complete);
+    EXPECT_EQ(decoded.value().headers, (coquic::http3::Http3Headers{
+                                           {":authority", "server4:443"},
+                                           {":method", "GET"},
+                                           {":path", "/euphoric-arctic-ranger"},
+                                           {":scheme", "https"},
+                                           {"accept-encoding", "gzip"},
+                                           {"user-agent", "quic-go HTTP/3"},
+                                       }));
+}

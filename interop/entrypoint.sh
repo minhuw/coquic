@@ -7,7 +7,7 @@ testcase="${TESTCASE:-}"
 
 supports_testcase() {
   case "$1" in
-    handshake | transfer | keyupdate | amplificationlimit | rebind-port | rebind-addr | connectionmigration | ecn | multiconnect | chacha20 | retry | resumption | zerortt | v2)
+    handshake | transfer | keyupdate | amplificationlimit | rebind-port | rebind-addr | connectionmigration | ecn | multiconnect | chacha20 | retry | resumption | zerortt | v2 | http3)
       return 0
       ;;
     *)
@@ -42,6 +42,9 @@ server)
   cert_root="${CERTS:-/certs}"
   export CERTIFICATE_CHAIN_PATH="${CERTIFICATE_CHAIN_PATH:-${cert_root}/cert.pem}"
   export PRIVATE_KEY_PATH="${PRIVATE_KEY_PATH:-${cert_root}/priv.key}"
+  if [ "${testcase}" = "http3" ]; then
+    exec "${binary}" h3-interop-server
+  fi
   exec "${binary}" interop-server
   ;;
 client)
@@ -51,6 +54,9 @@ client)
   export PORT="${PORT:-443}"
   export SERVER_NAME="${SERVER_NAME:-}"
   export DOWNLOAD_ROOT="${DOWNLOAD_ROOT:-/downloads}"
+  if [ "${testcase}" = "http3" ]; then
+    exec "${binary}" h3-interop-client
+  fi
   exec "${binary}" interop-client
   ;;
 *)

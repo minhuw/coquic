@@ -84,6 +84,21 @@ void finalize_perf_run_summary(QuicPerfRunSummary &summary) {
     summary.requests_per_s = static_cast<double>(summary.requests_completed) / seconds;
 }
 
+void reset_perf_run_summary_measurement(QuicPerfRunSummary &summary) {
+    summary.elapsed = std::chrono::milliseconds{0};
+    summary.bytes_sent = 0;
+    summary.bytes_received = 0;
+    summary.server_bytes_sent = 0;
+    summary.server_bytes_received = 0;
+    summary.server_requests_completed = 0;
+    summary.requests_completed = 0;
+    summary.latency_samples.clear();
+    summary.latency = {};
+    summary.throughput_mib_per_s = 0.0;
+    summary.throughput_gbit_per_s = 0.0;
+    summary.requests_per_s = 0.0;
+}
+
 QuicPerfLatencySummary summarize_latency_samples(
     std::vector<std::chrono::nanoseconds> samples) { // NOLINT(performance-unnecessary-value-param)
     if (samples.empty()) {

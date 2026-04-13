@@ -6807,7 +6807,81 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                         trim_probe_candidate_to_fit(ack_frame, probe_stream_fragments));
                 }
             }
-            const auto probe_datagram_size = datagram_size_or_zero(datagram);
+            const auto retry_probe_candidate_without_fresh_receive_credit = [&]() -> bool {
+                if (!fresh_probe_max_data_frame.has_value() &&
+                    fresh_probe_max_stream_data_frames.empty()) {
+                    return true;
+                }
+
+                probe_max_data_frame = probe_packet.max_data_frame;
+                probe_max_stream_data_frames = probe_packet.max_stream_data_frames;
+                fresh_probe_max_data_frame = std::nullopt;
+                fresh_probe_max_stream_data_frames.clear();
+                probe_stream_fragments = make_probe_stream_fragments();
+                mark_probe_fragments_sent(probe_stream_fragments);
+                datagram = serialize_application_candidate(
+                    probe_crypto_ranges, probe_packet.has_handshake_done, ack_frame,
+                    probe_max_data_frame, {}, {}, path_validation_frames,
+                    probe_max_stream_data_frames, probe_packet.max_streams_frames,
+                    probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                    probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
+                    probe_stream_fragments, std::nullopt, include_ping);
+                if (!datagram.has_value()) {
+                    mark_failed();
+                    return false;
+                }
+                if (ack_frame.has_value() && datagram.value().size() > max_outbound_datagram_size) {
+                    auto no_ack_datagram = serialize_application_candidate(
+                        probe_crypto_ranges, probe_packet.has_handshake_done, std::nullopt,
+                        probe_max_data_frame, {}, {}, path_validation_frames,
+                        probe_max_stream_data_frames, probe_packet.max_streams_frames,
+                        probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                        probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
+                        probe_stream_fragments, std::nullopt, include_ping);
+                    if (!no_ack_datagram.has_value()) {
+                        mark_failed();
+                        return false;
+                    }
+                    if (no_ack_datagram.value().size() <= max_outbound_datagram_size) {
+                        ack_frame = std::nullopt;
+                        datagram = std::move(no_ack_datagram);
+                    }
+                }
+                if (!trim_probe_candidate_to_fit(ack_frame, probe_stream_fragments)) {
+                    if (has_failed()) {
+                        return false;
+                    }
+
+                    if (ack_frame.has_value()) {
+                        ack_frame = std::nullopt;
+                        probe_stream_fragments = make_probe_stream_fragments();
+                        mark_probe_fragments_sent(probe_stream_fragments);
+                        datagram = serialize_application_candidate(
+                            probe_crypto_ranges, probe_packet.has_handshake_done, ack_frame,
+                            probe_max_data_frame, {}, {}, path_validation_frames,
+                            probe_max_stream_data_frames, probe_packet.max_streams_frames,
+                            probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                            probe_packet.data_blocked_frame,
+                            probe_packet.stream_data_blocked_frames, probe_stream_fragments,
+                            std::nullopt, include_ping);
+                        if (!datagram.has_value()) {
+                            mark_failed();
+                            return false;
+                        }
+                        static_cast<void>(
+                            trim_probe_candidate_to_fit(ack_frame, probe_stream_fragments));
+                    }
+                }
+
+                return !has_failed();
+            };
+            auto probe_datagram_size = datagram_size_or_zero(datagram);
+            if (probe_datagram_size > max_outbound_datagram_size) {
+                if (!retry_probe_candidate_without_fresh_receive_credit()) {
+                    return {};
+                }
+                probe_datagram_size = datagram_size_or_zero(datagram);
+            }
             if (probe_datagram_size > max_outbound_datagram_size) {
                 restore_unsent_application_probe_candidate();
                 restore_unsent_path_validation_frames(path_validation_frames);
@@ -7229,7 +7303,126 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     return fallback_to_existing_packets_or_ack_only();
                 }
             }
-            const auto candidate_datagram_size = datagram_size_or_zero(candidate_datagram);
+            const auto retry_candidate_without_receive_credit = [&]() -> bool {
+                if (!max_data_frame.has_value() && max_stream_data_frames.empty()) {
+                    return true;
+                }
+
+                restore_unsent_application_candidate(
+                    max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                    path_validation_frames, max_stream_data_frames, max_streams_frames,
+                    reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                    stream_data_blocked_frames, stream_fragments);
+                max_data_frame = std::nullopt;
+                data_blocked_frame = connection_flow_control_.take_data_blocked_frame();
+                max_stream_data_frames.clear();
+                max_streams_frames = take_max_streams_frames(/*force_ack_only=*/false);
+                new_connection_id_frames = take_new_connection_id_frames(/*force_ack_only=*/false);
+                retire_connection_id_frames =
+                    take_retire_connection_id_frames(/*force_ack_only=*/false);
+                path_validation_frames = take_path_validation_frames(/*force_ack_only=*/false);
+                reset_stream_frames = take_reset_stream_frames(streams_);
+                stop_sending_frames = take_stop_sending_frames(streams_);
+                stream_data_blocked_frames = take_stream_data_blocked_frames(streams_);
+                candidate_last_stream_id = last_application_send_stream_id_;
+                stream_fragments = take_stream_fragments(
+                    connection_flow_control_, streams_, max_outbound_datagram_size,
+                    candidate_last_stream_id, prefer_fresh_application_stream_data);
+                candidate_datagram = serialize_application_candidate(
+                    application_candidate_crypto_ranges, include_handshake_done, selected_ack_frame,
+                    max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                    path_validation_frames, max_stream_data_frames, max_streams_frames,
+                    reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                    stream_data_blocked_frames, stream_fragments, application_close_frame,
+                    /*include_ping=*/false);
+                if (!candidate_datagram.has_value() &
+                    !is_empty_packet_payload_error(candidate_datagram)) {
+                    mark_failed();
+                    return false;
+                }
+                if (!candidate_datagram.has_value()) {
+                    return true;
+                }
+                if (selected_ack_frame.has_value() &&
+                    candidate_datagram.value().size() > max_outbound_datagram_size) {
+                    auto no_ack_candidate = serialize_application_candidate(
+                        application_candidate_crypto_ranges, include_handshake_done, std::nullopt,
+                        max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                        path_validation_frames, max_stream_data_frames, max_streams_frames,
+                        reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                        stream_data_blocked_frames, stream_fragments, application_close_frame,
+                        /*include_ping=*/false);
+                    if (!no_ack_candidate.has_value() &
+                        !is_empty_packet_payload_error(no_ack_candidate)) {
+                        mark_failed();
+                        return false;
+                    }
+                    if (!no_ack_candidate.has_value()) {
+                        candidate_datagram = std::move(no_ack_candidate);
+                        return true;
+                    }
+                    if (no_ack_candidate.value().size() <= max_outbound_datagram_size) {
+                        selected_ack_frame = std::nullopt;
+                        candidate_datagram = std::move(no_ack_candidate);
+                    }
+                }
+                if (!trim_candidate_to_fit(selected_ack_frame, candidate_datagram,
+                                           stream_fragments)) {
+                    if (has_failed()) {
+                        return false;
+                    }
+                    if (selected_ack_frame.has_value()) {
+                        restore_unsent_application_candidate(
+                            max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                            path_validation_frames, max_stream_data_frames, max_streams_frames,
+                            reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                            stream_data_blocked_frames, stream_fragments);
+                        data_blocked_frame = connection_flow_control_.take_data_blocked_frame();
+                        max_streams_frames = take_max_streams_frames(/*force_ack_only=*/false);
+                        new_connection_id_frames =
+                            take_new_connection_id_frames(/*force_ack_only=*/false);
+                        retire_connection_id_frames =
+                            take_retire_connection_id_frames(/*force_ack_only=*/false);
+                        path_validation_frames =
+                            take_path_validation_frames(/*force_ack_only=*/false);
+                        reset_stream_frames = take_reset_stream_frames(streams_);
+                        stop_sending_frames = take_stop_sending_frames(streams_);
+                        stream_data_blocked_frames = take_stream_data_blocked_frames(streams_);
+                        candidate_last_stream_id = last_application_send_stream_id_;
+                        stream_fragments = take_stream_fragments(
+                            connection_flow_control_, streams_, max_outbound_datagram_size,
+                            candidate_last_stream_id, prefer_fresh_application_stream_data);
+                        selected_ack_frame = std::nullopt;
+                        candidate_datagram = serialize_application_candidate(
+                            application_candidate_crypto_ranges, include_handshake_done,
+                            selected_ack_frame, max_data_frame, new_connection_id_frames,
+                            retire_connection_id_frames, path_validation_frames,
+                            max_stream_data_frames, max_streams_frames, reset_stream_frames,
+                            stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
+                            stream_fragments, application_close_frame,
+                            /*include_ping=*/false);
+                        if (!candidate_datagram.has_value() &
+                            !is_empty_packet_payload_error(candidate_datagram)) {
+                            mark_failed();
+                            return false;
+                        }
+                        static_cast<void>(trim_candidate_to_fit(
+                            selected_ack_frame, candidate_datagram, stream_fragments));
+                    }
+                }
+
+                return !has_failed();
+            };
+            auto candidate_datagram_size = datagram_size_or_zero(candidate_datagram);
+            if (candidate_datagram_size > max_outbound_datagram_size) {
+                if (!retry_candidate_without_receive_credit()) {
+                    return {};
+                }
+                if (!candidate_datagram.has_value()) {
+                    return fallback_to_existing_packets_or_ack_only();
+                }
+                candidate_datagram_size = datagram_size_or_zero(candidate_datagram);
+            }
             if (candidate_datagram_size > max_outbound_datagram_size) {
                 restore_unsent_application_candidate(
                     max_data_frame, new_connection_id_frames, retire_connection_id_frames,

@@ -51,6 +51,7 @@ struct QuicPerfRunSummary {
 };
 
 void finalize_perf_run_summary(QuicPerfRunSummary &summary);
+void reset_perf_run_summary_measurement(QuicPerfRunSummary &summary);
 QuicPerfLatencySummary summarize_latency_samples(
     std::vector<std::chrono::nanoseconds> samples); // NOLINT(performance-unnecessary-value-param)
 std::string render_perf_summary(const QuicPerfRunSummary &summary);

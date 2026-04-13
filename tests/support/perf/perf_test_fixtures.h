@@ -1,10 +1,13 @@
 #pragma once
 
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <thread>
 
 #include <arpa/inet.h>
@@ -108,6 +111,58 @@ class ScopedPerfProcess {
 
 inline std::string read_result_text(const std::filesystem::path &path) {
     return quic::test::read_text_file(path);
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+inline std::optional<std::uint64_t> json_u64_field(std::string_view json, std::string_view key) {
+    const std::string needle = std::string{"\""} + std::string{key} + "\":";
+    const auto pos = json.rfind(needle);
+    if (pos == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    std::uint64_t value = 0;
+    const auto start = pos + needle.size();
+    const auto *begin = json.data() + start;
+    const auto *end = json.data() + json.size();
+    const auto result = std::from_chars(begin, end, value);
+    if (result.ec != std::errc{}) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+inline std::optional<std::uint64_t> json_u64_field_in_object(std::string_view json,
+                                                             std::string_view object_key,
+                                                             std::string_view field_key) {
+    const std::string object_needle = std::string{"\""} + std::string{object_key} + "\":{";
+    const auto object_pos = json.find(object_needle);
+    if (object_pos == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    const auto object_start = object_pos + object_needle.size();
+    const auto object_end = json.find('}', object_start);
+    if (object_end == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    const std::string field_needle = std::string{"\""} + std::string{field_key} + "\":";
+    const auto field_pos = json.find(field_needle, object_start);
+    if (field_pos == std::string_view::npos || field_pos > object_end) {
+        return std::nullopt;
+    }
+
+    std::uint64_t value = 0;
+    const auto start = field_pos + field_needle.size();
+    const auto *begin = json.data() + start;
+    const auto *end = json.data() + object_end;
+    const auto result = std::from_chars(begin, end, value);
+    if (result.ec != std::errc{}) {
+        return std::nullopt;
+    }
+    return value;
 }
 
 } // namespace coquic::perf::test_support

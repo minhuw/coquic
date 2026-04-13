@@ -545,6 +545,19 @@ bool has_in_flight_ack_eliciting_packet(const PacketSpaceState &packet_space) {
     return false;
 }
 
+void schedule_application_ack_deadline(PacketSpaceState &packet_space, QuicCoreTimePoint now,
+                                       std::uint64_t max_ack_delay_ms, QuicEcnCodepoint ecn) {
+    if (ecn == QuicEcnCodepoint::ce) {
+        packet_space.pending_ack_deadline = now;
+        packet_space.force_ack_send = true;
+        return;
+    }
+
+    if (!packet_space.pending_ack_deadline.has_value()) {
+        packet_space.pending_ack_deadline = now + std::chrono::milliseconds(max_ack_delay_ms);
+    }
+}
+
 bool requires_connected_application_state_for_inbound_frame(const Frame &frame) {
     return std::holds_alternative<ResetStreamFrame>(frame) |
            std::holds_alternative<StopSendingFrame>(frame) |
@@ -3329,8 +3342,9 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                         protected_packet.packet_number, ack_eliciting, now, ecn);
                     last_peer_activity_time_ = now;
                     if (ack_eliciting) {
-                        application_space_.pending_ack_deadline = now;
-                        application_space_.force_ack_send |= ecn == QuicEcnCodepoint::ce;
+                        schedule_application_ack_deadline(application_space_, now,
+                                                          local_transport_parameters_.max_ack_delay,
+                                                          ecn);
                     }
                     if (zero_rtt_space_.read_secret.has_value() ||
                         zero_rtt_space_.write_secret.has_value()) {
@@ -4582,6 +4596,10 @@ QuicConnection::process_retire_connection_id_frame(const RetireConnectionIdFrame
 void QuicConnection::issue_spare_connection_ids() {
     if (!handshake_confirmed_ || !peer_transport_parameters_.has_value() ||
         config_.source_connection_id.empty()) {
+        return;
+    }
+    if (config_.role == EndpointRole::client &&
+        local_transport_parameters_.disable_active_migration) {
         return;
     }
 

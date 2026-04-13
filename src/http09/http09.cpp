@@ -230,6 +230,9 @@ QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase test
         config.initial_max_data = 32ull * 1024ull * 1024ull;
         config.initial_max_stream_data_bidi_local = 16ull * 1024ull * 1024ull;
     }
+    if (testcase == QuicHttp09Testcase::resumption || testcase == QuicHttp09Testcase::zerortt) {
+        config.disable_active_migration = true;
+    }
     return config;
 }
 

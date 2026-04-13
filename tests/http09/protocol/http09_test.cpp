@@ -137,6 +137,16 @@ TEST(QuicHttp09Test, UsesExpandedServerStreamProfileForResumptionAndZeroRttCases
     EXPECT_EQ(zero_rtt.initial_max_streams_bidi, 64u);
 }
 
+TEST(QuicHttp09Test, ResumptionAndZeroRttClientProfilesDisableActiveMigration) {
+    const auto resumption = coquic::http09::http09_client_transport_for_testcase(
+        coquic::http09::QuicHttp09Testcase::resumption);
+    EXPECT_TRUE(resumption.disable_active_migration);
+
+    const auto zero_rtt = coquic::http09::http09_client_transport_for_testcase(
+        coquic::http09::QuicHttp09Testcase::zerortt);
+    EXPECT_TRUE(zero_rtt.disable_active_migration);
+}
+
 TEST(QuicHttp09Test, UsesStableZeroRttContextAcrossDifferentGetRequestSets) {
     const auto warmup =
         coquic::http09::parse_http09_requests_env("https://example.test/warmup-only.txt");

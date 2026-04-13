@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -13,6 +14,11 @@
 namespace coquic::http3 {
 
 inline constexpr std::string_view kHttp3ApplicationProtocol = "h3";
+
+enum class Http3ConnectionRole : std::uint8_t {
+    client,
+    server,
+};
 
 enum class Http3ErrorCode : std::uint16_t {
     no_error = 0x0100,
@@ -92,16 +98,97 @@ struct Http3RequestHead {
     std::string scheme;
     std::string authority;
     std::string path;
+    std::optional<std::uint64_t> content_length;
     Http3Headers headers;
 };
 
 struct Http3ResponseHead {
     std::uint16_t status = 200;
+    std::optional<std::uint64_t> content_length;
     Http3Headers headers;
+};
+
+struct Http3Request {
+    Http3RequestHead head;
+    std::vector<std::byte> body;
+    Http3Headers trailers;
+};
+
+struct Http3Response {
+    std::vector<Http3ResponseHead> interim_heads;
+    Http3ResponseHead head;
+    std::vector<std::byte> body;
+    Http3Headers trailers;
+};
+
+struct Http3PeerRequestHeadEvent {
+    std::uint64_t stream_id = 0;
+    Http3RequestHead head;
+};
+
+struct Http3PeerRequestBodyEvent {
+    std::uint64_t stream_id = 0;
+    std::vector<std::byte> body;
+};
+
+struct Http3PeerRequestTrailersEvent {
+    std::uint64_t stream_id = 0;
+    Http3Headers trailers;
+};
+
+struct Http3PeerRequestCompleteEvent {
+    std::uint64_t stream_id = 0;
+};
+
+struct Http3PeerRequestResetEvent {
+    std::uint64_t stream_id = 0;
+    std::uint64_t application_error_code = 0;
+};
+
+struct Http3PeerInformationalResponseEvent {
+    std::uint64_t stream_id = 0;
+    Http3ResponseHead head;
+};
+
+struct Http3PeerResponseHeadEvent {
+    std::uint64_t stream_id = 0;
+    Http3ResponseHead head;
+};
+
+struct Http3PeerResponseBodyEvent {
+    std::uint64_t stream_id = 0;
+    std::vector<std::byte> body;
+};
+
+struct Http3PeerResponseTrailersEvent {
+    std::uint64_t stream_id = 0;
+    Http3Headers trailers;
+};
+
+struct Http3PeerResponseCompleteEvent {
+    std::uint64_t stream_id = 0;
+};
+
+struct Http3PeerResponseResetEvent {
+    std::uint64_t stream_id = 0;
+    std::uint64_t application_error_code = 0;
+};
+
+using Http3EndpointEvent = std::variant<
+    Http3PeerRequestHeadEvent, Http3PeerRequestBodyEvent, Http3PeerRequestTrailersEvent,
+    Http3PeerRequestCompleteEvent, Http3PeerRequestResetEvent, Http3PeerInformationalResponseEvent,
+    Http3PeerResponseHeadEvent, Http3PeerResponseBodyEvent, Http3PeerResponseTrailersEvent,
+    Http3PeerResponseCompleteEvent, Http3PeerResponseResetEvent>;
+
+struct Http3SettingsSnapshot {
+    std::uint64_t qpack_max_table_capacity = 4096;
+    std::uint64_t qpack_blocked_streams = 16;
+    std::optional<std::uint64_t> max_field_section_size = 64 * 1024;
 };
 
 struct Http3EndpointUpdate {
     std::vector<quic::QuicCoreInput> core_inputs;
+    std::vector<Http3EndpointEvent> events;
     bool has_pending_work = false;
     bool terminal_success = false;
     bool terminal_failure = false;

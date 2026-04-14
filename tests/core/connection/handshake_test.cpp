@@ -2806,6 +2806,20 @@ TEST(QuicCoreTest, FlushOutboundDatagramMarksFailuresForSerializationErrors) {
     EXPECT_TRUE(padding_failure.has_failed());
 }
 
+TEST(QuicCoreTest, FlushOutboundDatagramReusesAcceptedApplicationCandidateSerialization) {
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("hello"), false)
+            .has_value());
+
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
+    const auto datagram = connection.flush_outbound_datagram(coquic::quic::test::test_time(5));
+
+    EXPECT_FALSE(datagram.empty());
+    EXPECT_FALSE(connection.has_failed());
+}
+
 TEST(QuicCoreTest, CoalescedInitialAndHandshakeCandidateSerializationFailureMarksConnectionFailed) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.started_ = true;

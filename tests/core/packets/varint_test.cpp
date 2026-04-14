@@ -55,6 +55,29 @@ TEST(QuicVarIntTest, EncodesEightByteVarintsFromRuntimeValue) {
     EXPECT_EQ(encoded.value().size(), 8u);
 }
 
+TEST(QuicVarIntTest, EncodeVarintIntoMatchesHeapEncodingAcrossAllWidths) {
+    for (std::uint64_t value : {0ull, 63ull, 64ull, 16383ull, 16384ull, 1073741823ull,
+                                1073741824ull, 4611686018427387903ull}) {
+        std::array<std::byte, 8> output{};
+        const auto written = coquic::quic::encode_varint_into(output, value);
+        ASSERT_TRUE(written.has_value());
+
+        const auto encoded = coquic::quic::encode_varint(value);
+        ASSERT_TRUE(encoded.has_value());
+        EXPECT_EQ(written.value(), encoded.value().size());
+        EXPECT_TRUE(std::equal(output.begin(),
+                               output.begin() + static_cast<std::ptrdiff_t>(written.value()),
+                               encoded.value().begin(), encoded.value().end()));
+    }
+}
+
+TEST(QuicVarIntTest, EncodeVarintIntoRejectsTooSmallOutputBuffer) {
+    std::array<std::byte, 1> output{};
+    const auto written = coquic::quic::encode_varint_into(output, 64ull);
+    ASSERT_FALSE(written.has_value());
+    EXPECT_EQ(written.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicVarIntTest, ReportsEightByteWidthForMaximumRuntimeValue) {
     const auto max_value = runtime_quic_varint(4611686018427387903ull);
 

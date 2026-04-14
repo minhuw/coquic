@@ -357,6 +357,25 @@ TEST(QuicPacketCryptoTest, DeriveNextTrafficSecretReusesProvidedHeaderProtection
     EXPECT_EQ(next_header_protection_key, header_protection_key);
 }
 
+TEST(QuicPacketCryptoTest, ExpandTrafficSecretReusesCachedKeysAcrossCalls) {
+    const coquic::quic::TrafficSecret secret{
+        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        .secret = make_secret(32),
+    };
+
+    const auto first = coquic::quic::expand_traffic_secret(secret);
+    ASSERT_TRUE(first.has_value());
+
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
+        coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_context_new, 1);
+
+    const auto second = coquic::quic::expand_traffic_secret(secret);
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(second.value().key, first.value().key);
+    EXPECT_EQ(second.value().iv, first.value().iv);
+    EXPECT_EQ(second.value().hp_key, first.value().hp_key);
+}
+
 TEST(QuicPacketCryptoTest, DeriveNextTrafficSecretRejectsUnsupportedQuicVersion) {
     const coquic::quic::TrafficSecret secret{
         .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
@@ -779,6 +798,70 @@ TEST(QuicPacketCryptoTest, SealsPayloadDirectlyIntoCallerOwnedBuffer) {
         nonce.value(), hex_bytes("4200bff4"), ciphertext);
     ASSERT_TRUE(plaintext.has_value());
     EXPECT_EQ(to_hex(plaintext.value()), "01");
+}
+
+TEST(QuicPacketCryptoTest, SealsPayloadInPlaceInsideCallerOwnedBuffer) {
+    const auto nonce = coquic::quic::make_packet_protection_nonce(
+        hex_bytes("e0459b3474bdd0e44a41c144"), 654360564ULL);
+    ASSERT_TRUE(nonce.has_value());
+
+    std::vector<std::byte> buffer = hex_bytes("0100000000000000000000000000000000");
+    ASSERT_EQ(buffer.size(), 17u);
+
+    const auto written = coquic::quic::seal_payload_into(
+        coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+        hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
+        nonce.value(), hex_bytes("4200bff4"), std::span<const std::byte>(buffer).first(1),
+        std::span<std::byte>(buffer));
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(written.value(), buffer.size());
+    EXPECT_EQ(to_hex(buffer), "655e5cd55c41f69080575d7999c25a5bfb");
+}
+
+TEST(QuicPacketCryptoTest, SealPayloadIntoReusesContextAcrossCalls) {
+    coquic::quic::test::reset_packet_crypto_runtime_caches_for_tests();
+
+    const auto key = hex_bytes("000102030405060708090a0b0c0d0e0f");
+    const auto aad = hex_bytes("a0a1a2a3a4");
+    const auto plaintext = hex_bytes("112233445566778899");
+    std::vector<std::byte> first_ciphertext(plaintext.size() + 16u);
+    std::vector<std::byte> second_ciphertext(plaintext.size() + 16u);
+
+    const auto first_written = coquic::quic::seal_payload_into(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, key,
+        hex_bytes("101112131415161718191a1b"), aad, plaintext, first_ciphertext);
+    ASSERT_TRUE(first_written.has_value());
+
+    const auto second_written = coquic::quic::seal_payload_into(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, key,
+        hex_bytes("202122232425262728292a2b"), aad, plaintext, second_ciphertext);
+    ASSERT_TRUE(second_written.has_value());
+
+    const auto stats = coquic::quic::test::packet_crypto_runtime_cache_stats_for_tests();
+    EXPECT_EQ(stats.seal_context_new_calls, 1u);
+}
+
+TEST(QuicPacketCryptoTest, HeaderProtectionReusesContextAcrossCalls) {
+    coquic::quic::test::reset_packet_crypto_runtime_caches_for_tests();
+
+    const auto first_mask = coquic::quic::make_header_protection_mask(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        coquic::quic::HeaderProtectionMaskInput{
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+        });
+    ASSERT_TRUE(first_mask.has_value());
+
+    const auto second_mask = coquic::quic::make_header_protection_mask(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        coquic::quic::HeaderProtectionMaskInput{
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("00112233445566778899aabbccddeeff"),
+        });
+    ASSERT_TRUE(second_mask.has_value());
+
+    const auto stats = coquic::quic::test::packet_crypto_runtime_cache_stats_for_tests();
+    EXPECT_EQ(stats.header_protection_context_new_calls, 1u);
 }
 
 TEST(QuicPacketCryptoTest, SealPayloadIntoRejectsUnsupportedCipherSuite) {

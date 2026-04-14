@@ -11,12 +11,6 @@
 
 namespace coquic::quic {
 
-struct PacketProtectionKeys {
-    std::vector<std::byte> key;
-    std::vector<std::byte> iv;
-    std::vector<std::byte> hp_key;
-};
-
 struct PlaintextChunk {
     std::span<const std::byte> bytes;
 };

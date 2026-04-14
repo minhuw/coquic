@@ -95,9 +95,20 @@ bool ReceivedPacketHistory::contains(std::uint64_t packet_number) const {
 
 void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ack_eliciting,
                                             QuicCoreTimePoint received_time, QuicEcnCodepoint ecn) {
-    if (contains(packet_number)) {
+    const bool duplicate = contains(packet_number);
+    const bool has_prior_ack_eliciting_packet =
+        ack_eliciting && largest_received_ack_eliciting_packet_number_.has_value();
+    const bool ack_eliciting_out_of_order =
+        has_prior_ack_eliciting_packet &&
+        packet_number < *largest_received_ack_eliciting_packet_number_;
+    const bool ack_eliciting_creates_gap = ack_eliciting &&
+                                           largest_received_packet_number_.has_value() &&
+                                           packet_number > *largest_received_packet_number_ + 1;
+
+    if (duplicate) {
         if (ack_eliciting) {
             ack_pending_ = true;
+            immediate_ack_requested_ = true;
         }
         return;
     }
@@ -136,6 +147,12 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
     }
 
     if (ack_eliciting) {
+        ++ack_eliciting_packets_since_last_ack_;
+        immediate_ack_requested_ = immediate_ack_requested_ || ack_eliciting_out_of_order ||
+                                   ack_eliciting_creates_gap ||
+                                   ack_eliciting_packets_since_last_ack_ >= 2;
+        largest_received_ack_eliciting_packet_number_ = std::max(
+            largest_received_ack_eliciting_packet_number_.value_or(packet_number), packet_number);
         ack_pending_ = true;
     }
     if (ecn != QuicEcnCodepoint::unavailable) {
@@ -146,6 +163,10 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
 
 bool ReceivedPacketHistory::has_ack_to_send() const {
     return ack_pending_;
+}
+
+bool ReceivedPacketHistory::requests_immediate_ack() const {
+    return immediate_ack_requested_;
 }
 
 std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack_delay_exponent,
@@ -192,6 +213,8 @@ std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack
 
 void ReceivedPacketHistory::on_ack_sent() {
     ack_pending_ = false;
+    immediate_ack_requested_ = false;
+    ack_eliciting_packets_since_last_ack_ = 0;
 }
 
 void PacketSpaceRecovery::on_packet_sent(SentPacketRecord packet) {

@@ -1,5 +1,6 @@
 #include "src/quic/packet.h"
 
+#include <array>
 #include <type_traits>
 #include "src/quic/buffer.h"
 #include "src/quic/version.h"
@@ -45,7 +46,9 @@ LongHeaderPacketType decode_long_header_type(std::uint32_t version, std::uint8_t
 }
 
 void append_varint(BufferWriter &writer, std::uint64_t value) {
-    writer.write_bytes(encode_varint(value).value());
+    std::array<std::byte, 8> encoded{};
+    const auto written = encode_varint_into(encoded, value).value();
+    writer.write_bytes(std::span<const std::byte>(encoded.data(), written));
 }
 
 CodecResult<std::uint64_t> read_varint(BufferReader &reader) {

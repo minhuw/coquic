@@ -185,6 +185,21 @@ TEST(QuicCoreTest, QlogDeferredReplayPreservesDatagramIdAndAddsKeysAvailableTrig
         coquic::quic::test::qlog_any_record_contains(records, "\"trigger\":\"keys_available\""));
 }
 
+TEST(QuicCoreTest, SendingWithoutQlogDoesNotCachePacketSnapshots) {
+    auto connection = make_connected_client_connection();
+    ASSERT_EQ(connection.qlog_session_, nullptr);
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("hello"), false)
+            .has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+
+    const auto &packet = connection.application_space_.sent_packets.rbegin()->second;
+    EXPECT_EQ(packet.qlog_packet_snapshot, nullptr);
+}
+
 TEST(QuicCoreTest, QlogPacketLostUsesReorderingAndTimeThresholdTriggers) {
     coquic::quic::test::ScopedTempDir qlog_dir;
     auto connection = make_connected_client_connection();

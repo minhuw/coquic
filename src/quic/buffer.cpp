@@ -1,5 +1,7 @@
 #include "src/quic/buffer.h"
 
+#include <algorithm>
+
 namespace coquic::quic {
 
 BufferReader::BufferReader(std::span<const std::byte> bytes) : bytes_(bytes) {
@@ -37,7 +39,9 @@ void BufferWriter::write_byte(std::byte value) {
 }
 
 void BufferWriter::write_bytes(std::span<const std::byte> bytes) {
-    bytes_.insert(bytes_.end(), bytes.begin(), bytes.end());
+    const auto offset = bytes_.size();
+    bytes_.resize(offset + bytes.size());
+    std::copy(bytes.begin(), bytes.end(), bytes_.data() + offset);
 }
 
 const std::vector<std::byte> &BufferWriter::bytes() const {

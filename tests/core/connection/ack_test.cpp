@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 
 #include <gtest/gtest.h>
@@ -639,6 +640,45 @@ TEST(QuicCoreTest, AckProcessingClearsOutstandingDataAndKeepsReceiveKeepaliveWak
     EXPECT_FALSE(client.connection_->streams_.at(0).has_outstanding_send());
     EXPECT_EQ(client_step.next_wakeup, client.connection_->next_wakeup());
     EXPECT_TRUE(client_step.next_wakeup.has_value());
+}
+
+TEST(QuicCoreTest, CompletedBidirectionalStreamRetiresAfterLocalFinAckAndPeerFinDelivery) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto request = client.advance(
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 4,
+            .bytes = coquic::quic::test::bytes_from_string("request"),
+            .fin = true,
+        },
+        coquic::quic::test::test_time(1));
+    const auto request_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
+        request, server, coquic::quic::test::test_time(2));
+    EXPECT_EQ(coquic::quic::test::received_application_data_from(request_delivered),
+              coquic::quic::test::bytes_from_string("request"));
+
+    const auto request_acked = coquic::quic::test::relay_send_datagrams_to_peer(
+        request_delivered, client, coquic::quic::test::test_time(3));
+    EXPECT_TRUE(coquic::quic::test::received_application_data_from(request_acked).empty());
+    ASSERT_TRUE(client.connection_->streams_.contains(4));
+
+    const auto response = server.advance(
+        coquic::quic::QuicCoreSendStreamData{
+            .stream_id = 4,
+            .bytes = coquic::quic::test::bytes_from_string("response"),
+            .fin = true,
+        },
+        coquic::quic::test::test_time(4));
+    const auto response_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
+        response, client, coquic::quic::test::test_time(5));
+    EXPECT_EQ(coquic::quic::test::received_application_data_from(response_delivered),
+              coquic::quic::test::bytes_from_string("response"));
+    EXPECT_FALSE(client.connection_->streams_.contains(4));
 }
 
 TEST(QuicCoreTest, AckProcessingUsesLargestNewlyAcknowledgedPacketForRttSample) {
@@ -2056,6 +2096,51 @@ TEST(QuicCoreTest, DeadlineHelpersPreferEarlierCandidatesAndSkipIneligiblePacket
     EXPECT_LT(*loss_deadline, *pto_deadline);
 }
 
+TEST(QuicCoreTest, DeadlineTrackingCacheRefreshesAfterTrackedPacketsAreRemoved) {
+    auto connection = make_connected_client_connection();
+    auto &packet_space = connection.initial_space_;
+    packet_space.recovery.largest_acked_packet_number_ = 10;
+
+    connection.track_sent_packet(packet_space, coquic::quic::SentPacketRecord{
+                                                   .packet_number = 1,
+                                                   .sent_time = coquic::quic::test::test_time(5),
+                                                   .ack_eliciting = true,
+                                                   .in_flight = true,
+                                               });
+    connection.track_sent_packet(packet_space, coquic::quic::SentPacketRecord{
+                                                   .packet_number = 2,
+                                                   .sent_time = coquic::quic::test::test_time(9),
+                                                   .ack_eliciting = true,
+                                                   .in_flight = true,
+                                               });
+    connection.track_sent_packet(packet_space, coquic::quic::SentPacketRecord{
+                                                   .packet_number = 3,
+                                                   .sent_time = coquic::quic::test::test_time(7),
+                                                   .ack_eliciting = true,
+                                                   .in_flight = true,
+                                               });
+
+    ASSERT_TRUE(packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet.has_value());
+    EXPECT_EQ(packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet->packet_number,
+              2u);
+    ASSERT_TRUE(packet_space.deadline_tracking.earliest_loss_packet.has_value());
+    EXPECT_EQ(packet_space.deadline_tracking.earliest_loss_packet->packet_number, 1u);
+
+    connection.retire_acked_packet(packet_space, packet_space.sent_packets.at(2));
+
+    ASSERT_TRUE(packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet.has_value());
+    EXPECT_EQ(packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet->packet_number,
+              3u);
+
+    connection.mark_lost_packet(packet_space, packet_space.sent_packets.at(1));
+
+    ASSERT_TRUE(packet_space.deadline_tracking.earliest_loss_packet.has_value());
+    EXPECT_EQ(packet_space.deadline_tracking.earliest_loss_packet->packet_number, 3u);
+    ASSERT_TRUE(packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet.has_value());
+    EXPECT_EQ(packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet->packet_number,
+              3u);
+}
+
 TEST(QuicCoreTest,
      ServerHandshakeConfirmationFromApplicationAckKeepsPtoForMissingApplicationTailPacket) {
     auto connection = make_connected_server_connection();
@@ -2718,8 +2803,14 @@ TEST(QuicCoreTest, InboundApplicationAckRetiresOwnedSendRanges) {
 
     const auto server_step = coquic::quic::test::relay_send_datagrams_to_peer(
         send, server, coquic::quic::test::test_time(2));
+    ASSERT_TRUE(server_step.next_wakeup.has_value());
+
+    const auto ack_deadline = optional_value_or_terminate(server_step.next_wakeup);
+    const auto server_ack = server.advance(coquic::quic::QuicCoreTimerExpired{}, ack_deadline);
+    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(server_ack).empty());
+
     const auto client_step = coquic::quic::test::relay_send_datagrams_to_peer(
-        server_step, client, coquic::quic::test::test_time(3));
+        server_ack, client, ack_deadline + std::chrono::milliseconds(1));
 
     EXPECT_FALSE(client.has_failed());
     EXPECT_TRUE(coquic::quic::test::received_application_data_from(client_step).empty());
@@ -5529,7 +5620,7 @@ TEST(QuicCoreTest, ClientReceiveKeepalivePtoDeadlineStaysArmedAfterPartialRespon
     EXPECT_FALSE(coquic::quic::test::send_datagrams_from(timeout_result).empty());
 }
 
-TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowStillSendsProbe) {
+TEST(QuicCoreTest, LargePartialResponsePiggybacksAckAndClearsOutstandingRequest) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 
@@ -5557,7 +5648,13 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowStillSendsProbe) {
             .fin = false,
         },
         coquic::quic::test::test_time(3));
-    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(response).empty());
+    const auto response_datagrams = coquic::quic::test::send_datagrams_from(response);
+    ASSERT_FALSE(response_datagrams.empty());
+
+    EXPECT_TRUE(std::any_of(response_datagrams.begin(), response_datagrams.end(),
+                            [&](const auto &datagram) {
+                                return datagram_has_application_ack(*server.connection_, datagram);
+                            }));
 
     const auto response_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
         response, client, coquic::quic::test::test_time(4));
@@ -5565,14 +5662,7 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowStillSendsProbe) {
     EXPECT_FALSE(coquic::quic::test::send_datagrams_from(response_delivered).empty());
 
     ASSERT_TRUE(client.connection_->handshake_confirmed_);
-    ASSERT_FALSE(client.connection_->application_space_.sent_packets.empty());
-
-    const auto deadline = client.connection_->next_wakeup();
-    ASSERT_TRUE(deadline.has_value());
-
-    const auto timeout_result =
-        client.advance(coquic::quic::QuicCoreTimerExpired{}, optional_value_or_terminate(deadline));
-    EXPECT_FALSE(coquic::quic::test::send_datagrams_from(timeout_result).empty());
+    EXPECT_TRUE(client.connection_->application_space_.sent_packets.empty());
 }
 
 TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowRetainsAckOnProbe) {
@@ -5739,7 +5829,7 @@ TEST(QuicCoreTest, FirstAckElicitingOneRttPacketSchedulesDelayedApplicationAckDe
     EXPECT_FALSE(connection.application_space_.force_ack_send);
 }
 
-TEST(QuicCoreTest, SecondAckElicitingOneRttPacketKeepsDelayedApplicationAckDeadline) {
+TEST(QuicCoreTest, SecondAckElicitingOneRttPacketRequestsImmediateApplicationAck) {
     auto connection = make_connected_client_connection();
     connection.application_space_.pending_ack_deadline = std::nullopt;
 
@@ -5765,11 +5855,9 @@ TEST(QuicCoreTest, SecondAckElicitingOneRttPacketKeepsDelayedApplicationAckDeadl
 
     ASSERT_TRUE(second_processed.has_value());
     ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
-    EXPECT_EQ(
-        optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
-        coquic::quic::test::test_time(
-            1 + static_cast<std::int64_t>(connection.local_transport_parameters_.max_ack_delay)));
-    EXPECT_FALSE(connection.application_space_.force_ack_send);
+    EXPECT_EQ(optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
+              coquic::quic::test::test_time(2));
+    EXPECT_TRUE(connection.application_space_.force_ack_send);
 }
 
 TEST(QuicCoreTest, DelayedApplicationAckDeadlineSuppressesImmediateAckOnlySend) {

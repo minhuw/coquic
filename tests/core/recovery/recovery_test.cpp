@@ -307,6 +307,42 @@ TEST(QuicRecoveryTest, DuplicateNonAckElicitingPacketKeepsAckPendingClear) {
               std::nullopt);
 }
 
+TEST(QuicRecoveryTest, SecondAckElicitingPacketRequestsImmediateAck) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/4, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1));
+    EXPECT_FALSE(history.requests_immediate_ack());
+
+    history.record_received(/*packet_number=*/5, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(2));
+    EXPECT_TRUE(history.requests_immediate_ack());
+}
+
+TEST(QuicRecoveryTest, AckElicitingGapRequestsImmediateAck) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/7, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1));
+    history.on_ack_sent();
+    EXPECT_FALSE(history.requests_immediate_ack());
+
+    history.record_received(/*packet_number=*/9, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(2));
+    EXPECT_TRUE(history.requests_immediate_ack());
+}
+
+TEST(QuicRecoveryTest, NonAckElicitingPacketBetweenAckElicitingPacketsDoesNotRequestImmediateAck) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/0, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1));
+    history.on_ack_sent();
+
+    history.record_received(/*packet_number=*/1, /*ack_eliciting=*/false,
+                            coquic::quic::test::test_time(2));
+    history.record_received(/*packet_number=*/2, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(3));
+    EXPECT_FALSE(history.requests_immediate_ack());
+}
+
 TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(SentPacketRecord{

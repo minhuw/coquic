@@ -2367,6 +2367,97 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeArmsFromMostRecentProbeTimeRefer
     EXPECT_TRUE(optional_ref_or_terminate(connection.initial_space_.pending_probe_packet).has_ping);
 }
 
+TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsHandshakeAckAfterAckOnlySend) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.initial_packet_space_discarded_ = true;
+    connection.handshake_space_.write_secret = make_test_traffic_secret();
+    connection.last_peer_activity_time_ = coquic::quic::test::test_time(4);
+    connection.pto_count_ = 4;
+    connection.handshake_space_.received_packets.record_received(
+        /*packet_number=*/7, /*ack_eliciting=*/true, coquic::quic::test::test_time(4));
+
+    const auto first_ack_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(5));
+    ASSERT_FALSE(first_ack_datagram.empty());
+    ASSERT_FALSE(connection.handshake_space_.received_packets.has_ack_to_send());
+
+    const auto deadline = coquic::quic::compute_pto_deadline(connection.shared_recovery_rtt_state(),
+                                                             std::chrono::milliseconds(0),
+                                                             coquic::quic::test::test_time(4), 2);
+    connection.arm_pto_probe(deadline);
+
+    ASSERT_TRUE(connection.handshake_space_.pending_probe_packet.has_value());
+    EXPECT_TRUE(
+        optional_ref_or_terminate(connection.handshake_space_.pending_probe_packet).has_ping);
+
+    const auto probe_datagram = connection.drain_outbound_datagram(deadline);
+    ASSERT_FALSE(probe_datagram.empty());
+
+    const auto probe_packets = decode_sender_datagram(connection, probe_datagram);
+    ASSERT_EQ(probe_packets.size(), 1u);
+    const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&probe_packets[0]);
+    ASSERT_NE(handshake, nullptr);
+
+    bool saw_ack = false;
+    bool saw_ping = false;
+    for (const auto &frame : handshake->frames) {
+        if (const auto *ack = std::get_if<coquic::quic::AckFrame>(&frame)) {
+            saw_ack = saw_ack || ack_frame_acks_packet_number_for_tests(*ack, 7);
+        }
+        saw_ping = saw_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_ack);
+    EXPECT_TRUE(saw_ping);
+}
+
+TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsInitialAckAfterAckOnlySend) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.last_peer_activity_time_ = coquic::quic::test::test_time(4);
+    connection.pto_count_ = 4;
+    connection.initial_space_.received_packets.record_received(
+        /*packet_number=*/7, /*ack_eliciting=*/true, coquic::quic::test::test_time(4));
+
+    const auto first_ack_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(5));
+    ASSERT_FALSE(first_ack_datagram.empty());
+    ASSERT_FALSE(connection.initial_space_.received_packets.has_ack_to_send());
+
+    const auto deadline = coquic::quic::compute_pto_deadline(connection.shared_recovery_rtt_state(),
+                                                             std::chrono::milliseconds(0),
+                                                             coquic::quic::test::test_time(4), 2);
+    connection.arm_pto_probe(deadline);
+
+    ASSERT_TRUE(connection.initial_space_.pending_probe_packet.has_value());
+    EXPECT_TRUE(optional_ref_or_terminate(connection.initial_space_.pending_probe_packet).has_ping);
+
+    const auto probe_datagram = connection.drain_outbound_datagram(deadline);
+    ASSERT_FALSE(probe_datagram.empty());
+
+    const auto probe_packets = decode_sender_datagram(connection, probe_datagram);
+    ASSERT_EQ(probe_packets.size(), 1u);
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&probe_packets[0]);
+    ASSERT_NE(initial, nullptr);
+
+    bool saw_ack = false;
+    bool saw_ping = false;
+    for (const auto &frame : initial->frames) {
+        if (const auto *ack = std::get_if<coquic::quic::AckFrame>(&frame)) {
+            saw_ack = saw_ack || ack_frame_acks_packet_number_for_tests(*ack, 7);
+        }
+        saw_ping = saw_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_ack);
+    EXPECT_TRUE(saw_ping);
+}
+
 TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeDoesNotArmBeforeDeadline) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.started_ = true;

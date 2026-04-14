@@ -2391,8 +2391,11 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         }
 
         packet_space.pending_probe_packet = select_pto_probe(packet_space);
-        if (allow_client_receive_keepalive_probe & packet_space.pending_probe_packet.has_value()) {
+        if ((allow_client_handshake_keepalive_probe | allow_client_receive_keepalive_probe) &
+            packet_space.pending_probe_packet.has_value()) {
             packet_space.pending_probe_packet->force_ack = true;
+        }
+        if (allow_client_receive_keepalive_probe & packet_space.pending_probe_packet.has_value()) {
             if ((&packet_space == &application_space_) & current_send_path_id_.has_value()) {
                 auto &path = ensure_path_state(*current_send_path_id_);
                 if (path.validated) {
@@ -5645,7 +5648,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
     };
 
     const auto initial_ack_frame =
-        initial_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now);
+        (initial_space_.pending_probe_packet.has_value() &&
+         initial_space_.pending_probe_packet->force_ack)
+            ? initial_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now,
+                                                              /*allow_non_pending=*/true)
+            : initial_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now);
     auto initial_crypto_ranges = std::vector<ByteRange>{};
     if (!defer_server_compatible_negotiation_crypto) {
         initial_crypto_ranges =
@@ -5804,8 +5811,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
         }
     }
 
-    const auto handshake_ack_frame =
-        handshake_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now);
     const auto max_handshake_crypto_bytes =
         std::numeric_limits<std::size_t>::max() *
         static_cast<std::size_t>(!defer_server_compatible_negotiation_crypto);
@@ -5814,6 +5819,12 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
     const auto build_handshake_frames = [&](std::span<const ByteRange> crypto_ranges,
                                             bool override_probe_crypto_ranges = false,
                                             std::span<const ByteRange> probe_crypto_ranges = {}) {
+        const auto handshake_ack_frame =
+            (handshake_space_.pending_probe_packet.has_value() &&
+             handshake_space_.pending_probe_packet->force_ack)
+                ? handshake_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now,
+                                                                    /*allow_non_pending=*/true)
+                : handshake_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now);
         std::vector<Frame> frames;
         frames.reserve(crypto_ranges.size() + (handshake_ack_frame.has_value() ? 1u : 0u) +
                        (handshake_space_.pending_probe_packet.has_value()
@@ -5989,6 +6000,40 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                         ? std::optional<AckFrame>{}
                                         : application_space_.received_packets.build_ack_frame(
                                               local_transport_parameters_.ack_delay_exponent, now);
+        const auto maybe_queue_client_ack_only_receive_keepalive_challenge = [&]() {
+            const bool has_receive_interest = std::ranges::any_of(
+                streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
+            const bool has_pending_path_validation =
+                std::ranges::any_of(paths_, [](const auto &entry) {
+                    return entry.second.pending_response.has_value() ||
+                           entry.second.challenge_pending;
+                });
+            const bool eligible =
+                (config_.role == EndpointRole::client) & handshake_confirmed_ &
+                base_ack_frame.has_value() & last_peer_activity_time_.has_value() &
+                has_receive_interest & !has_pending_application_send() &
+                !application_space_.pending_probe_packet.has_value() &
+                pending_new_connection_id_frames_.empty() &
+                pending_retire_connection_id_frames_.empty() & application_crypto_frames.empty() &
+                !has_pending_path_validation & !has_in_flight_ack_eliciting_packet(initial_space_) &
+                !has_in_flight_ack_eliciting_packet(handshake_space_) &
+                !has_in_flight_ack_eliciting_packet(application_space_) &
+                current_send_path_id_.has_value();
+            if (!eligible) {
+                return;
+            }
+
+            auto &path = ensure_path_state(*current_send_path_id_);
+            if (!path.validated) {
+                return;
+            }
+
+            if (!path.outstanding_challenge.has_value()) {
+                path.outstanding_challenge = next_path_challenge_data(*current_send_path_id_);
+            }
+            path.challenge_pending = true;
+        };
+        maybe_queue_client_ack_only_receive_keepalive_challenge();
         for (auto &[stream_id, stream] : streams_) {
             static_cast<void>(stream_id);
             maybe_queue_stream_blocked_frame(stream);

@@ -680,9 +680,15 @@ derive_initial_packet_keys(EndpointRole local_role, bool for_local_send,
 }
 
 CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &secret) {
-    if (secret.cached_packet_protection_keys.has_value()) {
-        return CodecResult<PacketProtectionKeys>::success(
-            secret.cached_packet_protection_keys.value());
+    if (secret.cached_packet_protection_keys.has_value() &&
+        secret.cached_packet_protection_inputs.has_value()) {
+        const auto &cached_inputs = secret.cached_packet_protection_inputs.value();
+        if (cached_inputs.secret == secret.secret &&
+            cached_inputs.header_protection_key == secret.header_protection_key &&
+            cached_inputs.quic_version == secret.quic_version) {
+            return CodecResult<PacketProtectionKeys>::success(
+                secret.cached_packet_protection_keys.value());
+        }
     }
 
     auto keys = expand_secret(secret.cipher_suite, secret.secret, secret.quic_version);
@@ -699,6 +705,11 @@ CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &sec
     auto expanded = keys.value();
     expanded.hp_key = hp_key.value();
     secret.cached_packet_protection_keys = expanded;
+    secret.cached_packet_protection_inputs = TrafficSecretCacheInputs{
+        .secret = secret.secret,
+        .header_protection_key = secret.header_protection_key,
+        .quic_version = secret.quic_version,
+    };
     return CodecResult<PacketProtectionKeys>::success(secret.cached_packet_protection_keys.value());
 }
 

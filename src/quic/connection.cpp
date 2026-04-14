@@ -7366,16 +7366,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     path_validation_frames.response.has_value()
                         ? std::optional<QuicPathId>{path_validation_frames.path_id}
                         : current_send_path_id_;
-                auto ack_only_datagram = serialize_application_candidate(
-                    {}, /*include_handshake_done=*/false, ack_frame, std::nullopt, {}, {},
-                    path_validation_frames, {}, {}, {}, {}, std::nullopt, {}, {}, std::nullopt,
-                    /*include_ping=*/false);
-                if (!ack_only_datagram.has_value()) {
-                    restore_unsent_path_validation_frames(path_validation_frames);
-                    mark_failed();
-                    return {};
-                }
-
                 std::vector<Frame> ack_only_frames;
                 ack_only_frames.emplace_back(ack_frame);
                 if (path_validation_frames.response.has_value()) {
@@ -7395,6 +7385,12 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     application_destination_connection_id(), config_.source_connection_id,
                     application_write_key_phase_, kDefaultInitialPacketNumberLength, *packet_number,
                     std::move(ack_only_frames), {}));
+                auto ack_only_datagram = serialize_candidate_datagram_with_metadata(packets);
+                if (!ack_only_datagram.has_value()) {
+                    restore_unsent_path_validation_frames(path_validation_frames);
+                    mark_failed();
+                    return {};
+                }
                 if (path_validation_frames.response.has_value() |
                     path_validation_frames.challenge.has_value()) {
                     track_sent_packet(
@@ -7416,9 +7412,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             };
             std::vector<Frame> frames;
             const auto force_ack_only =
-                (validation_only_send ||
-                 (application_space_.force_ack_send & base_ack_frame.has_value())) &&
-                !send_application_close_only;
+                validation_only_send && !send_application_close_only;
             auto max_data_frame = (force_ack_only || send_application_close_only)
                                       ? std::optional<MaxDataFrame>{}
                                       : connection_flow_control_.take_max_data_frame();
@@ -7927,6 +7921,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 pending_terminal_state_ = QuicConnectionTerminalState::closed;
                 mark_failed();
             }
+            return commit_serialized_datagram(packets, std::move(candidate_datagram.value()));
         }
     }
 

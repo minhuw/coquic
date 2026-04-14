@@ -376,6 +376,41 @@ TEST(QuicPacketCryptoTest, ExpandTrafficSecretReusesCachedKeysAcrossCalls) {
     EXPECT_EQ(second.value().hp_key, first.value().hp_key);
 }
 
+TEST(QuicPacketCryptoTest, ExpandTrafficSecretRefreshesCacheWhenHeaderProtectionKeyChanges) {
+    coquic::quic::TrafficSecret secret{
+        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        .secret = make_secret(32),
+    };
+
+    const auto first = coquic::quic::expand_traffic_secret(secret);
+    ASSERT_TRUE(first.has_value());
+
+    secret.header_protection_key = hex_bytes("00112233445566778899aabbccddeeff");
+
+    const auto second = coquic::quic::expand_traffic_secret(secret);
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(secret.header_protection_key.has_value());
+    EXPECT_EQ(second.value().hp_key, secret.header_protection_key.value());
+    EXPECT_NE(second.value().hp_key, first.value().hp_key);
+}
+
+TEST(QuicPacketCryptoTest, ExpandTrafficSecretRefreshesCacheWhenSecretChanges) {
+    coquic::quic::TrafficSecret secret{
+        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        .secret = make_secret(32),
+    };
+
+    const auto first = coquic::quic::expand_traffic_secret(secret);
+    ASSERT_TRUE(first.has_value());
+
+    secret.secret.front() ^= std::byte{0x5a};
+
+    const auto second = coquic::quic::expand_traffic_secret(secret);
+    ASSERT_TRUE(second.has_value());
+    EXPECT_NE(second.value().key, first.value().key);
+    EXPECT_NE(second.value().iv, first.value().iv);
+}
+
 TEST(QuicPacketCryptoTest, DeriveNextTrafficSecretRejectsUnsupportedQuicVersion) {
     const coquic::quic::TrafficSecret secret{
         .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,

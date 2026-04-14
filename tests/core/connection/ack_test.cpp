@@ -3662,7 +3662,7 @@ TEST(QuicCoreTest, ApplicationSendPathFailsWhenPacketSerializationFails) {
     EXPECT_TRUE(connection.has_failed());
 }
 
-TEST(QuicCoreTest, ApplicationSendPathFailsWhenFinalPacketSerializationFails) {
+TEST(QuicCoreTest, DrainOutboundDatagramReusesAcceptedApplicationCandidateSerialization) {
     auto connection = make_connected_client_connection();
     ASSERT_TRUE(
         connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("data"), false)
@@ -3672,8 +3672,8 @@ TEST(QuicCoreTest, ApplicationSendPathFailsWhenFinalPacketSerializationFails) {
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-    EXPECT_TRUE(datagram.empty());
-    EXPECT_TRUE(connection.has_failed());
+    EXPECT_FALSE(datagram.empty());
+    EXPECT_FALSE(connection.has_failed());
 }
 
 TEST(QuicCoreTest, ApplicationSendPathFailsWhenTrimmedFinOnlyPacketReserializationFails) {

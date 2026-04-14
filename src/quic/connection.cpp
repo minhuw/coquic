@@ -6257,6 +6257,11 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                                 status_ != HandshakeStatus::connected &&
                                                 zero_rtt_space_.write_secret.has_value();
     const bool can_send_one_rtt_packets = application_space_.write_secret.has_value();
+    for (auto &[stream_id, stream] : streams_) {
+        static_cast<void>(stream_id);
+        maybe_queue_stream_blocked_frame(stream);
+    }
+    maybe_queue_connection_blocked_frame();
     const bool application_ack_due_now =
         application_space_.received_packets.has_ack_to_send() &&
         (application_space_.force_ack_send ||
@@ -6272,11 +6277,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                                         ? std::optional<AckFrame>{}
                                         : application_space_.received_packets.build_ack_frame(
                                               local_transport_parameters_.ack_delay_exponent, now);
-        for (auto &[stream_id, stream] : streams_) {
-            static_cast<void>(stream_id);
-            maybe_queue_stream_blocked_frame(stream);
-        }
-        maybe_queue_connection_blocked_frame();
         const auto reserve_application_packet_number =
             [&](bool using_one_rtt_packet_protection) -> std::optional<std::uint64_t> {
             const auto packet_number = application_space_.next_send_packet_number;
@@ -7927,7 +7927,6 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 pending_terminal_state_ = QuicConnectionTerminalState::closed;
                 mark_failed();
             }
-            return commit_serialized_datagram(packets, std::move(candidate_datagram.value()));
         }
     }
 

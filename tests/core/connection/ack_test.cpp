@@ -3102,7 +3102,7 @@ TEST(QuicCoreTest,
             },
     };
     const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 2);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     EXPECT_TRUE(connection.has_failed());
@@ -3451,7 +3451,7 @@ TEST(QuicCoreTest, ApplicationProbePathFailsWhenNoAckFallbackSerializationFails)
             },
     };
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 3);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 3);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
@@ -3476,7 +3476,7 @@ TEST(QuicCoreTest, ApplicationProbePathFailsWhenTrimLoopReserializationFails) {
             },
     };
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 2);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
@@ -3668,7 +3668,7 @@ TEST(QuicCoreTest, ApplicationSendPathFailsWhenFinalPacketSerializationFails) {
         connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("data"), false)
             .has_value());
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 2);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
@@ -3683,7 +3683,7 @@ TEST(QuicCoreTest, ApplicationSendPathFailsWhenTrimmedFinOnlyPacketReserializati
         ASSERT_TRUE(connection.queue_stream_send(stream_index * 4, {}, true).has_value());
     }
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 12);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 12);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
@@ -3783,7 +3783,7 @@ TEST(QuicCoreTest,
     connection.congestion_controller_.bytes_in_flight_ =
         connection.congestion_controller_.congestion_window();
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 3);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 3);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
@@ -3806,7 +3806,7 @@ TEST(QuicCoreTest, ApplicationSendPathFailsWhenNoAckFallbackSerializationFails) 
                         0, std::vector<std::byte>(payload_size_value, std::byte{0x59}), false)
                     .has_value());
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 3);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 3);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 

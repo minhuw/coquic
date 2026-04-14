@@ -2840,7 +2840,7 @@ TEST(QuicCoreTest, InitialTrimReserializationFailureMarksConnectionFailed) {
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.initial_space_.send_crypto.append(std::vector<std::byte>(1500, std::byte{0x5a}));
     const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 2);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     EXPECT_TRUE(connection.has_failed());
@@ -2860,7 +2860,7 @@ TEST(QuicCoreTest, HandshakeTrimReserializationFailureMarksConnectionFailedAfter
     connection.handshake_space_.send_crypto.mark_lost(0, 1300);
     connection.handshake_space_.send_crypto.mark_unsent(1350, 50);
     const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 2);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     EXPECT_TRUE(connection.has_failed());

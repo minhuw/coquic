@@ -2841,6 +2841,20 @@ TEST(QuicCoreTest, FlushOutboundDatagramMarksFailuresForSerializationErrors) {
     EXPECT_TRUE(padding_failure.has_failed());
 }
 
+TEST(QuicCoreTest, FlushOutboundDatagramReusesAcceptedApplicationCandidateSerialization) {
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("hello"), false)
+            .has_value());
+
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
+    const auto datagram = connection.flush_outbound_datagram(coquic::quic::test::test_time(5));
+
+    EXPECT_FALSE(datagram.empty());
+    EXPECT_FALSE(connection.has_failed());
+}
+
 TEST(QuicCoreTest, CoalescedInitialAndHandshakeCandidateSerializationFailureMarksConnectionFailed) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.started_ = true;
@@ -2861,7 +2875,7 @@ TEST(QuicCoreTest, InitialTrimReserializationFailureMarksConnectionFailed) {
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.initial_space_.send_crypto.append(std::vector<std::byte>(1500, std::byte{0x5a}));
     const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 2);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     EXPECT_TRUE(connection.has_failed());
@@ -2881,7 +2895,7 @@ TEST(QuicCoreTest, HandshakeTrimReserializationFailureMarksConnectionFailedAfter
     connection.handshake_space_.send_crypto.mark_lost(0, 1300);
     connection.handshake_space_.send_crypto.mark_unsent(1350, 50);
     const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 2);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     EXPECT_TRUE(connection.has_failed());
@@ -3468,10 +3482,15 @@ TEST(QuicCoreTest, DrainOutboundDatagramReplaysDeferredProtectedPacketsBeforeFlu
     }
     connection.deferred_protected_packets_.push_back(deferred_packet.value());
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_TRUE(connection.deferred_protected_packets_.empty());
     EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 7u);
+    if (datagram.empty()) {
+        const auto ack_deadline = connection.next_wakeup();
+        ASSERT_TRUE(ack_deadline.has_value());
+        datagram = connection.drain_outbound_datagram(optional_value_or_terminate(ack_deadline));
+    }
     ASSERT_FALSE(datagram.empty());
     const auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);

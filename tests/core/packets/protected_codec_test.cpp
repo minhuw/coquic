@@ -399,6 +399,42 @@ TEST(QuicProtectedCodecTest, AppendsOneRttPacketIntoExistingDatagramBuffer) {
               encoded.value());
 }
 
+TEST(QuicProtectedCodecTest, StreamViewPathUsesSinglePayloadSealUpdate) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.stream_frame_views = {
+        coquic::quic::StreamFrameView{
+            .fin = false,
+            .stream_id = 4,
+            .offset = 0,
+            .storage = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
+                std::byte{0xaa},
+                std::byte{0xbb},
+                std::byte{0xcc},
+            }),
+            .begin = 0,
+            .end = 3,
+        },
+    };
+
+    const auto serialize_context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    const auto deserialize_context = make_one_rtt_deserialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
+
+    std::vector<std::byte> datagram;
+    const auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+        datagram, packet, serialize_context);
+    ASSERT_TRUE(appended.has_value());
+    ASSERT_EQ(datagram.size(), appended.value());
+
+    const auto decoded =
+        coquic::quic::deserialize_protected_datagram(datagram, deserialize_context);
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+}
+
 TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsInvalidStreamViewBounds) {
     auto packet = make_minimal_one_rtt_packet();
     packet.frames.clear();

@@ -17,6 +17,126 @@ bool fits_openssl_int(std::size_t size) {
     return size <= static_cast<std::size_t>(std::numeric_limits<int>::max());
 }
 
+struct ReusableCipherContext {
+    EVP_CIPHER_CTX *context = nullptr;
+    std::size_t new_calls = 0;
+
+    ~ReusableCipherContext() {
+        EVP_CIPHER_CTX_free(context);
+    }
+
+    void reset() {
+        EVP_CIPHER_CTX_free(context);
+        context = nullptr;
+        new_calls = 0;
+    }
+};
+
+struct ReusableAeadContext {
+    EVP_AEAD_CTX context{};
+    bool initialized = false;
+    const EVP_AEAD *aead = nullptr;
+    std::vector<std::byte> key;
+    std::size_t new_calls = 0;
+
+    ~ReusableAeadContext() {
+        if (initialized) {
+            EVP_AEAD_CTX_cleanup(&context);
+        }
+    }
+
+    void reset() {
+        if (initialized) {
+            EVP_AEAD_CTX_cleanup(&context);
+        }
+        initialized = false;
+        aead = nullptr;
+        key.clear();
+        new_calls = 0;
+    }
+};
+
+ReusableCipherContext &seal_cipher_context_cache() {
+    static thread_local ReusableCipherContext cache;
+    return cache;
+}
+
+ReusableAeadContext &seal_aead_context_cache() {
+    static thread_local ReusableAeadContext cache;
+    return cache;
+}
+
+ReusableAeadContext &open_aead_context_cache() {
+    static thread_local ReusableAeadContext cache;
+    return cache;
+}
+
+ReusableCipherContext &header_protection_context_cache() {
+    static thread_local ReusableCipherContext cache;
+    return cache;
+}
+
+EVP_CIPHER_CTX *acquire_cipher_context(ReusableCipherContext &cache,
+                                       PacketCryptoFaultPoint fault_point) {
+    if (cache.context == nullptr) {
+        if (consume_packet_crypto_fault(fault_point)) {
+            return nullptr;
+        }
+        cache.context = EVP_CIPHER_CTX_new();
+        if (cache.context == nullptr) {
+            return nullptr;
+        }
+        ++cache.new_calls;
+        return cache.context;
+    }
+
+    if (EVP_CIPHER_CTX_reset(cache.context) <= 0) {
+        EVP_CIPHER_CTX_free(cache.context);
+        cache.context = nullptr;
+        return nullptr;
+    }
+    return cache.context;
+}
+
+EVP_AEAD_CTX *acquire_aead_context(ReusableAeadContext &cache, const EVP_AEAD *aead,
+                                   std::span<const std::byte> key,
+                                   PacketCryptoFaultPoint fault_point) {
+    if (!cache.initialized || cache.aead != aead || cache.key != key) {
+        if (cache.initialized) {
+            EVP_AEAD_CTX_cleanup(&cache.context);
+            cache.initialized = false;
+        }
+        if (consume_packet_crypto_fault(fault_point)) {
+            return nullptr;
+        }
+        if (EVP_AEAD_CTX_init(&cache.context, aead, openssl_data(key), key.size(), aead_tag_length,
+                              nullptr) != 1) {
+            return nullptr;
+        }
+        cache.initialized = true;
+        cache.aead = aead;
+        cache.key.assign(key.begin(), key.end());
+        ++cache.new_calls;
+    }
+    return &cache.context;
+}
+
+coquic::quic::test::PacketCryptoRuntimeCacheStats runtime_cache_stats_for_tests_impl() {
+    return coquic::quic::test::PacketCryptoRuntimeCacheStats{
+        .seal_context_new_calls =
+            seal_cipher_context_cache().new_calls + seal_aead_context_cache().new_calls,
+        .open_context_new_calls = open_aead_context_cache().new_calls,
+        .header_protection_context_new_calls = header_protection_context_cache().new_calls,
+    };
+}
+
+void reset_runtime_caches_for_tests_impl() {
+    seal_cipher_context_cache().reset();
+    seal_aead_context_cache().reset();
+    open_aead_context_cache().reset();
+    header_protection_context_cache().reset();
+}
+
 CodecResult<std::size_t> total_plaintext_length(std::span<const PlaintextChunk> plaintext_chunks) {
     std::size_t total = 0;
     for (const auto &chunk : plaintext_chunks) {
@@ -305,21 +425,18 @@ CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *cipher,
                                                  0);
     }
 
-    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> context(
-        consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_context_new)
-            ? nullptr
-            : EVP_CIPHER_CTX_new(),
-        &EVP_CIPHER_CTX_free);
+    auto *context = acquire_cipher_context(seal_cipher_context_cache(),
+                                           PacketCryptoFaultPoint::seal_context_new);
     if (context == nullptr) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
     }
 
     bool init_failed = consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_init);
-    init_failed |= EVP_EncryptInit_ex(context.get(), cipher, nullptr, nullptr, nullptr) <= 0;
-    init_failed |= EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_AEAD_SET_IVLEN,
+    init_failed |= EVP_EncryptInit_ex(context, cipher, nullptr, nullptr, nullptr) <= 0;
+    init_failed |= EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_AEAD_SET_IVLEN,
                                        static_cast<int>(request.nonce.size()), nullptr) <= 0;
-    init_failed |= EVP_EncryptInit_ex(context.get(), nullptr, nullptr, openssl_data(request.key),
+    init_failed |= EVP_EncryptInit_ex(context, nullptr, nullptr, openssl_data(request.key),
                                       openssl_data(request.nonce)) <= 0;
     if (init_failed) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
@@ -330,7 +447,7 @@ CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *cipher,
     if (!request.associated_data.empty()) {
         const auto aad_failed =
             consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_aad_update) |
-            (EVP_EncryptUpdate(context.get(), nullptr, &output_length,
+            (EVP_EncryptUpdate(context, nullptr, &output_length,
                                openssl_data(request.associated_data),
                                static_cast<int>(request.associated_data.size())) <= 0);
         if (aad_failed) {
@@ -349,7 +466,7 @@ CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *cipher,
         int produced_length = 0;
         const auto payload_failed =
             consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_payload_update) |
-            (EVP_EncryptUpdate(context.get(), openssl_data(payload_output.subspan(produced_total)),
+            (EVP_EncryptUpdate(context, openssl_data(payload_output.subspan(produced_total)),
                                &produced_length, openssl_data(chunk.bytes),
                                static_cast<int>(chunk.bytes.size())) <= 0);
         if (payload_failed) {
@@ -366,7 +483,7 @@ CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *cipher,
     int final_length = 0;
     const auto final_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_final) |
-        (EVP_EncryptFinal_ex(context.get(), openssl_data(payload_output.subspan(produced_total)),
+        (EVP_EncryptFinal_ex(context, openssl_data(payload_output.subspan(produced_total)),
                              &final_length) <= 0);
     if (final_failed) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
@@ -382,7 +499,7 @@ CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *cipher,
     std::array<std::byte, aead_tag_length> tag{};
     const auto get_tag_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_get_tag) |
-        (EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_AEAD_GET_TAG, static_cast<int>(tag.size()),
+        (EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_AEAD_GET_TAG, static_cast<int>(tag.size()),
                              openssl_data(std::span<std::byte>{tag})) <= 0);
     if (get_tag_failed) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
@@ -446,12 +563,8 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_AEAD *aead,
                                                  0);
     }
 
-    std::unique_ptr<EVP_AEAD_CTX, decltype(&EVP_AEAD_CTX_free)> context(
-        consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_context_new)
-            ? nullptr
-            : EVP_AEAD_CTX_new(aead, openssl_data(request.key), request.key.size(),
-                               aead_tag_length),
-        &EVP_AEAD_CTX_free);
+    auto *context = acquire_aead_context(seal_aead_context_cache(), aead, request.key,
+                                         PacketCryptoFaultPoint::seal_context_new);
     if (context == nullptr) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
@@ -470,7 +583,7 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_AEAD *aead,
     }
 
     std::size_t output_length = 0;
-    if (EVP_AEAD_CTX_seal(context.get(), openssl_data(request.ciphertext), &output_length,
+    if (EVP_AEAD_CTX_seal(context, openssl_data(request.ciphertext), &output_length,
                           request.ciphertext.size(), openssl_data(request.nonce),
                           request.nonce.size(), openssl_data(std::span{plaintext.value()}),
                           plaintext.value().size(), openssl_data(request.associated_data),
@@ -494,12 +607,8 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_AEAD *aead,
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
     }
 
-    std::unique_ptr<EVP_AEAD_CTX, decltype(&EVP_AEAD_CTX_free)> context(
-        consume_packet_crypto_fault(PacketCryptoFaultPoint::open_context_new)
-            ? nullptr
-            : EVP_AEAD_CTX_new(aead, openssl_data(request.key), request.key.size(),
-                               aead_tag_length),
-        &EVP_AEAD_CTX_free);
+    auto *context = acquire_aead_context(open_aead_context_cache(), aead, request.key,
+                                         PacketCryptoFaultPoint::open_context_new);
     if (context == nullptr) {
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
     }
@@ -515,7 +624,7 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_AEAD *aead,
 
     std::vector<std::byte> plaintext(request.ciphertext.size() - aead_tag_length);
     std::size_t output_length = 0;
-    if (EVP_AEAD_CTX_open(context.get(), openssl_data(std::span{plaintext}), &output_length,
+    if (EVP_AEAD_CTX_open(context, openssl_data(std::span{plaintext}), &output_length,
                           plaintext.size(), openssl_data(request.nonce), request.nonce.size(),
                           openssl_data(request.ciphertext), request.ciphertext.size(),
                           openssl_data(request.associated_data),
@@ -571,6 +680,17 @@ derive_initial_packet_keys(EndpointRole local_role, bool for_local_send,
 }
 
 CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &secret) {
+    if (secret.cached_packet_protection_keys.has_value() &&
+        secret.cached_packet_protection_inputs.has_value()) {
+        const auto &cached_inputs = secret.cached_packet_protection_inputs.value();
+        if (cached_inputs.secret == secret.secret &&
+            cached_inputs.header_protection_key == secret.header_protection_key &&
+            cached_inputs.quic_version == secret.quic_version) {
+            return CodecResult<PacketProtectionKeys>::success(
+                secret.cached_packet_protection_keys.value());
+        }
+    }
+
     auto keys = expand_secret(secret.cipher_suite, secret.secret, secret.quic_version);
     if (!keys.has_value()) {
         return keys;
@@ -584,7 +704,13 @@ CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &sec
 
     auto expanded = keys.value();
     expanded.hp_key = hp_key.value();
-    return CodecResult<PacketProtectionKeys>::success(std::move(expanded));
+    secret.cached_packet_protection_keys = expanded;
+    secret.cached_packet_protection_inputs = TrafficSecretCacheInputs{
+        .secret = secret.secret,
+        .header_protection_key = secret.header_protection_key,
+        .quic_version = secret.quic_version,
+    };
+    return CodecResult<PacketProtectionKeys>::success(secret.cached_packet_protection_keys.value());
 }
 
 CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secret) {
@@ -860,8 +986,9 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
         return CodecResult<std::vector<std::byte>>::success(std::move(mask));
     }
 
-    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> context(
-        new_header_protection_cipher_ctx(), &EVP_CIPHER_CTX_free);
+    auto *context =
+        acquire_cipher_context(header_protection_context_cache(),
+                               PacketCryptoFaultPoint::header_protection_aes_context_new);
     if (context == nullptr) {
         return crypto_failure(CodecErrorCode::header_protection_failed);
     }
@@ -874,9 +1001,9 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
 
     std::vector<std::byte> block(header_protection_sample_length);
     int produced_length = 0;
-    const auto init_failed = header_protection_aes_init(context.get(), cipher, input.hp_key) <= 0 ||
-                             header_protection_aes_set_padding(context.get()) <= 0 ||
-                             header_protection_aes_update(context.get(), std::span{block},
+    const auto init_failed = header_protection_aes_init(context, cipher, input.hp_key) <= 0 ||
+                             header_protection_aes_set_padding(context) <= 0 ||
+                             header_protection_aes_update(context, std::span{block},
                                                           &produced_length, sample_prefix) <= 0;
     if (init_failed) {
         return crypto_failure(CodecErrorCode::header_protection_failed);
@@ -885,7 +1012,7 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
     int final_length = 0;
     const auto final_failed =
         header_protection_aes_final(
-            context.get(), std::span{block}.subspan(static_cast<std::size_t>(produced_length)),
+            context, std::span{block}.subspan(static_cast<std::size_t>(produced_length)),
             &final_length) <= 0;
     if (final_failed) {
         return crypto_failure(CodecErrorCode::header_protection_failed);
@@ -909,14 +1036,24 @@ CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite ciph
 
 namespace coquic::quic::test {
 
+PacketCryptoRuntimeCacheStats packet_crypto_runtime_cache_stats_for_tests() {
+    return runtime_cache_stats_for_tests_impl();
+}
+
+void reset_packet_crypto_runtime_caches_for_tests() {
+    reset_runtime_caches_for_tests_impl();
+}
+
 ScopedPacketCryptoFaultInjector::ScopedPacketCryptoFaultInjector(PacketCryptoFaultPoint fault_point,
                                                                  std::size_t occurrence)
     : previous_fault_point_(detail::packet_crypto_fault_state().fault_point),
       previous_occurrence_(detail::packet_crypto_fault_state().occurrence) {
+    reset_packet_crypto_runtime_caches_for_tests();
     detail::set_packet_crypto_fault_state(fault_point, occurrence);
 }
 
 ScopedPacketCryptoFaultInjector::~ScopedPacketCryptoFaultInjector() {
+    reset_packet_crypto_runtime_caches_for_tests();
     detail::set_packet_crypto_fault_state(previous_fault_point_, previous_occurrence_);
 }
 

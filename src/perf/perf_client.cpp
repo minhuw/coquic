@@ -188,7 +188,7 @@ void QuicPerfClient::enter_measure_phase(quic::QuicCoreTimePoint now) {
         }
         for (auto &[stream_id, counts_toward_measurement] : connection.active_bulk_streams) {
             (void)stream_id;
-            counts_toward_measurement = false;
+            counts_toward_measurement = true;
         }
     }
 }
@@ -316,6 +316,7 @@ int QuicPerfClient::run() {
         if (!event.has_value()) {
             return fail("client wait failed");
         }
+        advance_benchmark_phase(event->now);
 
         switch (event->kind) {
         case io::QuicIoEvent::Kind::idle_timeout:
@@ -503,7 +504,10 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
 
     if (timed_bulk_download_mode()) {
         const auto stream_it = connection.active_bulk_streams.find(received.stream_id);
-        if (stream_it != connection.active_bulk_streams.end() && stream_it->second) {
+        const bool within_measurement_window =
+            now >= measure_started_at_ && now < measure_deadline_;
+        if (stream_it != connection.active_bulk_streams.end() && stream_it->second &&
+            within_measurement_window) {
             summary_.bytes_received += received.bytes.size();
         }
 

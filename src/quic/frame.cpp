@@ -1,5 +1,6 @@
 #include "src/quic/frame.h"
 
+#include <array>
 #include <limits>
 
 #include "src/quic/buffer.h"
@@ -20,17 +21,20 @@ CodecResult<FrameDecodeResult> decode_failure(CodecErrorCode code, std::size_t o
 }
 
 std::optional<CodecError> append_varint(BufferWriter &writer, std::uint64_t value) {
-    const auto encoded = encode_varint(value);
-    if (!encoded.has_value()) {
-        return encoded.error();
+    std::array<std::byte, 8> encoded{};
+    const auto written = encode_varint_into(encoded, value);
+    if (!written.has_value()) {
+        return written.error();
     }
 
-    writer.write_bytes(encoded.value());
+    writer.write_bytes(std::span<const std::byte>(encoded.data(), written.value()));
     return std::nullopt;
 }
 
 void append_varint_unchecked(BufferWriter &writer, std::uint64_t value) {
-    writer.write_bytes(encode_varint(value).value());
+    std::array<std::byte, 8> encoded{};
+    const auto written = encode_varint_into(encoded, value).value();
+    writer.write_bytes(std::span<const std::byte>(encoded.data(), written));
 }
 
 std::optional<CodecError> append_exact_length_bytes(BufferWriter &writer,

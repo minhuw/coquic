@@ -37,6 +37,15 @@ enum class PacketCryptoFaultPoint : std::uint8_t {
     header_protection_aes_bad_length,
 };
 
+struct PacketCryptoRuntimeCacheStats {
+    std::size_t seal_context_new_calls = 0;
+    std::size_t open_context_new_calls = 0;
+    std::size_t header_protection_context_new_calls = 0;
+};
+
+PacketCryptoRuntimeCacheStats packet_crypto_runtime_cache_stats_for_tests();
+void reset_packet_crypto_runtime_caches_for_tests();
+
 class ScopedPacketCryptoFaultInjector {
   public:
     explicit ScopedPacketCryptoFaultInjector(PacketCryptoFaultPoint fault_point,

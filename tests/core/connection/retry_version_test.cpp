@@ -78,7 +78,7 @@ TEST(QuicCoreTest, ApplicationProbePathFailsWhenRetryWithoutAckCannotSerialize) 
             });
     }
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 5);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 5);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
@@ -107,7 +107,7 @@ TEST(QuicCoreTest, ApplicationSendFailsWhenRetryWithoutAckCannotSerialize) {
         stream.reset_state = coquic::quic::StreamControlFrameState::pending;
     }
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 5);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 5);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
@@ -1039,7 +1039,7 @@ TEST(QuicCoreTest, CompatibleNegotiationDuplicateInitialSerializationFailureMark
     connection.initial_space_.send_crypto.append(
         coquic::quic::test::bytes_from_string("serverhello"));
     const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, 2);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     EXPECT_TRUE(connection.has_failed());
@@ -1066,7 +1066,7 @@ TEST(
             coquic::quic::test::bytes_from_string("serverhello"));
 
         const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
-            coquic::quic::test::PacketCryptoFaultPoint::seal_context_new, occurrence);
+            coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, occurrence);
 
         const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 

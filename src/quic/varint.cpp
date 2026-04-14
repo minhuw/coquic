@@ -29,20 +29,35 @@ std::size_t encoded_varint_size(std::uint64_t value) {
 }
 
 CodecResult<std::vector<std::byte>> encode_varint(std::uint64_t value) {
-    if (value > kMaxQuicVarInt) {
-        return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
-    }
-
     const auto length = encoded_varint_size(value);
     std::vector<std::byte> bytes(length, std::byte{0x00});
 
-    for (std::size_t i = 0; i < length; ++i) {
-        const auto shift = static_cast<unsigned>((length - i - 1) * 8);
-        bytes[i] = static_cast<std::byte>((value >> shift) & 0xffu);
+    const auto encoded = encode_varint_into(bytes, value);
+    if (!encoded.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(encoded.error().code,
+                                                            encoded.error().offset);
     }
-    bytes[0] |= prefix_mask(length);
 
     return CodecResult<std::vector<std::byte>>::success(std::move(bytes));
+}
+
+CodecResult<std::size_t> encode_varint_into(std::span<std::byte> output, std::uint64_t value) {
+    if (value > kMaxQuicVarInt) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    const auto length = encoded_varint_size(value);
+    if (output.size() < length) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    for (std::size_t i = 0; i < length; ++i) {
+        const auto shift = static_cast<unsigned>((length - i - 1) * 8);
+        output[i] = static_cast<std::byte>((value >> shift) & 0xffu);
+    }
+    output[0] |= prefix_mask(length);
+
+    return CodecResult<std::size_t>::success(length);
 }
 
 CodecResult<VarIntDecoded> decode_varint(BufferReader &reader) {

@@ -4,7 +4,9 @@
 
 #include <gtest/gtest.h>
 
+#define private public
 #include "src/perf/perf_client.h"
+#undef private
 #include "tests/support/perf/perf_test_fixtures.h"
 
 namespace {
@@ -171,6 +173,52 @@ TEST(QuicPerfBulkTest, TimedDrainCompletesAfterCloseRequestsDrainActiveStreams) 
     EXPECT_FALSE(timed_bulk_download_drain_complete_for_test(connections));
 }
 
+TEST(QuicPerfBulkTest, TimedDownloadStopsCountingBytesAfterMeasurementDeadline) {
+    const QuicPerfConfig config{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::bulk,
+        .direction = QuicPerfDirection::download,
+        .host = "127.0.0.1",
+        .port = 9443,
+        .request_bytes = 0,
+        .response_bytes = 1u << 20,
+        .streams = 1,
+        .connections = 1,
+        .requests_in_flight = 1,
+        .warmup = std::chrono::milliseconds{100},
+        .duration = std::chrono::milliseconds{150},
+    };
+    QuicPerfClient client(config);
+    client.phase_ = QuicPerfClient::BenchmarkPhase::measure;
+    client.measure_started_at_ = coquic::quic::test::test_time(100);
+    client.measure_deadline_ = client.measure_started_at_ + std::chrono::milliseconds{150};
+
+    auto &connection = client.connections_[1];
+    connection.handle = 1;
+    connection.active_bulk_streams.emplace(kQuicPerfFirstDataStreamId, true);
+
+    const auto payload = std::vector<std::byte>(1024, std::byte{0x5a});
+    ASSERT_TRUE(client.handle_stream_data(connection,
+                                          coquic::quic::QuicCoreReceiveStreamData{
+                                              .connection = 1,
+                                              .stream_id = kQuicPerfFirstDataStreamId,
+                                              .bytes = payload,
+                                              .fin = false,
+                                          },
+                                          client.measure_deadline_ - std::chrono::milliseconds{1}));
+    EXPECT_EQ(client.summary_.bytes_received, 1024u);
+
+    ASSERT_TRUE(client.handle_stream_data(connection,
+                                          coquic::quic::QuicCoreReceiveStreamData{
+                                              .connection = 1,
+                                              .stream_id = kQuicPerfFirstDataStreamId,
+                                              .bytes = payload,
+                                              .fin = false,
+                                          },
+                                          client.measure_deadline_ + std::chrono::milliseconds{1}));
+    EXPECT_EQ(client.summary_.bytes_received, 1024u);
+}
+
 TEST(QuicPerfBulkTest, TimedDownloadUsesMeasurementWindow) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
@@ -229,6 +277,48 @@ TEST(QuicPerfBulkTest, TimedDownloadUsesMeasurementWindow) {
     EXPECT_GT(measured_bytes_received_value,
               static_cast<std::uint64_t>(client.response_bytes * client.streams));
     EXPECT_LT(wall_elapsed.count(), 900);
+}
+
+TEST(QuicPerfBulkTest, TimedDownloadCountsBytesFromStreamsThatSpanWarmupBoundary) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const QuicPerfConfig server{
+        .role = QuicPerfRole::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    ScopedPerfProcess server_process(server);
+
+    const auto json_path =
+        std::filesystem::temp_directory_path() / "coquic-perf-bulk-timed-warmup-boundary.json";
+    std::filesystem::remove(json_path);
+
+    const QuicPerfConfig client{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::bulk,
+        .direction = QuicPerfDirection::download,
+        .host = "127.0.0.1",
+        .port = port,
+        .request_bytes = 0,
+        .response_bytes = 1u << 20,
+        .streams = 4,
+        .connections = 1,
+        .requests_in_flight = 1,
+        .warmup = std::chrono::milliseconds{100},
+        .duration = std::chrono::milliseconds{150},
+        .json_out = json_path,
+    };
+
+    EXPECT_EQ(run_perf_runtime(client), 0);
+
+    const auto json = read_result_text(json_path);
+    const auto measured_bytes_received = json_first_u64_field(json, "bytes_received");
+
+    ASSERT_TRUE(measured_bytes_received.has_value());
+    EXPECT_GT(measured_bytes_received.value_or(0), 0u);
 }
 
 TEST(QuicPerfBulkTest, TimedDownloadDurationScalesMeasuredBytes) {

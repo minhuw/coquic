@@ -1216,6 +1216,22 @@ TEST(QuicCoreTest, NewDataSchedulingRoundsRobinAcrossSendableStreams) {
     EXPECT_NE(std::find(stream_ids.begin(), stream_ids.end(), 4), stream_ids.end());
 }
 
+TEST(QuicCoreTest, NewDataSchedulingResumesRoundRobinAfterLastSentStream) {
+    auto connection = make_connected_client_connection();
+    const auto payload = std::vector<std::byte>(static_cast<std::size_t>(2000), std::byte{0x61});
+
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+    ASSERT_TRUE(connection.queue_stream_send(4, payload, false).has_value());
+    ASSERT_TRUE(connection.queue_stream_send(8, payload, false).has_value());
+    connection.last_application_send_stream_id_ = 4;
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_EQ(application_stream_ids_from_datagram(connection, datagram),
+              (std::vector<std::uint64_t>{8, 0, 4}));
+}
+
 TEST(QuicCoreTest, RetransmissionPreservesStreamIdentityAcrossMultipleStreams) {
     auto connection = make_connected_client_connection();
     const auto payload = std::vector<std::byte>(static_cast<std::size_t>(2000), std::byte{0x62});

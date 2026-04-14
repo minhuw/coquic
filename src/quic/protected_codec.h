@@ -25,11 +25,25 @@ enum class EndpointRole : std::uint8_t {
     server,
 };
 
+struct PacketProtectionKeys {
+    std::vector<std::byte> key;
+    std::vector<std::byte> iv;
+    std::vector<std::byte> hp_key;
+};
+
+struct TrafficSecretCacheInputs {
+    std::vector<std::byte> secret;
+    std::optional<std::vector<std::byte>> header_protection_key;
+    std::uint32_t quic_version = kQuicVersion1;
+};
+
 struct TrafficSecret {
     CipherSuite cipher_suite;
     std::vector<std::byte> secret;
     std::optional<std::vector<std::byte>> header_protection_key;
     std::uint32_t quic_version = kQuicVersion1;
+    mutable std::optional<PacketProtectionKeys> cached_packet_protection_keys;
+    mutable std::optional<TrafficSecretCacheInputs> cached_packet_protection_inputs;
 };
 
 struct ProtectedInitialPacket {

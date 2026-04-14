@@ -63,6 +63,7 @@ class ReceivedPacketHistory {
                          QuicCoreTimePoint received_time,
                          QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
     bool has_ack_to_send() const;
+    bool requests_immediate_ack() const;
     std::optional<AckFrame> build_ack_frame(std::uint64_t ack_delay_exponent, QuicCoreTimePoint now,
                                             bool allow_non_pending = false) const;
     void on_ack_sent();
@@ -79,7 +80,10 @@ class ReceivedPacketHistory {
 
     std::map<std::uint64_t, ReceivedPacketRange> ranges_;
     bool ack_pending_ = false;
+    bool immediate_ack_requested_ = false;
+    std::uint64_t ack_eliciting_packets_since_last_ack_ = 0;
     std::optional<std::uint64_t> largest_received_packet_number_;
+    std::optional<std::uint64_t> largest_received_ack_eliciting_packet_number_;
     std::optional<ReceivedPacketRecord> largest_received_packet_record_;
     bool ecn_feedback_accessible_ = false;
     AckEcnCounts ecn_counts_{};

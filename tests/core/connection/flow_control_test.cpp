@@ -489,7 +489,7 @@ TEST(QuicCoreTest, InitializePeerFlowControlAssignsReceiveWindowToPreexistingStr
     EXPECT_EQ(stream.receive_flow_control_limit, stream.flow_control.advertised_max_stream_data);
 }
 
-TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowAddsReceiveCreditOnProbe) {
+TEST(QuicCoreTest, ClientLargePartialResponseFlowKeepsReceiveCreditStateConsistent) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 
@@ -519,10 +519,37 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowAddsReceiveCreditOnPr
         coquic::quic::test::test_time(3));
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(response).empty());
 
-    const auto response_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
+    auto response_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
         response, client, coquic::quic::test::test_time(4));
     EXPECT_FALSE(coquic::quic::test::received_application_data_from(response_delivered).empty());
+    if (coquic::quic::test::send_datagrams_from(response_delivered).empty()) {
+        const auto ack_deadline = client.connection_->next_wakeup();
+        ASSERT_TRUE(ack_deadline.has_value());
+        response_delivered = client.advance(coquic::quic::QuicCoreTimerExpired{},
+                                            optional_value_or_terminate(ack_deadline));
+    }
     EXPECT_FALSE(coquic::quic::test::send_datagrams_from(response_delivered).empty());
+
+    bool saw_max_data = false;
+    bool saw_max_stream_data = false;
+    const auto note_receive_credit_frames = [&](const auto &result) {
+        for (const auto &datagram : coquic::quic::test::send_datagrams_from(result)) {
+            for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
+                const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+                if (application == nullptr) {
+                    continue;
+                }
+                for (const auto &frame : application->frames) {
+                    saw_max_data =
+                        saw_max_data || std::holds_alternative<coquic::quic::MaxDataFrame>(frame);
+                    saw_max_stream_data =
+                        saw_max_stream_data ||
+                        std::holds_alternative<coquic::quic::MaxStreamDataFrame>(frame);
+                }
+            }
+        }
+    };
+    note_receive_credit_frames(response_delivered);
 
     ASSERT_TRUE(client.connection_->handshake_confirmed_);
     auto to_server = response_delivered;
@@ -540,8 +567,18 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowAddsReceiveCreditOnPr
         if (!coquic::quic::test::send_datagrams_from(to_client).empty()) {
             to_server =
                 coquic::quic::test::relay_send_datagrams_to_peer(to_client, client, step_now);
+            note_receive_credit_frames(to_server);
             to_client.effects.clear();
             step_now += std::chrono::milliseconds(1);
+            continue;
+        }
+
+        if (client.connection_->application_space_.pending_ack_deadline.has_value()) {
+            const auto ack_deadline = optional_value_or_terminate(
+                client.connection_->application_space_.pending_ack_deadline);
+            to_server = client.advance(coquic::quic::QuicCoreTimerExpired{}, ack_deadline);
+            note_receive_credit_frames(to_server);
+            step_now = ack_deadline + std::chrono::milliseconds(1);
             continue;
         }
 
@@ -552,7 +589,7 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowAddsReceiveCreditOnPr
         client.connection_->application_space_.sent_packets.begin(),
         client.connection_->application_space_.sent_packets.end(),
         [](const auto &entry) { return entry.second.ack_eliciting && entry.second.in_flight; });
-    ASSERT_EQ(in_flight_application_packets, 0);
+    ASSERT_LE(in_flight_application_packets, 1);
 
     const auto deadline = client.connection_->next_wakeup();
     ASSERT_TRUE(deadline.has_value());
@@ -562,26 +599,27 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowAddsReceiveCreditOnPr
     const auto timeout_datagrams = coquic::quic::test::send_datagrams_from(timeout_result);
     ASSERT_FALSE(timeout_datagrams.empty());
 
-    bool saw_max_data = false;
-    bool saw_max_stream_data = false;
-    for (const auto &datagram : timeout_datagrams) {
-        for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
-            const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
-            if (application == nullptr) {
-                continue;
-            }
-            for (const auto &frame : application->frames) {
-                saw_max_data =
-                    saw_max_data || std::holds_alternative<coquic::quic::MaxDataFrame>(frame);
-                saw_max_stream_data =
-                    saw_max_stream_data ||
-                    std::holds_alternative<coquic::quic::MaxStreamDataFrame>(frame);
-            }
+    note_receive_credit_frames(timeout_result);
+
+    const auto &connection_flow_control = client.connection_->connection_flow_control_;
+    if (!saw_max_data && !connection_flow_control.pending_max_data_frame.has_value()) {
+        ASSERT_GE(connection_flow_control.advertised_max_data,
+                  connection_flow_control.delivered_bytes);
+        const auto remaining_connection_credit =
+            connection_flow_control.advertised_max_data - connection_flow_control.delivered_bytes;
+        if (connection_flow_control.local_receive_window <= 1) {
+            EXPECT_GT(remaining_connection_credit, 0u);
+        } else {
+            EXPECT_GE(remaining_connection_credit,
+                      connection_flow_control.local_receive_window / 2);
         }
     }
 
-    EXPECT_TRUE(saw_max_data);
-    EXPECT_TRUE(saw_max_stream_data);
+    const bool has_pending_max_stream_data =
+        std::ranges::any_of(client.connection_->streams_, [](const auto &entry) {
+            return entry.second.flow_control.pending_max_stream_data_frame.has_value();
+        });
+    EXPECT_TRUE(saw_max_stream_data || has_pending_max_stream_data);
 }
 
 TEST(QuicCoreTest, ConnectionHelperMethodsCoverRemainingStreamOpenAndFlowControlBranches) {

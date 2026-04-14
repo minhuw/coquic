@@ -480,7 +480,12 @@ TEST(QuicCoreTest, ProcessInboundDatagramPromotesApplicationKeysOnPeerKeyUpdate)
     const auto &promoted_read_secret = connection.application_space_.read_secret.value();
     EXPECT_EQ(promoted_read_secret.secret, next_read_secret_value.secret);
 
-    const auto outbound = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto outbound = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    if (outbound.empty()) {
+        const auto ack_deadline = connection.next_wakeup();
+        ASSERT_TRUE(ack_deadline.has_value());
+        outbound = connection.drain_outbound_datagram(optional_value_or_terminate(ack_deadline));
+    }
     ASSERT_FALSE(outbound.empty());
     const auto write_secret = connection.application_space_.write_secret;
     ASSERT_TRUE(write_secret.has_value());
@@ -877,8 +882,10 @@ TEST(QuicCoreTest, CoreRequestKeyUpdateWaitsForAckThenFlipsOutboundPhase) {
     auto server_ack = coquic::quic::test::relay_send_datagrams_to_peer(
         current_phase_send, server, coquic::quic::test::test_time(3));
     if (coquic::quic::test::send_datagrams_from(server_ack).empty()) {
-        server_ack =
-            server.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(4));
+        const auto ack_deadline = server.connection_->next_wakeup();
+        ASSERT_TRUE(ack_deadline.has_value());
+        server_ack = server.advance(coquic::quic::QuicCoreTimerExpired{},
+                                    optional_value_or_terminate(ack_deadline));
     }
     const auto client_after_ack = coquic::quic::test::relay_send_datagrams_to_peer(
         server_ack, client, coquic::quic::test::test_time(5));

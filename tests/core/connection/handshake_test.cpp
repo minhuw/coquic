@@ -3447,10 +3447,15 @@ TEST(QuicCoreTest, DrainOutboundDatagramReplaysDeferredProtectedPacketsBeforeFlu
     }
     connection.deferred_protected_packets_.push_back(deferred_packet.value());
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_TRUE(connection.deferred_protected_packets_.empty());
     EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 7u);
+    if (datagram.empty()) {
+        const auto ack_deadline = connection.next_wakeup();
+        ASSERT_TRUE(ack_deadline.has_value());
+        datagram = connection.drain_outbound_datagram(optional_value_or_terminate(ack_deadline));
+    }
     ASSERT_FALSE(datagram.empty());
     const auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);

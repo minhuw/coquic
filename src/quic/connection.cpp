@@ -715,9 +715,14 @@ bool has_in_flight_ack_eliciting_packet(const PacketSpaceState &packet_space) {
 
 void schedule_application_ack_deadline(PacketSpaceState &packet_space, QuicCoreTimePoint now,
                                        std::uint64_t max_ack_delay_ms, QuicEcnCodepoint ecn) {
-    if (ecn == QuicEcnCodepoint::ce || packet_space.received_packets.requests_immediate_ack()) {
+    if (ecn == QuicEcnCodepoint::ce) {
         packet_space.pending_ack_deadline = now;
         packet_space.force_ack_send = true;
+        return;
+    }
+
+    if (packet_space.received_packets.requests_immediate_ack()) {
+        packet_space.pending_ack_deadline = now;
         return;
     }
 
@@ -5868,6 +5873,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                         });
                     static_cast<void>(qlog_session_->write_event(
                         now, "quic:packet_sent", qlog::serialize_packet_snapshot(snapshot)));
+                    auto snapshot_ptr = std::make_shared<qlog::PacketSnapshot>(snapshot);
 
                     for (auto *packet_space :
                          {&initial_space_, &handshake_space_, &application_space_}) {
@@ -5876,8 +5882,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                             continue;
                         }
 
-                        sent->second.qlog_packet_snapshot =
-                            std::make_shared<qlog::PacketSnapshot>(std::move(snapshot));
+                        sent->second.qlog_packet_snapshot = snapshot_ptr;
                         sent->second.qlog_pto_probe = pto_probe_burst_active;
                     }
                 }
@@ -6603,6 +6608,20 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 });
             }
         };
+        const auto serialize_application_candidate_from_frames =
+            [&](std::vector<Frame> candidate_frames,
+                std::span<const StreamFrameSendFragment> stream_fragments,
+                bool has_application_close, std::uint64_t packet_number,
+                bool write_key_phase) -> CodecResult<SerializedProtectedDatagram> {
+            auto candidate_packets = packets;
+            candidate_packets.emplace_back(make_application_protected_packet(
+                use_zero_rtt_packet_protection & !has_application_close, current_version_,
+                application_destination_connection_id(), config_.source_connection_id,
+                write_key_phase, kDefaultInitialPacketNumberLength, packet_number,
+                std::move(candidate_frames), stream_fragments));
+
+            return serialize_candidate_datagram_with_metadata(candidate_packets);
+        };
         const auto serialize_application_candidate =
             [&](std::span<const ByteRange> crypto_ranges, bool include_handshake_done,
                 const std::optional<AckFrame> &ack_frame,
@@ -6677,18 +6696,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 candidate_frames.emplace_back(PingFrame{});
             }
 
-            const bool has_application_close = application_close_frame.has_value();
-            const bool candidate_uses_zero_rtt_packet_protection =
-                use_zero_rtt_packet_protection & !has_application_close;
-            auto candidate_packets = packets;
-            candidate_packets.emplace_back(make_application_protected_packet(
-                candidate_uses_zero_rtt_packet_protection, current_version_,
-                application_destination_connection_id(), config_.source_connection_id,
-                application_write_key_phase_, kDefaultInitialPacketNumberLength,
-                application_space_.next_send_packet_number, std::move(candidate_frames),
-                stream_fragments));
-
-            return serialize_candidate_datagram_with_metadata(candidate_packets);
+            return serialize_application_candidate_from_frames(
+                std::move(candidate_frames), stream_fragments, application_close_frame.has_value(),
+                application_space_.next_send_packet_number, application_write_key_phase_);
         };
         const auto restore_application_fragment = [&](const StreamFrameSendFragment &fragment) {
             const bool releases_flow_control =
@@ -7412,7 +7422,9 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             };
             std::vector<Frame> frames;
             const auto force_ack_only =
-                validation_only_send && !send_application_close_only;
+                ((application_space_.force_ack_send & base_ack_frame.has_value()) |
+                 validation_only_send) &
+                !send_application_close_only;
             auto max_data_frame = (force_ack_only || send_application_close_only)
                                       ? std::optional<MaxDataFrame>{}
                                       : connection_flow_control_.take_max_data_frame();
@@ -7461,6 +7473,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 return {};
             }
 
+            const auto candidate_application_write_key_phase = application_write_key_phase_;
             auto candidate_datagram = serialize_application_candidate(
                 application_candidate_crypto_ranges, include_handshake_done, selected_ack_frame,
                 max_data_frame, new_connection_id_frames, retire_connection_id_frames,
@@ -7862,6 +7875,16 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 (!use_zero_rtt_packet_protection) | has_application_close);
             if (!packet_number.has_value()) {
                 return {};
+            }
+            if (application_write_key_phase_ != candidate_application_write_key_phase) {
+                auto final_candidate_datagram = serialize_application_candidate_from_frames(
+                    frames, stream_fragments, has_application_close, *packet_number,
+                    application_write_key_phase_);
+                if (!final_candidate_datagram.has_value()) {
+                    mark_failed();
+                    return {};
+                }
+                candidate_datagram = std::move(final_candidate_datagram);
             }
             const auto stream_bytes = stream_fragment_bytes(stream_fragments);
             if (packet_trace_matches_connection(config_.source_connection_id)) {

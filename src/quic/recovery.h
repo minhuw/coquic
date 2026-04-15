@@ -2,10 +2,10 @@
 
 #include <chrono>
 #include <cstdint>
-#include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <vector>
 
 #include "src/quic/core.h"
@@ -110,20 +110,48 @@ struct RecoveryPacketMetadata {
     bool declared_lost = false;
 };
 
+struct RecoveryPacketHandle {
+    std::uint64_t packet_number = 0;
+    std::size_t slot_index = 0;
+    QuicCoreTimePoint sent_time{};
+    bool ack_eliciting = false;
+    bool in_flight = false;
+    bool declared_lost = false;
+};
+
 struct AckProcessingResult {
-    std::vector<RecoveryPacketMetadata> acked_packets;
-    std::vector<RecoveryPacketMetadata> lost_packets;
-    std::optional<RecoveryPacketMetadata> largest_newly_acked_packet;
+    std::vector<RecoveryPacketHandle> acked_packets;
+    std::vector<RecoveryPacketHandle> late_acked_packets;
+    std::vector<RecoveryPacketHandle> lost_packets;
+    std::optional<RecoveryPacketHandle> largest_newly_acked_packet;
     bool largest_acknowledged_was_newly_acked = false;
     bool has_newly_acked_ack_eliciting = false;
 };
 
 class PacketSpaceRecovery {
   public:
+    PacketSpaceRecovery();
+    PacketSpaceRecovery(const PacketSpaceRecovery &other);
+    PacketSpaceRecovery(PacketSpaceRecovery &&other) noexcept;
+    PacketSpaceRecovery &operator=(const PacketSpaceRecovery &other);
+    PacketSpaceRecovery &operator=(PacketSpaceRecovery &&other) noexcept;
+
     void on_packet_sent(const SentPacketRecord &packet);
     void on_packet_declared_lost(std::uint64_t packet_number);
+    void retire_packet(RecoveryPacketHandle handle);
     void retire_packet(std::uint64_t packet_number);
+    AckProcessingResult on_ack_received(std::span<const AckPacketNumberRange> ack_ranges,
+                                        std::uint64_t largest_acknowledged, QuicCoreTimePoint now);
     AckProcessingResult on_ack_received(const AckFrame &ack, QuicCoreTimePoint now);
+    std::optional<RecoveryPacketHandle> handle_for_packet_number(std::uint64_t packet_number) const;
+    SentPacketRecord *packet_for_handle(RecoveryPacketHandle handle);
+    const SentPacketRecord *packet_for_handle(RecoveryPacketHandle handle) const;
+    SentPacketRecord *find_packet(std::uint64_t packet_number);
+    const SentPacketRecord *find_packet(std::uint64_t packet_number) const;
+    std::vector<RecoveryPacketHandle> tracked_packets() const;
+    std::size_t tracked_packet_count() const;
+    std::optional<RecoveryPacketHandle> oldest_tracked_packet() const;
+    std::optional<RecoveryPacketHandle> newest_tracked_packet() const;
     std::optional<std::uint64_t> largest_acked_packet_number() const;
     std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet() const;
     std::optional<DeadlineTrackedPacket> earliest_loss_packet() const;
@@ -132,26 +160,44 @@ class PacketSpaceRecovery {
     const RecoveryRttState &rtt_state() const;
 
   private:
-    struct SentPacketRecoveryRecord {
-        std::uint64_t packet_number = 0;
-        QuicCoreTimePoint sent_time{};
-        bool ack_eliciting = false;
-        bool in_flight = false;
-        bool declared_lost = false;
+    struct SentPacketsView {
+        const PacketSpaceRecovery *owner = nullptr;
+
+        bool contains(std::uint64_t packet_number) const;
+        const SentPacketRecord &at(std::uint64_t packet_number) const;
+        std::size_t size() const;
     };
 
-    static DeadlineTrackedPacket tracked_packet(const SentPacketRecoveryRecord &packet);
-    static RecoveryPacketMetadata packet_metadata(const SentPacketRecoveryRecord &packet);
-    void erase_from_tracked_sets(const SentPacketRecoveryRecord &packet);
-    void maybe_track_as_loss_candidate(const SentPacketRecoveryRecord &packet);
+    enum class LedgerSlotState {
+        empty,
+        sent,
+        declared_lost,
+        retired,
+    };
+
+    struct SentPacketLedgerSlot {
+        LedgerSlotState state = LedgerSlotState::empty;
+        SentPacketRecord packet;
+        bool acknowledged = false;
+    };
+
+    static DeadlineTrackedPacket tracked_packet(const SentPacketRecord &packet);
+    static RecoveryPacketHandle packet_handle(const SentPacketLedgerSlot &slot,
+                                              std::size_t slot_index);
+    void erase_from_tracked_sets(const SentPacketRecord &packet);
+    void maybe_track_as_loss_candidate(const SentPacketRecord &packet);
     void track_new_loss_candidates(std::optional<std::uint64_t> previous_largest_acked,
                                    std::uint64_t largest_acked);
+    std::size_t ensure_slot_for_packet_number(std::uint64_t packet_number);
+    void compact_retired_prefix();
 
-    std::map<std::uint64_t, SentPacketRecoveryRecord> sent_packets_;
+    std::uint64_t base_packet_number_ = 0;
+    std::vector<SentPacketLedgerSlot> slots_;
     std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> in_flight_ack_eliciting_packets_;
     std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> eligible_loss_packets_;
     std::optional<std::uint64_t> largest_acked_packet_number_;
     RecoveryRttState rtt_state_;
+    SentPacketsView sent_packets_{};
 };
 
 bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked);

@@ -1,7 +1,9 @@
 #include "src/quic/recovery.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace coquic::quic {
@@ -191,31 +193,102 @@ void ReceivedPacketHistory::on_ack_sent() {
     ack_eliciting_packets_since_last_ack_ = 0;
 }
 
-DeadlineTrackedPacket PacketSpaceRecovery::tracked_packet(const SentPacketRecoveryRecord &packet) {
+PacketSpaceRecovery::PacketSpaceRecovery() : sent_packets_{this} {
+}
+
+PacketSpaceRecovery::PacketSpaceRecovery(const PacketSpaceRecovery &other)
+    : base_packet_number_(other.base_packet_number_), slots_(other.slots_),
+      in_flight_ack_eliciting_packets_(other.in_flight_ack_eliciting_packets_),
+      eligible_loss_packets_(other.eligible_loss_packets_),
+      largest_acked_packet_number_(other.largest_acked_packet_number_),
+      rtt_state_(other.rtt_state_), sent_packets_{this} {
+}
+
+PacketSpaceRecovery::PacketSpaceRecovery(PacketSpaceRecovery &&other) noexcept
+    : base_packet_number_(other.base_packet_number_), slots_(std::move(other.slots_)),
+      in_flight_ack_eliciting_packets_(std::move(other.in_flight_ack_eliciting_packets_)),
+      eligible_loss_packets_(std::move(other.eligible_loss_packets_)),
+      largest_acked_packet_number_(other.largest_acked_packet_number_),
+      rtt_state_(other.rtt_state_), sent_packets_{this} {
+}
+
+PacketSpaceRecovery &PacketSpaceRecovery::operator=(const PacketSpaceRecovery &other) {
+    if (this == &other) {
+        return *this;
+    }
+
+    base_packet_number_ = other.base_packet_number_;
+    slots_ = other.slots_;
+    in_flight_ack_eliciting_packets_ = other.in_flight_ack_eliciting_packets_;
+    eligible_loss_packets_ = other.eligible_loss_packets_;
+    largest_acked_packet_number_ = other.largest_acked_packet_number_;
+    rtt_state_ = other.rtt_state_;
+    sent_packets_.owner = this;
+    return *this;
+}
+
+PacketSpaceRecovery &PacketSpaceRecovery::operator=(PacketSpaceRecovery &&other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+
+    base_packet_number_ = other.base_packet_number_;
+    slots_ = std::move(other.slots_);
+    in_flight_ack_eliciting_packets_ = std::move(other.in_flight_ack_eliciting_packets_);
+    eligible_loss_packets_ = std::move(other.eligible_loss_packets_);
+    largest_acked_packet_number_ = other.largest_acked_packet_number_;
+    rtt_state_ = other.rtt_state_;
+    sent_packets_.owner = this;
+    return *this;
+}
+
+bool PacketSpaceRecovery::SentPacketsView::contains(std::uint64_t packet_number) const {
+    return owner != nullptr && owner->find_packet(packet_number) != nullptr;
+}
+
+const SentPacketRecord &
+PacketSpaceRecovery::SentPacketsView::at(std::uint64_t packet_number) const {
+    if (owner == nullptr) {
+        throw std::out_of_range("packet recovery view is detached");
+    }
+
+    const auto *packet = owner->find_packet(packet_number);
+    if (packet == nullptr) {
+        throw std::out_of_range("packet number is not tracked");
+    }
+    return *packet;
+}
+
+std::size_t PacketSpaceRecovery::SentPacketsView::size() const {
+    return owner == nullptr ? 0 : owner->tracked_packet_count();
+}
+
+DeadlineTrackedPacket PacketSpaceRecovery::tracked_packet(const SentPacketRecord &packet) {
     return DeadlineTrackedPacket{
         .packet_number = packet.packet_number,
         .sent_time = packet.sent_time,
     };
 }
 
-RecoveryPacketMetadata
-PacketSpaceRecovery::packet_metadata(const SentPacketRecoveryRecord &packet) {
-    return RecoveryPacketMetadata{
-        .packet_number = packet.packet_number,
-        .sent_time = packet.sent_time,
-        .ack_eliciting = packet.ack_eliciting,
-        .in_flight = packet.in_flight,
-        .declared_lost = packet.declared_lost,
+RecoveryPacketHandle PacketSpaceRecovery::packet_handle(const SentPacketLedgerSlot &slot,
+                                                        std::size_t slot_index) {
+    return RecoveryPacketHandle{
+        .packet_number = slot.packet.packet_number,
+        .slot_index = slot_index,
+        .sent_time = slot.packet.sent_time,
+        .ack_eliciting = slot.packet.ack_eliciting,
+        .in_flight = slot.packet.in_flight,
+        .declared_lost = slot.state == LedgerSlotState::declared_lost || slot.packet.declared_lost,
     };
 }
 
-void PacketSpaceRecovery::erase_from_tracked_sets(const SentPacketRecoveryRecord &packet) {
+void PacketSpaceRecovery::erase_from_tracked_sets(const SentPacketRecord &packet) {
     const auto tracked = tracked_packet(packet);
     in_flight_ack_eliciting_packets_.erase(tracked);
     eligible_loss_packets_.erase(tracked);
 }
 
-void PacketSpaceRecovery::maybe_track_as_loss_candidate(const SentPacketRecoveryRecord &packet) {
+void PacketSpaceRecovery::maybe_track_as_loss_candidate(const SentPacketRecord &packet) {
     if (!largest_acked_packet_number_.has_value() ||
         packet.packet_number >= *largest_acked_packet_number_ || !packet.in_flight ||
         packet.declared_lost) {
@@ -227,112 +300,305 @@ void PacketSpaceRecovery::maybe_track_as_loss_candidate(const SentPacketRecovery
 
 void PacketSpaceRecovery::track_new_loss_candidates(
     std::optional<std::uint64_t> previous_largest_acked, std::uint64_t largest_acked) {
-    auto it = previous_largest_acked.has_value()
-                  ? sent_packets_.lower_bound(*previous_largest_acked)
-                  : sent_packets_.begin();
-    for (; it != sent_packets_.end() && it->first < largest_acked; ++it) {
-        maybe_track_as_loss_candidate(it->second);
+    if (slots_.empty() || largest_acked <= base_packet_number_) {
+        return;
     }
+
+    const auto scan_start =
+        std::max(previous_largest_acked.value_or(base_packet_number_), base_packet_number_);
+    const auto scan_end =
+        std::min(largest_acked, base_packet_number_ + static_cast<std::uint64_t>(slots_.size()));
+    for (auto packet_number = scan_start; packet_number < scan_end; ++packet_number) {
+        const auto slot_index = static_cast<std::size_t>(packet_number - base_packet_number_);
+        const auto &slot = slots_[slot_index];
+        if (slot.state != LedgerSlotState::sent || slot.acknowledged) {
+            continue;
+        }
+        maybe_track_as_loss_candidate(slot.packet);
+    }
+}
+
+std::size_t PacketSpaceRecovery::ensure_slot_for_packet_number(std::uint64_t packet_number) {
+    if (slots_.empty()) {
+        base_packet_number_ = packet_number;
+        slots_.resize(1);
+        return 0;
+    }
+
+    if (packet_number < base_packet_number_) {
+        const auto prepend_count = static_cast<std::size_t>(base_packet_number_ - packet_number);
+        slots_.insert(slots_.begin(), prepend_count, SentPacketLedgerSlot{});
+        base_packet_number_ = packet_number;
+        return 0;
+    }
+
+    const auto slot_index = static_cast<std::size_t>(packet_number - base_packet_number_);
+    if (slot_index >= slots_.size()) {
+        slots_.resize(slot_index + 1);
+    }
+    return slot_index;
+}
+
+void PacketSpaceRecovery::compact_retired_prefix() {
+    std::size_t retired_prefix = 0;
+    while (retired_prefix < slots_.size() &&
+           slots_[retired_prefix].state == LedgerSlotState::retired) {
+        ++retired_prefix;
+    }
+    if (retired_prefix == 0) {
+        return;
+    }
+    if (retired_prefix == slots_.size()) {
+        slots_.clear();
+        base_packet_number_ = 0;
+        return;
+    }
+
+    slots_.erase(slots_.begin(), slots_.begin() + static_cast<std::ptrdiff_t>(retired_prefix));
+    base_packet_number_ += retired_prefix;
+}
+
+std::optional<RecoveryPacketHandle>
+PacketSpaceRecovery::handle_for_packet_number(std::uint64_t packet_number) const {
+    if (slots_.empty() || packet_number < base_packet_number_) {
+        return std::nullopt;
+    }
+
+    const auto slot_index = static_cast<std::size_t>(packet_number - base_packet_number_);
+    if (slot_index >= slots_.size()) {
+        return std::nullopt;
+    }
+
+    const auto &slot = slots_[slot_index];
+    if ((slot.state != LedgerSlotState::sent && slot.state != LedgerSlotState::declared_lost) ||
+        slot.packet.packet_number != packet_number) {
+        return std::nullopt;
+    }
+
+    return packet_handle(slot, slot_index);
+}
+
+SentPacketRecord *PacketSpaceRecovery::packet_for_handle(RecoveryPacketHandle handle) {
+    return const_cast<SentPacketRecord *>(std::as_const(*this).packet_for_handle(handle));
+}
+
+const SentPacketRecord *PacketSpaceRecovery::packet_for_handle(RecoveryPacketHandle handle) const {
+    if (handle.slot_index >= slots_.size()) {
+        return nullptr;
+    }
+
+    const auto &slot = slots_[handle.slot_index];
+    if ((slot.state != LedgerSlotState::sent && slot.state != LedgerSlotState::declared_lost) ||
+        slot.packet.packet_number != handle.packet_number) {
+        return nullptr;
+    }
+
+    return &slot.packet;
+}
+
+SentPacketRecord *PacketSpaceRecovery::find_packet(std::uint64_t packet_number) {
+    const auto handle = handle_for_packet_number(packet_number);
+    if (!handle.has_value()) {
+        return nullptr;
+    }
+    return packet_for_handle(*handle);
+}
+
+const SentPacketRecord *PacketSpaceRecovery::find_packet(std::uint64_t packet_number) const {
+    const auto handle = handle_for_packet_number(packet_number);
+    if (!handle.has_value()) {
+        return nullptr;
+    }
+    return packet_for_handle(*handle);
+}
+
+std::vector<RecoveryPacketHandle> PacketSpaceRecovery::tracked_packets() const {
+    std::vector<RecoveryPacketHandle> packets;
+    packets.reserve(tracked_packet_count());
+    for (std::size_t slot_index = 0; slot_index < slots_.size(); ++slot_index) {
+        const auto &slot = slots_[slot_index];
+        if (slot.state != LedgerSlotState::sent && slot.state != LedgerSlotState::declared_lost) {
+            continue;
+        }
+        packets.push_back(packet_handle(slot, slot_index));
+    }
+    return packets;
+}
+
+std::size_t PacketSpaceRecovery::tracked_packet_count() const {
+    return static_cast<std::size_t>(
+        std::count_if(slots_.begin(), slots_.end(), [](const SentPacketLedgerSlot &slot) {
+            return slot.state == LedgerSlotState::sent ||
+                   slot.state == LedgerSlotState::declared_lost;
+        }));
+}
+
+std::optional<RecoveryPacketHandle> PacketSpaceRecovery::oldest_tracked_packet() const {
+    for (std::size_t slot_index = 0; slot_index < slots_.size(); ++slot_index) {
+        const auto &slot = slots_[slot_index];
+        if (slot.state == LedgerSlotState::sent || slot.state == LedgerSlotState::declared_lost) {
+            return packet_handle(slot, slot_index);
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<RecoveryPacketHandle> PacketSpaceRecovery::newest_tracked_packet() const {
+    for (std::size_t slot_index = slots_.size(); slot_index > 0; --slot_index) {
+        const auto &slot = slots_[slot_index - 1];
+        if (slot.state == LedgerSlotState::sent || slot.state == LedgerSlotState::declared_lost) {
+            return packet_handle(slot, slot_index - 1);
+        }
+    }
+    return std::nullopt;
 }
 
 void PacketSpaceRecovery::on_packet_sent(const SentPacketRecord &packet) {
-    if (const auto existing = sent_packets_.find(packet.packet_number);
-        existing != sent_packets_.end()) {
-        erase_from_tracked_sets(existing->second);
-        sent_packets_.erase(existing);
+    auto &slot = slots_[ensure_slot_for_packet_number(packet.packet_number)];
+    if (slot.state == LedgerSlotState::sent || slot.state == LedgerSlotState::declared_lost) {
+        erase_from_tracked_sets(slot.packet);
     }
 
-    auto &tracked = sent_packets_[packet.packet_number];
-    tracked = SentPacketRecoveryRecord{
-        .packet_number = packet.packet_number,
-        .sent_time = packet.sent_time,
-        .ack_eliciting = packet.ack_eliciting,
-        .in_flight = packet.in_flight,
-        .declared_lost = packet.declared_lost,
-    };
-    if (tracked.ack_eliciting && tracked.in_flight) {
-        in_flight_ack_eliciting_packets_.insert(tracked_packet(tracked));
+    slot.state = packet.declared_lost ? LedgerSlotState::declared_lost : LedgerSlotState::sent;
+    slot.packet = packet;
+    slot.packet.declared_lost = packet.declared_lost;
+    if (slot.state == LedgerSlotState::declared_lost) {
+        slot.packet.in_flight = false;
+        slot.packet.bytes_in_flight = 0;
     }
-    maybe_track_as_loss_candidate(tracked);
+    slot.acknowledged = false;
+
+    if (slot.packet.ack_eliciting && slot.packet.in_flight) {
+        in_flight_ack_eliciting_packets_.insert(tracked_packet(slot.packet));
+    }
+    maybe_track_as_loss_candidate(slot.packet);
 }
 
 void PacketSpaceRecovery::on_packet_declared_lost(std::uint64_t packet_number) {
-    const auto packet_it = sent_packets_.find(packet_number);
-    if (packet_it == sent_packets_.end()) {
+    auto *packet = find_packet(packet_number);
+    if (packet == nullptr) {
         return;
     }
 
-    erase_from_tracked_sets(packet_it->second);
-    packet_it->second.in_flight = false;
-    packet_it->second.declared_lost = true;
+    erase_from_tracked_sets(*packet);
+    packet->in_flight = false;
+    packet->declared_lost = true;
+    packet->bytes_in_flight = 0;
+
+    if (const auto handle = handle_for_packet_number(packet_number); handle.has_value()) {
+        slots_[handle->slot_index].state = LedgerSlotState::declared_lost;
+    }
+}
+
+void PacketSpaceRecovery::retire_packet(RecoveryPacketHandle handle) {
+    auto current_handle = packet_for_handle(handle) != nullptr
+                              ? std::optional{handle}
+                              : handle_for_packet_number(handle.packet_number);
+    if (!current_handle.has_value()) {
+        return;
+    }
+
+    auto &slot = slots_[current_handle->slot_index];
+    erase_from_tracked_sets(slot.packet);
+    slot.packet.in_flight = false;
+    slot.packet.bytes_in_flight = 0;
+    slot.state = LedgerSlotState::retired;
+    slot.acknowledged = true;
+    compact_retired_prefix();
 }
 
 void PacketSpaceRecovery::retire_packet(std::uint64_t packet_number) {
-    const auto packet_it = sent_packets_.find(packet_number);
-    if (packet_it == sent_packets_.end()) {
+    const auto handle = handle_for_packet_number(packet_number);
+    if (!handle.has_value()) {
         return;
     }
-
-    erase_from_tracked_sets(packet_it->second);
-    sent_packets_.erase(packet_it);
+    retire_packet(*handle);
 }
 
-AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
-                                                         QuicCoreTimePoint now) {
+AckProcessingResult
+PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_ranges,
+                                     std::uint64_t largest_acknowledged, QuicCoreTimePoint now) {
     AckProcessingResult result;
     const auto previous_largest_acked = largest_acked_packet_number_;
     largest_acked_packet_number_ = previous_largest_acked.has_value()
-                                       ? std::max(*previous_largest_acked, ack.largest_acknowledged)
-                                       : ack.largest_acknowledged;
+                                       ? std::max(*previous_largest_acked, largest_acknowledged)
+                                       : largest_acknowledged;
     const auto effective_largest_acked = *largest_acked_packet_number_;
     if (!previous_largest_acked.has_value() || effective_largest_acked > *previous_largest_acked) {
         track_new_loss_candidates(previous_largest_acked, effective_largest_acked);
     }
 
-    std::vector<std::uint64_t> acked_packet_numbers;
-    const auto ack_ranges = ack_frame_packet_number_ranges(ack);
-    if (ack_ranges.has_value()) {
-        for (auto range_it = ack_ranges.value().rbegin(); range_it != ack_ranges.value().rend();
-             ++range_it) {
-            const auto ack_begin = sent_packets_.lower_bound(range_it->smallest);
-            const auto ack_end = sent_packets_.upper_bound(range_it->largest);
-            for (auto it = ack_begin; it != ack_end; ++it) {
-                acked_packet_numbers.push_back(it->first);
-                result.acked_packets.push_back(packet_metadata(it->second));
+    for (auto range_it = ack_ranges.rbegin(); range_it != ack_ranges.rend(); ++range_it) {
+        for (auto packet_number = range_it->smallest; packet_number <= range_it->largest;
+             ++packet_number) {
+            const auto handle = handle_for_packet_number(packet_number);
+            if (!handle.has_value()) {
+                continue;
+            }
+
+            auto &slot = slots_[handle->slot_index];
+            if (slot.acknowledged) {
+                continue;
+            }
+
+            if (slot.state == LedgerSlotState::sent) {
+                result.acked_packets.push_back(packet_handle(slot, handle->slot_index));
                 result.largest_newly_acked_packet = result.acked_packets.back();
-                if (it->second.packet_number == ack.largest_acknowledged) {
+                if (packet_number == largest_acknowledged) {
                     result.largest_acknowledged_was_newly_acked = true;
                 }
-                if (it->second.ack_eliciting) {
+                if (slot.packet.ack_eliciting) {
                     result.has_newly_acked_ack_eliciting = true;
                 }
+
+                erase_from_tracked_sets(slot.packet);
+                slot.acknowledged = true;
+                slot.packet.in_flight = false;
+                slot.packet.bytes_in_flight = 0;
+            } else if (slot.state == LedgerSlotState::declared_lost) {
+                result.late_acked_packets.push_back(packet_handle(slot, handle->slot_index));
+                slot.acknowledged = true;
             }
         }
     }
 
-    for (const auto packet_number : acked_packet_numbers) {
-        retire_packet(packet_number);
+    if (slots_.empty() || effective_largest_acked <= base_packet_number_) {
+        return result;
     }
 
-    const auto loss_scan_end = sent_packets_.lower_bound(effective_largest_acked);
-    for (auto it = sent_packets_.begin(); it != loss_scan_end; ++it) {
-        auto &packet = it->second;
-        if (packet.declared_lost || !packet.in_flight) {
+    const auto loss_scan_end = std::min(
+        effective_largest_acked, base_packet_number_ + static_cast<std::uint64_t>(slots_.size()));
+    for (auto packet_number = base_packet_number_; packet_number < loss_scan_end; ++packet_number) {
+        auto &slot = slots_[static_cast<std::size_t>(packet_number - base_packet_number_)];
+        if (slot.state != LedgerSlotState::sent || slot.acknowledged || !slot.packet.in_flight) {
             continue;
         }
 
-        if (!is_packet_threshold_lost(packet.packet_number, effective_largest_acked) &&
-            !is_time_threshold_lost(rtt_state_, packet.sent_time, now)) {
+        if (!is_packet_threshold_lost(packet_number, effective_largest_acked) &&
+            !is_time_threshold_lost(rtt_state_, slot.packet.sent_time, now)) {
             continue;
         }
 
-        erase_from_tracked_sets(packet);
-        packet.declared_lost = true;
-        packet.in_flight = false;
-        result.lost_packets.push_back(packet_metadata(packet));
+        erase_from_tracked_sets(slot.packet);
+        slot.state = LedgerSlotState::declared_lost;
+        slot.packet.declared_lost = true;
+        slot.packet.in_flight = false;
+        slot.packet.bytes_in_flight = 0;
+        result.lost_packets.push_back(packet_handle(slot, packet_number - base_packet_number_));
     }
 
     return result;
+}
+
+AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
+                                                         QuicCoreTimePoint now) {
+    const auto ack_ranges = ack_frame_packet_number_ranges(ack);
+    if (!ack_ranges.has_value()) {
+        return on_ack_received(std::span<const AckPacketNumberRange>{}, ack.largest_acknowledged,
+                               now);
+    }
+    return on_ack_received(std::span<const AckPacketNumberRange>(ack_ranges.value()),
+                           ack.largest_acknowledged, now);
 }
 
 std::optional<std::uint64_t> PacketSpaceRecovery::largest_acked_packet_number() const {

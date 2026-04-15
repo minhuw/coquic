@@ -1,3 +1,4 @@
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -24,10 +25,12 @@ struct ReceivedPacketHistoryTestPeer {
 namespace {
 
 using coquic::quic::AckFrame;
+using coquic::quic::AckPacketNumberRange;
 using coquic::quic::AckRange;
 using coquic::quic::ByteRange;
 using coquic::quic::PacketSpaceRecovery;
 using coquic::quic::ReceivedPacketHistory;
+using coquic::quic::RecoveryPacketHandle;
 using coquic::quic::RecoveryPacketMetadata;
 using coquic::quic::RecoveryRttState;
 using coquic::quic::SentPacketRecord;
@@ -56,6 +59,21 @@ std::vector<std::uint64_t> packet_numbers_from(const std::vector<Packet> &packet
     packet_numbers.reserve(packets.size());
     for (const auto &packet : packets) {
         packet_numbers.push_back(packet.packet_number);
+    }
+    return packet_numbers;
+}
+
+std::vector<std::uint64_t>
+packet_numbers_from_handles(const PacketSpaceRecovery &recovery,
+                            const std::vector<RecoveryPacketHandle> &handles) {
+    std::vector<std::uint64_t> packet_numbers;
+    packet_numbers.reserve(handles.size());
+    for (const auto handle : handles) {
+        const auto *packet = recovery.packet_for_handle(handle);
+        EXPECT_NE(packet, nullptr);
+        if (packet != nullptr) {
+            packet_numbers.push_back(packet->packet_number);
+        }
     }
     return packet_numbers;
 }
@@ -655,8 +673,40 @@ TEST(QuicRecoveryTest, AckProcessingCanStillAcknowledgeDeclaredLostPackets) {
     const auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/2), coquic::quic::test::test_time(20));
 
-    EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{2}));
+    EXPECT_TRUE(result.acked_packets.empty());
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets),
+              (std::vector<std::uint64_t>{2}));
     EXPECT_TRUE(result.lost_packets.empty());
+}
+
+TEST(QuicRecoveryTest, AckProcessingSeparatesActiveAndLateAckedPacketsInLedger) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(3)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(5)));
+    recovery.on_packet_declared_lost(3);
+
+    const std::array ack_ranges = {
+        AckPacketNumberRange{
+            .smallest = 3,
+            .largest = 3,
+        },
+        AckPacketNumberRange{
+            .smallest = 5,
+            .largest = 5,
+        },
+    };
+
+    const auto result = recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/5,
+                                                 coquic::quic::test::test_time(10));
+
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets),
+              (std::vector<std::uint64_t>{5}));
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets),
+              (std::vector<std::uint64_t>{3}));
+    ASSERT_TRUE(result.largest_newly_acked_packet.has_value());
+    EXPECT_EQ(result.largest_newly_acked_packet->packet_number, 5u);
 }
 
 TEST(QuicRecoveryTest, PtoDeadlineUsesInitialRttBeforeSamples) {

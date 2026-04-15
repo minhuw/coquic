@@ -1619,7 +1619,10 @@ TEST(QuicCoreTest, MarkLostPacketRequeuesConnectionAndStreamControlState) {
     EXPECT_EQ(stream.reset_state, coquic::quic::StreamControlFrameState::pending);
     EXPECT_EQ(stream.stop_sending_state, coquic::quic::StreamControlFrameState::pending);
     EXPECT_EQ(fin_stream.send_fin_state, coquic::quic::StreamSendFinState::pending);
-    EXPECT_EQ(tracked_packet_or_null(connection.application_space_, packet.packet_number), nullptr);
+    const auto &lost_packet =
+        tracked_packet_or_terminate(connection.application_space_, packet.packet_number);
+    EXPECT_TRUE(lost_packet.declared_lost);
+    EXPECT_FALSE(lost_packet.in_flight);
 }
 
 TEST(QuicCoreTest, InboundApplicationStreamAllowsOmittedOffsetAndLengthFlags) {

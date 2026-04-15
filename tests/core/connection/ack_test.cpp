@@ -1069,14 +1069,13 @@ TEST(QuicCoreTest, DetectLostPacketsMarksCryptoRangesLostAndKeepsRecoveryStateFo
 
     connection.detect_lost_packets(connection.initial_space_, coquic::quic::test::test_time(20));
 
-    EXPECT_EQ(tracked_packet_count(connection.initial_space_), 0u);
+    EXPECT_EQ(tracked_packet_count(connection.initial_space_), 1u);
     EXPECT_TRUE(connection.initial_space_.send_crypto.has_pending_data());
     EXPECT_EQ(connection.initial_space_.recovery.largest_acked_packet_number(),
               std::optional<std::uint64_t>{5});
-    const auto *initial_packet = connection.initial_space_.recovery.find_packet(0);
-    ASSERT_NE(initial_packet, nullptr);
-    EXPECT_EQ(connection.initial_space_.recovery.find_packet(0)->declared_lost, true);
-    EXPECT_EQ(connection.initial_space_.recovery.find_packet(0)->in_flight, false);
+    const auto &initial_packet = tracked_packet_or_terminate(connection.initial_space_, 0);
+    EXPECT_TRUE(initial_packet.declared_lost);
+    EXPECT_FALSE(initial_packet.in_flight);
 }
 
 TEST(QuicCoreTest, DetectLostApplicationPacketsRequeuesApplicationCryptoRanges) {
@@ -1104,10 +1103,13 @@ TEST(QuicCoreTest, DetectLostApplicationPacketsRequeuesApplicationCryptoRanges) 
     connection.detect_lost_packets(connection.application_space_,
                                    coquic::quic::test::test_time(20));
 
-    EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 1u);
     EXPECT_TRUE(connection.application_space_.send_crypto.has_pending_data());
     EXPECT_EQ(connection.application_space_.recovery.largest_acked_packet_number(),
               std::optional<std::uint64_t>{5});
+    const auto &application_packet = tracked_packet_or_terminate(connection.application_space_, 0);
+    EXPECT_TRUE(application_packet.declared_lost);
+    EXPECT_FALSE(application_packet.in_flight);
 }
 
 TEST(QuicCoreTest, DetectLostPacketsLeavesPacketsQueuedWhenNoLossThresholdIsMet) {
@@ -5499,7 +5501,7 @@ TEST(QuicCoreTest, MarkLostPacketKeepsEcnProbingWhenProbeLossIsNotConclusive) {
             .path_id = 0,
             .ecn = coquic::quic::QuicEcnCodepoint::ect0,
         };
-        connection.track_sent_packet(connection.application_space_, packet);
+        connection.application_space_.recovery.on_packet_sent(packet);
 
         connection.mark_lost_packet(
             connection.application_space_,

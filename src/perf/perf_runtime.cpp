@@ -13,6 +13,7 @@
 
 namespace coquic::perf {
 namespace {
+constexpr std::size_t kPerfMaxOutboundDatagramSize = 16 * 1024;
 constexpr std::string_view kPerfUsageLine =
     "usage: coquic-perf [server|client] [--host HOST] [--port PORT] "
     "[--io-backend socket|io_uring] [--mode bulk|rr|crr] "
@@ -368,6 +369,7 @@ quic::QuicCoreEndpointConfig make_perf_client_endpoint_config(const QuicPerfConf
         .role = quic::EndpointRole::client,
         .verify_peer = config.verify_peer,
         .application_protocol = "coquic-perf/1",
+        .max_outbound_datagram_size = kPerfMaxOutboundDatagramSize,
     };
 }
 
@@ -382,6 +384,7 @@ quic::QuicCoreEndpointConfig make_perf_server_endpoint_config(const QuicPerfConf
                 .private_key_pem = read_text_file(config.private_key_path),
             },
     };
+    endpoint_config.max_outbound_datagram_size = kPerfMaxOutboundDatagramSize;
     endpoint_config.transport.initial_max_streams_bidi =
         std::max(endpoint_config.transport.initial_max_streams_bidi,
                  kPerfServerInitialMaxBidirectionalStreams);

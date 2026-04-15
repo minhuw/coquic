@@ -1315,7 +1315,8 @@ void LocalStreamLimitState::mark_max_streams_frame_lost(const MaxStreamsFrame &f
 
 QuicConnection::QuicConnection(QuicCoreConfig config)
     : config_(std::move(config)), original_version_(config_.original_version),
-      current_version_(config_.initial_version), congestion_controller_(kMaximumDatagramSize) {
+      current_version_(config_.initial_version),
+      congestion_controller_(std::max(kMaximumDatagramSize, config_.max_outbound_datagram_size)) {
     if (config_.supported_versions.empty()) {
         config_.supported_versions.push_back(current_version_);
     }
@@ -5377,6 +5378,13 @@ std::uint64_t QuicConnection::anti_amplification_send_budget(QuicPathId path_id)
 }
 
 std::size_t QuicConnection::outbound_datagram_size_limit() const {
+    auto max_datagram_size = config_.max_outbound_datagram_size;
+    if (peer_transport_parameters_.has_value()) {
+        max_datagram_size = static_cast<std::size_t>(
+            std::min<std::uint64_t>(static_cast<std::uint64_t>(max_datagram_size),
+                                    peer_transport_parameters_->max_udp_payload_size));
+    }
+
     const auto pending_response_path =
         std::find_if(paths_.begin(), paths_.end(),
                      [](const auto &entry) { return entry.second.pending_response.has_value(); });
@@ -5386,7 +5394,7 @@ std::size_t QuicConnection::outbound_datagram_size_limit() const {
             saturating_subtract(anti_amplification_send_budget(pending_response_path->first),
                                 pending_response_path->second.anti_amplification_sent_bytes);
         return static_cast<std::size_t>(std::min<std::uint64_t>(
-            remaining_budget, static_cast<std::uint64_t>(kMaximumDatagramSize)));
+            remaining_budget, static_cast<std::uint64_t>(max_datagram_size)));
     }
     if (current_send_path_id_.has_value() && anti_amplification_applies(*current_send_path_id_)) {
         const auto &path = paths_.at(*current_send_path_id_);
@@ -5394,16 +5402,16 @@ std::size_t QuicConnection::outbound_datagram_size_limit() const {
             saturating_subtract(anti_amplification_send_budget(*current_send_path_id_),
                                 path.anti_amplification_sent_bytes);
         return static_cast<std::size_t>(std::min<std::uint64_t>(
-            remaining_budget, static_cast<std::uint64_t>(kMaximumDatagramSize)));
+            remaining_budget, static_cast<std::uint64_t>(max_datagram_size)));
     }
     if (!anti_amplification_applies()) {
-        return kMaximumDatagramSize;
+        return max_datagram_size;
     }
 
     const auto remaining_budget =
         saturating_subtract(anti_amplification_send_budget(), anti_amplification_sent_bytes_);
-    return static_cast<std::size_t>(std::min<std::uint64_t>(
-        remaining_budget, static_cast<std::uint64_t>(kMaximumDatagramSize)));
+    return static_cast<std::size_t>(
+        std::min<std::uint64_t>(remaining_budget, static_cast<std::uint64_t>(max_datagram_size)));
 }
 
 void QuicConnection::note_inbound_datagram_bytes(std::size_t bytes) {
@@ -5635,7 +5643,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
     const auto serialize_candidate_datagram_with_metadata =
         [&](const std::vector<ProtectedPacket> &candidate_packets,
             const ProtectedPacket *appended_packet = nullptr,
-            const ProtectedOneRttPacketView *appended_one_rtt_packet =
+            const ProtectedOneRttPacketView *appended_one_rtt_packet = nullptr,
+            const ProtectedOneRttPacketFragmentView *appended_one_rtt_fragment_packet =
                 nullptr) -> CodecResult<SerializedProtectedDatagram> {
         auto datagram_packets = candidate_packets;
         const auto context = make_serialize_context();
@@ -5655,6 +5664,25 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 const auto offset = encoded.value().bytes.size();
                 const auto appended = append_protected_one_rtt_packet_to_datagram(
                     encoded.value().bytes, *appended_one_rtt_packet, serialize_context);
+                if (!appended.has_value()) {
+                    return CodecResult<SerializedProtectedDatagram>::failure(
+                        appended.error().code, appended.error().offset);
+                }
+                encoded.value().packet_metadata.push_back(SerializedProtectedPacketMetadata{
+                    .offset = offset,
+                    .length = appended.value(),
+                });
+                return encoded;
+            }
+            if (appended_one_rtt_fragment_packet != nullptr) {
+                auto encoded =
+                    serialize_protected_datagram_with_metadata(datagram_packets, serialize_context);
+                if (!encoded.has_value()) {
+                    return encoded;
+                }
+                const auto offset = encoded.value().bytes.size();
+                const auto appended = append_protected_one_rtt_packet_to_datagram(
+                    encoded.value().bytes, *appended_one_rtt_fragment_packet, serialize_context);
                 if (!appended.has_value()) {
                     return CodecResult<SerializedProtectedDatagram>::failure(
                         appended.error().code, appended.error().offset);
@@ -6648,16 +6676,15 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
             if (!use_zero_rtt && serialized_packet == nullptr) {
                 const auto candidate_destination_connection_id =
                     application_destination_connection_id();
-                const auto candidate_stream_views = make_stream_frame_views(stream_fragments);
-                const auto candidate_packet = ProtectedOneRttPacketView{
+                const auto candidate_packet = ProtectedOneRttPacketFragmentView{
                     .key_phase = write_key_phase,
                     .destination_connection_id = candidate_destination_connection_id,
                     .packet_number_length = kDefaultInitialPacketNumberLength,
                     .packet_number = packet_number,
                     .frames = candidate_frames,
-                    .stream_frame_views = candidate_stream_views,
+                    .stream_fragments = stream_fragments,
                 };
-                return serialize_candidate_datagram_with_metadata(packets, nullptr,
+                return serialize_candidate_datagram_with_metadata(packets, nullptr, nullptr,
                                                                   &candidate_packet);
             }
 

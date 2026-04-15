@@ -14,6 +14,7 @@
 #include "src/quic/packet_crypto.h"
 #include "src/quic/packet_number.h"
 #include "src/quic/protected_codec_test_hooks.h"
+#include "src/quic/streams.h"
 #include "src/quic/version.h"
 
 namespace coquic::quic {
@@ -194,19 +195,17 @@ void append_packet_number(std::vector<std::byte> &bytes, TruncatedPacketNumberEn
     }
 }
 
-CodecResult<std::size_t>
-serialize_stream_frame_view_header_into(std::vector<std::byte> &bytes,
-                                        const StreamFrameView &stream_view) {
-    if (stream_view.end < stream_view.begin) {
-        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
-    }
+std::size_t encoded_stream_frame_payload_size(std::uint64_t stream_id, std::uint64_t offset,
+                                              std::size_t payload_size) {
+    return 1 + encoded_varint_size(stream_id) + encoded_varint_size(offset) +
+           encoded_varint_size(payload_size) + payload_size;
+}
 
-    const auto payload_size = stream_view.end - stream_view.begin;
-    if (stream_view.offset > kMaxVarInt - payload_size) {
-        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
-    }
-    if (payload_size != 0 &&
-        (!stream_view.storage || stream_view.end > stream_view.storage->size())) {
+CodecResult<std::size_t> serialize_stream_frame_header_into(std::vector<std::byte> &bytes, bool fin,
+                                                            std::uint64_t stream_id,
+                                                            std::uint64_t offset,
+                                                            std::size_t payload_size) {
+    if (offset > kMaxVarInt - payload_size) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
     }
 
@@ -214,18 +213,63 @@ serialize_stream_frame_view_header_into(std::vector<std::byte> &bytes,
     std::byte type = std::byte{0x08};
     type |= std::byte{0x04};
     type |= std::byte{0x02};
-    if (stream_view.fin) {
+    if (fin) {
         type |= std::byte{0x01};
     }
 
     bytes.push_back(type);
-    if (const auto error = append_varint(bytes, stream_view.stream_id)) {
+    if (const auto error = append_varint(bytes, stream_id)) {
         bytes.resize(begin);
         return CodecResult<std::size_t>::failure(error->code, error->offset);
     }
-    append_varint_unchecked(bytes, stream_view.offset);
+    append_varint_unchecked(bytes, offset);
     append_varint_unchecked(bytes, payload_size);
     return CodecResult<std::size_t>::success(bytes.size() - begin);
+}
+
+CodecResult<std::size_t> append_stream_frame_payload_into(std::vector<std::byte> &bytes, bool fin,
+                                                          std::uint64_t stream_id,
+                                                          std::uint64_t offset,
+                                                          std::span<const std::byte> payload) {
+    const auto begin = bytes.size();
+    const auto header =
+        serialize_stream_frame_header_into(bytes, fin, stream_id, offset, payload.size());
+    if (!header.has_value()) {
+        return header;
+    }
+
+    append_bytes(bytes, payload);
+    return CodecResult<std::size_t>::success(bytes.size() - begin);
+}
+
+CodecResult<std::size_t>
+append_stream_frame_view_into_datagram(std::vector<std::byte> &bytes,
+                                       const StreamFrameView &stream_view) {
+    if (stream_view.end < stream_view.begin) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    const auto payload_size = stream_view.end - stream_view.begin;
+    if (payload_size != 0 &&
+        (!stream_view.storage || stream_view.end > stream_view.storage->size())) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    const auto payload =
+        payload_size == 0
+            ? std::span<const std::byte>{}
+            : std::span<const std::byte>(stream_view.storage->data() +
+                                             static_cast<std::ptrdiff_t>(stream_view.begin),
+                                         payload_size);
+    return append_stream_frame_payload_into(bytes, stream_view.fin, stream_view.stream_id,
+                                            stream_view.offset, payload);
+}
+
+CodecResult<std::size_t>
+append_stream_frame_send_fragment_to_datagram(std::vector<std::byte> &bytes,
+                                              const StreamFrameSendFragment &fragment) {
+    return append_stream_frame_payload_into(bytes, fragment.fin, fragment.stream_id,
+                                            fragment.offset, fragment.bytes.span());
 }
 
 bool long_header_has_token(LongHeaderPacketType packet_type) {
@@ -1075,6 +1119,35 @@ void pad_short_header_plaintext_for_header_protection(std::vector<std::byte> &pl
 }
 
 template <typename OneRttPacketLike>
+bool packet_has_stream_payloads(const OneRttPacketLike &packet) {
+    if constexpr (requires { packet.stream_frame_views; }) {
+        return !packet.stream_frame_views.empty();
+    } else {
+        return !packet.stream_fragments.empty();
+    }
+}
+
+template <typename OneRttPacketLike>
+std::size_t packet_stream_payload_wire_size(const OneRttPacketLike &packet) {
+    std::size_t total = 0;
+    if constexpr (requires { packet.stream_frame_views; }) {
+        for (const auto &stream_view : packet.stream_frame_views) {
+            if (stream_view.end < stream_view.begin) {
+                continue;
+            }
+            total += encoded_stream_frame_payload_size(stream_view.stream_id, stream_view.offset,
+                                                       stream_view.end - stream_view.begin);
+        }
+    } else {
+        for (const auto &fragment : packet.stream_fragments) {
+            total += encoded_stream_frame_payload_size(fragment.stream_id, fragment.offset,
+                                                       fragment.bytes.size());
+        }
+    }
+    return total;
+}
+
+template <typename OneRttPacketLike>
 CodecResult<std::size_t>
 append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagram,
                                                  const OneRttPacketLike &packet,
@@ -1108,7 +1181,7 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
     const auto datagram_begin = datagram.size();
     const auto rollback = [&]() { datagram.resize(datagram_begin); };
 
-    if (packet.stream_frame_views.empty()) {
+    if (!packet_has_stream_payloads(packet)) {
         CodecResult<std::vector<std::byte>> plaintext_image =
             CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::unsupported_packet_type,
                                                          0);
@@ -1190,6 +1263,9 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
                                        .truncated_packet_number = truncated_packet_number.value(),
                                    });
 
+    datagram.reserve(datagram_begin + payload_offset + packet_stream_payload_wire_size(packet) +
+                     kHeaderProtectionSampleOffset + kPacketProtectionTagLength);
+
     std::size_t frame_index = 0;
     for (const auto &frame : packet.frames) {
         if (const auto *stream = std::get_if<StreamFrame>(&frame);
@@ -1208,20 +1284,24 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
         ++frame_index;
     }
 
-    for (const auto &stream_view : packet.stream_frame_views) {
-        const auto header = serialize_stream_frame_view_header_into(datagram, stream_view);
-        if (!header.has_value()) {
-            rollback();
-            return CodecResult<std::size_t>::failure(header.error().code, frame_index);
+    if constexpr (requires { packet.stream_frame_views; }) {
+        for (const auto &stream_view : packet.stream_frame_views) {
+            const auto appended = append_stream_frame_view_into_datagram(datagram, stream_view);
+            if (!appended.has_value()) {
+                rollback();
+                return CodecResult<std::size_t>::failure(appended.error().code, frame_index);
+            }
+            ++frame_index;
         }
-
-        if (stream_view.end > stream_view.begin) {
-            datagram.insert(
-                datagram.end(),
-                stream_view.storage->begin() + static_cast<std::ptrdiff_t>(stream_view.begin),
-                stream_view.storage->begin() + static_cast<std::ptrdiff_t>(stream_view.end));
+    } else {
+        for (const auto &fragment : packet.stream_fragments) {
+            const auto appended = append_stream_frame_send_fragment_to_datagram(datagram, fragment);
+            if (!appended.has_value()) {
+                rollback();
+                return CodecResult<std::size_t>::failure(appended.error().code, frame_index);
+            }
+            ++frame_index;
         }
-        ++frame_index;
     }
 
     const auto minimum_packet_plaintext_size = packet_number_offset + kHeaderProtectionSampleOffset;
@@ -1434,6 +1514,13 @@ serialize_protected_datagram_with_metadata(std::span<const ProtectedPacket> pack
 CodecResult<std::size_t>
 append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
                                             const ProtectedOneRttPacketView &packet,
+                                            const SerializeProtectionContext &context) {
+    return append_protected_one_rtt_packet_to_datagram_impl(datagram, packet, context);
+}
+
+CodecResult<std::size_t>
+append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
+                                            const ProtectedOneRttPacketFragmentView &packet,
                                             const SerializeProtectionContext &context) {
     return append_protected_one_rtt_packet_to_datagram_impl(datagram, packet, context);
 }

@@ -101,4 +101,16 @@ TEST(QuicPerfConfigTest, ParsesServerIoUringInvocation) {
               std::filesystem::path{"tests/fixtures/quic-server-cert.pem"});
     EXPECT_EQ(parsed.private_key_path, std::filesystem::path{"tests/fixtures/quic-server-key.pem"});
 }
+
+TEST(QuicPerfConfigTest, EndpointConfigUsesPerfOutboundDatagramSize) {
+    constexpr std::size_t kExpectedPerfDatagramSize = 16 * 1024;
+
+    const auto client =
+        make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
+    const auto server =
+        make_perf_server_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::server});
+
+    EXPECT_EQ(client.max_outbound_datagram_size, kExpectedPerfDatagramSize);
+    EXPECT_EQ(server.max_outbound_datagram_size, kExpectedPerfDatagramSize);
+}
 } // namespace

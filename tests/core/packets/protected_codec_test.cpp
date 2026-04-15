@@ -15,6 +15,7 @@
 #include "src/quic/core.h"
 #include "src/quic/protected_codec.h"
 #include "src/quic/protected_codec_test_hooks.h"
+#include "src/quic/streams.h"
 
 namespace {
 
@@ -416,6 +417,69 @@ TEST(QuicProtectedCodecTest, AppendsOneRttPacketViewIntoExistingDatagramBuffer) 
     const std::vector<std::byte> prefix{
         std::byte{0xdd},
         std::byte{0xee},
+    };
+    auto datagram = prefix;
+
+    const auto appended =
+        coquic::quic::append_protected_one_rtt_packet_to_datagram(datagram, packet_view, context);
+    ASSERT_TRUE(appended.has_value());
+    EXPECT_EQ(datagram.size(), prefix.size() + appended.value());
+    EXPECT_EQ(std::vector<std::byte>(datagram.begin(),
+                                     datagram.begin() + static_cast<std::ptrdiff_t>(prefix.size())),
+              prefix);
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{packet}, context);
+    ASSERT_TRUE(encoded.has_value());
+    EXPECT_EQ(std::vector<std::byte>(datagram.begin() + static_cast<std::ptrdiff_t>(prefix.size()),
+                                     datagram.end()),
+              encoded.value());
+}
+
+TEST(QuicProtectedCodecTest, AppendsOneRttPacketFragmentViewIntoExistingDatagramBuffer) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames.clear();
+    auto shared_payload = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+        std::byte{0xdd},
+    });
+    packet.stream_frame_views = {
+        coquic::quic::StreamFrameView{
+            .fin = true,
+            .stream_id = 9,
+            .offset = 4,
+            .storage = shared_payload,
+            .begin = 1,
+            .end = 3,
+        },
+    };
+
+    const std::vector<coquic::quic::StreamFrameSendFragment> fragments = {
+        coquic::quic::StreamFrameSendFragment{
+            .stream_id = 9,
+            .offset = 4,
+            .bytes = coquic::quic::SharedBytes(shared_payload, 1, 3),
+            .fin = true,
+        },
+    };
+
+    const auto context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    const auto packet_view = coquic::quic::ProtectedOneRttPacketFragmentView{
+        .spin_bit = packet.spin_bit,
+        .key_phase = packet.key_phase,
+        .destination_connection_id = packet.destination_connection_id,
+        .packet_number_length = packet.packet_number_length,
+        .packet_number = packet.packet_number,
+        .frames = packet.frames,
+        .stream_fragments = fragments,
+    };
+
+    const std::vector<std::byte> prefix{
+        std::byte{0xfa},
+        std::byte{0xfb},
     };
     auto datagram = prefix;
 

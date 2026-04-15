@@ -74,6 +74,8 @@ struct ProtectedZeroRttPacket {
     std::vector<Frame> frames;
 };
 
+struct StreamFrameSendFragment;
+
 struct StreamFrameView {
     bool fin = false;
     std::uint64_t stream_id = 0;
@@ -101,6 +103,16 @@ struct ProtectedOneRttPacketView {
     std::uint64_t packet_number = 0;
     std::span<const Frame> frames;
     std::span<const StreamFrameView> stream_frame_views;
+};
+
+struct ProtectedOneRttPacketFragmentView {
+    bool spin_bit = false;
+    bool key_phase = false;
+    std::span<const std::byte> destination_connection_id;
+    std::uint8_t packet_number_length = 1;
+    std::uint64_t packet_number = 0;
+    std::span<const Frame> frames;
+    std::span<const StreamFrameSendFragment> stream_fragments;
 };
 
 struct SerializeProtectionContext {
@@ -149,6 +161,11 @@ serialize_protected_datagram_with_metadata(std::span<const ProtectedPacket> pack
 CodecResult<std::size_t>
 append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
                                             const ProtectedOneRttPacketView &packet,
+                                            const SerializeProtectionContext &context);
+
+CodecResult<std::size_t>
+append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
+                                            const ProtectedOneRttPacketFragmentView &packet,
                                             const SerializeProtectionContext &context);
 
 CodecResult<std::vector<std::byte>>

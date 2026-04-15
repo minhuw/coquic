@@ -56,6 +56,7 @@ struct QuicCoreConfig {
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
     QuicTransportConfig transport;
+    std::size_t max_outbound_datagram_size = 1200;
     std::vector<CipherSuite> allowed_tls_cipher_suites;
     std::optional<QuicResumptionState> resumption_state;
     QuicZeroRttConfig zero_rtt;
@@ -77,6 +78,7 @@ struct QuicCoreEndpointConfig {
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
     QuicTransportConfig transport;
+    std::size_t max_outbound_datagram_size = 1200;
     std::vector<CipherSuite> allowed_tls_cipher_suites;
     QuicZeroRttConfig zero_rtt;
     std::optional<QuicQlogConfig> qlog;

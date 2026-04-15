@@ -4762,6 +4762,27 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossRepeatedCumulativeAcks
         << " pending_send=" << connection.has_pending_application_send();
 }
 
+TEST(QuicCoreTest, ApplicationSendUsesConfiguredOutboundDatagramSizeLimit) {
+    auto connection = make_connected_client_connection();
+    connection.config_.max_outbound_datagram_size = 4096;
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.max_udp_payload_size = 4096;
+    peer_transport_parameters.initial_max_data = 64 * 1024;
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = 64 * 1024;
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = 64 * 1024;
+
+    const auto payload = std::vector<std::byte>(32 * 1024, std::byte{0x42});
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_GT(datagram.size(), 1200u);
+    EXPECT_LE(datagram.size(), 4096u);
+}
+
 TEST(QuicCoreTest, ApplicationSendYieldsAfterBoundedBurstUntilResumeDeadline) {
     auto connection = make_connected_client_connection();
     const auto payload =

@@ -13,6 +13,7 @@ readonly iperf_image="${INTEROP_IPERF_IMAGE:-martenseemann/quic-interop-iperf-en
 readonly interop_testcases="${INTEROP_TESTCASES:-handshake,transfer}"
 readonly interop_directions="${INTEROP_DIRECTIONS:-both}"
 readonly interop_analysis_shell_package="${INTEROP_ANALYSIS_SHELL_PACKAGE:-nixpkgs#wireshark}"
+readonly interop_runner_output_tail_lines="${INTEROP_RUNNER_OUTPUT_TAIL_LINES:-200}"
 readonly log_root="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
 readonly runner_repo_url="https://github.com/quic-interop/quic-interop-runner"
 readonly runner_dir="$(mktemp -d "${TMPDIR:-/tmp}/coquic-interop-runner.XXXXXX")"
@@ -22,6 +23,18 @@ readonly coquic_package="${INTEROP_COQUIC_PACKAGE:-interop-image-quictls-musl}"
 
 have_interop_analysis_tools() {
   command -v tshark >/dev/null 2>&1 && command -v editcap >/dev/null 2>&1
+}
+
+show_runner_output_tail() {
+  local runner_output_log=$1
+
+  if [ ! -f "${runner_output_log}" ]; then
+    return 0
+  fi
+
+  echo "Official runner output saved to ${runner_output_log}"
+  echo "Showing last ${interop_runner_output_tail_lines} lines from ${runner_output_log}"
+  tail -n "${interop_runner_output_tail_lines}" "${runner_output_log}" || true
 }
 
 cleanup() {
@@ -166,7 +179,7 @@ run_direction() {
   local direction_log_dir="${log_root}/${server}_${client}"
   local results_json="${direction_log_dir}/results.json"
   local runner_log_dir="${direction_log_dir}/runner"
-  local run_output
+  local runner_output_log="${direction_log_dir}/runner-output.txt"
   local status
   local testcase
   local testcase_log_dir
@@ -178,7 +191,7 @@ run_direction() {
   echo "== official interop: server=${server} client=${client} testcases=${interop_testcases} =="
   set +e
   if have_interop_analysis_tools; then
-    run_output="$(
+    (
       cd "${runner_dir}"
       python3 run.py \
         --server "${server}" \
@@ -187,10 +200,9 @@ run_direction() {
         --log-dir "${runner_log_dir}" \
         --json "${results_json}" \
         --debug
-    2>&1
-    )"
+    ) > "${runner_output_log}" 2>&1
   else
-    run_output="$(
+    (
       cd "${runner_dir}"
       nix shell "${interop_analysis_shell_package}" -c \
         python3 run.py \
@@ -200,23 +212,23 @@ run_direction() {
           --log-dir "${runner_log_dir}" \
           --json "${results_json}" \
           --debug
-    2>&1
-    )"
+    ) > "${runner_output_log}" 2>&1
   fi
   status=$?
   set -e
 
-  printf '%s\n' "${run_output}"
+  echo "Official runner output saved to ${runner_output_log}"
 
   if [ ! -f "${results_json}" ]; then
     echo "official runner results file missing: ${results_json}" >&2
+    show_runner_output_tail "${runner_output_log}"
     if [ "${status}" -ne 0 ]; then
       return "${status}"
     fi
     return 1
   fi
 
-  python3 - "${results_json}" "${server}" "${client}" "${interop_testcases}" <<'PY'
+  if ! python3 - "${results_json}" "${server}" "${client}" "${interop_testcases}" <<'PY'
 import json
 import pathlib
 import sys
@@ -286,6 +298,10 @@ if failed:
         f"{server}/{client}: {', '.join(failed)}"
     )
 PY
+  then
+    show_runner_output_tail "${runner_output_log}"
+    return 1
+  fi
 
   if [ -d "${runner_log_dir}/${server}_${client}" ]; then
     mv "${runner_log_dir}/${server}_${client}" "${direction_log_dir}/${server}_${client}"
@@ -293,6 +309,7 @@ PY
   rmdir "${runner_log_dir}" >/dev/null 2>&1 || true
 
   if [ "${status}" -ne 0 ]; then
+    show_runner_output_tail "${runner_output_log}"
     return "${status}"
   fi
 
@@ -300,6 +317,7 @@ PY
     testcase_log_dir="${direction_log_dir}/${server}_${client}/${testcase}"
     if [ ! -d "${testcase_log_dir}" ]; then
       echo "official runner did not produce testcase logs for ${server}/${client}/${testcase}: ${testcase_log_dir}" >&2
+      show_runner_output_tail "${runner_output_log}"
       return 1
     fi
   done

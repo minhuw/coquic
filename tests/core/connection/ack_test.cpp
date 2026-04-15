@@ -4768,12 +4768,12 @@ TEST(QuicCoreTest, ApplicationSendUsesConfiguredOutboundDatagramSizeLimit) {
     auto &peer_transport_parameters =
         optional_ref_or_terminate(connection.peer_transport_parameters_);
     peer_transport_parameters.max_udp_payload_size = 4096;
-    peer_transport_parameters.initial_max_data = 64 * 1024;
-    peer_transport_parameters.initial_max_stream_data_bidi_remote = 64 * 1024;
+    peer_transport_parameters.initial_max_data = std::uint64_t{64} * 1024u;
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = std::uint64_t{64} * 1024u;
     connection.initialize_peer_flow_control_from_transport_parameters();
-    connection.congestion_controller_.congestion_window_ = 64 * 1024;
+    connection.congestion_controller_.congestion_window_ = std::size_t{64} * 1024u;
 
-    const auto payload = std::vector<std::byte>(32 * 1024, std::byte{0x42});
+    const auto payload = std::vector<std::byte>(std::size_t{32} * 1024u, std::byte{0x42});
     ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
@@ -5432,9 +5432,9 @@ TEST(QuicCoreTest, ApplicationCloseDrainReturnsEmptyWithoutOneRttKeys) {
     EXPECT_TRUE(datagram.empty());
 }
 
-TEST(QuicCoreTest, TinyDatagramBudgetFailsApplicationCloseSerialization) {
+TEST(QuicCoreTest, TinyDatagramBudgetTruncatesApplicationCloseReason) {
     auto connection = make_connected_client_connection();
-    connection.config_.transport.max_udp_payload_size = 48;
+    connection.config_.max_outbound_datagram_size = 48;
     auto &peer_transport_parameters =
         optional_ref_or_terminate(connection.peer_transport_parameters_);
     peer_transport_parameters.max_udp_payload_size = 48;
@@ -5447,7 +5447,18 @@ TEST(QuicCoreTest, TinyDatagramBudgetFailsApplicationCloseSerialization) {
                     .has_value());
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
-    EXPECT_FALSE(datagram.empty());
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(packet, nullptr);
+    const auto close_it =
+        std::find_if(packet->frames.begin(), packet->frames.end(), [](const auto &frame) {
+            return std::holds_alternative<coquic::quic::ApplicationConnectionCloseFrame>(frame);
+        });
+    ASSERT_NE(close_it, packet->frames.end());
+    const auto &close_frame = std::get<coquic::quic::ApplicationConnectionCloseFrame>(*close_it);
+    EXPECT_TRUE(close_frame.reason.bytes.empty());
     EXPECT_TRUE(connection.has_failed());
 }
 

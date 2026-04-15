@@ -13,7 +13,7 @@
 
 namespace coquic::perf {
 namespace {
-constexpr std::size_t kPerfMaxOutboundDatagramSize = 16 * 1024;
+constexpr std::size_t kPerfMaxOutboundDatagramSize = std::size_t{16} * 1024u;
 constexpr std::string_view kPerfUsageLine =
     "usage: coquic-perf [server|client] [--host HOST] [--port PORT] "
     "[--io-backend socket|io_uring] [--mode bulk|rr|crr] "

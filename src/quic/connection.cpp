@@ -7353,7 +7353,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 return static_cast<bool>(has_validation_path & path_unvalidated &
                                          remotely_initiated);
             }();
-            const auto application_close_frame = pending_application_close_;
+            auto application_close_frame = pending_application_close_;
             const bool send_application_close_only = application_close_frame.has_value();
             if (application_close_frame.has_value() && !can_send_one_rtt_packets) {
                 return {};
@@ -7750,6 +7750,28 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
                 return !has_failed();
             };
+            const auto retry_application_close_without_reason = [&]() -> bool {
+                if (!send_application_close_only || !application_close_frame.has_value() ||
+                    application_close_frame->reason.bytes.empty()) {
+                    return false;
+                }
+
+                application_close_frame->reason.bytes.clear();
+                candidate_datagram = serialize_application_candidate(
+                    application_candidate_crypto_ranges, include_handshake_done, selected_ack_frame,
+                    max_data_frame, new_connection_id_frames, retire_connection_id_frames,
+                    path_validation_frames, max_stream_data_frames, max_streams_frames,
+                    reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                    stream_data_blocked_frames, stream_fragments, application_close_frame,
+                    /*include_ping=*/false, nullptr);
+                if (!candidate_datagram.has_value()) {
+                    if (!is_empty_packet_payload_error(candidate_datagram)) {
+                        mark_failed();
+                    }
+                    return false;
+                }
+                return candidate_datagram.value().bytes.size() <= max_outbound_datagram_size;
+            };
             auto candidate_datagram_size = datagram_size_or_zero(candidate_datagram);
             if (candidate_datagram_size > max_outbound_datagram_size) {
                 if (!retry_candidate_without_receive_credit()) {
@@ -7759,6 +7781,13 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                     return fallback_to_existing_packets_or_ack_only();
                 }
                 candidate_datagram_size = datagram_size_or_zero(candidate_datagram);
+            }
+            if (candidate_datagram_size > max_outbound_datagram_size &&
+                retry_application_close_without_reason()) {
+                candidate_datagram_size = datagram_size_or_zero(candidate_datagram);
+            }
+            if (has_failed()) {
+                return {};
             }
             if (candidate_datagram_size > max_outbound_datagram_size) {
                 restore_unsent_application_candidate(

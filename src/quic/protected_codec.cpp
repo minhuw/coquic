@@ -66,6 +66,13 @@ struct RemovedShortHeaderProtection {
     std::uint32_t truncated_packet_number = 0;
 };
 
+struct StreamFrameHeaderFields {
+    bool fin = false;
+    std::uint64_t stream_id = 0;
+    std::uint64_t offset = 0;
+    std::size_t payload_size = 0;
+};
+
 struct ProtectedPacketDecodeResult {
     ProtectedPacket packet;
     std::size_t bytes_consumed = 0;
@@ -201,11 +208,9 @@ std::size_t encoded_stream_frame_payload_size(std::uint64_t stream_id, std::uint
            encoded_varint_size(payload_size) + payload_size;
 }
 
-CodecResult<std::size_t> serialize_stream_frame_header_into(std::vector<std::byte> &bytes, bool fin,
-                                                            std::uint64_t stream_id,
-                                                            std::uint64_t offset,
-                                                            std::size_t payload_size) {
-    if (offset > kMaxVarInt - payload_size) {
+CodecResult<std::size_t> serialize_stream_frame_header_into(std::vector<std::byte> &bytes,
+                                                            const StreamFrameHeaderFields &header) {
+    if (header.offset > kMaxVarInt - header.payload_size) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
     }
 
@@ -213,29 +218,28 @@ CodecResult<std::size_t> serialize_stream_frame_header_into(std::vector<std::byt
     std::byte type = std::byte{0x08};
     type |= std::byte{0x04};
     type |= std::byte{0x02};
-    if (fin) {
+    if (header.fin) {
         type |= std::byte{0x01};
     }
 
     bytes.push_back(type);
-    if (const auto error = append_varint(bytes, stream_id)) {
+    if (const auto error = append_varint(bytes, header.stream_id)) {
         bytes.resize(begin);
         return CodecResult<std::size_t>::failure(error->code, error->offset);
     }
-    append_varint_unchecked(bytes, offset);
-    append_varint_unchecked(bytes, payload_size);
+    append_varint_unchecked(bytes, header.offset);
+    append_varint_unchecked(bytes, header.payload_size);
     return CodecResult<std::size_t>::success(bytes.size() - begin);
 }
 
-CodecResult<std::size_t> append_stream_frame_payload_into(std::vector<std::byte> &bytes, bool fin,
-                                                          std::uint64_t stream_id,
-                                                          std::uint64_t offset,
+CodecResult<std::size_t> append_stream_frame_payload_into(std::vector<std::byte> &bytes,
+                                                          StreamFrameHeaderFields header,
                                                           std::span<const std::byte> payload) {
     const auto begin = bytes.size();
-    const auto header =
-        serialize_stream_frame_header_into(bytes, fin, stream_id, offset, payload.size());
-    if (!header.has_value()) {
-        return header;
+    header.payload_size = payload.size();
+    const auto serialized_header = serialize_stream_frame_header_into(bytes, header);
+    if (!serialized_header.has_value()) {
+        return serialized_header;
     }
 
     bytes.insert(bytes.end(), payload.begin(), payload.end());
@@ -261,15 +265,25 @@ append_stream_frame_view_into_datagram(std::vector<std::byte> &bytes,
             : std::span<const std::byte>(stream_view.storage->data() +
                                              static_cast<std::ptrdiff_t>(stream_view.begin),
                                          payload_size);
-    return append_stream_frame_payload_into(bytes, stream_view.fin, stream_view.stream_id,
-                                            stream_view.offset, payload);
+    return append_stream_frame_payload_into(bytes,
+                                            StreamFrameHeaderFields{
+                                                .fin = stream_view.fin,
+                                                .stream_id = stream_view.stream_id,
+                                                .offset = stream_view.offset,
+                                            },
+                                            payload);
 }
 
 CodecResult<std::size_t>
 append_stream_frame_send_fragment_to_datagram(std::vector<std::byte> &bytes,
                                               const StreamFrameSendFragment &fragment) {
-    return append_stream_frame_payload_into(bytes, fragment.fin, fragment.stream_id,
-                                            fragment.offset, fragment.bytes.span());
+    return append_stream_frame_payload_into(bytes,
+                                            StreamFrameHeaderFields{
+                                                .fin = fragment.fin,
+                                                .stream_id = fragment.stream_id,
+                                                .offset = fragment.offset,
+                                            },
+                                            fragment.bytes.span());
 }
 
 bool long_header_has_token(LongHeaderPacketType packet_type) {

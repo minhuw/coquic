@@ -13,6 +13,7 @@ namespace {
 
 using coquic::quic::AckEcnCounts;
 using coquic::quic::AckFrame;
+using coquic::quic::AckPacketNumberRange;
 using coquic::quic::AckRange;
 using coquic::quic::ApplicationConnectionCloseFrame;
 using coquic::quic::CodecErrorCode;
@@ -243,6 +244,42 @@ TEST(QuicFrameTest, RoundTripsAckWithEcn) {
     EXPECT_EQ(ecn_counts.ect0, 5u);
     EXPECT_EQ(ecn_counts.ect1, 6u);
     EXPECT_EQ(ecn_counts.ecn_ce, 7u);
+}
+
+TEST(QuicFrameTest, ExpandsAckPacketNumberRanges) {
+    const AckFrame ack{
+        .largest_acknowledged = 42,
+        .ack_delay = 7,
+        .first_ack_range = 3,
+        .additional_ranges =
+            {
+                AckRange{
+                    .gap = 1,
+                    .range_length = 0,
+                },
+                AckRange{
+                    .gap = 0,
+                    .range_length = 1,
+                },
+            },
+    };
+
+    const auto ranges = coquic::quic::ack_frame_packet_number_ranges(ack);
+    ASSERT_TRUE(ranges.has_value());
+    EXPECT_EQ(ranges.value(), (std::vector<AckPacketNumberRange>{
+                                  AckPacketNumberRange{
+                                      .smallest = 39,
+                                      .largest = 42,
+                                  },
+                                  AckPacketNumberRange{
+                                      .smallest = 36,
+                                      .largest = 36,
+                                  },
+                                  AckPacketNumberRange{
+                                      .smallest = 33,
+                                      .largest = 34,
+                                  },
+                              }));
 }
 
 TEST(QuicFrameTest, RoundTripsCryptoFrame) {

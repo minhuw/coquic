@@ -21,40 +21,6 @@ std::uint64_t encode_ack_delay(std::chrono::microseconds ack_delay,
     return static_cast<std::uint64_t>(ack_delay.count()) >> ack_delay_exponent;
 }
 
-bool ack_frame_acks_packet(const AckFrame &ack, std::uint64_t packet_number) {
-    if (packet_number > ack.largest_acknowledged) {
-        return false;
-    }
-    if (ack.largest_acknowledged < ack.first_ack_range) {
-        return false;
-    }
-
-    auto range_smallest = ack.largest_acknowledged - ack.first_ack_range;
-    if (packet_number >= range_smallest) {
-        return true;
-    }
-
-    auto previous_smallest = range_smallest;
-    for (const auto &range : ack.additional_ranges) {
-        if (previous_smallest < range.gap + 2) {
-            return false;
-        }
-
-        const auto range_largest = previous_smallest - range.gap - 2;
-        if (range_largest < range.range_length) {
-            return false;
-        }
-        range_smallest = range_largest - range.range_length;
-        if (packet_number >= range_smallest && packet_number <= range_largest) {
-            return true;
-        }
-
-        previous_smallest = range_smallest;
-    }
-
-    return false;
-}
-
 std::chrono::milliseconds latest_loss_delay(const RecoveryRttState &rtt) {
     const auto base_rtt =
         rtt.latest_rtt.has_value() ? std::max(*rtt.latest_rtt, rtt.smoothed_rtt) : kInitialRtt;
@@ -324,20 +290,23 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
     }
 
     std::vector<std::uint64_t> acked_packet_numbers;
-    const auto ack_scan_end = sent_packets_.upper_bound(ack.largest_acknowledged);
-    for (auto it = sent_packets_.begin(); it != ack_scan_end; ++it) {
-        if (!ack_frame_acks_packet(ack, it->first)) {
-            continue;
-        }
-
-        acked_packet_numbers.push_back(it->first);
-        result.acked_packets.push_back(packet_metadata(it->second));
-        result.largest_newly_acked_packet = result.acked_packets.back();
-        if (it->second.packet_number == ack.largest_acknowledged) {
-            result.largest_acknowledged_was_newly_acked = true;
-        }
-        if (it->second.ack_eliciting) {
-            result.has_newly_acked_ack_eliciting = true;
+    const auto ack_ranges = ack_frame_packet_number_ranges(ack);
+    if (ack_ranges.has_value()) {
+        for (auto range_it = ack_ranges.value().rbegin(); range_it != ack_ranges.value().rend();
+             ++range_it) {
+            const auto ack_begin = sent_packets_.lower_bound(range_it->smallest);
+            const auto ack_end = sent_packets_.upper_bound(range_it->largest);
+            for (auto it = ack_begin; it != ack_end; ++it) {
+                acked_packet_numbers.push_back(it->first);
+                result.acked_packets.push_back(packet_metadata(it->second));
+                result.largest_newly_acked_packet = result.acked_packets.back();
+                if (it->second.packet_number == ack.largest_acknowledged) {
+                    result.largest_acknowledged_was_newly_acked = true;
+                }
+                if (it->second.ack_eliciting) {
+                    result.has_newly_acked_ack_eliciting = true;
+                }
+            }
         }
     }
 

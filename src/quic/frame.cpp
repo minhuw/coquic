@@ -1052,4 +1052,43 @@ CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> byte
     }
 }
 
+CodecResult<std::vector<AckPacketNumberRange>> ack_frame_packet_number_ranges(const AckFrame &ack) {
+    if (ack.largest_acknowledged < ack.first_ack_range) {
+        return CodecResult<std::vector<AckPacketNumberRange>>::failure(
+            CodecErrorCode::invalid_varint, 0);
+    }
+
+    std::vector<AckPacketNumberRange> ranges;
+    ranges.reserve(1 + ack.additional_ranges.size());
+
+    auto range_smallest = ack.largest_acknowledged - ack.first_ack_range;
+    ranges.push_back(AckPacketNumberRange{
+        .smallest = range_smallest,
+        .largest = ack.largest_acknowledged,
+    });
+
+    auto previous_smallest = range_smallest;
+    for (const auto &range : ack.additional_ranges) {
+        if (previous_smallest < range.gap + 2) {
+            return CodecResult<std::vector<AckPacketNumberRange>>::failure(
+                CodecErrorCode::invalid_varint, 0);
+        }
+
+        const auto range_largest = previous_smallest - range.gap - 2;
+        if (range_largest < range.range_length) {
+            return CodecResult<std::vector<AckPacketNumberRange>>::failure(
+                CodecErrorCode::invalid_varint, 0);
+        }
+
+        range_smallest = range_largest - range.range_length;
+        ranges.push_back(AckPacketNumberRange{
+            .smallest = range_smallest,
+            .largest = range_largest,
+        });
+        previous_smallest = range_smallest;
+    }
+
+    return CodecResult<std::vector<AckPacketNumberRange>>::success(std::move(ranges));
+}
+
 } // namespace coquic::quic

@@ -37,6 +37,12 @@ struct AckFrame {
     std::optional<AckEcnCounts> ecn_counts;
 };
 
+struct AckPacketNumberRange {
+    std::uint64_t smallest = 0;
+    std::uint64_t largest = 0;
+    bool operator==(const AckPacketNumberRange &) const = default;
+};
+
 struct ResetStreamFrame {
     std::uint64_t stream_id = 0;
     std::uint64_t application_protocol_error_code = 0;
@@ -148,6 +154,7 @@ struct FrameDecodeResult {
     std::size_t bytes_consumed = 0;
 };
 
+CodecResult<std::vector<AckPacketNumberRange>> ack_frame_packet_number_ranges(const AckFrame &ack);
 CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame);
 CodecResult<std::size_t> append_serialized_frame(std::vector<std::byte> &bytes, const Frame &frame);
 CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> bytes);

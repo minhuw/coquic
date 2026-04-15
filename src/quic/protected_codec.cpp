@@ -238,7 +238,7 @@ CodecResult<std::size_t> append_stream_frame_payload_into(std::vector<std::byte>
         return header;
     }
 
-    append_bytes(bytes, payload);
+    bytes.insert(bytes.end(), payload.begin(), payload.end());
     return CodecResult<std::size_t>::success(bytes.size() - begin);
 }
 

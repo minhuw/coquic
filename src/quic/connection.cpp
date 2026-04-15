@@ -1080,40 +1080,6 @@ bool establishes_persistent_congestion(std::span<const SentPacketRecord> lost_pa
     return last_loss->sent_time - first_loss->sent_time >= persistent_congestion_duration;
 }
 
-bool ack_frame_acks_packet(const AckFrame &ack, std::uint64_t packet_number) {
-    if (packet_number > ack.largest_acknowledged) {
-        return false;
-    }
-    if (ack.largest_acknowledged < ack.first_ack_range) {
-        return false;
-    }
-
-    auto range_smallest = ack.largest_acknowledged - ack.first_ack_range;
-    if (packet_number >= range_smallest) {
-        return true;
-    }
-
-    auto previous_smallest = range_smallest;
-    for (const auto &range : ack.additional_ranges) {
-        if (previous_smallest < range.gap + 2) {
-            return false;
-        }
-
-        const auto range_largest = previous_smallest - range.gap - 2;
-        if (range_largest < range.range_length) {
-            return false;
-        }
-        range_smallest = range_largest - range.range_length;
-        if (packet_number >= range_smallest && packet_number <= range_largest) {
-            return true;
-        }
-
-        previous_smallest = range_smallest;
-    }
-
-    return false;
-}
-
 void discard_packet_space_state(PacketSpaceState &packet_space) {
     packet_space.largest_authenticated_packet_number = std::nullopt;
     packet_space.read_secret = std::nullopt;
@@ -3486,13 +3452,18 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
                                                       bool suppress_pto_reset) {
     std::vector<SentPacketRecord> late_acked_packets;
     std::vector<std::uint64_t> late_acked_packet_numbers;
-    for (const auto &[packet_number, packet] : packet_space.declared_lost_packets) {
-        if (!ack_frame_acks_packet(ack, packet_number)) {
-            continue;
+    const auto ack_ranges = ack_frame_packet_number_ranges(ack);
+    if (ack_ranges.has_value()) {
+        for (auto range_it = ack_ranges.value().rbegin(); range_it != ack_ranges.value().rend();
+             ++range_it) {
+            const auto ack_begin =
+                packet_space.declared_lost_packets.lower_bound(range_it->smallest);
+            const auto ack_end = packet_space.declared_lost_packets.upper_bound(range_it->largest);
+            for (auto it = ack_begin; it != ack_end; ++it) {
+                late_acked_packets.push_back(it->second);
+                late_acked_packet_numbers.push_back(it->first);
+            }
         }
-
-        late_acked_packets.push_back(packet);
-        late_acked_packet_numbers.push_back(packet_number);
     }
     for (const auto packet_number : late_acked_packet_numbers) {
         packet_space.declared_lost_packets.erase(packet_number);

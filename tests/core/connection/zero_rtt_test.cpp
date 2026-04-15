@@ -36,7 +36,9 @@ using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
 using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
+using coquic::quic::test_support::first_tracked_packet;
 using coquic::quic::test_support::invalid_cipher_suite;
+using coquic::quic::test_support::last_tracked_packet;
 using coquic::quic::test_support::make_connected_client_connection;
 using coquic::quic::test_support::make_connected_server_connection;
 using coquic::quic::test_support::make_connected_server_connection_with_preferred_address;
@@ -50,6 +52,10 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::tracked_packet_count;
+using coquic::quic::test_support::tracked_packet_or_null;
+using coquic::quic::test_support::tracked_packet_or_terminate;
+using coquic::quic::test_support::tracked_packet_snapshot;
 
 TEST(QuicCoreTest, ClientUsesResumptionStateToEmitZeroRttDatagramBeforeHandshakeReady) {
     auto first_client_config = coquic::quic::test::make_client_core_config();
@@ -1358,12 +1364,13 @@ TEST(QuicCoreTest, ServerHandshakeRecoveryAndZeroRttDeadlineHelpersCoverEarlyRet
     auto probing_server = make_connected_server_connection();
     probing_server.status_ = coquic::quic::HandshakeStatus::in_progress;
     probing_server.handshake_confirmed_ = false;
-    probing_server.handshake_space_.sent_packets.emplace(9, coquic::quic::SentPacketRecord{
-                                                                .packet_number = 9,
-                                                                .ack_eliciting = true,
-                                                                .in_flight = true,
-                                                                .has_ping = true,
-                                                            });
+    probing_server.track_sent_packet(probing_server.handshake_space_,
+                                     coquic::quic::SentPacketRecord{
+                                         .packet_number = 9,
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .has_ping = true,
+                                     });
     probing_server.queue_server_handshake_recovery_probes();
     ASSERT_TRUE(probing_server.handshake_space_.pending_probe_packet.has_value());
     EXPECT_EQ(optional_value_or_terminate(probing_server.handshake_space_.pending_probe_packet)

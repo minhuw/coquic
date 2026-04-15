@@ -36,7 +36,9 @@ using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
 using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
+using coquic::quic::test_support::first_tracked_packet;
 using coquic::quic::test_support::invalid_cipher_suite;
+using coquic::quic::test_support::last_tracked_packet;
 using coquic::quic::test_support::make_connected_client_connection;
 using coquic::quic::test_support::make_connected_server_connection;
 using coquic::quic::test_support::make_connected_server_connection_with_preferred_address;
@@ -50,6 +52,10 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::tracked_packet_count;
+using coquic::quic::test_support::tracked_packet_or_null;
+using coquic::quic::test_support::tracked_packet_or_terminate;
+using coquic::quic::test_support::tracked_packet_snapshot;
 
 TEST(QuicCoreTest, BlockedStreamResumesWhenPeerMaxStreamDataArrives) {
     auto client_config = coquic::quic::test::make_client_core_config();
@@ -585,10 +591,10 @@ TEST(QuicCoreTest, ClientLargePartialResponseFlowKeepsReceiveCreditStateConsiste
         break;
     }
 
-    const auto in_flight_application_packets = std::count_if(
-        client.connection_->application_space_.sent_packets.begin(),
-        client.connection_->application_space_.sent_packets.end(),
-        [](const auto &entry) { return entry.second.ack_eliciting && entry.second.in_flight; });
+    const auto sent_packets = tracked_packet_snapshot(client.connection_->application_space_);
+    const auto in_flight_application_packets =
+        std::count_if(sent_packets.begin(), sent_packets.end(),
+                      [](const auto &packet) { return packet.ack_eliciting && packet.in_flight; });
     ASSERT_LE(in_flight_application_packets, 1);
 
     const auto deadline = client.connection_->next_wakeup();

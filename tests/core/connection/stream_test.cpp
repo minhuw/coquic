@@ -36,7 +36,9 @@ using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
 using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
+using coquic::quic::test_support::first_tracked_packet;
 using coquic::quic::test_support::invalid_cipher_suite;
+using coquic::quic::test_support::last_tracked_packet;
 using coquic::quic::test_support::make_connected_client_connection;
 using coquic::quic::test_support::make_connected_server_connection;
 using coquic::quic::test_support::make_connected_server_connection_with_preferred_address;
@@ -50,6 +52,10 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::tracked_packet_count;
+using coquic::quic::test_support::tracked_packet_or_null;
+using coquic::quic::test_support::tracked_packet_or_terminate;
+using coquic::quic::test_support::tracked_packet_snapshot;
 
 TEST(QuicCoreTest, TwoPeersExchangeStreamZeroDataThroughEffects) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
@@ -311,9 +317,10 @@ TEST(QuicCoreTest, ClosedPeerInitiatedBidirectionalStreamRefreshesMaxStreams) {
     const auto response_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(response_datagram.empty());
-    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+    ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
 
-    const auto response_packet_number = connection.application_space_.sent_packets.begin()->first;
+    const auto response_packet_number =
+        first_tracked_packet(connection.application_space_).packet_number;
     ASSERT_TRUE(connection
                     .process_inbound_ack(connection.application_space_,
                                          coquic::quic::AckFrame{
@@ -711,8 +718,8 @@ TEST(QuicCoreTest, LostResetStreamIsReEmitted) {
     const auto first_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(first_datagram.empty());
-    ASSERT_EQ(connection.application_space_.sent_packets.size(), 1u);
-    const auto first_packet = connection.application_space_.sent_packets.begin()->second;
+    ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
+    const auto first_packet = first_tracked_packet(connection.application_space_);
     ASSERT_EQ(first_packet.reset_stream_frames.size(), 1u);
 
     connection.mark_lost_packet(
@@ -749,8 +756,8 @@ TEST(QuicCoreTest, LostStopSendingIsReEmitted) {
     const auto first_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(first_datagram.empty());
-    ASSERT_EQ(connection.application_space_.sent_packets.size(), 1u);
-    const auto first_packet = connection.application_space_.sent_packets.begin()->second;
+    ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
+    const auto first_packet = first_tracked_packet(connection.application_space_);
     ASSERT_EQ(first_packet.stop_sending_frames.size(), 1u);
 
     connection.mark_lost_packet(
@@ -886,9 +893,9 @@ TEST(QuicCoreTest,
             break;
         }
 
-        const auto packet_number =
-            std::prev(connection.application_space_.sent_packets.end())->first;
-        const auto &sent_packet = connection.application_space_.sent_packets.at(packet_number);
+        const auto packet_number = last_tracked_packet(connection.application_space_).packet_number;
+        const auto &sent_packet =
+            tracked_packet_or_terminate(connection.application_space_, packet_number);
         ASSERT_FALSE(sent_packet.stream_fragments.empty());
         sent_stream_packets.push_back(SentStreamPacket{
             .packet_number = packet_number,
@@ -902,8 +909,8 @@ TEST(QuicCoreTest,
     }
 
     ASSERT_GE(sent_stream_packets.size(), 2u);
-    const auto lost_packet =
-        connection.application_space_.sent_packets.at(sent_stream_packets.front().packet_number);
+    const auto lost_packet = tracked_packet_or_terminate(connection.application_space_,
+                                                         sent_stream_packets.front().packet_number);
     const auto lost_offset = sent_stream_packets.front().first_stream_offset;
     const auto probe_packet_number = sent_stream_packets.back().packet_number;
     const auto probe_offset = sent_stream_packets.back().first_stream_offset;
@@ -915,7 +922,7 @@ TEST(QuicCoreTest,
 
     ASSERT_TRUE(connection.streams_.contains(0));
     ASSERT_TRUE(connection.streams_.at(0).send_buffer.has_lost_data());
-    ASSERT_TRUE(connection.application_space_.sent_packets.contains(probe_packet_number));
+    ASSERT_NE(tracked_packet_or_null(connection.application_space_, probe_packet_number), nullptr);
     ASSERT_TRUE(connection.has_pending_application_send());
 
     const auto deadline = connection.pto_deadline();
@@ -1150,9 +1157,8 @@ TEST(QuicCoreTest, ApplicationSendClearsPendingProbeAfterSendingStreamData) {
 
     ASSERT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
-    ASSERT_EQ(connection.application_space_.sent_packets.size(), 1u);
-    EXPECT_FALSE(
-        connection.application_space_.sent_packets.begin()->second.stream_fragments.empty());
+    ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
+    EXPECT_FALSE(first_tracked_packet(connection.application_space_).stream_fragments.empty());
 }
 
 TEST(QuicCoreTest, ApplicationSendBudgetsManyFinOnlyStreamsWithinDatagramLimit) {
@@ -1251,8 +1257,8 @@ TEST(QuicCoreTest, RetransmissionPreservesStreamIdentityAcrossMultipleStreams) {
     const auto first_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(first_datagram.empty());
-    ASSERT_EQ(connection.application_space_.sent_packets.size(), 1u);
-    const auto first_packet = connection.application_space_.sent_packets.begin()->second;
+    ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
+    const auto first_packet = first_tracked_packet(connection.application_space_);
 
     connection.mark_lost_packet(
         connection.application_space_,
@@ -1465,7 +1471,7 @@ TEST(QuicCoreTest, RetireAckedPacketAcknowledgesConnectionAndStreamControlState)
                 },
             },
     };
-    connection.application_space_.sent_packets.emplace(packet.packet_number, packet);
+    connection.track_sent_packet(connection.application_space_, packet);
 
     connection.retire_acked_packet(
         connection.application_space_,
@@ -1483,7 +1489,7 @@ TEST(QuicCoreTest, RetireAckedPacketAcknowledgesConnectionAndStreamControlState)
     EXPECT_EQ(stream.reset_state, coquic::quic::StreamControlFrameState::acknowledged);
     EXPECT_EQ(stream.stop_sending_state, coquic::quic::StreamControlFrameState::acknowledged);
     EXPECT_EQ(fin_stream.send_fin_state, coquic::quic::StreamSendFinState::acknowledged);
-    EXPECT_FALSE(connection.application_space_.sent_packets.contains(packet.packet_number));
+    EXPECT_EQ(tracked_packet_or_null(connection.application_space_, packet.packet_number), nullptr);
 }
 
 TEST(QuicCoreTest, MarkLostPacketRequeuesConnectionAndStreamControlState) {
@@ -1595,7 +1601,7 @@ TEST(QuicCoreTest, MarkLostPacketRequeuesConnectionAndStreamControlState) {
                 },
             },
     };
-    connection.application_space_.sent_packets.emplace(packet.packet_number, packet);
+    connection.track_sent_packet(connection.application_space_, packet);
 
     connection.mark_lost_packet(
         connection.application_space_,
@@ -1613,7 +1619,7 @@ TEST(QuicCoreTest, MarkLostPacketRequeuesConnectionAndStreamControlState) {
     EXPECT_EQ(stream.reset_state, coquic::quic::StreamControlFrameState::pending);
     EXPECT_EQ(stream.stop_sending_state, coquic::quic::StreamControlFrameState::pending);
     EXPECT_EQ(fin_stream.send_fin_state, coquic::quic::StreamSendFinState::pending);
-    EXPECT_FALSE(connection.application_space_.sent_packets.contains(packet.packet_number));
+    EXPECT_EQ(tracked_packet_or_null(connection.application_space_, packet.packet_number), nullptr);
 }
 
 TEST(QuicCoreTest, InboundApplicationStreamAllowsOmittedOffsetAndLengthFlags) {
@@ -1743,23 +1749,23 @@ TEST(QuicCoreTest, SelectPtoProbeDropsAcknowledgedAndMismatchedMaxStreamsFrames)
         coquic::quic::StreamControlFrameState::acknowledged;
 
     coquic::quic::PacketSpaceState packet_space;
-    packet_space.sent_packets.emplace(
-        7, coquic::quic::SentPacketRecord{
-               .packet_number = 7,
-               .ack_eliciting = true,
-               .in_flight = true,
-               .max_streams_frames =
-                   {
-                       coquic::quic::MaxStreamsFrame{
-                           .stream_type = coquic::quic::StreamLimitType::bidirectional,
-                           .maximum_streams = 9,
-                       },
-                       coquic::quic::MaxStreamsFrame{
-                           .stream_type = coquic::quic::StreamLimitType::unidirectional,
-                           .maximum_streams = 4,
-                       },
-                   },
-           });
+    connection.track_sent_packet(
+        packet_space, coquic::quic::SentPacketRecord{
+                          .packet_number = 7,
+                          .ack_eliciting = true,
+                          .in_flight = true,
+                          .max_streams_frames =
+                              {
+                                  coquic::quic::MaxStreamsFrame{
+                                      .stream_type = coquic::quic::StreamLimitType::bidirectional,
+                                      .maximum_streams = 9,
+                                  },
+                                  coquic::quic::MaxStreamsFrame{
+                                      .stream_type = coquic::quic::StreamLimitType::unidirectional,
+                                      .maximum_streams = 4,
+                                  },
+                              },
+                      });
 
     const auto probe = connection.select_pto_probe(packet_space);
 
@@ -1794,7 +1800,7 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
         ASSERT_FALSE(datagram.empty());
         EXPECT_EQ(connection.last_drained_path_id(), 9u);
         delivered_packet_numbers.push_back(
-            std::prev(connection.application_space_.sent_packets.end())->first);
+            last_tracked_packet(connection.application_space_).packet_number);
     }
     for (std::size_t i = 0; i < kGapPackets; ++i) {
         const auto datagram = connection.drain_outbound_datagram(
@@ -1802,14 +1808,14 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
         ASSERT_FALSE(datagram.empty());
         EXPECT_EQ(connection.last_drained_path_id(), 9u);
         gap_packet_numbers.push_back(
-            std::prev(connection.application_space_.sent_packets.end())->first);
+            last_tracked_packet(connection.application_space_).packet_number);
     }
 
     ASSERT_FALSE(delivered_packet_numbers.empty());
     ASSERT_FALSE(gap_packet_numbers.empty());
     const auto first_gap_packet_number = gap_packet_numbers.front();
     const auto first_gap_packet =
-        connection.application_space_.sent_packets.at(first_gap_packet_number);
+        tracked_packet_or_terminate(connection.application_space_, first_gap_packet_number);
     ASSERT_FALSE(first_gap_packet.stream_fragments.empty());
     const auto tracked_gap_offset = first_gap_packet.stream_fragments.front().offset;
 
@@ -1836,7 +1842,7 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
     const auto challenge =
         optional_ref_or_terminate(connection.paths_.at(11).outstanding_challenge);
     const auto migration_packet_number =
-        std::prev(connection.application_space_.sent_packets.end())->first;
+        last_tracked_packet(connection.application_space_).packet_number;
 
     const auto first_delivered_packet_number = delivered_packet_numbers.front();
     const auto last_delivered_packet_number = delivered_packet_numbers.back();
@@ -1873,9 +1879,9 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
     EXPECT_EQ(connection.last_drained_path_id(), 11u);
 
     const auto retransmit_packet_number =
-        std::prev(connection.application_space_.sent_packets.end())->first;
+        last_tracked_packet(connection.application_space_).packet_number;
     const auto retransmit_packet =
-        connection.application_space_.sent_packets.at(retransmit_packet_number);
+        tracked_packet_or_terminate(connection.application_space_, retransmit_packet_number);
     ASSERT_FALSE(retransmit_packet.stream_fragments.empty());
     EXPECT_EQ(retransmit_packet.stream_fragments.front().offset, tracked_gap_offset);
 }
@@ -1908,7 +1914,7 @@ TEST(QuicCoreTest, InboundMigratedAckGapDatagramRetransmitsLostStreamData) {
         ASSERT_FALSE(datagram.empty());
         EXPECT_EQ(connection.last_drained_path_id(), 9u);
         delivered_packet_numbers.push_back(
-            std::prev(connection.application_space_.sent_packets.end())->first);
+            last_tracked_packet(connection.application_space_).packet_number);
     }
     for (std::size_t i = 0; i < kGapPackets; ++i) {
         const auto datagram = connection.drain_outbound_datagram(
@@ -1916,14 +1922,14 @@ TEST(QuicCoreTest, InboundMigratedAckGapDatagramRetransmitsLostStreamData) {
         ASSERT_FALSE(datagram.empty());
         EXPECT_EQ(connection.last_drained_path_id(), 9u);
         gap_packet_numbers.push_back(
-            std::prev(connection.application_space_.sent_packets.end())->first);
+            last_tracked_packet(connection.application_space_).packet_number);
     }
 
     ASSERT_FALSE(delivered_packet_numbers.empty());
     ASSERT_FALSE(gap_packet_numbers.empty());
     const auto first_gap_packet_number = gap_packet_numbers.front();
     const auto first_gap_packet =
-        connection.application_space_.sent_packets.at(first_gap_packet_number);
+        tracked_packet_or_terminate(connection.application_space_, first_gap_packet_number);
     ASSERT_FALSE(first_gap_packet.stream_fragments.empty());
     const auto tracked_gap_offset = first_gap_packet.stream_fragments.front().offset;
 
@@ -1950,7 +1956,7 @@ TEST(QuicCoreTest, InboundMigratedAckGapDatagramRetransmitsLostStreamData) {
     const auto challenge =
         optional_ref_or_terminate(connection.paths_.at(11).outstanding_challenge);
     const auto migration_packet_number =
-        std::prev(connection.application_space_.sent_packets.end())->first;
+        last_tracked_packet(connection.application_space_).packet_number;
 
     const auto first_delivered_packet_number = delivered_packet_numbers.front();
     const auto last_delivered_packet_number = delivered_packet_numbers.back();
@@ -2064,7 +2070,7 @@ TEST(QuicCoreTest, LiveLikeMigratedAckGapDatagramRetransmitsLostStreamData) {
         ASSERT_FALSE(datagram.empty());
         EXPECT_EQ(connection.last_drained_path_id(), 9u);
         delivered_packet_numbers.push_back(
-            std::prev(connection.application_space_.sent_packets.end())->first);
+            last_tracked_packet(connection.application_space_).packet_number);
     }
     for (std::size_t i = 0; i < kGapPackets; ++i) {
         const auto datagram = connection.drain_outbound_datagram(
@@ -2072,7 +2078,7 @@ TEST(QuicCoreTest, LiveLikeMigratedAckGapDatagramRetransmitsLostStreamData) {
         ASSERT_FALSE(datagram.empty());
         EXPECT_EQ(connection.last_drained_path_id(), 9u);
         gap_packet_numbers.push_back(
-            std::prev(connection.application_space_.sent_packets.end())->first);
+            last_tracked_packet(connection.application_space_).packet_number);
     }
 
     ASSERT_EQ(delivered_packet_numbers.front(), 8241u);
@@ -2080,7 +2086,7 @@ TEST(QuicCoreTest, LiveLikeMigratedAckGapDatagramRetransmitsLostStreamData) {
     ASSERT_EQ(gap_packet_numbers.front(), 8372u);
     ASSERT_EQ(gap_packet_numbers.back(), 8393u);
 
-    const auto first_gap_packet = connection.application_space_.sent_packets.at(8372);
+    const auto first_gap_packet = tracked_packet_or_terminate(connection.application_space_, 8372);
     ASSERT_FALSE(first_gap_packet.stream_fragments.empty());
     const auto tracked_gap_offset = first_gap_packet.stream_fragments.front().offset;
 
@@ -2106,7 +2112,7 @@ TEST(QuicCoreTest, LiveLikeMigratedAckGapDatagramRetransmitsLostStreamData) {
     const auto challenge =
         optional_ref_or_terminate(connection.paths_.at(11).outstanding_challenge);
     const auto migration_packet_number =
-        std::prev(connection.application_space_.sent_packets.end())->first;
+        last_tracked_packet(connection.application_space_).packet_number;
     ASSERT_EQ(migration_packet_number, 8394u);
 
     const auto encoded = coquic::quic::serialize_protected_datagram(
@@ -2185,41 +2191,41 @@ TEST(QuicCoreTest, SelectPtoProbeDropsFramesWhoseStreamsNoLongerExist) {
     auto connection = make_connected_client_connection();
 
     coquic::quic::PacketSpaceState packet_space;
-    packet_space.sent_packets.emplace(3, coquic::quic::SentPacketRecord{
-                                             .packet_number = 3,
-                                             .ack_eliciting = true,
-                                             .in_flight = true,
-                                             .reset_stream_frames =
-                                                 {
-                                                     coquic::quic::ResetStreamFrame{
-                                                         .stream_id = 11,
-                                                         .application_protocol_error_code = 1,
-                                                         .final_size = 0,
-                                                     },
-                                                 },
-                                             .stop_sending_frames =
-                                                 {
-                                                     coquic::quic::StopSendingFrame{
-                                                         .stream_id = 11,
-                                                         .application_protocol_error_code = 2,
-                                                     },
-                                                 },
-                                             .max_stream_data_frames =
-                                                 {
-                                                     coquic::quic::MaxStreamDataFrame{
-                                                         .stream_id = 11,
-                                                         .maximum_stream_data = 3,
-                                                     },
-                                                 },
-                                             .stream_data_blocked_frames =
-                                                 {
-                                                     coquic::quic::StreamDataBlockedFrame{
-                                                         .stream_id = 11,
-                                                         .maximum_stream_data = 4,
-                                                     },
-                                                 },
-                                             .has_ping = true,
-                                         });
+    connection.track_sent_packet(packet_space, coquic::quic::SentPacketRecord{
+                                                   .packet_number = 3,
+                                                   .ack_eliciting = true,
+                                                   .in_flight = true,
+                                                   .reset_stream_frames =
+                                                       {
+                                                           coquic::quic::ResetStreamFrame{
+                                                               .stream_id = 11,
+                                                               .application_protocol_error_code = 1,
+                                                               .final_size = 0,
+                                                           },
+                                                       },
+                                                   .stop_sending_frames =
+                                                       {
+                                                           coquic::quic::StopSendingFrame{
+                                                               .stream_id = 11,
+                                                               .application_protocol_error_code = 2,
+                                                           },
+                                                       },
+                                                   .max_stream_data_frames =
+                                                       {
+                                                           coquic::quic::MaxStreamDataFrame{
+                                                               .stream_id = 11,
+                                                               .maximum_stream_data = 3,
+                                                           },
+                                                       },
+                                                   .stream_data_blocked_frames =
+                                                       {
+                                                           coquic::quic::StreamDataBlockedFrame{
+                                                               .stream_id = 11,
+                                                               .maximum_stream_data = 4,
+                                                           },
+                                                       },
+                                                   .has_ping = true,
+                                               });
 
     const auto probe = connection.select_pto_probe(packet_space);
 
@@ -2578,10 +2584,10 @@ TEST(QuicCoreTest, MarkLostPacketRequeuesUnidirectionalMaxStreamsFrame) {
     const auto frames = connection.local_stream_limit_state_.take_max_streams_frames();
     ASSERT_EQ(frames.size(), 1u);
 
-    connection.application_space_.sent_packets.emplace(7, coquic::quic::SentPacketRecord{
-                                                              .packet_number = 7,
-                                                              .max_streams_frames = frames,
-                                                          });
+    connection.track_sent_packet(connection.application_space_, coquic::quic::SentPacketRecord{
+                                                                    .packet_number = 7,
+                                                                    .max_streams_frames = frames,
+                                                                });
     connection.mark_lost_packet(
         connection.application_space_,
         optional_value_or_terminate(

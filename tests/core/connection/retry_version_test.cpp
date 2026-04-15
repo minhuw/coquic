@@ -36,7 +36,9 @@ using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
 using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
+using coquic::quic::test_support::first_tracked_packet;
 using coquic::quic::test_support::invalid_cipher_suite;
+using coquic::quic::test_support::last_tracked_packet;
 using coquic::quic::test_support::make_connected_client_connection;
 using coquic::quic::test_support::make_connected_server_connection;
 using coquic::quic::test_support::make_connected_server_connection_with_preferred_address;
@@ -50,6 +52,10 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::tracked_packet_count;
+using coquic::quic::test_support::tracked_packet_or_null;
+using coquic::quic::test_support::tracked_packet_or_terminate;
+using coquic::quic::test_support::tracked_packet_snapshot;
 
 TEST(QuicCoreTest, ApplicationProbePathFailsWhenRetryWithoutAckCannotSerialize) {
     auto connection = make_connected_client_connection();
@@ -84,7 +90,7 @@ TEST(QuicCoreTest, ApplicationProbePathFailsWhenRetryWithoutAckCannotSerialize) 
 
     EXPECT_TRUE(datagram.empty());
     EXPECT_TRUE(connection.has_failed());
-    EXPECT_TRUE(connection.application_space_.sent_packets.empty());
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
 }
 
 TEST(QuicCoreTest, ApplicationSendFailsWhenRetryWithoutAckCannotSerialize) {
@@ -113,7 +119,7 @@ TEST(QuicCoreTest, ApplicationSendFailsWhenRetryWithoutAckCannotSerialize) {
 
     EXPECT_TRUE(datagram.empty());
     EXPECT_TRUE(connection.has_failed());
-    EXPECT_TRUE(connection.application_space_.sent_packets.empty());
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
 }
 
 TEST(QuicCoreTest, ApplicationSendReturnsEmptyWhenRetryWithoutAckTrimsAwayAllStreamData) {
@@ -373,8 +379,9 @@ TEST(QuicCoreTest, ClientRestartsHandshakeAfterValidRetry) {
     const auto restarted_initial_token_value =
         restarted_initial_token.value_or(std::vector<std::byte>{});
     EXPECT_EQ(restarted_initial_token_value, retry_token);
-    EXPECT_TRUE(
-        client.connection_->initial_space_.sent_packets.contains(next_initial_send_packet_number));
+    EXPECT_NE(
+        tracked_packet_or_null(client.connection_->initial_space_, next_initial_send_packet_number),
+        nullptr);
     EXPECT_EQ(client.connection_->initial_space_.next_send_packet_number,
               next_initial_send_packet_number + 1);
     EXPECT_FALSE(client.has_failed());
@@ -1070,14 +1077,14 @@ TEST(
 
         const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-        if (!connection.has_failed() || connection.initial_space_.sent_packets.size() != 1u) {
+        if (!connection.has_failed() || tracked_packet_count(connection.initial_space_) != 1u) {
             continue;
         }
 
         found_duplicate_serialization_failure = true;
         EXPECT_TRUE(datagram.empty());
         EXPECT_EQ(connection.initial_space_.next_send_packet_number, 1u);
-        EXPECT_EQ(connection.initial_space_.sent_packets.begin()->second.packet_number, 0u);
+        EXPECT_EQ(first_tracked_packet(connection.initial_space_).packet_number, 0u);
     }
 
     EXPECT_TRUE(found_duplicate_serialization_failure);
@@ -1112,7 +1119,7 @@ TEST(QuicCoreTest,
             std::count_if(packets.begin(), packets.end(), [](const auto &packet) {
                 return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packet);
             });
-        if (initial_count != 1u || connection.initial_space_.sent_packets.size() != 1u) {
+        if (initial_count != 1u || tracked_packet_count(connection.initial_space_) != 1u) {
             continue;
         }
 

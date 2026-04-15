@@ -36,7 +36,9 @@ using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
 using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
+using coquic::quic::test_support::first_tracked_packet;
 using coquic::quic::test_support::invalid_cipher_suite;
+using coquic::quic::test_support::last_tracked_packet;
 using coquic::quic::test_support::make_connected_client_connection;
 using coquic::quic::test_support::make_connected_server_connection;
 using coquic::quic::test_support::make_connected_server_connection_with_preferred_address;
@@ -50,6 +52,10 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::tracked_packet_count;
+using coquic::quic::test_support::tracked_packet_or_null;
+using coquic::quic::test_support::tracked_packet_or_terminate;
+using coquic::quic::test_support::tracked_packet_snapshot;
 
 TEST(QuicCoreTest, KeyUpdatedMaxDataAndAckUnblockLostApplicationSend) {
     auto connection = make_connected_server_connection();
@@ -60,10 +66,10 @@ TEST(QuicCoreTest, KeyUpdatedMaxDataAndAckUnblockLostApplicationSend) {
     const auto first_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(0));
     ASSERT_FALSE(first_datagram.empty());
-    ASSERT_EQ(connection.application_space_.sent_packets.size(), 1u);
+    ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
 
-    const auto first_packet_number = connection.application_space_.sent_packets.begin()->first;
-    const auto first_packet = connection.application_space_.sent_packets.at(first_packet_number);
+    const auto first_packet = first_tracked_packet(connection.application_space_);
+    const auto first_packet_number = first_packet.packet_number;
     ASSERT_FALSE(first_packet.stream_fragments.empty());
     EXPECT_EQ(first_packet.stream_fragments.front().offset, 0u);
     const auto first_fragment_length = first_packet.stream_fragments.front().bytes.size();
@@ -128,9 +134,9 @@ TEST(QuicCoreTest, KeyUpdatedMaxDataAndAckUnblockLostApplicationSend) {
     const auto retransmitted = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
     ASSERT_FALSE(retransmitted.empty());
     const auto retransmit_packet_number =
-        std::prev(connection.application_space_.sent_packets.end())->first;
+        last_tracked_packet(connection.application_space_).packet_number;
     const auto retransmit_packet =
-        connection.application_space_.sent_packets.at(retransmit_packet_number);
+        tracked_packet_or_terminate(connection.application_space_, retransmit_packet_number);
     ASSERT_FALSE(retransmit_packet.stream_fragments.empty());
     const auto retransmitted_packets = decode_sender_datagram(connection, retransmitted);
     ASSERT_EQ(retransmitted_packets.size(), 1u);
@@ -190,7 +196,7 @@ TEST(QuicCoreTest, KeyUpdatedMaxDataAndAckUnblockLostApplicationSend) {
         << " outstanding_suffix="
         << stream.send_buffer.has_outstanding_range(first_fragment_length,
                                                     payload.size() - first_fragment_length)
-        << " sent_packets=" << connection.application_space_.sent_packets.size();
+        << " sent_packets=" << tracked_packet_count(connection.application_space_);
 
     const auto resumed = connection.drain_outbound_datagram(coquic::quic::test::test_time(4));
     ASSERT_FALSE(resumed.empty())
@@ -203,7 +209,7 @@ TEST(QuicCoreTest, KeyUpdatedMaxDataAndAckUnblockLostApplicationSend) {
         << " outstanding_suffix="
         << stream.send_buffer.has_outstanding_range(first_fragment_length,
                                                     payload.size() - first_fragment_length)
-        << " sent_packets=" << connection.application_space_.sent_packets.size();
+        << " sent_packets=" << tracked_packet_count(connection.application_space_);
     const auto resumed_packets = decode_sender_datagram(connection, resumed);
     ASSERT_EQ(resumed_packets.size(), 1u);
     const auto *resumed_application =
@@ -388,17 +394,17 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossDroppedKeyUpdatedAckDa
         const auto [emitted_packets, largest_sent] = drain_burst(burst_time);
         static_cast<void>(largest_sent);
         const auto largest_outstanding =
-            connection.application_space_.sent_packets.empty()
+            tracked_packet_count(connection.application_space_) == 0u
                 ? std::optional<std::uint64_t>{}
                 : std::optional<std::uint64_t>{
-                      connection.application_space_.sent_packets.rbegin()->first,
+                      last_tracked_packet(connection.application_space_).packet_number,
                   };
         ASSERT_TRUE(emitted_packets > 0u || largest_outstanding.has_value())
             << "round=" << round << " expected_offset=" << expected_offset
             << " total_packets=" << total_packets << " dropped_ack_rounds=" << dropped_ack_rounds
             << " bytes_in_flight=" << connection.congestion_controller_.bytes_in_flight()
             << " cwnd=" << connection.congestion_controller_.congestion_window()
-            << " sent_packets=" << connection.application_space_.sent_packets.size()
+            << " sent_packets=" << tracked_packet_count(connection.application_space_)
             << " queued_bytes=" << connection.total_queued_stream_bytes()
             << " pending_send=" << connection.has_pending_application_send();
 
@@ -426,7 +432,7 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossDroppedKeyUpdatedAckDa
         << "total_packets=" << total_packets << " dropped_ack_rounds=" << dropped_ack_rounds
         << " bytes_in_flight=" << connection.congestion_controller_.bytes_in_flight()
         << " cwnd=" << connection.congestion_controller_.congestion_window()
-        << " sent_packets=" << connection.application_space_.sent_packets.size()
+        << " sent_packets=" << tracked_packet_count(connection.application_space_)
         << " queued_bytes=" << connection.total_queued_stream_bytes()
         << " pending_send=" << connection.has_pending_application_send();
 }
@@ -589,7 +595,7 @@ TEST(QuicCoreTest, KeyUpdatedAckOnlyPacketRetiresAckedApplicationFragment) {
     connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
 
     EXPECT_FALSE(connection.has_failed());
-    EXPECT_FALSE(connection.application_space_.sent_packets.contains(124));
+    EXPECT_EQ(tracked_packet_or_null(connection.application_space_, 124), nullptr);
     EXPECT_FALSE(stream.send_buffer.has_outstanding_range(fragment_offset, fragment_length));
 }
 

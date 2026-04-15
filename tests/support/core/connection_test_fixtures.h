@@ -78,6 +78,62 @@ template <typename T> T &optional_ref_or_terminate(std::optional<T> &value) {
     return value.value();
 }
 
+inline std::size_t tracked_packet_count(const PacketSpaceState &packet_space) {
+    return packet_space.recovery.tracked_packet_count();
+}
+
+inline const SentPacketRecord *tracked_packet_or_null(const PacketSpaceState &packet_space,
+                                                      std::uint64_t packet_number) {
+    return packet_space.recovery.find_packet(packet_number);
+}
+
+inline const SentPacketRecord &tracked_packet_or_terminate(const PacketSpaceState &packet_space,
+                                                           std::uint64_t packet_number) {
+    const auto *packet = tracked_packet_or_null(packet_space, packet_number);
+    if (packet == nullptr) {
+        std::abort();
+    }
+    return *packet;
+}
+
+inline const SentPacketRecord &first_tracked_packet(const PacketSpaceState &packet_space) {
+    const auto handle = packet_space.recovery.oldest_tracked_packet();
+    if (!handle.has_value()) {
+        std::abort();
+    }
+
+    const auto *packet = packet_space.recovery.packet_for_handle(*handle);
+    if (packet == nullptr) {
+        std::abort();
+    }
+    return *packet;
+}
+
+inline const SentPacketRecord &last_tracked_packet(const PacketSpaceState &packet_space) {
+    const auto handle = packet_space.recovery.newest_tracked_packet();
+    if (!handle.has_value()) {
+        std::abort();
+    }
+
+    const auto *packet = packet_space.recovery.packet_for_handle(*handle);
+    if (packet == nullptr) {
+        std::abort();
+    }
+    return *packet;
+}
+
+inline std::vector<SentPacketRecord> tracked_packet_snapshot(const PacketSpaceState &packet_space) {
+    std::vector<SentPacketRecord> packets;
+    for (const auto handle : packet_space.recovery.tracked_packets()) {
+        const auto *packet = packet_space.recovery.packet_for_handle(handle);
+        if (packet == nullptr) {
+            std::abort();
+        }
+        packets.push_back(*packet);
+    }
+    return packets;
+}
+
 class ScopedEnvVar {
   public:
     ScopedEnvVar(std::string name, std::optional<std::string> value) : name_(std::move(name)) {

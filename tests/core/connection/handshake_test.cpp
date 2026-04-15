@@ -36,7 +36,9 @@ using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
 using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
+using coquic::quic::test_support::first_tracked_packet;
 using coquic::quic::test_support::invalid_cipher_suite;
+using coquic::quic::test_support::last_tracked_packet;
 using coquic::quic::test_support::make_connected_client_connection;
 using coquic::quic::test_support::make_connected_server_connection;
 using coquic::quic::test_support::make_connected_server_connection_with_preferred_address;
@@ -50,6 +52,10 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::tracked_packet_count;
+using coquic::quic::test_support::tracked_packet_or_null;
+using coquic::quic::test_support::tracked_packet_or_terminate;
+using coquic::quic::test_support::tracked_packet_snapshot;
 
 template <typename Core>
 concept has_receive = requires(Core &core) { core.receive(std::vector<std::byte>{}); };
@@ -944,7 +950,7 @@ TEST(QuicCoreTest, HandshakeTrimLoopStopsWhenAckStillOverflowsAfterAllCryptoIsRe
     EXPECT_FALSE(connection.has_failed());
     EXPECT_TRUE(connection.handshake_space_.received_packets.has_ack_to_send());
     EXPECT_TRUE(connection.handshake_space_.send_crypto.has_pending_data());
-    EXPECT_TRUE(connection.handshake_space_.sent_packets.empty());
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
 }
 
 TEST(QuicCoreTest, PendingApplicationCryptoDoesNotStarveQueuedServerResponse) {
@@ -1893,8 +1899,9 @@ TEST(QuicCoreTest, ClientSendsStandaloneHandshakeAckBeforeHandshakeFlight) {
     ASSERT_TRUE(connection.handshake_space_.read_secret.has_value());
     ASSERT_TRUE(connection.handshake_space_.write_secret.has_value());
 
-    ASSERT_FALSE(connection.initial_space_.sent_packets.empty());
-    const auto initial_packet_number = connection.initial_space_.sent_packets.begin()->first;
+    ASSERT_NE(tracked_packet_count(connection.initial_space_), 0u);
+    const auto initial_packet_number =
+        first_tracked_packet(connection.initial_space_).packet_number;
     ASSERT_TRUE(connection
                     .process_inbound_ack(connection.initial_space_,
                                          coquic::quic::AckFrame{
@@ -1947,8 +1954,9 @@ TEST(QuicCoreTest, ClientKeepsPtoArmedAfterServerInitialAckWithoutHandshakeFligh
     ASSERT_TRUE(connection.handshake_space_.read_secret.has_value());
     ASSERT_TRUE(connection.handshake_space_.write_secret.has_value());
 
-    ASSERT_FALSE(connection.initial_space_.sent_packets.empty());
-    const auto initial_packet_number = connection.initial_space_.sent_packets.begin()->first;
+    ASSERT_NE(tracked_packet_count(connection.initial_space_), 0u);
+    const auto initial_packet_number =
+        first_tracked_packet(connection.initial_space_).packet_number;
     ASSERT_TRUE(connection
                     .process_inbound_ack(connection.initial_space_,
                                          coquic::quic::AckFrame{
@@ -1960,10 +1968,10 @@ TEST(QuicCoreTest, ClientKeepsPtoArmedAfterServerInitialAckWithoutHandshakeFligh
                                          /*max_ack_delay_ms=*/0,
                                          /*suppress_pto_reset=*/true)
                     .has_value());
-    EXPECT_FALSE(std::ranges::any_of(connection.initial_space_.sent_packets, [](const auto &entry) {
-        return entry.second.ack_eliciting && entry.second.in_flight;
-    }));
-    EXPECT_TRUE(connection.handshake_space_.sent_packets.empty());
+    EXPECT_FALSE(std::ranges::any_of(
+        tracked_packet_snapshot(connection.initial_space_),
+        [](const auto &packet) { return packet.ack_eliciting && packet.in_flight; }));
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
 
     const auto response = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(response.empty());
@@ -1981,10 +1989,10 @@ TEST(QuicCoreTest, ClientKeepsPtoArmedAfterServerInitialAckWithoutHandshakeFligh
                       return std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(packet);
                   }),
               0);
-    EXPECT_FALSE(std::ranges::any_of(connection.initial_space_.sent_packets, [](const auto &entry) {
-        return entry.second.ack_eliciting && entry.second.in_flight;
-    }));
-    EXPECT_TRUE(connection.handshake_space_.sent_packets.empty());
+    EXPECT_FALSE(std::ranges::any_of(
+        tracked_packet_snapshot(connection.initial_space_),
+        [](const auto &packet) { return packet.ack_eliciting && packet.in_flight; }));
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
 
     const auto next_wakeup = connection.next_wakeup();
     ASSERT_TRUE(next_wakeup.has_value());
@@ -2206,7 +2214,7 @@ TEST(QuicCoreTest, DuplicatePicoquicClientInitialRetransmitsHandshakeFlight) {
         first_responses.push_back(response);
     }
     ASSERT_FALSE(first_responses.empty());
-    const auto first_handshake_packet_count = connection.handshake_space_.sent_packets.size();
+    const auto first_handshake_packet_count = tracked_packet_count(connection.handshake_space_);
     ASSERT_GT(first_handshake_packet_count, 0u);
     const auto first_handshake_next_packet_number =
         connection.handshake_space_.next_send_packet_number;
@@ -2223,7 +2231,7 @@ TEST(QuicCoreTest, DuplicatePicoquicClientInitialRetransmitsHandshakeFlight) {
         second_responses.push_back(response);
     }
     ASSERT_FALSE(second_responses.empty());
-    EXPECT_GT(connection.handshake_space_.sent_packets.size(), first_handshake_packet_count);
+    EXPECT_GT(tracked_packet_count(connection.handshake_space_), first_handshake_packet_count);
     EXPECT_GT(connection.handshake_space_.next_send_packet_number,
               first_handshake_next_packet_number);
 }
@@ -2261,7 +2269,7 @@ TEST(QuicCoreTest, FirstServerInitialCanBeBlockedByAmplificationLimit) {
 
     EXPECT_TRUE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
-    EXPECT_TRUE(connection.initial_space_.sent_packets.empty());
+    EXPECT_EQ(tracked_packet_count(connection.initial_space_), 0u);
     EXPECT_EQ(connection.initial_space_.next_send_packet_number, 0u);
 }
 
@@ -2275,8 +2283,8 @@ TEST(QuicCoreTest, ProcessCapturedPicoquicClientInitialPacketEmitsInitialCrypto)
 
     const auto outbound = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(outbound.empty());
-    ASSERT_FALSE(connection.initial_space_.sent_packets.empty());
-    EXPECT_FALSE(connection.initial_space_.sent_packets.begin()->second.crypto_ranges.empty());
+    ASSERT_NE(tracked_packet_count(connection.initial_space_), 0u);
+    EXPECT_FALSE(first_tracked_packet(connection.initial_space_).crypto_ranges.empty());
 }
 
 TEST(QuicCoreTest, ProcessCapturedPicoquicClientInitialIgnoresTrailingDatagramPadding) {
@@ -2533,14 +2541,14 @@ TEST(QuicCoreTest, ServerHandshakeStatusUpdateDoesNotConfirmHandshakeEarly) {
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
     connection.handshake_space_.write_secret = make_test_traffic_secret(
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x51});
-    connection.handshake_space_.sent_packets.emplace(
-        9, coquic::quic::SentPacketRecord{
-               .packet_number = 9,
-               .sent_time = coquic::quic::test::test_time(1),
-               .ack_eliciting = true,
-               .in_flight = true,
-               .has_ping = true,
-           });
+    connection.track_sent_packet(connection.handshake_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 9,
+                                     .sent_time = coquic::quic::test::test_time(1),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .has_ping = true,
+                                 });
 
     connection.update_handshake_status();
 
@@ -2549,7 +2557,7 @@ TEST(QuicCoreTest, ServerHandshakeStatusUpdateDoesNotConfirmHandshakeEarly) {
     EXPECT_FALSE(connection.handshake_confirmed_);
     EXPECT_TRUE(connection.handshake_space_.read_secret.has_value());
     EXPECT_TRUE(connection.handshake_space_.write_secret.has_value());
-    EXPECT_EQ(connection.handshake_space_.sent_packets.size(), 1u);
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
 }
 
 TEST(QuicCoreTest, ClientHandshakeMarksEstablishedPathValidated) {
@@ -2584,13 +2592,13 @@ TEST(QuicCoreTest, ProcessInboundCryptoApplicationHandshakeDoneConfirmsHandshake
     auto connection = make_connected_client_connection();
     connection.handshake_confirmed_ = false;
     connection.handshake_packet_space_discarded_ = false;
-    connection.handshake_space_.sent_packets.emplace(
-        1, coquic::quic::SentPacketRecord{
-               .packet_number = 1,
-               .sent_time = coquic::quic::test::test_time(0),
-               .ack_eliciting = true,
-               .in_flight = true,
-           });
+    connection.track_sent_packet(connection.handshake_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 1,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                 });
 
     const auto processed =
         connection.process_inbound_crypto(coquic::quic::EncryptionLevel::application,
@@ -2602,7 +2610,7 @@ TEST(QuicCoreTest, ProcessInboundCryptoApplicationHandshakeDoneConfirmsHandshake
     ASSERT_TRUE(processed.has_value());
     EXPECT_TRUE(connection.handshake_confirmed_);
     EXPECT_TRUE(connection.handshake_packet_space_discarded_);
-    EXPECT_TRUE(connection.handshake_space_.sent_packets.empty());
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
 }
 
 TEST(QuicCoreTest, ConnectedApplicationControlFramesDoNotTripPreconnectedGuards) {
@@ -3264,9 +3272,12 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
         EXPECT_EQ(connection.application_space_.recovery.find_packet(2), nullptr);
         EXPECT_EQ(connection.application_space_.recovery.find_packet(5), nullptr);
         EXPECT_NE(connection.application_space_.recovery.find_packet(8), nullptr);
-        EXPECT_FALSE(connection.application_space_.declared_lost_packets.contains(2));
-        EXPECT_FALSE(connection.application_space_.declared_lost_packets.contains(5));
-        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(8));
+        EXPECT_EQ(tracked_packet_or_null(connection.application_space_, 2), nullptr);
+        EXPECT_EQ(tracked_packet_or_null(connection.application_space_, 5), nullptr);
+        const auto *lost_packet = tracked_packet_or_null(connection.application_space_, 8);
+        ASSERT_NE(lost_packet, nullptr);
+        EXPECT_TRUE(lost_packet->declared_lost);
+        EXPECT_FALSE(lost_packet->in_flight);
     }
 
     {
@@ -3284,7 +3295,9 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
         EXPECT_NE(connection.application_space_.recovery.find_packet(1), nullptr);
-        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(1));
+        const auto &lost_packet = tracked_packet_or_terminate(connection.application_space_, 1);
+        EXPECT_TRUE(lost_packet.declared_lost);
+        EXPECT_FALSE(lost_packet.in_flight);
     }
 
     {
@@ -3309,7 +3322,9 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
         EXPECT_NE(connection.application_space_.recovery.find_packet(0), nullptr);
-        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(0));
+        const auto &lost_packet = tracked_packet_or_terminate(connection.application_space_, 0);
+        EXPECT_TRUE(lost_packet.declared_lost);
+        EXPECT_FALSE(lost_packet.in_flight);
     }
 
     {
@@ -3334,7 +3349,9 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
         EXPECT_NE(connection.application_space_.recovery.find_packet(0), nullptr);
-        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(0));
+        const auto &lost_packet = tracked_packet_or_terminate(connection.application_space_, 0);
+        EXPECT_TRUE(lost_packet.declared_lost);
+        EXPECT_FALSE(lost_packet.in_flight);
     }
 
     {
@@ -3352,7 +3369,9 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
         EXPECT_NE(connection.application_space_.recovery.find_packet(0), nullptr);
-        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(0));
+        const auto &lost_packet = tracked_packet_or_terminate(connection.application_space_, 0);
+        EXPECT_TRUE(lost_packet.declared_lost);
+        EXPECT_FALSE(lost_packet.in_flight);
     }
 }
 

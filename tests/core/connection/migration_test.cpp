@@ -36,7 +36,9 @@ using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
 using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
+using coquic::quic::test_support::first_tracked_packet;
 using coquic::quic::test_support::invalid_cipher_suite;
+using coquic::quic::test_support::last_tracked_packet;
 using coquic::quic::test_support::make_connected_client_connection;
 using coquic::quic::test_support::make_connected_server_connection;
 using coquic::quic::test_support::make_connected_server_connection_with_preferred_address;
@@ -50,6 +52,10 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::tracked_packet_count;
+using coquic::quic::test_support::tracked_packet_or_null;
+using coquic::quic::test_support::tracked_packet_or_terminate;
+using coquic::quic::test_support::tracked_packet_snapshot;
 
 bool connection_additional_internal_coverage_for_tests() {
     bool ok = true;
@@ -423,9 +429,9 @@ TEST(QuicCoreTest, AckOnlyRebindResponseIncludesPathChallengeOnFirstNewPathPacke
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(path3_datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), 3u);
-    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+    ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
     const auto largest_sent_packet =
-        std::prev(connection.application_space_.sent_packets.end())->first;
+        last_tracked_packet(connection.application_space_).packet_number;
 
     ASSERT_TRUE(connection
                     .process_inbound_application(
@@ -475,9 +481,9 @@ TEST(QuicCoreTest, AckOnlyRebindDefersQueuedStreamDataUntilPathValidated) {
     const auto path3_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(path3_datagram.empty());
-    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+    ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
     const auto largest_sent_packet =
-        std::prev(connection.application_space_.sent_packets.end())->first;
+        last_tracked_packet(connection.application_space_).packet_number;
 
     ASSERT_TRUE(connection
                     .process_inbound_application(
@@ -531,11 +537,11 @@ TEST(QuicCoreTest, AckOnlyRebindDefersApplicationProbePayloadUntilPathValidated)
     const auto path3_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(path3_datagram.empty());
-    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+    ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
     const auto largest_sent_packet =
-        std::prev(connection.application_space_.sent_packets.end())->first;
+        last_tracked_packet(connection.application_space_).packet_number;
     connection.application_space_.pending_probe_packet =
-        connection.application_space_.sent_packets.at(largest_sent_packet);
+        tracked_packet_or_terminate(connection.application_space_, largest_sent_packet);
     ASSERT_TRUE(connection.application_space_.pending_probe_packet.has_value());
     ASSERT_FALSE(connection.application_space_.pending_probe_packet->stream_fragments.empty());
 
@@ -591,9 +597,9 @@ TEST(QuicCoreTest, AckOnlyRebindPathValidationBypassesCongestionWindow) {
     const auto path3_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(path3_datagram.empty());
-    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+    ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
     const auto largest_sent_packet =
-        std::prev(connection.application_space_.sent_packets.end())->first;
+        last_tracked_packet(connection.application_space_).packet_number;
 
     ASSERT_TRUE(connection
                     .process_inbound_application(
@@ -1166,9 +1172,9 @@ TEST(QuicCoreTest, PacketTraceLogsAckTimeoutMigrationAndBlockedSendPaths) {
                 .has_value());
         const auto outbound = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
         ASSERT_FALSE(outbound.empty());
-        ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+        ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
         const auto largest_sent_packet =
-            std::prev(connection.application_space_.sent_packets.end())->first;
+            last_tracked_packet(connection.application_space_).packet_number;
 
         connection.start_path_validation(9, /*initiated_locally=*/true);
         ASSERT_TRUE(connection.paths_.at(9).outstanding_challenge.has_value());

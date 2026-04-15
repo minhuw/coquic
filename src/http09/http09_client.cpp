@@ -8,12 +8,6 @@
 
 namespace coquic::http09 {
 
-namespace {
-
-constexpr std::size_t kZeroRttPreHandshakeRequestBurstLimit = 24;
-
-} // namespace
-
 using quic::QuicCoreLocalError;
 using quic::QuicCoreLocalErrorCode;
 using quic::QuicCoreReceiveStreamData;
@@ -220,10 +214,6 @@ bool QuicHttp09ClientEndpoint::can_issue_next_request() const {
     }
 
     const auto in_flight_requests = in_flight_request_count();
-    if (config_.allow_requests_before_handshake_ready && !handshake_ready_ &&
-        in_flight_requests >= kZeroRttPreHandshakeRequestBurstLimit) {
-        return false;
-    }
     if (max_concurrent_requests_.has_value() && in_flight_requests >= *max_concurrent_requests_) {
         return false;
     }

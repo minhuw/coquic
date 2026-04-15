@@ -186,7 +186,7 @@ TEST(QuicHttp09ClientTest, PollBeforeHandshakeQueuesAllZeroRttRequestsInSingleUp
     EXPECT_TRUE(sends[2].fin);
 }
 
-TEST(QuicHttp09ClientTest, PollBeforeHandshakeCapsLargeZeroRttBurst) {
+TEST(QuicHttp09ClientTest, PollBeforeHandshakeQueuesLargeZeroRttBurstWithoutCap) {
     std::vector<QuicHttp09Request> requests;
     requests.reserve(40);
     for (std::size_t i = 0; i < 40; ++i) {
@@ -203,12 +203,12 @@ TEST(QuicHttp09ClientTest, PollBeforeHandshakeCapsLargeZeroRttBurst) {
     const auto update = endpoint.poll(coquic::quic::test::test_time());
     const auto sends = send_stream_inputs_from(update);
 
-    ASSERT_EQ(sends.size(), 24u);
+    ASSERT_EQ(sends.size(), 40u);
     EXPECT_EQ(sends.front().stream_id, 0u);
-    EXPECT_EQ(sends.back().stream_id, 92u);
+    EXPECT_EQ(sends.back().stream_id, 156u);
 }
 
-TEST(QuicHttp09ClientTest, PollAfterHandshakeBatchesRemainingZeroRttRequests) {
+TEST(QuicHttp09ClientTest, HandshakeDoesNotNeedToBatchRemainingZeroRttRequestsAfterFullBurst) {
     const auto now = coquic::quic::test::test_time();
     std::vector<QuicHttp09Request> requests;
     requests.reserve(40);
@@ -225,18 +225,16 @@ TEST(QuicHttp09ClientTest, PollAfterHandshakeBatchesRemainingZeroRttRequests) {
 
     const auto pre_handshake = endpoint.poll(now);
     const auto pre_handshake_sends = send_stream_inputs_from(pre_handshake);
-    ASSERT_EQ(pre_handshake_sends.size(), 24u);
+    ASSERT_EQ(pre_handshake_sends.size(), 40u);
 
     const auto on_handshake =
         endpoint.on_core_result(handshake_ready_result(), coquic::quic::test::test_time(1));
-    EXPECT_TRUE(on_handshake.has_pending_work);
+    EXPECT_FALSE(on_handshake.has_pending_work);
 
     const auto post_handshake = endpoint.poll(coquic::quic::test::test_time(1));
     const auto post_handshake_sends = send_stream_inputs_from(post_handshake);
 
-    ASSERT_EQ(post_handshake_sends.size(), 16u);
-    EXPECT_EQ(post_handshake_sends.front().stream_id, 96u);
-    EXPECT_EQ(post_handshake_sends.back().stream_id, 156u);
+    EXPECT_TRUE(post_handshake_sends.empty());
 }
 
 TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesSingleRequestAfterFirstRequestActivation) {

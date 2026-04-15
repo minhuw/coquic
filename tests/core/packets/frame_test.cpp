@@ -58,6 +58,76 @@ void expect_serialize_error(const Frame &frame, CodecErrorCode code) {
     EXPECT_EQ(encoded.error().code, code);
 }
 
+TEST(QuicFrameTest, AppendSerializedFrameMatchesStandaloneSerialization) {
+    const std::vector<Frame> frames = {
+        AckFrame{
+            .largest_acknowledged = 42,
+            .ack_delay = 7,
+            .first_ack_range = 3,
+            .additional_ranges =
+                {
+                    AckRange{
+                        .gap = 1,
+                        .range_length = 0,
+                    },
+                },
+        },
+        CryptoFrame{
+            .offset = 9,
+            .crypto_data = {std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}},
+        },
+        MaxDataFrame{
+            .maximum_data = 4096,
+        },
+        NewConnectionIdFrame{
+            .sequence_number = 3,
+            .retire_prior_to = 1,
+            .connection_id = {std::byte{0x10}, std::byte{0x11}, std::byte{0x12}},
+            .stateless_reset_token =
+                {
+                    std::byte{0x00},
+                    std::byte{0x01},
+                    std::byte{0x02},
+                    std::byte{0x03},
+                    std::byte{0x04},
+                    std::byte{0x05},
+                    std::byte{0x06},
+                    std::byte{0x07},
+                    std::byte{0x08},
+                    std::byte{0x09},
+                    std::byte{0x0a},
+                    std::byte{0x0b},
+                    std::byte{0x0c},
+                    std::byte{0x0d},
+                    std::byte{0x0e},
+                    std::byte{0x0f},
+                },
+        },
+        ApplicationConnectionCloseFrame{
+            .error_code = 0x1234,
+            .reason =
+                ConnectionCloseReason{
+                    .bytes = {std::byte{0x61}, std::byte{0x62}, std::byte{0x63}},
+                },
+        },
+        HandshakeDoneFrame{},
+    };
+
+    std::vector<std::byte> appended_bytes;
+    std::vector<std::byte> standalone_bytes;
+    for (const auto &frame : frames) {
+        const auto appended = coquic::quic::append_serialized_frame(appended_bytes, frame);
+        ASSERT_TRUE(appended.has_value());
+
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+        standalone_bytes.insert(standalone_bytes.end(), encoded.value().begin(),
+                                encoded.value().end());
+    }
+
+    EXPECT_EQ(appended_bytes, standalone_bytes);
+}
+
 TEST(QuicFrameTest, SerializesAndDeserializesPing) {
     Frame frame = PingFrame{};
 

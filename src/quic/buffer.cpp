@@ -34,18 +34,24 @@ CodecResult<std::span<const std::byte>> BufferReader::read_exact(std::size_t siz
     return CodecResult<std::span<const std::byte>>::success(begin);
 }
 
+BufferWriter::BufferWriter() = default;
+
+BufferWriter::BufferWriter(std::vector<std::byte> *bytes)
+    : bytes_(bytes != nullptr ? bytes : &owned_bytes_) {
+}
+
 void BufferWriter::write_byte(std::byte value) {
-    bytes_.push_back(value);
+    bytes_->push_back(value);
 }
 
 void BufferWriter::write_bytes(std::span<const std::byte> bytes) {
-    const auto offset = bytes_.size();
-    bytes_.resize(offset + bytes.size());
-    std::copy(bytes.begin(), bytes.end(), bytes_.data() + offset);
+    const auto offset = bytes_->size();
+    bytes_->resize(offset + bytes.size());
+    std::copy(bytes.begin(), bytes.end(), bytes_->data() + offset);
 }
 
 const std::vector<std::byte> &BufferWriter::bytes() const {
-    return bytes_;
+    return *bytes_;
 }
 
 } // namespace coquic::quic

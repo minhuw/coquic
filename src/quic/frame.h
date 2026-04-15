@@ -149,6 +149,7 @@ struct FrameDecodeResult {
 };
 
 CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame);
+CodecResult<std::size_t> append_serialized_frame(std::vector<std::byte> &bytes, const Frame &frame);
 CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> bytes);
 
 } // namespace coquic::quic

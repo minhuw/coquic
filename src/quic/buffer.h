@@ -24,12 +24,16 @@ class BufferReader {
 
 class BufferWriter {
   public:
+    BufferWriter();
+    explicit BufferWriter(std::vector<std::byte> *bytes);
+
     void write_byte(std::byte value);
     void write_bytes(std::span<const std::byte> bytes);
     const std::vector<std::byte> &bytes() const;
 
   private:
-    std::vector<std::byte> bytes_;
+    std::vector<std::byte> owned_bytes_;
+    std::vector<std::byte> *bytes_ = &owned_bytes_;
 };
 
 } // namespace coquic::quic

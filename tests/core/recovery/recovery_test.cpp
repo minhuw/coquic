@@ -584,6 +584,23 @@ TEST(QuicRecoveryTest,
     EXPECT_TRUE(result.has_newly_acked_ack_eliciting);
 }
 
+TEST(QuicRecoveryTest, AckProcessingSnapshotsLargestNewlyAckedPacketMetadataBeforeRetirement) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(33)));
+
+    const auto result =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/7), coquic::quic::test::test_time(40));
+
+    ASSERT_TRUE(result.largest_newly_acked_packet.has_value());
+    recovery.retire_packet(result.acked_packets.handles().front());
+    EXPECT_EQ(result.largest_newly_acked_packet->packet_number, 7u);
+    EXPECT_EQ(result.largest_newly_acked_packet->sent_time, coquic::quic::test::test_time(33));
+    EXPECT_TRUE(result.largest_newly_acked_packet->ack_eliciting);
+    EXPECT_TRUE(result.largest_newly_acked_packet->in_flight);
+    EXPECT_FALSE(result.largest_newly_acked_packet->declared_lost);
+}
+
 TEST(QuicRecoveryTest, RecoveryTracksLatestInflightAckElicitingPacketIncrementally) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,

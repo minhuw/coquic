@@ -263,13 +263,23 @@ RecoveryPacketMetadata resolved_packet_metadata(const PacketSpaceRecovery *recov
     return metadata;
 }
 
+RecoveryPacketMetadata packet_metadata(const SentPacketRecord &packet) {
+    return RecoveryPacketMetadata{
+        .packet_number = packet.packet_number,
+        .sent_time = packet.sent_time,
+        .ack_eliciting = packet.ack_eliciting,
+        .in_flight = packet.in_flight,
+        .declared_lost = packet.declared_lost,
+    };
+}
+
 RecoveryPacketHandleList::const_iterator::const_iterator(
-    const PacketSpaceRecovery *recovery, std::vector<RecoveryPacketHandle>::const_iterator it)
-    : recovery_(recovery), it_(it) {
+    std::vector<RecoveryPacketMetadata>::const_iterator it)
+    : it_(it) {
 }
 
 RecoveryPacketMetadata RecoveryPacketHandleList::const_iterator::operator*() const {
-    return resolved_packet_metadata(recovery_, *it_);
+    return *it_;
 }
 
 RecoveryPacketHandleList::const_iterator &RecoveryPacketHandleList::const_iterator::operator++() {
@@ -283,16 +293,15 @@ RecoveryPacketHandleList::const_iterator RecoveryPacketHandleList::const_iterato
     return copy;
 }
 
-RecoveryPacketHandleList::RecoveryPacketHandleList(const PacketSpaceRecovery *recovery)
-    : recovery_(recovery) {
-}
-
 void RecoveryPacketHandleList::reserve(std::size_t count) {
     handles_.reserve(count);
+    metadata_.reserve(count);
 }
 
-void RecoveryPacketHandleList::push_back(RecoveryPacketHandle handle) {
+void RecoveryPacketHandleList::push_back(RecoveryPacketHandle handle,
+                                         RecoveryPacketMetadata metadata) {
     handles_.push_back(handle);
+    metadata_.push_back(metadata);
 }
 
 bool RecoveryPacketHandleList::empty() const {
@@ -304,11 +313,11 @@ std::size_t RecoveryPacketHandleList::size() const {
 }
 
 RecoveryPacketMetadata RecoveryPacketHandleList::front() const {
-    return resolved_packet_metadata(recovery_, handles_.front());
+    return metadata_.front();
 }
 
 RecoveryPacketMetadata RecoveryPacketHandleList::back() const {
-    return resolved_packet_metadata(recovery_, handles_.back());
+    return metadata_.back();
 }
 
 std::span<const RecoveryPacketHandle> RecoveryPacketHandleList::handles() const {
@@ -316,21 +325,17 @@ std::span<const RecoveryPacketHandle> RecoveryPacketHandleList::handles() const 
 }
 
 RecoveryPacketHandleList::const_iterator RecoveryPacketHandleList::begin() const {
-    return const_iterator{recovery_, handles_.begin()};
+    return const_iterator{metadata_.begin()};
 }
 
 RecoveryPacketHandleList::const_iterator RecoveryPacketHandleList::end() const {
-    return const_iterator{recovery_, handles_.end()};
+    return const_iterator{metadata_.end()};
 }
 
-RecoveryPacketHandleOptional::RecoveryPacketHandleOptional(const PacketSpaceRecovery *recovery)
-    : recovery_(recovery) {
-}
-
-RecoveryPacketHandleOptional &RecoveryPacketHandleOptional::operator=(RecoveryPacketHandle handle) {
+void RecoveryPacketHandleOptional::emplace(RecoveryPacketHandle handle,
+                                           RecoveryPacketMetadata metadata) {
     handle_ = handle;
-    cached_metadata_.reset();
-    return *this;
+    metadata_ = metadata;
 }
 
 bool RecoveryPacketHandleOptional::has_value() const {
@@ -338,23 +343,17 @@ bool RecoveryPacketHandleOptional::has_value() const {
 }
 
 RecoveryPacketMetadata RecoveryPacketHandleOptional::value() const {
-    if (!handle_.has_value()) {
+    if (!metadata_.has_value()) {
         throw std::bad_optional_access();
     }
-    return resolved_packet_metadata(recovery_, *handle_);
+    return *metadata_;
 }
 
 const RecoveryPacketMetadata *RecoveryPacketHandleOptional::operator->() const {
-    if (!handle_.has_value()) {
+    if (!metadata_.has_value()) {
         throw std::bad_optional_access();
     }
-    cached_metadata_ = resolved_packet_metadata(recovery_, *handle_);
-    return &*cached_metadata_;
-}
-
-AckProcessingResult::AckProcessingResult(const PacketSpaceRecovery *recovery)
-    : acked_packets(recovery), late_acked_packets(recovery), lost_packets(recovery),
-      largest_newly_acked_packet(recovery) {
+    return &*metadata_;
 }
 
 bool PacketSpaceRecovery::SentPacketsView::contains(std::uint64_t packet_number) const {
@@ -629,7 +628,7 @@ void PacketSpaceRecovery::retire_packet(std::uint64_t packet_number) {
 AckProcessingResult
 PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_ranges,
                                      std::uint64_t largest_acknowledged, QuicCoreTimePoint now) {
-    AckProcessingResult result{this};
+    AckProcessingResult result;
     const auto previous_largest_acked = largest_acked_packet_number_;
     largest_acked_packet_number_ = previous_largest_acked.has_value()
                                        ? std::max(*previous_largest_acked, largest_acknowledged)
@@ -653,8 +652,9 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
             }
 
             if (slot.state == LedgerSlotState::sent) {
-                result.acked_packets.push_back(packet_handle(slot, handle->slot_index));
-                result.largest_newly_acked_packet = *handle;
+                const auto snapshot = packet_metadata(slot.packet);
+                result.acked_packets.push_back(packet_handle(slot, handle->slot_index), snapshot);
+                result.largest_newly_acked_packet.emplace(*handle, snapshot);
                 if (packet_number == largest_acknowledged) {
                     result.largest_acknowledged_was_newly_acked = true;
                 }
@@ -667,7 +667,8 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
                 slot.packet.in_flight = false;
                 slot.packet.bytes_in_flight = 0;
             } else if (slot.state == LedgerSlotState::declared_lost) {
-                result.late_acked_packets.push_back(packet_handle(slot, handle->slot_index));
+                result.late_acked_packets.push_back(packet_handle(slot, handle->slot_index),
+                                                    packet_metadata(slot.packet));
                 slot.acknowledged = true;
             }
         }
@@ -695,7 +696,8 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
         slot.packet.declared_lost = true;
         slot.packet.in_flight = false;
         slot.packet.bytes_in_flight = 0;
-        result.lost_packets.push_back(packet_handle(slot, packet_number - base_packet_number_));
+        result.lost_packets.push_back(packet_handle(slot, packet_number - base_packet_number_),
+                                      packet_metadata(slot.packet));
     }
 
     return result;

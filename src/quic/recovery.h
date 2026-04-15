@@ -113,7 +113,6 @@ struct RecoveryPacketMetadata {
 };
 
 class PacketSpaceRecovery;
-
 struct RecoveryPacketHandle {
     std::uint64_t packet_number = 0;
     std::size_t slot_index = 0;
@@ -127,8 +126,7 @@ class RecoveryPacketHandleList {
         using difference_type = std::ptrdiff_t;
         using value_type = RecoveryPacketMetadata;
 
-        const_iterator(const PacketSpaceRecovery *recovery,
-                       std::vector<RecoveryPacketHandle>::const_iterator it);
+        explicit const_iterator(std::vector<RecoveryPacketMetadata>::const_iterator it);
 
         value_type operator*() const;
         const_iterator &operator++();
@@ -136,14 +134,11 @@ class RecoveryPacketHandleList {
         bool operator==(const const_iterator &other) const = default;
 
       private:
-        const PacketSpaceRecovery *recovery_ = nullptr;
-        std::vector<RecoveryPacketHandle>::const_iterator it_;
+        std::vector<RecoveryPacketMetadata>::const_iterator it_;
     };
 
-    explicit RecoveryPacketHandleList(const PacketSpaceRecovery *recovery = nullptr);
-
     void reserve(std::size_t count);
-    void push_back(RecoveryPacketHandle handle);
+    void push_back(RecoveryPacketHandle handle, RecoveryPacketMetadata metadata);
     bool empty() const;
     std::size_t size() const;
     RecoveryPacketMetadata front() const;
@@ -153,28 +148,23 @@ class RecoveryPacketHandleList {
     const_iterator end() const;
 
   private:
-    const PacketSpaceRecovery *recovery_ = nullptr;
     std::vector<RecoveryPacketHandle> handles_;
+    std::vector<RecoveryPacketMetadata> metadata_;
 };
 
 class RecoveryPacketHandleOptional {
   public:
-    explicit RecoveryPacketHandleOptional(const PacketSpaceRecovery *recovery = nullptr);
-
-    RecoveryPacketHandleOptional &operator=(RecoveryPacketHandle handle);
+    void emplace(RecoveryPacketHandle handle, RecoveryPacketMetadata metadata);
     bool has_value() const;
     RecoveryPacketMetadata value() const;
     const RecoveryPacketMetadata *operator->() const;
 
   private:
-    const PacketSpaceRecovery *recovery_ = nullptr;
     std::optional<RecoveryPacketHandle> handle_;
-    mutable std::optional<RecoveryPacketMetadata> cached_metadata_;
+    std::optional<RecoveryPacketMetadata> metadata_;
 };
 
 struct AckProcessingResult {
-    explicit AckProcessingResult(const PacketSpaceRecovery *recovery = nullptr);
-
     RecoveryPacketHandleList acked_packets;
     RecoveryPacketHandleList late_acked_packets;
     RecoveryPacketHandleList lost_packets;

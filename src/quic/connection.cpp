@@ -3842,9 +3842,8 @@ std::optional<SentPacketRecord> QuicConnection::mark_lost_packet(PacketSpaceStat
         handshake_done_state_ = StreamControlFrameState::pending;
     }
 
-    if (!already_marked_in_recovery) {
-        packet_space.recovery.on_packet_declared_lost(packet.packet_number);
-    }
+    static_cast<void>(already_marked_in_recovery);
+    packet_space.recovery.on_packet_declared_lost(packet.packet_number);
     return packet;
 }
 

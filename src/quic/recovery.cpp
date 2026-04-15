@@ -724,8 +724,6 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
 
                 erase_from_tracked_sets(slot.packet);
                 slot.acknowledged = true;
-                slot.packet.in_flight = false;
-                slot.packet.bytes_in_flight = 0;
                 mutated = true;
             } else if (slot.state == LedgerSlotState::declared_lost) {
                 result.late_acked_packets.push_back(packet_handle(slot, handle->slot_index),
@@ -755,11 +753,11 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
 
         erase_from_tracked_sets(slot.packet);
         slot.state = LedgerSlotState::declared_lost;
-        slot.packet.declared_lost = true;
-        slot.packet.in_flight = false;
-        slot.packet.bytes_in_flight = 0;
+        auto metadata = packet_metadata(slot.packet);
+        metadata.in_flight = false;
+        metadata.declared_lost = true;
         result.lost_packets.push_back(packet_handle(slot, packet_number - base_packet_number_),
-                                      packet_metadata(slot.packet));
+                                      metadata);
         mutated = true;
     }
 

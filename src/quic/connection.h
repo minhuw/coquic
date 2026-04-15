@@ -34,6 +34,148 @@ enum class QuicConnectionTerminalState : std::uint8_t {
     failed,
 };
 
+class PacketSpacePacketMapView {
+  public:
+    using Storage = std::map<std::uint64_t, SentPacketRecord>;
+    using const_iterator = Storage::const_iterator;
+    using const_reverse_iterator = Storage::const_reverse_iterator;
+
+    enum class Filter : std::uint8_t {
+        outstanding,
+        declared_lost,
+    };
+
+    PacketSpacePacketMapView() = default;
+    PacketSpacePacketMapView(PacketSpaceRecovery *recovery, Filter filter)
+        : recovery_(recovery), filter_(filter) {
+    }
+
+    void bind(PacketSpaceRecovery *recovery, Filter filter) {
+        recovery_ = recovery;
+        filter_ = filter;
+        last_synced_version_.reset();
+        cache_.clear();
+    }
+
+    bool empty() const {
+        sync();
+        return cache_.empty();
+    }
+
+    std::size_t size() const {
+        sync();
+        return cache_.size();
+    }
+
+    bool contains(std::uint64_t packet_number) const {
+        sync();
+        return cache_.contains(packet_number);
+    }
+
+    const SentPacketRecord &at(std::uint64_t packet_number) const {
+        sync();
+        return cache_.at(packet_number);
+    }
+
+    std::pair<const_iterator, bool> emplace(std::uint64_t packet_number,
+                                            const SentPacketRecord &packet) {
+        sync();
+        const auto existing = cache_.find(packet_number);
+        if (existing != cache_.end()) {
+            return {existing, false};
+        }
+
+        if (recovery_ == nullptr) {
+            return {cache_.end(), false};
+        }
+
+        auto stored_packet = packet;
+        stored_packet.packet_number = packet_number;
+        if (filter_ == Filter::declared_lost) {
+            stored_packet.declared_lost = true;
+            stored_packet.in_flight = false;
+            stored_packet.bytes_in_flight = 0;
+        }
+
+        recovery_->on_packet_sent(stored_packet);
+        if (filter_ == Filter::declared_lost) {
+            recovery_->on_packet_declared_lost(packet_number);
+        }
+
+        last_synced_version_.reset();
+        sync();
+        return {cache_.find(packet_number), true};
+    }
+
+    std::size_t erase(std::uint64_t packet_number) {
+        sync();
+        if (!cache_.contains(packet_number) || recovery_ == nullptr) {
+            return 0;
+        }
+
+        recovery_->retire_packet(packet_number);
+        last_synced_version_.reset();
+        sync();
+        return 1;
+    }
+
+    const_iterator begin() const {
+        sync();
+        return cache_.begin();
+    }
+
+    const_iterator end() const {
+        sync();
+        return cache_.end();
+    }
+
+    const_reverse_iterator rbegin() const {
+        sync();
+        return cache_.rbegin();
+    }
+
+    const_reverse_iterator rend() const {
+        sync();
+        return cache_.rend();
+    }
+
+  private:
+    void sync() const {
+        if (recovery_ == nullptr) {
+            cache_.clear();
+            last_synced_version_ = 0;
+            return;
+        }
+
+        const auto version = recovery_->compatibility_version();
+        if (last_synced_version_.has_value() && *last_synced_version_ == version) {
+            return;
+        }
+
+        cache_.clear();
+        for (const auto handle : recovery_->tracked_packets()) {
+            const auto *packet = recovery_->packet_for_handle(handle);
+            if (packet == nullptr) {
+                continue;
+            }
+
+            const bool matches_filter =
+                filter_ == Filter::declared_lost ? packet->declared_lost : !packet->declared_lost;
+            if (!matches_filter) {
+                continue;
+            }
+
+            cache_.emplace(packet->packet_number, *packet);
+        }
+        last_synced_version_ = version;
+    }
+
+    PacketSpaceRecovery *recovery_ = nullptr;
+    Filter filter_ = Filter::outstanding;
+    mutable std::optional<std::uint64_t> last_synced_version_;
+    mutable Storage cache_;
+};
+
 struct PacketSpaceState {
     std::uint64_t next_send_packet_number = 0;
     std::optional<std::uint64_t> largest_authenticated_packet_number;
@@ -42,12 +184,67 @@ struct PacketSpaceState {
     ReliableSendBuffer send_crypto;
     ReliableReceiveBuffer receive_crypto;
     ReceivedPacketHistory received_packets;
-    std::map<std::uint64_t, SentPacketRecord> sent_packets;
-    std::map<std::uint64_t, SentPacketRecord> declared_lost_packets;
     PacketSpaceRecovery recovery;
+    PacketSpacePacketMapView sent_packets;
+    PacketSpacePacketMapView declared_lost_packets;
     std::optional<SentPacketRecord> pending_probe_packet;
     std::optional<QuicCoreTimePoint> pending_ack_deadline;
     bool force_ack_send = false;
+
+    PacketSpaceState()
+        : sent_packets(&recovery, PacketSpacePacketMapView::Filter::outstanding),
+          declared_lost_packets(&recovery, PacketSpacePacketMapView::Filter::declared_lost) {
+    }
+
+    PacketSpaceState(const PacketSpaceState &other) : PacketSpaceState() {
+        *this = other;
+    }
+
+    PacketSpaceState(PacketSpaceState &&other) noexcept : PacketSpaceState() {
+        *this = std::move(other);
+    }
+
+    PacketSpaceState &operator=(const PacketSpaceState &other) {
+        if (this == &other) {
+            return *this;
+        }
+
+        next_send_packet_number = other.next_send_packet_number;
+        largest_authenticated_packet_number = other.largest_authenticated_packet_number;
+        read_secret = other.read_secret;
+        write_secret = other.write_secret;
+        send_crypto = other.send_crypto;
+        receive_crypto = other.receive_crypto;
+        received_packets = other.received_packets;
+        recovery = other.recovery;
+        sent_packets.bind(&recovery, PacketSpacePacketMapView::Filter::outstanding);
+        declared_lost_packets.bind(&recovery, PacketSpacePacketMapView::Filter::declared_lost);
+        pending_probe_packet = other.pending_probe_packet;
+        pending_ack_deadline = other.pending_ack_deadline;
+        force_ack_send = other.force_ack_send;
+        return *this;
+    }
+
+    PacketSpaceState &operator=(PacketSpaceState &&other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+
+        next_send_packet_number = other.next_send_packet_number;
+        largest_authenticated_packet_number = std::move(other.largest_authenticated_packet_number);
+        read_secret = std::move(other.read_secret);
+        write_secret = std::move(other.write_secret);
+        send_crypto = std::move(other.send_crypto);
+        receive_crypto = std::move(other.receive_crypto);
+        received_packets = std::move(other.received_packets);
+        recovery = std::move(other.recovery);
+        sent_packets.bind(&recovery, PacketSpacePacketMapView::Filter::outstanding);
+        declared_lost_packets.bind(&recovery, PacketSpacePacketMapView::Filter::declared_lost);
+        pending_probe_packet = std::move(other.pending_probe_packet);
+        pending_ack_deadline = std::move(other.pending_ack_deadline);
+        force_ack_send = other.force_ack_send;
+        return *this;
+    }
 };
 
 struct LocalResetCommand {
@@ -293,9 +490,11 @@ class QuicConnection {
                                           QuicCoreTimePoint now, std::uint64_t ack_delay_exponent,
                                           std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);
     void track_sent_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet);
-    void retire_acked_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet);
-    void mark_lost_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet,
-                          bool already_marked_in_recovery = false);
+    std::optional<SentPacketRecord> retire_acked_packet(PacketSpaceState &packet_space,
+                                                        RecoveryPacketHandle handle);
+    std::optional<SentPacketRecord> mark_lost_packet(PacketSpaceState &packet_space,
+                                                     RecoveryPacketHandle handle,
+                                                     bool already_marked_in_recovery = false);
     void rebuild_recovery(PacketSpaceState &packet_space);
     std::optional<QuicCoreTimePoint> loss_deadline() const;
     std::optional<QuicCoreTimePoint> pto_deadline() const;

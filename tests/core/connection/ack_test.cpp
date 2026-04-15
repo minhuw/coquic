@@ -1478,8 +1478,10 @@ TEST(QuicCoreTest, ApplicationPtoDoesNotResendFullyAckedPrefixOfPartiallyOutstan
                                      .in_flight = true,
                                      .stream_fragments = initial_fragments,
                                  });
-    connection.mark_lost_packet(connection.application_space_,
-                                connection.application_space_.sent_packets.at(72));
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(
+            connection.application_space_.recovery.handle_for_packet_number(72)));
 
     const auto retransmitted_prefix = stream.take_send_fragments(coquic::quic::StreamSendBudget{
         .packet_bytes = 2,
@@ -2136,14 +2138,18 @@ TEST(QuicCoreTest, DeadlineTrackingCacheRefreshesAfterTrackedPacketsAreRemoved) 
         optional_value_or_terminate(packet_space.recovery.earliest_loss_packet()).packet_number,
         1u);
 
-    connection.retire_acked_packet(packet_space, packet_space.sent_packets.at(2));
+    connection.retire_acked_packet(
+        packet_space,
+        optional_value_or_terminate(packet_space.recovery.handle_for_packet_number(2)));
 
     EXPECT_EQ(
         optional_value_or_terminate(packet_space.recovery.latest_in_flight_ack_eliciting_packet())
             .packet_number,
         3u);
 
-    connection.mark_lost_packet(packet_space, packet_space.sent_packets.at(1));
+    connection.mark_lost_packet(
+        packet_space,
+        optional_value_or_terminate(packet_space.recovery.handle_for_packet_number(1)));
 
     EXPECT_EQ(
         optional_value_or_terminate(packet_space.recovery.earliest_loss_packet()).packet_number,
@@ -4136,7 +4142,10 @@ TEST(QuicCoreTest, RetransmittedServerResponseStillCarriesAckForRepeatedRequestP
     const auto first_packet = connection.application_space_.sent_packets.at(first_packet_number);
     ASSERT_FALSE(first_packet.stream_fragments.empty());
 
-    connection.mark_lost_packet(connection.application_space_, first_packet);
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(connection.application_space_.recovery.handle_for_packet_number(
+            first_packet.packet_number)));
     ASSERT_TRUE(connection.has_pending_application_send());
 
     process_request(/*packet_number=*/8, coquic::quic::test::test_time(2));
@@ -4239,7 +4248,10 @@ TEST(QuicCoreTest, LostPostHandshakeCryptoDoesNotStarveRetransmittedServerRespon
     const auto first_packet = connection.application_space_.sent_packets.at(first_packet_number);
     EXPECT_FALSE(first_packet.crypto_ranges.empty());
 
-    connection.mark_lost_packet(connection.application_space_, first_packet);
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(connection.application_space_.recovery.handle_for_packet_number(
+            first_packet.packet_number)));
     EXPECT_TRUE(connection.has_pending_application_send());
 
     const auto second_datagram =
@@ -4330,7 +4342,10 @@ TEST(QuicCoreTest, ApplicationSendRetransmitsLostDataWithoutConnectionCredit) {
     ASSERT_EQ(connection.application_space_.sent_packets.size(), 1u);
     const auto first_packet = connection.application_space_.sent_packets.begin()->second;
 
-    connection.mark_lost_packet(connection.application_space_, first_packet);
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(connection.application_space_.recovery.handle_for_packet_number(
+            first_packet.packet_number)));
     connection.connection_flow_control_.peer_max_data =
         connection.connection_flow_control_.highest_sent;
 
@@ -5068,12 +5083,10 @@ TEST(QuicCoreTest, AckProcessingAccountsForLateAckedEcnPackets) {
                                      .path_id = 0,
                                      .ecn = coquic::quic::QuicEcnCodepoint::ect0,
                                  });
-    auto late_packet = connection.application_space_.sent_packets.at(3);
-    late_packet.in_flight = false;
-    late_packet.declared_lost = true;
-    late_packet.bytes_in_flight = 0;
-    connection.application_space_.declared_lost_packets.emplace(3, late_packet);
-    connection.application_space_.sent_packets.erase(3);
+    const auto late_handle = optional_value_or_terminate(
+        connection.application_space_.recovery.handle_for_packet_number(3));
+    ASSERT_TRUE(
+        connection.mark_lost_packet(connection.application_space_, late_handle).has_value());
 
     const auto processed =
         connection.process_inbound_ack(connection.application_space_,
@@ -5098,8 +5111,56 @@ TEST(QuicCoreTest, AckProcessingAccountsForLateAckedEcnPackets) {
                                        /*max_ack_delay_ms=*/0, /*suppress_pto_reset=*/false);
 
     ASSERT_TRUE(processed.has_value());
-    EXPECT_FALSE(connection.application_space_.declared_lost_packets.contains(3));
-    EXPECT_FALSE(connection.application_space_.sent_packets.contains(5));
+    EXPECT_EQ(connection.application_space_.recovery.find_packet(3), nullptr);
+    EXPECT_EQ(connection.application_space_.recovery.find_packet(5), nullptr);
+}
+
+TEST(QuicCoreTest, AckProcessingRetiresLateAckedPacketFromRecoveryLedger) {
+    auto connection = make_connected_client_connection();
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 3,
+                                     .sent_time = coquic::quic::test::test_time(3),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                     .path_id = 0,
+                                 });
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 5,
+                                     .sent_time = coquic::quic::test::test_time(5),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                     .path_id = 0,
+                                 });
+
+    const auto late_handle = optional_value_or_terminate(
+        connection.application_space_.recovery.handle_for_packet_number(3));
+    EXPECT_TRUE(
+        connection.mark_lost_packet(connection.application_space_, late_handle).has_value());
+
+    const auto processed = connection.process_inbound_ack(connection.application_space_,
+                                                          coquic::quic::AckFrame{
+                                                              .largest_acknowledged = 5,
+                                                              .first_ack_range = 0,
+                                                              .additional_ranges =
+                                                                  {
+                                                                      coquic::quic::AckRange{
+                                                                          .gap = 0,
+                                                                          .range_length = 0,
+                                                                      },
+                                                                  },
+                                                          },
+                                                          coquic::quic::test::test_time(10),
+                                                          /*ack_delay_exponent=*/0,
+                                                          /*max_ack_delay_ms=*/0,
+                                                          /*suppress_pto_reset=*/false);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_EQ(connection.application_space_.recovery.find_packet(3), nullptr);
+    EXPECT_EQ(connection.application_space_.recovery.find_packet(5), nullptr);
 }
 
 TEST(QuicCoreTest, AckProcessingDisablesEcnWhenPeerDecreasesEct1OrCeCounts) {
@@ -5402,7 +5463,11 @@ TEST(QuicCoreTest, MarkLostPacketKeepsEcnProbingWhenProbeLossIsNotConclusive) {
         };
         connection.application_space_.sent_packets.emplace(packet.packet_number, packet);
 
-        connection.mark_lost_packet(connection.application_space_, packet);
+        connection.mark_lost_packet(
+            connection.application_space_,
+            optional_value_or_terminate(
+                connection.application_space_.recovery.handle_for_packet_number(
+                    packet.packet_number)));
 
         EXPECT_EQ(path.ecn.state, coquic::quic::QuicPathEcnState::probing);
     }
@@ -6695,7 +6760,10 @@ TEST(QuicCoreTest, MarkLostPacketRequeuesHandshakeDoneWhenItWasNotYetAcknowledge
     };
     connection.application_space_.sent_packets.emplace(packet.packet_number, packet);
 
-    connection.mark_lost_packet(connection.application_space_, packet);
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(
+            connection.application_space_.recovery.handle_for_packet_number(packet.packet_number)));
 
     EXPECT_EQ(connection.handshake_done_state_, coquic::quic::StreamControlFrameState::pending);
 }

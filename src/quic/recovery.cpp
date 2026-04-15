@@ -201,7 +201,8 @@ PacketSpaceRecovery::PacketSpaceRecovery(const PacketSpaceRecovery &other)
       in_flight_ack_eliciting_packets_(other.in_flight_ack_eliciting_packets_),
       eligible_loss_packets_(other.eligible_loss_packets_),
       largest_acked_packet_number_(other.largest_acked_packet_number_),
-      rtt_state_(other.rtt_state_), sent_packets_{this} {
+      compatibility_version_(other.compatibility_version_), rtt_state_(other.rtt_state_),
+      sent_packets_{this} {
 }
 
 PacketSpaceRecovery::PacketSpaceRecovery(PacketSpaceRecovery &&other) noexcept
@@ -209,7 +210,8 @@ PacketSpaceRecovery::PacketSpaceRecovery(PacketSpaceRecovery &&other) noexcept
       in_flight_ack_eliciting_packets_(std::move(other.in_flight_ack_eliciting_packets_)),
       eligible_loss_packets_(std::move(other.eligible_loss_packets_)),
       largest_acked_packet_number_(other.largest_acked_packet_number_),
-      rtt_state_(other.rtt_state_), sent_packets_{this} {
+      compatibility_version_(other.compatibility_version_), rtt_state_(other.rtt_state_),
+      sent_packets_{this} {
 }
 
 PacketSpaceRecovery &PacketSpaceRecovery::operator=(const PacketSpaceRecovery &other) {
@@ -222,6 +224,7 @@ PacketSpaceRecovery &PacketSpaceRecovery::operator=(const PacketSpaceRecovery &o
     in_flight_ack_eliciting_packets_ = other.in_flight_ack_eliciting_packets_;
     eligible_loss_packets_ = other.eligible_loss_packets_;
     largest_acked_packet_number_ = other.largest_acked_packet_number_;
+    compatibility_version_ = other.compatibility_version_;
     rtt_state_ = other.rtt_state_;
     sent_packets_.owner = this;
     return *this;
@@ -237,6 +240,7 @@ PacketSpaceRecovery &PacketSpaceRecovery::operator=(PacketSpaceRecovery &&other)
     in_flight_ack_eliciting_packets_ = std::move(other.in_flight_ack_eliciting_packets_);
     eligible_loss_packets_ = std::move(other.eligible_loss_packets_);
     largest_acked_packet_number_ = other.largest_acked_packet_number_;
+    compatibility_version_ = other.compatibility_version_;
     rtt_state_ = other.rtt_state_;
     sent_packets_.owner = this;
     return *this;
@@ -616,6 +620,7 @@ void PacketSpaceRecovery::on_packet_sent(const SentPacketRecord &packet) {
         in_flight_ack_eliciting_packets_.insert(tracked_packet(slot.packet));
     }
     maybe_track_as_loss_candidate(slot.packet);
+    ++compatibility_version_;
 }
 
 void PacketSpaceRecovery::on_packet_declared_lost(std::uint64_t packet_number) {
@@ -632,6 +637,7 @@ void PacketSpaceRecovery::on_packet_declared_lost(std::uint64_t packet_number) {
     if (const auto handle = handle_for_packet_number(packet_number); handle.has_value()) {
         slots_[handle->slot_index].state = LedgerSlotState::declared_lost;
     }
+    ++compatibility_version_;
 }
 
 void PacketSpaceRecovery::retire_packet(RecoveryPacketHandle handle) {
@@ -649,6 +655,7 @@ void PacketSpaceRecovery::retire_packet(RecoveryPacketHandle handle) {
     slot.state = LedgerSlotState::retired;
     slot.acknowledged = true;
     compact_retired_prefix();
+    ++compatibility_version_;
 }
 
 void PacketSpaceRecovery::retire_packet(std::uint64_t packet_number) {
@@ -663,6 +670,7 @@ AckProcessingResult
 PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_ranges,
                                      std::uint64_t largest_acknowledged, QuicCoreTimePoint now) {
     AckProcessingResult result;
+    bool mutated = false;
     const auto previous_largest_acked = largest_acked_packet_number_;
     largest_acked_packet_number_ = previous_largest_acked.has_value()
                                        ? std::max(*previous_largest_acked, largest_acknowledged)
@@ -700,10 +708,12 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
                 slot.acknowledged = true;
                 slot.packet.in_flight = false;
                 slot.packet.bytes_in_flight = 0;
+                mutated = true;
             } else if (slot.state == LedgerSlotState::declared_lost) {
                 result.late_acked_packets.push_back(packet_handle(slot, handle->slot_index),
                                                     packet_metadata(slot.packet));
                 slot.acknowledged = true;
+                mutated = true;
             }
         }
     }
@@ -732,6 +742,11 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
         slot.packet.bytes_in_flight = 0;
         result.lost_packets.push_back(packet_handle(slot, packet_number - base_packet_number_),
                                       packet_metadata(slot.packet));
+        mutated = true;
+    }
+
+    if (mutated) {
+        ++compatibility_version_;
     }
 
     return result;
@@ -767,6 +782,10 @@ std::optional<DeadlineTrackedPacket> PacketSpaceRecovery::earliest_loss_packet()
     }
 
     return *eligible_loss_packets_.begin();
+}
+
+std::uint64_t PacketSpaceRecovery::compatibility_version() const {
+    return compatibility_version_;
 }
 
 RecoveryRttState &PacketSpaceRecovery::rtt_state() {

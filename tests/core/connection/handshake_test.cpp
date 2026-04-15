@@ -3224,8 +3224,9 @@ TEST(QuicCoreTest, ServerRejectsNewTokenFrameInApplicationSpace) {
 }
 
 TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRangesUnacknowledged) {
-    const auto make_declared_lost_packet = [](std::uint64_t packet_number) {
-        return coquic::quic::SentPacketRecord{
+    const auto seed_declared_lost_packet = [](coquic::quic::PacketSpaceState &packet_space,
+                                              std::uint64_t packet_number) {
+        packet_space.recovery.on_packet_sent(coquic::quic::SentPacketRecord{
             .packet_number = packet_number,
             .sent_time = coquic::quic::test::test_time(0),
             .ack_eliciting = true,
@@ -3233,17 +3234,15 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
             .declared_lost = true,
             .has_ping = true,
             .bytes_in_flight = 0,
-        };
+        });
+        packet_space.recovery.on_packet_declared_lost(packet_number);
     };
 
     {
         auto connection = make_connected_client_connection();
-        connection.application_space_.declared_lost_packets.emplace(2,
-                                                                    make_declared_lost_packet(2));
-        connection.application_space_.declared_lost_packets.emplace(5,
-                                                                    make_declared_lost_packet(5));
-        connection.application_space_.declared_lost_packets.emplace(8,
-                                                                    make_declared_lost_packet(8));
+        seed_declared_lost_packet(connection.application_space_, 2);
+        seed_declared_lost_packet(connection.application_space_, 5);
+        seed_declared_lost_packet(connection.application_space_, 8);
 
         const auto result = connection.process_inbound_ack(connection.application_space_,
                                                            coquic::quic::AckFrame{
@@ -3262,15 +3261,14 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*max_ack_delay_ms=*/0,
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
-        EXPECT_FALSE(connection.application_space_.declared_lost_packets.contains(2));
-        EXPECT_FALSE(connection.application_space_.declared_lost_packets.contains(5));
-        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(8));
+        EXPECT_EQ(connection.application_space_.recovery.find_packet(2), nullptr);
+        EXPECT_EQ(connection.application_space_.recovery.find_packet(5), nullptr);
+        EXPECT_NE(connection.application_space_.recovery.find_packet(8), nullptr);
     }
 
     {
         auto connection = make_connected_client_connection();
-        connection.application_space_.declared_lost_packets.emplace(1,
-                                                                    make_declared_lost_packet(1));
+        seed_declared_lost_packet(connection.application_space_, 1);
 
         const auto result = connection.process_inbound_ack(connection.application_space_,
                                                            coquic::quic::AckFrame{
@@ -3282,13 +3280,12 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*max_ack_delay_ms=*/0,
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
-        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(1));
+        EXPECT_NE(connection.application_space_.recovery.find_packet(1), nullptr);
     }
 
     {
         auto connection = make_connected_client_connection();
-        connection.application_space_.declared_lost_packets.emplace(0,
-                                                                    make_declared_lost_packet(0));
+        seed_declared_lost_packet(connection.application_space_, 0);
 
         const auto result = connection.process_inbound_ack(connection.application_space_,
                                                            coquic::quic::AckFrame{
@@ -3307,13 +3304,12 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*max_ack_delay_ms=*/0,
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
-        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(0));
+        EXPECT_NE(connection.application_space_.recovery.find_packet(0), nullptr);
     }
 
     {
         auto connection = make_connected_client_connection();
-        connection.application_space_.declared_lost_packets.emplace(0,
-                                                                    make_declared_lost_packet(0));
+        seed_declared_lost_packet(connection.application_space_, 0);
 
         const auto result = connection.process_inbound_ack(connection.application_space_,
                                                            coquic::quic::AckFrame{
@@ -3332,13 +3328,12 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*max_ack_delay_ms=*/0,
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
-        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(0));
+        EXPECT_NE(connection.application_space_.recovery.find_packet(0), nullptr);
     }
 
     {
         auto connection = make_connected_client_connection();
-        connection.application_space_.declared_lost_packets.emplace(0,
-                                                                    make_declared_lost_packet(0));
+        seed_declared_lost_packet(connection.application_space_, 0);
 
         const auto result = connection.process_inbound_ack(connection.application_space_,
                                                            coquic::quic::AckFrame{
@@ -3350,7 +3345,7 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*max_ack_delay_ms=*/0,
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
-        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(0));
+        EXPECT_NE(connection.application_space_.recovery.find_packet(0), nullptr);
     }
 }
 

@@ -70,7 +70,10 @@ TEST(QuicCoreTest, KeyUpdatedMaxDataAndAckUnblockLostApplicationSend) {
     ASSERT_GT(first_fragment_length, 1000u);
     ASSERT_EQ(connection.connection_flow_control_.highest_sent, first_fragment_length);
 
-    connection.mark_lost_packet(connection.application_space_, first_packet);
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(connection.application_space_.recovery.handle_for_packet_number(
+            first_packet.packet_number)));
 
     ASSERT_TRUE(connection.application_space_.read_secret.has_value());
     ASSERT_TRUE(connection.application_space_.write_secret.has_value());

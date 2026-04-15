@@ -715,7 +715,10 @@ TEST(QuicCoreTest, LostResetStreamIsReEmitted) {
     const auto first_packet = connection.application_space_.sent_packets.begin()->second;
     ASSERT_EQ(first_packet.reset_stream_frames.size(), 1u);
 
-    connection.mark_lost_packet(connection.application_space_, first_packet);
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(connection.application_space_.recovery.handle_for_packet_number(
+            first_packet.packet_number)));
 
     const auto second_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
@@ -750,7 +753,10 @@ TEST(QuicCoreTest, LostStopSendingIsReEmitted) {
     const auto first_packet = connection.application_space_.sent_packets.begin()->second;
     ASSERT_EQ(first_packet.stop_sending_frames.size(), 1u);
 
-    connection.mark_lost_packet(connection.application_space_, first_packet);
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(connection.application_space_.recovery.handle_for_packet_number(
+            first_packet.packet_number)));
 
     const auto second_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
@@ -902,7 +908,10 @@ TEST(QuicCoreTest,
     const auto probe_packet_number = sent_stream_packets.back().packet_number;
     const auto probe_offset = sent_stream_packets.back().first_stream_offset;
 
-    connection.mark_lost_packet(connection.application_space_, lost_packet);
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(connection.application_space_.recovery.handle_for_packet_number(
+            lost_packet.packet_number)));
 
     ASSERT_TRUE(connection.streams_.contains(0));
     ASSERT_TRUE(connection.streams_.at(0).send_buffer.has_lost_data());
@@ -1245,7 +1254,10 @@ TEST(QuicCoreTest, RetransmissionPreservesStreamIdentityAcrossMultipleStreams) {
     ASSERT_EQ(connection.application_space_.sent_packets.size(), 1u);
     const auto first_packet = connection.application_space_.sent_packets.begin()->second;
 
-    connection.mark_lost_packet(connection.application_space_, first_packet);
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(connection.application_space_.recovery.handle_for_packet_number(
+            first_packet.packet_number)));
 
     const auto repaired_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
@@ -1455,7 +1467,10 @@ TEST(QuicCoreTest, RetireAckedPacketAcknowledgesConnectionAndStreamControlState)
     };
     connection.application_space_.sent_packets.emplace(packet.packet_number, packet);
 
-    connection.retire_acked_packet(connection.application_space_, packet);
+    connection.retire_acked_packet(
+        connection.application_space_,
+        optional_value_or_terminate(
+            connection.application_space_.recovery.handle_for_packet_number(packet.packet_number)));
 
     EXPECT_EQ(connection.connection_flow_control_.max_data_state,
               coquic::quic::StreamControlFrameState::acknowledged);
@@ -1582,7 +1597,10 @@ TEST(QuicCoreTest, MarkLostPacketRequeuesConnectionAndStreamControlState) {
     };
     connection.application_space_.sent_packets.emplace(packet.packet_number, packet);
 
-    connection.mark_lost_packet(connection.application_space_, packet);
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(
+            connection.application_space_.recovery.handle_for_packet_number(packet.packet_number)));
 
     EXPECT_EQ(connection.connection_flow_control_.max_data_state,
               coquic::quic::StreamControlFrameState::pending);
@@ -2560,10 +2578,14 @@ TEST(QuicCoreTest, MarkLostPacketRequeuesUnidirectionalMaxStreamsFrame) {
     const auto frames = connection.local_stream_limit_state_.take_max_streams_frames();
     ASSERT_EQ(frames.size(), 1u);
 
-    connection.mark_lost_packet(connection.application_space_, coquic::quic::SentPacketRecord{
-                                                                   .packet_number = 7,
-                                                                   .max_streams_frames = frames,
-                                                               });
+    connection.application_space_.sent_packets.emplace(7, coquic::quic::SentPacketRecord{
+                                                              .packet_number = 7,
+                                                              .max_streams_frames = frames,
+                                                          });
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(
+            connection.application_space_.recovery.handle_for_packet_number(7)));
 
     EXPECT_EQ(connection.local_stream_limit_state_.max_streams_uni_state,
               coquic::quic::StreamControlFrameState::pending);

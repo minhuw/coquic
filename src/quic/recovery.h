@@ -1,7 +1,9 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <set>
@@ -110,20 +112,73 @@ struct RecoveryPacketMetadata {
     bool declared_lost = false;
 };
 
+class PacketSpaceRecovery;
+
 struct RecoveryPacketHandle {
     std::uint64_t packet_number = 0;
     std::size_t slot_index = 0;
-    QuicCoreTimePoint sent_time{};
-    bool ack_eliciting = false;
-    bool in_flight = false;
-    bool declared_lost = false;
+};
+
+class RecoveryPacketHandleList {
+  public:
+    class const_iterator {
+      public:
+        using iterator_category = std::forward_iterator_tag;
+        using difference_type = std::ptrdiff_t;
+        using value_type = RecoveryPacketMetadata;
+
+        const_iterator(const PacketSpaceRecovery *recovery,
+                       std::vector<RecoveryPacketHandle>::const_iterator it);
+
+        value_type operator*() const;
+        const_iterator &operator++();
+        const_iterator operator++(int);
+        bool operator==(const const_iterator &other) const = default;
+
+      private:
+        const PacketSpaceRecovery *recovery_ = nullptr;
+        std::vector<RecoveryPacketHandle>::const_iterator it_;
+    };
+
+    explicit RecoveryPacketHandleList(const PacketSpaceRecovery *recovery = nullptr);
+
+    void reserve(std::size_t count);
+    void push_back(RecoveryPacketHandle handle);
+    bool empty() const;
+    std::size_t size() const;
+    RecoveryPacketMetadata front() const;
+    RecoveryPacketMetadata back() const;
+    std::span<const RecoveryPacketHandle> handles() const;
+    const_iterator begin() const;
+    const_iterator end() const;
+
+  private:
+    const PacketSpaceRecovery *recovery_ = nullptr;
+    std::vector<RecoveryPacketHandle> handles_;
+};
+
+class RecoveryPacketHandleOptional {
+  public:
+    explicit RecoveryPacketHandleOptional(const PacketSpaceRecovery *recovery = nullptr);
+
+    RecoveryPacketHandleOptional &operator=(RecoveryPacketHandle handle);
+    bool has_value() const;
+    RecoveryPacketMetadata value() const;
+    const RecoveryPacketMetadata *operator->() const;
+
+  private:
+    const PacketSpaceRecovery *recovery_ = nullptr;
+    std::optional<RecoveryPacketHandle> handle_;
+    mutable std::optional<RecoveryPacketMetadata> cached_metadata_;
 };
 
 struct AckProcessingResult {
-    std::vector<RecoveryPacketHandle> acked_packets;
-    std::vector<RecoveryPacketHandle> late_acked_packets;
-    std::vector<RecoveryPacketHandle> lost_packets;
-    std::optional<RecoveryPacketHandle> largest_newly_acked_packet;
+    explicit AckProcessingResult(const PacketSpaceRecovery *recovery = nullptr);
+
+    RecoveryPacketHandleList acked_packets;
+    RecoveryPacketHandleList late_acked_packets;
+    RecoveryPacketHandleList lost_packets;
+    RecoveryPacketHandleOptional largest_newly_acked_packet;
     bool largest_acknowledged_was_newly_acked = false;
     bool has_newly_acked_ack_eliciting = false;
 };

@@ -36,6 +36,31 @@ using coquic::quic::RecoveryRttState;
 using coquic::quic::SentPacketRecord;
 using coquic::quic::test_support::optional_value_or_terminate;
 
+template <typename Handle>
+concept RecoveryHandleHasPacketNumber = requires(Handle handle) { handle.packet_number; };
+
+template <typename Handle>
+concept RecoveryHandleHasSlotIndex = requires(Handle handle) { handle.slot_index; };
+
+template <typename Handle>
+concept RecoveryHandleHasSentTime = requires(Handle handle) { handle.sent_time; };
+
+template <typename Handle>
+concept RecoveryHandleHasAckEliciting = requires(Handle handle) { handle.ack_eliciting; };
+
+template <typename Handle>
+concept RecoveryHandleHasInFlight = requires(Handle handle) { handle.in_flight; };
+
+template <typename Handle>
+concept RecoveryHandleHasDeclaredLost = requires(Handle handle) { handle.declared_lost; };
+
+static_assert(RecoveryHandleHasPacketNumber<RecoveryPacketHandle>);
+static_assert(RecoveryHandleHasSlotIndex<RecoveryPacketHandle>);
+static_assert(!RecoveryHandleHasSentTime<RecoveryPacketHandle>);
+static_assert(!RecoveryHandleHasAckEliciting<RecoveryPacketHandle>);
+static_assert(!RecoveryHandleHasInFlight<RecoveryPacketHandle>);
+static_assert(!RecoveryHandleHasDeclaredLost<RecoveryPacketHandle>);
+
 SentPacketRecord make_sent_packet(std::uint64_t packet_number, bool ack_eliciting,
                                   coquic::quic::QuicCoreTimePoint sent_time) {
     return SentPacketRecord{
@@ -53,8 +78,8 @@ AckFrame make_ack_frame(std::uint64_t largest, std::uint64_t first_ack_range = 0
     };
 }
 
-template <typename Packet>
-std::vector<std::uint64_t> packet_numbers_from(const std::vector<Packet> &packets) {
+template <typename PacketRange>
+std::vector<std::uint64_t> packet_numbers_from(const PacketRange &packets) {
     std::vector<std::uint64_t> packet_numbers;
     packet_numbers.reserve(packets.size());
     for (const auto &packet : packets) {
@@ -65,7 +90,7 @@ std::vector<std::uint64_t> packet_numbers_from(const std::vector<Packet> &packet
 
 std::vector<std::uint64_t>
 packet_numbers_from_handles(const PacketSpaceRecovery &recovery,
-                            const std::vector<RecoveryPacketHandle> &handles) {
+                            std::span<const RecoveryPacketHandle> handles) {
     std::vector<std::uint64_t> packet_numbers;
     packet_numbers.reserve(handles.size());
     for (const auto handle : handles) {
@@ -674,7 +699,7 @@ TEST(QuicRecoveryTest, AckProcessingCanStillAcknowledgeDeclaredLostPackets) {
         recovery.on_ack_received(make_ack_frame(/*largest=*/2), coquic::quic::test::test_time(20));
 
     EXPECT_TRUE(result.acked_packets.empty());
-    EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets),
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets.handles()),
               (std::vector<std::uint64_t>{2}));
     EXPECT_TRUE(result.lost_packets.empty());
 }
@@ -701,9 +726,9 @@ TEST(QuicRecoveryTest, AckProcessingSeparatesActiveAndLateAckedPacketsInLedger) 
     const auto result = recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/5,
                                                  coquic::quic::test::test_time(10));
 
-    EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets),
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets.handles()),
               (std::vector<std::uint64_t>{5}));
-    EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets),
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets.handles()),
               (std::vector<std::uint64_t>{3}));
     ASSERT_TRUE(result.largest_newly_acked_packet.has_value());
     EXPECT_EQ(result.largest_newly_acked_packet->packet_number, 5u);

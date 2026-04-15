@@ -20,6 +20,18 @@ struct ReceivedPacketHistoryTestPeer {
     }
 };
 
+struct PacketSpaceRecoveryTestPeer {
+    static bool sent_packets_contains(const PacketSpaceRecovery &recovery,
+                                      std::uint64_t packet_number) {
+        return recovery.sent_packets_.contains(packet_number);
+    }
+
+    static const SentPacketRecord &sent_packets_at(const PacketSpaceRecovery &recovery,
+                                                   std::uint64_t packet_number) {
+        return recovery.sent_packets_.at(packet_number);
+    }
+};
+
 } // namespace coquic::quic::test
 
 namespace {
@@ -601,6 +613,26 @@ TEST(QuicRecoveryTest, AckProcessingSnapshotsLargestNewlyAckedPacketMetadataBefo
     EXPECT_FALSE(result.largest_newly_acked_packet->declared_lost);
 }
 
+TEST(QuicRecoveryTest, PacketHandlesRemainReadableAfterEarlierRetirementCompactsPrefix) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/10, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(10)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/11, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(11)));
+
+    const auto handles = recovery.tracked_packets();
+    ASSERT_EQ(handles.size(), 2u);
+
+    recovery.retire_packet(handles.front());
+
+    const auto *packet = recovery.packet_for_handle(handles.back());
+    ASSERT_NE(packet, nullptr);
+    if (packet == nullptr) {
+        return;
+    }
+    EXPECT_EQ(packet->packet_number, 11u);
+}
+
 TEST(QuicRecoveryTest, RecoveryTracksLatestInflightAckElicitingPacketIncrementally) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
@@ -719,6 +751,24 @@ TEST(QuicRecoveryTest, AckProcessingCanStillAcknowledgeDeclaredLostPackets) {
     EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets.handles()),
               (std::vector<std::uint64_t>{2}));
     EXPECT_TRUE(result.lost_packets.empty());
+}
+
+TEST(QuicRecoveryTest, AckProcessingHidesAcknowledgedPacketsFromCompatibilitySentPacketsView) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(4)));
+
+    const auto result =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/4), coquic::quic::test::test_time(8));
+
+    ASSERT_EQ(result.acked_packets.size(), 1u);
+    EXPECT_FALSE(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::sent_packets_contains(recovery, 4));
+    EXPECT_THROW(static_cast<void>(
+                     coquic::quic::test::PacketSpaceRecoveryTestPeer::sent_packets_at(recovery, 4)),
+                 std::out_of_range);
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets.handles()),
+              (std::vector<std::uint64_t>{4}));
 }
 
 TEST(QuicRecoveryTest, AckProcessingSeparatesActiveAndLateAckedPacketsInLedger) {

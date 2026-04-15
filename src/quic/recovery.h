@@ -20,7 +20,8 @@ namespace coquic::quic {
 
 namespace test {
 struct ReceivedPacketHistoryTestPeer;
-}
+struct PacketSpaceRecoveryTestPeer;
+} // namespace test
 
 inline constexpr std::uint64_t kPacketThreshold = 3;
 inline constexpr double kTimeThreshold = 9.0 / 8.0;
@@ -229,6 +230,11 @@ class PacketSpaceRecovery {
     static DeadlineTrackedPacket tracked_packet(const SentPacketRecord &packet);
     static RecoveryPacketHandle packet_handle(const SentPacketLedgerSlot &slot,
                                               std::size_t slot_index);
+    SentPacketLedgerSlot *slot_for_packet_number(std::uint64_t packet_number);
+    const SentPacketLedgerSlot *slot_for_packet_number(std::uint64_t packet_number) const;
+    SentPacketLedgerSlot *outstanding_slot_for_packet_number(std::uint64_t packet_number);
+    const SentPacketLedgerSlot *
+    outstanding_slot_for_packet_number(std::uint64_t packet_number) const;
     void erase_from_tracked_sets(const SentPacketRecord &packet);
     void maybe_track_as_loss_candidate(const SentPacketRecord &packet);
     void track_new_loss_candidates(std::optional<std::uint64_t> previous_largest_acked,
@@ -243,6 +249,8 @@ class PacketSpaceRecovery {
     std::optional<std::uint64_t> largest_acked_packet_number_;
     RecoveryRttState rtt_state_;
     SentPacketsView sent_packets_{};
+
+    friend struct test::PacketSpaceRecoveryTestPeer;
 };
 
 bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked);

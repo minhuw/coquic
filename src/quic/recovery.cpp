@@ -357,7 +357,7 @@ const RecoveryPacketMetadata *RecoveryPacketHandleOptional::operator->() const {
 }
 
 bool PacketSpaceRecovery::SentPacketsView::contains(std::uint64_t packet_number) const {
-    return owner != nullptr && owner->find_packet(packet_number) != nullptr;
+    return owner != nullptr && owner->outstanding_slot_for_packet_number(packet_number) != nullptr;
 }
 
 const SentPacketRecord &
@@ -366,15 +366,24 @@ PacketSpaceRecovery::SentPacketsView::at(std::uint64_t packet_number) const {
         throw std::out_of_range("packet recovery view is detached");
     }
 
-    const auto *packet = owner->find_packet(packet_number);
-    if (packet == nullptr) {
+    const auto *slot = owner->outstanding_slot_for_packet_number(packet_number);
+    if (slot == nullptr) {
         throw std::out_of_range("packet number is not tracked");
     }
-    return *packet;
+    return slot->packet;
 }
 
 std::size_t PacketSpaceRecovery::SentPacketsView::size() const {
-    return owner == nullptr ? 0 : owner->tracked_packet_count();
+    if (owner == nullptr) {
+        return 0;
+    }
+
+    return static_cast<std::size_t>(std::count_if(
+        owner->slots_.begin(), owner->slots_.end(), [](const SentPacketLedgerSlot &slot) {
+            return (slot.state == LedgerSlotState::sent ||
+                    slot.state == LedgerSlotState::declared_lost) &&
+                   !slot.acknowledged;
+        }));
 }
 
 DeadlineTrackedPacket PacketSpaceRecovery::tracked_packet(const SentPacketRecord &packet) {
@@ -390,6 +399,47 @@ RecoveryPacketHandle PacketSpaceRecovery::packet_handle(const SentPacketLedgerSl
         .packet_number = slot.packet.packet_number,
         .slot_index = slot_index,
     };
+}
+
+PacketSpaceRecovery::SentPacketLedgerSlot *
+PacketSpaceRecovery::slot_for_packet_number(std::uint64_t packet_number) {
+    return const_cast<SentPacketLedgerSlot *>(
+        std::as_const(*this).slot_for_packet_number(packet_number));
+}
+
+const PacketSpaceRecovery::SentPacketLedgerSlot *
+PacketSpaceRecovery::slot_for_packet_number(std::uint64_t packet_number) const {
+    if (slots_.empty() || packet_number < base_packet_number_) {
+        return nullptr;
+    }
+
+    const auto slot_index = static_cast<std::size_t>(packet_number - base_packet_number_);
+    if (slot_index >= slots_.size()) {
+        return nullptr;
+    }
+
+    const auto &slot = slots_[slot_index];
+    if ((slot.state != LedgerSlotState::sent && slot.state != LedgerSlotState::declared_lost) ||
+        slot.packet.packet_number != packet_number) {
+        return nullptr;
+    }
+
+    return &slot;
+}
+
+PacketSpaceRecovery::SentPacketLedgerSlot *
+PacketSpaceRecovery::outstanding_slot_for_packet_number(std::uint64_t packet_number) {
+    return const_cast<SentPacketLedgerSlot *>(
+        std::as_const(*this).outstanding_slot_for_packet_number(packet_number));
+}
+
+const PacketSpaceRecovery::SentPacketLedgerSlot *
+PacketSpaceRecovery::outstanding_slot_for_packet_number(std::uint64_t packet_number) const {
+    const auto *slot = slot_for_packet_number(packet_number);
+    if (slot == nullptr || slot->acknowledged) {
+        return nullptr;
+    }
+    return slot;
 }
 
 void PacketSpaceRecovery::erase_from_tracked_sets(const SentPacketRecord &packet) {
@@ -470,22 +520,13 @@ void PacketSpaceRecovery::compact_retired_prefix() {
 
 std::optional<RecoveryPacketHandle>
 PacketSpaceRecovery::handle_for_packet_number(std::uint64_t packet_number) const {
-    if (slots_.empty() || packet_number < base_packet_number_) {
+    const auto *slot = slot_for_packet_number(packet_number);
+    if (slot == nullptr) {
         return std::nullopt;
     }
 
-    const auto slot_index = static_cast<std::size_t>(packet_number - base_packet_number_);
-    if (slot_index >= slots_.size()) {
-        return std::nullopt;
-    }
-
-    const auto &slot = slots_[slot_index];
-    if ((slot.state != LedgerSlotState::sent && slot.state != LedgerSlotState::declared_lost) ||
-        slot.packet.packet_number != packet_number) {
-        return std::nullopt;
-    }
-
-    return packet_handle(slot, slot_index);
+    const auto slot_index = static_cast<std::size_t>(slot - slots_.data());
+    return packet_handle(*slot, slot_index);
 }
 
 SentPacketRecord *PacketSpaceRecovery::packet_for_handle(RecoveryPacketHandle handle) {
@@ -493,33 +534,26 @@ SentPacketRecord *PacketSpaceRecovery::packet_for_handle(RecoveryPacketHandle ha
 }
 
 const SentPacketRecord *PacketSpaceRecovery::packet_for_handle(RecoveryPacketHandle handle) const {
-    if (handle.slot_index >= slots_.size()) {
-        return nullptr;
+    if (handle.slot_index < slots_.size()) {
+        const auto &slot = slots_[handle.slot_index];
+        if ((slot.state == LedgerSlotState::sent || slot.state == LedgerSlotState::declared_lost) &&
+            slot.packet.packet_number == handle.packet_number) {
+            return &slot.packet;
+        }
     }
 
-    const auto &slot = slots_[handle.slot_index];
-    if ((slot.state != LedgerSlotState::sent && slot.state != LedgerSlotState::declared_lost) ||
-        slot.packet.packet_number != handle.packet_number) {
-        return nullptr;
-    }
-
-    return &slot.packet;
+    const auto *slot = slot_for_packet_number(handle.packet_number);
+    return slot == nullptr ? nullptr : &slot->packet;
 }
 
 SentPacketRecord *PacketSpaceRecovery::find_packet(std::uint64_t packet_number) {
-    const auto handle = handle_for_packet_number(packet_number);
-    if (!handle.has_value()) {
-        return nullptr;
-    }
-    return packet_for_handle(*handle);
+    auto *slot = slot_for_packet_number(packet_number);
+    return slot == nullptr ? nullptr : &slot->packet;
 }
 
 const SentPacketRecord *PacketSpaceRecovery::find_packet(std::uint64_t packet_number) const {
-    const auto handle = handle_for_packet_number(packet_number);
-    if (!handle.has_value()) {
-        return nullptr;
-    }
-    return packet_for_handle(*handle);
+    const auto *slot = slot_for_packet_number(packet_number);
+    return slot == nullptr ? nullptr : &slot->packet;
 }
 
 std::vector<RecoveryPacketHandle> PacketSpaceRecovery::tracked_packets() const {

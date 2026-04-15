@@ -601,6 +601,24 @@ std::optional<RecoveryPacketHandle> PacketSpaceRecovery::newest_tracked_packet()
     return std::nullopt;
 }
 
+std::vector<RecoveryPacketHandle>
+PacketSpaceRecovery::collect_time_threshold_losses(QuicCoreTimePoint now) {
+    std::vector<RecoveryPacketHandle> lost_packets;
+    for (const auto &tracked : eligible_loss_packets_) {
+        if (!is_time_threshold_lost(rtt_state_, tracked.sent_time, now)) {
+            continue;
+        }
+
+        const auto handle = handle_for_packet_number(tracked.packet_number);
+        if (!handle.has_value()) {
+            continue;
+        }
+        lost_packets.push_back(*handle);
+    }
+
+    return lost_packets;
+}
+
 void PacketSpaceRecovery::on_packet_sent(const SentPacketRecord &packet) {
     auto &slot = slots_[ensure_slot_for_packet_number(packet.packet_number)];
     if (slot.state == LedgerSlotState::sent || slot.state == LedgerSlotState::declared_lost) {
@@ -782,6 +800,21 @@ std::optional<DeadlineTrackedPacket> PacketSpaceRecovery::earliest_loss_packet()
     }
 
     return *eligible_loss_packets_.begin();
+}
+
+void PacketSpaceRecovery::rebuild_auxiliary_indexes() {
+    in_flight_ack_eliciting_packets_.clear();
+    eligible_loss_packets_.clear();
+    for (const auto handle : tracked_packets()) {
+        const auto *packet = packet_for_handle(handle);
+        if (packet == nullptr) {
+            continue;
+        }
+        if (packet->ack_eliciting && packet->in_flight) {
+            in_flight_ack_eliciting_packets_.insert(tracked_packet(*packet));
+        }
+        maybe_track_as_loss_candidate(*packet);
+    }
 }
 
 void PacketSpaceRecovery::note_packet_metadata_updated() {

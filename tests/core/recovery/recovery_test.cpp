@@ -529,7 +529,7 @@ TEST(QuicRecoveryTest, AckProcessingRejectsMalformedAdditionalRangeLengthUnderfl
 
 TEST(QuicRecoveryTest, AckProcessingMatchesPacketsInAdditionalAckRanges) {
     PacketSpaceRecovery recovery;
-    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(0)));
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(1)));
@@ -579,7 +579,7 @@ TEST(QuicRecoveryTest, AckProcessingLeavesPacketsUnackedWhenAdditionalRangeStart
 TEST(QuicRecoveryTest,
      AckProcessingTracksLargestNewlyAcknowledgedPacketSeparatelyFromAckElicitingStatus) {
     PacketSpaceRecovery recovery;
-    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(0)));
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/false,
                                              coquic::quic::test::test_time(10)));
@@ -631,6 +631,49 @@ TEST(QuicRecoveryTest, PacketHandlesRemainReadableAfterEarlierRetirementCompacts
         return;
     }
     EXPECT_EQ(packet->packet_number, 11u);
+}
+
+TEST(QuicRecoveryTest, TrackedPacketsPreservePacketNumberOrderAcrossLateLosses) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(2)));
+    recovery.on_packet_declared_lost(4);
+
+    EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.tracked_packets()),
+              (std::vector<std::uint64_t>{2, 4, 7}));
+    ASSERT_TRUE(recovery.oldest_tracked_packet().has_value());
+    ASSERT_TRUE(recovery.newest_tracked_packet().has_value());
+    EXPECT_EQ(recovery.oldest_tracked_packet()->packet_number, 2u);
+    EXPECT_EQ(recovery.newest_tracked_packet()->packet_number, 7u);
+}
+
+TEST(QuicRecoveryTest, TimeThresholdLossScansLedgerWithoutSentPacketMap) {
+    PacketSpaceRecovery recovery;
+    recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().min_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().smoothed_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().rttvar = std::chrono::milliseconds(5);
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+
+    const auto ack_ranges = std::array{
+        AckPacketNumberRange{
+            .smallest = 4,
+            .largest = 4,
+        },
+    };
+    static_cast<void>(recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/4,
+                                               coquic::quic::test::test_time(2)));
+
+    EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.collect_time_threshold_losses(
+                                                        coquic::quic::test::test_time(20))),
+              (std::vector<std::uint64_t>{3}));
 }
 
 TEST(QuicRecoveryTest, RecoveryTracksLatestInflightAckElicitingPacketIncrementally) {

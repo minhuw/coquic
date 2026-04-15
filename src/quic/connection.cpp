@@ -1960,10 +1960,12 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
         arm_pto_probe(now);
         if (packet_trace_matches_connection(config_.source_connection_id)) {
             const auto in_flight_ack_eliciting_count = [](const PacketSpaceState &packet_space) {
-                return std::count_if(packet_space.sent_packets.begin(),
-                                     packet_space.sent_packets.end(), [](const auto &entry) {
-                                         return entry.second.ack_eliciting & entry.second.in_flight;
-                                     });
+                const auto handles = packet_space.recovery.tracked_packets();
+                return std::count_if(
+                    handles.begin(), handles.end(), [&](const RecoveryPacketHandle handle) {
+                        const auto *packet = packet_space.recovery.packet_for_handle(handle);
+                        return packet != nullptr && (packet->ack_eliciting & packet->in_flight);
+                    });
             };
             std::cerr << "quic-packet-trace timeout scid="
                       << format_connection_id_hex(config_.source_connection_id)
@@ -2201,37 +2203,25 @@ void QuicConnection::detect_lost_packets(QuicCoreTimePoint now) {
 }
 
 void QuicConnection::detect_lost_packets(PacketSpaceState &packet_space, QuicCoreTimePoint now) {
-    const auto largest_acked = packet_space.recovery.largest_acked_packet_number();
-    if (!largest_acked.has_value()) {
+    const auto handles = packet_space.recovery.collect_time_threshold_losses(now);
+    if (handles.empty()) {
         return;
     }
 
     const auto &shared_rtt_state = shared_recovery_rtt_state();
 
     std::vector<SentPacketRecord> lost_packets;
-    for (const auto &[packet_number, packet] : packet_space.sent_packets) {
-        static_cast<void>(packet_number);
-        if (!packet.in_flight || packet.packet_number >= *largest_acked) {
+    lost_packets.reserve(handles.size());
+    for (const auto handle : handles) {
+        if (const auto *packet = packet_space.recovery.packet_for_handle(handle);
+            packet != nullptr) {
+            emit_qlog_packet_lost(*packet, "time_threshold", now);
+        }
+        auto lost_packet = mark_lost_packet(packet_space, handle);
+        if (!lost_packet.has_value()) {
             continue;
         }
-        if (!is_time_threshold_lost(shared_rtt_state, packet.sent_time, now)) {
-            continue;
-        }
-
-        lost_packets.push_back(packet);
-    }
-
-    if (lost_packets.empty()) {
-        return;
-    }
-
-    for (const auto &packet : lost_packets) {
-        emit_qlog_packet_lost(packet, "time_threshold", now);
-        const auto handle = packet_space.recovery.handle_for_packet_number(packet.packet_number);
-        if (!handle.has_value()) {
-            continue;
-        }
-        static_cast<void>(mark_lost_packet(packet_space, *handle));
+        lost_packets.push_back(*lost_packet);
     }
     const auto ack_eliciting_lost_packets = ack_eliciting_in_flight_losses(lost_packets);
     if (packet_space_is_application(packet_space, application_space_) &&
@@ -2476,22 +2466,21 @@ QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
     std::optional<SentPacketRecord> ping_fallback;
     std::optional<SentPacketRecord> best_probe;
     int best_probe_priority = -1;
-    for (auto it = packet_space.sent_packets.rbegin(); it != packet_space.sent_packets.rend();
-         ++it) {
-        const auto &[packet_number, packet] = *it;
-        static_cast<void>(packet_number);
-        if (!packet.ack_eliciting || !packet.in_flight) {
+    const auto handles = packet_space.recovery.tracked_packets();
+    for (auto it = handles.rbegin(); it != handles.rend(); ++it) {
+        const auto *packet = packet_space.recovery.packet_for_handle(*it);
+        if (packet == nullptr || !packet->ack_eliciting || !packet->in_flight) {
             continue;
         }
 
         ping_fallback = ping_fallback.value_or(SentPacketRecord{
-            .packet_number = packet.packet_number,
+            .packet_number = packet->packet_number,
             .ack_eliciting = true,
             .in_flight = true,
             .has_ping = true,
         });
 
-        auto probe = packet;
+        auto probe = *packet;
         std::erase_if(probe.crypto_ranges, [&](const ByteRange &range) {
             return !packet_space.send_crypto.has_outstanding_range(range.offset,
                                                                    range.bytes.size());
@@ -3870,41 +3859,7 @@ std::optional<SentPacketRecord> QuicConnection::mark_lost_packet(PacketSpaceStat
 }
 
 void QuicConnection::rebuild_recovery(PacketSpaceState &packet_space) {
-    std::vector<SentPacketRecord> outstanding_packets;
-    outstanding_packets.reserve(packet_space.sent_packets.size());
-    for (const auto &[packet_number, packet] : packet_space.sent_packets) {
-        static_cast<void>(packet_number);
-        outstanding_packets.push_back(packet);
-    }
-
-    std::vector<SentPacketRecord> declared_lost_packets;
-    declared_lost_packets.reserve(packet_space.declared_lost_packets.size());
-    for (const auto &[packet_number, packet] : packet_space.declared_lost_packets) {
-        static_cast<void>(packet_number);
-        declared_lost_packets.push_back(packet);
-    }
-
-    const auto largest_acked = packet_space.recovery.largest_acked_packet_number();
-    const auto rtt_state = packet_space.recovery.rtt_state();
-
-    packet_space.recovery = PacketSpaceRecovery{};
-    packet_space.recovery.rtt_state() = rtt_state;
-    if (largest_acked.has_value()) {
-        static_cast<void>(packet_space.recovery.on_ack_received(
-            AckFrame{
-                .largest_acknowledged = *largest_acked,
-                .first_ack_range = 0,
-            },
-            QuicCoreTimePoint{}));
-    }
-
-    for (const auto &packet : outstanding_packets) {
-        packet_space.recovery.on_packet_sent(packet);
-    }
-    for (const auto &packet : declared_lost_packets) {
-        packet_space.recovery.on_packet_sent(packet);
-        packet_space.recovery.on_packet_declared_lost(packet.packet_number);
-    }
+    packet_space.recovery.rebuild_auxiliary_indexes();
 }
 
 CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Frame> frames,

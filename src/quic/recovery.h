@@ -198,9 +198,11 @@ class PacketSpaceRecovery {
     std::size_t tracked_packet_count() const;
     std::optional<RecoveryPacketHandle> oldest_tracked_packet() const;
     std::optional<RecoveryPacketHandle> newest_tracked_packet() const;
+    std::vector<RecoveryPacketHandle> collect_time_threshold_losses(QuicCoreTimePoint now);
     std::optional<std::uint64_t> largest_acked_packet_number() const;
     std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet() const;
     std::optional<DeadlineTrackedPacket> earliest_loss_packet() const;
+    void rebuild_auxiliary_indexes();
     void note_packet_metadata_updated();
     std::uint64_t compatibility_version() const;
 

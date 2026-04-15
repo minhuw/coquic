@@ -1067,9 +1067,10 @@ TEST(QuicCoreTest, DetectLostPacketsMarksCryptoRangesLostAndKeepsRecoveryStateFo
     EXPECT_TRUE(connection.initial_space_.send_crypto.has_pending_data());
     EXPECT_EQ(connection.initial_space_.recovery.largest_acked_packet_number(),
               std::optional<std::uint64_t>{5});
-    ASSERT_TRUE(connection.initial_space_.recovery.sent_packets_.contains(0));
-    EXPECT_TRUE(connection.initial_space_.recovery.sent_packets_.at(0).declared_lost);
-    EXPECT_FALSE(connection.initial_space_.recovery.sent_packets_.at(0).in_flight);
+    const auto *initial_packet = connection.initial_space_.recovery.find_packet(0);
+    ASSERT_NE(initial_packet, nullptr);
+    EXPECT_EQ(connection.initial_space_.recovery.find_packet(0)->declared_lost, true);
+    EXPECT_EQ(connection.initial_space_.recovery.find_packet(0)->in_flight, false);
 }
 
 TEST(QuicCoreTest, DetectLostApplicationPacketsRequeuesApplicationCryptoRanges) {
@@ -1167,9 +1168,11 @@ TEST(QuicCoreTest, RebuildRecoveryPreservesLargestAckedAndOutstandingPackets) {
               std::optional<std::uint64_t>{9});
     EXPECT_EQ(connection.handshake_space_.recovery.rtt_state().latest_rtt,
               std::optional{std::chrono::milliseconds(8)});
-    EXPECT_EQ(connection.handshake_space_.recovery.sent_packets_.size(), 2u);
-    EXPECT_TRUE(connection.handshake_space_.recovery.sent_packets_.contains(4));
-    EXPECT_TRUE(connection.handshake_space_.recovery.sent_packets_.contains(7));
+    EXPECT_EQ(connection.handshake_space_.recovery.tracked_packet_count(), 2u);
+    ASSERT_NE(connection.handshake_space_.recovery.find_packet(4), nullptr);
+    ASSERT_NE(connection.handshake_space_.recovery.find_packet(7), nullptr);
+    EXPECT_EQ(connection.handshake_space_.recovery.find_packet(4)->packet_number, 4u);
+    EXPECT_EQ(connection.handshake_space_.recovery.find_packet(7)->packet_number, 7u);
 }
 
 TEST(QuicCoreTest, RebuildRecoveryHandlesPacketSpacesWithoutAcknowledgments) {
@@ -1185,7 +1188,8 @@ TEST(QuicCoreTest, RebuildRecoveryHandlesPacketSpacesWithoutAcknowledgments) {
     connection.rebuild_recovery(connection.application_space_);
 
     EXPECT_EQ(connection.application_space_.recovery.largest_acked_packet_number(), std::nullopt);
-    EXPECT_TRUE(connection.application_space_.recovery.sent_packets_.contains(1));
+    ASSERT_NE(connection.application_space_.recovery.find_packet(1), nullptr);
+    EXPECT_EQ(connection.application_space_.recovery.find_packet(1)->packet_number, 1u);
 }
 
 TEST(QuicCoreTest, TimeoutRunsLossDetectionAndArmsPtoProbe) {

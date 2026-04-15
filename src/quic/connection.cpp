@@ -5804,6 +5804,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
                         sent->qlog_packet_snapshot = snapshot_ptr;
                         sent->qlog_pto_probe = pto_probe_burst_active;
+                        packet_space->recovery.note_packet_metadata_updated();
                     }
                 }
             }

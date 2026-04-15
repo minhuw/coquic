@@ -784,6 +784,10 @@ std::optional<DeadlineTrackedPacket> PacketSpaceRecovery::earliest_loss_packet()
     return *eligible_loss_packets_.begin();
 }
 
+void PacketSpaceRecovery::note_packet_metadata_updated() {
+    ++compatibility_version_;
+}
+
 std::uint64_t PacketSpaceRecovery::compatibility_version() const {
     return compatibility_version_;
 }

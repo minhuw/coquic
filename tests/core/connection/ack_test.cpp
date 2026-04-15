@@ -5113,6 +5113,30 @@ TEST(QuicCoreTest, AckProcessingAccountsForLateAckedEcnPackets) {
     ASSERT_TRUE(processed.has_value());
     EXPECT_EQ(connection.application_space_.recovery.find_packet(3), nullptr);
     EXPECT_EQ(connection.application_space_.recovery.find_packet(5), nullptr);
+    EXPECT_TRUE(connection.application_space_.sent_packets.empty());
+    EXPECT_TRUE(connection.application_space_.declared_lost_packets.empty());
+}
+
+TEST(QuicCoreTest, CompatibilitySentPacketsViewRefreshesAfterRecoveryMetadataMutation) {
+    auto connection = make_connected_client_connection();
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 7,
+                                     .sent_time = coquic::quic::test::test_time(7),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                 });
+
+    ASSERT_FALSE(connection.application_space_.sent_packets.empty());
+    EXPECT_FALSE(connection.application_space_.sent_packets.at(7).qlog_pto_probe);
+
+    auto *packet = connection.application_space_.recovery.find_packet(7);
+    ASSERT_NE(packet, nullptr);
+    packet->qlog_pto_probe = true;
+    connection.application_space_.recovery.note_packet_metadata_updated();
+
+    EXPECT_TRUE(connection.application_space_.sent_packets.at(7).qlog_pto_probe);
 }
 
 TEST(QuicCoreTest, AckProcessingRetiresLateAckedPacketFromRecoveryLedger) {

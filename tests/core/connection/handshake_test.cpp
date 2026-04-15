@@ -3264,6 +3264,9 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
         EXPECT_EQ(connection.application_space_.recovery.find_packet(2), nullptr);
         EXPECT_EQ(connection.application_space_.recovery.find_packet(5), nullptr);
         EXPECT_NE(connection.application_space_.recovery.find_packet(8), nullptr);
+        EXPECT_FALSE(connection.application_space_.declared_lost_packets.contains(2));
+        EXPECT_FALSE(connection.application_space_.declared_lost_packets.contains(5));
+        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(8));
     }
 
     {
@@ -3281,6 +3284,7 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
         EXPECT_NE(connection.application_space_.recovery.find_packet(1), nullptr);
+        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(1));
     }
 
     {
@@ -3305,6 +3309,7 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
         EXPECT_NE(connection.application_space_.recovery.find_packet(0), nullptr);
+        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(0));
     }
 
     {
@@ -3329,6 +3334,7 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
         EXPECT_NE(connection.application_space_.recovery.find_packet(0), nullptr);
+        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(0));
     }
 
     {
@@ -3346,6 +3352,7 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
                                                            /*suppress_pto_reset=*/false);
         ASSERT_TRUE(result.has_value());
         EXPECT_NE(connection.application_space_.recovery.find_packet(0), nullptr);
+        EXPECT_TRUE(connection.application_space_.declared_lost_packets.contains(0));
     }
 }
 

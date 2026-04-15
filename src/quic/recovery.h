@@ -201,6 +201,7 @@ class PacketSpaceRecovery {
     std::optional<std::uint64_t> largest_acked_packet_number() const;
     std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet() const;
     std::optional<DeadlineTrackedPacket> earliest_loss_packet() const;
+    void note_packet_metadata_updated();
     std::uint64_t compatibility_version() const;
 
     RecoveryRttState &rtt_state();

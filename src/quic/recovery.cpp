@@ -604,16 +604,26 @@ std::optional<RecoveryPacketHandle> PacketSpaceRecovery::newest_tracked_packet()
 std::vector<RecoveryPacketHandle>
 PacketSpaceRecovery::collect_time_threshold_losses(QuicCoreTimePoint now) {
     std::vector<RecoveryPacketHandle> lost_packets;
-    for (const auto &tracked : eligible_loss_packets_) {
-        if (!is_time_threshold_lost(rtt_state_, tracked.sent_time, now)) {
+    if (!largest_acked_packet_number_.has_value() || slots_.empty() ||
+        *largest_acked_packet_number_ <= base_packet_number_) {
+        return lost_packets;
+    }
+
+    const auto loss_scan_end =
+        std::min(*largest_acked_packet_number_,
+                 base_packet_number_ + static_cast<std::uint64_t>(slots_.size()));
+    for (auto packet_number = base_packet_number_; packet_number < loss_scan_end; ++packet_number) {
+        const auto slot_index = static_cast<std::size_t>(packet_number - base_packet_number_);
+        const auto &slot = slots_[slot_index];
+        if (slot.state != LedgerSlotState::sent || slot.acknowledged || !slot.packet.in_flight) {
             continue;
         }
 
-        const auto handle = handle_for_packet_number(tracked.packet_number);
-        if (!handle.has_value()) {
+        if (!is_time_threshold_lost(rtt_state_, slot.packet.sent_time, now)) {
             continue;
         }
-        lost_packets.push_back(*handle);
+
+        lost_packets.push_back(packet_handle(slot, slot_index));
     }
 
     return lost_packets;

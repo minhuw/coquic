@@ -2319,31 +2319,21 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         client_receive_keepalive_deadline.has_value() && now >= *client_receive_keepalive_deadline;
     const auto consider_packet_space = [&](PacketSpaceState &packet_space,
                                            std::chrono::milliseconds max_ack_delay) {
-        std::optional<QuicCoreTimePoint> packet_space_deadline;
-        for (const auto &[packet_number, packet] : packet_space.sent_packets) {
-            static_cast<void>(packet_number);
-            const bool skip_packet = !packet.ack_eliciting | !packet.in_flight;
-            if (skip_packet) {
-                continue;
-            }
-
-            const auto candidate =
-                compute_pto_deadline(shared_rtt_state, max_ack_delay, packet.sent_time,
-                                     effective_pto_count(packet_space));
-            const auto current_packet_space_deadline = packet_space_deadline.value_or(candidate);
-            if (!packet_space_deadline.has_value() | (candidate > current_packet_space_deadline)) {
-                packet_space_deadline = candidate;
-            }
+        const auto tracked_packet = latest_in_flight_ack_eliciting_packet(packet_space);
+        if (!tracked_packet.has_value()) {
+            return;
         }
+        const auto packet_space_deadline =
+            compute_pto_deadline(shared_rtt_state, max_ack_delay, tracked_packet->sent_time,
+                                 effective_pto_count(packet_space));
 
-        const bool deadline_due =
-            packet_space_deadline.has_value() && now >= *packet_space_deadline;
+        const bool deadline_due = now >= packet_space_deadline;
         if (!deadline_due) {
             return;
         }
 
-        const auto current_selected_deadline = selected_deadline.value_or(*packet_space_deadline);
-        if (!selected_deadline.has_value() | (*packet_space_deadline < current_selected_deadline)) {
+        const auto current_selected_deadline = selected_deadline.value_or(packet_space_deadline);
+        if (!selected_deadline.has_value() | (packet_space_deadline < current_selected_deadline)) {
             selected_deadline = packet_space_deadline;
             selected_packet_space = &packet_space;
         }

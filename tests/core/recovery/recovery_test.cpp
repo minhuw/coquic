@@ -529,7 +529,7 @@ TEST(QuicRecoveryTest, AckProcessingRejectsMalformedAdditionalRangeLengthUnderfl
 
 TEST(QuicRecoveryTest, AckProcessingMatchesPacketsInAdditionalAckRanges) {
     PacketSpaceRecovery recovery;
-    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(0)));
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(1)));
@@ -579,7 +579,7 @@ TEST(QuicRecoveryTest, AckProcessingLeavesPacketsUnackedWhenAdditionalRangeStart
 TEST(QuicRecoveryTest,
      AckProcessingTracksLargestNewlyAcknowledgedPacketSeparatelyFromAckElicitingStatus) {
     PacketSpaceRecovery recovery;
-    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(0)));
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/false,
                                              coquic::quic::test::test_time(10)));

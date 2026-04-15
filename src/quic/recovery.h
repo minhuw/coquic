@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <vector>
 
 #include "src/quic/core.h"
@@ -56,6 +57,16 @@ struct RecoveryRttState {
     std::chrono::milliseconds rttvar{166};
 };
 
+struct DeadlineTrackedPacket {
+    std::uint64_t packet_number = 0;
+    QuicCoreTimePoint sent_time{};
+    bool operator==(const DeadlineTrackedPacket &) const = default;
+};
+
+struct DeadlineTrackedPacketLess {
+    bool operator()(const DeadlineTrackedPacket &lhs, const DeadlineTrackedPacket &rhs) const;
+};
+
 class ReceivedPacketHistory {
   public:
     bool contains(std::uint64_t packet_number) const;
@@ -91,25 +102,54 @@ class ReceivedPacketHistory {
     friend struct test::ReceivedPacketHistoryTestPeer;
 };
 
+struct RecoveryPacketMetadata {
+    std::uint64_t packet_number = 0;
+    QuicCoreTimePoint sent_time{};
+    bool ack_eliciting = false;
+    bool in_flight = false;
+    bool declared_lost = false;
+};
+
 struct AckProcessingResult {
-    std::vector<SentPacketRecord> acked_packets;
-    std::vector<SentPacketRecord> lost_packets;
-    std::optional<SentPacketRecord> largest_newly_acked_packet;
+    std::vector<RecoveryPacketMetadata> acked_packets;
+    std::vector<RecoveryPacketMetadata> lost_packets;
+    std::optional<RecoveryPacketMetadata> largest_newly_acked_packet;
     bool largest_acknowledged_was_newly_acked = false;
     bool has_newly_acked_ack_eliciting = false;
 };
 
 class PacketSpaceRecovery {
   public:
-    void on_packet_sent(SentPacketRecord packet);
+    void on_packet_sent(const SentPacketRecord &packet);
+    void on_packet_declared_lost(std::uint64_t packet_number);
+    void retire_packet(std::uint64_t packet_number);
     AckProcessingResult on_ack_received(const AckFrame &ack, QuicCoreTimePoint now);
     std::optional<std::uint64_t> largest_acked_packet_number() const;
+    std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet() const;
+    std::optional<DeadlineTrackedPacket> earliest_loss_packet() const;
 
     RecoveryRttState &rtt_state();
     const RecoveryRttState &rtt_state() const;
 
   private:
-    std::map<std::uint64_t, SentPacketRecord> sent_packets_;
+    struct SentPacketRecoveryRecord {
+        std::uint64_t packet_number = 0;
+        QuicCoreTimePoint sent_time{};
+        bool ack_eliciting = false;
+        bool in_flight = false;
+        bool declared_lost = false;
+    };
+
+    static DeadlineTrackedPacket tracked_packet(const SentPacketRecoveryRecord &packet);
+    static RecoveryPacketMetadata packet_metadata(const SentPacketRecoveryRecord &packet);
+    void erase_from_tracked_sets(const SentPacketRecoveryRecord &packet);
+    void maybe_track_as_loss_candidate(const SentPacketRecoveryRecord &packet);
+    void track_new_loss_candidates(std::optional<std::uint64_t> previous_largest_acked,
+                                   std::uint64_t largest_acked);
+
+    std::map<std::uint64_t, SentPacketRecoveryRecord> sent_packets_;
+    std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> in_flight_ack_eliciting_packets_;
+    std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> eligible_loss_packets_;
     std::optional<std::uint64_t> largest_acked_packet_number_;
     RecoveryRttState rtt_state_;
 };

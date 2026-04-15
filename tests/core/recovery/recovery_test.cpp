@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "src/quic/recovery.h"
+#include "tests/support/core/connection_test_fixtures.h"
 #include "tests/support/quic_test_utils.h"
 
 namespace coquic::quic::test {
@@ -27,8 +28,10 @@ using coquic::quic::AckRange;
 using coquic::quic::ByteRange;
 using coquic::quic::PacketSpaceRecovery;
 using coquic::quic::ReceivedPacketHistory;
+using coquic::quic::RecoveryPacketMetadata;
 using coquic::quic::RecoveryRttState;
 using coquic::quic::SentPacketRecord;
+using coquic::quic::test_support::optional_value_or_terminate;
 
 SentPacketRecord make_sent_packet(std::uint64_t packet_number, bool ack_eliciting,
                                   coquic::quic::QuicCoreTimePoint sent_time) {
@@ -47,7 +50,8 @@ AckFrame make_ack_frame(std::uint64_t largest, std::uint64_t first_ack_range = 0
     };
 }
 
-std::vector<std::uint64_t> packet_numbers_from(const std::vector<SentPacketRecord> &packets) {
+template <typename Packet>
+std::vector<std::uint64_t> packet_numbers_from(const std::vector<Packet> &packets) {
     std::vector<std::uint64_t> packet_numbers;
     packet_numbers.reserve(packets.size());
     for (const auto &packet : packets) {
@@ -343,58 +347,19 @@ TEST(QuicRecoveryTest, NonAckElicitingPacketBetweenAckElicitingPacketsDoesNotReq
     EXPECT_FALSE(history.requests_immediate_ack());
 }
 
-TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
+TEST(QuicRecoveryTest, AckProcessingReturnsLightweightAckedAndLostPacketMetadata) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(SentPacketRecord{
         .packet_number = 0,
         .sent_time = coquic::quic::test::test_time(0),
         .ack_eliciting = true,
         .in_flight = true,
-        .crypto_ranges = {ByteRange{
-            .offset = 11,
-            .bytes = {std::byte{0xaa}, std::byte{0xbb}},
-        }},
-        .reset_stream_frames = {coquic::quic::ResetStreamFrame{
-            .stream_id = 8,
-            .application_protocol_error_code = 9,
-            .final_size = 10,
-        }},
-        .stop_sending_frames = {coquic::quic::StopSendingFrame{
-            .stream_id = 12,
-            .application_protocol_error_code = 13,
-        }},
-        .stream_fragments = {coquic::quic::StreamFrameSendFragment{
-            .stream_id = 0,
-            .offset = 21,
-            .bytes = {std::byte{0xcc}},
-            .fin = false,
-        }},
-        .has_ping = true,
     });
     recovery.on_packet_sent(SentPacketRecord{
         .packet_number = 3,
         .sent_time = coquic::quic::test::test_time(1),
         .ack_eliciting = true,
         .in_flight = true,
-        .crypto_ranges = {ByteRange{
-            .offset = 31,
-            .bytes = {std::byte{0xdd}},
-        }},
-        .reset_stream_frames = {coquic::quic::ResetStreamFrame{
-            .stream_id = 14,
-            .application_protocol_error_code = 15,
-            .final_size = 16,
-        }},
-        .stop_sending_frames = {coquic::quic::StopSendingFrame{
-            .stream_id = 18,
-            .application_protocol_error_code = 19,
-        }},
-        .stream_fragments = {coquic::quic::StreamFrameSendFragment{
-            .stream_id = 4,
-            .offset = 41,
-            .bytes = {std::byte{0xee}, std::byte{0xff}},
-            .fin = true,
-        }},
     });
 
     const auto result =
@@ -406,36 +371,16 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAckedAndLostPacketMetadata) {
     EXPECT_EQ(packet_numbers_from(result.lost_packets), (std::vector<std::uint64_t>{0}));
 
     const auto &acked_packet = result.acked_packets.front();
-    EXPECT_EQ(acked_packet.crypto_ranges.size(), 1u);
-    EXPECT_EQ(acked_packet.crypto_ranges[0].offset, 31u);
-    EXPECT_EQ(acked_packet.stream_fragments.size(), 1u);
-    EXPECT_EQ(acked_packet.stream_fragments[0].stream_id, 4u);
-    EXPECT_EQ(acked_packet.stream_fragments[0].offset, 41u);
-    EXPECT_TRUE(acked_packet.stream_fragments[0].fin);
-    ASSERT_EQ(acked_packet.reset_stream_frames.size(), 1u);
-    EXPECT_EQ(acked_packet.reset_stream_frames[0].stream_id, 14u);
-    EXPECT_EQ(acked_packet.reset_stream_frames[0].application_protocol_error_code, 15u);
-    EXPECT_EQ(acked_packet.reset_stream_frames[0].final_size, 16u);
-    ASSERT_EQ(acked_packet.stop_sending_frames.size(), 1u);
-    EXPECT_EQ(acked_packet.stop_sending_frames[0].stream_id, 18u);
-    EXPECT_EQ(acked_packet.stop_sending_frames[0].application_protocol_error_code, 19u);
-    EXPECT_FALSE(acked_packet.has_ping);
+    EXPECT_EQ(acked_packet.sent_time, coquic::quic::test::test_time(1));
+    EXPECT_TRUE(acked_packet.ack_eliciting);
+    EXPECT_TRUE(acked_packet.in_flight);
+    EXPECT_FALSE(acked_packet.declared_lost);
 
     const auto &lost_packet = result.lost_packets.front();
-    EXPECT_EQ(lost_packet.crypto_ranges.size(), 1u);
-    EXPECT_EQ(lost_packet.crypto_ranges[0].offset, 11u);
-    EXPECT_EQ(lost_packet.stream_fragments.size(), 1u);
-    EXPECT_EQ(lost_packet.stream_fragments[0].stream_id, 0u);
-    EXPECT_EQ(lost_packet.stream_fragments[0].offset, 21u);
-    EXPECT_FALSE(lost_packet.stream_fragments[0].fin);
-    ASSERT_EQ(lost_packet.reset_stream_frames.size(), 1u);
-    EXPECT_EQ(lost_packet.reset_stream_frames[0].stream_id, 8u);
-    EXPECT_EQ(lost_packet.reset_stream_frames[0].application_protocol_error_code, 9u);
-    EXPECT_EQ(lost_packet.reset_stream_frames[0].final_size, 10u);
-    ASSERT_EQ(lost_packet.stop_sending_frames.size(), 1u);
-    EXPECT_EQ(lost_packet.stop_sending_frames[0].stream_id, 12u);
-    EXPECT_EQ(lost_packet.stop_sending_frames[0].application_protocol_error_code, 13u);
-    EXPECT_TRUE(lost_packet.has_ping);
+    EXPECT_EQ(lost_packet.sent_time, coquic::quic::test::test_time(0));
+    EXPECT_TRUE(lost_packet.ack_eliciting);
+    EXPECT_FALSE(lost_packet.in_flight);
+    EXPECT_TRUE(lost_packet.declared_lost);
 }
 
 TEST(QuicRecoveryTest, PacketThresholdLossKeepsRunningLargestAcknowledgedState) {
@@ -594,6 +539,61 @@ TEST(QuicRecoveryTest,
     }
     EXPECT_EQ(result.largest_newly_acked_packet.value().packet_number, 2u);
     EXPECT_TRUE(result.has_newly_acked_ack_eliciting);
+}
+
+TEST(QuicRecoveryTest, RecoveryTracksLatestInflightAckElicitingPacketIncrementally) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(5)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(9)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/false,
+                                             coquic::quic::test::test_time(11)));
+
+    const auto latest_in_flight = recovery.latest_in_flight_ack_eliciting_packet();
+    ASSERT_TRUE(latest_in_flight.has_value());
+    EXPECT_EQ(optional_value_or_terminate(latest_in_flight).packet_number, 2u);
+
+    static_cast<void>(
+        recovery.on_ack_received(make_ack_frame(/*largest=*/2), coquic::quic::test::test_time(20)));
+
+    const auto latest_in_flight_after_ack = recovery.latest_in_flight_ack_eliciting_packet();
+    ASSERT_TRUE(latest_in_flight_after_ack.has_value());
+    EXPECT_EQ(optional_value_or_terminate(latest_in_flight_after_ack).packet_number, 1u);
+
+    recovery.on_packet_declared_lost(1);
+
+    EXPECT_FALSE(recovery.latest_in_flight_ack_eliciting_packet().has_value());
+}
+
+TEST(QuicRecoveryTest, RecoveryTracksEarliestLossPacketAcrossLargestAckAdvance) {
+    PacketSpaceRecovery recovery;
+    recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().min_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().smoothed_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().rttvar = std::chrono::milliseconds(5);
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(5)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(7)));
+
+    EXPECT_FALSE(recovery.earliest_loss_packet().has_value());
+
+    static_cast<void>(
+        recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(9)));
+
+    const auto earliest_loss = recovery.earliest_loss_packet();
+    ASSERT_TRUE(earliest_loss.has_value());
+    EXPECT_EQ(optional_value_or_terminate(earliest_loss).packet_number, 2u);
+
+    recovery.on_packet_declared_lost(2);
+
+    const auto earliest_loss_after_declaring_packet_2_lost = recovery.earliest_loss_packet();
+    ASSERT_TRUE(earliest_loss_after_declaring_packet_2_lost.has_value());
+    EXPECT_EQ(
+        optional_value_or_terminate(earliest_loss_after_declaring_packet_2_lost).packet_number, 1u);
 }
 
 TEST(QuicRecoveryTest, AckProcessingSkipsPacketsAlreadyLostOrNotInFlight) {

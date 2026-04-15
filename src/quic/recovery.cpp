@@ -81,6 +81,14 @@ void note_received_ecn(AckEcnCounts &counts, QuicEcnCodepoint ecn) {
 
 } // namespace
 
+bool DeadlineTrackedPacketLess::operator()(const DeadlineTrackedPacket &lhs,
+                                           const DeadlineTrackedPacket &rhs) const {
+    if (lhs.sent_time != rhs.sent_time) {
+        return lhs.sent_time < rhs.sent_time;
+    }
+    return lhs.packet_number < rhs.packet_number;
+}
+
 bool ReceivedPacketHistory::contains(std::uint64_t packet_number) const {
     const auto next = ranges_.upper_bound(packet_number);
     if (next != ranges_.begin()) {
@@ -217,43 +225,130 @@ void ReceivedPacketHistory::on_ack_sent() {
     ack_eliciting_packets_since_last_ack_ = 0;
 }
 
-void PacketSpaceRecovery::on_packet_sent(SentPacketRecord packet) {
-    sent_packets_[packet.packet_number] = std::move(packet);
+DeadlineTrackedPacket PacketSpaceRecovery::tracked_packet(const SentPacketRecoveryRecord &packet) {
+    return DeadlineTrackedPacket{
+        .packet_number = packet.packet_number,
+        .sent_time = packet.sent_time,
+    };
+}
+
+RecoveryPacketMetadata
+PacketSpaceRecovery::packet_metadata(const SentPacketRecoveryRecord &packet) {
+    return RecoveryPacketMetadata{
+        .packet_number = packet.packet_number,
+        .sent_time = packet.sent_time,
+        .ack_eliciting = packet.ack_eliciting,
+        .in_flight = packet.in_flight,
+        .declared_lost = packet.declared_lost,
+    };
+}
+
+void PacketSpaceRecovery::erase_from_tracked_sets(const SentPacketRecoveryRecord &packet) {
+    const auto tracked = tracked_packet(packet);
+    in_flight_ack_eliciting_packets_.erase(tracked);
+    eligible_loss_packets_.erase(tracked);
+}
+
+void PacketSpaceRecovery::maybe_track_as_loss_candidate(const SentPacketRecoveryRecord &packet) {
+    if (!largest_acked_packet_number_.has_value() ||
+        packet.packet_number >= *largest_acked_packet_number_ || !packet.in_flight ||
+        packet.declared_lost) {
+        return;
+    }
+
+    eligible_loss_packets_.insert(tracked_packet(packet));
+}
+
+void PacketSpaceRecovery::track_new_loss_candidates(
+    std::optional<std::uint64_t> previous_largest_acked, std::uint64_t largest_acked) {
+    auto it = previous_largest_acked.has_value()
+                  ? sent_packets_.lower_bound(*previous_largest_acked)
+                  : sent_packets_.begin();
+    for (; it != sent_packets_.end() && it->first < largest_acked; ++it) {
+        maybe_track_as_loss_candidate(it->second);
+    }
+}
+
+void PacketSpaceRecovery::on_packet_sent(const SentPacketRecord &packet) {
+    if (const auto existing = sent_packets_.find(packet.packet_number);
+        existing != sent_packets_.end()) {
+        erase_from_tracked_sets(existing->second);
+        sent_packets_.erase(existing);
+    }
+
+    auto &tracked = sent_packets_[packet.packet_number];
+    tracked = SentPacketRecoveryRecord{
+        .packet_number = packet.packet_number,
+        .sent_time = packet.sent_time,
+        .ack_eliciting = packet.ack_eliciting,
+        .in_flight = packet.in_flight,
+        .declared_lost = packet.declared_lost,
+    };
+    if (tracked.ack_eliciting && tracked.in_flight) {
+        in_flight_ack_eliciting_packets_.insert(tracked_packet(tracked));
+    }
+    maybe_track_as_loss_candidate(tracked);
+}
+
+void PacketSpaceRecovery::on_packet_declared_lost(std::uint64_t packet_number) {
+    const auto packet_it = sent_packets_.find(packet_number);
+    if (packet_it == sent_packets_.end()) {
+        return;
+    }
+
+    erase_from_tracked_sets(packet_it->second);
+    packet_it->second.in_flight = false;
+    packet_it->second.declared_lost = true;
+}
+
+void PacketSpaceRecovery::retire_packet(std::uint64_t packet_number) {
+    const auto packet_it = sent_packets_.find(packet_number);
+    if (packet_it == sent_packets_.end()) {
+        return;
+    }
+
+    erase_from_tracked_sets(packet_it->second);
+    sent_packets_.erase(packet_it);
 }
 
 AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
                                                          QuicCoreTimePoint now) {
     AckProcessingResult result;
-    largest_acked_packet_number_ =
-        largest_acked_packet_number_.has_value()
-            ? std::max(*largest_acked_packet_number_, ack.largest_acknowledged)
-            : ack.largest_acknowledged;
+    const auto previous_largest_acked = largest_acked_packet_number_;
+    largest_acked_packet_number_ = previous_largest_acked.has_value()
+                                       ? std::max(*previous_largest_acked, ack.largest_acknowledged)
+                                       : ack.largest_acknowledged;
     const auto effective_largest_acked = *largest_acked_packet_number_;
-    std::vector<std::uint64_t> acked_packet_numbers;
+    if (!previous_largest_acked.has_value() || effective_largest_acked > *previous_largest_acked) {
+        track_new_loss_candidates(previous_largest_acked, effective_largest_acked);
+    }
 
-    for (const auto &[packet_number, packet] : sent_packets_) {
-        if (!ack_frame_acks_packet(ack, packet_number)) {
+    std::vector<std::uint64_t> acked_packet_numbers;
+    const auto ack_scan_end = sent_packets_.upper_bound(ack.largest_acknowledged);
+    for (auto it = sent_packets_.begin(); it != ack_scan_end; ++it) {
+        if (!ack_frame_acks_packet(ack, it->first)) {
             continue;
         }
 
-        acked_packet_numbers.push_back(packet_number);
-        result.acked_packets.push_back(packet);
-        result.largest_newly_acked_packet = packet;
-        if (packet.packet_number == ack.largest_acknowledged) {
+        acked_packet_numbers.push_back(it->first);
+        result.acked_packets.push_back(packet_metadata(it->second));
+        result.largest_newly_acked_packet = result.acked_packets.back();
+        if (it->second.packet_number == ack.largest_acknowledged) {
             result.largest_acknowledged_was_newly_acked = true;
         }
-        if (packet.ack_eliciting) {
+        if (it->second.ack_eliciting) {
             result.has_newly_acked_ack_eliciting = true;
         }
     }
 
     for (const auto packet_number : acked_packet_numbers) {
-        sent_packets_.erase(packet_number);
+        retire_packet(packet_number);
     }
 
-    for (auto &[packet_number, packet] : sent_packets_) {
-        if (packet.declared_lost || !packet.in_flight ||
-            packet.packet_number >= effective_largest_acked) {
+    const auto loss_scan_end = sent_packets_.lower_bound(effective_largest_acked);
+    for (auto it = sent_packets_.begin(); it != loss_scan_end; ++it) {
+        auto &packet = it->second;
+        if (packet.declared_lost || !packet.in_flight) {
             continue;
         }
 
@@ -262,10 +357,10 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
             continue;
         }
 
-        result.lost_packets.push_back(packet);
+        erase_from_tracked_sets(packet);
         packet.declared_lost = true;
         packet.in_flight = false;
-        packet.bytes_in_flight = 0;
+        result.lost_packets.push_back(packet_metadata(packet));
     }
 
     return result;
@@ -273,6 +368,23 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
 
 std::optional<std::uint64_t> PacketSpaceRecovery::largest_acked_packet_number() const {
     return largest_acked_packet_number_;
+}
+
+std::optional<DeadlineTrackedPacket>
+PacketSpaceRecovery::latest_in_flight_ack_eliciting_packet() const {
+    if (in_flight_ack_eliciting_packets_.empty()) {
+        return std::nullopt;
+    }
+
+    return *in_flight_ack_eliciting_packets_.rbegin();
+}
+
+std::optional<DeadlineTrackedPacket> PacketSpaceRecovery::earliest_loss_packet() const {
+    if (eligible_loss_packets_.empty()) {
+        return std::nullopt;
+    }
+
+    return *eligible_loss_packets_.begin();
 }
 
 RecoveryRttState &PacketSpaceRecovery::rtt_state() {

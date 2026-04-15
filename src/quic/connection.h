@@ -34,17 +34,6 @@ enum class QuicConnectionTerminalState : std::uint8_t {
     failed,
 };
 
-struct DeadlineTrackedPacket {
-    std::uint64_t packet_number = 0;
-    QuicCoreTimePoint sent_time{};
-};
-
-struct PacketSpaceDeadlineTracking {
-    std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet;
-    std::optional<DeadlineTrackedPacket> earliest_loss_packet;
-    std::optional<std::uint64_t> earliest_loss_largest_acked_packet_number;
-};
-
 struct PacketSpaceState {
     std::uint64_t next_send_packet_number = 0;
     std::optional<std::uint64_t> largest_authenticated_packet_number;
@@ -59,7 +48,6 @@ struct PacketSpaceState {
     std::optional<SentPacketRecord> pending_probe_packet;
     std::optional<QuicCoreTimePoint> pending_ack_deadline;
     bool force_ack_send = false;
-    PacketSpaceDeadlineTracking deadline_tracking;
 };
 
 struct LocalResetCommand {
@@ -305,10 +293,9 @@ class QuicConnection {
                                           QuicCoreTimePoint now, std::uint64_t ack_delay_exponent,
                                           std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);
     void track_sent_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet);
-    void retire_acked_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet,
-                             bool refresh_deadline_tracking = true);
+    void retire_acked_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet);
     void mark_lost_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet,
-                          bool refresh_deadline_tracking = true);
+                          bool already_marked_in_recovery = false);
     void rebuild_recovery(PacketSpaceState &packet_space);
     std::optional<QuicCoreTimePoint> loss_deadline() const;
     std::optional<QuicCoreTimePoint> pto_deadline() const;

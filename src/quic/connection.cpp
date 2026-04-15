@@ -558,155 +558,12 @@ bool has_ack_eliciting_frame(std::span<const Frame> frames) {
 }
 
 std::optional<DeadlineTrackedPacket>
-scan_latest_in_flight_ack_eliciting_packet(const PacketSpaceState &packet_space) {
-    std::optional<DeadlineTrackedPacket> tracked_packet;
-    for (const auto &[packet_number, packet] : packet_space.sent_packets) {
-        static_cast<void>(packet_number);
-        if (!packet.ack_eliciting || !packet.in_flight) {
-            continue;
-        }
-
-        if (!tracked_packet.has_value() || packet.sent_time > tracked_packet->sent_time ||
-            (packet.sent_time == tracked_packet->sent_time &&
-             packet.packet_number > tracked_packet->packet_number)) {
-            tracked_packet = DeadlineTrackedPacket{
-                .packet_number = packet.packet_number,
-                .sent_time = packet.sent_time,
-            };
-        }
-    }
-
-    return tracked_packet;
-}
-
-std::optional<DeadlineTrackedPacket>
-scan_earliest_loss_packet(const PacketSpaceState &packet_space) {
-    const auto largest_acked = packet_space.recovery.largest_acked_packet_number();
-    if (!largest_acked.has_value()) {
-        return std::nullopt;
-    }
-
-    std::optional<DeadlineTrackedPacket> tracked_packet;
-    for (const auto &[packet_number, packet] : packet_space.sent_packets) {
-        static_cast<void>(packet_number);
-        if (!packet.in_flight || packet.packet_number >= *largest_acked) {
-            continue;
-        }
-
-        if (!tracked_packet.has_value() || packet.sent_time < tracked_packet->sent_time ||
-            (packet.sent_time == tracked_packet->sent_time &&
-             packet.packet_number < tracked_packet->packet_number)) {
-            tracked_packet = DeadlineTrackedPacket{
-                .packet_number = packet.packet_number,
-                .sent_time = packet.sent_time,
-            };
-        }
-    }
-
-    return tracked_packet;
-}
-
-void refresh_pto_deadline_tracking(PacketSpaceState &packet_space) {
-    packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet =
-        scan_latest_in_flight_ack_eliciting_packet(packet_space);
-}
-
-void refresh_loss_deadline_tracking(PacketSpaceState &packet_space) {
-    packet_space.deadline_tracking.earliest_loss_largest_acked_packet_number =
-        packet_space.recovery.largest_acked_packet_number();
-    packet_space.deadline_tracking.earliest_loss_packet = scan_earliest_loss_packet(packet_space);
-}
-
-bool cached_latest_in_flight_ack_eliciting_packet_valid(const PacketSpaceState &packet_space) {
-    const auto &tracked_packet =
-        packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet;
-    if (!tracked_packet.has_value()) {
-        return false;
-    }
-
-    const auto packet_it = packet_space.sent_packets.find(tracked_packet->packet_number);
-    if (packet_it == packet_space.sent_packets.end()) {
-        return false;
-    }
-
-    const auto &packet = packet_it->second;
-    return packet.sent_time == tracked_packet->sent_time && packet.ack_eliciting &&
-           packet.in_flight;
-}
-
-bool cached_earliest_loss_packet_valid(const PacketSpaceState &packet_space) {
-    const auto largest_acked = packet_space.recovery.largest_acked_packet_number();
-    const auto &tracked_packet = packet_space.deadline_tracking.earliest_loss_packet;
-    const auto &tracked_largest_acked =
-        packet_space.deadline_tracking.earliest_loss_largest_acked_packet_number;
-    if (!largest_acked.has_value() || !tracked_packet.has_value() ||
-        tracked_largest_acked != largest_acked) {
-        return false;
-    }
-
-    const auto packet_it = packet_space.sent_packets.find(tracked_packet->packet_number);
-    if (packet_it == packet_space.sent_packets.end()) {
-        return false;
-    }
-
-    const auto &packet = packet_it->second;
-    return packet.sent_time == tracked_packet->sent_time && packet.in_flight &&
-           packet.packet_number < *largest_acked;
-}
-
-std::optional<DeadlineTrackedPacket>
 latest_in_flight_ack_eliciting_packet(const PacketSpaceState &packet_space) {
-    if (cached_latest_in_flight_ack_eliciting_packet_valid(packet_space)) {
-        return packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet;
-    }
-
-    return scan_latest_in_flight_ack_eliciting_packet(packet_space);
+    return packet_space.recovery.latest_in_flight_ack_eliciting_packet();
 }
 
 std::optional<DeadlineTrackedPacket> earliest_loss_packet(const PacketSpaceState &packet_space) {
-    if (cached_earliest_loss_packet_valid(packet_space)) {
-        return packet_space.deadline_tracking.earliest_loss_packet;
-    }
-
-    return scan_earliest_loss_packet(packet_space);
-}
-
-void note_tracked_sent_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet) {
-    if (packet.ack_eliciting && packet.in_flight) {
-        auto &tracked_packet = packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet;
-        if (!tracked_packet.has_value() || packet.sent_time > tracked_packet->sent_time ||
-            (packet.sent_time == tracked_packet->sent_time &&
-             packet.packet_number > tracked_packet->packet_number)) {
-            tracked_packet = DeadlineTrackedPacket{
-                .packet_number = packet.packet_number,
-                .sent_time = packet.sent_time,
-            };
-        }
-    }
-
-    const auto largest_acked = packet_space.recovery.largest_acked_packet_number();
-    if (!largest_acked.has_value() || !packet.in_flight || packet.packet_number >= *largest_acked) {
-        return;
-    }
-
-    auto &tracked_largest_acked =
-        packet_space.deadline_tracking.earliest_loss_largest_acked_packet_number;
-    if (!tracked_largest_acked.has_value()) {
-        tracked_largest_acked = largest_acked;
-    }
-    if (tracked_largest_acked != largest_acked) {
-        return;
-    }
-
-    auto &tracked_packet = packet_space.deadline_tracking.earliest_loss_packet;
-    if (!tracked_packet.has_value() || packet.sent_time < tracked_packet->sent_time ||
-        (packet.sent_time == tracked_packet->sent_time &&
-         packet.packet_number < tracked_packet->packet_number)) {
-        tracked_packet = DeadlineTrackedPacket{
-            .packet_number = packet.packet_number,
-            .sent_time = packet.sent_time,
-        };
-    }
+    return packet_space.recovery.earliest_loss_packet();
 }
 
 bool has_in_flight_ack_eliciting_packet(const PacketSpaceState &packet_space) {
@@ -1270,7 +1127,6 @@ void discard_packet_space_state(PacketSpaceState &packet_space) {
     packet_space.pending_probe_packet = std::nullopt;
     packet_space.pending_ack_deadline = std::nullopt;
     packet_space.force_ack_send = false;
-    packet_space.deadline_tracking = PacketSpaceDeadlineTracking{};
 }
 
 void reset_packet_space_receive_state(PacketSpaceState &packet_space) {
@@ -2406,10 +2262,8 @@ void QuicConnection::detect_lost_packets(PacketSpaceState &packet_space, QuicCor
 
     for (const auto &packet : lost_packets) {
         emit_qlog_packet_lost(packet, "time_threshold", now);
-        mark_lost_packet(packet_space, packet, /*refresh_deadline_tracking=*/false);
+        mark_lost_packet(packet_space, packet);
     }
-    refresh_pto_deadline_tracking(packet_space);
-    refresh_loss_deadline_tracking(packet_space);
     const auto ack_eliciting_lost_packets = ack_eliciting_in_flight_losses(lost_packets);
     if (packet_space_is_application(packet_space, application_space_) &&
         !ack_eliciting_lost_packets.empty()) {
@@ -2423,7 +2277,6 @@ void QuicConnection::detect_lost_packets(PacketSpaceState &packet_space, QuicCor
             congestion_controller_.on_persistent_congestion();
         }
     }
-    rebuild_recovery(packet_space);
     maybe_emit_qlog_recovery_metrics(now);
 }
 
@@ -3646,22 +3499,42 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
 
     packet_space.recovery.rtt_state() = shared_recovery_rtt_state();
     auto ack_result = packet_space.recovery.on_ack_received(ack, now);
-    for (const auto &packet : ack_result.acked_packets) {
-        retire_acked_packet(packet_space, packet, /*refresh_deadline_tracking=*/false);
+    std::vector<SentPacketRecord> acked_packets;
+    acked_packets.reserve(ack_result.acked_packets.size());
+    for (const auto &packet_metadata : ack_result.acked_packets) {
+        if (packet_metadata.declared_lost) {
+            continue;
+        }
+
+        const auto packet_it = packet_space.sent_packets.find(packet_metadata.packet_number);
+        if (packet_it == packet_space.sent_packets.end()) {
+            continue;
+        }
+        acked_packets.push_back(packet_it->second);
+    }
+    std::vector<SentPacketRecord> newly_lost_packets;
+    newly_lost_packets.reserve(ack_result.lost_packets.size());
+    for (const auto &packet_metadata : ack_result.lost_packets) {
+        const auto packet_it = packet_space.sent_packets.find(packet_metadata.packet_number);
+        if (packet_it == packet_space.sent_packets.end()) {
+            continue;
+        }
+        newly_lost_packets.push_back(packet_it->second);
+    }
+    for (const auto &packet : acked_packets) {
+        retire_acked_packet(packet_space, packet);
     }
     for (const auto &packet : late_acked_packets) {
-        retire_acked_packet(packet_space, packet, /*refresh_deadline_tracking=*/false);
+        retire_acked_packet(packet_space, packet);
     }
-    for (const auto &packet : ack_result.lost_packets) {
+    for (const auto &packet : newly_lost_packets) {
         const auto trigger =
             is_packet_threshold_lost(packet.packet_number, ack.largest_acknowledged)
                 ? "reordering_threshold"
                 : "time_threshold";
         emit_qlog_packet_lost(packet, trigger, now);
-        mark_lost_packet(packet_space, packet, /*refresh_deadline_tracking=*/false);
+        mark_lost_packet(packet_space, packet, /*already_marked_in_recovery=*/true);
     }
-    refresh_pto_deadline_tracking(packet_space);
-    refresh_loss_deadline_tracking(packet_space);
 
     std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
     if (ack_result.largest_acknowledged_was_newly_acked) {
@@ -3688,7 +3561,7 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
                     ? std::max(*summary.latest_marked_sent_time, packet.sent_time)
                     : packet.sent_time;
         };
-        for (const auto &packet : ack_result.acked_packets) {
+        for (const auto &packet : acked_packets) {
             note_acked_ecn_packet(packet);
         }
         for (const auto &packet : late_acked_packets) {
@@ -3758,20 +3631,22 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
     }
 
     if (ack_result.largest_acknowledged_was_newly_acked &&
-        ack_result.has_newly_acked_ack_eliciting) {
-        update_rtt(packet_space.recovery.rtt_state(), now, ack_result.acked_packets.back(),
+        ack_result.has_newly_acked_ack_eliciting &&
+        ack_result.largest_newly_acked_packet.has_value()) {
+        update_rtt(packet_space.recovery.rtt_state(), now,
+                   SentPacketRecord{.sent_time = ack_result.largest_newly_acked_packet->sent_time},
                    decode_ack_delay(ack, ack_delay_exponent),
                    std::chrono::milliseconds(max_ack_delay_ms));
         recovery_rtt_state_ = packet_space.recovery.rtt_state();
         synchronize_recovery_rtt_state();
     }
-    if (&packet_space == &application_space_ && !ack_result.acked_packets.empty()) {
+    const bool has_any_acked_packets = !acked_packets.empty() || !late_acked_packets.empty();
+    if (&packet_space == &application_space_ && has_any_acked_packets) {
         confirm_handshake();
     }
     if (packet_space_is_application(packet_space, application_space_)) {
         const auto &shared_rtt_state = shared_recovery_rtt_state();
-        const auto ack_eliciting_lost_packets =
-            ack_eliciting_in_flight_losses(ack_result.lost_packets);
+        const auto ack_eliciting_lost_packets = ack_eliciting_in_flight_losses(newly_lost_packets);
         if (!ack_eliciting_lost_packets.empty()) {
             congestion_controller_.on_loss_event(
                 now, latest_packet_sent_time(ack_eliciting_lost_packets));
@@ -3783,16 +3658,20 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         if (latest_ecn_ce_sent_time.has_value()) {
             congestion_controller_.on_loss_event(now, *latest_ecn_ce_sent_time);
         }
-        congestion_controller_.on_packets_acked(ack_result.acked_packets,
-                                                !has_pending_application_send());
+        congestion_controller_.on_packets_acked(acked_packets, !has_pending_application_send());
     }
-    if (!ack_result.acked_packets.empty() && !suppress_pto_reset) {
+    if (has_any_acked_packets && !suppress_pto_reset) {
         const bool keepalive_probe_packet_space =
             (&packet_space == &initial_space_) | (&packet_space == &handshake_space_);
         const bool client_handshake_keepalive_ack_only =
             (config_.role == EndpointRole::client) & (status_ == HandshakeStatus::in_progress) &
-            !handshake_confirmed_ & keepalive_probe_packet_space &
-            std::ranges::all_of(ack_result.acked_packets, [&](const SentPacketRecord &packet) {
+                !handshake_confirmed_ & keepalive_probe_packet_space &
+                std::ranges::all_of(acked_packets,
+                                    [&](const SentPacketRecord &packet) {
+                                        return packet.has_ping &
+                                               (retransmittable_probe_frame_count(packet) == 0);
+                                    }) &&
+            std::ranges::all_of(late_acked_packets, [&](const SentPacketRecord &packet) {
                 return packet.has_ping & (retransmittable_probe_frame_count(packet) == 0);
             });
         if (!client_handshake_keepalive_ack_only) {
@@ -3805,9 +3684,9 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         std::cerr << "quic-packet-trace ack scid="
                   << format_connection_id_hex(config_.source_connection_id)
                   << " path=" << last_inbound_path_id_ << " ranges=" << format_ack_ranges(ack)
-                  << " acked={" << summarize_packets(ack_result.acked_packets) << "}"
+                  << " acked={" << summarize_packets(acked_packets) << "}"
                   << " late={" << summarize_packets(late_acked_packets) << "}"
-                  << " lost={" << summarize_packets(ack_result.lost_packets) << "}"
+                  << " lost={" << summarize_packets(newly_lost_packets) << "}"
                   << " pending_send=" << static_cast<int>(has_pending_application_send())
                   << " probe="
                   << static_cast<int>(application_space_.pending_probe_packet.has_value())
@@ -3832,7 +3711,6 @@ void QuicConnection::track_sent_packet(PacketSpaceState &packet_space,
                                        const SentPacketRecord &packet) {
     packet_space.sent_packets[packet.packet_number] = packet;
     packet_space.recovery.on_packet_sent(packet);
-    note_tracked_sent_packet(packet_space, packet);
     if (is_ect_codepoint(packet.ecn)) {
         auto &path = ensure_path_state(packet.path_id);
         if (packet.ecn == QuicEcnCodepoint::ect0) {
@@ -3851,8 +3729,7 @@ void QuicConnection::track_sent_packet(PacketSpaceState &packet_space,
 }
 
 void QuicConnection::retire_acked_packet(PacketSpaceState &packet_space,
-                                         const SentPacketRecord &packet,
-                                         bool refresh_deadline_tracking) {
+                                         const SentPacketRecord &packet) {
     std::vector<std::uint64_t> retirement_candidates;
     const auto note_retirement_candidate = [&](std::uint64_t stream_id) {
         if (std::find(retirement_candidates.begin(), retirement_candidates.end(), stream_id) ==
@@ -3923,12 +3800,9 @@ void QuicConnection::retire_acked_packet(PacketSpaceState &packet_space,
         handshake_done_state_ = StreamControlFrameState::acknowledged;
     }
 
+    packet_space.recovery.retire_packet(packet.packet_number);
     packet_space.sent_packets.erase(packet.packet_number);
     packet_space.declared_lost_packets.erase(packet.packet_number);
-    if (refresh_deadline_tracking) {
-        refresh_pto_deadline_tracking(packet_space);
-        refresh_loss_deadline_tracking(packet_space);
-    }
     for (const auto stream_id : retirement_candidates) {
         maybe_retire_stream(stream_id);
     }
@@ -3936,7 +3810,7 @@ void QuicConnection::retire_acked_packet(PacketSpaceState &packet_space,
 
 void QuicConnection::mark_lost_packet(PacketSpaceState &packet_space,
                                       const SentPacketRecord &packet,
-                                      bool refresh_deadline_tracking) {
+                                      bool already_marked_in_recovery) {
     if (packet_space_is_application(packet_space, application_space_)) {
         congestion_controller_.on_packets_lost(std::span<const SentPacketRecord>(&packet, 1));
         if (current_send_path_id_.has_value()) {
@@ -4017,16 +3891,15 @@ void QuicConnection::mark_lost_packet(PacketSpaceState &packet_space,
         handshake_done_state_ = StreamControlFrameState::pending;
     }
 
+    if (!already_marked_in_recovery) {
+        packet_space.recovery.on_packet_declared_lost(packet.packet_number);
+    }
     packet_space.sent_packets.erase(packet.packet_number);
     auto declared_lost = packet;
     declared_lost.declared_lost = true;
     declared_lost.in_flight = false;
     declared_lost.bytes_in_flight = 0;
     packet_space.declared_lost_packets[packet.packet_number] = std::move(declared_lost);
-    if (refresh_deadline_tracking) {
-        refresh_pto_deadline_tracking(packet_space);
-        refresh_loss_deadline_tracking(packet_space);
-    }
 }
 
 void QuicConnection::rebuild_recovery(PacketSpaceState &packet_space) {
@@ -4048,8 +3921,6 @@ void QuicConnection::rebuild_recovery(PacketSpaceState &packet_space) {
         static_cast<void>(packet_number);
         packet_space.recovery.on_packet_sent(packet);
     }
-    refresh_pto_deadline_tracking(packet_space);
-    refresh_loss_deadline_tracking(packet_space);
 }
 
 CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Frame> frames,

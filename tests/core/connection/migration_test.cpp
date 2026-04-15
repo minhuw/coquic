@@ -1228,28 +1228,28 @@ TEST(QuicCoreTest, PacketTraceLogsAckTimeoutMigrationAndBlockedSendPaths) {
         connection.status_ = coquic::quic::HandshakeStatus::in_progress;
         connection.handshake_confirmed_ = false;
         connection.handshake_space_.write_secret = make_test_traffic_secret();
-        connection.handshake_space_.sent_packets.emplace(
-            1, coquic::quic::SentPacketRecord{
-                   .packet_number = 1,
-                   .sent_time = coquic::quic::test::test_time(0),
-                   .ack_eliciting = true,
-                   .in_flight = true,
-                   .has_ping = true,
-               });
+        connection.track_sent_packet(connection.handshake_space_,
+                                     coquic::quic::SentPacketRecord{
+                                         .packet_number = 1,
+                                         .sent_time = coquic::quic::test::test_time(0),
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .has_ping = true,
+                                     });
 
         connection.arm_pto_probe(coquic::quic::test::test_time(1000));
     }
 
     {
         auto connection = make_connected_client_connection();
-        connection.application_space_.sent_packets.emplace(
-            1, coquic::quic::SentPacketRecord{
-                   .packet_number = 1,
-                   .sent_time = coquic::quic::test::test_time(0),
-                   .ack_eliciting = true,
-                   .in_flight = true,
-                   .has_ping = true,
-               });
+        connection.track_sent_packet(connection.application_space_,
+                                     coquic::quic::SentPacketRecord{
+                                         .packet_number = 1,
+                                         .sent_time = coquic::quic::test::test_time(0),
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .has_ping = true,
+                                     });
 
         connection.on_timeout(coquic::quic::test::test_time(1000));
     }

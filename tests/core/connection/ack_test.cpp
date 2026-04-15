@@ -1040,7 +1040,7 @@ TEST(QuicCoreTest, NewlyAcknowledgedNonAckElicitingPacketsResetPtoBackoff) {
     EXPECT_EQ(connection.pto_count_, 0u);
 }
 
-TEST(QuicCoreTest, DetectLostPacketsMarksCryptoRangesLostAndRebuildsRecoveryState) {
+TEST(QuicCoreTest, DetectLostPacketsMarksCryptoRangesLostAndKeepsRecoveryStateForLateAcks) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.initial_space_.recovery.largest_acked_packet_number_ = 5;
     connection.initial_space_.recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
@@ -1067,7 +1067,9 @@ TEST(QuicCoreTest, DetectLostPacketsMarksCryptoRangesLostAndRebuildsRecoveryStat
     EXPECT_TRUE(connection.initial_space_.send_crypto.has_pending_data());
     EXPECT_EQ(connection.initial_space_.recovery.largest_acked_packet_number(),
               std::optional<std::uint64_t>{5});
-    EXPECT_TRUE(connection.initial_space_.recovery.sent_packets_.empty());
+    ASSERT_TRUE(connection.initial_space_.recovery.sent_packets_.contains(0));
+    EXPECT_TRUE(connection.initial_space_.recovery.sent_packets_.at(0).declared_lost);
+    EXPECT_FALSE(connection.initial_space_.recovery.sent_packets_.at(0).in_flight);
 }
 
 TEST(QuicCoreTest, DetectLostApplicationPacketsRequeuesApplicationCryptoRanges) {
@@ -2126,30 +2128,30 @@ TEST(QuicCoreTest, DeadlineTrackingCacheRefreshesAfterTrackedPacketsAreRemoved) 
                                                    .in_flight = true,
                                                });
 
-    EXPECT_EQ(optional_value_or_terminate(
-                  packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet)
-                  .packet_number,
-              2u);
-    EXPECT_EQ(optional_value_or_terminate(packet_space.deadline_tracking.earliest_loss_packet)
-                  .packet_number,
-              1u);
+    EXPECT_EQ(
+        optional_value_or_terminate(packet_space.recovery.latest_in_flight_ack_eliciting_packet())
+            .packet_number,
+        2u);
+    EXPECT_EQ(
+        optional_value_or_terminate(packet_space.recovery.earliest_loss_packet()).packet_number,
+        1u);
 
     connection.retire_acked_packet(packet_space, packet_space.sent_packets.at(2));
 
-    EXPECT_EQ(optional_value_or_terminate(
-                  packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet)
-                  .packet_number,
-              3u);
+    EXPECT_EQ(
+        optional_value_or_terminate(packet_space.recovery.latest_in_flight_ack_eliciting_packet())
+            .packet_number,
+        3u);
 
     connection.mark_lost_packet(packet_space, packet_space.sent_packets.at(1));
 
-    EXPECT_EQ(optional_value_or_terminate(packet_space.deadline_tracking.earliest_loss_packet)
-                  .packet_number,
-              3u);
-    EXPECT_EQ(optional_value_or_terminate(
-                  packet_space.deadline_tracking.latest_in_flight_ack_eliciting_packet)
-                  .packet_number,
-              3u);
+    EXPECT_EQ(
+        optional_value_or_terminate(packet_space.recovery.earliest_loss_packet()).packet_number,
+        3u);
+    EXPECT_EQ(
+        optional_value_or_terminate(packet_space.recovery.latest_in_flight_ack_eliciting_packet())
+            .packet_number,
+        3u);
 }
 
 TEST(QuicCoreTest,

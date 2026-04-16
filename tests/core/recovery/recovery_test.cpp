@@ -866,6 +866,42 @@ TEST(QuicRecoveryTest, AckProcessingCanStillAcknowledgeDeclaredLostPackets) {
     EXPECT_TRUE(result.lost_packets.empty());
 }
 
+TEST(QuicRecoveryTest, AckProcessingRemovesAckedAndLateAckedPacketsFromTrackedPackets) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(2)));
+    recovery.on_packet_declared_lost(1);
+
+    const std::array ack_ranges = {
+        AckPacketNumberRange{
+            .smallest = 1,
+            .largest = 1,
+        },
+        AckPacketNumberRange{
+            .smallest = 2,
+            .largest = 2,
+        },
+    };
+
+    const auto result = recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/2,
+                                                 coquic::quic::test::test_time(10));
+
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets.handles()),
+              (std::vector<std::uint64_t>{2}));
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets.handles()),
+              (std::vector<std::uint64_t>{1}));
+    EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.tracked_packets()),
+              (std::vector<std::uint64_t>{0}));
+    ASSERT_TRUE(recovery.oldest_tracked_packet().has_value());
+    EXPECT_EQ(recovery.oldest_tracked_packet()->packet_number, 0u);
+    ASSERT_TRUE(recovery.newest_tracked_packet().has_value());
+    EXPECT_EQ(recovery.newest_tracked_packet()->packet_number, 0u);
+}
+
 TEST(QuicRecoveryTest, AckProcessingHidesAcknowledgedPacketsFromCompatibilitySentPacketsView) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,

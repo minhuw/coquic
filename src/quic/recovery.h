@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -225,16 +226,23 @@ class PacketSpaceRecovery {
         retired,
     };
 
+    static constexpr std::size_t kInvalidLedgerSlotIndex = std::numeric_limits<std::size_t>::max();
+
     struct SentPacketLedgerSlot {
         LedgerSlotState state = LedgerSlotState::empty;
         SentPacketRecord packet;
         bool acknowledged = false;
+        std::size_t prev_live_slot = kInvalidLedgerSlotIndex;
+        std::size_t next_live_slot = kInvalidLedgerSlotIndex;
     };
 
     static DeadlineTrackedPacket tracked_packet(const SentPacketRecord &packet);
     static RecoveryPacketHandle packet_handle(const SentPacketLedgerSlot &slot,
                                               std::size_t slot_index);
     static void reclaim_retired_packet_storage(SentPacketRecord &packet);
+    void link_live_slot(std::size_t slot_index);
+    void unlink_live_slot(std::size_t slot_index);
+    std::optional<std::size_t> newest_live_slot_at_or_below(std::uint64_t packet_number) const;
     SentPacketLedgerSlot *slot_for_packet_number(std::uint64_t packet_number);
     const SentPacketLedgerSlot *slot_for_packet_number(std::uint64_t packet_number) const;
     SentPacketLedgerSlot *outstanding_slot_for_packet_number(std::uint64_t packet_number);
@@ -250,6 +258,9 @@ class PacketSpaceRecovery {
     std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> in_flight_ack_eliciting_packets_;
     std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> eligible_loss_packets_;
     std::optional<std::uint64_t> largest_acked_packet_number_;
+    std::size_t first_live_slot_ = kInvalidLedgerSlotIndex;
+    std::size_t last_live_slot_ = kInvalidLedgerSlotIndex;
+    std::size_t next_loss_candidate_slot_ = 0;
     std::uint64_t compatibility_version_ = 0;
     RecoveryRttState rtt_state_;
     SentPacketsView sent_packets_{};

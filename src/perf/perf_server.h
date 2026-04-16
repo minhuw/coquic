@@ -33,6 +33,8 @@ class QuicPerfServer {
         std::uint64_t requests_completed = 0;
     };
 
+    static constexpr std::size_t kMaxDownloadPayloadCacheEntries = 8;
+
     bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now);
     bool handle_stream_data(Session &session, const quic::QuicCoreReceiveStreamData &received,
                             quic::QuicCoreTimePoint now);
@@ -43,6 +45,7 @@ class QuicPerfServer {
     quic::QuicCore core_;
     std::unique_ptr<io::QuicIoBackend> backend_;
     std::unordered_map<std::size_t, quic::SharedBytes> download_payload_cache_;
+    std::vector<std::size_t> download_payload_cache_lru_;
     std::unordered_map<quic::QuicConnectionHandle, Session> sessions_;
 };
 

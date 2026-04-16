@@ -605,6 +605,42 @@ TEST(QuicRecoveryTest,
     EXPECT_TRUE(result.has_newly_acked_ack_eliciting);
 }
 
+TEST(QuicRecoveryTest, AckProcessingPreservesAscendingOrderForLateAckedPackets) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(2)));
+    recovery.on_packet_declared_lost(1);
+    recovery.on_packet_declared_lost(5);
+
+    const auto result = recovery.on_ack_received(
+        AckFrame{
+            .largest_acknowledged = 7,
+            .first_ack_range = 0,
+            .additional_ranges =
+                {
+                    AckRange{
+                        .gap = 0,
+                        .range_length = 0,
+                    },
+                    AckRange{
+                        .gap = 2,
+                        .range_length = 0,
+                    },
+                },
+        },
+        coquic::quic::test::test_time(10));
+
+    EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{7}));
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets.handles()),
+              (std::vector<std::uint64_t>{1, 5}));
+    ASSERT_TRUE(result.largest_newly_acked_packet.has_value());
+    EXPECT_EQ(result.largest_newly_acked_packet->packet_number, 7u);
+}
+
 TEST(QuicRecoveryTest, AckProcessingSnapshotsLargestNewlyAckedPacketMetadataBeforeRetirement) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,

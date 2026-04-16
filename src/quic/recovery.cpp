@@ -724,6 +724,12 @@ AckProcessingResult
 PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_ranges,
                                      std::uint64_t largest_acknowledged, QuicCoreTimePoint now) {
     AckProcessingResult result;
+    struct BufferedAckResult {
+        RecoveryPacketHandle handle;
+        RecoveryPacketMetadata metadata;
+    };
+    std::vector<BufferedAckResult> acked_packets_descending;
+    std::vector<BufferedAckResult> late_acked_packets_descending;
     bool mutated = false;
     const auto previous_largest_acked = largest_acked_packet_number_;
     largest_acked_packet_number_ = previous_largest_acked.has_value()
@@ -765,8 +771,14 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
 
             if (slot.state == LedgerSlotState::sent) {
                 const auto snapshot = packet_metadata(slot.packet);
-                result.acked_packets.push_back(handle, snapshot);
-                result.largest_newly_acked_packet.emplace(handle, snapshot);
+                acked_packets_descending.push_back({
+                    .handle = handle,
+                    .metadata = snapshot,
+                });
+                if (!result.largest_newly_acked_packet.has_value() ||
+                    snapshot.packet_number > result.largest_newly_acked_packet->packet_number) {
+                    result.largest_newly_acked_packet.emplace(handle, snapshot);
+                }
                 if (slot.packet.packet_number == largest_acknowledged) {
                     result.largest_acknowledged_was_newly_acked = true;
                 }
@@ -779,7 +791,10 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
                 slot.acknowledged = true;
                 mutated = true;
             } else if (slot.state == LedgerSlotState::declared_lost) {
-                result.late_acked_packets.push_back(handle, packet_metadata(slot.packet));
+                late_acked_packets_descending.push_back({
+                    .handle = handle,
+                    .metadata = packet_metadata(slot.packet),
+                });
                 unlink_live_slot(slot_index);
                 slot.acknowledged = true;
                 mutated = true;
@@ -787,6 +802,16 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
 
             current = previous;
         }
+    }
+
+    result.acked_packets.reserve(acked_packets_descending.size());
+    for (auto it = acked_packets_descending.rbegin(); it != acked_packets_descending.rend(); ++it) {
+        result.acked_packets.push_back(it->handle, it->metadata);
+    }
+    result.late_acked_packets.reserve(late_acked_packets_descending.size());
+    for (auto it = late_acked_packets_descending.rbegin();
+         it != late_acked_packets_descending.rend(); ++it) {
+        result.late_acked_packets.push_back(it->handle, it->metadata);
     }
 
     if (slots_.empty()) {

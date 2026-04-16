@@ -9,27 +9,17 @@ namespace coquic::quic {
 namespace {
 
 std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> output,
-                                                       std::size_t *offset, std::uint64_t value,
-                                                       bool checked) {
+                                                       std::size_t *offset, std::uint64_t value) {
     const auto start_offset = *offset;
     std::array<std::byte, 8> encoded{};
-    std::size_t encoded_size = 0;
-
-    if (checked) {
-        const auto written = encode_varint_into(encoded, value);
-        if (!written.has_value()) {
-            return CodecError{
-                .code = written.error().code,
-                .offset = start_offset,
-            };
-        }
-        encoded_size = written.value();
-    } else {
-        encoded_size = encoded_varint_size(value);
-        const auto written =
-            encode_varint_into(std::span<std::byte>(encoded.data(), encoded_size), value).value();
-        encoded_size = written;
+    const auto written = encode_varint_into(encoded, value);
+    if (!written.has_value()) {
+        return CodecError{
+            .code = written.error().code,
+            .offset = start_offset,
+        };
     }
+    const auto encoded_size = written.value();
 
     if (output.size() - start_offset < encoded_size) {
         return CodecError{
@@ -42,16 +32,6 @@ std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> outp
               output.begin() + static_cast<std::ptrdiff_t>(start_offset));
     *offset += encoded_size;
     return std::nullopt;
-}
-
-void write_varint_into_vector_unchecked(std::vector<std::byte> *bytes, std::uint64_t value) {
-    const auto start_offset = bytes->size();
-    const auto encoded_size = encoded_varint_size(value);
-    bytes->resize(start_offset + encoded_size);
-    encode_varint_into(std::span<std::byte>(
-                           bytes->data() + static_cast<std::ptrdiff_t>(start_offset), encoded_size),
-                       value)
-        .value();
 }
 
 } // namespace
@@ -107,10 +87,14 @@ void BufferWriter::write_bytes(std::span<const std::byte> bytes) {
 }
 
 std::optional<CodecError> BufferWriter::write_varint(std::uint64_t value) {
+    const auto start_offset = offset();
     std::array<std::byte, 8> encoded{};
     const auto written = encode_varint_into(encoded, value);
     if (!written.has_value()) {
-        return written.error();
+        return CodecError{
+            .code = written.error().code,
+            .offset = start_offset,
+        };
     }
 
     write_bytes(std::span<const std::byte>(encoded.data(), written.value()));
@@ -118,7 +102,9 @@ std::optional<CodecError> BufferWriter::write_varint(std::uint64_t value) {
 }
 
 void BufferWriter::write_varint_unchecked(std::uint64_t value) {
-    write_varint_into_vector_unchecked(bytes_, value);
+    if (write_varint(value).has_value()) {
+        std::abort();
+    }
 }
 
 const std::vector<std::byte> &BufferWriter::bytes() const {
@@ -166,11 +152,11 @@ std::optional<CodecError> SpanBufferWriter::write_bytes(std::span<const std::byt
 }
 
 std::optional<CodecError> SpanBufferWriter::write_varint(std::uint64_t value) {
-    return write_varint_into_fixed_span(bytes_, &offset_, value, true);
+    return write_varint_into_fixed_span(bytes_, &offset_, value);
 }
 
 void SpanBufferWriter::write_varint_unchecked(std::uint64_t value) {
-    if (write_varint_into_fixed_span(bytes_, &offset_, value, false).has_value()) {
+    if (write_varint(value).has_value()) {
         std::abort();
     }
 }
@@ -190,10 +176,14 @@ std::optional<CodecError> CountingBufferWriter::write_bytes(std::span<const std:
 }
 
 std::optional<CodecError> CountingBufferWriter::write_varint(std::uint64_t value) {
+    const auto start_offset = offset_;
     std::array<std::byte, 8> encoded{};
     const auto written = encode_varint_into(encoded, value);
     if (!written.has_value()) {
-        return written.error();
+        return CodecError{
+            .code = written.error().code,
+            .offset = start_offset,
+        };
     }
 
     offset_ += written.value();
@@ -201,7 +191,9 @@ std::optional<CodecError> CountingBufferWriter::write_varint(std::uint64_t value
 }
 
 void CountingBufferWriter::write_varint_unchecked(std::uint64_t value) {
-    offset_ += encoded_varint_size(value);
+    if (write_varint(value).has_value()) {
+        std::abort();
+    }
 }
 
 } // namespace coquic::quic

@@ -77,6 +77,17 @@ TEST(QuicBufferTest, SpanBufferWriterUncheckedVarintAbortsOnOverflow) {
 #endif
 }
 
+TEST(QuicBufferTest, SpanBufferWriterUncheckedVarintAbortsOnInvalidInput) {
+#if GTEST_HAS_DEATH_TEST
+    std::array<std::byte, 8> storage{};
+    coquic::quic::SpanBufferWriter writer{std::span<std::byte>(storage)};
+
+    EXPECT_DEATH(writer.write_varint_unchecked(4611686018427387904ull), "");
+#else
+    GTEST_SKIP() << "Death tests are not supported in this configuration";
+#endif
+}
+
 TEST(QuicBufferTest, CountingBufferWriterTracksWrittenSizeWithoutStorage) {
     coquic::quic::CountingBufferWriter writer;
 
@@ -103,6 +114,16 @@ TEST(QuicBufferTest, CountingBufferWriterUncheckedVarintTracksSize) {
     EXPECT_EQ(writer.offset(), 3u);
 }
 
+TEST(QuicBufferTest, CountingBufferWriterUncheckedVarintAbortsOnInvalidInput) {
+#if GTEST_HAS_DEATH_TEST
+    coquic::quic::CountingBufferWriter writer;
+
+    EXPECT_DEATH(writer.write_varint_unchecked(4611686018427387904ull), "");
+#else
+    GTEST_SKIP() << "Death tests are not supported in this configuration";
+#endif
+}
+
 TEST(QuicBufferTest, BufferWriterWritesVarintsAndTracksOffset) {
     coquic::quic::BufferWriter writer;
 
@@ -126,6 +147,42 @@ TEST(QuicBufferTest, BufferWriterWriteVarintRejectsInvalidInput) {
     EXPECT_EQ(error->offset, 0u);
     EXPECT_EQ(writer.offset(), 0u);
     EXPECT_TRUE(writer.bytes().empty());
+}
+
+TEST(QuicBufferTest, BufferWriterWriteVarintRejectsInvalidInputAtCurrentOffset) {
+    coquic::quic::BufferWriter writer;
+    writer.write_byte(std::byte{0x01});
+
+    const auto error = writer.write_varint(4611686018427387904ull);
+
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(error->code, coquic::quic::CodecErrorCode::invalid_varint);
+    EXPECT_EQ(error->offset, 1u);
+    EXPECT_EQ(writer.offset(), 1u);
+    ASSERT_EQ(writer.bytes().size(), 1u);
+    EXPECT_EQ(writer.bytes()[0], std::byte{0x01});
+}
+
+TEST(QuicBufferTest, BufferWriterUncheckedVarintAbortsOnInvalidInput) {
+#if GTEST_HAS_DEATH_TEST
+    coquic::quic::BufferWriter writer;
+
+    EXPECT_DEATH(writer.write_varint_unchecked(4611686018427387904ull), "");
+#else
+    GTEST_SKIP() << "Death tests are not supported in this configuration";
+#endif
+}
+
+TEST(QuicBufferTest, CountingBufferWriterWriteVarintRejectsInvalidInputAtCurrentOffset) {
+    coquic::quic::CountingBufferWriter writer;
+    ASSERT_FALSE(writer.write_byte(std::byte{0x01}).has_value());
+
+    const auto error = writer.write_varint(4611686018427387904ull);
+
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(error->code, coquic::quic::CodecErrorCode::invalid_varint);
+    EXPECT_EQ(error->offset, 1u);
+    EXPECT_EQ(writer.offset(), 1u);
 }
 
 } // namespace

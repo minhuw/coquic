@@ -175,31 +175,18 @@ TEST(QuicPerfServerTest, FixedDownloadPayloadCacheReusesSharedStorageBySize) {
                             [](std::byte byte) { return byte == std::byte{0x5a}; }));
 }
 
-TEST(QuicPerfServerTest, FixedDownloadPayloadCacheBoundsEntriesAndKeepsHotSize) {
+TEST(QuicPerfServerTest, FixedDownloadPayloadCacheRetainsPreviouslyMaterializedSizes) {
     QuicPerfServer server(QuicPerfConfig{}, nullptr);
-    const auto hot = server.cached_download_payload(4096);
+    const auto first = server.cached_download_payload(4096);
 
-    std::vector<std::size_t> cold_sizes;
-    for (std::size_t i = 0; i + 1 < QuicPerfServer::kMaxDownloadPayloadCacheEntries; ++i) {
-        cold_sizes.push_back(8192 + i);
-        static_cast<void>(server.cached_download_payload(cold_sizes.back()));
+    for (std::size_t i = 0; i < 16; ++i) {
+        static_cast<void>(server.cached_download_payload(8192 + i));
     }
 
-    ASSERT_FALSE(cold_sizes.empty());
-    const auto oldest_cold_size = cold_sizes.front();
-    ASSERT_TRUE(server.download_payload_cache_.contains(oldest_cold_size));
-    ASSERT_EQ(server.download_payload_cache_.size(),
-              QuicPerfServer::kMaxDownloadPayloadCacheEntries);
-
-    const auto hot_again = server.cached_download_payload(4096);
-    EXPECT_EQ(hot.storage(), hot_again.storage());
-
-    static_cast<void>(server.cached_download_payload(16384));
-
-    EXPECT_EQ(server.download_payload_cache_.size(),
-              QuicPerfServer::kMaxDownloadPayloadCacheEntries);
-    EXPECT_EQ(server.cached_download_payload(4096).storage(), hot.storage());
-    EXPECT_FALSE(server.download_payload_cache_.contains(oldest_cold_size));
+    const auto second = server.cached_download_payload(4096);
+    ASSERT_NE(first.storage(), nullptr);
+    EXPECT_EQ(first.storage(), second.storage());
+    EXPECT_TRUE(server.download_payload_cache_.contains(4096));
 }
 
 TEST(QuicPerfServerTest, FixedDownloadRuntimeBranchQueuesCachedSharedPayloadOnStream) {

@@ -1,6 +1,5 @@
 #include "src/perf/perf_server.h"
 
-#include <algorithm>
 #include <span>
 
 namespace coquic::perf {
@@ -40,31 +39,9 @@ quic::SharedBytes QuicPerfServer::cached_download_payload(std::size_t bytes) {
         return {};
     }
 
-    const auto touch_lru = [&](std::size_t size) {
-        const auto existing =
-            std::find(download_payload_cache_lru_.begin(), download_payload_cache_lru_.end(), size);
-        if (existing != download_payload_cache_lru_.end()) {
-            download_payload_cache_lru_.erase(existing);
-        }
-        download_payload_cache_lru_.push_back(size);
-    };
-
-    if (auto existing = download_payload_cache_.find(bytes);
-        existing != download_payload_cache_.end()) {
-        touch_lru(bytes);
-        return existing->second;
-    }
-
-    if (download_payload_cache_.size() >= kMaxDownloadPayloadCacheEntries &&
-        !download_payload_cache_lru_.empty()) {
-        download_payload_cache_.erase(download_payload_cache_lru_.front());
-        download_payload_cache_lru_.erase(download_payload_cache_lru_.begin());
-    }
-
-    auto [it, inserted] =
-        download_payload_cache_.emplace(bytes, quic::SharedBytes(make_payload(bytes)));
+    auto [it, inserted] = download_payload_cache_.try_emplace(bytes);
     if (inserted) {
-        download_payload_cache_lru_.push_back(bytes);
+        it->second = quic::SharedBytes(make_payload(bytes));
     }
     return it->second;
 }

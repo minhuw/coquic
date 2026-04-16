@@ -69,4 +69,29 @@ TEST(QuicBufferTest, CountingBufferWriterTracksWrittenSizeWithoutStorage) {
     EXPECT_EQ(writer.offset(), 7u);
 }
 
+TEST(QuicBufferTest, BufferWriterWritesVarintsAndTracksOffset) {
+    coquic::quic::BufferWriter writer;
+
+    ASSERT_FALSE(writer.write_varint(0x1234).has_value());
+    writer.write_varint_unchecked(63);
+
+    EXPECT_EQ(writer.offset(), 3u);
+    ASSERT_EQ(writer.bytes().size(), 3u);
+    EXPECT_EQ(writer.bytes()[0], std::byte{0x52});
+    EXPECT_EQ(writer.bytes()[1], std::byte{0x34});
+    EXPECT_EQ(writer.bytes()[2], std::byte{0x3f});
+}
+
+TEST(QuicBufferTest, BufferWriterWriteVarintRejectsInvalidInput) {
+    coquic::quic::BufferWriter writer;
+
+    const auto error = writer.write_varint(4611686018427387904ull);
+
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(error->code, coquic::quic::CodecErrorCode::invalid_varint);
+    EXPECT_EQ(error->offset, 0u);
+    EXPECT_EQ(writer.offset(), 0u);
+    EXPECT_TRUE(writer.bytes().empty());
+}
+
 } // namespace

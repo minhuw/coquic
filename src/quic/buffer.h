@@ -29,8 +29,11 @@ class BufferWriter {
     BufferWriter();
     explicit BufferWriter(std::vector<std::byte> *bytes);
 
+    std::size_t offset() const;
     void write_byte(std::byte value);
     void write_bytes(std::span<const std::byte> bytes);
+    std::optional<CodecError> write_varint(std::uint64_t value);
+    void write_varint_unchecked(std::uint64_t value);
     const std::vector<std::byte> &bytes() const;
 
   private:
@@ -49,7 +52,7 @@ class SpanBufferWriter {
     std::optional<CodecError> write_byte(std::byte value);
     std::optional<CodecError> write_bytes(std::span<const std::byte> bytes);
     std::optional<CodecError> write_varint(std::uint64_t value);
-    std::optional<CodecError> write_varint_unchecked(std::uint64_t value);
+    void write_varint_unchecked(std::uint64_t value);
 
   private:
     std::span<std::byte> bytes_;
@@ -63,7 +66,7 @@ class CountingBufferWriter {
     std::optional<CodecError> write_byte(std::byte value);
     std::optional<CodecError> write_bytes(std::span<const std::byte> bytes);
     std::optional<CodecError> write_varint(std::uint64_t value);
-    std::optional<CodecError> write_varint_unchecked(std::uint64_t value);
+    void write_varint_unchecked(std::uint64_t value);
 
   private:
     std::size_t offset_ = 0;

@@ -902,6 +902,88 @@ TEST(QuicProtectedCodecTest,
               encoded_full.value().packet_metadata[1].length);
 }
 
+TEST(QuicProtectedCodecTest,
+     SerializeProtectedDatagramWithMetadataAppendedInitialPacketMatchesFullVectorSerialization) {
+    const std::array<coquic::quic::ProtectedPacket, 1> prefix_packets = {
+        make_minimal_initial_packet(),
+    };
+    const auto appended_packet = coquic::quic::ProtectedPacket{make_minimal_initial_packet()};
+    const std::array<coquic::quic::ProtectedPacket, 2> full_packets = {
+        prefix_packets.front(),
+        appended_packet,
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram_with_metadata(
+        prefix_packets, appended_packet, make_rfc9001_client_initial_serialize_context());
+    const auto encoded_full = coquic::quic::serialize_protected_datagram_with_metadata(
+        full_packets, make_rfc9001_client_initial_serialize_context());
+
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded_full.has_value());
+    EXPECT_EQ(encoded.value().bytes, encoded_full.value().bytes);
+    ASSERT_EQ(encoded.value().packet_metadata.size(), encoded_full.value().packet_metadata.size());
+    EXPECT_EQ(encoded.value().packet_metadata[0].offset,
+              encoded_full.value().packet_metadata[0].offset);
+    EXPECT_EQ(encoded.value().packet_metadata[0].length,
+              encoded_full.value().packet_metadata[0].length);
+    EXPECT_EQ(encoded.value().packet_metadata[1].offset,
+              encoded_full.value().packet_metadata[1].offset);
+    EXPECT_EQ(encoded.value().packet_metadata[1].length,
+              encoded_full.value().packet_metadata[1].length);
+}
+
+TEST(QuicProtectedCodecTest,
+     SerializeProtectedDatagramWithMetadataAppendedZeroRttPacketMatchesFullVectorSerialization) {
+    const auto context = coquic::quic::SerializeProtectionContext{
+        .local_role = coquic::quic::EndpointRole::client,
+        .zero_rtt_secret =
+            make_zero_rtt_secret(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16),
+    };
+    const std::array<coquic::quic::ProtectedPacket, 1> prefix_packets = {
+        make_minimal_zero_rtt_packet(),
+    };
+    const auto appended_packet = coquic::quic::ProtectedPacket{make_minimal_zero_rtt_packet()};
+    const std::array<coquic::quic::ProtectedPacket, 2> full_packets = {
+        prefix_packets.front(),
+        appended_packet,
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram_with_metadata(
+        prefix_packets, appended_packet, context);
+    const auto encoded_full =
+        coquic::quic::serialize_protected_datagram_with_metadata(full_packets, context);
+
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded_full.has_value());
+    EXPECT_EQ(encoded.value().bytes, encoded_full.value().bytes);
+    ASSERT_EQ(encoded.value().packet_metadata.size(), encoded_full.value().packet_metadata.size());
+    EXPECT_EQ(encoded.value().packet_metadata[0].offset,
+              encoded_full.value().packet_metadata[0].offset);
+    EXPECT_EQ(encoded.value().packet_metadata[0].length,
+              encoded_full.value().packet_metadata[0].length);
+    EXPECT_EQ(encoded.value().packet_metadata[1].offset,
+              encoded_full.value().packet_metadata[1].offset);
+    EXPECT_EQ(encoded.value().packet_metadata[1].length,
+              encoded_full.value().packet_metadata[1].length);
+}
+
+TEST(QuicProtectedCodecTest, SerializeProtectedDatagramWithMetadataTracksCoalescedInitialOffsets) {
+    const std::array<coquic::quic::ProtectedPacket, 2> packets = {
+        make_minimal_initial_packet(),
+        make_minimal_initial_packet(),
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram_with_metadata(
+        packets, make_rfc9001_client_initial_serialize_context());
+
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_EQ(encoded.value().packet_metadata.size(), 2u);
+    EXPECT_EQ(encoded.value().packet_metadata[0].offset, 0u);
+    EXPECT_EQ(encoded.value().packet_metadata[1].offset, encoded.value().packet_metadata[0].length);
+    EXPECT_EQ(encoded.value().packet_metadata[0].length + encoded.value().packet_metadata[1].length,
+              encoded.value().bytes.size());
+}
+
 TEST(QuicProtectedCodecTest, LegacySerializeProtectedDatagramStillReturnsOnlyBytes) {
     const auto context =
         make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);

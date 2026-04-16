@@ -244,9 +244,7 @@ class PacketSpaceRecovery {
     void track_new_loss_candidates(std::optional<std::uint64_t> previous_largest_acked,
                                    std::uint64_t largest_acked);
     std::size_t ensure_slot_for_packet_number(std::uint64_t packet_number);
-    void compact_retired_prefix();
 
-    std::uint64_t base_packet_number_ = 0;
     std::vector<SentPacketLedgerSlot> slots_;
     std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> in_flight_ack_eliciting_packets_;
     std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> eligible_loss_packets_;

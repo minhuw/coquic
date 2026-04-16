@@ -30,6 +30,10 @@ struct PacketSpaceRecoveryTestPeer {
                                                    std::uint64_t packet_number) {
         return recovery.sent_packets_.at(packet_number);
     }
+
+    static std::size_t slot_count(const PacketSpaceRecovery &recovery) {
+        return recovery.slots_.size();
+    }
 };
 
 } // namespace coquic::quic::test
@@ -611,6 +615,35 @@ TEST(QuicRecoveryTest, AckProcessingSnapshotsLargestNewlyAckedPacketMetadataBefo
     EXPECT_TRUE(result.largest_newly_acked_packet->ack_eliciting);
     EXPECT_TRUE(result.largest_newly_acked_packet->in_flight);
     EXPECT_FALSE(result.largest_newly_acked_packet->declared_lost);
+}
+
+TEST(QuicRecoveryTest, RetiringEarlierPacketsDoesNotRenumberLaterHandles) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(2)));
+
+    const auto handle_before = recovery.handle_for_packet_number(2);
+    ASSERT_TRUE(handle_before.has_value());
+    ASSERT_EQ(handle_before->slot_index, 2u);
+
+    recovery.retire_packet(0);
+    recovery.retire_packet(1);
+
+    const auto handle_after = recovery.handle_for_packet_number(2);
+    ASSERT_TRUE(handle_after.has_value());
+    EXPECT_EQ(handle_after->slot_index, 2u);
+    EXPECT_EQ(handle_after->slot_index, handle_before->slot_index);
+    EXPECT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_count(recovery), 3u);
+
+    const auto *packet = recovery.packet_for_handle(*handle_before);
+    ASSERT_NE(packet, nullptr);
+    if (packet != nullptr) {
+        EXPECT_EQ(packet->packet_number, 2u);
+    }
 }
 
 TEST(QuicRecoveryTest, PacketHandlesRemainReadableAfterEarlierRetirementCompactsPrefix) {

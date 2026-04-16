@@ -1,8 +1,49 @@
 #include "src/quic/buffer.h"
 
 #include <algorithm>
+#include <array>
 
 namespace coquic::quic {
+
+namespace {
+
+std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> output,
+                                                       std::size_t *offset, std::uint64_t value,
+                                                       bool checked) {
+    const auto start_offset = *offset;
+    std::array<std::byte, 8> encoded{};
+    std::size_t encoded_size = 0;
+
+    if (checked) {
+        const auto written = encode_varint_into(encoded, value);
+        if (!written.has_value()) {
+            return CodecError{
+                .code = written.error().code,
+                .offset = start_offset,
+            };
+        }
+        encoded_size = written.value();
+    } else {
+        encoded_size = encoded_varint_size(value);
+        const auto written =
+            encode_varint_into(std::span<std::byte>(encoded.data(), encoded_size), value).value();
+        encoded_size = written;
+    }
+
+    if (output.size() - start_offset < encoded_size) {
+        return CodecError{
+            .code = CodecErrorCode::truncated_input,
+            .offset = start_offset,
+        };
+    }
+
+    std::copy(encoded.begin(), encoded.begin() + static_cast<std::ptrdiff_t>(encoded_size),
+              output.begin() + static_cast<std::ptrdiff_t>(start_offset));
+    *offset += encoded_size;
+    return std::nullopt;
+}
+
+} // namespace
 
 BufferReader::BufferReader(std::span<const std::byte> bytes) : bytes_(bytes) {
 }
@@ -52,6 +93,84 @@ void BufferWriter::write_bytes(std::span<const std::byte> bytes) {
 
 const std::vector<std::byte> &BufferWriter::bytes() const {
     return *bytes_;
+}
+
+SpanBufferWriter::SpanBufferWriter(std::span<std::byte> bytes) : bytes_(bytes) {
+}
+
+std::size_t SpanBufferWriter::offset() const {
+    return offset_;
+}
+
+std::size_t SpanBufferWriter::remaining() const {
+    return bytes_.size() - offset_;
+}
+
+std::span<const std::byte> SpanBufferWriter::written() const {
+    return std::span<const std::byte>(bytes_.data(), offset_);
+}
+
+std::optional<CodecError> SpanBufferWriter::write_byte(std::byte value) {
+    if (remaining() < 1) {
+        return CodecError{
+            .code = CodecErrorCode::truncated_input,
+            .offset = offset_,
+        };
+    }
+
+    bytes_[offset_++] = value;
+    return std::nullopt;
+}
+
+std::optional<CodecError> SpanBufferWriter::write_bytes(std::span<const std::byte> bytes) {
+    if (remaining() < bytes.size()) {
+        return CodecError{
+            .code = CodecErrorCode::truncated_input,
+            .offset = offset_,
+        };
+    }
+
+    std::copy(bytes.begin(), bytes.end(), bytes_.begin() + static_cast<std::ptrdiff_t>(offset_));
+    offset_ += bytes.size();
+    return std::nullopt;
+}
+
+std::optional<CodecError> SpanBufferWriter::write_varint(std::uint64_t value) {
+    return write_varint_into_fixed_span(bytes_, &offset_, value, true);
+}
+
+std::optional<CodecError> SpanBufferWriter::write_varint_unchecked(std::uint64_t value) {
+    return write_varint_into_fixed_span(bytes_, &offset_, value, false);
+}
+
+std::size_t CountingBufferWriter::offset() const {
+    return offset_;
+}
+
+std::optional<CodecError> CountingBufferWriter::write_byte(std::byte /*value*/) {
+    ++offset_;
+    return std::nullopt;
+}
+
+std::optional<CodecError> CountingBufferWriter::write_bytes(std::span<const std::byte> bytes) {
+    offset_ += bytes.size();
+    return std::nullopt;
+}
+
+std::optional<CodecError> CountingBufferWriter::write_varint(std::uint64_t value) {
+    std::array<std::byte, 8> encoded{};
+    const auto written = encode_varint_into(encoded, value);
+    if (!written.has_value()) {
+        return written.error();
+    }
+
+    offset_ += written.value();
+    return std::nullopt;
+}
+
+std::optional<CodecError> CountingBufferWriter::write_varint_unchecked(std::uint64_t value) {
+    offset_ += encoded_varint_size(value);
+    return std::nullopt;
 }
 
 } // namespace coquic::quic

@@ -288,6 +288,7 @@ pub fn build(b: *std.Build) void {
     const core_test_files = &.{
         "tests/core/recovery/congestion_test.cpp",
         "tests/core/recovery/recovery_test.cpp",
+        "tests/core/packets/buffer_test.cpp",
         "tests/core/packets/frame_test.cpp",
         "tests/core/packets/packet_test.cpp",
         "tests/core/packets/packet_number_test.cpp",

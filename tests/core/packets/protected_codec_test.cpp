@@ -620,6 +620,34 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsInvalidStreamViewBounds) {
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
     EXPECT_EQ(appended.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+    EXPECT_EQ(appended.error().offset, 0u);
+}
+
+TEST(QuicProtectedCodecTest,
+     AppendOneRttPacketRejectsInvalidStreamViewBoundsAfterNonStreamFrameAtCurrentFrameIndex) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames = {
+        coquic::quic::PingFrame{},
+    };
+    packet.stream_frame_views = {
+        coquic::quic::StreamFrameView{
+            .fin = false,
+            .stream_id = 0,
+            .offset = 0,
+            .storage = std::make_shared<std::vector<std::byte>>(
+                std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}}),
+            .begin = 2,
+            .end = 1,
+        },
+    };
+
+    std::vector<std::byte> datagram;
+    const auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+        datagram, packet,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
+    ASSERT_FALSE(appended.has_value());
+    EXPECT_EQ(appended.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+    EXPECT_EQ(appended.error().offset, 1u);
 }
 
 TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsStreamViewOffsetOverflow) {

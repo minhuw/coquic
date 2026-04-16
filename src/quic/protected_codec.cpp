@@ -1359,12 +1359,16 @@ bool packet_has_stream_payloads(const OneRttPacketLike &packet) {
 }
 
 template <typename OneRttPacketLike>
-CodecResult<std::size_t> packet_stream_payload_wire_size(const OneRttPacketLike &packet) {
+CodecResult<std::size_t> packet_stream_payload_wire_size(const OneRttPacketLike &packet,
+                                                         std::size_t frame_index_base = 0) {
     std::size_t total = 0;
     if constexpr (requires { packet.stream_frame_views; }) {
-        for (const auto &stream_view : packet.stream_frame_views) {
+        for (std::size_t stream_index = 0; stream_index < packet.stream_frame_views.size();
+             ++stream_index) {
+            const auto &stream_view = packet.stream_frame_views[stream_index];
             if (stream_view.end < stream_view.begin) {
-                return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+                return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint,
+                                                         frame_index_base + stream_index);
             }
             total += encoded_stream_frame_payload_size(stream_view.stream_id, stream_view.offset,
                                                        stream_view.end - stream_view.begin);
@@ -1429,7 +1433,7 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
         frame_payload_size += encoded.value();
     }
 
-    const auto stream_payload_size = packet_stream_payload_wire_size(packet);
+    const auto stream_payload_size = packet_stream_payload_wire_size(packet, packet.frames.size());
     if (!stream_payload_size.has_value()) {
         return CodecResult<std::size_t>::failure(stream_payload_size.error().code,
                                                  stream_payload_size.error().offset);

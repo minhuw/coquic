@@ -812,7 +812,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsLengthlessFrameBeforeStrea
 }
 
 TEST(QuicProtectedCodecTest,
-     AppendOneRttPacketRejectsLengthlessFrameBeforeStreamViewAtOffsetZeroWithPriorFrames) {
+     AppendOneRttPacketRejectsLengthlessFrameBeforeStreamViewAtCurrentFrameIndexWithPriorFrames) {
     auto packet = make_minimal_one_rtt_packet();
     packet.frames = {
         coquic::quic::PingFrame{},
@@ -843,7 +843,7 @@ TEST(QuicProtectedCodecTest,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
     EXPECT_EQ(appended.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
-    EXPECT_EQ(appended.error().offset, 0u);
+    EXPECT_EQ(appended.error().offset, 1u);
 }
 
 TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsInvalidSerializedFrameBeforeStreamView) {

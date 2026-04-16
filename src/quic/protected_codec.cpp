@@ -1422,7 +1422,8 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
         if (const auto *stream = std::get_if<StreamFrame>(&packet.frames[frame_index]);
             stream != nullptr && !stream->has_length &&
             (frame_index + 1 != packet.frames.size() || has_stream_payloads)) {
-            return CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch, 0);
+            return CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch,
+                                                     frame_index);
         }
 
         const auto encoded = serialized_frame_size(packet.frames[frame_index]);

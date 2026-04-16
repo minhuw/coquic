@@ -67,6 +67,9 @@ derive_initial_packet_keys(EndpointRole local_role, bool for_local_send,
 CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &secret);
 CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secret);
 
+CodecResult<std::size_t> make_packet_protection_nonce_into(PacketProtectionNonceInput input,
+                                                           std::span<std::byte> nonce);
+
 CodecResult<std::vector<std::byte>> make_packet_protection_nonce(PacketProtectionNonceInput input);
 
 CodecResult<std::array<std::byte, 16>>
@@ -83,6 +86,10 @@ CodecResult<std::size_t> seal_payload_chunks_into(const SealPayloadChunksIntoInp
 CodecResult<std::vector<std::byte>> seal_payload(const SealPayloadInput &input);
 
 CodecResult<std::vector<std::byte>> open_payload(const OpenPayloadInput &input);
+
+CodecResult<std::size_t> make_header_protection_mask_into(CipherSuite cipher_suite,
+                                                          HeaderProtectionMaskInput input,
+                                                          std::span<std::byte> mask);
 
 CodecResult<std::vector<std::byte>> make_header_protection_mask(CipherSuite cipher_suite,
                                                                 HeaderProtectionMaskInput input);

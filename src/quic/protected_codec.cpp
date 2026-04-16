@@ -24,6 +24,7 @@ namespace {
 constexpr CipherSuite kInitialCipherSuite = CipherSuite::tls_aes_128_gcm_sha256;
 constexpr std::size_t kPacketProtectionTagLength = 16;
 constexpr std::size_t kHeaderProtectionSampleOffset = 4;
+constexpr std::size_t kMaxInlineSealPlaintextChunks = 32;
 constexpr std::uint64_t kMaxVarInt = 4611686018427387903ull;
 
 enum class LongHeaderPacketType : std::uint8_t {
@@ -685,20 +686,23 @@ CodecResult<bool> apply_long_header_protection_in_place(std::span<std::byte> pac
                                                         PacketNumberSpan packet_number,
                                                         CipherSuite cipher_suite,
                                                         const PacketProtectionKeys &keys) {
-    const auto mask = make_header_protection_mask(
-        cipher_suite, HeaderProtectionMaskInput{
-                          .hp_key = keys.hp_key,
-                          .sample = std::span<const std::byte>(packet_bytes)
-                                        .subspan(packet_number.packet_number_offset +
-                                                 kHeaderProtectionSampleOffset),
-                      });
-    if (!mask.has_value())
-        return CodecResult<bool>::failure(mask.error().code, mask.error().offset);
+    std::array<std::byte, 5> mask{};
+    const auto mask_written = make_header_protection_mask_into(
+        cipher_suite,
+        HeaderProtectionMaskInput{
+            .hp_key = keys.hp_key,
+            .sample =
+                std::span<const std::byte>(packet_bytes)
+                    .subspan(packet_number.packet_number_offset + kHeaderProtectionSampleOffset),
+        },
+        mask);
+    if (!mask_written.has_value()) {
+        return CodecResult<bool>::failure(mask_written.error().code, mask_written.error().offset);
+    }
 
-    packet_bytes[0] ^=
-        static_cast<std::byte>(std::to_integer<std::uint8_t>(mask.value()[0]) & 0x0fu);
+    packet_bytes[0] ^= static_cast<std::byte>(std::to_integer<std::uint8_t>(mask[0]) & 0x0fu);
     for (std::size_t index = 0; index < packet_number.packet_number_length; ++index) {
-        packet_bytes[packet_number.packet_number_offset + index] ^= mask.value()[index + 1];
+        packet_bytes[packet_number.packet_number_offset + index] ^= mask[index + 1];
     }
 
     return CodecResult<bool>::success(true);
@@ -759,20 +763,23 @@ CodecResult<bool> apply_short_header_protection_in_place(std::span<std::byte> pa
                                                          PacketNumberSpan packet_number,
                                                          CipherSuite cipher_suite,
                                                          const PacketProtectionKeys &keys) {
-    const auto mask = make_header_protection_mask(
-        cipher_suite, HeaderProtectionMaskInput{
-                          .hp_key = keys.hp_key,
-                          .sample = std::span<const std::byte>(packet_bytes)
-                                        .subspan(packet_number.packet_number_offset +
-                                                 kHeaderProtectionSampleOffset),
-                      });
-    if (!mask.has_value())
-        return CodecResult<bool>::failure(mask.error().code, mask.error().offset);
+    std::array<std::byte, 5> mask{};
+    const auto mask_written = make_header_protection_mask_into(
+        cipher_suite,
+        HeaderProtectionMaskInput{
+            .hp_key = keys.hp_key,
+            .sample =
+                std::span<const std::byte>(packet_bytes)
+                    .subspan(packet_number.packet_number_offset + kHeaderProtectionSampleOffset),
+        },
+        mask);
+    if (!mask_written.has_value()) {
+        return CodecResult<bool>::failure(mask_written.error().code, mask_written.error().offset);
+    }
 
-    packet_bytes[0] ^=
-        static_cast<std::byte>(std::to_integer<std::uint8_t>(mask.value()[0]) & 0x1fu);
+    packet_bytes[0] ^= static_cast<std::byte>(std::to_integer<std::uint8_t>(mask[0]) & 0x1fu);
     for (std::size_t index = 0; index < packet_number.packet_number_length; ++index) {
-        packet_bytes[packet_number.packet_number_offset + index] ^= mask.value()[index + 1];
+        packet_bytes[packet_number.packet_number_offset + index] ^= mask[index + 1];
     }
 
     return CodecResult<bool>::success(true);
@@ -833,6 +840,19 @@ PatchedLengthField patch_long_header_length_field_or_assert(std::vector<std::byt
                                                             const LongHeaderLayout &layout,
                                                             std::uint64_t new_length_value) {
     return patch_long_header_length_field(packet_bytes, layout, new_length_value).value();
+}
+
+std::span<const std::byte> make_packet_protection_nonce_or_assert(std::span<const std::byte> iv,
+                                                                  std::uint64_t packet_number,
+                                                                  std::span<std::byte> storage) {
+    const auto written = make_packet_protection_nonce_into(
+                             PacketProtectionNonceInput{
+                                 .iv = iv,
+                                 .packet_number = packet_number,
+                             },
+                             storage)
+                             .value();
+    return std::span<const std::byte>(storage).first(written);
 }
 
 std::vector<std::byte> make_packet_protection_nonce_or_assert(std::span<const std::byte> iv,
@@ -963,7 +983,9 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
         payload_offset += written.value();
     }
 
-    const auto nonce = make_packet_protection_nonce_or_assert(keys.iv, full_packet_number);
+    std::array<std::byte, 32> nonce_storage{};
+    const auto nonce =
+        make_packet_protection_nonce_or_assert(keys.iv, full_packet_number, nonce_storage);
     const auto ciphertext = seal_payload_into(SealPayloadIntoInput{
         .cipher_suite = cipher_suite,
         .key = keys.key,
@@ -1407,8 +1429,9 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
     const auto packet_number_offset = 1 + packet.destination_connection_id.size();
     const auto payload_offset = packet_number_offset + packet.packet_number_length;
     const auto cipher_suite = context.one_rtt_secret->cipher_suite;
-    const auto nonce =
-        make_packet_protection_nonce_or_assert(keys.value().iv, packet.packet_number);
+    std::array<std::byte, 32> nonce_storage{};
+    const auto nonce = make_packet_protection_nonce_or_assert(keys.value().iv, packet.packet_number,
+                                                              nonce_storage);
     const auto packet_number_span = PacketNumberSpan{
         .packet_number_offset = packet_number_offset,
         .packet_number_length = packet.packet_number_length,
@@ -1471,6 +1494,93 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
     }
 
     auto payload_bytes = packet_bytes.subspan(payload_offset, plaintext_payload_size);
+    if constexpr (requires { packet.stream_fragments; }) {
+        const auto required_inline_chunks =
+            static_cast<std::size_t>(!packet.frames.empty()) + (packet.stream_fragments.size() * 2);
+        const bool can_chunk_seal_stream_fragments =
+            packet.stream_fragments.size() > 1 && payload_size == plaintext_payload_size &&
+            required_inline_chunks <= kMaxInlineSealPlaintextChunks;
+        if (can_chunk_seal_stream_fragments) {
+            std::array<PlaintextChunk, kMaxInlineSealPlaintextChunks> plaintext_chunks{};
+            std::size_t chunk_count = 0;
+            std::size_t plaintext_offset = 0;
+            std::size_t frame_index = 0;
+
+            for (const auto &frame : packet.frames) {
+                const auto written =
+                    serialize_frame_into(payload_bytes.subspan(plaintext_offset), frame);
+                if (!written.has_value()) {
+                    rollback();
+                    return CodecResult<std::size_t>::failure(written.error().code,
+                                                             written.error().offset);
+                }
+                plaintext_offset += written.value();
+                ++frame_index;
+            }
+            if (plaintext_offset != 0) {
+                plaintext_chunks[chunk_count++] = PlaintextChunk{
+                    .bytes = std::span<const std::byte>(payload_bytes).first(plaintext_offset),
+                };
+            }
+
+            for (const auto &fragment : packet.stream_fragments) {
+                const auto header_offset = plaintext_offset;
+                SpanBufferWriter writer(payload_bytes.subspan(header_offset));
+                const auto header_written = serialize_stream_frame_header_into(
+                    writer, StreamFrameHeaderFields{
+                                .fin = fragment.fin,
+                                .stream_id = fragment.stream_id,
+                                .offset = fragment.offset,
+                                .payload_size = fragment.bytes.size(),
+                            });
+                if (!header_written.has_value()) {
+                    rollback();
+                    return CodecResult<std::size_t>::failure(header_written.error().code,
+                                                             frame_index);
+                }
+
+                plaintext_chunks[chunk_count++] = PlaintextChunk{
+                    .bytes = std::span<const std::byte>(payload_bytes)
+                                 .subspan(header_offset, header_written.value()),
+                };
+                plaintext_offset += header_written.value();
+                plaintext_chunks[chunk_count++] = PlaintextChunk{
+                    .bytes = fragment.bytes.span(),
+                };
+                plaintext_offset += fragment.bytes.size();
+                ++frame_index;
+            }
+
+            const auto ciphertext = seal_payload_chunks_into(SealPayloadChunksIntoInput{
+                .cipher_suite = cipher_suite,
+                .key = keys.value().key,
+                .nonce = nonce,
+                .associated_data = std::span<const std::byte>(packet_bytes).first(payload_offset),
+                .plaintext_chunks =
+                    std::span<const PlaintextChunk>(plaintext_chunks.data(), chunk_count),
+                .ciphertext = packet_bytes.subspan(payload_offset),
+            });
+            if (!ciphertext.has_value()) {
+                rollback();
+                return CodecResult<std::size_t>::failure(ciphertext.error().code,
+                                                         ciphertext.error().offset);
+            }
+
+            const auto final_packet_size = payload_offset + ciphertext.value();
+            datagram.resize(datagram_begin + final_packet_size);
+            const auto protected_packet = apply_short_header_protection_in_place(
+                std::span<std::byte>(datagram).subspan(datagram_begin, final_packet_size),
+                packet_number_span, cipher_suite, keys.value());
+            if (!protected_packet.has_value()) {
+                rollback();
+                return CodecResult<std::size_t>::failure(protected_packet.error().code,
+                                                         protected_packet.error().offset);
+            }
+
+            return CodecResult<std::size_t>::success(final_packet_size);
+        }
+    }
+
     std::size_t payload_written = 0;
     std::size_t frame_index = 0;
     for (const auto &frame : packet.frames) {

@@ -28,6 +28,17 @@ CodecResult<std::vector<std::byte>> make_packet_protection_nonce(std::span<const
     });
 }
 
+CodecResult<std::size_t> make_packet_protection_nonce_into(std::span<const std::byte> iv,
+                                                           std::uint64_t packet_number,
+                                                           std::span<std::byte> nonce) {
+    return make_packet_protection_nonce_into(
+        PacketProtectionNonceInput{
+            .iv = iv,
+            .packet_number = packet_number,
+        },
+        nonce);
+}
+
 CodecResult<std::size_t> seal_payload_into(CipherSuite cipher_suite, std::span<const std::byte> key,
                                            std::span<const std::byte> nonce,
                                            std::span<const std::byte> associated_data,
@@ -792,6 +803,32 @@ TEST(QuicPacketCryptoTest, BuildsChaChaHeaderProtectionMaskFromRfc9001AppendixA5
     EXPECT_EQ(to_hex(mask.value()), "aefefe7d03");
 }
 
+TEST(QuicPacketCryptoTest, BuildsPacketProtectionNonceIntoCallerOwnedBuffer) {
+    std::array<std::byte, 12> nonce{};
+
+    const auto written = coquic::quic::make_packet_protection_nonce_into(
+        hex_bytes("e0459b3474bdd0e44a41c144"), 654360564ULL, nonce);
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(written.value(), nonce.size());
+    EXPECT_EQ(to_hex(std::vector<std::byte>(nonce.begin(), nonce.end())),
+              "e0459b3474bdd0e46d417eb0");
+}
+
+TEST(QuicPacketCryptoTest, BuildsHeaderProtectionMaskIntoCallerOwnedBuffer) {
+    std::array<std::byte, 5> mask{};
+
+    const auto written = coquic::quic::make_header_protection_mask_into(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        coquic::quic::HeaderProtectionMaskInput{
+            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .sample = hex_bytes("d1b1c98dd7689fb8ec11d242b123dc9b"),
+        },
+        mask);
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(written.value(), mask.size());
+    EXPECT_EQ(to_hex(std::vector<std::byte>(mask.begin(), mask.end())), "437b9aec36");
+}
+
 TEST(QuicPacketCryptoTest, SealsAndOpensPayloadWithAssociatedData) {
     const auto nonce = coquic::quic::make_packet_protection_nonce(
         hex_bytes("e0459b3474bdd0e44a41c144"), 654360564ULL);
@@ -874,6 +911,41 @@ TEST(QuicPacketCryptoTest, SealPayloadIntoReusesContextAcrossCalls) {
 
     const auto stats = coquic::quic::test::packet_crypto_runtime_cache_stats_for_tests();
     EXPECT_EQ(stats.seal_context_new_calls, 1u);
+    EXPECT_EQ(stats.seal_key_setup_calls, 1u);
+}
+
+TEST(QuicPacketCryptoTest, OpenPayloadReusesKeySetupAcrossCalls) {
+    const auto key = hex_bytes("000102030405060708090a0b0c0d0e0f");
+    const auto aad = hex_bytes("a0a1a2a3a4");
+    const auto plaintext = hex_bytes("112233445566778899");
+
+    const auto first_ciphertext =
+        coquic::quic::seal_payload(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, key,
+                                   hex_bytes("101112131415161718191a1b"), aad, plaintext);
+    ASSERT_TRUE(first_ciphertext.has_value());
+
+    const auto second_ciphertext =
+        coquic::quic::seal_payload(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, key,
+                                   hex_bytes("202122232425262728292a2b"), aad, plaintext);
+    ASSERT_TRUE(second_ciphertext.has_value());
+
+    coquic::quic::test::reset_packet_crypto_runtime_caches_for_tests();
+
+    const auto first_plaintext = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, key,
+        hex_bytes("101112131415161718191a1b"), aad, first_ciphertext.value());
+    ASSERT_TRUE(first_plaintext.has_value());
+    EXPECT_EQ(first_plaintext.value(), plaintext);
+
+    const auto second_plaintext = coquic::quic::open_payload(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, key,
+        hex_bytes("202122232425262728292a2b"), aad, second_ciphertext.value());
+    ASSERT_TRUE(second_plaintext.has_value());
+    EXPECT_EQ(second_plaintext.value(), plaintext);
+
+    const auto stats = coquic::quic::test::packet_crypto_runtime_cache_stats_for_tests();
+    EXPECT_EQ(stats.open_context_new_calls, 1u);
+    EXPECT_EQ(stats.open_key_setup_calls, 1u);
 }
 
 TEST(QuicPacketCryptoTest, HeaderProtectionReusesContextAcrossCalls) {

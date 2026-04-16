@@ -113,4 +113,19 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesPerfOutboundDatagramSize) {
     EXPECT_EQ(client.max_outbound_datagram_size, kExpectedPerfDatagramSize);
     EXPECT_EQ(server.max_outbound_datagram_size, kExpectedPerfDatagramSize);
 }
+
+TEST(QuicPerfConfigTest, EndpointConfigUsesTransferSizedReceiveWindows) {
+    constexpr std::uint64_t kExpectedConnectionWindow = 32ull * 1024ull * 1024ull;
+    constexpr std::uint64_t kExpectedStreamWindow = 16ull * 1024ull * 1024ull;
+
+    const auto client =
+        make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
+    const auto server =
+        make_perf_server_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::server});
+
+    EXPECT_EQ(client.transport.initial_max_data, kExpectedConnectionWindow);
+    EXPECT_EQ(client.transport.initial_max_stream_data_bidi_local, kExpectedStreamWindow);
+    EXPECT_EQ(server.transport.initial_max_data, kExpectedConnectionWindow);
+    EXPECT_EQ(server.transport.initial_max_stream_data_bidi_remote, kExpectedStreamWindow);
+}
 } // namespace

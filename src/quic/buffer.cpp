@@ -10,17 +10,21 @@ namespace {
 
 std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> output,
                                                        std::size_t *offset, std::uint64_t value) {
+    constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
     const auto start_offset = *offset;
-    std::array<std::byte, 8> encoded{};
-    const auto written = encode_varint_into(encoded, value);
-    if (!written.has_value()) {
+    if (value > kMaxQuicVarInt) {
         return CodecError{
-            .code = written.error().code,
+            .code = CodecErrorCode::invalid_varint,
             .offset = start_offset,
         };
     }
-    const auto encoded_size = written.value();
-
+    if (start_offset > output.size()) {
+        return CodecError{
+            .code = CodecErrorCode::truncated_input,
+            .offset = start_offset,
+        };
+    }
+    const auto encoded_size = encoded_varint_size(value);
     if (output.size() - start_offset < encoded_size) {
         return CodecError{
             .code = CodecErrorCode::truncated_input,
@@ -28,9 +32,8 @@ std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> outp
         };
     }
 
-    std::copy(encoded.begin(), encoded.begin() + static_cast<std::ptrdiff_t>(encoded_size),
-              output.begin() + static_cast<std::ptrdiff_t>(start_offset));
-    *offset += encoded_size;
+    const auto written = encode_varint_into(output.subspan(start_offset), value).value();
+    *offset += written;
     return std::nullopt;
 }
 

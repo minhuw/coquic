@@ -41,6 +41,8 @@ struct PacketCryptoRuntimeCacheStats {
     std::size_t seal_context_new_calls = 0;
     std::size_t open_context_new_calls = 0;
     std::size_t header_protection_context_new_calls = 0;
+    std::size_t seal_key_setup_calls = 0;
+    std::size_t open_key_setup_calls = 0;
 };
 
 PacketCryptoRuntimeCacheStats packet_crypto_runtime_cache_stats_for_tests();

@@ -599,6 +599,56 @@ TEST(QuicProtectedCodecTest, StreamViewPathUsesSinglePayloadSealUpdate) {
     ASSERT_EQ(decoded.value().size(), 1u);
 }
 
+TEST(QuicProtectedCodecTest, FragmentViewPathUsesChunkedPayloadSealUpdates) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames.clear();
+    auto shared_payload = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+        std::byte{0xdd},
+    });
+    const std::vector<coquic::quic::StreamFrameSendFragment> fragments = {
+        coquic::quic::StreamFrameSendFragment{
+            .stream_id = 4,
+            .offset = 0,
+            .bytes = coquic::quic::SharedBytes(shared_payload, 0, 2),
+            .fin = false,
+        },
+        coquic::quic::StreamFrameSendFragment{
+            .stream_id = 4,
+            .offset = 2,
+            .bytes = coquic::quic::SharedBytes(shared_payload, 2, 4),
+            .fin = true,
+        },
+    };
+
+    const auto context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    const auto packet_view = coquic::quic::ProtectedOneRttPacketFragmentView{
+        .spin_bit = packet.spin_bit,
+        .key_phase = packet.key_phase,
+        .destination_connection_id = packet.destination_connection_id,
+        .packet_number_length = packet.packet_number_length,
+        .packet_number = packet.packet_number,
+        .frames = packet.frames,
+        .stream_fragments = fragments,
+    };
+    const std::vector<std::byte> prefix{
+        std::byte{0x44},
+        std::byte{0x55},
+    };
+    auto datagram = prefix;
+
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
+    const auto appended =
+        coquic::quic::append_protected_one_rtt_packet_to_datagram(datagram, packet_view, context);
+
+    ASSERT_FALSE(appended.has_value());
+    EXPECT_EQ(datagram, prefix);
+}
+
 TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsInvalidStreamViewBounds) {
     auto packet = make_minimal_one_rtt_packet();
     packet.frames.clear();

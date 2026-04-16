@@ -34,6 +34,18 @@ QuicPerfServer::QuicPerfServer(const QuicPerfConfig &config,
       backend_(std::move(backend)) {
 }
 
+quic::SharedBytes QuicPerfServer::cached_download_payload(std::size_t bytes) {
+    if (bytes == 0) {
+        return {};
+    }
+
+    auto [it, inserted] = download_payload_cache_.try_emplace(bytes);
+    if (inserted) {
+        it->second = quic::SharedBytes(make_payload(bytes));
+    }
+    return it->second;
+}
+
 int run_perf_server(const QuicPerfConfig &config) {
     auto bootstrap = io::bootstrap_server_io_backend(
         io::QuicIoBackendBootstrapConfig{
@@ -148,9 +160,9 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
-                        quic::QuicCoreSendStreamData{
+                        quic::QuicCoreSendSharedStreamData{
                             .stream_id = received.stream_id,
-                            .bytes = make_payload(response_bytes),
+                            .bytes = cached_download_payload(response_bytes),
                             .fin = true,
                         },
                 },

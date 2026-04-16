@@ -10,6 +10,7 @@
 #include "src/perf/perf_loop.h"
 #include "src/perf/perf_protocol.h"
 #include "src/perf/perf_runtime.h"
+#include "src/quic/crypto_stream.h"
 
 namespace coquic::perf {
 
@@ -35,11 +36,13 @@ class QuicPerfServer {
     bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now);
     bool handle_stream_data(Session &session, const quic::QuicCoreReceiveStreamData &received,
                             quic::QuicCoreTimePoint now);
+    quic::SharedBytes cached_download_payload(std::size_t bytes);
     bool send_control(Session &session, const QuicPerfControlMessage &message);
 
     QuicPerfConfig config_;
     quic::QuicCore core_;
     std::unique_ptr<io::QuicIoBackend> backend_;
+    std::unordered_map<std::size_t, quic::SharedBytes> download_payload_cache_;
     std::unordered_map<quic::QuicConnectionHandle, Session> sessions_;
 };
 

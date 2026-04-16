@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cerrno>
 
 #include <gtest/gtest.h>
@@ -80,5 +81,28 @@ TEST(QuicPerfServerTest, ServerFailsFastWhenIoUringInitializationFails) {
     };
 
     EXPECT_EQ(run_perf_runtime(config), 1);
+}
+
+TEST(QuicPerfServerTest, FixedDownloadPayloadCacheReusesSharedStorageBySize) {
+    QuicPerfServer server(QuicPerfConfig{}, nullptr);
+
+    const auto empty = server.cached_download_payload(0);
+    const auto first = server.cached_download_payload(4096);
+    const auto second = server.cached_download_payload(4096);
+    const auto different = server.cached_download_payload(2048);
+
+    EXPECT_TRUE(empty.empty());
+    EXPECT_EQ(empty.size(), 0u);
+
+    ASSERT_NE(first.storage(), nullptr);
+    ASSERT_NE(different.storage(), nullptr);
+    EXPECT_EQ(first.storage(), second.storage());
+    EXPECT_NE(first.storage(), different.storage());
+    EXPECT_EQ(first.size(), 4096u);
+    EXPECT_EQ(different.size(), 2048u);
+    EXPECT_TRUE(std::all_of(first.begin(), first.end(),
+                            [](std::byte byte) { return byte == std::byte{0x5a}; }));
+    EXPECT_TRUE(std::all_of(different.begin(), different.end(),
+                            [](std::byte byte) { return byte == std::byte{0x5a}; }));
 }
 } // namespace

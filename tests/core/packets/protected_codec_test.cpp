@@ -499,6 +499,70 @@ TEST(QuicProtectedCodecTest, AppendsOneRttPacketFragmentViewIntoExistingDatagram
               encoded.value());
 }
 
+TEST(QuicProtectedCodecTest, AppendOneRttPacketRollsBackDatagramOnHeaderProtectionFault) {
+    const auto packet = make_minimal_one_rtt_packet();
+    const auto context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    const std::vector<std::byte> prefix{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+    };
+    auto datagram = prefix;
+
+    const auto injector = coquic::quic::test::ScopedPacketCryptoFaultInjector(
+        coquic::quic::test::PacketCryptoFaultPoint::header_protection_context_new);
+    const auto appended =
+        coquic::quic::test::append_protected_one_rtt_packet_to_datagram(datagram, packet, context);
+
+    ASSERT_FALSE(appended.has_value());
+    EXPECT_EQ(datagram, prefix);
+}
+
+TEST(QuicProtectedCodecTest, AppendOneRttPacketFragmentViewRollsBackDatagramOnSealFault) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames.clear();
+    auto shared_payload = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+        std::byte{0xdd},
+    });
+    const std::vector<coquic::quic::StreamFrameSendFragment> fragments = {
+        coquic::quic::StreamFrameSendFragment{
+            .stream_id = 9,
+            .offset = 4,
+            .bytes = coquic::quic::SharedBytes(shared_payload, 1, 3),
+            .fin = true,
+        },
+    };
+
+    const auto context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    const auto packet_view = coquic::quic::ProtectedOneRttPacketFragmentView{
+        .spin_bit = packet.spin_bit,
+        .key_phase = packet.key_phase,
+        .destination_connection_id = packet.destination_connection_id,
+        .packet_number_length = packet.packet_number_length,
+        .packet_number = packet.packet_number,
+        .frames = packet.frames,
+        .stream_fragments = fragments,
+    };
+    const std::vector<std::byte> prefix{
+        std::byte{0xdd},
+        std::byte{0xee},
+    };
+    auto datagram = prefix;
+
+    const auto injector = coquic::quic::test::ScopedPacketCryptoFaultInjector(
+        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new);
+    const auto appended =
+        coquic::quic::append_protected_one_rtt_packet_to_datagram(datagram, packet_view, context);
+
+    ASSERT_FALSE(appended.has_value());
+    EXPECT_EQ(datagram, prefix);
+}
+
 TEST(QuicProtectedCodecTest, StreamViewPathUsesSinglePayloadSealUpdate) {
     auto packet = make_minimal_one_rtt_packet();
     packet.stream_frame_views = {
@@ -943,6 +1007,38 @@ TEST(QuicProtectedCodecTest,
         make_minimal_zero_rtt_packet(),
     };
     const auto appended_packet = coquic::quic::ProtectedPacket{make_minimal_zero_rtt_packet()};
+    const std::array<coquic::quic::ProtectedPacket, 2> full_packets = {
+        prefix_packets.front(),
+        appended_packet,
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram_with_metadata(
+        prefix_packets, appended_packet, context);
+    const auto encoded_full =
+        coquic::quic::serialize_protected_datagram_with_metadata(full_packets, context);
+
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded_full.has_value());
+    EXPECT_EQ(encoded.value().bytes, encoded_full.value().bytes);
+    ASSERT_EQ(encoded.value().packet_metadata.size(), encoded_full.value().packet_metadata.size());
+    EXPECT_EQ(encoded.value().packet_metadata[0].offset,
+              encoded_full.value().packet_metadata[0].offset);
+    EXPECT_EQ(encoded.value().packet_metadata[0].length,
+              encoded_full.value().packet_metadata[0].length);
+    EXPECT_EQ(encoded.value().packet_metadata[1].offset,
+              encoded_full.value().packet_metadata[1].offset);
+    EXPECT_EQ(encoded.value().packet_metadata[1].length,
+              encoded_full.value().packet_metadata[1].length);
+}
+
+TEST(QuicProtectedCodecTest,
+     SerializeProtectedDatagramWithMetadataAppendedOneRttPacketMatchesFullVectorSerialization) {
+    const auto packet = make_minimal_one_rtt_packet();
+    const auto context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+
+    const std::array<coquic::quic::ProtectedPacket, 1> prefix_packets = {packet};
+    const auto appended_packet = coquic::quic::ProtectedPacket{packet};
     const std::array<coquic::quic::ProtectedPacket, 2> full_packets = {
         prefix_packets.front(),
         appended_packet,

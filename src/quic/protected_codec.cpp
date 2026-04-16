@@ -311,6 +311,31 @@ CodecResult<std::size_t> serialize_stream_frame_header_into(std::vector<std::byt
     return CodecResult<std::size_t>::success(bytes.size() - begin);
 }
 
+CodecResult<std::size_t> serialize_stream_frame_header_into(SpanBufferWriter &writer,
+                                                            const StreamFrameHeaderFields &header) {
+    if (header.offset > kMaxVarInt - header.payload_size) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    const auto begin = writer.offset();
+    std::byte type = std::byte{0x08};
+    type |= std::byte{0x04};
+    type |= std::byte{0x02};
+    if (header.fin) {
+        type |= std::byte{0x01};
+    }
+
+    if (const auto error = writer.write_byte(type)) {
+        return CodecResult<std::size_t>::failure(error->code, error->offset);
+    }
+    if (const auto error = writer.write_varint(header.stream_id)) {
+        return CodecResult<std::size_t>::failure(error->code, error->offset);
+    }
+    writer.write_varint_unchecked(header.offset);
+    writer.write_varint_unchecked(header.payload_size);
+    return CodecResult<std::size_t>::success(writer.offset() - begin);
+}
+
 CodecResult<std::size_t> append_stream_frame_payload_into(std::vector<std::byte> &bytes,
                                                           StreamFrameHeaderFields header,
                                                           std::span<const std::byte> payload) {
@@ -323,6 +348,23 @@ CodecResult<std::size_t> append_stream_frame_payload_into(std::vector<std::byte>
 
     bytes.insert(bytes.end(), payload.begin(), payload.end());
     return CodecResult<std::size_t>::success(bytes.size() - begin);
+}
+
+CodecResult<std::size_t> serialize_stream_frame_into(std::span<std::byte> output,
+                                                     const StreamFrameHeaderFields &header,
+                                                     std::span<const std::byte> payload) {
+    SpanBufferWriter writer(output);
+    auto adjusted_header = header;
+    adjusted_header.payload_size = payload.size();
+    const auto serialized_header = serialize_stream_frame_header_into(writer, adjusted_header);
+    if (!serialized_header.has_value()) {
+        return serialized_header;
+    }
+    if (const auto error = writer.write_bytes(payload)) {
+        return CodecResult<std::size_t>::failure(error->code, error->offset);
+    }
+
+    return CodecResult<std::size_t>::success(writer.offset());
 }
 
 CodecResult<std::size_t>
@@ -363,6 +405,45 @@ append_stream_frame_send_fragment_to_datagram(std::vector<std::byte> &bytes,
                                                 .offset = fragment.offset,
                                             },
                                             fragment.bytes.span());
+}
+
+CodecResult<std::size_t> serialize_stream_frame_view_into_span(std::span<std::byte> output,
+                                                               const StreamFrameView &stream_view) {
+    if (stream_view.end < stream_view.begin) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    const auto payload_size = stream_view.end - stream_view.begin;
+    if (payload_size != 0 &&
+        (!stream_view.storage || stream_view.end > stream_view.storage->size())) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    const auto payload =
+        payload_size == 0
+            ? std::span<const std::byte>{}
+            : std::span<const std::byte>(stream_view.storage->data() +
+                                             static_cast<std::ptrdiff_t>(stream_view.begin),
+                                         payload_size);
+    return serialize_stream_frame_into(output,
+                                       StreamFrameHeaderFields{
+                                           .fin = stream_view.fin,
+                                           .stream_id = stream_view.stream_id,
+                                           .offset = stream_view.offset,
+                                       },
+                                       payload);
+}
+
+CodecResult<std::size_t>
+serialize_stream_frame_send_fragment_into_span(std::span<std::byte> output,
+                                               const StreamFrameSendFragment &fragment) {
+    return serialize_stream_frame_into(output,
+                                       StreamFrameHeaderFields{
+                                           .fin = fragment.fin,
+                                           .stream_id = fragment.stream_id,
+                                           .offset = fragment.offset,
+                                       },
+                                       fragment.bytes.span());
 }
 
 bool long_header_has_token(LongHeaderPacketType packet_type) {
@@ -1331,139 +1412,93 @@ append_protected_one_rtt_packet_to_datagram_impl(std::vector<std::byte> &datagra
     const auto datagram_begin = datagram.size();
     const auto rollback = [&]() { datagram.resize(datagram_begin); };
 
-    if (!packet_has_stream_payloads(packet)) {
-        CodecResult<std::vector<std::byte>> plaintext_image =
-            CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::unsupported_packet_type,
-                                                         0);
-
-        if constexpr (std::is_same_v<OneRttPacketLike, ProtectedOneRttPacket>) {
-            const auto plaintext_packet = to_plaintext_one_rtt(packet);
-            if (!plaintext_packet.has_value()) {
-                return CodecResult<std::size_t>::failure(plaintext_packet.error().code,
-                                                         plaintext_packet.error().offset);
-            }
-            plaintext_image = serialize_packet(Packet{plaintext_packet.value()});
-        } else {
-            auto owned_packet = ProtectedOneRttPacket{
-                .spin_bit = packet.spin_bit,
-                .key_phase = packet.key_phase,
-                .destination_connection_id = ConnectionId(packet.destination_connection_id.begin(),
-                                                          packet.destination_connection_id.end()),
-                .packet_number_length = packet.packet_number_length,
-                .packet_number = packet.packet_number,
-                .frames = std::vector<Frame>(packet.frames.begin(), packet.frames.end()),
-            };
-            const auto plaintext_packet = to_plaintext_one_rtt(owned_packet);
-            if (!plaintext_packet.has_value()) {
-                return CodecResult<std::size_t>::failure(plaintext_packet.error().code,
-                                                         plaintext_packet.error().offset);
-            }
-            plaintext_image = serialize_packet(Packet{plaintext_packet.value()});
-        }
-        if (!plaintext_image.has_value())
-            return CodecResult<std::size_t>::failure(plaintext_image.error().code,
-                                                     plaintext_image.error().offset);
-
-        auto padded_plaintext_image = std::move(plaintext_image.value());
-        pad_short_header_plaintext_for_header_protection(padded_plaintext_image,
-                                                         packet_number_offset);
-        const auto plaintext_payload =
-            std::span<const std::byte>(padded_plaintext_image).subspan(payload_offset);
-        const auto packet_size =
-            payload_offset + plaintext_payload.size() + kPacketProtectionTagLength;
-        datagram.resize(datagram_begin + packet_size);
-        auto packet_bytes = std::span<std::byte>(datagram).subspan(datagram_begin, packet_size);
-        std::copy_n(padded_plaintext_image.begin(), payload_offset, packet_bytes.begin());
-
-        const auto ciphertext = seal_payload_into(SealPayloadIntoInput{
-            .cipher_suite = cipher_suite,
-            .key = keys.value().key,
-            .nonce = nonce,
-            .associated_data =
-                std::span<const std::byte>(padded_plaintext_image).first(payload_offset),
-            .plaintext = plaintext_payload,
-            .ciphertext = packet_bytes.subspan(payload_offset),
-        });
-        if (!ciphertext.has_value()) {
-            rollback();
-            return CodecResult<std::size_t>::failure(ciphertext.error().code,
-                                                     ciphertext.error().offset);
-        }
-
-        const auto final_packet_size = payload_offset + ciphertext.value();
-        datagram.resize(datagram_begin + final_packet_size);
-        const auto protected_packet = apply_short_header_protection_in_place(
-            std::span<std::byte>(datagram).subspan(datagram_begin, final_packet_size),
-            packet_number_span, cipher_suite, keys.value());
-        if (!protected_packet.has_value()) {
-            rollback();
-            return CodecResult<std::size_t>::failure(protected_packet.error().code,
-                                                     protected_packet.error().offset);
-        }
-
-        return CodecResult<std::size_t>::success(final_packet_size);
-    }
-
-    datagram.push_back(make_short_header_first_byte(packet.spin_bit, packet.key_phase,
-                                                    packet.packet_number_length));
-    datagram.insert(datagram.end(), packet.destination_connection_id.begin(),
-                    packet.destination_connection_id.end());
-    append_packet_number(datagram, TruncatedPacketNumberEncoding{
-                                       .packet_number_length = packet.packet_number_length,
-                                       .truncated_packet_number = truncated_packet_number.value(),
-                                   });
-
-    datagram.reserve(datagram_begin + payload_offset + packet_stream_payload_wire_size(packet) +
-                     kHeaderProtectionSampleOffset + kPacketProtectionTagLength);
-
-    std::size_t frame_index = 0;
-    for (const auto &frame : packet.frames) {
-        if (const auto *stream = std::get_if<StreamFrame>(&frame);
-            stream != nullptr && !stream->has_length) {
-            rollback();
+    const auto has_stream_payloads = packet_has_stream_payloads(packet);
+    std::size_t frame_payload_size = 0;
+    for (std::size_t frame_index = 0; frame_index < packet.frames.size(); ++frame_index) {
+        if (const auto *stream = std::get_if<StreamFrame>(&packet.frames[frame_index]);
+            stream != nullptr && !stream->has_length &&
+            (frame_index + 1 != packet.frames.size() || has_stream_payloads)) {
             return CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch,
                                                      frame_index);
         }
 
-        const auto encoded = append_serialized_frame(datagram, frame);
+        const auto encoded = serialized_frame_size(packet.frames[frame_index]);
         if (!encoded.has_value()) {
-            rollback();
             return CodecResult<std::size_t>::failure(encoded.error().code, encoded.error().offset);
         }
+        frame_payload_size += encoded.value();
+    }
 
+    const auto stream_payload_size = packet_stream_payload_wire_size(packet);
+    const auto payload_size = frame_payload_size + stream_payload_size;
+    if (payload_size == 0) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::empty_packet_payload, 0);
+    }
+
+    const auto plaintext_payload_size = std::max(
+        payload_size, minimum_payload_bytes_for_header_sample(packet.packet_number_length));
+    const auto maximum_packet_size =
+        payload_offset + plaintext_payload_size + kPacketProtectionTagLength;
+    datagram.reserve(datagram_begin + maximum_packet_size);
+    datagram.resize(datagram_begin + maximum_packet_size);
+    auto packet_bytes = std::span<std::byte>(datagram).subspan(datagram_begin, maximum_packet_size);
+
+    SpanBufferWriter header_writer(packet_bytes.first(payload_offset));
+    if (const auto error = header_writer.write_byte(make_short_header_first_byte(
+            packet.spin_bit, packet.key_phase, packet.packet_number_length))) {
+        rollback();
+        return CodecResult<std::size_t>::failure(error->code, error->offset);
+    }
+    if (const auto error = header_writer.write_bytes(packet.destination_connection_id)) {
+        rollback();
+        return CodecResult<std::size_t>::failure(error->code, error->offset);
+    }
+    if (const auto error = append_packet_number(
+            header_writer, TruncatedPacketNumberEncoding{
+                               .packet_number_length = packet.packet_number_length,
+                               .truncated_packet_number = truncated_packet_number.value(),
+                           })) {
+        rollback();
+        return CodecResult<std::size_t>::failure(error->code, error->offset);
+    }
+
+    auto payload_bytes = packet_bytes.subspan(payload_offset, plaintext_payload_size);
+    std::size_t payload_written = 0;
+    std::size_t frame_index = 0;
+    for (const auto &frame : packet.frames) {
+        const auto written = serialize_frame_into(payload_bytes.subspan(payload_written), frame);
+        if (!written.has_value()) {
+            rollback();
+            return CodecResult<std::size_t>::failure(written.error().code, written.error().offset);
+        }
+        payload_written += written.value();
         ++frame_index;
     }
 
     if constexpr (requires { packet.stream_frame_views; }) {
         for (const auto &stream_view : packet.stream_frame_views) {
-            const auto appended = append_stream_frame_view_into_datagram(datagram, stream_view);
-            if (!appended.has_value()) {
+            const auto written = serialize_stream_frame_view_into_span(
+                payload_bytes.subspan(payload_written), stream_view);
+            if (!written.has_value()) {
                 rollback();
-                return CodecResult<std::size_t>::failure(appended.error().code, frame_index);
+                return CodecResult<std::size_t>::failure(written.error().code, frame_index);
             }
+            payload_written += written.value();
             ++frame_index;
         }
     } else {
         for (const auto &fragment : packet.stream_fragments) {
-            const auto appended = append_stream_frame_send_fragment_to_datagram(datagram, fragment);
-            if (!appended.has_value()) {
+            const auto written = serialize_stream_frame_send_fragment_into_span(
+                payload_bytes.subspan(payload_written), fragment);
+            if (!written.has_value()) {
                 rollback();
-                return CodecResult<std::size_t>::failure(appended.error().code, frame_index);
+                return CodecResult<std::size_t>::failure(written.error().code, frame_index);
             }
+            payload_written += written.value();
             ++frame_index;
         }
     }
 
-    const auto minimum_packet_plaintext_size = packet_number_offset + kHeaderProtectionSampleOffset;
-    if (datagram.size() - datagram_begin < minimum_packet_plaintext_size) {
-        datagram.resize(datagram_begin + minimum_packet_plaintext_size, std::byte{0x00});
-    }
-
-    const auto plaintext_payload_size = datagram.size() - (datagram_begin + payload_offset);
-    const auto maximum_packet_size =
-        payload_offset + plaintext_payload_size + kPacketProtectionTagLength;
-    datagram.resize(datagram_begin + maximum_packet_size);
-    auto packet_bytes = std::span<std::byte>(datagram).subspan(datagram_begin, maximum_packet_size);
     const auto plaintext_payload =
         std::span<const std::byte>(packet_bytes).subspan(payload_offset, plaintext_payload_size);
 

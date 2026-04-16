@@ -1457,6 +1457,41 @@ TEST(QuicProtectedCodecTest, RejectsInitialPacketWithQuicV1ConnectionIdLongerTha
     EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
 }
 
+TEST(QuicProtectedCodecTest,
+     RejectsInitialPacketWithQuicV1ConnectionIdLongerThanTwentyBytesBeforeForbiddenFrame) {
+    auto packet = make_minimal_initial_packet();
+    packet.destination_connection_id = std::vector<std::byte>(21, std::byte{0xaa});
+    packet.frames = {
+        coquic::quic::NewTokenFrame{
+            .token = {std::byte{0x01}},
+        },
+    };
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicProtectedCodecTest, RejectsInitialVersionNegotiationPacketBeforeForbiddenFrameValidation) {
+    auto packet = make_minimal_initial_packet();
+    packet.version = coquic::quic::kVersionNegotiationVersion;
+    packet.frames = {
+        coquic::quic::NewTokenFrame{
+            .token = {std::byte{0x01}},
+        },
+    };
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
+}
+
 TEST(QuicProtectedCodecTest, RejectsInitialPacketWithEmptyPayload) {
     auto packet = make_minimal_initial_packet();
     packet.frames.clear();

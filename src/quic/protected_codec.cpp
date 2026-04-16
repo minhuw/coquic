@@ -781,15 +781,19 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
     const auto datagram_begin = datagram.size();
     const auto rollback = [&]() { datagram.resize(datagram_begin); };
 
-    const auto valid_frames = validate_long_header_frames(frames, packet_type);
-    if (!valid_frames.has_value()) {
-        return CodecResult<std::size_t>::failure(valid_frames.error().code,
-                                                 valid_frames.error().offset);
+    if (version == kVersionNegotiationVersion) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::unsupported_packet_type, 0);
     }
 
     if (version == kQuicVersion1 &&
         (destination_connection_id.size() > 20 || source_connection_id.size() > 20)) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    const auto valid_frames = validate_long_header_frames(frames, packet_type);
+    if (!valid_frames.has_value()) {
+        return CodecResult<std::size_t>::failure(valid_frames.error().code,
+                                                 valid_frames.error().offset);
     }
 
     const auto frame_payload_size = serialized_frame_payload_size(frames);

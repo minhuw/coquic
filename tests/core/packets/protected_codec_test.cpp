@@ -1445,6 +1445,18 @@ TEST(QuicProtectedCodecTest, RejectsInitialPacketWithInvalidPacketNumberLength) 
     EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
 }
 
+TEST(QuicProtectedCodecTest, RejectsInitialPacketWithQuicV1ConnectionIdLongerThanTwentyBytes) {
+    auto packet = make_minimal_initial_packet();
+    packet.destination_connection_id = std::vector<std::byte>(21, std::byte{0xaa});
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicProtectedCodecTest, RejectsInitialPacketWithEmptyPayload) {
     auto packet = make_minimal_initial_packet();
     packet.frames.clear();
@@ -1607,6 +1619,19 @@ TEST(QuicProtectedCodecTest, RejectsHandshakePacketWithInvalidPacketNumberLength
     const auto encoded = coquic::quic::serialize_protected_datagram(
         packets,
         make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicProtectedCodecTest, RejectsHandshakePacketWithQuicV1ConnectionIdLongerThanTwentyBytes) {
+    auto packet = make_minimal_handshake_packet();
+    packet.source_connection_id = std::vector<std::byte>(21, std::byte{0xcc});
+    const std::vector<coquic::quic::ProtectedPacket> packets{packet};
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_handshake_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::invalid_varint);
 }

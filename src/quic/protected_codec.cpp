@@ -787,6 +787,11 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
                                                  valid_frames.error().offset);
     }
 
+    if (version == kQuicVersion1 &&
+        (destination_connection_id.size() > 20 || source_connection_id.size() > 20)) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
     const auto frame_payload_size = serialized_frame_payload_size(frames);
     if (!frame_payload_size.has_value()) {
         return CodecResult<std::size_t>::failure(frame_payload_size.error().code,

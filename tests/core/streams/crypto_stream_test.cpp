@@ -159,6 +159,52 @@ TEST(QuicCryptoStreamTest, TakeRangesReusesUnderlyingSegmentStorage) {
     EXPECT_EQ(ranges[0].bytes.data(), source_bytes);
 }
 
+TEST(QuicCryptoStreamTest, SharedAppendReusesCallerStorageWithoutCloning) {
+    ReliableSendBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcdef"));
+    const SharedBytes shared(storage, 1, 5);
+
+    buffer.append(shared);
+
+    ASSERT_EQ(buffer.segments_.size(), 1u);
+    const auto &segment = buffer.segments_.begin()->second;
+    EXPECT_EQ(buffer.segments_.begin()->first, 0u);
+    EXPECT_EQ(segment.storage, storage);
+    EXPECT_EQ(segment.begin, 1u);
+    EXPECT_EQ(segment.end, 5u);
+
+    const auto ranges = buffer.take_ranges(4);
+    ASSERT_EQ(ranges.size(), 1u);
+    EXPECT_EQ(ranges[0].offset, 0u);
+    EXPECT_EQ(ranges[0].bytes, bytes_from_string("bcde"));
+    EXPECT_EQ(ranges[0].bytes.storage().get(), storage.get());
+    EXPECT_EQ(ranges[0].bytes.begin_offset(), 1u);
+    EXPECT_EQ(ranges[0].bytes.end_offset(), 5u);
+}
+
+TEST(QuicCryptoStreamTest, SharedAppendPreservesAckAndLossBookkeeping) {
+    ReliableSendBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcdef"));
+
+    buffer.append(SharedBytes(storage, 0, 6));
+
+    const auto sent = buffer.take_ranges(4);
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].bytes.storage().get(), storage.get());
+
+    buffer.acknowledge(1, 2);
+    buffer.mark_lost(0, 4);
+
+    const auto retransmit = buffer.take_ranges(2);
+    ASSERT_EQ(retransmit.size(), 2u);
+    EXPECT_EQ(retransmit[0].offset, 0u);
+    EXPECT_EQ(retransmit[0].bytes, bytes_from_string("a"));
+    EXPECT_EQ(retransmit[0].bytes.storage().get(), storage.get());
+    EXPECT_EQ(retransmit[1].offset, 3u);
+    EXPECT_EQ(retransmit[1].bytes, bytes_from_string("d"));
+    EXPECT_EQ(retransmit[1].bytes.storage().get(), storage.get());
+}
+
 TEST(QuicCryptoStreamTest, TakeRangesWithZeroBudgetPreservesPendingBytes) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("ab"));

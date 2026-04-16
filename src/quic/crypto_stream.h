@@ -150,7 +150,9 @@ struct ByteRange {
 
 class ReliableSendBuffer {
   public:
+    void append(const std::vector<std::byte> &bytes);
     void append(std::span<const std::byte> bytes);
+    void append(SharedBytes bytes);
     std::vector<ByteRange> take_ranges(std::size_t max_bytes);
     std::vector<ByteRange> take_lost_ranges(std::size_t max_bytes,
                                             std::optional<std::uint64_t> max_offset = std::nullopt);

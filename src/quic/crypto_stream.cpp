@@ -33,17 +33,29 @@ std::uint64_t range_end(std::uint64_t offset, std::size_t length) {
 
 namespace coquic::quic {
 
+void ReliableSendBuffer::append(const std::vector<std::byte> &bytes) {
+    append(std::span<const std::byte>(bytes));
+}
+
 void ReliableSendBuffer::append(std::span<const std::byte> bytes) {
     if (bytes.empty()) {
         return;
     }
 
     auto storage = std::make_shared<std::vector<std::byte>>(bytes.begin(), bytes.end());
+    append(SharedBytes{std::move(storage), 0, bytes.size()});
+}
+
+void ReliableSendBuffer::append(SharedBytes bytes) {
+    if (bytes.empty()) {
+        return;
+    }
+
     segments_.emplace(next_append_offset_, Segment{
                                                .state = SegmentState::unsent,
-                                               .storage = std::move(storage),
-                                               .begin = 0,
-                                               .end = bytes.size(),
+                                               .storage = bytes.storage(),
+                                               .begin = bytes.begin_offset(),
+                                               .end = bytes.end_offset(),
                                            });
     next_append_offset_ += static_cast<std::uint64_t>(bytes.size());
     merge_adjacent_segments();

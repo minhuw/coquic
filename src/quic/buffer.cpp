@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 
 namespace coquic::quic {
 
@@ -169,7 +170,9 @@ std::optional<CodecError> SpanBufferWriter::write_varint(std::uint64_t value) {
 }
 
 void SpanBufferWriter::write_varint_unchecked(std::uint64_t value) {
-    (void)write_varint_into_fixed_span(bytes_, &offset_, value, false);
+    if (write_varint_into_fixed_span(bytes_, &offset_, value, false).has_value()) {
+        std::abort();
+    }
 }
 
 std::size_t CountingBufferWriter::offset() const {

@@ -66,6 +66,17 @@ TEST(QuicBufferTest, SpanBufferWriterUncheckedVarintWritesWithoutThrowing) {
     EXPECT_EQ(storage[2], std::byte{0x3f});
 }
 
+TEST(QuicBufferTest, SpanBufferWriterUncheckedVarintAbortsOnOverflow) {
+#if GTEST_HAS_DEATH_TEST
+    std::array<std::byte, 1> storage{};
+    coquic::quic::SpanBufferWriter writer{std::span<std::byte>(storage)};
+
+    EXPECT_DEATH(writer.write_varint_unchecked(0x1234), "");
+#else
+    GTEST_SKIP() << "Death tests are not supported in this configuration";
+#endif
+}
+
 TEST(QuicBufferTest, CountingBufferWriterTracksWrittenSizeWithoutStorage) {
     coquic::quic::CountingBufferWriter writer;
 

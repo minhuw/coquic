@@ -169,7 +169,7 @@ std::optional<CodecError> SpanBufferWriter::write_varint(std::uint64_t value) {
 }
 
 void SpanBufferWriter::write_varint_unchecked(std::uint64_t value) {
-    write_varint_into_fixed_span(bytes_, &offset_, value, false).value();
+    (void)write_varint_into_fixed_span(bytes_, &offset_, value, false);
 }
 
 std::size_t CountingBufferWriter::offset() const {

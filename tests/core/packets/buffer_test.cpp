@@ -52,6 +52,20 @@ TEST(QuicBufferTest, SpanBufferWriterRejectsOverflowWithoutAdvancingOffset) {
     EXPECT_EQ(storage[2], std::byte{0x00});
 }
 
+TEST(QuicBufferTest, SpanBufferWriterUncheckedVarintWritesWithoutThrowing) {
+    std::array<std::byte, 8> storage{};
+    coquic::quic::SpanBufferWriter writer{std::span<std::byte>(storage)};
+
+    writer.write_varint_unchecked(0x1234);
+    writer.write_varint_unchecked(63);
+
+    EXPECT_EQ(writer.offset(), 3u);
+    ASSERT_EQ(writer.written().size(), 3u);
+    EXPECT_EQ(storage[0], std::byte{0x52});
+    EXPECT_EQ(storage[1], std::byte{0x34});
+    EXPECT_EQ(storage[2], std::byte{0x3f});
+}
+
 TEST(QuicBufferTest, CountingBufferWriterTracksWrittenSizeWithoutStorage) {
     coquic::quic::CountingBufferWriter writer;
 
@@ -67,6 +81,15 @@ TEST(QuicBufferTest, CountingBufferWriterTracksWrittenSizeWithoutStorage) {
     ASSERT_FALSE(writer.write_varint(64).has_value());
 
     EXPECT_EQ(writer.offset(), 7u);
+}
+
+TEST(QuicBufferTest, CountingBufferWriterUncheckedVarintTracksSize) {
+    coquic::quic::CountingBufferWriter writer;
+
+    writer.write_varint_unchecked(0x1234);
+    writer.write_varint_unchecked(63);
+
+    EXPECT_EQ(writer.offset(), 3u);
 }
 
 TEST(QuicBufferTest, BufferWriterWritesVarintsAndTracksOffset) {

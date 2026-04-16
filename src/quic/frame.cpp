@@ -2,6 +2,7 @@
 
 #include <array>
 #include <limits>
+#include <type_traits>
 
 #include "src/quic/buffer.h"
 
@@ -20,33 +21,48 @@ CodecResult<FrameDecodeResult> decode_failure(CodecErrorCode code, std::size_t o
     return CodecResult<FrameDecodeResult>::failure(code, offset);
 }
 
-std::optional<CodecError> append_varint(BufferWriter &writer, std::uint64_t value) {
-    std::array<std::byte, 8> encoded{};
-    const auto written = encode_varint_into(encoded, value);
-    if (!written.has_value()) {
-        return written.error();
+template <typename Writer> std::optional<CodecError> append_byte(Writer &writer, std::byte value) {
+    if constexpr (std::is_void_v<decltype(writer.write_byte(value))>) {
+        writer.write_byte(value);
+        return std::nullopt;
+    } else {
+        return writer.write_byte(value);
     }
-
-    writer.write_bytes(std::span<const std::byte>(encoded.data(), written.value()));
-    return std::nullopt;
 }
 
-void append_varint_unchecked(BufferWriter &writer, std::uint64_t value) {
-    std::array<std::byte, 8> encoded{};
-    const auto written = encode_varint_into(encoded, value).value();
-    writer.write_bytes(std::span<const std::byte>(encoded.data(), written));
+template <typename Writer>
+std::optional<CodecError> append_bytes(Writer &writer, std::span<const std::byte> bytes) {
+    if constexpr (std::is_void_v<decltype(writer.write_bytes(bytes))>) {
+        writer.write_bytes(bytes);
+        return std::nullopt;
+    } else {
+        return writer.write_bytes(bytes);
+    }
 }
 
-std::optional<CodecError> append_exact_length_bytes(BufferWriter &writer,
+template <typename Writer>
+std::optional<CodecError> append_varint(Writer &writer, std::uint64_t value) {
+    return writer.write_varint(value);
+}
+
+template <typename Writer>
+std::optional<CodecError> append_exact_length_bytes(Writer &writer,
                                                     const std::vector<std::byte> &bytes) {
-    append_varint_unchecked(writer, bytes.size());
-    writer.write_bytes(bytes);
+    if (const auto error = append_varint(writer, bytes.size())) {
+        return error;
+    }
+    if (const auto error = append_bytes(writer, bytes)) {
+        return error;
+    }
     return std::nullopt;
 }
 
-std::optional<CodecError> append_single_varint_frame(BufferWriter &writer, std::byte type,
+template <typename Writer>
+std::optional<CodecError> append_single_varint_frame(Writer &writer, std::byte type,
                                                      std::uint64_t value) {
-    writer.write_byte(type);
+    if (const auto error = append_byte(writer, type)) {
+        return error;
+    }
     if (const auto error = append_varint(writer, value)) {
         return error;
     }
@@ -208,69 +224,6 @@ CodecResult<AckFrame> decode_ack_frame(BufferReader &reader, bool has_ecn_counts
 
     return CodecResult<AckFrame>::success(std::move(frame));
 }
-
-CodecResult<std::vector<std::byte>> serialize_ack_frame(const AckFrame &frame) {
-    BufferWriter writer;
-    writer.write_byte(frame.ecn_counts.has_value() ? std::byte{0x03} : std::byte{0x02});
-
-    if (const auto error = append_varint(writer, frame.largest_acknowledged)) {
-        return failure_result(error->code, error->offset);
-    }
-    if (const auto error = append_varint(writer, frame.ack_delay)) {
-        return failure_result(error->code, error->offset);
-    }
-    append_varint_unchecked(writer, frame.additional_ranges.size());
-    if (const auto error = append_varint(writer, frame.first_ack_range)) {
-        return failure_result(error->code, error->offset);
-    }
-
-    if (frame.largest_acknowledged < frame.first_ack_range) {
-        return failure_result(CodecErrorCode::invalid_varint, 0);
-    }
-
-    std::uint64_t previous_smallest = frame.largest_acknowledged - frame.first_ack_range;
-    for (const auto &range : frame.additional_ranges) {
-        if (previous_smallest < range.gap + 2) {
-            return failure_result(CodecErrorCode::invalid_varint, 0);
-        }
-        const auto largest = previous_smallest - range.gap - 2;
-        if (largest < range.range_length) {
-            return failure_result(CodecErrorCode::invalid_varint, 0);
-        }
-
-        append_varint_unchecked(writer, range.gap);
-        append_varint_unchecked(writer, range.range_length);
-
-        previous_smallest = largest - range.range_length;
-    }
-
-    if (frame.ecn_counts.has_value()) {
-        if (const auto error = append_varint(writer, frame.ecn_counts->ect0)) {
-            return failure_result(error->code, error->offset);
-        }
-        if (const auto error = append_varint(writer, frame.ecn_counts->ect1)) {
-            return failure_result(error->code, error->offset);
-        }
-        if (const auto error = append_varint(writer, frame.ecn_counts->ecn_ce)) {
-            return failure_result(error->code, error->offset);
-        }
-    }
-
-    return CodecResult<std::vector<std::byte>>::success(writer.bytes());
-}
-
-template <typename T>
-CodecResult<std::vector<std::byte>> serialize_single_varint_frame(std::byte type,
-                                                                  std::uint64_t value) {
-    BufferWriter writer;
-    writer.write_byte(type);
-    if (const auto error = append_varint(writer, value)) {
-        return failure_result(error->code, error->offset);
-    }
-    return CodecResult<std::vector<std::byte>>::success(writer.bytes());
-}
-
-template <typename T> CodecResult<T> read_structured_frame(BufferReader &reader);
 
 CodecResult<ResetStreamFrame> decode_reset_stream_frame(BufferReader &reader) {
     ResetStreamFrame frame{};
@@ -562,33 +515,87 @@ decode_application_connection_close_frame(BufferReader &reader) {
     return CodecResult<ApplicationConnectionCloseFrame>::success(std::move(frame));
 }
 
-std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame &frame) {
+template <typename Writer>
+std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Frame &frame) {
     if (const auto *padding = std::get_if<PaddingFrame>(&frame)) {
         if (padding->length == 0) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
         for (std::size_t i = 0; i < padding->length; ++i) {
-            writer.write_byte(std::byte{0x00});
+            if (const auto error = append_byte(writer, std::byte{0x00})) {
+                return error;
+            }
         }
         return std::nullopt;
     }
 
     if (std::holds_alternative<PingFrame>(frame)) {
-        writer.write_byte(std::byte{0x01});
+        if (const auto error = append_byte(writer, std::byte{0x01})) {
+            return error;
+        }
         return std::nullopt;
     }
 
     if (const auto *ack = std::get_if<AckFrame>(&frame)) {
-        const auto encoded = serialize_ack_frame(*ack);
-        if (!encoded.has_value()) {
-            return encoded.error();
+        if (const auto error = append_byte(writer, ack->ecn_counts.has_value() ? std::byte{0x03}
+                                                                               : std::byte{0x02})) {
+            return error;
         }
-        writer.write_bytes(encoded.value());
+        if (const auto error = append_varint(writer, ack->largest_acknowledged)) {
+            return error;
+        }
+        if (const auto error = append_varint(writer, ack->ack_delay)) {
+            return error;
+        }
+        if (const auto error = append_varint(writer, ack->additional_ranges.size())) {
+            return error;
+        }
+        if (const auto error = append_varint(writer, ack->first_ack_range)) {
+            return error;
+        }
+
+        if (ack->largest_acknowledged < ack->first_ack_range) {
+            return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
+        }
+
+        std::uint64_t previous_smallest = ack->largest_acknowledged - ack->first_ack_range;
+        for (const auto &range : ack->additional_ranges) {
+            if (previous_smallest < range.gap + 2) {
+                return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
+            }
+            const auto largest = previous_smallest - range.gap - 2;
+            if (largest < range.range_length) {
+                return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
+            }
+
+            if (const auto error = append_varint(writer, range.gap)) {
+                return error;
+            }
+            if (const auto error = append_varint(writer, range.range_length)) {
+                return error;
+            }
+
+            previous_smallest = largest - range.range_length;
+        }
+
+        if (ack->ecn_counts.has_value()) {
+            if (const auto error = append_varint(writer, ack->ecn_counts->ect0)) {
+                return error;
+            }
+            if (const auto error = append_varint(writer, ack->ecn_counts->ect1)) {
+                return error;
+            }
+            if (const auto error = append_varint(writer, ack->ecn_counts->ecn_ce)) {
+                return error;
+            }
+        }
         return std::nullopt;
     }
 
     if (const auto *reset_stream = std::get_if<ResetStreamFrame>(&frame)) {
-        writer.write_byte(std::byte{0x04});
+        if (const auto error = append_byte(writer, std::byte{0x04})) {
+            return error;
+        }
         if (const auto error = append_varint(writer, reset_stream->stream_id)) {
             return error;
         }
@@ -603,7 +610,9 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
     }
 
     if (const auto *stop_sending = std::get_if<StopSendingFrame>(&frame)) {
-        writer.write_byte(std::byte{0x05});
+        if (const auto error = append_byte(writer, std::byte{0x05})) {
+            return error;
+        }
         if (const auto error = append_varint(writer, stop_sending->stream_id)) {
             return error;
         }
@@ -619,9 +628,15 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
 
-        writer.write_byte(std::byte{0x06});
-        append_varint_unchecked(writer, crypto->offset);
-        append_exact_length_bytes(writer, crypto->crypto_data);
+        if (const auto error = append_byte(writer, std::byte{0x06})) {
+            return error;
+        }
+        if (const auto error = append_varint(writer, crypto->offset)) {
+            return error;
+        }
+        if (const auto error = append_exact_length_bytes(writer, crypto->crypto_data)) {
+            return error;
+        }
         return std::nullopt;
     }
 
@@ -630,8 +645,12 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
 
-        writer.write_byte(std::byte{0x07});
-        append_exact_length_bytes(writer, new_token->token);
+        if (const auto error = append_byte(writer, std::byte{0x07})) {
+            return error;
+        }
+        if (const auto error = append_exact_length_bytes(writer, new_token->token)) {
+            return error;
+        }
         return std::nullopt;
     }
 
@@ -652,17 +671,25 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
 
-        writer.write_byte(type);
+        if (const auto error = append_byte(writer, type)) {
+            return error;
+        }
         if (const auto error = append_varint(writer, stream->stream_id)) {
             return error;
         }
         if (stream->has_offset) {
-            append_varint_unchecked(writer, offset);
+            if (const auto error = append_varint(writer, offset)) {
+                return error;
+            }
         }
         if (stream->has_length) {
-            append_varint_unchecked(writer, stream->stream_data.size());
+            if (const auto error = append_varint(writer, stream->stream_data.size())) {
+                return error;
+            }
         }
-        writer.write_bytes(stream->stream_data);
+        if (const auto error = append_bytes(writer, stream->stream_data)) {
+            return error;
+        }
         return std::nullopt;
     }
 
@@ -671,7 +698,9 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
     }
 
     if (const auto *max_stream_data = std::get_if<MaxStreamDataFrame>(&frame)) {
-        writer.write_byte(std::byte{0x11});
+        if (const auto error = append_byte(writer, std::byte{0x11})) {
+            return error;
+        }
         if (const auto error = append_varint(writer, max_stream_data->stream_id)) {
             return error;
         }
@@ -685,10 +714,15 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
         if (max_streams->maximum_streams > kMaxStreamsLimit) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
-        writer.write_byte(max_streams->stream_type == StreamLimitType::bidirectional
-                              ? std::byte{0x12}
-                              : std::byte{0x13});
-        append_varint_unchecked(writer, max_streams->maximum_streams);
+        if (const auto error =
+                append_byte(writer, max_streams->stream_type == StreamLimitType::bidirectional
+                                        ? std::byte{0x12}
+                                        : std::byte{0x13})) {
+            return error;
+        }
+        if (const auto error = append_varint(writer, max_streams->maximum_streams)) {
+            return error;
+        }
         return std::nullopt;
     }
 
@@ -697,7 +731,9 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
     }
 
     if (const auto *stream_data_blocked = std::get_if<StreamDataBlockedFrame>(&frame)) {
-        writer.write_byte(std::byte{0x15});
+        if (const auto error = append_byte(writer, std::byte{0x15})) {
+            return error;
+        }
         if (const auto error = append_varint(writer, stream_data_blocked->stream_id)) {
             return error;
         }
@@ -711,10 +747,15 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
         if (streams_blocked->maximum_streams > kMaxStreamsLimit) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
-        writer.write_byte(streams_blocked->stream_type == StreamLimitType::bidirectional
-                              ? std::byte{0x16}
-                              : std::byte{0x17});
-        append_varint_unchecked(writer, streams_blocked->maximum_streams);
+        if (const auto error =
+                append_byte(writer, streams_blocked->stream_type == StreamLimitType::bidirectional
+                                        ? std::byte{0x16}
+                                        : std::byte{0x17})) {
+            return error;
+        }
+        if (const auto error = append_varint(writer, streams_blocked->maximum_streams)) {
+            return error;
+        }
         return std::nullopt;
     }
 
@@ -727,14 +768,25 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
 
-        writer.write_byte(std::byte{0x18});
+        if (const auto error = append_byte(writer, std::byte{0x18})) {
+            return error;
+        }
         if (const auto error = append_varint(writer, new_connection_id->sequence_number)) {
             return error;
         }
-        append_varint_unchecked(writer, new_connection_id->retire_prior_to);
-        writer.write_byte(static_cast<std::byte>(new_connection_id->connection_id.size()));
-        writer.write_bytes(new_connection_id->connection_id);
-        writer.write_bytes(new_connection_id->stateless_reset_token);
+        if (const auto error = append_varint(writer, new_connection_id->retire_prior_to)) {
+            return error;
+        }
+        if (const auto error = append_byte(
+                writer, static_cast<std::byte>(new_connection_id->connection_id.size()))) {
+            return error;
+        }
+        if (const auto error = append_bytes(writer, new_connection_id->connection_id)) {
+            return error;
+        }
+        if (const auto error = append_bytes(writer, new_connection_id->stateless_reset_token)) {
+            return error;
+        }
         return std::nullopt;
     }
 
@@ -744,39 +796,57 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
     }
 
     if (const auto *path_challenge = std::get_if<PathChallengeFrame>(&frame)) {
-        writer.write_byte(std::byte{0x1a});
-        writer.write_bytes(path_challenge->data);
+        if (const auto error = append_byte(writer, std::byte{0x1a})) {
+            return error;
+        }
+        if (const auto error = append_bytes(writer, path_challenge->data)) {
+            return error;
+        }
         return std::nullopt;
     }
 
     if (const auto *path_response = std::get_if<PathResponseFrame>(&frame)) {
-        writer.write_byte(std::byte{0x1b});
-        writer.write_bytes(path_response->data);
+        if (const auto error = append_byte(writer, std::byte{0x1b})) {
+            return error;
+        }
+        if (const auto error = append_bytes(writer, path_response->data)) {
+            return error;
+        }
         return std::nullopt;
     }
 
     if (const auto *transport_close = std::get_if<TransportConnectionCloseFrame>(&frame)) {
-        writer.write_byte(std::byte{0x1c});
+        if (const auto error = append_byte(writer, std::byte{0x1c})) {
+            return error;
+        }
         if (const auto error = append_varint(writer, transport_close->error_code)) {
             return error;
         }
         if (const auto error = append_varint(writer, transport_close->frame_type)) {
             return error;
         }
-        append_exact_length_bytes(writer, transport_close->reason.bytes);
+        if (const auto error = append_exact_length_bytes(writer, transport_close->reason.bytes)) {
+            return error;
+        }
         return std::nullopt;
     }
 
     if (const auto *application_close = std::get_if<ApplicationConnectionCloseFrame>(&frame)) {
-        writer.write_byte(std::byte{0x1d});
+        if (const auto error = append_byte(writer, std::byte{0x1d})) {
+            return error;
+        }
         if (const auto error = append_varint(writer, application_close->error_code)) {
             return error;
         }
-        append_exact_length_bytes(writer, application_close->reason.bytes);
+        if (const auto error = append_exact_length_bytes(writer, application_close->reason.bytes)) {
+            return error;
+        }
         return std::nullopt;
     }
 
-    writer.write_byte(std::byte{0x1e});
+    if (const auto error = append_byte(writer, std::byte{0x1e})) {
+        return error;
+    }
     return std::nullopt;
 }
 
@@ -784,18 +854,44 @@ std::optional<CodecError> serialize_frame_into(BufferWriter &writer, const Frame
 
 CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
     BufferWriter writer;
-    if (const auto error = serialize_frame_into(writer, frame)) {
+    if (const auto error = serialize_frame_into_writer(writer, frame)) {
         return failure_result(error->code, error->offset);
     }
 
     return CodecResult<std::vector<std::byte>>::success(writer.bytes());
 }
 
+CodecResult<std::size_t> serialized_frame_size(const Frame &frame) {
+    CountingBufferWriter writer;
+    if (const auto error = serialize_frame_into_writer(writer, frame)) {
+        return CodecResult<std::size_t>::failure(error->code, error->offset);
+    }
+
+    return CodecResult<std::size_t>::success(writer.offset());
+}
+
+CodecResult<std::size_t> serialize_frame_into(std::span<std::byte> output, const Frame &frame) {
+    const auto size = serialized_frame_size(frame);
+    if (!size.has_value()) {
+        return CodecResult<std::size_t>::failure(size.error().code, size.error().offset);
+    }
+    if (output.size() < size.value()) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::truncated_input, 0);
+    }
+
+    SpanBufferWriter writer(output);
+    if (const auto error = serialize_frame_into_writer(writer, frame)) {
+        return CodecResult<std::size_t>::failure(error->code, error->offset);
+    }
+
+    return CodecResult<std::size_t>::success(writer.offset());
+}
+
 CodecResult<std::size_t> append_serialized_frame(std::vector<std::byte> &bytes,
                                                  const Frame &frame) {
     const auto begin = bytes.size();
     BufferWriter writer(&bytes);
-    if (const auto error = serialize_frame_into(writer, frame)) {
+    if (const auto error = serialize_frame_into_writer(writer, frame)) {
         bytes.resize(begin);
         return CodecResult<std::size_t>::failure(error->code, error->offset);
     }

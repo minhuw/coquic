@@ -155,6 +155,8 @@ struct FrameDecodeResult {
 };
 
 CodecResult<std::vector<AckPacketNumberRange>> ack_frame_packet_number_ranges(const AckFrame &ack);
+CodecResult<std::size_t> serialized_frame_size(const Frame &frame);
+CodecResult<std::size_t> serialize_frame_into(std::span<std::byte> output, const Frame &frame);
 CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame);
 CodecResult<std::size_t> append_serialized_frame(std::vector<std::byte> &bytes, const Frame &frame);
 CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> bytes);

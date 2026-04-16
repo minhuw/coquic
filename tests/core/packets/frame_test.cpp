@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -127,6 +128,88 @@ TEST(QuicFrameTest, AppendSerializedFrameMatchesStandaloneSerialization) {
     }
 
     EXPECT_EQ(appended_bytes, standalone_bytes);
+}
+
+TEST(QuicFrameTest, SerializedFrameSizeMatchesStandaloneSerialization) {
+    const std::vector<Frame> frames = {
+        PingFrame{},
+        AckFrame{
+            .largest_acknowledged = 42,
+            .ack_delay = 7,
+            .first_ack_range = 3,
+        },
+        CryptoFrame{
+            .offset = 9,
+            .crypto_data = {std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}},
+        },
+        StreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 9,
+            .offset = 4,
+            .stream_data = {std::byte{0xbb}, std::byte{0xcc}},
+        },
+        ApplicationConnectionCloseFrame{
+            .error_code = 0x1234,
+            .reason =
+                ConnectionCloseReason{
+                    .bytes = {std::byte{0x61}, std::byte{0x62}, std::byte{0x63}},
+                },
+        },
+    };
+
+    for (const auto &frame : frames) {
+        const auto encoded = coquic::quic::serialize_frame(frame);
+        ASSERT_TRUE(encoded.has_value());
+
+        const auto size = coquic::quic::serialized_frame_size(frame);
+        ASSERT_TRUE(size.has_value());
+        EXPECT_EQ(size.value(), encoded.value().size());
+    }
+}
+
+TEST(QuicFrameTest, SerializeFrameIntoSpanMatchesStandaloneSerialization) {
+    const Frame frame = StreamFrame{
+        .fin = true,
+        .has_offset = true,
+        .has_length = true,
+        .stream_id = 9,
+        .offset = 4,
+        .stream_data = {std::byte{0xbb}, std::byte{0xcc}},
+    };
+
+    const auto encoded = coquic::quic::serialize_frame(frame);
+    ASSERT_TRUE(encoded.has_value());
+
+    std::vector<std::byte> output(encoded.value().size() + 3, std::byte{0xee});
+    const auto written = coquic::quic::serialize_frame_into(
+        std::span<std::byte>(output).subspan(1, encoded.value().size()), frame);
+
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(written.value(), encoded.value().size());
+    EXPECT_EQ(output.front(), std::byte{0xee});
+    EXPECT_EQ(output.back(), std::byte{0xee});
+    EXPECT_TRUE(std::equal(encoded.value().begin(), encoded.value().end(), output.begin() + 1));
+}
+
+TEST(QuicFrameTest, SerializeFrameIntoSpanRejectsTooSmallOutputWithoutClobberingPrefix) {
+    const Frame frame = CryptoFrame{
+        .offset = 9,
+        .crypto_data = {std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}},
+    };
+
+    const auto size = coquic::quic::serialized_frame_size(frame);
+    ASSERT_TRUE(size.has_value());
+
+    std::vector<std::byte> output(size.value(), std::byte{0x7f});
+    const auto result = coquic::quic::serialize_frame_into(
+        std::span<std::byte>(output).first(size.value() - 1), frame);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, coquic::quic::CodecErrorCode::truncated_input);
+    EXPECT_TRUE(std::all_of(output.begin(), output.end(),
+                            [](std::byte byte) { return byte == std::byte{0x7f}; }));
 }
 
 TEST(QuicFrameTest, SerializesAndDeserializesPing) {

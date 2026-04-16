@@ -93,6 +93,35 @@ TEST(QuicCoreEndpointTest, EndpointCommandUsesConnectionHandleWithoutLegacyFallb
     EXPECT_FALSE(core.has_failed());
 }
 
+TEST(QuicCoreEndpointTest, SharedSendCommandUsesConnectionHandleWithoutLegacyFallback) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0)));
+
+    const auto result = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreSendSharedStreamData{
+                    .stream_id = 0,
+                    .bytes =
+                        coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("hello")),
+                    .fin = false,
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(result.local_error.has_value());
+    EXPECT_EQ(result.local_error->connection,
+              std::optional<coquic::quic::QuicConnectionHandle>{1u});
+    EXPECT_EQ(result.local_error->code, coquic::quic::QuicCoreLocalErrorCode::invalid_stream_id);
+}
+
 TEST(QuicCoreEndpointTest, EndpointConstructedCoreRejectsLegacyAdvance) {
     coquic::quic::QuicCore core(make_client_endpoint_config());
 

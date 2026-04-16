@@ -62,6 +62,56 @@ TEST(QuicCoreEndpointTest, ConnectionCommandsOnlyAdvanceTheSelectedHandle) {
     EXPECT_EQ(core.connection_count(), 2u);
 }
 
+TEST(QuicCoreEndpointTest, SharedSendCommandProducesSameDatagramAsOwnedSendCommand) {
+    const auto make_ready_core = [] {
+        coquic::quic::QuicCore core(make_client_endpoint_config());
+        static_cast<void>(core.advance_endpoint(
+            coquic::quic::QuicCoreOpenConnection{
+                .connection = make_client_open_config(1),
+                .initial_route_handle = 11,
+            },
+            coquic::quic::test::test_time(0)));
+
+        *core.connections_.at(1).connection = make_connected_client_connection();
+        core.connections_.at(1).route_handle_by_path_id.emplace(0, 11);
+        core.connections_.at(1).path_id_by_route_handle.emplace(11, 0);
+        return core;
+    };
+
+    auto owned_core = make_ready_core();
+    auto shared_core = make_ready_core();
+
+    const auto owned = owned_core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreSendStreamData{
+                    .stream_id = 0,
+                    .bytes = bytes_from_ints({0x68, 0x69, 0x21}),
+                    .fin = true,
+                },
+        },
+        coquic::quic::test::test_time(1));
+    const auto shared = shared_core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreSendSharedStreamData{
+                    .stream_id = 0,
+                    .bytes = coquic::quic::SharedBytes(bytes_from_ints({0x68, 0x69, 0x21})),
+                    .fin = true,
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    const auto owned_sends = send_effects_from(owned);
+    const auto shared_sends = send_effects_from(shared);
+    ASSERT_EQ(owned_sends.size(), shared_sends.size());
+    ASSERT_FALSE(owned_sends.empty());
+    EXPECT_EQ(shared_sends.front().route_handle, owned_sends.front().route_handle);
+    EXPECT_EQ(shared_sends.front().bytes, owned_sends.front().bytes);
+}
+
 TEST(QuicCoreEndpointTest, EndpointTimerExpiredWalksAllDueConnections) {
     coquic::quic::QuicCore core(make_client_endpoint_config());
 

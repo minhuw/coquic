@@ -426,6 +426,8 @@ class QuicConnection {
                                   QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
     StreamStateResult<bool> queue_stream_send(std::uint64_t stream_id,
                                               std::span<const std::byte> bytes, bool fin);
+    StreamStateResult<bool> queue_stream_send_shared(std::uint64_t stream_id, SharedBytes bytes,
+                                                     bool fin);
     StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
     StreamStateResult<bool> queue_stop_sending(LocalStopSendingCommand command);
     CodecResult<bool> request_connection_migration(QuicPathId path_id,
@@ -547,6 +549,10 @@ class QuicConnection {
     CodecResult<StreamState *> get_or_open_receive_stream(std::uint64_t stream_id);
     CodecResult<StreamState *> get_or_open_send_stream(std::uint64_t stream_id);
     CodecResult<StreamState *> get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id);
+    StreamStateResult<bool> queue_stream_send_impl(std::uint64_t stream_id,
+                                                   std::span<const std::byte> owned_bytes,
+                                                   std::optional<SharedBytes> shared_bytes,
+                                                   bool fin);
     PeerStreamOpenLimits peer_stream_open_limits() const;
     bool has_pending_application_send() const;
     bool has_pending_fresh_application_stream_send() const;

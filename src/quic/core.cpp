@@ -941,6 +941,14 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                         result.local_error->connection = entry.handle;
                     }
                 },
+                [&](const QuicCoreSendSharedStreamData &in) {
+                    const auto queued =
+                        entry.connection->queue_stream_send_shared(in.stream_id, in.bytes, in.fin);
+                    if (!queued.has_value()) {
+                        result.local_error = stream_state_error_to_local_error(queued.error());
+                        result.local_error->connection = entry.handle;
+                    }
+                },
                 [&](const QuicCoreResetStream &in) {
                     const auto queued = entry.connection->queue_stream_reset(LocalResetCommand{
                         .stream_id = in.stream_id,
@@ -1159,6 +1167,13 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
             },
             [&](const QuicCoreSendStreamData &in) {
                 const auto queued = connection->queue_stream_send(in.stream_id, in.bytes, in.fin);
+                if (!queued.has_value()) {
+                    result.local_error = stream_state_error_to_local_error(queued.error());
+                }
+            },
+            [&](const QuicCoreSendSharedStreamData &in) {
+                const auto queued =
+                    connection->queue_stream_send_shared(in.stream_id, in.bytes, in.fin);
                 if (!queued.has_value()) {
                     result.local_error = stream_state_error_to_local_error(queued.error());
                 }

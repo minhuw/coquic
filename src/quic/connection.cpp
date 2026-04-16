@@ -1701,10 +1701,12 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
     }
 }
 
-StreamStateResult<bool> QuicConnection::queue_stream_send(std::uint64_t stream_id,
-                                                          std::span<const std::byte> bytes,
-                                                          bool fin) {
-    if (status_ == HandshakeStatus::failed || (bytes.empty() && !fin)) {
+StreamStateResult<bool>
+QuicConnection::queue_stream_send_impl(std::uint64_t stream_id,
+                                       std::span<const std::byte> owned_bytes,
+                                       std::optional<SharedBytes> shared_bytes, bool fin) {
+    if (status_ == HandshakeStatus::failed ||
+        (owned_bytes.empty() && (!shared_bytes.has_value() || shared_bytes->empty()) && !fin)) {
         return StreamStateResult<bool>::success(true);
     }
 
@@ -1723,10 +1725,14 @@ StreamStateResult<bool> QuicConnection::queue_stream_send(std::uint64_t stream_i
         return validated;
     }
 
-    if (!bytes.empty()) {
-        stream->send_buffer.append(bytes);
-        stream->send_flow_control_committed += static_cast<std::uint64_t>(bytes.size());
+    if (shared_bytes.has_value() && !shared_bytes->empty()) {
+        stream->send_buffer.append(*shared_bytes);
+        stream->send_flow_control_committed += static_cast<std::uint64_t>(shared_bytes->size());
+    } else if (!owned_bytes.empty()) {
+        stream->send_buffer.append(owned_bytes);
+        stream->send_flow_control_committed += static_cast<std::uint64_t>(owned_bytes.size());
     }
+
     if (fin) {
         stream->send_final_size = stream->send_flow_control_committed;
         stream->send_fin_state = StreamSendFinState::pending;
@@ -1743,6 +1749,17 @@ StreamStateResult<bool> QuicConnection::queue_stream_send(std::uint64_t stream_i
     }
 
     return StreamStateResult<bool>::success(true);
+}
+
+StreamStateResult<bool> QuicConnection::queue_stream_send(std::uint64_t stream_id,
+                                                          std::span<const std::byte> bytes,
+                                                          bool fin) {
+    return queue_stream_send_impl(stream_id, bytes, std::nullopt, fin);
+}
+
+StreamStateResult<bool> QuicConnection::queue_stream_send_shared(std::uint64_t stream_id,
+                                                                 SharedBytes bytes, bool fin) {
+    return queue_stream_send_impl(stream_id, {}, std::move(bytes), fin);
 }
 
 StreamStateResult<bool> QuicConnection::queue_stream_reset(LocalResetCommand command) {

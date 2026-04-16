@@ -12,6 +12,7 @@
 #include <variant>
 #include <vector>
 
+#include "src/quic/crypto_stream.h"
 #include "src/quic/packet.h"
 #include "src/quic/resumption.h"
 #include "src/quic/tls_adapter.h"
@@ -147,6 +148,12 @@ struct QuicCoreSendStreamData {
     bool fin = false;
 };
 
+struct QuicCoreSendSharedStreamData {
+    std::uint64_t stream_id = 0;
+    SharedBytes bytes;
+    bool fin = false;
+};
+
 struct QuicCoreResetStream {
     std::uint64_t stream_id = 0;
     std::uint64_t application_error_code = 0;
@@ -175,8 +182,8 @@ struct QuicCoreOpenConnection {
 };
 
 using QuicCoreConnectionInput =
-    std::variant<QuicCoreSendStreamData, QuicCoreResetStream, QuicCoreStopSending,
-                 QuicCoreCloseConnection, QuicCoreRequestKeyUpdate,
+    std::variant<QuicCoreSendStreamData, QuicCoreSendSharedStreamData, QuicCoreResetStream,
+                 QuicCoreStopSending, QuicCoreCloseConnection, QuicCoreRequestKeyUpdate,
                  QuicCoreRequestConnectionMigration>;
 
 struct QuicCoreConnectionCommand {
@@ -187,10 +194,11 @@ struct QuicCoreConnectionCommand {
 using QuicCoreEndpointInput = std::variant<QuicCoreOpenConnection, QuicCoreInboundDatagram,
                                            QuicCoreConnectionCommand, QuicCoreTimerExpired>;
 
-using QuicCoreInput = std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
-                                   QuicCoreResetStream, QuicCoreStopSending,
-                                   QuicCoreCloseConnection, QuicCoreRequestKeyUpdate,
-                                   QuicCoreRequestConnectionMigration, QuicCoreTimerExpired>;
+using QuicCoreInput =
+    std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
+                 QuicCoreSendSharedStreamData, QuicCoreResetStream, QuicCoreStopSending,
+                 QuicCoreCloseConnection, QuicCoreRequestKeyUpdate,
+                 QuicCoreRequestConnectionMigration, QuicCoreTimerExpired>;
 
 struct QuicCoreSendDatagram {
     QuicConnectionHandle connection = 0;

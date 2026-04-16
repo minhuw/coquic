@@ -34,6 +34,11 @@ struct PacketSpaceRecoveryTestPeer {
     static std::size_t slot_count(const PacketSpaceRecovery &recovery) {
         return recovery.slots_.size();
     }
+
+    static const SentPacketRecord &slot_packet_at(const PacketSpaceRecovery &recovery,
+                                                  std::size_t slot_index) {
+        return recovery.slots_.at(slot_index).packet;
+    }
 };
 
 } // namespace coquic::quic::test
@@ -644,6 +649,38 @@ TEST(QuicRecoveryTest, RetiringEarlierPacketsDoesNotRenumberLaterHandles) {
     if (packet != nullptr) {
         EXPECT_EQ(packet->packet_number, 2u);
     }
+}
+
+TEST(QuicRecoveryTest, RetiringPacketClearsPayloadStateButKeepsStableSlotAllocation) {
+    PacketSpaceRecovery recovery;
+    SentPacketRecord packet = make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                               coquic::quic::test::test_time(0));
+    packet.crypto_ranges.push_back(ByteRange{
+        .offset = 3,
+        .bytes = coquic::quic::SharedBytes({std::byte{0x01}, std::byte{0x02}, std::byte{0x03}}),
+    });
+    packet.stream_fragments.push_back(coquic::quic::StreamFrameSendFragment{
+        .stream_id = 9,
+        .offset = 12,
+        .bytes = coquic::quic::SharedBytes({std::byte{0x0a}, std::byte{0x0b}}),
+        .fin = true,
+        .consumes_flow_control = true,
+    });
+    packet.max_data_frame = coquic::quic::MaxDataFrame{
+        .maximum_data = 1024,
+    };
+
+    recovery.on_packet_sent(packet);
+    recovery.retire_packet(0);
+
+    EXPECT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_count(recovery), 1u);
+
+    const auto &retired_packet =
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_packet_at(recovery, 0);
+    EXPECT_EQ(retired_packet.packet_number, 0u);
+    EXPECT_TRUE(retired_packet.crypto_ranges.empty());
+    EXPECT_TRUE(retired_packet.stream_fragments.empty());
+    EXPECT_FALSE(retired_packet.max_data_frame.has_value());
 }
 
 TEST(QuicRecoveryTest, PacketHandlesRemainReadableAfterEarlierRetirementCompactsPrefix) {

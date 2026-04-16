@@ -403,6 +403,19 @@ RecoveryPacketHandle PacketSpaceRecovery::packet_handle(const SentPacketLedgerSl
     };
 }
 
+void PacketSpaceRecovery::reclaim_retired_packet_storage(SentPacketRecord &packet) {
+    std::vector<ByteRange>().swap(packet.crypto_ranges);
+    std::vector<ResetStreamFrame>().swap(packet.reset_stream_frames);
+    std::vector<StopSendingFrame>().swap(packet.stop_sending_frames);
+    packet.max_data_frame.reset();
+    std::vector<MaxStreamDataFrame>().swap(packet.max_stream_data_frames);
+    std::vector<MaxStreamsFrame>().swap(packet.max_streams_frames);
+    packet.data_blocked_frame.reset();
+    std::vector<StreamDataBlockedFrame>().swap(packet.stream_data_blocked_frames);
+    std::vector<StreamFrameSendFragment>().swap(packet.stream_fragments);
+    packet.qlog_packet_snapshot.reset();
+}
+
 PacketSpaceRecovery::SentPacketLedgerSlot *
 PacketSpaceRecovery::slot_for_packet_number(std::uint64_t packet_number) {
     return const_cast<SentPacketLedgerSlot *>(
@@ -637,6 +650,7 @@ void PacketSpaceRecovery::retire_packet(RecoveryPacketHandle handle) {
     erase_from_tracked_sets(slot.packet);
     slot.packet.in_flight = false;
     slot.packet.bytes_in_flight = 0;
+    reclaim_retired_packet_storage(slot.packet);
     slot.state = LedgerSlotState::retired;
     slot.acknowledged = true;
     ++compatibility_version_;

@@ -234,6 +234,7 @@ class PacketSpaceRecovery {
     static DeadlineTrackedPacket tracked_packet(const SentPacketRecord &packet);
     static RecoveryPacketHandle packet_handle(const SentPacketLedgerSlot &slot,
                                               std::size_t slot_index);
+    static void reclaim_retired_packet_storage(SentPacketRecord &packet);
     SentPacketLedgerSlot *slot_for_packet_number(std::uint64_t packet_number);
     const SentPacketLedgerSlot *slot_for_packet_number(std::uint64_t packet_number) const;
     SentPacketLedgerSlot *outstanding_slot_for_packet_number(std::uint64_t packet_number);

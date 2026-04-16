@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -64,6 +65,8 @@ derive_initial_packet_keys(EndpointRole local_role, bool for_local_send,
                            const ConnectionId &client_initial_destination_connection_id,
                            std::uint32_t version = kQuicVersion1);
 
+CodecResult<std::reference_wrapper<const PacketProtectionKeys>>
+expand_traffic_secret_cached(const TrafficSecret &secret);
 CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &secret);
 CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secret);
 

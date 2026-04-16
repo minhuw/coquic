@@ -784,27 +784,29 @@ derive_initial_packet_keys(EndpointRole local_role, bool for_local_send,
     return expand_secret(CipherSuite::tls_aes_128_gcm_sha256, directional_secret.value(), version);
 }
 
-CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &secret) {
+CodecResult<std::reference_wrapper<const PacketProtectionKeys>>
+expand_traffic_secret_cached(const TrafficSecret &secret) {
     if (secret.cached_packet_protection_keys.has_value() &&
         secret.cached_packet_protection_inputs.has_value()) {
         const auto &cached_inputs = secret.cached_packet_protection_inputs.value();
         if (cached_inputs.secret == secret.secret &&
             cached_inputs.header_protection_key == secret.header_protection_key &&
             cached_inputs.quic_version == secret.quic_version) {
-            return CodecResult<PacketProtectionKeys>::success(
-                secret.cached_packet_protection_keys.value());
+            return CodecResult<std::reference_wrapper<const PacketProtectionKeys>>::success(
+                std::cref(secret.cached_packet_protection_keys.value()));
         }
     }
 
     auto keys = expand_secret(secret.cipher_suite, secret.secret, secret.quic_version);
     if (!keys.has_value()) {
-        return keys;
+        return CodecResult<std::reference_wrapper<const PacketProtectionKeys>>::failure(
+            keys.error().code, keys.error().offset);
     }
 
     const auto hp_key = derive_header_protection_key(secret);
     if (!hp_key.has_value()) {
-        return CodecResult<PacketProtectionKeys>::failure(hp_key.error().code,
-                                                          hp_key.error().offset);
+        return CodecResult<std::reference_wrapper<const PacketProtectionKeys>>::failure(
+            hp_key.error().code, hp_key.error().offset);
     }
 
     auto expanded = keys.value();
@@ -815,7 +817,18 @@ CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &sec
         .header_protection_key = secret.header_protection_key,
         .quic_version = secret.quic_version,
     };
-    return CodecResult<PacketProtectionKeys>::success(secret.cached_packet_protection_keys.value());
+    return CodecResult<std::reference_wrapper<const PacketProtectionKeys>>::success(
+        std::cref(secret.cached_packet_protection_keys.value()));
+}
+
+CodecResult<PacketProtectionKeys> expand_traffic_secret(const TrafficSecret &secret) {
+    const auto cached = expand_traffic_secret_cached(secret);
+    if (!cached.has_value()) {
+        return CodecResult<PacketProtectionKeys>::failure(cached.error().code,
+                                                          cached.error().offset);
+    }
+
+    return CodecResult<PacketProtectionKeys>::success(cached.value().get());
 }
 
 CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secret) {

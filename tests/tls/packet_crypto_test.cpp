@@ -387,6 +387,27 @@ TEST(QuicPacketCryptoTest, ExpandTrafficSecretReusesCachedKeysAcrossCalls) {
     EXPECT_EQ(second.value().hp_key, first.value().hp_key);
 }
 
+TEST(QuicPacketCryptoTest, ExpandTrafficSecretCachedReusesStableKeyStorageAcrossCalls) {
+    const coquic::quic::TrafficSecret secret{
+        .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+        .secret = make_secret(32),
+    };
+
+    const auto first = coquic::quic::expand_traffic_secret_cached(secret);
+    ASSERT_TRUE(first.has_value());
+
+    const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
+        coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_context_new, 1);
+
+    const auto second = coquic::quic::expand_traffic_secret_cached(secret);
+    ASSERT_TRUE(second.has_value());
+    const auto *const cached_packet_protection_keys =
+        secret.cached_packet_protection_keys ? &*secret.cached_packet_protection_keys : nullptr;
+    ASSERT_NE(cached_packet_protection_keys, nullptr);
+    EXPECT_EQ(&first.value().get(), cached_packet_protection_keys);
+    EXPECT_EQ(&second.value().get(), &first.value().get());
+}
+
 TEST(QuicPacketCryptoTest, ExpandTrafficSecretRefreshesCacheWhenHeaderProtectionKeyChanges) {
     coquic::quic::TrafficSecret secret{
         .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,

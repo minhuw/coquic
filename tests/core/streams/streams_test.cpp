@@ -185,6 +185,65 @@ TEST(QuicStreamsTest, TakeSendFragmentsCarriesFinOnFinalFragment) {
     EXPECT_TRUE(fragments[0].fin);
 }
 
+TEST(QuicStreamsTest, TakeSendFragmentsPrimesStreamFrameHeaderCache) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/9, EndpointRole::client);
+    state.send_buffer.append(bytes_from_string("hello"));
+    state.send_flow_control_committed = 5;
+    ASSERT_TRUE(state.validate_local_send(/*fin=*/true).has_value());
+    state.send_final_size = 5;
+    state.send_fin_state = coquic::quic::StreamSendFinState::pending;
+
+    const auto fragments = state.take_send_fragments(/*max_bytes=*/16);
+
+    ASSERT_EQ(fragments.size(), 1u);
+    EXPECT_TRUE(fragments[0].has_cached_stream_frame_header());
+    EXPECT_EQ(std::vector<std::byte>(fragments[0].stream_frame_header_bytes().begin(),
+                                     fragments[0].stream_frame_header_bytes().end()),
+              (std::vector<std::byte>{
+                  std::byte{0x0f},
+                  std::byte{0x09},
+                  std::byte{0x00},
+                  std::byte{0x05},
+              }));
+    EXPECT_EQ(fragments[0].stream_frame_wire_size(), 9u);
+}
+
+TEST(QuicStreamsTest, StreamFrameHeaderCacheRefreshesAfterFragmentMutation) {
+    coquic::quic::StreamFrameSendFragment fragment{
+        .stream_id = 9,
+        .offset = 4,
+        .bytes = bytes_from_string("hello"),
+        .fin = true,
+    };
+
+    fragment.prime_stream_frame_header_cache();
+    EXPECT_TRUE(fragment.has_cached_stream_frame_header());
+    EXPECT_EQ(std::vector<std::byte>(fragment.stream_frame_header_bytes().begin(),
+                                     fragment.stream_frame_header_bytes().end()),
+              (std::vector<std::byte>{
+                  std::byte{0x0f},
+                  std::byte{0x09},
+                  std::byte{0x04},
+                  std::byte{0x05},
+              }));
+
+    fragment.offset = 12;
+    fragment.bytes.resize(3);
+    fragment.fin = false;
+
+    EXPECT_FALSE(fragment.has_cached_stream_frame_header());
+    EXPECT_EQ(std::vector<std::byte>(fragment.stream_frame_header_bytes().begin(),
+                                     fragment.stream_frame_header_bytes().end()),
+              (std::vector<std::byte>{
+                  std::byte{0x0e},
+                  std::byte{0x09},
+                  std::byte{0x0c},
+                  std::byte{0x03},
+              }));
+    EXPECT_TRUE(fragment.has_cached_stream_frame_header());
+    EXPECT_EQ(fragment.stream_frame_wire_size(), 7u);
+}
+
 TEST(QuicStreamsTest, TakeSendFragmentsSupportsFinOnlySend) {
     StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
     ASSERT_TRUE(state.validate_local_send(/*fin=*/true).has_value());

@@ -245,7 +245,7 @@ CodecResult<bool> prime_traffic_secret_cache(const std::optional<TrafficSecret> 
         return CodecResult<bool>::success(true);
     }
 
-    const auto expanded = expand_traffic_secret(secret.value());
+    const auto expanded = expand_traffic_secret_cached(secret.value());
     if (!expanded.has_value()) {
         return CodecResult<bool>::failure(expanded.error().code, expanded.error().offset);
     }
@@ -3690,7 +3690,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         return std::nullopt;
     }
 
-    const auto packet = *tracked_packet;
+    auto packet = *tracked_packet;
     std::vector<std::uint64_t> retirement_candidates;
     const auto note_retirement_candidate = [&](std::uint64_t stream_id) {
         if (std::find(retirement_candidates.begin(), retirement_candidates.end(), stream_id) ==
@@ -3778,7 +3778,7 @@ std::optional<SentPacketRecord> QuicConnection::mark_lost_packet(PacketSpaceStat
         return std::nullopt;
     }
 
-    const auto packet = *tracked_packet;
+    auto packet = *tracked_packet;
     if (packet_space_is_application(packet_space, application_space_)) {
         congestion_controller_.on_packets_lost(std::span<const SentPacketRecord>(&packet, 1));
         if (current_send_path_id_.has_value()) {
@@ -7066,6 +7066,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                             };
                             last_fragment.bytes.resize(last_fragment.bytes.size() - trim_bytes);
                             last_fragment.fin = false;
+                            last_fragment.prime_stream_frame_header_cache();
+                            tail_fragment.prime_stream_frame_header_cache();
                             restore_probe_fragment(tail_fragment);
                         }
                     }
@@ -7534,6 +7536,8 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                             };
                             last_fragment.bytes.resize(last_fragment.bytes.size() - trim_bytes);
                             last_fragment.fin = false;
+                            last_fragment.prime_stream_frame_header_cache();
+                            tail_fragment.prime_stream_frame_header_cache();
                             restore_application_fragment(tail_fragment);
                         }
                     }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -89,6 +90,17 @@ struct StreamFrameSendFragment {
     SharedBytes bytes;
     bool fin = false;
     bool consumes_flow_control = false;
+    mutable std::array<std::byte, 25> cached_stream_frame_header_bytes{};
+    mutable std::size_t cached_stream_frame_header_length = 0;
+    mutable std::uint64_t cached_stream_frame_header_stream_id = 0;
+    mutable std::uint64_t cached_stream_frame_header_offset = 0;
+    mutable std::size_t cached_stream_frame_header_payload_size = 0;
+    mutable bool cached_stream_frame_header_fin = false;
+
+    bool has_cached_stream_frame_header() const;
+    void prime_stream_frame_header_cache() const;
+    std::span<const std::byte> stream_frame_header_bytes() const;
+    std::size_t stream_frame_wire_size() const;
 };
 
 struct StreamSendBudget {

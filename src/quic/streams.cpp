@@ -60,6 +60,53 @@ bool stream_data_blocked_frame_matches(const std::optional<StreamDataBlockedFram
 
 } // namespace
 
+bool StreamFrameSendFragment::has_cached_stream_frame_header() const {
+    return cached_stream_frame_header_length != 0 &&
+           cached_stream_frame_header_stream_id == stream_id &&
+           cached_stream_frame_header_offset == offset &&
+           cached_stream_frame_header_payload_size == bytes.size() &&
+           cached_stream_frame_header_fin == fin;
+}
+
+void StreamFrameSendFragment::prime_stream_frame_header_cache() const {
+    if (has_cached_stream_frame_header()) {
+        return;
+    }
+
+    std::size_t header_offset = 0;
+    cached_stream_frame_header_bytes[header_offset++] =
+        std::byte{static_cast<std::uint8_t>(0x0e | (fin ? 0x01u : 0x00u))};
+
+    const auto append_varint = [&](std::uint64_t value) {
+        const auto written =
+            encode_varint_into(
+                std::span<std::byte>(cached_stream_frame_header_bytes).subspan(header_offset),
+                value)
+                .value();
+        header_offset += written;
+    };
+    append_varint(stream_id);
+    append_varint(offset);
+    append_varint(bytes.size());
+
+    cached_stream_frame_header_length = header_offset;
+    cached_stream_frame_header_stream_id = stream_id;
+    cached_stream_frame_header_offset = offset;
+    cached_stream_frame_header_payload_size = bytes.size();
+    cached_stream_frame_header_fin = fin;
+}
+
+std::span<const std::byte> StreamFrameSendFragment::stream_frame_header_bytes() const {
+    prime_stream_frame_header_cache();
+    return std::span<const std::byte>(cached_stream_frame_header_bytes.data(),
+                                      cached_stream_frame_header_length);
+}
+
+std::size_t StreamFrameSendFragment::stream_frame_wire_size() const {
+    prime_stream_frame_header_cache();
+    return cached_stream_frame_header_length + bytes.size();
+}
+
 StreamIdInfo classify_stream_id(std::uint64_t stream_id, EndpointRole local_role) {
     const auto initiator_bit = (stream_id & 0x01u);
     const auto direction_bit = (stream_id & 0x02u);
@@ -473,6 +520,7 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
             .fin = fin,
             .consumes_flow_control = consumes_flow_control,
         });
+        fragments.back().prime_stream_frame_header_cache();
         if (fin) {
             send_fin_state = StreamSendFinState::sent;
         }
@@ -518,6 +566,7 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
             .fin = true,
             .consumes_flow_control = false,
         });
+        fragments.back().prime_stream_frame_header_cache();
         send_fin_state = StreamSendFinState::sent;
     }
 

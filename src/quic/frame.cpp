@@ -42,7 +42,11 @@ std::optional<CodecError> append_bytes(Writer &writer, std::span<const std::byte
 
 template <typename Writer>
 std::optional<CodecError> append_varint(Writer &writer, std::uint64_t value) {
-    return writer.write_varint(value);
+    auto error = writer.write_varint(value);
+    if (error.has_value() && error->code == CodecErrorCode::invalid_varint) {
+        error->offset = 0;
+    }
+    return error;
 }
 
 template <typename Writer>

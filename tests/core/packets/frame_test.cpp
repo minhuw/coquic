@@ -60,6 +60,14 @@ void expect_serialize_error(const Frame &frame, CodecErrorCode code) {
     EXPECT_EQ(encoded.error().code, code);
 }
 
+void expect_serialize_error_with_offset(const Frame &frame, CodecErrorCode code,
+                                        std::size_t offset) {
+    const auto encoded = coquic::quic::serialize_frame(frame);
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, code);
+    EXPECT_EQ(encoded.error().offset, offset);
+}
+
 TEST(QuicFrameTest, AppendSerializedFrameMatchesStandaloneSerialization) {
     const std::vector<Frame> frames = {
         AckFrame{
@@ -1306,6 +1314,30 @@ TEST(QuicFrameTest, RejectsInvalidSerializationInputsAcrossFrameFamilies) {
             .error_code = kInvalidQuicVarInt,
         },
         CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicFrameTest, PreserveInvalidVarintOffsetForResetStreamSerialization) {
+    expect_serialize_error_with_offset(
+        ResetStreamFrame{
+            .stream_id = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint, 0);
+}
+
+TEST(QuicFrameTest, PreserveInvalidVarintOffsetForMaxDataSerialization) {
+    expect_serialize_error_with_offset(
+        MaxDataFrame{
+            .maximum_data = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint, 0);
+}
+
+TEST(QuicFrameTest, PreserveInvalidVarintOffsetForApplicationCloseSerialization) {
+    expect_serialize_error_with_offset(
+        ApplicationConnectionCloseFrame{
+            .error_code = kInvalidQuicVarInt,
+        },
+        CodecErrorCode::invalid_varint, 0);
 }
 
 } // namespace

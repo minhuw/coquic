@@ -11,8 +11,17 @@ if [ ! -x ./zig-out/bin/h3-server ]; then
   exit 1
 fi
 
-if ./zig-out/bin/coquic h3-server >/tmp/coquic-h3-server.out 2>&1; then
+stderr_file="$(mktemp)"
+trap 'rm -f "${stderr_file}"' EXIT
+
+if ./zig-out/bin/coquic h3-server >"${stderr_file}" 2>&1; then
   echo "expected coquic h3-server to fail after the standalone split" >&2
+  exit 1
+fi
+
+if ! grep -Fq "usage: coquic [interop-server|interop-client]" "${stderr_file}"; then
+  echo "expected coquic h3-server to fail via top-level coquic usage after dispatch removal" >&2
+  cat "${stderr_file}" >&2
   exit 1
 fi
 

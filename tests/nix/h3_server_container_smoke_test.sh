@@ -10,7 +10,8 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false >/dev/null
+nix develop .#quictls-musl -c \
+  zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false >/dev/null
 
 image_tag="coquic-h3-server:smoke"
 docker build -t "${image_tag}" -f docker/h3-server/Dockerfile .

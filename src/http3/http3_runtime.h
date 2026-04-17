@@ -47,9 +47,13 @@ struct Http3RuntimeTransferJob {
 };
 
 std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv);
+std::optional<Http3RuntimeConfig> parse_http3_server_args(int argc, char **argv);
+std::optional<Http3RuntimeConfig> parse_http3_client_args(int argc, char **argv);
 quic::QuicCoreEndpointConfig make_http3_client_endpoint_config(const Http3RuntimeConfig &config);
 std::optional<quic::QuicCoreEndpointConfig>
 make_http3_server_endpoint_config(const Http3RuntimeConfig &config);
+int run_http3_server(const Http3RuntimeConfig &config);
+int run_http3_client(const Http3RuntimeConfig &config);
 int run_http3_client_transfers(const Http3RuntimeConfig &config,
                                std::span<const Http3RuntimeTransferJob> jobs);
 int run_http3_runtime(const Http3RuntimeConfig &config);

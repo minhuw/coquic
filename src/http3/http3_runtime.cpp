@@ -30,12 +30,17 @@
 namespace coquic::http3 {
 namespace {
 
-constexpr std::string_view kHttp3UsageLine =
-    "usage: coquic [h3-server|h3-client] [--host HOST] [--port PORT] "
-    "[--bootstrap-port PORT] [--alt-svc-max-age SECONDS] "
-    "[--io-backend socket|io_uring] [--certificate-chain PATH] [--private-key PATH] "
-    "[--document-root PATH] [URL] [--method GET|HEAD|POST] [--header NAME:VALUE] "
-    "[--data TEXT] [--body-file PATH] [--output PATH] [--server-name NAME] [--verify-peer]";
+constexpr std::string_view kHttp3ServerUsageLine =
+    "usage: h3-server [--host HOST] [--port PORT] [--bootstrap-port PORT] "
+    "[--alt-svc-max-age SECONDS] [--io-backend socket|io_uring] "
+    "[--certificate-chain PATH] [--private-key PATH] [--document-root PATH]";
+
+constexpr std::string_view kHttp3ClientUsageLine =
+    "usage: h3-client URL [--method GET|HEAD|POST] [--header NAME:VALUE] "
+    "[--data TEXT] [--body-file PATH] [--output PATH] [--server-name NAME] "
+    "[--verify-peer] [--host HOST] [--port PORT] [--io-backend socket|io_uring]";
+
+enum class Http3CliMode : std::uint8_t { server, client };
 
 struct ParsedHttp3Authority {
     std::string host;
@@ -61,8 +66,9 @@ struct Http3ClientTransferPlan {
     std::filesystem::path output_path;
 };
 
-void print_usage() {
-    std::cerr << kHttp3UsageLine << '\n';
+void print_usage(Http3CliMode mode) {
+    std::cerr << (mode == Http3CliMode::server ? kHttp3ServerUsageLine : kHttp3ClientUsageLine)
+              << '\n';
 }
 
 std::optional<std::string> read_text_file(const std::filesystem::path &path) {
@@ -1191,29 +1197,22 @@ class Http3ClientRuntime {
 
 } // namespace
 
-std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv) {
-    if (argc < 2) {
-        print_usage();
+std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3CliMode mode) {
+    if (argc < 1) {
+        print_usage(mode);
         return std::nullopt;
     }
 
     Http3RuntimeConfig config;
-    const std::string_view subcommand = argv[1];
-    if (subcommand == "h3-server") {
-        config.mode = Http3RuntimeMode::server;
-    } else if (subcommand == "h3-client") {
-        config.mode = Http3RuntimeMode::client;
-    } else {
-        print_usage();
-        return std::nullopt;
-    }
+    config.mode =
+        mode == Http3CliMode::server ? Http3RuntimeMode::server : Http3RuntimeMode::client;
 
-    int index = 2;
+    int index = 1;
     while (index < argc) {
         const std::string_view arg = argv[index++];
         auto require_value = [&](std::string_view) -> std::optional<std::string_view> {
             if (index >= argc) {
-                print_usage();
+                print_usage(mode);
                 return std::nullopt;
             }
             return std::string_view(argv[index++]);
@@ -1238,7 +1237,7 @@ std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv
             }
             const auto port = parse_size_arg(*value);
             if (!port.has_value() || *port > 65535u) {
-                print_usage();
+                print_usage(mode);
                 return std::nullopt;
             }
             config.port = static_cast<std::uint16_t>(*port);
@@ -1251,7 +1250,7 @@ std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv
             }
             const auto port = parse_size_arg(*value);
             if (!port.has_value() || *port > 65535u) {
-                print_usage();
+                print_usage(mode);
                 return std::nullopt;
             }
             config.bootstrap_port = static_cast<std::uint16_t>(*port);
@@ -1264,7 +1263,7 @@ std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv
             }
             const auto max_age = parse_size_arg(*value);
             if (!max_age.has_value()) {
-                print_usage();
+                print_usage(mode);
                 return std::nullopt;
             }
             config.alt_svc_max_age = static_cast<std::uint64_t>(*max_age);
@@ -1277,7 +1276,7 @@ std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv
             }
             const auto kind = parse_io_backend_arg(*value);
             if (!kind.has_value()) {
-                print_usage();
+                print_usage(mode);
                 return std::nullopt;
             }
             config.io_backend = *kind;
@@ -1322,7 +1321,7 @@ std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv
             }
             const auto parsed = parse_header_arg(*value);
             if (!parsed.has_value()) {
-                print_usage();
+                print_usage(mode);
                 return std::nullopt;
             }
             config.headers.push_back(*parsed);
@@ -1334,7 +1333,7 @@ std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv
                 return std::nullopt;
             }
             if (config.body_file_path.has_value()) {
-                print_usage();
+                print_usage(mode);
                 return std::nullopt;
             }
             config.body_text = std::string(*value);
@@ -1346,7 +1345,7 @@ std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv
                 return std::nullopt;
             }
             if (config.body_text.has_value()) {
-                print_usage();
+                print_usage(mode);
                 return std::nullopt;
             }
             config.body_file_path = std::filesystem::path(*value);
@@ -1370,24 +1369,23 @@ std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv
         }
 
         if (arg.starts_with("--")) {
-            print_usage();
+            print_usage(mode);
             return std::nullopt;
         }
 
-        if (config.mode != Http3RuntimeMode::client || !config.url.empty()) {
-            print_usage();
-            return std::nullopt;
+        if (!arg.empty() && arg.front() != '-') {
+            if (mode != Http3CliMode::client || !config.url.empty()) {
+                print_usage(mode);
+                return std::nullopt;
+            }
+            config.url = std::string(arg);
+            continue;
         }
-        config.url = std::string(arg);
     }
 
     if (config.mode == Http3RuntimeMode::client) {
-        if (config.url.empty()) {
-            print_usage();
-            return std::nullopt;
-        }
-        if (!make_client_execution_plan(config).has_value()) {
-            print_usage();
+        if (config.url.empty() || !make_client_execution_plan(config).has_value()) {
+            print_usage(mode);
             return std::nullopt;
         }
     } else if (config.bootstrap_port == 0) {
@@ -1395,6 +1393,32 @@ std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv
     }
 
     return config;
+}
+
+std::optional<Http3RuntimeConfig> parse_http3_server_args(int argc, char **argv) {
+    return parse_http3_args(argc, argv, Http3CliMode::server);
+}
+
+std::optional<Http3RuntimeConfig> parse_http3_client_args(int argc, char **argv) {
+    return parse_http3_args(argc, argv, Http3CliMode::client);
+}
+
+std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv) {
+    if (argc < 2) {
+        print_usage(Http3CliMode::server);
+        return std::nullopt;
+    }
+
+    const std::string_view subcommand = argv[1];
+    if (subcommand == "h3-server") {
+        return parse_http3_server_args(argc - 1, argv + 1);
+    }
+    if (subcommand == "h3-client") {
+        return parse_http3_client_args(argc - 1, argv + 1);
+    }
+
+    print_usage(Http3CliMode::server);
+    return std::nullopt;
 }
 
 quic::QuicCoreEndpointConfig make_http3_client_endpoint_config(const Http3RuntimeConfig &config) {
@@ -1452,61 +1476,61 @@ int run_http3_client_transfers(const Http3RuntimeConfig &config,
     return runtime.run();
 }
 
-int run_http3_runtime(const Http3RuntimeConfig &config) {
-    if (config.mode == Http3RuntimeMode::server) {
-        const auto endpoint = make_http3_server_endpoint_config(config);
-        if (!endpoint.has_value()) {
-            return 1;
-        }
+int run_http3_server(const Http3RuntimeConfig &config) {
+    const auto endpoint = make_http3_server_endpoint_config(config);
+    if (!endpoint.has_value()) {
+        return 1;
+    }
 
-        auto bootstrap = io::bootstrap_server_io_backend(
-            io::QuicIoBackendBootstrapConfig{
-                .kind = config.io_backend,
-                .backend =
-                    io::QuicUdpBackendConfig{
-                        .role_name = "h3-server",
-                        .idle_timeout_ms = 1000,
-                    },
-            },
-            config.host, std::span<const std::uint16_t>(&config.port, 1));
-        if (!bootstrap.has_value()) {
-            return 1;
-        }
+    auto bootstrap = io::bootstrap_server_io_backend(
+        io::QuicIoBackendBootstrapConfig{
+            .kind = config.io_backend,
+            .backend =
+                io::QuicUdpBackendConfig{
+                    .role_name = "h3-server",
+                    .idle_timeout_ms = 1000,
+                },
+        },
+        config.host, std::span<const std::uint16_t>(&config.port, 1));
+    if (!bootstrap.has_value()) {
+        return 1;
+    }
 
-        std::optional<std::future<int>> bootstrap_result;
-        std::optional<std::thread> bootstrap_thread;
-        std::atomic<bool> bootstrap_stop_requested = false;
-        if (config.enable_bootstrap) {
-            const auto bootstrap_config = make_http3_bootstrap_config(config);
-            std::packaged_task<int()> bootstrap_task(std::bind(
-                run_http3_bootstrap_server_guarded, bootstrap_config, &bootstrap_stop_requested));
-            bootstrap_result.emplace(bootstrap_task.get_future());
-            bootstrap_thread.emplace(std::move(bootstrap_task));
-            std::this_thread::sleep_for(std::chrono::milliseconds{100});
-            if (bootstrap_result->wait_for(std::chrono::milliseconds{0}) ==
-                std::future_status::ready) {
-                const int bootstrap_exit_code = bootstrap_result->get();
-                bootstrap_thread->join();
+    std::optional<std::future<int>> bootstrap_result;
+    std::optional<std::thread> bootstrap_thread;
+    std::atomic<bool> bootstrap_stop_requested = false;
+    if (config.enable_bootstrap) {
+        const auto bootstrap_config = make_http3_bootstrap_config(config);
+        std::packaged_task<int()> bootstrap_task(std::bind(
+            run_http3_bootstrap_server_guarded, bootstrap_config, &bootstrap_stop_requested));
+        bootstrap_result.emplace(bootstrap_task.get_future());
+        bootstrap_thread.emplace(std::move(bootstrap_task));
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        if (bootstrap_result->wait_for(std::chrono::milliseconds{0}) == std::future_status::ready) {
+            const int bootstrap_exit_code = bootstrap_result->get();
+            bootstrap_thread->join();
+            return bootstrap_exit_code;
+        }
+    }
+
+    Http3ServerRuntime runtime(config, *endpoint, std::move(bootstrap->backend));
+    const int runtime_exit_code = runtime.run();
+
+    if (bootstrap_thread.has_value()) {
+        bootstrap_stop_requested.store(true, std::memory_order_relaxed);
+        bootstrap_thread->join();
+        if (bootstrap_result.has_value() && bootstrap_result->valid()) {
+            const int bootstrap_exit_code = bootstrap_result->get();
+            if (runtime_exit_code == 0) {
                 return bootstrap_exit_code;
             }
         }
-
-        Http3ServerRuntime runtime(config, *endpoint, std::move(bootstrap->backend));
-        const int runtime_exit_code = runtime.run();
-
-        if (bootstrap_thread.has_value()) {
-            bootstrap_stop_requested.store(true, std::memory_order_relaxed);
-            bootstrap_thread->join();
-            if (bootstrap_result.has_value() && bootstrap_result->valid()) {
-                const int bootstrap_exit_code = bootstrap_result->get();
-                if (runtime_exit_code == 0) {
-                    return bootstrap_exit_code;
-                }
-            }
-        }
-        return runtime_exit_code;
     }
 
+    return runtime_exit_code;
+}
+
+int run_http3_client(const Http3RuntimeConfig &config) {
     std::filesystem::path output_path;
     if (config.output_path.has_value()) {
         output_path = *config.output_path;
@@ -1521,21 +1545,12 @@ int run_http3_runtime(const Http3RuntimeConfig &config) {
         .url = config.url,
         .output_path = output_path,
     }};
+    return run_http3_client_transfers(config, jobs);
+}
 
-    const int transfer_result = run_http3_client_transfers(config, jobs);
-    if (transfer_result != 0 || config.output_path.has_value()) {
-        return transfer_result;
-    }
-
-    const auto body = read_binary_file(output_path);
-    std::error_code ignored;
-    std::filesystem::remove(output_path, ignored);
-    if (!body.has_value() || body->empty()) {
-        return body.has_value() ? 0 : 1;
-    }
-    std::cout.write(reinterpret_cast<const char *>(body->data()),
-                    static_cast<std::streamsize>(body->size()));
-    return static_cast<bool>(std::cout) ? 0 : 1;
+int run_http3_runtime(const Http3RuntimeConfig &config) {
+    return config.mode == Http3RuntimeMode::server ? run_http3_server(config)
+                                                   : run_http3_client(config);
 }
 
 } // namespace coquic::http3

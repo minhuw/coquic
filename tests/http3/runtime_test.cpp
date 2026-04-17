@@ -378,6 +378,75 @@ TEST(QuicHttp3RuntimeTest, ParsesClientInvocation) {
     EXPECT_EQ(parsed.server_name, "localhost");
 }
 
+TEST(QuicHttp3RuntimeTest, ParsesStandaloneServerInvocation) {
+    const char *argv[] = {
+        "h3-server",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9443",
+        "--bootstrap-port",
+        "9443",
+        "--alt-svc-max-age",
+        "120",
+        "--document-root",
+        "site",
+        "--certificate-chain",
+        "tests/fixtures/quic-server-cert.pem",
+        "--private-key",
+        "tests/fixtures/quic-server-key.pem",
+    };
+
+    const auto config = coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                               const_cast<char **>(argv));
+
+    ASSERT_TRUE(config.has_value());
+    if (!config.has_value()) {
+        return;
+    }
+    const auto &parsed = config.value();
+    EXPECT_EQ(parsed.mode, coquic::http3::Http3RuntimeMode::server);
+    EXPECT_EQ(parsed.host, "127.0.0.1");
+    EXPECT_EQ(parsed.port, 9443);
+    EXPECT_EQ(parsed.bootstrap_port, 9443);
+    EXPECT_EQ(parsed.alt_svc_max_age, 120u);
+    EXPECT_EQ(parsed.document_root, std::filesystem::path("site"));
+}
+
+TEST(QuicHttp3RuntimeTest, ParsesStandaloneClientInvocation) {
+    const char *argv[] = {
+        "h3-client",     "https://localhost:9443/_coquic/echo",
+        "--method",      "POST",
+        "--header",      "x-test: 1",
+        "--data",        "ping",
+        "--output",      "reply.bin",
+        "--server-name", "localhost",
+    };
+
+    const auto config = coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                               const_cast<char **>(argv));
+
+    ASSERT_TRUE(config.has_value());
+    if (!config.has_value()) {
+        return;
+    }
+    const auto &parsed = config.value();
+    EXPECT_EQ(parsed.mode, coquic::http3::Http3RuntimeMode::client);
+    EXPECT_EQ(parsed.url, "https://localhost:9443/_coquic/echo");
+    EXPECT_EQ(parsed.method, "POST");
+    ASSERT_TRUE(parsed.body_text.has_value());
+    if (!parsed.body_text.has_value()) {
+        return;
+    }
+    EXPECT_EQ(*parsed.body_text, "ping");
+    ASSERT_TRUE(parsed.output_path.has_value());
+    if (!parsed.output_path.has_value()) {
+        return;
+    }
+    EXPECT_EQ(*parsed.output_path, std::filesystem::path("reply.bin"));
+    EXPECT_EQ(parsed.server_name, "localhost");
+}
+
 TEST(QuicHttp3RuntimeTest, CoreEndpointConfigsUseH3Alpn) {
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -17,6 +18,23 @@ namespace coquic::quic {
 struct ByteRange {
     std::uint64_t offset = 0;
     SharedBytes bytes;
+};
+
+struct ContiguousReceiveBytes {
+    SharedBytes shared;
+    std::vector<std::byte> owned;
+
+    bool empty() const {
+        return shared.empty() && owned.empty();
+    }
+
+    std::span<const std::byte> span() const {
+        return shared.empty() ? std::span<const std::byte>(owned) : shared.span();
+    }
+
+    std::vector<std::byte> to_vector() const {
+        return shared.empty() ? owned : shared.to_vector();
+    }
 };
 
 class ReliableSendBuffer {
@@ -65,15 +83,18 @@ class ReliableSendBuffer {
 
 class ReliableReceiveBuffer {
   public:
+    CodecResult<ContiguousReceiveBytes> push_shared(std::uint64_t offset, SharedBytes bytes);
+    CodecResult<std::vector<std::byte>> push(std::uint64_t offset, std::vector<std::byte> &&bytes);
     CodecResult<std::vector<std::byte>> push(std::uint64_t offset,
                                              std::span<const std::byte> bytes);
 
   private:
-    void buffer_range(std::uint64_t offset, std::span<const std::byte> bytes);
+    void buffer_range(std::uint64_t offset, SharedBytes bytes);
+    ContiguousReceiveBytes take_contiguous_buffered_bytes(ContiguousReceiveBytes contiguous);
     std::vector<std::byte> take_contiguous_buffered_bytes();
 
     std::uint64_t next_contiguous_offset_ = 0;
-    std::map<std::uint64_t, std::vector<std::byte>> buffered_bytes_;
+    std::map<std::uint64_t, SharedBytes> buffered_bytes_;
 };
 
 class CryptoSendBuffer {

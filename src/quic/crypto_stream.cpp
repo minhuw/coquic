@@ -5,19 +5,22 @@
 #include <cstdint>
 #include <iterator>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace {
 
 using coquic::quic::CodecErrorCode;
 using coquic::quic::CodecResult;
+using coquic::quic::ContiguousReceiveBytes;
 using coquic::quic::CryptoFrame;
 using coquic::quic::ReliableSendBuffer;
+using coquic::quic::SharedBytes;
 
 constexpr std::uint64_t maximum_stream_offset = (std::uint64_t{1} << 62) - 1;
 
-CodecResult<std::vector<std::byte>> crypto_stream_failure() {
-    return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
+template <typename T> CodecResult<T> crypto_stream_failure() {
+    return CodecResult<T>::failure(CodecErrorCode::invalid_varint, 0);
 }
 
 std::uint64_t range_end(std::uint64_t offset, std::size_t length) {
@@ -27,6 +30,31 @@ std::uint64_t range_end(std::uint64_t offset, std::size_t length) {
     }
 
     return offset + static_cast<std::uint64_t>(length);
+}
+
+void append_contiguous_segment(ContiguousReceiveBytes &contiguous, SharedBytes bytes) {
+    if (bytes.empty()) {
+        return;
+    }
+
+    if (contiguous.shared.empty() && contiguous.owned.empty()) {
+        contiguous.shared = std::move(bytes);
+        return;
+    }
+
+    if (!contiguous.shared.empty()) {
+        if (contiguous.shared.storage() == bytes.storage() &&
+            contiguous.shared.end_offset() == bytes.begin_offset()) {
+            contiguous.shared =
+                SharedBytes(bytes.storage(), contiguous.shared.begin_offset(), bytes.end_offset());
+            return;
+        }
+
+        contiguous.owned = contiguous.shared.to_vector();
+        contiguous.shared = {};
+    }
+
+    contiguous.owned.insert(contiguous.owned.end(), bytes.begin(), bytes.end());
 }
 
 } // namespace
@@ -374,26 +402,46 @@ bool CryptoSendBuffer::empty() const {
     return !reliable_.has_pending_data();
 }
 
-CodecResult<std::vector<std::byte>> ReliableReceiveBuffer::push(std::uint64_t offset,
-                                                                std::span<const std::byte> bytes) {
+CodecResult<ContiguousReceiveBytes> ReliableReceiveBuffer::push_shared(std::uint64_t offset,
+                                                                       SharedBytes bytes) {
     if (bytes.empty()) {
-        return CodecResult<std::vector<std::byte>>::success({});
+        return CodecResult<ContiguousReceiveBytes>::success({});
     }
     if (offset > maximum_stream_offset || bytes.size() - 1 > maximum_stream_offset - offset) {
-        return crypto_stream_failure();
+        return crypto_stream_failure<ContiguousReceiveBytes>();
     }
 
     const auto end = range_end(offset, bytes.size());
     const auto start = std::max(offset, next_contiguous_offset_);
     if (start < end) {
-        const auto buffer_offset = static_cast<std::size_t>(start - offset);
-        buffer_range(start, bytes.subspan(buffer_offset));
+        buffer_range(start, bytes.subspan(static_cast<std::size_t>(start - offset)));
     }
 
-    return CodecResult<std::vector<std::byte>>::success(take_contiguous_buffered_bytes());
+    return CodecResult<ContiguousReceiveBytes>::success(take_contiguous_buffered_bytes({}));
 }
 
-void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, std::span<const std::byte> bytes) {
+CodecResult<std::vector<std::byte>> ReliableReceiveBuffer::push(std::uint64_t offset,
+                                                                std::vector<std::byte> &&bytes) {
+    auto received = push_shared(offset, SharedBytes(std::move(bytes)));
+    if (!received.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(received.error().code,
+                                                            received.error().offset);
+    }
+
+    return CodecResult<std::vector<std::byte>>::success(received.value().to_vector());
+}
+
+CodecResult<std::vector<std::byte>> ReliableReceiveBuffer::push(std::uint64_t offset,
+                                                                std::span<const std::byte> bytes) {
+    if (bytes.empty()) {
+        return CodecResult<std::vector<std::byte>>::success({});
+    }
+
+    auto owned = std::vector<std::byte>(bytes.begin(), bytes.end());
+    return push(offset, std::move(owned));
+}
+
+void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, SharedBytes bytes) {
     if (bytes.empty()) {
         return;
     }
@@ -422,9 +470,7 @@ void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, std::span<const s
         if (cursor < next_gap_end) {
             const auto begin_index = static_cast<std::size_t>(cursor - offset);
             const auto byte_count = static_cast<std::size_t>(next_gap_end - cursor);
-            const auto begin = bytes.begin() + static_cast<std::ptrdiff_t>(begin_index);
-            const auto end_it = begin + static_cast<std::ptrdiff_t>(byte_count);
-            buffered_bytes_.emplace(cursor, std::vector<std::byte>(begin, end_it));
+            buffered_bytes_.emplace(cursor, bytes.subspan(begin_index, byte_count));
             cursor = next_gap_end;
             continue;
         }
@@ -441,9 +487,8 @@ void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, std::span<const s
     }
 }
 
-std::vector<std::byte> ReliableReceiveBuffer::take_contiguous_buffered_bytes() {
-    std::vector<std::byte> contiguous;
-
+ContiguousReceiveBytes
+ReliableReceiveBuffer::take_contiguous_buffered_bytes(ContiguousReceiveBytes contiguous) {
     while (!buffered_bytes_.empty()) {
         auto next = buffered_bytes_.begin();
         const auto segment_offset = next->first;
@@ -455,9 +500,7 @@ std::vector<std::byte> ReliableReceiveBuffer::take_contiguous_buffered_bytes() {
         const auto already_delivered =
             static_cast<std::size_t>(next_contiguous_offset_ - segment_offset);
         if (already_delivered < next->second.size()) {
-            contiguous.insert(contiguous.end(),
-                              next->second.begin() + static_cast<std::ptrdiff_t>(already_delivered),
-                              next->second.end());
+            append_contiguous_segment(contiguous, next->second.subspan(already_delivered));
             next_contiguous_offset_ = segment_end;
         }
 
@@ -465,6 +508,10 @@ std::vector<std::byte> ReliableReceiveBuffer::take_contiguous_buffered_bytes() {
     }
 
     return contiguous;
+}
+
+std::vector<std::byte> ReliableReceiveBuffer::take_contiguous_buffered_bytes() {
+    return take_contiguous_buffered_bytes({}).to_vector();
 }
 
 CodecResult<std::vector<std::byte>> CryptoReceiveBuffer::push(std::uint64_t offset,

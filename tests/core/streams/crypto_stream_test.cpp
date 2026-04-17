@@ -470,6 +470,46 @@ TEST(QuicCryptoStreamTest, ReceiveBufferReturnsOnlyUndeliveredTailOfOverlappingW
     EXPECT_EQ(second.value(), bytes_from_string("ef"));
 }
 
+TEST(QuicCryptoStreamTest, ReceiveBufferSharedPushReturnsAliasedInOrderStorage) {
+    ReliableReceiveBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcd"));
+
+    const auto released = buffer.push_shared(0, SharedBytes(storage, 0, 4));
+
+    ASSERT_TRUE(released.has_value());
+    EXPECT_EQ(
+        std::vector<std::byte>(released.value().span().begin(), released.value().span().end()),
+        bytes_from_string("abcd"));
+    EXPECT_EQ(released.value().shared.storage().get(), storage.get());
+    EXPECT_TRUE(released.value().owned.empty());
+    EXPECT_TRUE(buffer.buffered_bytes_.empty());
+}
+
+TEST(QuicCryptoStreamTest, ReceiveBufferSharedPushPreservesBufferedStorageWithoutCloning) {
+    ReliableReceiveBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcdef"));
+
+    ASSERT_TRUE(buffer.push_shared(3, SharedBytes(storage, 3, 6)).has_value());
+
+    ASSERT_EQ(buffer.buffered_bytes_.size(), 1u);
+    EXPECT_EQ(buffer.buffered_bytes_.begin()->first, 3u);
+    EXPECT_EQ(buffer.buffered_bytes_.begin()->second.storage().get(), storage.get());
+    EXPECT_EQ(buffer.buffered_bytes_.begin()->second, bytes_from_string("def"));
+}
+
+TEST(QuicCryptoStreamTest, ReceiveBufferSharedPushCoalescesSeparateStorageOnlyAtDelivery) {
+    ReliableReceiveBuffer buffer;
+    auto early = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcd"));
+    auto late = std::make_shared<std::vector<std::byte>>(bytes_from_string("ef"));
+
+    ASSERT_TRUE(buffer.push_shared(4, SharedBytes(late, 0, 2)).has_value());
+    const auto released = buffer.push_shared(0, SharedBytes(early, 0, 4));
+
+    ASSERT_TRUE(released.has_value());
+    EXPECT_TRUE(released.value().shared.empty());
+    EXPECT_EQ(released.value().owned, bytes_from_string("abcdef"));
+}
+
 TEST(QuicCryptoStreamTest, ReceiveBufferReleasesOnlyContiguousBytes) {
     CryptoReceiveBuffer buffer;
 
@@ -537,11 +577,11 @@ TEST(QuicCryptoStreamTest, ReceiveBufferStoresOutOfOrderBufferedBytesByRangeInst
 TEST(QuicCryptoStreamTest, ReceiveBufferSkipsEmptyAndOverlappingBufferedRanges) {
     ReliableReceiveBuffer buffer;
 
-    buffer.buffer_range(0, {});
+    buffer.buffer_range(0, SharedBytes{});
     EXPECT_TRUE(buffer.buffered_bytes_.empty());
 
-    buffer.buffer_range(0, bytes_from_string("abcd"));
-    buffer.buffer_range(2, bytes_from_string("cde"));
+    buffer.buffer_range(0, SharedBytes(bytes_from_string("abcd")));
+    buffer.buffer_range(2, SharedBytes(bytes_from_string("cde")));
 
     ASSERT_EQ(buffer.buffered_bytes_.size(), 2u);
     EXPECT_EQ(buffer.buffered_bytes_.at(0), bytes_from_string("abcd"));
@@ -555,7 +595,7 @@ TEST(QuicCryptoStreamTest, ReceiveBufferSkipsBufferedRangesAlreadyCoveredByCurso
     buffer.buffered_bytes_.emplace(0, bytes_from_string("abcdef"));
     buffer.buffered_bytes_.emplace(2, bytes_from_string("cd"));
 
-    buffer.buffer_range(1, bytes_from_string("bcdefg"));
+    buffer.buffer_range(1, SharedBytes(bytes_from_string("bcdefg")));
 
     EXPECT_EQ(buffer.take_contiguous_buffered_bytes(), bytes_from_string("abcdefg"));
     EXPECT_TRUE(buffer.buffered_bytes_.empty());

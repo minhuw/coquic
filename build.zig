@@ -390,6 +390,24 @@ pub fn build(b: *std.Build) void {
     exe.linkLibCpp();
     b.installArtifact(exe);
 
+    const h3_server_exe = b.addExecutable(.{
+        .name = "h3-server",
+        .target = target,
+        .optimize = optimize,
+    });
+    h3_server_exe.addIncludePath(b.path("."));
+    h3_server_exe.addCSourceFiles(.{
+        .root = b.path("."),
+        .files = &.{"src/main_h3_server.cpp"},
+        .flags = cpp_flags,
+    });
+    h3_server_exe.linkLibrary(project_lib);
+    linkTlsBackend(b, h3_server_exe, tls_backend, tls_lib_dir, tls_linkage);
+    linkSpdlog(h3_server_exe);
+    linkLiburing(h3_server_exe);
+    h3_server_exe.linkLibCpp();
+    b.installArtifact(h3_server_exe);
+
     const perf_exe = b.addExecutable(.{
         .name = "coquic-perf",
         .target = target,

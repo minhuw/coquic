@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cstdlib>
 
 namespace coquic::quic {
@@ -38,6 +39,109 @@ std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> outp
 }
 
 } // namespace
+
+DatagramBuffer::DatagramBuffer(std::initializer_list<std::byte> bytes) {
+    append(std::span<const std::byte>(bytes.begin(), bytes.size()));
+}
+
+DatagramBuffer::DatagramBuffer(std::span<const std::byte> bytes) {
+    append(bytes);
+}
+
+DatagramBuffer::DatagramBuffer(const std::vector<std::byte> &bytes) {
+    append(bytes);
+}
+
+DatagramBuffer::DatagramBuffer(std::vector<std::byte> &&bytes) {
+    append(bytes);
+}
+
+bool DatagramBuffer::empty() const {
+    return bytes_.empty();
+}
+
+std::size_t DatagramBuffer::size() const {
+    return bytes_.size();
+}
+
+void DatagramBuffer::reserve(std::size_t capacity) {
+    bytes_.reserve(capacity);
+}
+
+void DatagramBuffer::resize(std::size_t size) {
+    bytes_.resize(size);
+}
+
+void DatagramBuffer::resize(std::size_t size, std::byte value) {
+    bytes_.resize(size, value);
+}
+
+void DatagramBuffer::truncate(std::size_t size) {
+    bytes_.resize(size);
+}
+
+void DatagramBuffer::clear() {
+    bytes_.clear();
+}
+
+void DatagramBuffer::push_back(std::byte value) {
+    bytes_.push_back(value);
+}
+
+void DatagramBuffer::append(std::span<const std::byte> bytes) {
+    auto tail = append_uninitialized(bytes.size());
+    if (!bytes.empty()) {
+        std::memcpy(tail.data(), bytes.data(), bytes.size());
+    }
+}
+
+std::span<std::byte> DatagramBuffer::append_uninitialized(std::size_t size) {
+    const auto offset = bytes_.size();
+    bytes_.resize(offset + size);
+    return std::span<std::byte>(bytes_.data() + static_cast<std::ptrdiff_t>(offset), size);
+}
+
+std::span<std::byte> DatagramBuffer::span() {
+    return std::span<std::byte>(bytes_.data(), bytes_.size());
+}
+
+std::span<const std::byte> DatagramBuffer::span() const {
+    return std::span<const std::byte>(bytes_.data(), bytes_.size());
+}
+
+std::byte *DatagramBuffer::data() {
+    return bytes_.data();
+}
+
+const std::byte *DatagramBuffer::data() const {
+    return bytes_.data();
+}
+
+std::vector<std::byte> DatagramBuffer::to_vector() const {
+    return std::vector<std::byte>(bytes_.begin(), bytes_.end());
+}
+
+DatagramBuffer::operator std::vector<std::byte>() const {
+    return to_vector();
+}
+
+bool operator==(const DatagramBuffer &lhs, std::span<const std::byte> rhs) {
+    const auto lhs_bytes = lhs.span();
+    return lhs_bytes.size() == rhs.size() &&
+           std::equal(lhs_bytes.begin(), lhs_bytes.end(), rhs.begin(), rhs.end());
+}
+
+bool operator==(std::span<const std::byte> lhs, const DatagramBuffer &rhs) {
+    return rhs == lhs;
+}
+
+bool operator==(const DatagramBuffer &lhs, const std::vector<std::byte> &rhs) {
+    return lhs == std::span<const std::byte>(rhs);
+}
+
+bool operator==(const std::vector<std::byte> &lhs, const DatagramBuffer &rhs) {
+    return std::span<const std::byte>(lhs) == rhs;
+}
 
 BufferReader::BufferReader(std::span<const std::byte> bytes) : bytes_(bytes) {
 }

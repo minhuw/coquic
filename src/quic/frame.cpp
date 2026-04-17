@@ -1274,7 +1274,7 @@ CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> byte
     }
 }
 
-CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(SharedBytes bytes) {
+CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(const SharedBytes &bytes) {
     const auto span = bytes.span();
     if (span.empty()) {
         return received_decode_failure(CodecErrorCode::truncated_input, 0);
@@ -1328,7 +1328,7 @@ CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(SharedBytes by
         });
     }
 
-    const auto decoded = deserialize_frame(span);
+    auto decoded = deserialize_frame(span);
     if (!decoded.has_value()) {
         return received_decode_failure(decoded.error().code, decoded.error().offset);
     }

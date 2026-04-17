@@ -1507,12 +1507,15 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
         });
     };
+    struct PacketProcessingLabels {
+        std::string_view deserialize;
+        std::string_view process;
+    };
     const auto process_packet_bytes_with =
         [&](std::span<const std::byte> packet_bytes, bool allow_defer, QuicPathId packet_path_id,
             QuicEcnCodepoint packet_ecn, std::optional<std::uint32_t> datagram_id,
             bool packet_replay_trigger, auto deserialize_packets, auto process_packet,
-            auto emit_qlog_event, std::string_view deserialize_label,
-            std::string_view process_label) -> bool {
+            auto emit_qlog_event, PacketProcessingLabels labels) -> bool {
         const auto current_context =
             make_deserialize_context(application_space_.read_secret, application_read_key_phase_);
         if (!current_context.has_value()) {
@@ -1618,7 +1621,7 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
             if (processed_any_packet) {
                 return true;
             }
-            log_codec_failure(deserialize_label, packets.error());
+            log_codec_failure(labels.deserialize, packets.error());
             mark_failed();
             return false;
         }
@@ -1645,7 +1648,7 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                 if (processed_any_packet) {
                     return true;
                 }
-                log_codec_failure(process_label, processed.error());
+                log_codec_failure(labels.process, processed.error());
                 mark_failed();
                 return false;
             }
@@ -1699,7 +1702,11 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                        QuicEcnCodepoint packet_ecn_value) {
                     return process_inbound_packet(packet, packet_now, packet_ecn_value);
                 },
-                emit_qlog_event, "deserialize_protected_datagram", "process_inbound_packet");
+                emit_qlog_event,
+                PacketProcessingLabels{
+                    .deserialize = "deserialize_protected_datagram",
+                    .process = "process_inbound_packet",
+                });
         }
 
         return process_packet_bytes_with(
@@ -1712,8 +1719,11 @@ void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
                    QuicEcnCodepoint packet_ecn_value) {
                 return process_inbound_received_packet(packet, packet_now, packet_ecn_value);
             },
-            [](const ReceivedProtectedPacket &) {}, "deserialize_received_protected_datagram",
-            "process_inbound_received_packet");
+            [](const ReceivedProtectedPacket &) {},
+            PacketProcessingLabels{
+                .deserialize = "deserialize_received_protected_datagram",
+                .process = "process_inbound_received_packet",
+            });
     };
     const auto replay_deferred_packets = [&]() -> bool {
         if (deferred_protected_packets_.empty()) {
@@ -1929,7 +1939,7 @@ void QuicConnection::request_key_update() {
     }
 }
 
-std::vector<std::byte> QuicConnection::drain_outbound_datagram(QuicCoreTimePoint now) {
+DatagramBuffer QuicConnection::drain_outbound_datagram(QuicCoreTimePoint now) {
     if (status_ == HandshakeStatus::failed) {
         return {};
     }
@@ -6185,7 +6195,7 @@ ConnectionId QuicConnection::client_initial_destination_connection_id() const {
     return config_.initial_destination_connection_id;
 }
 
-std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
+DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
     const auto max_outbound_datagram_size = outbound_datagram_size_limit();
     const bool traces_this_connection =
         packet_trace_matches_connection(config_.source_connection_id);
@@ -6422,69 +6432,69 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
     };
     const auto commit_serialized_datagram =
         [&](const std::vector<ProtectedPacket> &datagram_packets,
-            SerializedProtectedDatagram datagram) {
-            if (pto_probe_burst_active) {
-                --remaining_pto_probe_datagrams_;
-                if (remaining_pto_probe_datagrams_ == 0) {
-                    initial_space_.pending_probe_packet = std::nullopt;
-                    handshake_space_.pending_probe_packet = std::nullopt;
-                    application_space_.pending_probe_packet = std::nullopt;
+            SerializedProtectedDatagram datagram) -> DatagramBuffer {
+        if (pto_probe_burst_active) {
+            --remaining_pto_probe_datagrams_;
+            if (remaining_pto_probe_datagrams_ == 0) {
+                initial_space_.pending_probe_packet = std::nullopt;
+                handshake_space_.pending_probe_packet = std::nullopt;
+                application_space_.pending_probe_packet = std::nullopt;
+            }
+        }
+
+        if (config_.role == EndpointRole::client) {
+            for (const auto &packet : datagram_packets) {
+                if (std::holds_alternative<ProtectedHandshakePacket>(packet)) {
+                    discard_initial_packet_space();
+                    break;
                 }
             }
+        }
 
-            if (config_.role == EndpointRole::client) {
-                for (const auto &packet : datagram_packets) {
-                    if (std::holds_alternative<ProtectedHandshakePacket>(packet)) {
-                        discard_initial_packet_space();
-                        break;
+        if (qlog_session_ != nullptr) {
+            const auto outbound_datagram_id =
+                std::optional<std::uint32_t>(qlog_session_->next_outbound_datagram_id());
+            for (std::size_t index = 0; index < datagram_packets.size(); ++index) {
+                const auto packet_number =
+                    std::visit([](const auto &packet_value) { return packet_value.packet_number; },
+                               datagram_packets[index]);
+                auto snapshot = make_qlog_packet_snapshot(
+                    datagram_packets[index],
+                    qlog::PacketSnapshotContext{
+                        .raw_length = datagram.packet_metadata[index].length,
+                        .datagram_id = *outbound_datagram_id,
+                        .trigger = pto_probe_burst_active ? std::optional<std::string>("pto_probe")
+                                                          : std::nullopt,
+                    });
+                static_cast<void>(qlog_session_->write_event(
+                    now, "quic:packet_sent", qlog::serialize_packet_snapshot(snapshot)));
+                auto snapshot_ptr = std::make_shared<qlog::PacketSnapshot>(snapshot);
+
+                for (auto *packet_space :
+                     {&initial_space_, &handshake_space_, &application_space_}) {
+                    auto *sent = packet_space->recovery.find_packet(packet_number);
+                    if (sent == nullptr) {
+                        continue;
                     }
+
+                    sent->qlog_packet_snapshot = snapshot_ptr;
+                    sent->qlog_pto_probe = pto_probe_burst_active;
+                    packet_space->recovery.note_packet_metadata_updated();
                 }
             }
+        }
 
-            if (qlog_session_ != nullptr) {
-                const auto outbound_datagram_id =
-                    std::optional<std::uint32_t>(qlog_session_->next_outbound_datagram_id());
-                for (std::size_t index = 0; index < datagram_packets.size(); ++index) {
-                    const auto packet_number = std::visit(
-                        [](const auto &packet_value) { return packet_value.packet_number; },
-                        datagram_packets[index]);
-                    auto snapshot = make_qlog_packet_snapshot(
-                        datagram_packets[index],
-                        qlog::PacketSnapshotContext{
-                            .raw_length = datagram.packet_metadata[index].length,
-                            .datagram_id = *outbound_datagram_id,
-                            .trigger = pto_probe_burst_active
-                                           ? std::optional<std::string>("pto_probe")
-                                           : std::nullopt,
-                        });
-                    static_cast<void>(qlog_session_->write_event(
-                        now, "quic:packet_sent", qlog::serialize_packet_snapshot(snapshot)));
-                    auto snapshot_ptr = std::make_shared<qlog::PacketSnapshot>(snapshot);
-
-                    for (auto *packet_space :
-                         {&initial_space_, &handshake_space_, &application_space_}) {
-                        auto *sent = packet_space->recovery.find_packet(packet_number);
-                        if (sent == nullptr) {
-                            continue;
-                        }
-
-                        sent->qlog_packet_snapshot = snapshot_ptr;
-                        sent->qlog_pto_probe = pto_probe_burst_active;
-                        packet_space->recovery.note_packet_metadata_updated();
-                    }
-                }
-            }
-
-            note_outbound_datagram_bytes(datagram.bytes.size(), selected_send_path_id);
-            last_drained_path_id_ = selected_send_path_id;
-            last_drained_ecn_codepoint_ = outbound_ecn_codepoint_for_path(selected_send_path_id);
-            return std::move(datagram.bytes);
-        };
-    const auto finalize_datagram = [&](const std::vector<ProtectedPacket> &datagram_packets) {
+        note_outbound_datagram_bytes(datagram.bytes.size(), selected_send_path_id);
+        last_drained_path_id_ = selected_send_path_id;
+        last_drained_ecn_codepoint_ = outbound_ecn_codepoint_for_path(selected_send_path_id);
+        return std::move(datagram.bytes);
+    };
+    const auto finalize_datagram =
+        [&](const std::vector<ProtectedPacket> &datagram_packets) -> DatagramBuffer {
         auto datagram = serialize_candidate_datagram_with_metadata(datagram_packets);
         if (!datagram.has_value()) {
             mark_failed();
-            return std::vector<std::byte>{};
+            return {};
         }
 
         return commit_serialized_datagram(datagram_packets, std::move(datagram.value()));
@@ -7146,6 +7156,19 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 static_cast<void>(visit_range(streams.begin(), start));
             };
 
+            constexpr std::size_t kLargeDatagramFreshStreamBudgetBytes = std::size_t{8} * 1024u;
+            const auto limit_fresh_streams_for_round = [&](std::size_t packet_budget,
+                                                           std::size_t active_stream_count) {
+                if ((packet_budget < kLargeDatagramFreshStreamBudgetBytes) ||
+                    (active_stream_count <= 1)) {
+                    return active_stream_count;
+                }
+
+                return std::min(active_stream_count,
+                                std::max<std::size_t>(
+                                    1u, packet_budget / kLargeDatagramFreshStreamBudgetBytes));
+            };
+
             for (;;) {
                 const bool should_continue_round = (remaining_bytes > 0) | allow_zero_byte_round;
                 if (!should_continue_round) {
@@ -7183,19 +7206,33 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 std::size_t bytes_sent_this_round = 0;
                 bool emitted_fragment = false;
                 const auto active_stream_count = active_streams.size();
-                for (const auto it : active_streams) {
+                const auto selected_stream_count =
+                    loss_phase || zero_byte_round
+                        ? active_stream_count
+                        : limit_fresh_streams_for_round(remaining_bytes, active_stream_count);
+                if (selected_stream_count != active_stream_count) {
+                    active_streams.resize(selected_stream_count);
+                }
+
+                const bool use_remaining_round_share = selected_stream_count != active_stream_count;
+                for (std::size_t stream_index = 0; stream_index < selected_stream_count;
+                     ++stream_index) {
+                    const auto it = active_streams[stream_index];
                     const auto stream_id = it->first;
                     auto &stream = it->second;
 
                     const auto highest_sent_before = stream.flow_control.highest_sent;
+                    const auto round_divisor = use_remaining_round_share
+                                                   ? selected_stream_count - stream_index
+                                                   : selected_stream_count;
                     const auto packet_share =
                         std::max<std::size_t>(static_cast<std::size_t>(!zero_byte_round),
-                                              remaining_bytes / active_stream_count);
+                                              remaining_bytes / round_divisor);
                     const auto new_byte_share =
                         loss_phase || remaining_connection_credit == 0
                             ? 0
-                            : std::max<std::uint64_t>(1, remaining_connection_credit /
-                                                             active_stream_count);
+                            : std::max<std::uint64_t>(1,
+                                                      remaining_connection_credit / round_divisor);
                     auto stream_fragments = stream.take_send_fragments(StreamSendBudget{
                         .packet_bytes = std::min(remaining_bytes, packet_share),
                         .new_bytes = new_byte_share,
@@ -8046,7 +8083,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 send_application_close_only ? std::span<const Frame>{}
                                             : std::span<const Frame>(application_crypto_frames);
             const auto send_application_ack_only =
-                [&](const AckFrame &ack_frame) -> std::vector<std::byte> {
+                [&](const AckFrame &ack_frame) -> DatagramBuffer {
                 const auto restore_unsent_path_validation_frames =
                     [&](const PendingPathValidationFrames &path_validation_frames) {
                         if (path_validation_frames.response.has_value()) {
@@ -8168,7 +8205,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
                 reset_stream_frames, stop_sending_frames, data_blocked_frame,
                 stream_data_blocked_frames, stream_fragments, application_close_frame,
                 /*include_ping=*/false, nullptr);
-            const auto finalize_existing_packets_or_empty = [&]() -> std::vector<std::byte> {
+            const auto finalize_existing_packets_or_empty = [&]() -> DatagramBuffer {
                 if (packets.empty()) {
                     return {};
                 }
@@ -8265,7 +8302,7 @@ std::vector<std::byte> QuicConnection::flush_outbound_datagram(QuicCoreTimePoint
 
                 return datagram.value().bytes.size() <= max_outbound_datagram_size;
             };
-            const auto fallback_to_existing_packets_or_ack_only = [&]() -> std::vector<std::byte> {
+            const auto fallback_to_existing_packets_or_ack_only = [&]() -> DatagramBuffer {
                 if (!packets.empty()) {
                     return finalize_existing_packets_or_empty();
                 }

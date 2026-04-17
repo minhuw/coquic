@@ -219,7 +219,7 @@ class PacketSpaceRecovery {
         std::size_t size() const;
     };
 
-    enum class LedgerSlotState {
+    enum class LedgerSlotState : std::uint8_t {
         empty,
         sent,
         declared_lost,

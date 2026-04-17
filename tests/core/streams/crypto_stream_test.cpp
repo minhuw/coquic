@@ -363,6 +363,37 @@ TEST(QuicCryptoStreamTest, MarkUnsentAndMarkSentOnlyUpdateEligibleSegments) {
     EXPECT_TRUE(buffer.has_outstanding_range(3, 1));
 }
 
+TEST(QuicCryptoStreamTest, MarkUnsentEarlierRangeIsTakenBeforeLaterFreshTail) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+    ASSERT_EQ(buffer.take_ranges(4).size(), 1u);
+
+    buffer.mark_unsent(1, 2);
+
+    const auto unsent = buffer.take_unsent_ranges(4);
+    ASSERT_EQ(unsent.size(), 2u);
+    EXPECT_EQ(unsent[0].offset, 1u);
+    EXPECT_EQ(unsent[0].bytes, bytes_from_string("bc"));
+    EXPECT_EQ(unsent[1].offset, 4u);
+    EXPECT_EQ(unsent[1].bytes, bytes_from_string("ef"));
+}
+
+TEST(QuicCryptoStreamTest, MarkLostEarlierRangeIsTakenBeforeLaterLostTail) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+    ASSERT_EQ(buffer.take_ranges(6).size(), 1u);
+
+    buffer.mark_lost(4, 2);
+    buffer.mark_lost(1, 2);
+
+    const auto lost = buffer.take_lost_ranges(4);
+    ASSERT_EQ(lost.size(), 2u);
+    EXPECT_EQ(lost[0].offset, 1u);
+    EXPECT_EQ(lost[0].bytes, bytes_from_string("bc"));
+    EXPECT_EQ(lost[1].offset, 4u);
+    EXPECT_EQ(lost[1].bytes, bytes_from_string("ef"));
+}
+
 TEST(QuicCryptoStreamTest, ZeroLengthMarkUnsentAndMarkSentLeaveSentStateUnchanged) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("ab"));

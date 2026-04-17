@@ -863,6 +863,9 @@ TEST(QuicFrameTest, ReceivedLengthlessStreamFrameAliasesRemainingPayloadStorage)
     EXPECT_TRUE(stream->has_offset);
     EXPECT_FALSE(stream->has_length);
     ASSERT_TRUE(stream->offset.has_value());
+    if (!stream->offset.has_value()) {
+        return;
+    }
     EXPECT_EQ(*stream->offset, 11u);
     EXPECT_EQ(stream->stream_data, (std::vector<std::byte>{
                                        std::byte{0xaa},
@@ -897,6 +900,9 @@ TEST(QuicFrameTest, ReceivedLengthPrefixedStreamFrameAliasesPayloadStorage) {
     EXPECT_TRUE(stream->has_offset);
     EXPECT_TRUE(stream->has_length);
     ASSERT_TRUE(stream->offset.has_value());
+    if (!stream->offset.has_value()) {
+        return;
+    }
     EXPECT_EQ(*stream->offset, 11u);
     EXPECT_EQ(stream->stream_data, (std::vector<std::byte>{
                                        std::byte{0xaa},

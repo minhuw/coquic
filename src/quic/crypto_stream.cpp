@@ -74,7 +74,7 @@ void ReliableSendBuffer::append(std::span<const std::byte> bytes) {
     append(SharedBytes{std::move(storage), 0, bytes.size()});
 }
 
-void ReliableSendBuffer::append(SharedBytes bytes) {
+void ReliableSendBuffer::append(const SharedBytes &bytes) {
     if (bytes.empty()) {
         return;
     }
@@ -403,7 +403,7 @@ bool CryptoSendBuffer::empty() const {
 }
 
 CodecResult<ContiguousReceiveBytes> ReliableReceiveBuffer::push_shared(std::uint64_t offset,
-                                                                       SharedBytes bytes) {
+                                                                       const SharedBytes &bytes) {
     if (bytes.empty()) {
         return CodecResult<ContiguousReceiveBytes>::success({});
     }
@@ -441,7 +441,7 @@ CodecResult<std::vector<std::byte>> ReliableReceiveBuffer::push(std::uint64_t of
     return push(offset, std::move(owned));
 }
 
-void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, SharedBytes bytes) {
+void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, const SharedBytes &bytes) {
     if (bytes.empty()) {
         return;
     }

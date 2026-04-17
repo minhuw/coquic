@@ -8,6 +8,7 @@
 #include <variant>
 #include <vector>
 
+#include "src/quic/buffer.h"
 #include "src/quic/packet.h"
 #include "src/quic/varint.h"
 #include "src/quic/version.h"
@@ -190,7 +191,7 @@ struct SerializedProtectedPacketMetadata {
 };
 
 struct SerializedProtectedDatagram {
-    std::vector<std::byte> bytes;
+    DatagramBuffer bytes;
     std::vector<SerializedProtectedPacketMetadata> packet_metadata;
 };
 
@@ -203,10 +204,18 @@ serialize_protected_datagram_with_metadata(std::span<const ProtectedPacket> pack
                                            const SerializeProtectionContext &context);
 
 CodecResult<std::size_t>
+append_protected_one_rtt_packet_to_datagram(DatagramBuffer &datagram,
+                                            const ProtectedOneRttPacketView &packet,
+                                            const SerializeProtectionContext &context);
+CodecResult<std::size_t>
 append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
                                             const ProtectedOneRttPacketView &packet,
                                             const SerializeProtectionContext &context);
 
+CodecResult<std::size_t>
+append_protected_one_rtt_packet_to_datagram(DatagramBuffer &datagram,
+                                            const ProtectedOneRttPacketFragmentView &packet,
+                                            const SerializeProtectionContext &context);
 CodecResult<std::size_t>
 append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
                                             const ProtectedOneRttPacketFragmentView &packet,

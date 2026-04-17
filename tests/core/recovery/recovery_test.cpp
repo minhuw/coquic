@@ -669,18 +669,26 @@ TEST(QuicRecoveryTest, RetiringEarlierPacketsDoesNotRenumberLaterHandles) {
 
     const auto handle_before = recovery.handle_for_packet_number(2);
     ASSERT_TRUE(handle_before.has_value());
-    ASSERT_EQ(handle_before->slot_index, 2u);
+    if (!handle_before.has_value()) {
+        return;
+    }
+    const auto checked_handle_before = *handle_before;
+    ASSERT_EQ(checked_handle_before.slot_index, 2u);
 
     recovery.retire_packet(0);
     recovery.retire_packet(1);
 
     const auto handle_after = recovery.handle_for_packet_number(2);
     ASSERT_TRUE(handle_after.has_value());
-    EXPECT_EQ(handle_after->slot_index, 2u);
-    EXPECT_EQ(handle_after->slot_index, handle_before->slot_index);
+    if (!handle_after.has_value()) {
+        return;
+    }
+    const auto checked_handle_after = *handle_after;
+    EXPECT_EQ(checked_handle_after.slot_index, 2u);
+    EXPECT_EQ(checked_handle_after.slot_index, checked_handle_before.slot_index);
     EXPECT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_count(recovery), 3u);
 
-    const auto *packet = recovery.packet_for_handle(*handle_before);
+    const auto *packet = recovery.packet_for_handle(checked_handle_before);
     ASSERT_NE(packet, nullptr);
     if (packet != nullptr) {
         EXPECT_EQ(packet->packet_number, 2u);
@@ -751,10 +759,15 @@ TEST(QuicRecoveryTest, TrackedPacketsPreservePacketNumberOrderAcrossLateLosses) 
 
     EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.tracked_packets()),
               (std::vector<std::uint64_t>{2, 4, 7}));
-    ASSERT_TRUE(recovery.oldest_tracked_packet().has_value());
-    ASSERT_TRUE(recovery.newest_tracked_packet().has_value());
-    EXPECT_EQ(recovery.oldest_tracked_packet()->packet_number, 2u);
-    EXPECT_EQ(recovery.newest_tracked_packet()->packet_number, 7u);
+    const auto oldest = recovery.oldest_tracked_packet();
+    ASSERT_TRUE(oldest.has_value());
+    const auto newest = recovery.newest_tracked_packet();
+    ASSERT_TRUE(newest.has_value());
+    if (!oldest.has_value() || !newest.has_value()) {
+        return;
+    }
+    EXPECT_EQ(oldest->packet_number, 2u);
+    EXPECT_EQ(newest->packet_number, 7u);
 }
 
 TEST(QuicRecoveryTest, TimeThresholdLossScansLedgerWithoutSentPacketMap) {
@@ -780,6 +793,30 @@ TEST(QuicRecoveryTest, TimeThresholdLossScansLedgerWithoutSentPacketMap) {
     EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.collect_time_threshold_losses(
                                                         coquic::quic::test::test_time(20))),
               (std::vector<std::uint64_t>{3}));
+}
+
+TEST(QuicRecoveryTest, StaleAckStillDeclaresNewTimeThresholdLosses) {
+    PacketSpaceRecovery recovery;
+    recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().min_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().smoothed_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().rttvar = std::chrono::milliseconds(5);
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(20)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(30)));
+
+    const auto first_ack =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/2), coquic::quic::test::test_time(31));
+    EXPECT_EQ(packet_numbers_from(first_ack.acked_packets), (std::vector<std::uint64_t>{2}));
+    EXPECT_EQ(packet_numbers_from(first_ack.lost_packets), (std::vector<std::uint64_t>{0}));
+
+    const auto stale_ack =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/2), coquic::quic::test::test_time(40));
+    EXPECT_TRUE(stale_ack.acked_packets.empty());
+    EXPECT_EQ(packet_numbers_from(stale_ack.lost_packets), (std::vector<std::uint64_t>{1}));
 }
 
 TEST(QuicRecoveryTest, RecoveryTracksLatestInflightAckElicitingPacketIncrementally) {
@@ -932,10 +969,15 @@ TEST(QuicRecoveryTest, AckProcessingRemovesAckedAndLateAckedPacketsFromTrackedPa
               (std::vector<std::uint64_t>{1}));
     EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.tracked_packets()),
               (std::vector<std::uint64_t>{0}));
-    ASSERT_TRUE(recovery.oldest_tracked_packet().has_value());
-    EXPECT_EQ(recovery.oldest_tracked_packet()->packet_number, 0u);
-    ASSERT_TRUE(recovery.newest_tracked_packet().has_value());
-    EXPECT_EQ(recovery.newest_tracked_packet()->packet_number, 0u);
+    const auto oldest = recovery.oldest_tracked_packet();
+    ASSERT_TRUE(oldest.has_value());
+    const auto newest = recovery.newest_tracked_packet();
+    ASSERT_TRUE(newest.has_value());
+    if (!oldest.has_value() || !newest.has_value()) {
+        return;
+    }
+    EXPECT_EQ(oldest->packet_number, 0u);
+    EXPECT_EQ(newest->packet_number, 0u);
 }
 
 TEST(QuicRecoveryTest, AckProcessingHidesAcknowledgedPacketsFromCompatibilitySentPacketsView) {

@@ -188,6 +188,6 @@ CodecResult<std::size_t> serialize_frame_into(std::span<std::byte> output, const
 CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame);
 CodecResult<std::size_t> append_serialized_frame(std::vector<std::byte> &bytes, const Frame &frame);
 CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> bytes);
-CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(SharedBytes bytes);
+CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(const SharedBytes &bytes);
 
 } // namespace coquic::quic

@@ -41,7 +41,7 @@ class ReliableSendBuffer {
   public:
     void append(const std::vector<std::byte> &bytes);
     void append(std::span<const std::byte> bytes);
-    void append(SharedBytes bytes);
+    void append(const SharedBytes &bytes);
     std::vector<ByteRange> take_ranges(std::size_t max_bytes);
     std::vector<ByteRange> take_lost_ranges(std::size_t max_bytes,
                                             std::optional<std::uint64_t> max_offset = std::nullopt);
@@ -83,13 +83,13 @@ class ReliableSendBuffer {
 
 class ReliableReceiveBuffer {
   public:
-    CodecResult<ContiguousReceiveBytes> push_shared(std::uint64_t offset, SharedBytes bytes);
+    CodecResult<ContiguousReceiveBytes> push_shared(std::uint64_t offset, const SharedBytes &bytes);
     CodecResult<std::vector<std::byte>> push(std::uint64_t offset, std::vector<std::byte> &&bytes);
     CodecResult<std::vector<std::byte>> push(std::uint64_t offset,
                                              std::span<const std::byte> bytes);
 
   private:
-    void buffer_range(std::uint64_t offset, SharedBytes bytes);
+    void buffer_range(std::uint64_t offset, const SharedBytes &bytes);
     ContiguousReceiveBytes take_contiguous_buffered_bytes(ContiguousReceiveBytes contiguous);
     std::vector<std::byte> take_contiguous_buffered_bytes();
 

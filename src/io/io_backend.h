@@ -40,7 +40,7 @@ struct QuicIoRxDatagram {
 
 struct QuicIoTxDatagram {
     QuicRouteHandle route_handle = 0;
-    std::vector<std::byte> bytes;
+    quic::DatagramBuffer bytes;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
 };
 

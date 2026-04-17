@@ -117,9 +117,12 @@ TEST(QuicCoreEndpointTest, SharedSendCommandUsesConnectionHandleWithoutLegacyFal
         coquic::quic::test::test_time(1));
 
     ASSERT_TRUE(result.local_error.has_value());
-    EXPECT_EQ(result.local_error->connection,
-              std::optional<coquic::quic::QuicConnectionHandle>{1u});
-    EXPECT_EQ(result.local_error->code, coquic::quic::QuicCoreLocalErrorCode::invalid_stream_id);
+    if (!result.local_error.has_value()) {
+        return;
+    }
+    const auto local_error = *result.local_error;
+    EXPECT_EQ(local_error.connection, std::optional<coquic::quic::QuicConnectionHandle>{1u});
+    EXPECT_EQ(local_error.code, coquic::quic::QuicCoreLocalErrorCode::invalid_stream_id);
 }
 
 TEST(QuicCoreEndpointTest, EndpointConstructedCoreRejectsLegacyAdvance) {

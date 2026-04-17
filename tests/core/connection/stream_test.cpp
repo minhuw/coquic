@@ -246,8 +246,9 @@ TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilG
 
     const auto received = connection.take_received_stream_data();
     ASSERT_TRUE(received.has_value());
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(received->bytes), "hello");
-    EXPECT_TRUE(received->fin);
+    const auto received_value = optional_value_or_terminate(received);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_value.bytes), "hello");
+    EXPECT_TRUE(received_value.fin);
     EXPECT_TRUE(connection.streams_.at(0).receive_buffer.buffered_bytes_.empty());
 }
 
@@ -1291,6 +1292,32 @@ TEST(QuicCoreTest, NewDataSchedulingResumesRoundRobinAfterLastSentStream) {
     ASSERT_FALSE(datagram.empty());
     EXPECT_EQ(application_stream_ids_from_datagram(connection, datagram),
               (std::vector<std::uint64_t>{8, 0, 4}));
+}
+
+TEST(QuicCoreTest, LargeDatagramSchedulingLimitsFreshDataToLeadingBulkStreamsPerPacket) {
+    auto connection = make_connected_client_connection();
+    constexpr std::size_t kLargeDatagramSize = std::size_t{16} * 1024u;
+    constexpr std::uint64_t kLargeFlowCredit = std::uint64_t{128} * 1024u;
+    connection.config_.max_outbound_datagram_size = kLargeDatagramSize;
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.max_udp_payload_size = static_cast<std::uint64_t>(kLargeDatagramSize);
+    peer_transport_parameters.initial_max_data = kLargeFlowCredit;
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = kLargeFlowCredit;
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = kLargeFlowCredit;
+    const auto payload = std::vector<std::byte>(static_cast<std::size_t>(12000), std::byte{0x61});
+
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+    ASSERT_TRUE(connection.queue_stream_send(4, payload, false).has_value());
+    ASSERT_TRUE(connection.queue_stream_send(8, payload, false).has_value());
+    ASSERT_TRUE(connection.queue_stream_send(12, payload, false).has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_EQ(application_stream_ids_from_datagram(connection, datagram),
+              (std::vector<std::uint64_t>{0, 4}));
 }
 
 TEST(QuicCoreTest, RetransmissionPreservesStreamIdentityAcrossMultipleStreams) {

@@ -12,6 +12,7 @@
 #include <variant>
 #include <vector>
 
+#include "src/quic/buffer.h"
 #include "src/quic/crypto_stream.h"
 #include "src/quic/packet.h"
 #include "src/quic/resumption.h"
@@ -203,7 +204,7 @@ using QuicCoreInput =
 struct QuicCoreSendDatagram {
     QuicConnectionHandle connection = 0;
     std::optional<QuicRouteHandle> route_handle;
-    std::vector<std::byte> bytes;
+    DatagramBuffer bytes;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
 };
 

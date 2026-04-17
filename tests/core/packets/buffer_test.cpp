@@ -44,8 +44,12 @@ TEST(QuicBufferTest, SpanBufferWriterRejectsOverflowWithoutAdvancingOffset) {
     const auto error = writer.write_varint(0x1234);
 
     ASSERT_TRUE(error.has_value());
-    EXPECT_EQ(error->code, coquic::quic::CodecErrorCode::truncated_input);
-    EXPECT_EQ(error->offset, before);
+    if (!error.has_value()) {
+        return;
+    }
+    const auto actual_error = *error;
+    EXPECT_EQ(actual_error.code, coquic::quic::CodecErrorCode::truncated_input);
+    EXPECT_EQ(actual_error.offset, before);
     EXPECT_EQ(writer.offset(), before);
     EXPECT_EQ(storage[0], std::byte{0x01});
     EXPECT_EQ(storage[1], std::byte{0x02});
@@ -143,8 +147,12 @@ TEST(QuicBufferTest, BufferWriterWriteVarintRejectsInvalidInput) {
     const auto error = writer.write_varint(4611686018427387904ull);
 
     ASSERT_TRUE(error.has_value());
-    EXPECT_EQ(error->code, coquic::quic::CodecErrorCode::invalid_varint);
-    EXPECT_EQ(error->offset, 0u);
+    if (!error.has_value()) {
+        return;
+    }
+    const auto actual_error = *error;
+    EXPECT_EQ(actual_error.code, coquic::quic::CodecErrorCode::invalid_varint);
+    EXPECT_EQ(actual_error.offset, 0u);
     EXPECT_EQ(writer.offset(), 0u);
     EXPECT_TRUE(writer.bytes().empty());
 }
@@ -156,8 +164,12 @@ TEST(QuicBufferTest, BufferWriterWriteVarintRejectsInvalidInputAtCurrentOffset) 
     const auto error = writer.write_varint(4611686018427387904ull);
 
     ASSERT_TRUE(error.has_value());
-    EXPECT_EQ(error->code, coquic::quic::CodecErrorCode::invalid_varint);
-    EXPECT_EQ(error->offset, 1u);
+    if (!error.has_value()) {
+        return;
+    }
+    const auto actual_error = *error;
+    EXPECT_EQ(actual_error.code, coquic::quic::CodecErrorCode::invalid_varint);
+    EXPECT_EQ(actual_error.offset, 1u);
     EXPECT_EQ(writer.offset(), 1u);
     ASSERT_EQ(writer.bytes().size(), 1u);
     EXPECT_EQ(writer.bytes()[0], std::byte{0x01});
@@ -180,9 +192,60 @@ TEST(QuicBufferTest, CountingBufferWriterWriteVarintRejectsInvalidInputAtCurrent
     const auto error = writer.write_varint(4611686018427387904ull);
 
     ASSERT_TRUE(error.has_value());
-    EXPECT_EQ(error->code, coquic::quic::CodecErrorCode::invalid_varint);
-    EXPECT_EQ(error->offset, 1u);
+    if (!error.has_value()) {
+        return;
+    }
+    const auto actual_error = *error;
+    EXPECT_EQ(actual_error.code, coquic::quic::CodecErrorCode::invalid_varint);
+    EXPECT_EQ(actual_error.offset, 1u);
     EXPECT_EQ(writer.offset(), 1u);
+}
+
+TEST(QuicBufferTest, DatagramBufferAppendUninitializedExtendsWritableTail) {
+    coquic::quic::DatagramBuffer buffer;
+    buffer.append(std::array<std::byte, 2>{
+        std::byte{0x01},
+        std::byte{0x02},
+    });
+
+    auto tail = buffer.append_uninitialized(3);
+    ASSERT_EQ(buffer.size(), 5u);
+    ASSERT_EQ(tail.size(), 3u);
+    tail[0] = std::byte{0x03};
+    tail[1] = std::byte{0x04};
+    tail[2] = std::byte{0x05};
+
+    const std::array<std::byte, 5> expected{
+        std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04}, std::byte{0x05},
+    };
+    EXPECT_TRUE(std::equal(expected.begin(), expected.end(), buffer.begin(), buffer.end()));
+}
+
+TEST(QuicBufferTest, DatagramBufferConstructsFromInitializerList) {
+    const coquic::quic::DatagramBuffer buffer{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+    };
+
+    EXPECT_EQ(buffer, std::vector<std::byte>({
+                          std::byte{0xaa},
+                          std::byte{0xbb},
+                          std::byte{0xcc},
+                      }));
+}
+
+TEST(QuicBufferTest, DatagramBufferComparesEqualToStandardByteVector) {
+    const std::vector<std::byte> expected{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+    };
+
+    coquic::quic::DatagramBuffer buffer(expected);
+
+    EXPECT_EQ(buffer, expected);
+    EXPECT_EQ(expected, buffer);
 }
 
 } // namespace

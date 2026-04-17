@@ -231,7 +231,7 @@ struct PacketSpaceState {
         }
 
         next_send_packet_number = other.next_send_packet_number;
-        largest_authenticated_packet_number = std::move(other.largest_authenticated_packet_number);
+        largest_authenticated_packet_number = other.largest_authenticated_packet_number;
         read_secret = std::move(other.read_secret);
         write_secret = std::move(other.write_secret);
         send_crypto = std::move(other.send_crypto);
@@ -241,7 +241,7 @@ struct PacketSpaceState {
         sent_packets.bind(&recovery, PacketSpacePacketMapView::Filter::outstanding);
         declared_lost_packets.bind(&recovery, PacketSpacePacketMapView::Filter::declared_lost);
         pending_probe_packet = std::move(other.pending_probe_packet);
-        pending_ack_deadline = std::move(other.pending_ack_deadline);
+        pending_ack_deadline = other.pending_ack_deadline;
         force_ack_send = other.force_ack_send;
         return *this;
     }
@@ -311,17 +311,29 @@ struct StoredClientResumptionState {
 };
 
 struct DeferredProtectedDatagram {
-    std::vector<std::byte> bytes;
+    DatagramBuffer bytes;
     QuicPathId path_id = 0;
     std::optional<std::uint32_t> datagram_id;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
 
     DeferredProtectedDatagram() = default;
-    DeferredProtectedDatagram(std::vector<std::byte> datagram_bytes, QuicPathId id = 0,
+    DeferredProtectedDatagram(DatagramBuffer datagram_bytes, QuicPathId id = 0,
                               std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
                               QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
         : bytes(std::move(datagram_bytes)), path_id(id), datagram_id(qlog_datagram_id),
           ecn(datagram_ecn) {
+    }
+    DeferredProtectedDatagram(const std::vector<std::byte> &datagram_bytes, QuicPathId id = 0,
+                              std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
+                              QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+        : DeferredProtectedDatagram(DatagramBuffer(datagram_bytes), id, qlog_datagram_id,
+                                    datagram_ecn) {
+    }
+    DeferredProtectedDatagram(std::vector<std::byte> &&datagram_bytes, QuicPathId id = 0,
+                              std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
+                              QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+        : DeferredProtectedDatagram(DatagramBuffer(std::move(datagram_bytes)), id, qlog_datagram_id,
+                                    datagram_ecn) {
     }
 
     bool operator==(const DeferredProtectedDatagram &) const = default;
@@ -336,12 +348,18 @@ inline bool operator==(const std::vector<std::byte> &lhs, const DeferredProtecte
 }
 
 struct DeferredProtectedPacket {
-    std::vector<std::byte> bytes;
+    DatagramBuffer bytes;
     std::uint32_t datagram_id = 0;
 
     DeferredProtectedPacket() = default;
-    DeferredProtectedPacket(std::vector<std::byte> packet_bytes, std::uint32_t id = 0)
+    DeferredProtectedPacket(DatagramBuffer packet_bytes, std::uint32_t id = 0)
         : bytes(std::move(packet_bytes)), datagram_id(id) {
+    }
+    DeferredProtectedPacket(const std::vector<std::byte> &packet_bytes, std::uint32_t id = 0)
+        : DeferredProtectedPacket(DatagramBuffer(packet_bytes), id) {
+    }
+    DeferredProtectedPacket(std::vector<std::byte> &&packet_bytes, std::uint32_t id = 0)
+        : DeferredProtectedPacket(DatagramBuffer(std::move(packet_bytes)), id) {
     }
 
     operator DeferredProtectedDatagram() const {
@@ -434,7 +452,7 @@ class QuicConnection {
                                                    QuicMigrationRequestReason reason);
     StreamStateResult<bool> queue_application_close(LocalApplicationCloseCommand command);
     void request_key_update();
-    std::vector<std::byte> drain_outbound_datagram(QuicCoreTimePoint now);
+    DatagramBuffer drain_outbound_datagram(QuicCoreTimePoint now);
     void on_timeout(QuicCoreTimePoint now);
     std::optional<QuicCoreReceiveStreamData> take_received_stream_data();
     std::optional<QuicCorePeerResetStream> take_peer_reset_stream();
@@ -588,7 +606,7 @@ class QuicConnection {
     ConnectionId
     outbound_destination_connection_id(std::optional<QuicPathId> path_id = std::nullopt) const;
     ConnectionId client_initial_destination_connection_id() const;
-    std::vector<std::byte> flush_outbound_datagram(QuicCoreTimePoint now);
+    DatagramBuffer flush_outbound_datagram(QuicCoreTimePoint now);
     void mark_failed();
     void queue_state_change(QuicCoreStateChange change);
 

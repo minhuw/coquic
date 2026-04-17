@@ -482,12 +482,22 @@ class QuicConnection {
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
     CodecResult<bool> process_inbound_packet(const ProtectedPacket &packet, QuicCoreTimePoint now,
                                              QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
+    CodecResult<bool>
+    process_inbound_received_packet(const ReceivedProtectedPacket &packet, QuicCoreTimePoint now,
+                                    QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
     CodecResult<bool> process_inbound_crypto(EncryptionLevel level, std::span<const Frame> frames,
                                              QuicCoreTimePoint now);
+    CodecResult<bool> process_inbound_received_crypto(EncryptionLevel level,
+                                                      std::span<const ReceivedFrame> frames,
+                                                      QuicCoreTimePoint now);
     CodecResult<bool> process_inbound_application(std::span<const Frame> frames,
                                                   QuicCoreTimePoint now,
                                                   bool allow_preconnected_frames = false,
                                                   QuicPathId path_id = 0);
+    CodecResult<bool> process_inbound_received_application(std::span<const ReceivedFrame> frames,
+                                                           QuicCoreTimePoint now,
+                                                           bool allow_preconnected_frames = false,
+                                                           QuicPathId path_id = 0);
     CodecResult<bool> process_inbound_ack(PacketSpaceState &packet_space, const AckFrame &ack,
                                           QuicCoreTimePoint now, std::uint64_t ack_delay_exponent,
                                           std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);

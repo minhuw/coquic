@@ -205,6 +205,52 @@ TEST(QuicCoreTest,
     EXPECT_TRUE(connection.deferred_protected_packets_.empty());
 }
 
+TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilGapCloses) {
+    auto connection = make_connected_server_connection();
+
+    const auto make_datagram = [&](std::uint64_t packet_number,
+                                   const coquic::quic::StreamFrame &frame) {
+        return coquic::quic::serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{
+                coquic::quic::ProtectedOneRttPacket{
+                    .destination_connection_id = connection.config_.source_connection_id,
+                    .packet_number_length = 1,
+                    .packet_number = packet_number,
+                    .frames = {frame},
+                },
+            },
+            coquic::quic::SerializeProtectionContext{
+                .local_role = coquic::quic::EndpointRole::client,
+                .client_initial_destination_connection_id =
+                    connection.client_initial_destination_connection_id(),
+                .one_rtt_secret =
+                    optional_ref_or_terminate(connection.application_space_.read_secret),
+            });
+    };
+
+    const auto late = make_datagram(
+        7, coquic::quic::test::make_inbound_application_stream_frame("lo", 3, 0, true));
+    ASSERT_TRUE(late.has_value());
+    connection.process_inbound_datagram(late.value(), coquic::quic::test::test_time(1));
+
+    ASSERT_EQ(connection.streams_.at(0).receive_buffer.buffered_bytes_.size(), 1u);
+    const auto &buffered = connection.streams_.at(0).receive_buffer.buffered_bytes_.begin()->second;
+    EXPECT_EQ(connection.streams_.at(0).receive_buffer.buffered_bytes_.begin()->first, 3u);
+    EXPECT_GT(buffered.storage()->size(), buffered.size());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+
+    const auto early = make_datagram(
+        8, coquic::quic::test::make_inbound_application_stream_frame("hel", 0, 0, false));
+    ASSERT_TRUE(early.has_value());
+    connection.process_inbound_datagram(early.value(), coquic::quic::test::test_time(2));
+
+    const auto received = connection.take_received_stream_data();
+    ASSERT_TRUE(received.has_value());
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(received->bytes), "hello");
+    EXPECT_TRUE(received->fin);
+    EXPECT_TRUE(connection.streams_.at(0).receive_buffer.buffered_bytes_.empty());
+}
+
 TEST(
     QuicCoreTest,
     ProcessInboundDatagramProcessesOneRttAckAndStreamBeforeHandshakeCompletesWhenApplicationKeysExist) {

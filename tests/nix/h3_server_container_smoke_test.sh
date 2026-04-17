@@ -20,6 +20,13 @@ cmd="$(docker image inspect "${image_tag}" --format '{{json .Config.Cmd}}')"
 bundled_page="$(
   docker run --rm --entrypoint /bin/sh "${image_tag}" -lc 'cat /app/www/index.html'
 )"
+binary_help_ok="$(
+  docker run --rm --entrypoint /bin/sh "${image_tag}" -lc '
+    test -x /usr/local/bin/h3-server &&
+      /usr/local/bin/h3-server --help >/tmp/help 2>&1 || true
+    grep -F "usage: h3-server" /tmp/help >/dev/null && echo runnable
+  '
+)"
 
 if [[ "${entrypoint}" != *"/usr/local/bin/h3-server"* ]]; then
   echo "Entrypoint does not include /usr/local/bin/h3-server: ${entrypoint}" >&2
@@ -33,6 +40,11 @@ fi
 
 if [[ "${bundled_page}" != *"<body>Hello HTTP/3</body>"* ]]; then
   echo "Bundled page did not contain expected body tag" >&2
+  exit 1
+fi
+
+if [[ "${binary_help_ok}" != "runnable" ]]; then
+  echo "Packaged /usr/local/bin/h3-server is not runnable or missing usage: h3-server from --help" >&2
   exit 1
 fi
 

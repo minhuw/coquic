@@ -76,7 +76,7 @@ class SharedBytes {
     // Mirrors std::span::subspan(offset, count).
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     SharedBytes subspan(std::size_t offset, std::size_t count = std::dynamic_extent) const {
-        if (offset >= size()) {
+        if (offset > size()) {
             return {};
         }
 

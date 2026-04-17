@@ -56,6 +56,19 @@ void expect_decode_error(std::span<const std::byte> bytes, CodecErrorCode code) 
     EXPECT_EQ(decoded.error().code, code);
 }
 
+void expect_received_decode_matches_decode_error(std::span<const std::byte> bytes) {
+    const auto decoded = coquic::quic::deserialize_frame(bytes);
+    ASSERT_FALSE(decoded.has_value());
+
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes.begin(), bytes.end());
+    const auto received =
+        coquic::quic::deserialize_received_frame(SharedBytes(storage, 0, bytes.size()));
+    ASSERT_FALSE(received.has_value());
+
+    EXPECT_EQ(received.error().code, decoded.error().code);
+    EXPECT_EQ(received.error().offset, decoded.error().offset);
+}
+
 void expect_serialize_error(const Frame &frame, CodecErrorCode code) {
     const auto encoded = coquic::quic::serialize_frame(frame);
     ASSERT_FALSE(encoded.has_value());
@@ -862,6 +875,62 @@ TEST(QuicFrameTest, ReceivedLengthlessStreamFrameAliasesRemainingPayloadStorage)
     EXPECT_EQ(decoded.value().bytes_consumed, 6u);
 }
 
+TEST(QuicFrameTest, ReceivedLengthPrefixedStreamFrameAliasesPayloadStorage) {
+    auto storage = std::make_shared<std::vector<std::byte>>(std::initializer_list<std::byte>{
+        std::byte{0xff},
+        std::byte{0x0e},
+        std::byte{0x05},
+        std::byte{0x0b},
+        std::byte{0x02},
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xee},
+    });
+    const SharedBytes bytes(storage, 1, 7);
+
+    const auto decoded = coquic::quic::deserialize_received_frame(bytes);
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *stream = std::get_if<coquic::quic::ReceivedStreamFrame>(&decoded.value().frame);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_FALSE(stream->fin);
+    EXPECT_TRUE(stream->has_offset);
+    EXPECT_TRUE(stream->has_length);
+    ASSERT_TRUE(stream->offset.has_value());
+    EXPECT_EQ(*stream->offset, 11u);
+    EXPECT_EQ(stream->stream_data, (std::vector<std::byte>{
+                                       std::byte{0xaa},
+                                       std::byte{0xbb},
+                                   }));
+    EXPECT_EQ(stream->stream_data.storage(), storage);
+    EXPECT_EQ(stream->stream_data.begin_offset(), 5u);
+    EXPECT_EQ(stream->stream_data.end_offset(), 7u);
+    EXPECT_EQ(decoded.value().bytes_consumed, 6u);
+}
+
+TEST(QuicFrameTest, ReceivedZeroLengthCryptoFrameAtEndPreservesAliasStorage) {
+    auto storage = std::make_shared<std::vector<std::byte>>(std::initializer_list<std::byte>{
+        std::byte{0xff},
+        std::byte{0x06},
+        std::byte{0x09},
+        std::byte{0x00},
+        std::byte{0xee},
+    });
+    const SharedBytes bytes(storage, 1, 4);
+
+    const auto decoded = coquic::quic::deserialize_received_frame(bytes);
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *crypto = std::get_if<coquic::quic::ReceivedCryptoFrame>(&decoded.value().frame);
+    ASSERT_NE(crypto, nullptr);
+    EXPECT_EQ(crypto->offset, 9u);
+    EXPECT_TRUE(crypto->crypto_data.empty());
+    EXPECT_EQ(crypto->crypto_data.storage(), storage);
+    EXPECT_EQ(crypto->crypto_data.begin_offset(), 4u);
+    EXPECT_EQ(crypto->crypto_data.end_offset(), 4u);
+    EXPECT_EQ(decoded.value().bytes_consumed, 3u);
+}
+
 TEST(QuicFrameTest, RoundTripsStreamFramesAcrossFlagVariants) {
     struct StreamVariantCase {
         std::byte expected_type;
@@ -1150,6 +1219,46 @@ TEST(QuicFrameTest, RejectsMalformedCryptoTokenAndStreamFrames) {
                             std::byte{0xaa},
                         }),
                         CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicFrameTest, ReceivedDecodeMatchesDecodeErrorsForMalformedFrames) {
+    const std::array<std::array<std::byte, 3>, 3> truncated_cases{{
+        {std::byte{0x06}, std::byte{0x00}, std::byte{0x01}},
+        {std::byte{0x0a}, std::byte{0x00}, std::byte{0x01}},
+        {std::byte{0x40}, std::byte{0x06}, std::byte{0x00}},
+    }};
+
+    for (const auto &bytes : truncated_cases) {
+        expect_received_decode_matches_decode_error(as_span(bytes));
+    }
+
+    expect_received_decode_matches_decode_error(as_span(std::array<std::byte, 11>{
+        std::byte{0x06},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0x01},
+        std::byte{0xaa},
+    }));
+    expect_received_decode_matches_decode_error(as_span(std::array<std::byte, 12>{
+        std::byte{0x0e},
+        std::byte{0x00},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0xff},
+        std::byte{0x01},
+        std::byte{0xaa},
+    }));
 }
 
 TEST(QuicFrameTest, RejectsMalformedFlowControlConnectionIdAndCloseFrames) {

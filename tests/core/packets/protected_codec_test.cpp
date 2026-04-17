@@ -372,6 +372,50 @@ TEST(QuicProtectedCodecTest, OneRttPacketSerializesSharedStreamFrameViews) {
     EXPECT_EQ(stream->stream_data, (std::vector<std::byte>{std::byte{0xbb}, std::byte{0xcc}}));
 }
 
+TEST(QuicProtectedCodecTest, DeserializesReceivedOneRttPacketWithAliasedStreamPayload) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames = {
+        coquic::quic::StreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 9,
+            .offset = 4,
+            .stream_data = {std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}},
+        },
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{packet},
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                       /*secret_size=*/16));
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_received_protected_datagram(
+        encoded.value(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                         /*secret_size=*/16));
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+
+    const auto *one_rtt =
+        std::get_if<coquic::quic::ReceivedProtectedOneRttPacket>(&decoded.value().front());
+    ASSERT_NE(one_rtt, nullptr);
+    ASSERT_NE(one_rtt->plaintext_storage, nullptr);
+    ASSERT_EQ(one_rtt->frames.size(), 1u);
+
+    const auto *stream = std::get_if<coquic::quic::ReceivedStreamFrame>(&one_rtt->frames.front());
+    ASSERT_NE(stream, nullptr);
+    EXPECT_TRUE(stream->fin);
+    EXPECT_TRUE(stream->has_offset);
+    EXPECT_TRUE(stream->has_length);
+    EXPECT_EQ(stream->stream_id, 9u);
+    EXPECT_EQ(stream->offset, std::optional<std::uint64_t>{4u});
+    EXPECT_EQ(stream->stream_data,
+              (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}}));
+    EXPECT_EQ(stream->stream_data.storage(), one_rtt->plaintext_storage);
+}
+
 TEST(QuicProtectedCodecTest, AppendsOneRttPacketIntoExistingDatagramBuffer) {
     const auto packet = make_minimal_one_rtt_packet();
     const auto context = make_one_rtt_serialize_context(
@@ -1022,6 +1066,30 @@ TEST(QuicProtectedCodecTest, DeserializesClientInitialFromRfc9001AppendixA2) {
     const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&decoded.value()[0]);
     ASSERT_NE(initial, nullptr);
     EXPECT_EQ(initial->packet_number, 2ULL);
+}
+
+TEST(QuicProtectedCodecTest, DeserializesReceivedInitialPacketWithAliasedCryptoPayload) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_received_protected_datagram(
+        encoded.value(), make_rfc9001_client_initial_deserialize_context());
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+
+    const auto *initial =
+        std::get_if<coquic::quic::ReceivedProtectedInitialPacket>(&decoded.value().front());
+    ASSERT_NE(initial, nullptr);
+    ASSERT_NE(initial->plaintext_storage, nullptr);
+    ASSERT_GE(initial->frames.size(), 1u);
+
+    const auto *crypto = std::get_if<coquic::quic::ReceivedCryptoFrame>(&initial->frames.front());
+    ASSERT_NE(crypto, nullptr);
+    EXPECT_EQ(crypto->offset, 0u);
+    EXPECT_EQ(crypto->crypto_data, hex_bytes(kRfc9001ClientHelloHex));
+    EXPECT_EQ(crypto->crypto_data.storage(), initial->plaintext_storage);
 }
 
 TEST(QuicProtectedCodecTest, RejectsInitialWithoutClientInitialDestinationConnectionId) {

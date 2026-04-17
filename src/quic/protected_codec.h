@@ -56,6 +56,17 @@ struct ProtectedInitialPacket {
     std::vector<Frame> frames;
 };
 
+struct ReceivedProtectedInitialPacket {
+    std::uint32_t version = 1;
+    ConnectionId destination_connection_id;
+    ConnectionId source_connection_id;
+    std::vector<std::byte> token;
+    std::uint8_t packet_number_length = 1;
+    std::uint64_t packet_number = 0;
+    std::shared_ptr<std::vector<std::byte>> plaintext_storage;
+    std::vector<ReceivedFrame> frames;
+};
+
 struct ProtectedHandshakePacket {
     std::uint32_t version = 1;
     ConnectionId destination_connection_id;
@@ -65,6 +76,16 @@ struct ProtectedHandshakePacket {
     std::vector<Frame> frames;
 };
 
+struct ReceivedProtectedHandshakePacket {
+    std::uint32_t version = 1;
+    ConnectionId destination_connection_id;
+    ConnectionId source_connection_id;
+    std::uint8_t packet_number_length = 1;
+    std::uint64_t packet_number = 0;
+    std::shared_ptr<std::vector<std::byte>> plaintext_storage;
+    std::vector<ReceivedFrame> frames;
+};
+
 struct ProtectedZeroRttPacket {
     std::uint32_t version = 1;
     ConnectionId destination_connection_id;
@@ -72,6 +93,16 @@ struct ProtectedZeroRttPacket {
     std::uint8_t packet_number_length = 1;
     std::uint64_t packet_number = 0;
     std::vector<Frame> frames;
+};
+
+struct ReceivedProtectedZeroRttPacket {
+    std::uint32_t version = 1;
+    ConnectionId destination_connection_id;
+    ConnectionId source_connection_id;
+    std::uint8_t packet_number_length = 1;
+    std::uint64_t packet_number = 0;
+    std::shared_ptr<std::vector<std::byte>> plaintext_storage;
+    std::vector<ReceivedFrame> frames;
 };
 
 struct StreamFrameSendFragment;
@@ -93,6 +124,16 @@ struct ProtectedOneRttPacket {
     std::uint64_t packet_number = 0;
     std::vector<Frame> frames;
     std::vector<StreamFrameView> stream_frame_views;
+};
+
+struct ReceivedProtectedOneRttPacket {
+    bool spin_bit = false;
+    bool key_phase = false;
+    ConnectionId destination_connection_id;
+    std::uint8_t packet_number_length = 1;
+    std::uint64_t packet_number = 0;
+    std::shared_ptr<std::vector<std::byte>> plaintext_storage;
+    std::vector<ReceivedFrame> frames;
 };
 
 struct ProtectedOneRttPacketView {
@@ -139,6 +180,9 @@ struct DeserializeProtectionContext {
 
 using ProtectedPacket = std::variant<ProtectedInitialPacket, ProtectedHandshakePacket,
                                      ProtectedZeroRttPacket, ProtectedOneRttPacket>;
+using ReceivedProtectedPacket =
+    std::variant<ReceivedProtectedInitialPacket, ReceivedProtectedHandshakePacket,
+                 ReceivedProtectedZeroRttPacket, ReceivedProtectedOneRttPacket>;
 
 struct SerializedProtectedPacketMetadata {
     std::size_t offset = 0;
@@ -175,5 +219,8 @@ serialize_protected_datagram(std::span<const ProtectedPacket> packets,
 CodecResult<std::vector<ProtectedPacket>>
 deserialize_protected_datagram(std::span<const std::byte> bytes,
                                const DeserializeProtectionContext &context);
+CodecResult<std::vector<ReceivedProtectedPacket>>
+deserialize_received_protected_datagram(std::span<const std::byte> bytes,
+                                        const DeserializeProtectionContext &context);
 
 } // namespace coquic::quic

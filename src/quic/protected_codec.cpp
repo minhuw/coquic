@@ -34,6 +34,13 @@ enum class LongHeaderPacketType : std::uint8_t {
     handshake = 0x02,
 };
 
+enum class ProtectedPayloadPacketType : std::uint8_t {
+    initial,
+    zero_rtt,
+    handshake,
+    one_rtt,
+};
+
 std::uint8_t encoded_long_header_type(LongHeaderPacketType packet_type, std::uint32_t version) {
     const auto encoded_type = static_cast<std::uint8_t>(packet_type);
     return version == kQuicVersion2 ? static_cast<std::uint8_t>(encoded_type + 1u) : encoded_type;
@@ -77,6 +84,11 @@ struct StreamFrameHeaderFields {
 
 struct ProtectedPacketDecodeResult {
     ProtectedPacket packet;
+    std::size_t bytes_consumed = 0;
+};
+
+struct ReceivedProtectedPacketDecodeResult {
+    ReceivedProtectedPacket packet;
     std::size_t bytes_consumed = 0;
 };
 
@@ -254,6 +266,26 @@ CodecResult<std::size_t> serialized_frame_payload_size(std::span<const Frame> fr
     return CodecResult<std::size_t>::success(total);
 }
 
+CodecResult<ConnectionId> read_connection_id(BufferReader &reader, bool enforce_v1_limit) {
+    const auto length = read_u8(reader);
+    if (!length.has_value()) {
+        return CodecResult<ConnectionId>::failure(length.error().code, length.error().offset);
+    }
+    if (enforce_v1_limit && length.value() > 20) {
+        return CodecResult<ConnectionId>::failure(CodecErrorCode::invalid_varint, reader.offset());
+    }
+
+    const auto bytes = reader.read_exact(length.value());
+    if (!bytes.has_value()) {
+        return CodecResult<ConnectionId>::failure(bytes.error().code, bytes.error().offset);
+    }
+
+    return CodecResult<ConnectionId>::success(ConnectionId{
+        bytes.value().begin(),
+        bytes.value().end(),
+    });
+}
+
 bool frame_allowed_in_long_header_packet_type(const Frame &frame,
                                               LongHeaderPacketType packet_type) {
     const auto frame_index = frame.index();
@@ -283,6 +315,52 @@ CodecResult<bool> validate_long_header_frames(std::span<const Frame> frames,
     }
 
     return CodecResult<bool>::success(true);
+}
+
+bool frame_allowed_in_protected_payload_packet_type(const ReceivedFrame &frame,
+                                                    ProtectedPayloadPacketType packet_type) {
+    if (packet_type == ProtectedPayloadPacketType::one_rtt) {
+        return true;
+    }
+
+    const auto frame_index = frame.index();
+    if (packet_type == ProtectedPayloadPacketType::zero_rtt) {
+        const auto forbidden_in_zero_rtt = (frame_index == 2) | (frame_index == 5) |
+                                           (frame_index == 20) | (frame_index == 6) |
+                                           (frame_index == 17) | (frame_index == 15);
+        return !forbidden_in_zero_rtt;
+    }
+
+    return (frame_index == 0) | (frame_index == 1) | (frame_index == 2) | (frame_index == 5) |
+           (frame_index == 18);
+}
+
+CodecResult<std::vector<ReceivedFrame>>
+deserialize_received_frame_sequence(SharedBytes payload, ProtectedPayloadPacketType packet_type,
+                                    std::size_t base_offset) {
+    if (payload.empty()) {
+        return CodecResult<std::vector<ReceivedFrame>>::failure(
+            CodecErrorCode::empty_packet_payload, base_offset);
+    }
+
+    std::vector<ReceivedFrame> frames;
+    std::size_t offset = 0;
+    while (offset < payload.size()) {
+        const auto decoded = deserialize_received_frame(payload.subspan(offset));
+        if (!decoded.has_value()) {
+            return CodecResult<std::vector<ReceivedFrame>>::failure(
+                decoded.error().code, base_offset + offset + decoded.error().offset);
+        }
+        if (!frame_allowed_in_protected_payload_packet_type(decoded.value().frame, packet_type)) {
+            return CodecResult<std::vector<ReceivedFrame>>::failure(
+                CodecErrorCode::frame_not_allowed_in_packet_type, base_offset + offset);
+        }
+
+        frames.push_back(std::move(decoded.value().frame));
+        offset += decoded.value().bytes_consumed;
+    }
+
+    return CodecResult<std::vector<ReceivedFrame>>::success(std::move(frames));
 }
 
 std::size_t encoded_stream_frame_payload_size(std::uint64_t stream_id, std::uint64_t offset,
@@ -891,6 +969,258 @@ deserialize_plaintext_packet_image(std::span<const std::byte> plaintext_image,
     return deserialize_packet(plaintext_image, options);
 }
 
+struct ReceivedLongHeaderPacketFields {
+    std::uint32_t version = 1;
+    ConnectionId destination_connection_id;
+    ConnectionId source_connection_id;
+    std::vector<std::byte> token;
+    std::uint8_t packet_number_length = 1;
+    std::vector<ReceivedFrame> frames;
+};
+
+struct ReceivedShortHeaderPacketFields {
+    bool spin_bit = false;
+    bool key_phase = false;
+    ConnectionId destination_connection_id;
+    std::uint8_t packet_number_length = 1;
+    std::vector<ReceivedFrame> frames;
+};
+
+CodecResult<std::vector<std::byte>>
+build_long_header_plaintext_header(const RemovedLongHeaderProtection &unprotected,
+                                   const LongHeaderLayout &layout,
+                                   std::size_t plaintext_payload_size) {
+    const auto header_end = layout.packet_number_offset + unprotected.packet_number_length;
+    std::vector<std::byte> plaintext_header(unprotected.packet_bytes.begin(),
+                                            unprotected.packet_bytes.begin() +
+                                                static_cast<std::ptrdiff_t>(header_end));
+    const auto patched = patch_long_header_length_field(
+        plaintext_header, layout, unprotected.packet_number_length + plaintext_payload_size);
+    if (!patched.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(patched.error().code,
+                                                            patched.error().offset);
+    }
+
+    return CodecResult<std::vector<std::byte>>::success(std::move(plaintext_header));
+}
+
+CodecResult<ReceivedLongHeaderPacketFields>
+decode_received_long_header_packet_fields(std::span<const std::byte> plaintext_header,
+                                          SharedBytes plaintext_payload,
+                                          ProtectedPayloadPacketType packet_type, bool has_token) {
+    BufferReader reader(plaintext_header);
+    const auto first_byte = read_u8(reader);
+    if (!first_byte.has_value()) {
+        return CodecResult<ReceivedLongHeaderPacketFields>::failure(first_byte.error().code,
+                                                                    first_byte.error().offset);
+    }
+    if ((first_byte.value() & 0x40u) == 0) {
+        return CodecResult<ReceivedLongHeaderPacketFields>::failure(
+            CodecErrorCode::invalid_fixed_bit, 0);
+    }
+    if ((first_byte.value() & 0x0cu) != 0) {
+        return CodecResult<ReceivedLongHeaderPacketFields>::failure(
+            CodecErrorCode::invalid_reserved_bits, 0);
+    }
+
+    const auto version_bytes = reader.read_exact(4);
+    if (!version_bytes.has_value()) {
+        return CodecResult<ReceivedLongHeaderPacketFields>::failure(version_bytes.error().code,
+                                                                    version_bytes.error().offset);
+    }
+    const auto version = read_u32_be(version_bytes.value());
+
+    const auto destination_connection_id = read_connection_id(reader, version == kQuicVersion1);
+    if (!destination_connection_id.has_value()) {
+        return CodecResult<ReceivedLongHeaderPacketFields>::failure(
+            destination_connection_id.error().code, destination_connection_id.error().offset);
+    }
+
+    const auto source_connection_id = read_connection_id(reader, version == kQuicVersion1);
+    if (!source_connection_id.has_value()) {
+        return CodecResult<ReceivedLongHeaderPacketFields>::failure(
+            source_connection_id.error().code, source_connection_id.error().offset);
+    }
+
+    std::vector<std::byte> token;
+    if (has_token) {
+        const auto token_length = read_varint(reader);
+        if (!token_length.has_value()) {
+            return CodecResult<ReceivedLongHeaderPacketFields>::failure(
+                token_length.error().code, token_length.error().offset);
+        }
+        if (token_length.value() > static_cast<std::uint64_t>(reader.remaining())) {
+            return CodecResult<ReceivedLongHeaderPacketFields>::failure(
+                CodecErrorCode::packet_length_mismatch, reader.offset());
+        }
+
+        const auto token_bytes =
+            reader.read_exact(static_cast<std::size_t>(token_length.value())).value();
+        token.assign(token_bytes.begin(), token_bytes.end());
+    }
+
+    const auto payload_length = read_varint(reader);
+    if (!payload_length.has_value()) {
+        return CodecResult<ReceivedLongHeaderPacketFields>::failure(payload_length.error().code,
+                                                                    payload_length.error().offset);
+    }
+
+    const auto packet_number_length = static_cast<std::uint8_t>((first_byte.value() & 0x03u) + 1u);
+    const auto expected_payload_length =
+        static_cast<std::uint64_t>(packet_number_length + plaintext_payload.size());
+    if (payload_length.value() != expected_payload_length) {
+        return CodecResult<ReceivedLongHeaderPacketFields>::failure(
+            CodecErrorCode::packet_length_mismatch, reader.offset());
+    }
+
+    const auto packet_number_bytes = reader.read_exact(packet_number_length);
+    if (!packet_number_bytes.has_value()) {
+        return CodecResult<ReceivedLongHeaderPacketFields>::failure(
+            packet_number_bytes.error().code, packet_number_bytes.error().offset);
+    }
+
+    const auto frames =
+        deserialize_received_frame_sequence(plaintext_payload, packet_type, reader.offset());
+    if (!frames.has_value()) {
+        return CodecResult<ReceivedLongHeaderPacketFields>::failure(frames.error().code,
+                                                                    frames.error().offset);
+    }
+
+    return CodecResult<ReceivedLongHeaderPacketFields>::success(ReceivedLongHeaderPacketFields{
+        .version = version,
+        .destination_connection_id = destination_connection_id.value(),
+        .source_connection_id = source_connection_id.value(),
+        .token = std::move(token),
+        .packet_number_length = packet_number_length,
+        .frames = std::move(frames.value()),
+    });
+}
+
+CodecResult<ReceivedShortHeaderPacketFields>
+decode_received_short_header_packet_fields(std::span<const std::byte> plaintext_header,
+                                           SharedBytes plaintext_payload) {
+    BufferReader reader(plaintext_header);
+    const auto first_byte = read_u8(reader);
+    if (!first_byte.has_value()) {
+        return CodecResult<ReceivedShortHeaderPacketFields>::failure(first_byte.error().code,
+                                                                     first_byte.error().offset);
+    }
+    if ((first_byte.value() & 0x40u) == 0) {
+        return CodecResult<ReceivedShortHeaderPacketFields>::failure(
+            CodecErrorCode::invalid_fixed_bit, 0);
+    }
+    if ((first_byte.value() & 0x18u) != 0) {
+        return CodecResult<ReceivedShortHeaderPacketFields>::failure(
+            CodecErrorCode::invalid_reserved_bits, 0);
+    }
+
+    const auto packet_number_length = static_cast<std::uint8_t>((first_byte.value() & 0x03u) + 1u);
+    if (reader.remaining() < packet_number_length) {
+        return CodecResult<ReceivedShortHeaderPacketFields>::failure(
+            CodecErrorCode::packet_length_mismatch, reader.offset());
+    }
+
+    const auto destination_connection_id_length = reader.remaining() - packet_number_length;
+    const auto destination_connection_id = reader.read_exact(destination_connection_id_length);
+    if (!destination_connection_id.has_value()) {
+        return CodecResult<ReceivedShortHeaderPacketFields>::failure(
+            destination_connection_id.error().code, destination_connection_id.error().offset);
+    }
+
+    const auto packet_number_bytes = reader.read_exact(packet_number_length);
+    if (!packet_number_bytes.has_value()) {
+        return CodecResult<ReceivedShortHeaderPacketFields>::failure(
+            packet_number_bytes.error().code, packet_number_bytes.error().offset);
+    }
+
+    const auto frames = deserialize_received_frame_sequence(
+        plaintext_payload, ProtectedPayloadPacketType::one_rtt, plaintext_header.size());
+    if (!frames.has_value()) {
+        return CodecResult<ReceivedShortHeaderPacketFields>::failure(frames.error().code,
+                                                                     frames.error().offset);
+    }
+
+    return CodecResult<ReceivedShortHeaderPacketFields>::success(ReceivedShortHeaderPacketFields{
+        .spin_bit = (first_byte.value() & 0x20u) != 0,
+        .key_phase = (first_byte.value() & 0x04u) != 0,
+        .destination_connection_id =
+            ConnectionId{
+                destination_connection_id.value().begin(),
+                destination_connection_id.value().end(),
+            },
+        .packet_number_length = packet_number_length,
+        .frames = std::move(frames.value()),
+    });
+}
+
+template <typename PacketFactory>
+CodecResult<ReceivedProtectedPacketDecodeResult> deserialize_received_long_header_packet(
+    std::span<const std::byte> bytes, const DeserializeProtectionContext &context,
+    LongHeaderPacketType long_header_type, ProtectedPayloadPacketType packet_type,
+    CipherSuite cipher_suite, const PacketProtectionKeys &keys,
+    std::optional<std::uint64_t> largest_authenticated_packet_number, bool has_token,
+    PacketFactory make_packet) {
+    const auto layout = locate_long_header(bytes, long_header_type);
+    if (!layout.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(layout.error().code,
+                                                                         layout.error().offset);
+    }
+
+    const auto unprotected =
+        remove_long_header_protection(bytes, layout.value(), cipher_suite, keys);
+    if (!unprotected.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            unprotected.error().code, unprotected.error().offset);
+    }
+
+    const auto packet_number = recover_packet_number(largest_authenticated_packet_number,
+                                                     unprotected.value().truncated_packet_number,
+                                                     unprotected.value().packet_number_length);
+    if (!packet_number.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            packet_number.error().code, packet_number.error().offset);
+    }
+
+    const auto header_end =
+        layout.value().packet_number_offset + unprotected.value().packet_number_length;
+    const auto nonce = make_packet_protection_nonce_or_assert(keys.iv, packet_number.value());
+    const auto plaintext = open_payload(OpenPayloadInput{
+        .cipher_suite = cipher_suite,
+        .key = keys.key,
+        .nonce = nonce,
+        .associated_data =
+            std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
+        .ciphertext = std::span<const std::byte>(unprotected.value().packet_bytes)
+                          .subspan(header_end, layout.value().packet_end_offset - header_end),
+    });
+    if (!plaintext.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(plaintext.error().code,
+                                                                         plaintext.error().offset);
+    }
+
+    auto plaintext_storage = std::make_shared<std::vector<std::byte>>(std::move(plaintext.value()));
+    auto plaintext_header = build_long_header_plaintext_header(unprotected.value(), layout.value(),
+                                                               plaintext_storage->size());
+    if (!plaintext_header.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            plaintext_header.error().code, plaintext_header.error().offset);
+    }
+
+    const auto decoded_fields = decode_received_long_header_packet_fields(
+        plaintext_header.value(), SharedBytes(plaintext_storage, 0, plaintext_storage->size()),
+        packet_type, has_token);
+    if (!decoded_fields.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            decoded_fields.error().code, decoded_fields.error().offset);
+    }
+
+    return CodecResult<ReceivedProtectedPacketDecodeResult>::success(
+        ReceivedProtectedPacketDecodeResult{
+            .packet = make_packet(decoded_fields.value(), packet_number.value(), plaintext_storage),
+            .bytes_consumed = layout.value().packet_end_offset,
+        });
+}
+
 CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
     std::vector<std::byte> &datagram, LongHeaderPacketType packet_type, std::uint32_t version,
     const ConnectionId &destination_connection_id, const ConnectionId &source_connection_id,
@@ -1144,6 +1474,36 @@ deserialize_protected_initial_packet(std::span<const std::byte> bytes,
     });
 }
 
+CodecResult<ReceivedProtectedPacketDecodeResult>
+deserialize_received_protected_initial_packet(std::span<const std::byte> bytes,
+                                              const DeserializeProtectionContext &context) {
+    const auto version = read_u32_be(bytes.subspan(1, 4));
+    const auto keys = derive_receive_initial_keys(context, version);
+    if (!keys.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(keys.error().code,
+                                                                         keys.error().offset);
+    }
+
+    return deserialize_received_long_header_packet(
+        bytes, context, LongHeaderPacketType::initial, ProtectedPayloadPacketType::initial,
+        kInitialCipherSuite, keys.value(), context.largest_authenticated_initial_packet_number,
+        true,
+        [](ReceivedLongHeaderPacketFields fields, std::uint64_t packet_number,
+           const std::shared_ptr<std::vector<std::byte>> &plaintext_storage)
+            -> ReceivedProtectedPacket {
+            return ReceivedProtectedInitialPacket{
+                .version = fields.version,
+                .destination_connection_id = std::move(fields.destination_connection_id),
+                .source_connection_id = std::move(fields.source_connection_id),
+                .token = std::move(fields.token),
+                .packet_number_length = fields.packet_number_length,
+                .packet_number = packet_number,
+                .plaintext_storage = plaintext_storage,
+                .frames = std::move(fields.frames),
+            };
+        });
+}
+
 CodecResult<std::vector<std::byte>>
 serialize_protected_handshake_packet(const ProtectedHandshakePacket &packet,
                                      const SerializeProtectionContext &context) {
@@ -1257,6 +1617,39 @@ deserialize_protected_handshake_packet(std::span<const std::byte> bytes,
             },
         .bytes_consumed = layout.value().packet_end_offset,
     });
+}
+
+CodecResult<ReceivedProtectedPacketDecodeResult>
+deserialize_received_protected_handshake_packet(std::span<const std::byte> bytes,
+                                                const DeserializeProtectionContext &context) {
+    if (!context.handshake_secret.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            CodecErrorCode::missing_crypto_context, 0);
+    }
+
+    const auto keys = expand_traffic_secret_cached(context.handshake_secret.value());
+    if (!keys.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(keys.error().code,
+                                                                         keys.error().offset);
+    }
+
+    return deserialize_received_long_header_packet(
+        bytes, context, LongHeaderPacketType::handshake, ProtectedPayloadPacketType::handshake,
+        context.handshake_secret->cipher_suite, keys.value().get(),
+        context.largest_authenticated_handshake_packet_number, false,
+        [](ReceivedLongHeaderPacketFields fields, std::uint64_t packet_number,
+           const std::shared_ptr<std::vector<std::byte>> &plaintext_storage)
+            -> ReceivedProtectedPacket {
+            return ReceivedProtectedHandshakePacket{
+                .version = fields.version,
+                .destination_connection_id = std::move(fields.destination_connection_id),
+                .source_connection_id = std::move(fields.source_connection_id),
+                .packet_number_length = fields.packet_number_length,
+                .packet_number = packet_number,
+                .plaintext_storage = plaintext_storage,
+                .frames = std::move(fields.frames),
+            };
+        });
 }
 
 CodecResult<std::vector<std::byte>>
@@ -1380,6 +1773,39 @@ deserialize_protected_zero_rtt_packet(std::span<const std::byte> bytes,
             },
         .bytes_consumed = layout.value().packet_end_offset,
     });
+}
+
+CodecResult<ReceivedProtectedPacketDecodeResult>
+deserialize_received_protected_zero_rtt_packet(std::span<const std::byte> bytes,
+                                               const DeserializeProtectionContext &context) {
+    if (!context.zero_rtt_secret.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            CodecErrorCode::missing_crypto_context, 0);
+    }
+
+    const auto keys = expand_traffic_secret_cached(context.zero_rtt_secret.value());
+    if (!keys.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(keys.error().code,
+                                                                         keys.error().offset);
+    }
+
+    return deserialize_received_long_header_packet(
+        bytes, context, LongHeaderPacketType::zero_rtt, ProtectedPayloadPacketType::zero_rtt,
+        context.zero_rtt_secret->cipher_suite, keys.value().get(),
+        context.largest_authenticated_application_packet_number, false,
+        [](ReceivedLongHeaderPacketFields fields, std::uint64_t packet_number,
+           const std::shared_ptr<std::vector<std::byte>> &plaintext_storage)
+            -> ReceivedProtectedPacket {
+            return ReceivedProtectedZeroRttPacket{
+                .version = fields.version,
+                .destination_connection_id = std::move(fields.destination_connection_id),
+                .source_connection_id = std::move(fields.source_connection_id),
+                .packet_number_length = fields.packet_number_length,
+                .packet_number = packet_number,
+                .plaintext_storage = plaintext_storage,
+                .frames = std::move(fields.frames),
+            };
+        });
 }
 
 void pad_short_header_plaintext_for_header_protection(std::vector<std::byte> &plaintext_image,
@@ -1750,6 +2176,94 @@ deserialize_protected_one_rtt_packet(std::span<const std::byte> bytes,
     });
 }
 
+CodecResult<ReceivedProtectedPacketDecodeResult>
+deserialize_received_protected_one_rtt_packet(std::span<const std::byte> bytes,
+                                              const DeserializeProtectionContext &context) {
+    if (!context.one_rtt_secret.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            CodecErrorCode::missing_crypto_context, 0);
+    }
+
+    const auto packet_number_offset = 1 + context.one_rtt_destination_connection_id_length;
+    if (packet_number_offset > bytes.size()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            CodecErrorCode::malformed_short_header_context, 1);
+    }
+
+    const auto keys = expand_traffic_secret_cached(context.one_rtt_secret.value());
+    if (!keys.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(keys.error().code,
+                                                                         keys.error().offset);
+    }
+    const auto &keys_ref = keys.value().get();
+
+    const auto cipher_suite = context.one_rtt_secret->cipher_suite;
+    const auto unprotected =
+        remove_short_header_protection(bytes, packet_number_offset, cipher_suite, keys_ref);
+    if (!unprotected.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            unprotected.error().code, unprotected.error().offset);
+    }
+
+    const auto key_phase =
+        (std::to_integer<std::uint8_t>(unprotected.value().packet_bytes[0]) & 0x04u) != 0;
+    if (key_phase != context.one_rtt_key_phase) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            CodecErrorCode::invalid_packet_protection_state, 0);
+    }
+
+    const auto packet_number = recover_packet_number(
+        context.largest_authenticated_application_packet_number,
+        unprotected.value().truncated_packet_number, unprotected.value().packet_number_length);
+    if (!packet_number.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            packet_number.error().code, packet_number.error().offset);
+    }
+
+    const auto header_end = packet_number_offset + unprotected.value().packet_number_length;
+    const auto nonce = make_packet_protection_nonce_or_assert(keys_ref.iv, packet_number.value());
+    const auto plaintext = open_payload(OpenPayloadInput{
+        .cipher_suite = cipher_suite,
+        .key = keys_ref.key,
+        .nonce = nonce,
+        .associated_data =
+            std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
+        .ciphertext =
+            std::span<const std::byte>(unprotected.value().packet_bytes).subspan(header_end),
+    });
+    if (!plaintext.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(plaintext.error().code,
+                                                                         plaintext.error().offset);
+    }
+
+    auto plaintext_storage = std::make_shared<std::vector<std::byte>>(std::move(plaintext.value()));
+    std::vector<std::byte> plaintext_header(unprotected.value().packet_bytes.begin(),
+                                            unprotected.value().packet_bytes.begin() +
+                                                static_cast<std::ptrdiff_t>(header_end));
+    const auto decoded_fields = decode_received_short_header_packet_fields(
+        plaintext_header, SharedBytes(plaintext_storage, 0, plaintext_storage->size()));
+    if (!decoded_fields.has_value()) {
+        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+            decoded_fields.error().code, decoded_fields.error().offset);
+    }
+
+    return CodecResult<ReceivedProtectedPacketDecodeResult>::success(
+        ReceivedProtectedPacketDecodeResult{
+            .packet =
+                ReceivedProtectedOneRttPacket{
+                    .spin_bit = decoded_fields.value().spin_bit,
+                    .key_phase = decoded_fields.value().key_phase,
+                    .destination_connection_id =
+                        std::move(decoded_fields.value().destination_connection_id),
+                    .packet_number_length = decoded_fields.value().packet_number_length,
+                    .packet_number = packet_number.value(),
+                    .plaintext_storage = plaintext_storage,
+                    .frames = std::move(decoded_fields.value().frames),
+                },
+            .bytes_consumed = bytes.size(),
+        });
+}
+
 CodecResult<bool> append_serialized_protected_packet(SerializedProtectedDatagram &datagram,
                                                      const ProtectedPacket &packet,
                                                      const SerializeProtectionContext &context) {
@@ -1957,6 +2471,53 @@ deserialize_protected_datagram(std::span<const std::byte> bytes,
     }
 
     return CodecResult<std::vector<ProtectedPacket>>::success(std::move(packets));
+}
+
+CodecResult<std::vector<ReceivedProtectedPacket>>
+deserialize_received_protected_datagram(std::span<const std::byte> bytes,
+                                        const DeserializeProtectionContext &context) {
+    if (bytes.empty()) {
+        return CodecResult<std::vector<ReceivedProtectedPacket>>::failure(
+            CodecErrorCode::truncated_input, 0);
+    }
+
+    std::vector<ReceivedProtectedPacket> packets;
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        CodecResult<ReceivedProtectedPacketDecodeResult> decoded =
+            CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
+                CodecErrorCode::unsupported_packet_type, 0);
+        const auto first_byte = std::to_integer<std::uint8_t>(bytes[offset]);
+        if ((first_byte & 0x80u) == 0) {
+            decoded = deserialize_received_protected_one_rtt_packet(bytes.subspan(offset), context);
+        } else {
+            const auto type = read_long_header_type(bytes.subspan(offset));
+            if (!type.has_value()) {
+                return CodecResult<std::vector<ReceivedProtectedPacket>>::failure(
+                    type.error().code, offset + type.error().offset);
+            }
+
+            if (type.value() == LongHeaderPacketType::initial) {
+                decoded =
+                    deserialize_received_protected_initial_packet(bytes.subspan(offset), context);
+            } else if (type.value() == LongHeaderPacketType::zero_rtt) {
+                decoded =
+                    deserialize_received_protected_zero_rtt_packet(bytes.subspan(offset), context);
+            } else {
+                decoded =
+                    deserialize_received_protected_handshake_packet(bytes.subspan(offset), context);
+            }
+        }
+        if (!decoded.has_value()) {
+            return CodecResult<std::vector<ReceivedProtectedPacket>>::failure(
+                decoded.error().code, offset + decoded.error().offset);
+        }
+
+        packets.push_back(std::move(decoded.value().packet));
+        offset += decoded.value().bytes_consumed;
+    }
+
+    return CodecResult<std::vector<ReceivedProtectedPacket>>::success(std::move(packets));
 }
 
 } // namespace coquic::quic

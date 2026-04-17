@@ -1,7 +1,7 @@
 # HTTP/3 Browser Discovery
 
 This document covers the manual in-repo browser discovery path for
-`coquic h3-server`.
+`h3-server`.
 
 The bootstrap flow is:
 
@@ -35,7 +35,7 @@ mkcert -install
 mkcert localhost 127.0.0.1 ::1
 ```
 
-That produces a certificate and key you can pass to `coquic h3-server`.
+That produces a certificate and key you can pass to `h3-server`.
 
 ## Start The Server
 
@@ -43,7 +43,7 @@ This example keeps the TCP bootstrap origin and the UDP HTTP/3 endpoint on the
 same numeric port:
 
 ```bash
-./zig-out/bin/coquic h3-server \
+./zig-out/bin/h3-server \
   --host 127.0.0.1 \
   --port 4433 \
   --bootstrap-port 4433 \
@@ -65,7 +65,7 @@ Before opening a browser, run the repo-owned smoke test:
 nix develop -c bash tests/nix/http3_browser_discovery_test.sh
 ```
 
-That test starts `coquic h3-server`, verifies the HTTPS bootstrap response
+That test starts `h3-server`, verifies the HTTPS bootstrap response
 advertises `Alt-Svc`, and verifies direct `--http3-only` content retrieval with
 the pinned Nix `curl`.
 

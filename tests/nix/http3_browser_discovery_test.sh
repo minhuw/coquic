@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd)"
 cd "${repo_root}"
 
 curl_bin="${CURL_BIN:-curl}"
-coquic_bin="${COQUIC_BIN:-./zig-out/bin/coquic}"
+h3_server_bin="${H3_SERVER_BIN:-./zig-out/bin/h3-server}"
 
 if ! "${curl_bin}" --version | grep -Eq '^Features: .*HTTP3($| )'; then
   echo "expected ${curl_bin} to report HTTP3 support in curl --version" >&2
@@ -39,7 +39,7 @@ sock.close()
 PY
 )"
 
-"${coquic_bin}" h3-server \
+"${h3_server_bin}" \
   --host 127.0.0.1 \
   --port "${port}" \
   --bootstrap-port "${port}" \

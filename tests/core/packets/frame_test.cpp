@@ -2,6 +2,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <variant>
 #include <vector>
@@ -34,6 +35,7 @@ using coquic::quic::PathResponseFrame;
 using coquic::quic::PingFrame;
 using coquic::quic::ResetStreamFrame;
 using coquic::quic::RetireConnectionIdFrame;
+using coquic::quic::SharedBytes;
 using coquic::quic::StopSendingFrame;
 using coquic::quic::StreamDataBlockedFrame;
 using coquic::quic::StreamFrame;
@@ -389,6 +391,36 @@ TEST(QuicFrameTest, RoundTripsCryptoFrame) {
     ASSERT_NE(crypto, nullptr);
     EXPECT_EQ(crypto->offset, 9u);
     EXPECT_EQ(crypto->crypto_data.size(), 3u);
+}
+
+TEST(QuicFrameTest, ReceivedCryptoFrameAliasesPayloadStorage) {
+    auto storage = std::make_shared<std::vector<std::byte>>(std::initializer_list<std::byte>{
+        std::byte{0xff},
+        std::byte{0x06},
+        std::byte{0x09},
+        std::byte{0x03},
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+        std::byte{0xee},
+    });
+    const SharedBytes bytes(storage, 1, 7);
+
+    const auto decoded = coquic::quic::deserialize_received_frame(bytes);
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *crypto = std::get_if<coquic::quic::ReceivedCryptoFrame>(&decoded.value().frame);
+    ASSERT_NE(crypto, nullptr);
+    EXPECT_EQ(crypto->offset, 9u);
+    EXPECT_EQ(crypto->crypto_data, (std::vector<std::byte>{
+                                       std::byte{0xaa},
+                                       std::byte{0xbb},
+                                       std::byte{0xcc},
+                                   }));
+    EXPECT_EQ(crypto->crypto_data.storage(), storage);
+    EXPECT_EQ(crypto->crypto_data.begin_offset(), 4u);
+    EXPECT_EQ(crypto->crypto_data.end_offset(), 7u);
+    EXPECT_EQ(decoded.value().bytes_consumed, 6u);
 }
 
 TEST(QuicFrameTest, RoundTripsStreamFrameWithFlags) {
@@ -794,6 +826,40 @@ TEST(QuicFrameTest, DeserializesStreamFrameWithoutLengthUsingRemainingBytes) {
     EXPECT_EQ(stream->offset.value_or(0), 3u);
     EXPECT_EQ(stream->stream_data,
               (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}}));
+}
+
+TEST(QuicFrameTest, ReceivedLengthlessStreamFrameAliasesRemainingPayloadStorage) {
+    auto storage = std::make_shared<std::vector<std::byte>>(std::initializer_list<std::byte>{
+        std::byte{0xff},
+        std::byte{0x0c},
+        std::byte{0x05},
+        std::byte{0x0b},
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+        std::byte{0xee},
+    });
+    const SharedBytes bytes(storage, 1, 7);
+
+    const auto decoded = coquic::quic::deserialize_received_frame(bytes);
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *stream = std::get_if<coquic::quic::ReceivedStreamFrame>(&decoded.value().frame);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_FALSE(stream->fin);
+    EXPECT_TRUE(stream->has_offset);
+    EXPECT_FALSE(stream->has_length);
+    ASSERT_TRUE(stream->offset.has_value());
+    EXPECT_EQ(*stream->offset, 11u);
+    EXPECT_EQ(stream->stream_data, (std::vector<std::byte>{
+                                       std::byte{0xaa},
+                                       std::byte{0xbb},
+                                       std::byte{0xcc},
+                                   }));
+    EXPECT_EQ(stream->stream_data.storage(), storage);
+    EXPECT_EQ(stream->stream_data.begin_offset(), 4u);
+    EXPECT_EQ(stream->stream_data.end_offset(), 7u);
+    EXPECT_EQ(decoded.value().bytes_consumed, 6u);
 }
 
 TEST(QuicFrameTest, RoundTripsStreamFramesAcrossFlagVariants) {

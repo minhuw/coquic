@@ -8,6 +8,7 @@
 #include <variant>
 #include <vector>
 
+#include "src/quic/shared_bytes.h"
 #include "src/quic/varint.h"
 
 namespace coquic::quic {
@@ -70,6 +71,20 @@ struct StreamFrame {
     std::uint64_t stream_id = 0;
     std::optional<std::uint64_t> offset;
     std::vector<std::byte> stream_data;
+};
+
+struct ReceivedCryptoFrame {
+    std::uint64_t offset = 0;
+    SharedBytes crypto_data;
+};
+
+struct ReceivedStreamFrame {
+    bool fin = false;
+    bool has_offset = false;
+    bool has_length = false;
+    std::uint64_t stream_id = 0;
+    std::optional<std::uint64_t> offset;
+    SharedBytes stream_data;
 };
 
 struct MaxDataFrame {
@@ -149,8 +164,21 @@ using Frame =
                  PathResponseFrame, TransportConnectionCloseFrame, ApplicationConnectionCloseFrame,
                  HandshakeDoneFrame>;
 
+using ReceivedFrame =
+    std::variant<PaddingFrame, PingFrame, AckFrame, ResetStreamFrame, StopSendingFrame,
+                 ReceivedCryptoFrame, NewTokenFrame, ReceivedStreamFrame, MaxDataFrame,
+                 MaxStreamDataFrame, MaxStreamsFrame, DataBlockedFrame, StreamDataBlockedFrame,
+                 StreamsBlockedFrame, NewConnectionIdFrame, RetireConnectionIdFrame,
+                 PathChallengeFrame, PathResponseFrame, TransportConnectionCloseFrame,
+                 ApplicationConnectionCloseFrame, HandshakeDoneFrame>;
+
 struct FrameDecodeResult {
     Frame frame;
+    std::size_t bytes_consumed = 0;
+};
+
+struct ReceivedFrameDecodeResult {
+    ReceivedFrame frame;
     std::size_t bytes_consumed = 0;
 };
 
@@ -160,5 +188,6 @@ CodecResult<std::size_t> serialize_frame_into(std::span<std::byte> output, const
 CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame);
 CodecResult<std::size_t> append_serialized_frame(std::vector<std::byte> &bytes, const Frame &frame);
 CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> bytes);
+CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(SharedBytes bytes);
 
 } // namespace coquic::quic

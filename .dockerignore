@@ -8,3 +8,10 @@
 !src/**
 !scripts/
 !scripts/**
+!docker/
+!docker/h3-server/
+!docker/h3-server/www/
+!docker/h3-server/www/index.html
+!zig-out/
+!zig-out/bin/
+!zig-out/bin/h3-server

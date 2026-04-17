@@ -530,6 +530,43 @@ TEST(QuicHttp3RuntimeTest, ParsesStandaloneClientInvocation) {
     EXPECT_EQ(parsed.server_name, "localhost");
 }
 
+TEST(QuicHttp3RuntimeTest, RejectsInvalidSingleDashArg) {
+    const char *argv[] = {
+        "h3-client",
+        "https://localhost:9443/_coquic/echo",
+        "-bad",
+    };
+
+    const auto config = coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                               const_cast<char **>(argv));
+    EXPECT_FALSE(config.has_value());
+}
+
+TEST(QuicHttp3RuntimeTest, ServerParserRejectsClientOnlyFlag) {
+    const char *argv[] = {
+        "h3-server",
+        "--output",
+        "reply.bin",
+    };
+
+    const auto config = coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                               const_cast<char **>(argv));
+    EXPECT_FALSE(config.has_value());
+}
+
+TEST(QuicHttp3RuntimeTest, ClientParserRejectsServerOnlyFlag) {
+    const char *argv[] = {
+        "h3-client",
+        "https://localhost:9443/_coquic/echo",
+        "--document-root",
+        "site",
+    };
+
+    const auto config = coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                               const_cast<char **>(argv));
+    EXPECT_FALSE(config.has_value());
+}
+
 TEST(QuicHttp3RuntimeTest, CoreEndpointConfigsUseH3Alpn) {
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,

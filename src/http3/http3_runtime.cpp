@@ -1210,6 +1210,7 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
     int index = 1;
     while (index < argc) {
         const std::string_view arg = argv[index++];
+        const bool is_server_mode = mode == Http3CliMode::server;
         auto require_value = [&](std::string_view) -> std::optional<std::string_view> {
             if (index >= argc) {
                 print_usage(mode);
@@ -1244,6 +1245,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--bootstrap-port") {
+            if (!is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1257,6 +1262,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--alt-svc-max-age") {
+            if (!is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1283,6 +1292,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--document-root") {
+            if (!is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1291,6 +1304,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--certificate-chain") {
+            if (!is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1299,6 +1316,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--private-key") {
+            if (!is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1307,6 +1328,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--method") {
+            if (is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1315,6 +1340,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--header") {
+            if (is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1328,6 +1357,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--data") {
+            if (is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1340,6 +1373,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--body-file") {
+            if (is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1352,6 +1389,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--output") {
+            if (is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1360,6 +1401,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
         if (arg == "--server-name") {
+            if (is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
             const auto value = require_value(arg);
             if (!value.has_value()) {
                 return std::nullopt;
@@ -1380,6 +1425,11 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             }
             config.url = std::string(arg);
             continue;
+        }
+
+        if (!arg.empty() && arg.front() == '-') {
+            print_usage(mode);
+            return std::nullopt;
         }
     }
 

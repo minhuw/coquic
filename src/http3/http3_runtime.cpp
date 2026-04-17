@@ -1403,24 +1403,6 @@ std::optional<Http3RuntimeConfig> parse_http3_client_args(int argc, char **argv)
     return parse_http3_args(argc, argv, Http3CliMode::client);
 }
 
-std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv) {
-    if (argc < 2) {
-        print_usage(Http3CliMode::server);
-        return std::nullopt;
-    }
-
-    const std::string_view subcommand = argv[1];
-    if (subcommand == "h3-server") {
-        return parse_http3_server_args(argc - 1, argv + 1);
-    }
-    if (subcommand == "h3-client") {
-        return parse_http3_client_args(argc - 1, argv + 1);
-    }
-
-    print_usage(Http3CliMode::server);
-    return std::nullopt;
-}
-
 quic::QuicCoreEndpointConfig make_http3_client_endpoint_config(const Http3RuntimeConfig &config) {
     auto endpoint = quic::QuicCoreEndpointConfig{
         .role = quic::EndpointRole::client,
@@ -1545,7 +1527,20 @@ int run_http3_client(const Http3RuntimeConfig &config) {
         .url = config.url,
         .output_path = output_path,
     }};
-    return run_http3_client_transfers(config, jobs);
+    const int transfer_result = run_http3_client_transfers(config, jobs);
+    if (transfer_result != 0 || config.output_path.has_value()) {
+        return transfer_result;
+    }
+
+    const auto body = read_binary_file(output_path);
+    std::error_code ignored;
+    std::filesystem::remove(output_path, ignored);
+    if (!body.has_value() || body->empty()) {
+        return body.has_value() ? 0 : 1;
+    }
+    std::cout.write(reinterpret_cast<const char *>(body->data()),
+                    static_cast<std::streamsize>(body->size()));
+    return static_cast<bool>(std::cout) ? 0 : 1;
 }
 
 int run_http3_runtime(const Http3RuntimeConfig &config) {

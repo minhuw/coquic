@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -41,6 +42,87 @@ class ScopedFd {
 
   private:
     int fd_ = -1;
+};
+
+class ScopedStdoutCapture {
+  public:
+    ScopedStdoutCapture() {
+        std::fflush(stdout);
+        old_stdout_fd_ = ::dup(STDOUT_FILENO);
+        if (old_stdout_fd_ < 0) {
+            return;
+        }
+
+        int pipe_fds[2] = {-1, -1};
+        if (::pipe(pipe_fds) != 0) {
+            ::close(old_stdout_fd_);
+            old_stdout_fd_ = -1;
+            return;
+        }
+
+        read_fd_ = pipe_fds[0];
+        write_fd_ = pipe_fds[1];
+        if (::dup2(write_fd_, STDOUT_FILENO) < 0) {
+            ::close(read_fd_);
+            ::close(write_fd_);
+            ::close(old_stdout_fd_);
+            read_fd_ = -1;
+            write_fd_ = -1;
+            old_stdout_fd_ = -1;
+        }
+    }
+
+    ~ScopedStdoutCapture() {
+        restore_stdout();
+        if (read_fd_ >= 0) {
+            ::close(read_fd_);
+        }
+    }
+
+    ScopedStdoutCapture(const ScopedStdoutCapture &) = delete;
+    ScopedStdoutCapture &operator=(const ScopedStdoutCapture &) = delete;
+
+    std::string finish_and_read() {
+        restore_stdout();
+
+        std::string captured;
+        if (read_fd_ < 0) {
+            return captured;
+        }
+
+        std::array<char, 4096> buffer{};
+        while (true) {
+            const auto bytes = ::read(read_fd_, buffer.data(), buffer.size());
+            if (bytes <= 0) {
+                break;
+            }
+            captured.append(buffer.data(), static_cast<std::size_t>(bytes));
+        }
+        return captured;
+    }
+
+  private:
+    void restore_stdout() {
+        if (stdout_restored_ || old_stdout_fd_ < 0) {
+            return;
+        }
+
+        std::cout.flush();
+        std::fflush(stdout);
+        ::dup2(old_stdout_fd_, STDOUT_FILENO);
+        ::close(old_stdout_fd_);
+        old_stdout_fd_ = -1;
+        if (write_fd_ >= 0) {
+            ::close(write_fd_);
+            write_fd_ = -1;
+        }
+        stdout_restored_ = true;
+    }
+
+    int old_stdout_fd_ = -1;
+    int read_fd_ = -1;
+    int write_fd_ = -1;
+    bool stdout_restored_ = false;
 };
 
 std::uint16_t allocate_udp_loopback_port() {
@@ -303,7 +385,6 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
 
 TEST(QuicHttp3RuntimeTest, ParsesServerInvocation) {
     const char *argv[] = {
-        "coquic",
         "h3-server",
         "--host",
         "127.0.0.1",
@@ -321,8 +402,8 @@ TEST(QuicHttp3RuntimeTest, ParsesServerInvocation) {
         "tests/fixtures/quic-server-key.pem",
     };
 
-    const auto config = coquic::http3::parse_http3_runtime_args(static_cast<int>(std::size(argv)),
-                                                                const_cast<char **>(argv));
+    const auto config = coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                               const_cast<char **>(argv));
 
     ASSERT_TRUE(config.has_value());
     if (!config.has_value()) {
@@ -342,15 +423,17 @@ TEST(QuicHttp3RuntimeTest, ParsesServerInvocation) {
 
 TEST(QuicHttp3RuntimeTest, ParsesClientInvocation) {
     const char *argv[] = {
-        "coquic",    "h3-client",     "https://localhost:9443/_coquic/echo",
-        "--method",  "POST",          "--header",
-        "x-test: 1", "--header",      "content-type: text/plain",
-        "--data",    "ping",          "--output",
-        "reply.bin", "--server-name", "localhost",
+        "h3-client",     "https://localhost:9443/_coquic/echo",
+        "--method",      "POST",
+        "--header",      "x-test: 1",
+        "--header",      "content-type: text/plain",
+        "--data",        "ping",
+        "--output",      "reply.bin",
+        "--server-name", "localhost",
     };
 
-    const auto config = coquic::http3::parse_http3_runtime_args(static_cast<int>(std::size(argv)),
-                                                                const_cast<char **>(argv));
+    const auto config = coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                               const_cast<char **>(argv));
 
     ASSERT_TRUE(config.has_value());
     if (!config.has_value()) {
@@ -623,6 +706,35 @@ TEST(QuicHttp3RuntimeTest, ServerModeCanDisableBootstrapListener) {
     };
 
     EXPECT_EQ(coquic::http3::run_http3_runtime(client), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
+}
+
+TEST(QuicHttp3RuntimeTest, ClientWithoutOutputWritesBodyToStdout) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello-http3");
+
+    const auto h3_port = allocate_udp_loopback_port();
+    ASSERT_NE(h3_port, 0);
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = h3_port,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    ScopedHttp3Process server_process(server);
+
+    const auto client = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .url = "https://localhost:" + std::to_string(h3_port) + "/hello.txt",
+    };
+
+    ScopedStdoutCapture stdout_capture;
+    EXPECT_EQ(coquic::http3::run_http3_client(client), 0);
+    EXPECT_EQ(stdout_capture.finish_and_read(), "hello-http3");
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
 }
 

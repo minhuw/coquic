@@ -349,6 +349,7 @@
             runHook preInstall
             mkdir -p $out/bin
             cp zig-out/bin/coquic $out/bin/coquic
+            cp zig-out/bin/h3-server $out/bin/h3-server
             cp zig-out/bin/coquic-perf $out/bin/coquic-perf
             runHook postInstall
           '';
@@ -595,6 +596,10 @@
           type = "app";
           program = "${quictlsPackage}/bin/coquic-perf";
         };
+        h3-server-quictls = {
+          type = "app";
+          program = "${quictlsPackage}/bin/h3-server";
+        };
         coquic-quictls-musl = {
           type = "app";
           program = "${quictlsMuslPackage}/bin/coquic";
@@ -603,13 +608,25 @@
           type = "app";
           program = "${quictlsMuslPackage}/bin/coquic-perf";
         };
+        h3-server-quictls-musl = {
+          type = "app";
+          program = "${quictlsMuslPackage}/bin/h3-server";
+        };
         coquic-boringssl = {
           type = "app";
           program = "${boringsslPackage}/bin/coquic";
         };
+        h3-server-boringssl = {
+          type = "app";
+          program = "${boringsslPackage}/bin/h3-server";
+        };
         coquic-boringssl-musl = {
           type = "app";
           program = "${boringsslMuslPackage}/bin/coquic";
+        };
+        h3-server-boringssl-musl = {
+          type = "app";
+          program = "${boringsslMuslPackage}/bin/h3-server";
         };
         curl-http3 = {
           type = "app";

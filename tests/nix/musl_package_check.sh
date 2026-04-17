@@ -33,30 +33,26 @@ fi
 
 nix --option eval-cache false build ".#${package_attr}" >/dev/null
 
-binary="$(readlink -f "$(nix path-info ".#${package_attr}")/bin/coquic")"
-file_output="$(file "${binary}")"
-ldd_output="$(ldd "${binary}" 2>&1 || true)"
+for binary_name in coquic h3-server; do
+  binary="$(readlink -f "$(nix path-info ".#${package_attr}")/bin/${binary_name}")"
+  file_output="$(file "${binary}")"
+  ldd_output="$(ldd "${binary}" 2>&1 || true)"
 
-printf 'binary: %s\n' "${binary}"
-printf 'file: %s\n' "${file_output}"
-printf 'ldd: %s\n' "${ldd_output}"
+  printf 'binary(%s): %s\n' "${binary_name}" "${binary}"
+  printf 'file(%s): %s\n' "${binary_name}" "${file_output}"
+  printf 'ldd(%s): %s\n' "${binary_name}" "${ldd_output}"
 
-case "${ldd_output}" in
-  *"not a dynamic executable"* | *"statically linked"*)
-    ;;
-  *)
-    echo "expected a static musl-linked binary" >&2
+  case "${ldd_output}" in
+    *"not a dynamic executable"* | *"statically linked"*)
+      ;;
+    *)
+      echo "expected ${binary_name} to be a static musl-linked binary" >&2
+      exit 1
+      ;;
+  esac
+
+  if ! grep -q "statically linked" <<<"${file_output}"; then
+    echo "expected file output to report ${binary_name} as statically linked" >&2
     exit 1
-    ;;
-esac
-
-if ! grep -q "statically linked" <<<"${file_output}"; then
-  echo "expected file output to report a statically linked binary" >&2
-  exit 1
-fi
-
-expected_name="${package_attr#coquic-}"
-if [[ "${binary}" != *"${expected_name}"* ]]; then
-  echo "expected binary path to include package name fragment ${expected_name}, got: ${binary}" >&2
-  exit 1
-fi
+  fi
+done

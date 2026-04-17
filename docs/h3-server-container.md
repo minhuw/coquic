@@ -5,11 +5,11 @@ Certificates are mounted at runtime and are not baked into the image.
 
 ## Build A Standalone musl Binary
 
-Use the verified shell for quictls + musl builds:
+Use the verified shell for quictls + musl builds with an explicit one-shot
+command:
 
 ```bash
-nix develop .#quictls-musl
-zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false
+nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false
 ```
 
 The resulting binary is:

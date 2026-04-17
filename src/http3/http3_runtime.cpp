@@ -1403,6 +1403,21 @@ std::optional<Http3RuntimeConfig> parse_http3_client_args(int argc, char **argv)
     return parse_http3_args(argc, argv, Http3CliMode::client);
 }
 
+std::optional<Http3RuntimeConfig> parse_http3_runtime_args(int argc, char **argv) {
+    if (argc < 2) {
+        return std::nullopt;
+    }
+
+    const std::string_view subcommand = argv[1];
+    if (subcommand == "h3-server") {
+        return parse_http3_server_args(argc - 1, argv + 1);
+    }
+    if (subcommand == "h3-client") {
+        return parse_http3_client_args(argc - 1, argv + 1);
+    }
+    return std::nullopt;
+}
+
 quic::QuicCoreEndpointConfig make_http3_client_endpoint_config(const Http3RuntimeConfig &config) {
     auto endpoint = quic::QuicCoreEndpointConfig{
         .role = quic::EndpointRole::client,

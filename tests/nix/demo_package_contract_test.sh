@@ -112,4 +112,59 @@ run_rejection_case "demo/site"
 run_rejection_case "demo"
 run_rejection_case "."
 
+run_missing_source_case() {
+  local case_repo
+  case_repo="$(mktemp -d "${safety_repo}/case.XXXXXX")"
+  install -d "${case_repo}/demo/deploy"
+  cp demo/deploy/package-demo.sh "${case_repo}/demo/deploy/package-demo.sh"
+
+  set +e
+  local failure_output
+  failure_output="$("${case_repo}/demo/deploy/package-demo.sh" "${case_repo}/out" 2>&1)"
+  local failure_status=$?
+  set -e
+
+  if [[ ${failure_status} -eq 0 ]]; then
+    echo "expected missing source directory to be rejected" >&2
+    exit 1
+  fi
+
+  if [[ "${failure_output}" != *"missing demo/site source directory"* ]]; then
+    echo "unexpected missing-source rejection output: ${failure_output}" >&2
+    exit 1
+  fi
+}
+
+run_missing_index_case() {
+  local case_repo
+  case_repo="$(mktemp -d "${safety_repo}/case.XXXXXX")"
+  install -d "${case_repo}/demo/deploy" "${case_repo}/demo/site"
+  cp demo/deploy/package-demo.sh "${case_repo}/demo/deploy/package-demo.sh"
+  printf 'sentinel\n' > "${case_repo}/demo/site/sentinel.txt"
+
+  set +e
+  local failure_output
+  failure_output="$("${case_repo}/demo/deploy/package-demo.sh" "${case_repo}/out" 2>&1)"
+  local failure_status=$?
+  set -e
+
+  if [[ ${failure_status} -eq 0 ]]; then
+    echo "expected missing index.html in source to be rejected" >&2
+    exit 1
+  fi
+
+  if [[ "${failure_output}" != *"packaged demo site is missing index.html"* ]]; then
+    echo "unexpected missing-index rejection output: ${failure_output}" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "${case_repo}/demo/site/sentinel.txt" ]]; then
+    echo "missing-index rejection did not preserve demo/site contents" >&2
+    exit 1
+  fi
+}
+
+run_missing_source_case
+run_missing_index_case
+
 echo "demo package contract looks correct"

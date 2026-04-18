@@ -518,6 +518,8 @@ for marker in \
   "/_coquic/speed/ping" \
   "/_coquic/speed/download" \
   "/_coquic/speed/upload" \
+  "AbortController" \
+  "withTimeout" \
   "runSpeedTest" \
   "runLatencyPhase" \
   "runDownloadPhase" \
@@ -535,7 +537,9 @@ for removed_marker in \
   "safeStorageGet" \
   "safeStorageSet" \
   "safeReadJson" \
-  "runProbe"; do
+  "runProbe" \
+  "fonts.googleapis.com" \
+  "fonts.gstatic.com"; do
   if grep -Fq -- "${removed_marker}" "${output_dir}/index.html"; then
     echo "packaged demo page still contains removed marker: ${removed_marker}" >&2
     exit 1
@@ -631,6 +635,8 @@ Use a restrained light theme in the existing `<style>` block:
   }
 }
 ```
+
+Keep the page self-contained: do not introduce third-party font or asset fetches for the demo UI.
 
 - [ ] **Step 4: Replace the page JavaScript with the balanced speed-test flow**
 
@@ -846,6 +852,12 @@ Complete the script with:
   resetRun();
 </script>
 ```
+
+Add per-request abort handling with `AbortController` so stalled latency, download, and upload
+requests fail explicitly instead of leaving the button stuck in the running state. Timeout/abort
+errors should flow through the existing failure rendering so the run always terminates cleanly and
+restores the retry button. Keep the timeout active for the full request/response work unit, not
+just until response headers arrive.
 
 Keep the stable deployment marker unchanged:
 

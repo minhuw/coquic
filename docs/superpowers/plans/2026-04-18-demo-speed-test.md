@@ -20,6 +20,8 @@
   Purpose: compile the new shared route source into the library and test binary.
 - Modify: `src/http3/http3_server.cpp`
   Purpose: replace the current duplicated default demo-route logic with the shared helper and keep the default upload route bounded before full buffering.
+- Modify: `src/http3/http3_server.h`
+  Purpose: expose the fallback server-handler hook needed for the standalone runtime to preserve bounded demo-route behavior.
 - Modify: `src/http3/http3_runtime.cpp`
   Purpose: call the shared helper before static-file fallback in the standalone `h3-server` runtime.
 - Modify: `tests/http3/server_test.cpp`
@@ -363,7 +365,10 @@ Expected: commit succeeds with only the shared route helper and protocol-level t
 ### Task 2: Wire the shared routes into the runtime and add loopback coverage
 
 **Files:**
+- Modify: `src/http3/http3_server.h`
+- Modify: `src/http3/http3_server.cpp`
 - Modify: `src/http3/http3_runtime.cpp`
+- Modify: `tests/http3/server_test.cpp`
 - Modify: `tests/http3/runtime_test.cpp`
 - Test: `nix develop -c zig build test -- --gtest_filter='QuicHttp3RuntimeTest.Speed*'`
 
@@ -378,6 +383,10 @@ TEST(QuicHttp3RuntimeTest, SpeedDownloadRouteWritesSizedBodyOverLoopback) {}
 
 TEST(QuicHttp3RuntimeTest, SpeedUploadRouteReturnsReceivedByteSummaryOverLoopback) {}
 ```
+
+Add one focused endpoint regression test in `tests/http3/server_test.cpp` that proves the new
+fallback handler still preserves the default speed-upload early rejection path when
+`content-length` already exceeds the upload cap.
 
 Use the existing server process fixture pattern:
 
@@ -418,6 +427,9 @@ Run: `nix develop -c zig build test -- --gtest_filter='QuicHttp3RuntimeTest.Spee
 
 Expected: FAIL because `runtime_server_response(...)` still only knows about the old inspect/echo routes and static files.
 
+Also run the focused endpoint regression you added for the fallback-handler path and verify it is
+RED before the server/runtime plumbing change.
+
 - [ ] **Step 3: Replace the runtime-owned duplicated route branches with the shared helper**
 
 In `src/http3/http3_runtime.cpp`:
@@ -438,6 +450,16 @@ Delete the now-duplicated echo/inspect branches from this function, leaving only
 - the shared demo-route dispatch
 - the existing GET/HEAD static file fallback
 - the existing path resolution and content-type logic
+
+Keep the standalone runtime on the bounded default demo-route path instead of bypassing it with a
+custom request handler:
+
+- extend `Http3ServerConfig` in `src/http3/http3_server.h` with a fallback request handler that is
+  used only when no shared demo route matches
+- update `src/http3/http3_server.cpp` so the default demo-route handling still runs first, and only
+  then delegates non-demo requests to the optional fallback handler before returning `404`
+- wire the standalone runtime to use that fallback for static-file serving so the existing default
+  speed-upload early rejection remains active for `/_coquic/speed/upload`
 
 - [ ] **Step 4: Re-run the focused runtime suite**
 

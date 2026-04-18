@@ -1383,6 +1383,20 @@ CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &ack) {
         return CodecResult<AckRangeCursor>::failure(CodecErrorCode::invalid_varint, 0);
     }
 
+    auto previous_smallest = ack.largest_acknowledged - ack.first_ack_range;
+    for (const auto &range : ack.additional_ranges) {
+        if (previous_smallest < range.gap + 2) {
+            return CodecResult<AckRangeCursor>::failure(CodecErrorCode::invalid_varint, 0);
+        }
+
+        const auto range_largest = previous_smallest - range.gap - 2;
+        if (range_largest < range.range_length) {
+            return CodecResult<AckRangeCursor>::failure(CodecErrorCode::invalid_varint, 0);
+        }
+
+        previous_smallest = range_largest - range.range_length;
+    }
+
     return CodecResult<AckRangeCursor>::success(AckRangeCursor{
         .largest_acknowledged = ack.largest_acknowledged,
         .first_ack_range = ack.first_ack_range,

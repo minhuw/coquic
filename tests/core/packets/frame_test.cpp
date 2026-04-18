@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -49,6 +51,11 @@ constexpr std::uint64_t kInvalidQuicVarInt = kMaxQuicVarInt + 1;
 template <std::size_t N> std::span<const std::byte> as_span(const std::array<std::byte, N> &bytes) {
     return std::span<const std::byte>(bytes.data(), bytes.size());
 }
+
+template <typename T, typename = void> inline constexpr bool can_make_ack_range_cursor_v = false;
+template <typename T>
+inline constexpr bool can_make_ack_range_cursor_v<
+    T, std::void_t<decltype(coquic::quic::make_ack_range_cursor(std::declval<T>()))>> = true;
 
 void expect_decode_error(std::span<const std::byte> bytes, CodecErrorCode code) {
     const auto decoded = coquic::quic::deserialize_frame(bytes);
@@ -421,14 +428,56 @@ TEST(QuicFrameTest, AckRangeCursorMatchesAckFramePacketNumberRanges) {
 }
 
 TEST(QuicFrameTest, AckRangeCursorRejectsInvalidFirstRange) {
-    const auto cursor = coquic::quic::make_ack_range_cursor(coquic::quic::AckFrame{
+    const coquic::quic::AckFrame ack{
         .largest_acknowledged = 3,
         .ack_delay = 0,
         .first_ack_range = 4,
-    });
+    };
+    const auto cursor = coquic::quic::make_ack_range_cursor(ack);
 
     ASSERT_FALSE(cursor.has_value());
     EXPECT_EQ(cursor.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicFrameTest, AckRangeCursorRejectsInvalidAdditionalRanges) {
+    const coquic::quic::AckFrame invalid_gap{
+        .largest_acknowledged = 10,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .additional_ranges =
+            {
+                coquic::quic::AckRange{
+                    .gap = 9,
+                    .range_length = 0,
+                },
+            },
+    };
+
+    const auto gap_cursor = coquic::quic::make_ack_range_cursor(invalid_gap);
+    ASSERT_FALSE(gap_cursor.has_value());
+    EXPECT_EQ(gap_cursor.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+
+    const coquic::quic::AckFrame invalid_range_length{
+        .largest_acknowledged = 10,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .additional_ranges =
+            {
+                coquic::quic::AckRange{
+                    .gap = 0,
+                    .range_length = 9,
+                },
+            },
+    };
+
+    const auto range_length_cursor = coquic::quic::make_ack_range_cursor(invalid_range_length);
+    ASSERT_FALSE(range_length_cursor.has_value());
+    EXPECT_EQ(range_length_cursor.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicFrameTest, AckRangeCursorRejectsTemporaryAckFrame) {
+    EXPECT_TRUE((can_make_ack_range_cursor_v<const AckFrame &>));
+    EXPECT_FALSE((can_make_ack_range_cursor_v<AckFrame &&>));
 }
 
 TEST(QuicFrameTest, RoundTripsCryptoFrame) {

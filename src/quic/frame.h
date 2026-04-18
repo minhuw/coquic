@@ -193,6 +193,8 @@ struct ReceivedFrameDecodeResult {
 
 CodecResult<std::vector<AckPacketNumberRange>> ack_frame_packet_number_ranges(const AckFrame &ack);
 CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &ack);
+CodecResult<AckRangeCursor> make_ack_range_cursor(AckFrame &&ack) = delete;
+CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &&ack) = delete;
 std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor);
 CodecResult<std::size_t> serialized_frame_size(const Frame &frame);
 CodecResult<std::size_t> serialize_frame_into(std::span<std::byte> output, const Frame &frame);

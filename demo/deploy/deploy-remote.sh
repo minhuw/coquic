@@ -58,6 +58,9 @@ ssh_opts=(
   -p "${ssh_port}"
   -i "${COQUIC_DEMO_REMOTE_SSH_KEY_PATH}"
   -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o ServerAliveInterval=10
+  -o ServerAliveCountMax=3
   -o StrictHostKeyChecking=yes
   -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
 )
@@ -65,6 +68,9 @@ scp_opts=(
   -P "${ssh_port}"
   -i "${COQUIC_DEMO_REMOTE_SSH_KEY_PATH}"
   -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o ServerAliveInterval=10
+  -o ServerAliveCountMax=3
   -o StrictHostKeyChecking=yes
   -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
 )
@@ -266,9 +272,10 @@ if [[ ! -L "${remote_current_link}" ]]; then
   exit 1
 fi
 
-canonical_target="$(readlink -m "${remote_current_link}")"
-if [[ -z "${canonical_target}" ]]; then
-  echo "remote preflight failed: unable to resolve ${remote_current_link} target" >&2
+# preflight: current target must resolve to existing directory
+canonical_target="$(readlink -f "${remote_current_link}" || true)"
+if [[ -z "${canonical_target}" || ! -d "${canonical_target}" ]]; then
+  echo "remote preflight failed: ${remote_current_link} target is missing or not a directory" >&2
   exit 1
 fi
 
@@ -407,7 +414,7 @@ headers_verified=0
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: headers
   headers=""
-  if headers="$(nix run .#curl-http3 -- -I "${url}" 2>/dev/null)"; then
+  if headers="$(timeout 20s nix run .#curl-http3 -- -I "${url}" 2>/dev/null)"; then
     if grep -Fq 'HTTP/1.1 200 OK' <<<"${headers}" &&
        grep -Fq "Alt-Svc: h3=\":${public_port}\"; ma=60" <<<"${headers}"; then
       headers_verified=1
@@ -426,7 +433,7 @@ http3_verified=0
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: http3-version
   http3_version=""
-  if http3_version="$(nix run .#curl-http3 -- --http3-only -sS -o /dev/null -w '%{http_version}' "${url}" 2>/dev/null)"; then
+  if http3_version="$(timeout 20s nix run .#curl-http3 -- --http3-only -sS -o /dev/null -w '%{http_version}' "${url}" 2>/dev/null)"; then
     if [[ "${http3_version}" == "3" ]]; then
       http3_verified=1
       break
@@ -444,7 +451,7 @@ page_verified=0
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: page-markers
   page=""
-  if page="$(nix run .#curl-http3 -- --http3-only -sS "${url}" 2>/dev/null)"; then
+  if page="$(timeout 20s nix run .#curl-http3 -- --http3-only -sS "${url}" 2>/dev/null)"; then
     missing_marker=""
     for marker in "Showcase" "Technical" "Run Live Checks" "Browser Verification"; do
       if ! grep -Fq "${marker}" <<<"${page}"; then

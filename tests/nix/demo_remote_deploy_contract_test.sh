@@ -56,6 +56,8 @@ if deploy_job is None:
     raise SystemExit("missing job: deploy-demo")
 if deploy_job.get("if") != "github.ref == 'refs/heads/main'":
     raise SystemExit(f"unexpected deploy-demo job guard: {deploy_job.get('if')!r}")
+if deploy_job.get("timeout-minutes") != 30:
+    raise SystemExit(f"unexpected deploy-demo timeout-minutes: {deploy_job.get('timeout-minutes')!r}")
 
 steps = deploy_job.get("steps", [])
 step_names = [step.get("name") for step in steps]
@@ -119,6 +121,13 @@ if "mktemp -d" not in deploy_script:
     raise SystemExit("deploy script missing mktemp -d usage")
 if "StrictHostKeyChecking=yes" not in deploy_script:
     raise SystemExit("deploy script missing strict host checking")
+for network_timeout_marker in [
+    "ConnectTimeout=10",
+    "ServerAliveInterval=10",
+    "ServerAliveCountMax=3",
+]:
+    if network_timeout_marker not in deploy_script:
+        raise SystemExit(f"deploy script missing network timeout marker: {network_timeout_marker}")
 rollback_markers = [
     "rollback: restore /opt/coquic-demo/current",
     "rollback: restore /etc/systemd/system/coquic-demo.service",
@@ -147,8 +156,12 @@ if "preflight: current must be symlink if present" not in deploy_script:
     raise SystemExit("deploy script missing current-symlink preflight marker")
 if "preflight: current target must resolve within /opt/coquic-demo/releases" not in deploy_script:
     raise SystemExit("deploy script missing current-target preflight marker")
+if "preflight: current target must resolve to existing directory" not in deploy_script:
+    raise SystemExit("deploy script missing existing-directory preflight marker")
 if "ln -sfnT" not in deploy_script:
     raise SystemExit("deploy script missing guarded symlink replacement")
+if "timeout 20s nix run .#curl-http3" not in deploy_script:
+    raise SystemExit("deploy script missing bounded verification timeout wrapper")
 same_release_backup_restore_markers = [
     "same-release backup /opt/coquic-demo/current/h3-server",
     "same-release backup /opt/coquic-demo/current/site",
@@ -419,3 +432,113 @@ echo "same-SHA repair rollback on verification failure behaves correctly"
 
 run_same_release_case "new-release-failure" "fail_after_install" "failure" "/opt/coquic-demo/releases/112233445566"
 echo "new-release rollback on verification failure behaves correctly"
+
+run_dangling_preflight_case() {
+  local case_name="dangling-preflight"
+  local case_dir="${test_tmp}/${case_name}"
+  local stub_bin="${case_dir}/bin"
+  local fake_home="${case_dir}/home"
+  local fake_site="${case_dir}/site"
+  local fake_binary="${case_dir}/h3-server"
+  local fake_key="${case_dir}/coquic-demo.key"
+  local ssh_log="${case_dir}/ssh.log"
+  local scp_log="${case_dir}/scp.log"
+  local nix_log="${case_dir}/nix.log"
+
+  mkdir -p "${stub_bin}" "${fake_home}/.ssh" "${fake_site}"
+  touch "${fake_binary}"
+  chmod 755 "${fake_binary}"
+  printf '<html>demo</html>\n' > "${fake_site}/index.html"
+  printf 'known-host-entry\n' > "${fake_home}/.ssh/known_hosts"
+  printf 'test-key\n' > "${fake_key}"
+  : > "${ssh_log}"
+  : > "${scp_log}"
+  : > "${nix_log}"
+
+  cat > "${stub_bin}/ssh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh %s\n' "$*" >> "${COQUIC_TEST_SSH_LOG:?}"
+
+if [[ "$*" == *"bash -s --"* &&
+      "$*" == *"/opt/coquic-demo/current"* &&
+      "$*" == *"/opt/coquic-demo/releases"* &&
+      "$*" != *"/tmp/coquic-demo-release-"* ]]; then
+  echo "remote preflight failed: /opt/coquic-demo/current target is missing or not a directory" >&2
+  exit 42
+fi
+
+if [[ "$*" == *"mktemp -d"* ]]; then
+  printf '%s\n' "/tmp/unexpected-preflight-mktemp"
+  exit 0
+fi
+
+if [[ "$*" == *"bash -s --"* ]]; then
+  printf 'unexpected-install-or-rollback\n' >> "${COQUIC_TEST_SSH_LOG:?}"
+  exit 0
+fi
+
+exit 0
+EOF
+
+  cat > "${stub_bin}/scp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'scp %s\n' "$*" >> "${COQUIC_TEST_SCP_LOG:?}"
+exit 0
+EOF
+
+  cat > "${stub_bin}/nix" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'nix %s\n' "$*" >> "${COQUIC_TEST_NIX_LOG:?}"
+exit 0
+EOF
+
+  chmod 755 "${stub_bin}/ssh" "${stub_bin}/scp" "${stub_bin}/nix"
+
+  set +e
+  case_output="$(
+    PATH="${stub_bin}:${PATH}" \
+    HOME="${fake_home}" \
+    GITHUB_SHA="deadbeefcafebabe1234" \
+    COQUIC_DEMO_REMOTE_HOST="example.test" \
+    COQUIC_DEMO_REMOTE_USER="deployer" \
+    COQUIC_DEMO_REMOTE_SSH_KEY_PATH="${fake_key}" \
+    COQUIC_DEMO_CERT_CHAIN_PEM="chain" \
+    COQUIC_DEMO_PRIVATE_KEY_PEM="key" \
+    COQUIC_DEMO_PUBLIC_HOST="demo.example.test" \
+    COQUIC_DEMO_PUBLIC_PORT="4433" \
+    COQUIC_TEST_SSH_LOG="${ssh_log}" \
+    COQUIC_TEST_SCP_LOG="${scp_log}" \
+    COQUIC_TEST_NIX_LOG="${nix_log}" \
+    demo/deploy/deploy-remote.sh "${fake_binary}" "${fake_site}" 2>&1
+  )"
+  case_status=$?
+  set -e
+
+  if [[ ${case_status} -eq 0 ]]; then
+    echo "dangling-preflight expected failure but command succeeded" >&2
+    exit 1
+  fi
+
+  if [[ "${case_output}" != *"remote preflight failed"* ]]; then
+    echo "dangling-preflight expected preflight failure output, got: ${case_output}" >&2
+    exit 1
+  fi
+
+  if [[ -s "${scp_log}" ]]; then
+    echo "dangling-preflight should not invoke scp" >&2
+    cat "${scp_log}" >&2
+    exit 1
+  fi
+
+  if grep -Fq "unexpected-install-or-rollback" "${ssh_log}"; then
+    echo "dangling-preflight should not invoke remote install or rollback paths" >&2
+    cat "${ssh_log}" >&2
+    exit 1
+  fi
+}
+
+run_dangling_preflight_case
+echo "dangling current preflight failure behaves correctly"

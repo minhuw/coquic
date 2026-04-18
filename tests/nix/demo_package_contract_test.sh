@@ -62,6 +62,7 @@ for marker in \
   "/_coquic/speed/upload" \
   "AbortController" \
   "withTimeout" \
+  "throughputRequestTimeoutMs" \
   "runSpeedTest" \
   "runLatencyPhase" \
   "runDownloadPhase" \

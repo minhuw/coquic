@@ -1,0 +1,57 @@
+name: Deploy Demo
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - demo/**
+      - src/**
+      - build.zig
+      - build.zig.zon
+      - docker/h3-server/Dockerfile
+      - .github/workflows/deploy-demo.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-demo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build h3-server
+        run: nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false
+
+      - name: Package demo site
+        run: demo/deploy/package-demo.sh "${RUNNER_TEMP}/demo-site"
+
+      - name: Configure SSH
+        env:
+          COQUIC_DEMO_REMOTE_HOST: ${{ vars.COQUIC_DEMO_REMOTE_HOST }}
+          COQUIC_DEMO_REMOTE_SSH_PORT: ${{ vars.COQUIC_DEMO_REMOTE_SSH_PORT }}
+          COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s' "${COQUIC_DEMO_REMOTE_SSH_KEY}" > "${RUNNER_TEMP}/coquic-demo.key"
+          chmod 600 "${RUNNER_TEMP}/coquic-demo.key"
+          ssh-keyscan -p "${COQUIC_DEMO_REMOTE_SSH_PORT:-22}" "${COQUIC_DEMO_REMOTE_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Deploy demo
+        env:
+          COQUIC_DEMO_REMOTE_HOST: ${{ vars.COQUIC_DEMO_REMOTE_HOST }}
+          COQUIC_DEMO_REMOTE_USER: ${{ vars.COQUIC_DEMO_REMOTE_USER }}
+          COQUIC_DEMO_REMOTE_SSH_PORT: ${{ vars.COQUIC_DEMO_REMOTE_SSH_PORT }}
+          COQUIC_DEMO_PUBLIC_HOST: ${{ vars.COQUIC_DEMO_PUBLIC_HOST }}
+          COQUIC_DEMO_PUBLIC_PORT: ${{ vars.COQUIC_DEMO_PUBLIC_PORT }}
+          COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}
+          COQUIC_DEMO_CERT_CHAIN_PEM: ${{ secrets.COQUIC_DEMO_CERT_CHAIN_PEM }}
+          COQUIC_DEMO_PRIVATE_KEY_PEM: ${{ secrets.COQUIC_DEMO_PRIVATE_KEY_PEM }}
+          COQUIC_DEMO_REMOTE_SSH_KEY_PATH: ${{ runner.temp }}/coquic-demo.key
+        run: demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-site"

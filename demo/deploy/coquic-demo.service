@@ -1,0 +1,15 @@
+[Unit]
+Description=Coquic demo HTTP/3 service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/coquic-demo/current/h3-server --host 0.0.0.0 --port 4433 --bootstrap-port 4433 --alt-svc-max-age 60 --document-root /opt/coquic-demo/current/site --certificate-chain /etc/coquic-demo/tls/fullchain.pem --private-key /etc/coquic-demo/tls/privkey.pem
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

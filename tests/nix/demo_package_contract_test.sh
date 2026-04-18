@@ -47,11 +47,25 @@ for marker in \
   "Technical" \
   "Run Live Checks" \
   "Browser Verification" \
-  "coquic.minhuw.dev:4433"; do
+  "coquic.minhuw.dev:4433" \
+  "/_coquic/inspect" \
+  "/_coquic/echo" \
+  "localStorage" \
+  "window.location" \
+  "How To Verify In Chrome" \
+  "safeStorageGet" \
+  "safeStorageSet" \
+  "safeReadJson" \
+  "runProbe"; do
   if ! grep -Fq -- "${marker}" "${output_dir}/index.html"; then
     echo "packaged demo page missing marker: ${marker}" >&2
     exit 1
   fi
 done
+
+if [[ -e tests/nix/h3_demo_page_contract_test.sh ]]; then
+  echo "obsolete test still present: tests/nix/h3_demo_page_contract_test.sh" >&2
+  exit 1
+fi
 
 echo "demo package contract looks correct"

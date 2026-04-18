@@ -19,7 +19,7 @@
 - Modify: `build.zig`
   Purpose: compile the new shared route source into the library and test binary.
 - Modify: `src/http3/http3_server.cpp`
-  Purpose: replace the current duplicated default demo-route logic with the shared helper.
+  Purpose: replace the current duplicated default demo-route logic with the shared helper and keep the default upload route bounded before full buffering.
 - Modify: `src/http3/http3_runtime.cpp`
   Purpose: call the shared helper before static-file fallback in the standalone `h3-server` runtime.
 - Modify: `tests/http3/server_test.cpp`
@@ -56,7 +56,11 @@ TEST(QuicHttp3ServerTest, DefaultSpeedDownloadRouteRejectsMissingBytesQuery) {}
 
 TEST(QuicHttp3ServerTest, DefaultSpeedDownloadRouteRejectsOversizedBytesQuery) {}
 
+TEST(QuicHttp3ServerTest, DefaultSpeedDownloadRouteRejectsMalformedBytesQuery) {}
+
 TEST(QuicHttp3ServerTest, DefaultSpeedUploadRouteRejectsNonPostMethod) {}
+
+TEST(QuicHttp3ServerTest, DefaultSpeedUploadRouteRejectsOversizedBodyBeforeRequestComplete) {}
 ```
 
 Make the assertions exact:
@@ -76,6 +80,12 @@ const std::array response_headers{
 };
 const auto expected_headers = headers_frame_bytes(
     0, response_fields(200, response_headers, 16u));
+```
+
+Use the download success case to cover the cache-busting query shape the page will send:
+
+```cpp
+coquic::http3::Http3Field{":path", "/_coquic/speed/download?bytes=16&ts=1712345678"},
 ```
 
 ```cpp
@@ -151,19 +161,39 @@ std::optional<std::size_t> parse_bytes_query(std::string_view path) {
     if (query == std::string_view::npos) {
         return std::nullopt;
     }
-    const auto expected = std::string_view{"bytes="};
+    constexpr auto expected = std::string_view{"bytes="};
     const auto tail = path.substr(query + 1);
-    if (!tail.starts_with(expected)) {
-        return std::nullopt;
+
+    std::optional<std::size_t> parsed_bytes;
+    std::size_t param_begin = 0;
+    while (param_begin <= tail.size()) {
+        const auto param_end = tail.find('&', param_begin);
+        const auto param =
+            tail.substr(param_begin, param_end == std::string_view::npos ? std::string_view::npos
+                                                                         : param_end - param_begin);
+        if (param.starts_with(expected)) {
+            if (parsed_bytes.has_value()) {
+                return std::nullopt;
+            }
+
+            std::size_t parsed = 0;
+            const auto value = param.substr(expected.size());
+            const auto *begin = value.data();
+            const auto *end = value.data() + value.size();
+            const auto result = std::from_chars(begin, end, parsed);
+            if (result.ec != std::errc{} || result.ptr != end || parsed == 0) {
+                return std::nullopt;
+            }
+            parsed_bytes = parsed;
+        }
+
+        if (param_end == std::string_view::npos) {
+            break;
+        }
+        param_begin = param_end + 1;
     }
-    std::size_t parsed = 0;
-    const auto *begin = tail.data() + expected.size();
-    const auto *end = tail.data() + tail.size();
-    const auto result = std::from_chars(begin, end, parsed);
-    if (result.ec != std::errc{} || result.ptr != end || parsed == 0) {
-        return std::nullopt;
-    }
-    return parsed;
+
+    return parsed_bytes;
 }
 
 std::vector<std::byte> make_demo_download_payload(std::size_t bytes) {
@@ -302,6 +332,15 @@ Http3Response default_route_response(const Http3Request &request) {
     };
 }
 ```
+
+Also keep the default upload route bounded before full buffering when no custom request handler is
+installed:
+
+- use the existing early-response path for `/_coquic/speed/upload`
+- return `400` with `cache-control: no-store` when `content-length` already exceeds the limit
+- return the same `400` response if streamed body growth crosses the limit before request
+  completion
+- continue to preserve the existing `404` fallback for non-demo routes
 
 - [ ] **Step 6: Re-run the focused server suite**
 

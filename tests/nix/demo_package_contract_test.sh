@@ -60,6 +60,7 @@ for marker in \
   "/_coquic/speed/ping" \
   "/_coquic/speed/download" \
   "/_coquic/speed/upload" \
+  "AbortController" \
   "runSpeedTest" \
   "runLatencyPhase" \
   "runDownloadPhase" \
@@ -78,7 +79,9 @@ for removed_marker in \
   "safeStorageGet" \
   "safeStorageSet" \
   "safeReadJson" \
-  "runProbe"; do
+  "runProbe" \
+  "fonts.googleapis.com" \
+  "fonts.gstatic.com"; do
   if grep -Fq -- "${removed_marker}" "${output_dir}/index.html"; then
     echo "packaged demo page still contains removed marker: ${removed_marker}" >&2
     exit 1

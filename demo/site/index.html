@@ -5,12 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="coquic-demo-marker" content="coquic-demo-v1">
     <title>coquic HTTP/3 speed test</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syncopate:wght@400;700&display=swap"
-      rel="stylesheet"
-    >
     <style>
       :root {
         --bg: #f4f7fb;
@@ -34,7 +28,7 @@
       body {
         margin: 0;
         min-height: 100vh;
-        font-family: "Space Mono", "SFMono-Regular", Consolas, monospace;
+        font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
         color: var(--ink);
         background:
           radial-gradient(circle at top left, rgba(22, 119, 255, 0.12), transparent 30%),
@@ -94,7 +88,8 @@
       h1,
       h2,
       button {
-        font-family: "Syncopate", "Avenir Next", sans-serif;
+        font-family: "Arial Narrow", "Franklin Gothic Medium", "Avenir Next Condensed", sans-serif;
+        font-stretch: condensed;
       }
 
       .eyebrow {
@@ -156,7 +151,8 @@
       }
 
       #phaseLabel {
-        font-family: "Syncopate", "Avenir Next", sans-serif;
+        font-family: "Arial Narrow", "Franklin Gothic Medium", "Avenir Next Condensed", sans-serif;
+        font-stretch: condensed;
         font-size: 0.96rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
@@ -384,6 +380,7 @@
         throughputWindowMs: 4500,
         downloadRequestBytes: 262144,
         uploadRequestBytes: 131072,
+        requestTimeoutMs: 4000,
       };
 
       const ui = {
@@ -506,6 +503,23 @@
         return (bytes * 8) / (elapsedMs / 1000) / 1000 / 1000;
       }
 
+      async function fetchWithTimeout(url, options, timeoutLabel) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(function () {
+          controller.abort();
+        }, SPEED_CONFIG.requestTimeoutMs);
+        try {
+          return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "AbortError") {
+            throw new Error(timeoutLabel + " timed out");
+          }
+          throw error;
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
+      }
+
       async function runTimedWorkers(workerCount, worker) {
         const deadline = performance.now() + SPEED_CONFIG.throughputWindowMs;
         const started = performance.now();
@@ -533,9 +547,11 @@
         const samples = [];
         for (let index = 0; index < SPEED_CONFIG.latencySamples; index += 1) {
           const started = performance.now();
-          const response = await fetch("/_coquic/speed/ping?ts=" + Date.now() + "-" + index, {
-            cache: "no-store",
-          });
+          const response = await fetchWithTimeout(
+            "/_coquic/speed/ping?ts=" + Date.now() + "-" + index,
+            { cache: "no-store" },
+            "Latency request"
+          );
           if (!response.ok && response.status !== 204) {
             throw new Error("Latency test failed");
           }
@@ -552,9 +568,10 @@
 
       async function runDownloadPhase() {
         return runTimedWorkers(SPEED_CONFIG.downloadWorkers, async function () {
-          const response = await fetch(
+          const response = await fetchWithTimeout(
             "/_coquic/speed/download?bytes=" + SPEED_CONFIG.downloadRequestBytes + "&ts=" + Date.now(),
-            { cache: "no-store" }
+            { cache: "no-store" },
+            "Download request"
           );
           if (!response.ok || !response.body) {
             throw new Error("Download test failed");
@@ -576,12 +593,16 @@
         const payload = new Uint8Array(SPEED_CONFIG.uploadRequestBytes);
         payload.fill(117);
         return runTimedWorkers(SPEED_CONFIG.uploadWorkers, async function () {
-          const response = await fetch("/_coquic/speed/upload?ts=" + Date.now(), {
-            method: "POST",
-            headers: { "content-type": "application/octet-stream" },
-            body: payload,
-            cache: "no-store",
-          });
+          const response = await fetchWithTimeout(
+            "/_coquic/speed/upload?ts=" + Date.now(),
+            {
+              method: "POST",
+              headers: { "content-type": "application/octet-stream" },
+              body: payload,
+              cache: "no-store",
+            },
+            "Upload request"
+          );
           if (!response.ok) {
             throw new Error("Upload test failed");
           }

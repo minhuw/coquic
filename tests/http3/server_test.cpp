@@ -559,6 +559,42 @@ TEST(QuicHttp3ServerTest, DefaultSpeedUploadRouteRejectsNonPostMethod) {
     EXPECT_TRUE(sends[0].fin);
 }
 
+TEST(QuicHttp3ServerTest,
+     DefaultSpeedUploadRouteRejectsOversizedDeclaredContentLengthBeforeRequestBody) {
+    coquic::http3::Http3ServerEndpoint endpoint;
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "POST"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/_coquic/speed/upload"},
+        coquic::http3::Http3Field{"content-length", "4194305"},
+    };
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields)),
+                                coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+    const auto stops = stop_sending_inputs_from(update);
+
+    const std::array response_headers{
+        coquic::http3::Http3Field{"cache-control", "no-store"},
+    };
+    const auto expected_headers =
+        headers_frame_bytes(0, response_fields(400, response_headers, 0u));
+
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends[0].bytes, expected_headers);
+    EXPECT_TRUE(sends[0].fin);
+
+    ASSERT_EQ(stops.size(), 1u);
+    EXPECT_EQ(stops[0].stream_id, 0u);
+    EXPECT_EQ(stops[0].application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::no_error));
+}
+
 TEST(QuicHttp3ServerTest, DefaultSpeedUploadRouteRejectsOversizedBodyBeforeRequestComplete) {
     coquic::http3::Http3ServerEndpoint endpoint;
 

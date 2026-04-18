@@ -29,6 +29,12 @@ Http3Response runtime_server_response_for_test(const std::filesystem::path &docu
                                                const Http3Request &request);
 void runtime_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path);
 void runtime_clear_forced_file_read_failure_path_for_test();
+std::optional<std::vector<std::byte>>
+runtime_load_request_body_for_test(const Http3RuntimeConfig &config);
+bool runtime_make_client_execution_plan_for_test(const Http3RuntimeConfig &config,
+                                                 std::string_view url);
+bool runtime_make_client_transfer_plans_for_test(const Http3RuntimeConfig &config,
+                                                 std::span<const Http3RuntimeTransferJob> jobs);
 } // namespace coquic::http3
 
 namespace {
@@ -46,6 +52,54 @@ class ScopedFd {
 
     ScopedFd(const ScopedFd &) = delete;
     ScopedFd &operator=(const ScopedFd &) = delete;
+
+  private:
+    int fd_ = -1;
+};
+
+class ScopedTcpLoopbackListener {
+  public:
+    explicit ScopedTcpLoopbackListener(std::uint16_t port) {
+        fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd_ < 0) {
+            return;
+        }
+
+        const int enable = 1;
+        if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) != 0) {
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(port);
+        if (::bind(fd_, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+
+        if (::listen(fd_, 1) != 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
+
+    ~ScopedTcpLoopbackListener() {
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
+    }
+
+    ScopedTcpLoopbackListener(const ScopedTcpLoopbackListener &) = delete;
+    ScopedTcpLoopbackListener &operator=(const ScopedTcpLoopbackListener &) = delete;
+
+    bool ready() const {
+        return fd_ >= 0;
+    }
 
   private:
     int fd_ = -1;
@@ -815,6 +869,176 @@ TEST(QuicHttp3RuntimeTest, ClientParserAcceptsIpv6AndPortAuthorities) {
     }
 }
 
+TEST(QuicHttp3RuntimeTest, RuntimeLoadRequestBodyHandlesConflictsEmptyAndFileInputs) {
+    {
+        coquic::quic::test::ScopedTempDir body_root;
+        body_root.write_file("body.txt", "payload");
+        const auto config = coquic::http3::Http3RuntimeConfig{
+            .mode = coquic::http3::Http3RuntimeMode::client,
+            .body_text = "inline",
+            .body_file_path = body_root.path() / "body.txt",
+        };
+        EXPECT_FALSE(coquic::http3::runtime_load_request_body_for_test(config).has_value());
+    }
+
+    {
+        const auto config = coquic::http3::Http3RuntimeConfig{
+            .mode = coquic::http3::Http3RuntimeMode::client,
+        };
+        const auto body = coquic::http3::runtime_load_request_body_for_test(config);
+        ASSERT_TRUE(body.has_value());
+        if (!body.has_value()) {
+            return;
+        }
+        EXPECT_TRUE(body->empty());
+    }
+
+    {
+        coquic::quic::test::ScopedTempDir body_root;
+        body_root.write_file("body.txt", "file-payload");
+        const auto config = coquic::http3::Http3RuntimeConfig{
+            .mode = coquic::http3::Http3RuntimeMode::client,
+            .body_file_path = body_root.path() / "body.txt",
+        };
+        const auto body = coquic::http3::runtime_load_request_body_for_test(config);
+        ASSERT_TRUE(body.has_value());
+        if (!body.has_value()) {
+            return;
+        }
+        EXPECT_EQ(*body, bytes_from_text("file-payload"));
+    }
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeExecutionPlanRejectsInvalidMethodUrlAndBodySources) {
+    {
+        const auto config = coquic::http3::Http3RuntimeConfig{
+            .mode = coquic::http3::Http3RuntimeMode::client,
+            .method = "PUT",
+            .url = "https://localhost:9443/ok",
+        };
+        EXPECT_FALSE(
+            coquic::http3::runtime_make_client_execution_plan_for_test(config, config.url));
+    }
+
+    {
+        const auto config = coquic::http3::Http3RuntimeConfig{
+            .mode = coquic::http3::Http3RuntimeMode::client,
+            .method = "HEAD",
+            .body_text = "not-allowed",
+            .url = "https://localhost:9443/ok",
+        };
+        EXPECT_FALSE(
+            coquic::http3::runtime_make_client_execution_plan_for_test(config, config.url));
+    }
+
+    {
+        const auto config = coquic::http3::Http3RuntimeConfig{
+            .mode = coquic::http3::Http3RuntimeMode::client,
+            .url = "https:///missing-host",
+        };
+        EXPECT_FALSE(
+            coquic::http3::runtime_make_client_execution_plan_for_test(config, config.url));
+    }
+
+    {
+        coquic::quic::test::ScopedTempDir body_root;
+        body_root.write_file("body.txt", "payload");
+        const auto config = coquic::http3::Http3RuntimeConfig{
+            .mode = coquic::http3::Http3RuntimeMode::client,
+            .body_text = "inline",
+            .body_file_path = body_root.path() / "body.txt",
+            .url = "https://localhost:9443/ok",
+        };
+        EXPECT_FALSE(
+            coquic::http3::runtime_make_client_execution_plan_for_test(config, config.url));
+    }
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeTransferPlansRejectInvalidJobSets) {
+    const auto config = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+    };
+
+    {
+        const std::array<coquic::http3::Http3RuntimeTransferJob, 0> jobs{};
+        EXPECT_FALSE(coquic::http3::runtime_make_client_transfer_plans_for_test(config, jobs));
+    }
+
+    {
+        const std::array jobs{coquic::http3::Http3RuntimeTransferJob{
+            .url = "",
+            .output_path = "out.bin",
+        }};
+        EXPECT_FALSE(coquic::http3::runtime_make_client_transfer_plans_for_test(config, jobs));
+    }
+
+    {
+        const std::array jobs{coquic::http3::Http3RuntimeTransferJob{
+            .url = "https://localhost:9443/ok",
+            .output_path = "",
+        }};
+        EXPECT_FALSE(coquic::http3::runtime_make_client_transfer_plans_for_test(config, jobs));
+    }
+
+    {
+        const std::array jobs{coquic::http3::Http3RuntimeTransferJob{
+            .url = "https:///missing-host",
+            .output_path = "out.bin",
+        }};
+        EXPECT_FALSE(coquic::http3::runtime_make_client_transfer_plans_for_test(config, jobs));
+    }
+
+    {
+        const std::array jobs{
+            coquic::http3::Http3RuntimeTransferJob{
+                .url = "https://localhost:9443/a",
+                .output_path = "a.bin",
+            },
+            coquic::http3::Http3RuntimeTransferJob{
+                .url = "https://127.0.0.1:9443/b",
+                .output_path = "b.bin",
+            },
+        };
+        EXPECT_FALSE(coquic::http3::runtime_make_client_transfer_plans_for_test(config, jobs));
+    }
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsMissingAndUnsupportedSubcommands) {
+    {
+        const char *argv[] = {"coquic-http3"};
+        const auto config = coquic::http3::parse_http3_runtime_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        EXPECT_FALSE(config.has_value());
+    }
+
+    {
+        const char *argv[] = {"coquic-http3", "h3-proxy"};
+        const auto config = coquic::http3::parse_http3_runtime_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        EXPECT_FALSE(config.has_value());
+    }
+}
+
+TEST(QuicHttp3RuntimeTest, ServerEndpointConfigRejectsUnreadableIdentityFiles) {
+    const auto base = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    {
+        auto config = base;
+        config.certificate_chain_path = "tests/fixtures/does-not-exist-cert.pem";
+        EXPECT_FALSE(coquic::http3::make_http3_server_endpoint_config(config).has_value());
+    }
+
+    {
+        auto config = base;
+        config.private_key_path = "tests/fixtures/does-not-exist-key.pem";
+        EXPECT_FALSE(coquic::http3::make_http3_server_endpoint_config(config).has_value());
+    }
+}
+
 TEST(QuicHttp3RuntimeTest, CoreEndpointConfigsUseH3Alpn) {
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -994,6 +1218,55 @@ TEST(QuicHttp3RuntimeTest, ServerModeCanDisableBootstrapListener) {
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
 }
 
+TEST(QuicHttp3RuntimeTest, RunHttp3ServerFailsWhenBootstrapPortAlreadyInUse) {
+    coquic::quic::test::ScopedTempDir document_root;
+    const auto h3_port = allocate_udp_loopback_port();
+    ASSERT_NE(h3_port, 0);
+    const auto bootstrap_port = allocate_tcp_loopback_port();
+    ASSERT_NE(bootstrap_port, 0);
+
+    ScopedTcpLoopbackListener occupied_listener(bootstrap_port);
+    ASSERT_TRUE(occupied_listener.ready());
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = h3_port,
+        .bootstrap_port = bootstrap_port,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    EXPECT_NE(coquic::http3::run_http3_server(server), 0);
+}
+
+TEST(QuicHttp3RuntimeTest, RunHttp3ClientTransfersRejectsInvalidPlans) {
+    const auto config = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .url = "https://localhost:9443/ok",
+    };
+
+    {
+        const std::array<coquic::http3::Http3RuntimeTransferJob, 0> jobs{};
+        EXPECT_NE(coquic::http3::run_http3_client_transfers(config, jobs), 0);
+    }
+
+    {
+        const std::array jobs{
+            coquic::http3::Http3RuntimeTransferJob{
+                .url = "https://localhost:9443/a",
+                .output_path = "a.bin",
+            },
+            coquic::http3::Http3RuntimeTransferJob{
+                .url = "https://localhost:9444/b",
+                .output_path = "b.bin",
+            },
+        };
+        EXPECT_NE(coquic::http3::run_http3_client_transfers(config, jobs), 0);
+    }
+}
+
 TEST(QuicHttp3RuntimeTest, ClientWithoutOutputWritesBodyToStdout) {
     coquic::quic::test::ScopedTempDir document_root;
     document_root.write_file("hello.txt", "hello-http3");
@@ -1020,6 +1293,37 @@ TEST(QuicHttp3RuntimeTest, ClientWithoutOutputWritesBodyToStdout) {
     ScopedStdoutCapture stdout_capture;
     EXPECT_EQ(coquic::http3::run_http3_client(client), 0);
     EXPECT_EQ(stdout_capture.finish_and_read(), "hello-http3");
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
+}
+
+TEST(QuicHttp3RuntimeTest, HeadClientWithoutOutputReturnsSuccessWithEmptyStdout) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello-http3");
+
+    const auto h3_port = allocate_udp_loopback_port();
+    ASSERT_NE(h3_port, 0);
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = h3_port,
+        .enable_bootstrap = false,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    ScopedHttp3Process server_process(server);
+
+    const auto client = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .url = "https://localhost:" + std::to_string(h3_port) + "/hello.txt",
+        .method = "HEAD",
+    };
+
+    ScopedStdoutCapture stdout_capture;
+    EXPECT_EQ(coquic::http3::run_http3_client(client), 0);
+    EXPECT_TRUE(stdout_capture.finish_and_read().empty());
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
 }
 

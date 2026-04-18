@@ -1223,6 +1223,21 @@ void runtime_clear_forced_file_read_failure_path_for_test() {
     forced_read_failure_path_for_test().reset();
 }
 
+std::optional<std::vector<std::byte>>
+runtime_load_request_body_for_test(const Http3RuntimeConfig &config) {
+    return load_request_body(config);
+}
+
+bool runtime_make_client_execution_plan_for_test(const Http3RuntimeConfig &config,
+                                                 std::string_view url) {
+    return make_client_execution_plan(config, url).has_value();
+}
+
+bool runtime_make_client_transfer_plans_for_test(const Http3RuntimeConfig &config,
+                                                 std::span<const Http3RuntimeTransferJob> jobs) {
+    return make_client_transfer_plans(config, jobs).has_value();
+}
+
 std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3CliMode mode) {
     if (argc < 1) {
         print_usage(mode);

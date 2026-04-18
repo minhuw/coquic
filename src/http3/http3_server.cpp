@@ -2,12 +2,15 @@
 #include "src/http3/http3_demo_routes.h"
 
 #include <limits>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
 namespace coquic::http3 {
 
 namespace {
+
+constexpr Http3DemoRouteLimits kDefaultDemoRouteLimits{};
 
 Http3ServerEndpointUpdate make_failure_update(bool handled_local_error = false) {
     return Http3ServerEndpointUpdate{
@@ -82,6 +85,66 @@ Http3Result<bool> submit_response(Http3Connection &connection, std::uint64_t str
     return Http3Result<bool>::success(true);
 }
 
+std::string_view request_path_without_query(std::string_view path) {
+    const auto query = path.find('?');
+    return query == std::string_view::npos ? path : path.substr(0, query);
+}
+
+bool is_default_speed_upload_request(const Http3RequestHead &request_head) {
+    return request_head.method == "POST" &&
+           request_path_without_query(request_head.path) == "/_coquic/speed/upload";
+}
+
+Http3Response speed_upload_limit_response() {
+    return Http3Response{
+        .head =
+            {
+                .status = 400,
+                .content_length = 0,
+                .headers = {{"cache-control", "no-store"}},
+            },
+    };
+}
+
+std::optional<Http3Response> default_route_head_response(const Http3RequestHead &request_head) {
+    if (!is_default_speed_upload_request(request_head)) {
+        return std::nullopt;
+    }
+    if (!request_head.content_length.has_value() ||
+        *request_head.content_length <= kDefaultDemoRouteLimits.max_speed_upload_bytes) {
+        return std::nullopt;
+    }
+    return speed_upload_limit_response();
+}
+
+bool would_exceed_body_limit(std::size_t buffered_bytes, std::size_t incoming_bytes,
+                             std::size_t limit) {
+    return buffered_bytes > limit || incoming_bytes > limit - buffered_bytes;
+}
+
+bool commit_early_response(Http3Connection &connection, std::uint64_t stream_id,
+                           const Http3RequestHead &request_head, const Http3Response &response,
+                           bool request_completed,
+                           std::unordered_set<std::uint64_t> &ignored_request_streams,
+                           bool &dispatched_response) {
+    const auto submitted = submit_response(connection, stream_id, request_head, response);
+    if (!submitted.has_value()) {
+        return false;
+    }
+
+    ignored_request_streams.insert(stream_id);
+    if (!request_completed) {
+        const auto aborted = connection.abort_request_body(
+            stream_id, static_cast<std::uint64_t>(Http3ErrorCode::no_error));
+        if (!aborted.has_value()) {
+            return false;
+        }
+    }
+
+    dispatched_response = true;
+    return true;
+}
+
 bool merge_connection_update(Http3ServerEndpointUpdate &out, Http3EndpointUpdate &update) {
     for (auto &input : update.core_inputs) {
         out.core_inputs.push_back(std::move(input));
@@ -135,35 +198,29 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             auto &pending = pending_requests_[head->stream_id];
             pending.head = head->head;
 
-            if (!config_.request_head_handler) {
-                continue;
+            std::optional<Http3Response> response;
+            if (config_.request_head_handler) {
+                response = config_.request_head_handler(head->head);
             }
-
-            const auto response = config_.request_head_handler(head->head);
             if (!response.has_value()) {
-                continue;
+                if (config_.request_handler) {
+                    continue;
+                }
+                response = default_route_head_response(head->head);
+                if (!response.has_value()) {
+                    continue;
+                }
             }
 
-            const auto submitted =
-                submit_response(connection_, head->stream_id, head->head, response.value());
-            if (!submitted.has_value()) {
+            if (!commit_early_response(connection_, head->stream_id, head->head, response.value(),
+                                       completed_request_streams.contains(head->stream_id),
+                                       ignored_request_streams, dispatched_response)) {
                 failed_ = true;
                 pending_requests_.clear();
                 return make_failure_update();
             }
 
             pending.early_response_committed = true;
-            ignored_request_streams.insert(head->stream_id);
-            if (!completed_request_streams.contains(head->stream_id)) {
-                const auto aborted = connection_.abort_request_body(
-                    head->stream_id, static_cast<std::uint64_t>(Http3ErrorCode::no_error));
-                if (!aborted.has_value()) {
-                    failed_ = true;
-                    pending_requests_.clear();
-                    return make_failure_update();
-                }
-            }
-            dispatched_response = true;
             continue;
         }
 
@@ -176,6 +233,27 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             if (pending_it != pending_requests_.end() &&
                 pending_it->second.early_response_committed) {
                 continue;
+            }
+
+            if (!config_.request_handler && pending_it != pending_requests_.end()) {
+                const auto &pending = pending_it->second;
+                const auto &request_head = pending.head;
+                if (request_head.has_value() &&
+                    is_default_speed_upload_request(request_head.value()) &&
+                    would_exceed_body_limit(pending.body.size(), body->body.size(),
+                                            kDefaultDemoRouteLimits.max_speed_upload_bytes)) {
+                    if (!commit_early_response(connection_, body->stream_id, request_head.value(),
+                                               speed_upload_limit_response(),
+                                               completed_request_streams.contains(body->stream_id),
+                                               ignored_request_streams, dispatched_response)) {
+                        failed_ = true;
+                        pending_requests_.clear();
+                        return make_failure_update();
+                    }
+
+                    pending_it->second.early_response_committed = true;
+                    continue;
+                }
             }
 
             auto &pending = pending_requests_[body->stream_id];

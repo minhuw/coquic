@@ -92,19 +92,39 @@ std::optional<std::size_t> parse_bytes_query(std::string_view path) {
     if (query == std::string_view::npos) {
         return std::nullopt;
     }
-    const auto expected = std::string_view{"bytes="};
+    constexpr auto expected = std::string_view{"bytes="};
     const auto tail = path.substr(query + 1);
-    if (!tail.starts_with(expected)) {
-        return std::nullopt;
+
+    std::optional<std::size_t> parsed_bytes;
+    std::size_t param_begin = 0;
+    while (param_begin <= tail.size()) {
+        const auto param_end = tail.find('&', param_begin);
+        const auto param =
+            tail.substr(param_begin, param_end == std::string_view::npos ? std::string_view::npos
+                                                                         : param_end - param_begin);
+        if (param.starts_with(expected)) {
+            if (parsed_bytes.has_value()) {
+                return std::nullopt;
+            }
+
+            std::size_t parsed = 0;
+            const auto value = param.substr(expected.size());
+            const auto *begin = value.data();
+            const auto *end = value.data() + value.size();
+            const auto result = std::from_chars(begin, end, parsed);
+            if (result.ec != std::errc{} || result.ptr != end || parsed == 0) {
+                return std::nullopt;
+            }
+            parsed_bytes = parsed;
+        }
+
+        if (param_end == std::string_view::npos) {
+            break;
+        }
+        param_begin = param_end + 1;
     }
-    std::size_t parsed = 0;
-    const auto *begin = tail.data() + expected.size();
-    const auto *end = tail.data() + tail.size();
-    const auto result = std::from_chars(begin, end, parsed);
-    if (result.ec != std::errc{} || result.ptr != end || parsed == 0) {
-        return std::nullopt;
-    }
-    return parsed;
+
+    return parsed_bytes;
 }
 
 std::vector<std::byte> make_demo_download_payload(std::size_t bytes) {

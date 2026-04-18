@@ -27,7 +27,9 @@
 namespace coquic::http3 {
 Http3Response runtime_server_response_for_test(const std::filesystem::path &document_root,
                                                const Http3Request &request);
-}
+void runtime_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path);
+void runtime_clear_forced_file_read_failure_path_for_test();
+} // namespace coquic::http3
 
 namespace {
 
@@ -213,6 +215,40 @@ bool tcp_port_is_accepting(std::uint16_t port) {
 std::vector<std::byte> bytes_from_text(std::string_view text) {
     return std::vector<std::byte>(reinterpret_cast<const std::byte *>(text.data()),
                                   reinterpret_cast<const std::byte *>(text.data()) + text.size());
+}
+
+class ScopedForcedFileReadFailure {
+  public:
+    explicit ScopedForcedFileReadFailure(const std::filesystem::path &path) {
+        coquic::http3::runtime_set_forced_file_read_failure_path_for_test(path);
+    }
+
+    ~ScopedForcedFileReadFailure() {
+        coquic::http3::runtime_clear_forced_file_read_failure_path_for_test();
+    }
+
+    ScopedForcedFileReadFailure(const ScopedForcedFileReadFailure &) = delete;
+    ScopedForcedFileReadFailure &operator=(const ScopedForcedFileReadFailure &) = delete;
+};
+
+std::optional<std::string_view> find_header_value(const coquic::http3::Http3Headers &headers,
+                                                  std::string_view name) {
+    for (const auto &header : headers) {
+        if (header.name == name) {
+            return header.value;
+        }
+    }
+    return std::nullopt;
+}
+
+void expect_header_value(const coquic::http3::Http3ResponseHead &head,
+                         std::pair<std::string_view, std::string_view> expected_header) {
+    const auto value = find_header_value(head.headers, expected_header.first);
+    ASSERT_TRUE(value.has_value());
+    if (!value.has_value()) {
+        return;
+    }
+    EXPECT_EQ(value.value(), expected_header.second);
 }
 
 bool wait_for_http3_server_ready(pid_t pid, const coquic::http3::Http3RuntimeConfig &config) {
@@ -1013,44 +1049,44 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCoversPathAndMimeBranches) {
         coquic::http3::runtime_server_response_for_test(document_root.path(), request("GET", "/"));
     EXPECT_EQ(root_get.head.status, 200);
     EXPECT_EQ(root_get.body, bytes_from_text("<h1>home</h1>"));
-    EXPECT_EQ(root_get.head.headers.at(0).value, "text/html; charset=utf-8");
+    expect_header_value(root_get.head, {"content-type", "text/html; charset=utf-8"});
 
     auto query_get = coquic::http3::runtime_server_response_for_test(
         document_root.path(), request("GET", "/plain.txt?x=1"));
     EXPECT_EQ(query_get.head.status, 200);
     EXPECT_EQ(query_get.body, bytes_from_text("plain"));
-    EXPECT_EQ(query_get.head.headers.at(0).value, "text/plain; charset=utf-8");
+    expect_header_value(query_get.head, {"content-type", "text/plain; charset=utf-8"});
 
     auto head = coquic::http3::runtime_server_response_for_test(document_root.path(),
                                                                 request("HEAD", "/payload.json"));
     EXPECT_EQ(head.head.status, 200);
     EXPECT_TRUE(head.body.empty());
-    EXPECT_EQ(head.head.headers.at(0).value, "application/json");
+    expect_header_value(head.head, {"content-type", "application/json"});
 
     auto css = coquic::http3::runtime_server_response_for_test(document_root.path(),
                                                                request("GET", "/style.css"));
     EXPECT_EQ(css.head.status, 200);
-    EXPECT_EQ(css.head.headers.at(0).value, "text/css; charset=utf-8");
+    expect_header_value(css.head, {"content-type", "text/css; charset=utf-8"});
 
     auto js = coquic::http3::runtime_server_response_for_test(document_root.path(),
                                                               request("GET", "/app.js"));
     EXPECT_EQ(js.head.status, 200);
-    EXPECT_EQ(js.head.headers.at(0).value, "text/javascript; charset=utf-8");
+    expect_header_value(js.head, {"content-type", "text/javascript; charset=utf-8"});
 
     auto mjs = coquic::http3::runtime_server_response_for_test(document_root.path(),
                                                                request("GET", "/module.mjs"));
     EXPECT_EQ(mjs.head.status, 200);
-    EXPECT_EQ(mjs.head.headers.at(0).value, "text/javascript; charset=utf-8");
+    expect_header_value(mjs.head, {"content-type", "text/javascript; charset=utf-8"});
 
     auto svg = coquic::http3::runtime_server_response_for_test(document_root.path(),
                                                                request("GET", "/vector.svg"));
     EXPECT_EQ(svg.head.status, 200);
-    EXPECT_EQ(svg.head.headers.at(0).value, "image/svg+xml");
+    expect_header_value(svg.head, {"content-type", "image/svg+xml"});
 
     auto bin = coquic::http3::runtime_server_response_for_test(document_root.path(),
                                                                request("GET", "/blob.bin"));
     EXPECT_EQ(bin.head.status, 200);
-    EXPECT_EQ(bin.head.headers.at(0).value, "application/octet-stream");
+    expect_header_value(bin.head, {"content-type", "application/octet-stream"});
 
     auto missing = coquic::http3::runtime_server_response_for_test(document_root.path(),
                                                                    request("GET", "/missing.txt"));
@@ -1064,10 +1100,8 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCoversPathAndMimeBranches) {
         document_root.path(), request("GET", "//secret.txt"));
     EXPECT_EQ(double_slash.head.status, 404);
 
-    std::filesystem::permissions(document_root.path() / "secret.txt",
-                                 std::filesystem::perms::owner_read |
-                                     std::filesystem::perms::owner_write,
-                                 std::filesystem::perm_options::remove);
+    ScopedForcedFileReadFailure force_read_failure(
+        (document_root.path() / "secret.txt").lexically_normal());
     auto unreadable = coquic::http3::runtime_server_response_for_test(
         document_root.path(), request("GET", "/secret.txt"));
     EXPECT_EQ(unreadable.head.status, 500);
@@ -1126,8 +1160,7 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCoversSpecialRoutes) {
     const auto echo_get = coquic::http3::runtime_server_response_for_test(
         document_root.path(), request("GET", "/_coquic/echo"));
     EXPECT_EQ(echo_get.head.status, 405);
-    EXPECT_EQ(echo_get.head.headers.at(0).name, "allow");
-    EXPECT_EQ(echo_get.head.headers.at(0).value, "POST");
+    expect_header_value(echo_get.head, {"allow", "POST"});
 
     const auto echo_post = coquic::http3::runtime_server_response_for_test(
         document_root.path(), request("POST", "/_coquic/echo", "ping"));
@@ -1137,14 +1170,12 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCoversSpecialRoutes) {
     const auto inspect_get = coquic::http3::runtime_server_response_for_test(
         document_root.path(), request("GET", "/_coquic/inspect"));
     EXPECT_EQ(inspect_get.head.status, 405);
-    EXPECT_EQ(inspect_get.head.headers.at(0).name, "allow");
-    EXPECT_EQ(inspect_get.head.headers.at(0).value, "POST");
+    expect_header_value(inspect_get.head, {"allow", "POST"});
 
     const auto inspect_post = coquic::http3::runtime_server_response_for_test(
         document_root.path(), request("POST", "/_coquic/inspect", "ping"));
     EXPECT_EQ(inspect_post.head.status, 200);
-    EXPECT_EQ(inspect_post.head.headers.at(0).name, "content-type");
-    EXPECT_EQ(inspect_post.head.headers.at(0).value, "application/json");
+    expect_header_value(inspect_post.head, {"content-type", "application/json"});
     const std::string inspect_body(reinterpret_cast<const char *>(inspect_post.body.data()),
                                    inspect_post.body.size());
     EXPECT_NE(inspect_body.find("\"method\":\"POST\""), std::string::npos);

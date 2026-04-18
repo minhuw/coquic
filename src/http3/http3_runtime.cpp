@@ -361,6 +361,19 @@ bool has_raw_dot_segment(const std::filesystem::path &path) {
     });
 }
 
+std::optional<std::filesystem::path> &forced_read_failure_path_for_test() {
+    static std::optional<std::filesystem::path> path;
+    return path;
+}
+
+std::optional<std::vector<std::byte>> read_runtime_file_bytes(const std::filesystem::path &path) {
+    const auto &forced_failure = forced_read_failure_path_for_test();
+    if (forced_failure.has_value() && path == *forced_failure) {
+        return std::nullopt;
+    }
+    return read_binary_file(path);
+}
+
 std::optional<std::filesystem::path>
 resolve_runtime_path_under_root(const std::filesystem::path &root, std::string_view request_path) {
     if (request_path.empty() || request_path.front() != '/') {
@@ -519,7 +532,7 @@ Http3Response runtime_server_response(const std::filesystem::path &document_root
     };
 
     if (request.head.method == "GET") {
-        const auto body = read_binary_file(*resolved);
+        const auto body = read_runtime_file_bytes(*resolved);
         if (!body.has_value()) {
             return Http3Response{
                 .head =
@@ -1200,6 +1213,14 @@ class Http3ClientRuntime {
 Http3Response runtime_server_response_for_test(const std::filesystem::path &document_root,
                                                const Http3Request &request) {
     return runtime_server_response(document_root, request);
+}
+
+void runtime_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path) {
+    forced_read_failure_path_for_test() = path.lexically_normal();
+}
+
+void runtime_clear_forced_file_read_failure_path_for_test() {
+    forced_read_failure_path_for_test().reset();
 }
 
 std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3CliMode mode) {

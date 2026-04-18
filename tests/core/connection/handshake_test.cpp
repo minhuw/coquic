@@ -3375,6 +3375,50 @@ TEST(QuicCoreTest, ProcessInboundAckAcceptsAdditionalRangesAndLeavesMalformedRan
     }
 }
 
+TEST(QuicCoreTest, ProcessInboundAckMalformedRangesDoNotMutateOutstandingInFlightRecoveryState) {
+    auto connection = make_connected_client_connection();
+    const auto seed_outstanding_packet = [](coquic::quic::PacketSpaceState &packet_space,
+                                            std::uint64_t packet_number,
+                                            coquic::quic::QuicCoreTimePoint sent_time) {
+        packet_space.recovery.on_packet_sent(coquic::quic::SentPacketRecord{
+            .packet_number = packet_number,
+            .sent_time = sent_time,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+            .bytes_in_flight = 1200,
+        });
+    };
+
+    seed_outstanding_packet(connection.application_space_, 0, coquic::quic::test::test_time(0));
+    seed_outstanding_packet(connection.application_space_, 1, coquic::quic::test::test_time(1));
+    seed_outstanding_packet(connection.application_space_, 2, coquic::quic::test::test_time(2));
+
+    EXPECT_EQ(connection.application_space_.recovery.tracked_packet_count(), 3u);
+    EXPECT_FALSE(connection.application_space_.recovery.largest_acked_packet_number().has_value());
+
+    const auto result = connection.process_inbound_ack(connection.application_space_,
+                                                       coquic::quic::AckFrame{
+                                                           .largest_acknowledged = 4,
+                                                           .first_ack_range = 5,
+                                                       },
+                                                       coquic::quic::test::test_time(30),
+                                                       /*ack_delay_exponent=*/0,
+                                                       /*max_ack_delay_ms=*/0,
+                                                       /*suppress_pto_reset=*/false);
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_EQ(connection.application_space_.recovery.tracked_packet_count(), 3u);
+    EXPECT_FALSE(connection.application_space_.recovery.largest_acked_packet_number().has_value());
+    for (const auto packet_number : std::array<std::uint64_t, 3>{0, 1, 2}) {
+        EXPECT_NE(connection.application_space_.recovery.find_packet(packet_number), nullptr);
+        const auto &packet =
+            tracked_packet_or_terminate(connection.application_space_, packet_number);
+        EXPECT_TRUE(packet.in_flight);
+        EXPECT_FALSE(packet.declared_lost);
+    }
+}
+
 TEST(QuicCoreTest, ProcessInboundDatagramKeepsDeferredShortHeaderPacketsBufferedUntilConnected) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.started_ = true;

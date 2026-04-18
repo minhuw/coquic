@@ -596,6 +596,8 @@ TEST(QuicRecoveryTest, AckFrameDirectRecoveryMatchesExpandedRangeRecovery) {
         direct_recovery.on_packet_sent(sent);
         expanded_recovery.on_packet_sent(sent);
     }
+    direct_recovery.on_packet_declared_lost(11);
+    expanded_recovery.on_packet_declared_lost(11);
 
     const coquic::quic::AckFrame ack{
         .largest_acknowledged = 15,
@@ -619,8 +621,21 @@ TEST(QuicRecoveryTest, AckFrameDirectRecoveryMatchesExpandedRangeRecovery) {
 
     EXPECT_EQ(packet_numbers_from_handles(direct_recovery, direct.acked_packets.handles()),
               packet_numbers_from_handles(expanded_recovery, expanded.acked_packets.handles()));
+    EXPECT_EQ(
+        packet_numbers_from_handles(direct_recovery, direct.late_acked_packets.handles()),
+        packet_numbers_from_handles(expanded_recovery, expanded.late_acked_packets.handles()));
     EXPECT_EQ(packet_numbers_from_handles(direct_recovery, direct.lost_packets.handles()),
               packet_numbers_from_handles(expanded_recovery, expanded.lost_packets.handles()));
+    EXPECT_EQ(direct.largest_newly_acked_packet.has_value(),
+              expanded.largest_newly_acked_packet.has_value());
+    if (direct.largest_newly_acked_packet.has_value() &&
+        expanded.largest_newly_acked_packet.has_value()) {
+        EXPECT_EQ(direct.largest_newly_acked_packet->packet_number,
+                  expanded.largest_newly_acked_packet->packet_number);
+    }
+    EXPECT_EQ(direct.largest_acknowledged_was_newly_acked,
+              expanded.largest_acknowledged_was_newly_acked);
+    EXPECT_EQ(direct.has_newly_acked_ack_eliciting, expanded.has_newly_acked_ack_eliciting);
 }
 
 TEST(QuicRecoveryTest,

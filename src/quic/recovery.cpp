@@ -981,8 +981,7 @@ AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
                                                          QuicCoreTimePoint now) {
     const auto cursor = make_ack_range_cursor(ack);
     if (!cursor.has_value()) {
-        return on_ack_received(std::span<const AckPacketNumberRange>{}, ack.largest_acknowledged,
-                               now);
+        return AckProcessingResult{};
     }
     return on_ack_received(cursor.value(), ack.largest_acknowledged, now);
 }

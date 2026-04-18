@@ -44,6 +44,15 @@ struct AckPacketNumberRange {
     bool operator==(const AckPacketNumberRange &) const = default;
 };
 
+struct AckRangeCursor {
+    std::uint64_t largest_acknowledged = 0;
+    std::uint64_t first_ack_range = 0;
+    std::span<const AckRange> additional_ranges;
+    std::size_t next_additional_index = 0;
+    std::uint64_t previous_smallest = 0;
+    bool first_range_pending = true;
+};
+
 struct ResetStreamFrame {
     std::uint64_t stream_id = 0;
     std::uint64_t application_protocol_error_code = 0;
@@ -183,6 +192,8 @@ struct ReceivedFrameDecodeResult {
 };
 
 CodecResult<std::vector<AckPacketNumberRange>> ack_frame_packet_number_ranges(const AckFrame &ack);
+CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &ack);
+std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor);
 CodecResult<std::size_t> serialized_frame_size(const Frame &frame);
 CodecResult<std::size_t> serialize_frame_into(std::span<std::byte> output, const Frame &frame);
 CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame);

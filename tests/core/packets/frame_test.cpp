@@ -388,6 +388,49 @@ TEST(QuicFrameTest, ExpandsAckPacketNumberRanges) {
                               }));
 }
 
+TEST(QuicFrameTest, AckRangeCursorMatchesAckFramePacketNumberRanges) {
+    const coquic::quic::AckFrame ack{
+        .largest_acknowledged = 12,
+        .ack_delay = 5,
+        .first_ack_range = 2,
+        .additional_ranges =
+            {
+                coquic::quic::AckRange{
+                    .gap = 1,
+                    .range_length = 0,
+                },
+                coquic::quic::AckRange{
+                    .gap = 0,
+                    .range_length = 1,
+                },
+            },
+    };
+
+    const auto expected = coquic::quic::ack_frame_packet_number_ranges(ack);
+    ASSERT_TRUE(expected.has_value());
+
+    auto cursor = coquic::quic::make_ack_range_cursor(ack);
+    ASSERT_TRUE(cursor.has_value());
+
+    std::vector<coquic::quic::AckPacketNumberRange> actual;
+    while (const auto range = coquic::quic::next_ack_range(cursor.value())) {
+        actual.push_back(*range);
+    }
+
+    EXPECT_EQ(actual, expected.value());
+}
+
+TEST(QuicFrameTest, AckRangeCursorRejectsInvalidFirstRange) {
+    const auto cursor = coquic::quic::make_ack_range_cursor(coquic::quic::AckFrame{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 4,
+    });
+
+    ASSERT_FALSE(cursor.has_value());
+    EXPECT_EQ(cursor.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicFrameTest, RoundTripsCryptoFrame) {
     Frame frame = CryptoFrame{
         .offset = 9,

@@ -1378,4 +1378,53 @@ CodecResult<std::vector<AckPacketNumberRange>> ack_frame_packet_number_ranges(co
     return CodecResult<std::vector<AckPacketNumberRange>>::success(std::move(ranges));
 }
 
+CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &ack) {
+    if (ack.largest_acknowledged < ack.first_ack_range) {
+        return CodecResult<AckRangeCursor>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    return CodecResult<AckRangeCursor>::success(AckRangeCursor{
+        .largest_acknowledged = ack.largest_acknowledged,
+        .first_ack_range = ack.first_ack_range,
+        .additional_ranges = ack.additional_ranges,
+        .next_additional_index = 0,
+        .previous_smallest = ack.largest_acknowledged - ack.first_ack_range,
+        .first_range_pending = true,
+    });
+}
+
+std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
+    if (cursor.first_range_pending) {
+        cursor.first_range_pending = false;
+        return AckPacketNumberRange{
+            .smallest = cursor.previous_smallest,
+            .largest = cursor.largest_acknowledged,
+        };
+    }
+
+    if (cursor.next_additional_index >= cursor.additional_ranges.size()) {
+        return std::nullopt;
+    }
+
+    const auto &range = cursor.additional_ranges[cursor.next_additional_index];
+    ++cursor.next_additional_index;
+
+    if (cursor.previous_smallest < range.gap + 2) {
+        cursor.next_additional_index = cursor.additional_ranges.size();
+        return std::nullopt;
+    }
+
+    const auto range_largest = cursor.previous_smallest - range.gap - 2;
+    if (range_largest < range.range_length) {
+        cursor.next_additional_index = cursor.additional_ranges.size();
+        return std::nullopt;
+    }
+
+    cursor.previous_smallest = range_largest - range.range_length;
+    return AckPacketNumberRange{
+        .smallest = cursor.previous_smallest,
+        .largest = range_largest,
+    };
+}
+
 } // namespace coquic::quic

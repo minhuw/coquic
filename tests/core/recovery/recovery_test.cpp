@@ -46,6 +46,7 @@ struct PacketSpaceRecoveryTestPeer {
 namespace {
 
 using coquic::quic::AckFrame;
+using coquic::quic::AckPacketNumberRange;
 using coquic::quic::AckRange;
 using coquic::quic::ByteRange;
 using coquic::quic::PacketSpaceRecovery;
@@ -610,10 +611,11 @@ TEST(QuicRecoveryTest, AckFrameDirectRecoveryMatchesExpandedRangeRecovery) {
     };
 
     const auto direct = direct_recovery.on_ack_received(ack, coquic::quic::test::test_time(100));
-    const auto cursor = coquic::quic::make_ack_range_cursor(ack);
-    ASSERT_TRUE(cursor.has_value());
+    const auto ranges = coquic::quic::ack_frame_packet_number_ranges(ack);
+    ASSERT_TRUE(ranges.has_value());
     const auto expanded = expanded_recovery.on_ack_received(
-        cursor.value(), ack.largest_acknowledged, coquic::quic::test::test_time(100));
+        std::span<const coquic::quic::AckPacketNumberRange>(ranges.value()),
+        ack.largest_acknowledged, coquic::quic::test::test_time(100));
 
     EXPECT_EQ(packet_numbers_from_handles(direct_recovery, direct.acked_packets.handles()),
               packet_numbers_from_handles(expanded_recovery, expanded.acked_packets.handles()));
@@ -817,8 +819,14 @@ TEST(QuicRecoveryTest, TimeThresholdLossScansLedgerWithoutSentPacketMap) {
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(1)));
 
-    static_cast<void>(
-        recovery.on_ack_received(make_ack_frame(/*largest=*/4), coquic::quic::test::test_time(2)));
+    const auto ack_ranges = std::array{
+        AckPacketNumberRange{
+            .smallest = 4,
+            .largest = 4,
+        },
+    };
+    static_cast<void>(recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/4,
+                                               coquic::quic::test::test_time(2)));
 
     EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.collect_time_threshold_losses(
                                                         coquic::quic::test::test_time(20))),
@@ -979,8 +987,19 @@ TEST(QuicRecoveryTest, AckProcessingRemovesAckedAndLateAckedPacketsFromTrackedPa
                                              coquic::quic::test::test_time(2)));
     recovery.on_packet_declared_lost(1);
 
-    const auto result = recovery.on_ack_received(
-        make_ack_frame(/*largest=*/2, /*first_ack_range=*/1), coquic::quic::test::test_time(10));
+    const std::array ack_ranges = {
+        AckPacketNumberRange{
+            .smallest = 1,
+            .largest = 1,
+        },
+        AckPacketNumberRange{
+            .smallest = 2,
+            .largest = 2,
+        },
+    };
+
+    const auto result = recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/2,
+                                                 coquic::quic::test::test_time(10));
 
     EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets.handles()),
               (std::vector<std::uint64_t>{2}));
@@ -1025,19 +1044,19 @@ TEST(QuicRecoveryTest, AckProcessingSeparatesActiveAndLateAckedPacketsInLedger) 
                                              coquic::quic::test::test_time(5)));
     recovery.on_packet_declared_lost(3);
 
-    const auto result = recovery.on_ack_received(
-        AckFrame{
-            .largest_acknowledged = 5,
-            .first_ack_range = 0,
-            .additional_ranges =
-                {
-                    AckRange{
-                        .gap = 0,
-                        .range_length = 0,
-                    },
-                },
+    const std::array ack_ranges = {
+        AckPacketNumberRange{
+            .smallest = 3,
+            .largest = 3,
         },
-        coquic::quic::test::test_time(10));
+        AckPacketNumberRange{
+            .smallest = 5,
+            .largest = 5,
+        },
+    };
+
+    const auto result = recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/5,
+                                                 coquic::quic::test::test_time(10));
 
     EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets.handles()),
               (std::vector<std::uint64_t>{5}));

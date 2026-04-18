@@ -672,6 +672,95 @@ TEST(QuicHttp3RuntimeTest, EchoesPostedBodyOverLoopback) {
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
 }
 
+TEST(QuicHttp3RuntimeTest, SpeedPingRouteReturnsNoBodyOverLoopback) {
+    coquic::quic::test::ScopedTempDir document_root;
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    ScopedHttp3Process server_process(server);
+
+    const auto client = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .url = "https://localhost:" + std::to_string(port) + "/_coquic/speed/ping",
+    };
+
+    ScopedStdoutCapture capture;
+    EXPECT_EQ(coquic::http3::run_http3_runtime(client), 0);
+    EXPECT_EQ(capture.finish_and_read(), "");
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
+}
+
+TEST(QuicHttp3RuntimeTest, SpeedDownloadRouteWritesSizedBodyOverLoopback) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir output_root;
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    ScopedHttp3Process server_process(server);
+
+    const auto client = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .url = "https://localhost:" + std::to_string(port) + "/_coquic/speed/download?bytes=131072",
+        .output_path = output_root.path() / "download.bin",
+    };
+
+    EXPECT_EQ(coquic::http3::run_http3_runtime(client), 0);
+    EXPECT_EQ(std::filesystem::file_size(output_root.path() / "download.bin"), 131072u);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
+}
+
+TEST(QuicHttp3RuntimeTest, SpeedUploadRouteReturnsReceivedByteSummaryOverLoopback) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir output_root;
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    ScopedHttp3Process server_process(server);
+
+    const auto client = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .url = "https://localhost:" + std::to_string(port) + "/_coquic/speed/upload",
+        .method = "POST",
+        .body_text = std::string(4096, 'x'),
+        .output_path = output_root.path() / "upload.json",
+    };
+
+    EXPECT_EQ(coquic::http3::run_http3_runtime(client), 0);
+    EXPECT_EQ(coquic::quic::test::read_text_file(output_root.path() / "upload.json"),
+              "{\"received_bytes\":4096}");
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
+}
+
 TEST(QuicHttp3RuntimeTest, ServesBootstrapAndHttp3FromOneServerProcess) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir output_root;

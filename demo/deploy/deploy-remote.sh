@@ -263,7 +263,7 @@ remote_current_link="$1"
 remote_releases_root="$2"
 
 # preflight: current must be symlink if present
-if [[ ! -e "${remote_current_link}" ]]; then
+if [[ ! -e "${remote_current_link}" && ! -L "${remote_current_link}" ]]; then
   exit 0
 fi
 

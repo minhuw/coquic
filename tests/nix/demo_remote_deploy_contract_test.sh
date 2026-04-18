@@ -154,6 +154,8 @@ if "sudo rm -rf '${remote_upload_dir}'" not in deploy_script:
     raise SystemExit("deploy script missing sudo-based remote cleanup")
 if "preflight: current must be symlink if present" not in deploy_script:
     raise SystemExit("deploy script missing current-symlink preflight marker")
+if '[[ ! -e "${remote_current_link}" && ! -L "${remote_current_link}" ]]' not in deploy_script:
+    raise SystemExit("deploy script missing compound absent check for dangling-symlink safety")
 if "preflight: current target must resolve within /opt/coquic-demo/releases" not in deploy_script:
     raise SystemExit("deploy script missing current-target preflight marker")
 if "preflight: current target must resolve to existing directory" not in deploy_script:
@@ -216,6 +218,16 @@ run_same_release_case() {
   printf '<html>demo</html>\n' > "${fake_site}/index.html"
   printf 'known-host-entry\n' > "${fake_home}/.ssh/known_hosts"
   printf 'test-key\n' > "${fake_key}"
+
+  dangling_probe="${case_dir}/dangling-current"
+  ln -s "${case_dir}/missing-target" "${dangling_probe}"
+  if [[ ! -e "${dangling_probe}" && -L "${dangling_probe}" ]]; then
+    :
+  else
+    echo "local shell dangling-symlink semantics check failed" >&2
+    exit 1
+  fi
+
   : > "${ssh_log}"
   : > "${scp_log}"
   : > "${nix_log}"

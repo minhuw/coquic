@@ -54,6 +54,8 @@ jobs = workflow.get("jobs", {})
 deploy_job = jobs.get("deploy-demo")
 if deploy_job is None:
     raise SystemExit("missing job: deploy-demo")
+if deploy_job.get("if") != "github.ref == 'refs/heads/main'":
+    raise SystemExit(f"unexpected deploy-demo job guard: {deploy_job.get('if')!r}")
 
 steps = deploy_job.get("steps", [])
 step_names = [step.get("name") for step in steps]
@@ -125,8 +127,8 @@ rollback_markers = [
 for marker in rollback_markers:
     if marker not in deploy_script:
         raise SystemExit(f"deploy script missing rollback marker: {marker}")
-if "refusing to redeploy over live release dir" not in deploy_script:
-    raise SystemExit("deploy script missing same-release refusal message")
+if "same-release repair mode" not in deploy_script:
+    raise SystemExit("deploy script missing same-release repair mode marker")
 if "COQUIC_DEMO_PUBLIC_PORT must be 4433 for the current service template" not in deploy_script:
     raise SystemExit("deploy script missing COQUIC_DEMO_PUBLIC_PORT guard")
 if "verification retry loop" not in deploy_script:
@@ -171,13 +173,13 @@ if [[ "$*" == *"readlink '/opt/coquic-demo/current'"* ]]; then
 fi
 
 if [[ "$*" == *"mktemp -d"* ]]; then
-  printf 'unexpected mktemp call\n' >> "${log_path}"
-  exit 70
+  printf '%s\n' "/tmp/coquic-demo-release-testtmp"
+  exit 0
 fi
 
 if [[ "$*" == *"bash -s --"* ]]; then
-  printf 'unexpected remote install call\n' >> "${log_path}"
-  exit 71
+  printf 'remote-install-invoked\n' >> "${log_path}"
+  exit 0
 fi
 
 exit 0
@@ -194,6 +196,30 @@ cat > "${stub_bin}/nix" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'nix %s\n' "$*" >> "${COQUIC_TEST_NIX_LOG:?}"
+
+if [[ "$*" == *"run .#curl-http3 -- -I "* ]]; then
+  cat <<'HEADERS'
+HTTP/1.1 200 OK
+Alt-Svc: h3=":4433"; ma=60
+HEADERS
+  exit 0
+fi
+
+if [[ "$*" == *"--http3-only -sS -o /dev/null -w %{http_version}"* ]]; then
+  printf '3'
+  exit 0
+fi
+
+if [[ "$*" == *"run .#curl-http3 -- --http3-only -sS https://"* ]]; then
+  cat <<'PAGE'
+Showcase
+Technical
+Run Live Checks
+Browser Verification
+PAGE
+  exit 0
+fi
+
 exit 0
 EOF
 
@@ -231,6 +257,7 @@ same_sha_output="$(
   COQUIC_DEMO_CERT_CHAIN_PEM="chain" \
   COQUIC_DEMO_PRIVATE_KEY_PEM="key" \
   COQUIC_DEMO_PUBLIC_HOST="demo.example.test" \
+  COQUIC_DEMO_PUBLIC_PORT="4433" \
   COQUIC_TEST_SAME_SHA="deadbeefcafe" \
   COQUIC_TEST_SSH_LOG="${ssh_log}" \
   COQUIC_TEST_SCP_LOG="${scp_log}" \
@@ -240,38 +267,43 @@ same_sha_output="$(
 same_sha_status=$?
 set -e
 
-if [[ ${same_sha_status} -eq 0 ]]; then
-  echo "expected same-SHA redeploy refusal to fail" >&2
+if [[ ${same_sha_status} -ne 0 ]]; then
+  echo "expected same-SHA repair mode to succeed, got: ${same_sha_output}" >&2
   exit 1
 fi
 
-if [[ "${same_sha_output}" != *"refusing to redeploy over live release dir"* ]]; then
-  echo "expected same-SHA refusal message, got: ${same_sha_output}" >&2
+if [[ "${same_sha_output}" != *"remote demo deploy verified"* ]]; then
+  echo "expected successful deploy output, got: ${same_sha_output}" >&2
   exit 1
 fi
 
-if [[ -s "${scp_log}" ]]; then
-  echo "same-SHA refusal should not invoke scp" >&2
+if ! grep -Fq "mktemp -d" "${ssh_log}"; then
+  echo "same-SHA repair should invoke remote mktemp" >&2
+  cat "${ssh_log}" >&2
+  exit 1
+fi
+
+if [[ ! -s "${scp_log}" ]]; then
+  echo "same-SHA repair should invoke scp uploads" >&2
   cat "${scp_log}" >&2
   exit 1
 fi
 
-if grep -Fq "mktemp -d" "${ssh_log}"; then
-  echo "same-SHA refusal should happen before remote mktemp" >&2
+if ! grep -Fq "remote-install-invoked" "${ssh_log}"; then
+  echo "same-SHA repair should invoke remote install" >&2
   cat "${ssh_log}" >&2
   exit 1
 fi
 
-if grep -Fq "bash -s --" "${ssh_log}"; then
-  echo "same-SHA refusal should happen before remote install" >&2
-  cat "${ssh_log}" >&2
-  exit 1
-fi
+for nix_expected in \
+  "run .#curl-http3 -- -I https://demo.example.test:4433/" \
+  "run .#curl-http3 -- --http3-only -sS -o /dev/null -w %{http_version} https://demo.example.test:4433/" \
+  "run .#curl-http3 -- --http3-only -sS https://demo.example.test:4433/"; do
+  if ! grep -Fq "${nix_expected}" "${nix_log}"; then
+    echo "same-SHA repair should invoke nix verification command: ${nix_expected}" >&2
+    cat "${nix_log}" >&2
+    exit 1
+  fi
+done
 
-if [[ -s "${nix_log}" ]]; then
-  echo "same-SHA refusal should happen before verification commands" >&2
-  cat "${nix_log}" >&2
-  exit 1
-fi
-
-echo "same-SHA redeploy guard behaves correctly"
+echo "same-SHA repair mode behaves correctly"

@@ -77,6 +77,7 @@ rollback_armed=0
 rollback_performed=0
 deploy_succeeded=0
 verification_attempts=5
+same_release_repair_mode=0
 
 cleanup_local() {
   rm -rf "${staging_dir}"
@@ -100,12 +101,13 @@ rollback_remote() {
     return
   fi
 
-  ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_upload_dir}" "${remote_current_link}" "${previous_release_target}" "${remote_release_dir}" <<'EOF'
+  ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_upload_dir}" "${remote_current_link}" "${previous_release_target}" "${remote_release_dir}" "${same_release_repair_mode}" <<'EOF'
 set -euo pipefail
 remote_upload_dir="$1"
 remote_current_link="$2"
 previous_release_target="$3"
 remote_release_dir="$4"
+same_release_repair_mode="$5"
 
 restore_or_remove() {
   local destination="$1"
@@ -128,7 +130,9 @@ else
 fi
 
 # rollback: cleanup failed ${remote_release_dir}
-if [[ -n "${remote_release_dir}" && "${remote_release_dir}" != "${previous_release_target}" ]]; then
+if [[ "${same_release_repair_mode}" != "1" &&
+      -n "${remote_release_dir}" &&
+      "${remote_release_dir}" != "${previous_release_target}" ]]; then
   sudo rm -rf "${remote_release_dir}"
 fi
 
@@ -206,8 +210,8 @@ previous_release_target="$(
 )"
 
 if [[ "${previous_release_target}" == "${remote_release_dir}" ]]; then
-  echo "refusing to redeploy over live release dir: ${remote_release_dir}" >&2
-  exit 1
+  # same-release repair mode
+  same_release_repair_mode=1
 fi
 
 remote_upload_dir="$(
@@ -223,12 +227,13 @@ scp "${scp_opts[@]}" "${staging_dir}/privkey.pem" "${remote_target}:${remote_upl
 
 rollback_armed=1
 
-if ! ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_release_dir}" "${remote_upload_dir}" "${remote_current_link}" <<'EOF'
+if ! ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_release_dir}" "${remote_upload_dir}" "${remote_current_link}" "${same_release_repair_mode}" <<'EOF'
 set -euo pipefail
 
 remote_release_dir="$1"
 remote_upload_dir="$2"
 remote_current_link="$3"
+same_release_repair_mode="$4"
 
 backup_or_mark_absent() {
   local source_path="$1"
@@ -260,9 +265,13 @@ backup_or_mark_absent \
   "${remote_upload_dir}/privkey.pem.bak" \
   "${remote_upload_dir}/privkey.pem.absent"
 
-sudo rm -rf "${remote_release_dir}"
 sudo install -d -m 755 "${remote_release_dir}"
+if [[ "${same_release_repair_mode}" != "1" ]]; then
+  sudo rm -rf "${remote_release_dir}"
+  sudo install -d -m 755 "${remote_release_dir}"
+fi
 sudo install -m 755 "${remote_upload_dir}/h3-server" "${remote_release_dir}/h3-server"
+sudo rm -rf "${remote_release_dir}/site"
 sudo install -d -m 755 "${remote_release_dir}/site"
 sudo tar -xf "${remote_upload_dir}/site.tar" -C "${remote_release_dir}/site"
 

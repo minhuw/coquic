@@ -61,6 +61,7 @@ for marker in \
   "/_coquic/speed/download" \
   "/_coquic/speed/upload" \
   "AbortController" \
+  "withTimeout" \
   "runSpeedTest" \
   "runLatencyPhase" \
   "runDownloadPhase" \

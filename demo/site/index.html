@@ -503,13 +503,13 @@
         return (bytes * 8) / (elapsedMs / 1000) / 1000 / 1000;
       }
 
-      async function fetchWithTimeout(url, options, timeoutLabel) {
+      async function withTimeout(timeoutLabel, work) {
         const controller = new AbortController();
         const timeoutId = window.setTimeout(function () {
           controller.abort();
         }, SPEED_CONFIG.requestTimeoutMs);
         try {
-          return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+          return await work(controller.signal);
         } catch (error) {
           if (error instanceof DOMException && error.name === "AbortError") {
             throw new Error(timeoutLabel + " timed out");
@@ -547,11 +547,12 @@
         const samples = [];
         for (let index = 0; index < SPEED_CONFIG.latencySamples; index += 1) {
           const started = performance.now();
-          const response = await fetchWithTimeout(
-            "/_coquic/speed/ping?ts=" + Date.now() + "-" + index,
-            { cache: "no-store" },
-            "Latency request"
-          );
+          const response = await withTimeout("Latency request", async function (signal) {
+            return fetch("/_coquic/speed/ping?ts=" + Date.now() + "-" + index, {
+              cache: "no-store",
+              signal,
+            });
+          });
           if (!response.ok && response.status !== 204) {
             throw new Error("Latency test failed");
           }
@@ -568,24 +569,25 @@
 
       async function runDownloadPhase() {
         return runTimedWorkers(SPEED_CONFIG.downloadWorkers, async function () {
-          const response = await fetchWithTimeout(
-            "/_coquic/speed/download?bytes=" + SPEED_CONFIG.downloadRequestBytes + "&ts=" + Date.now(),
-            { cache: "no-store" },
-            "Download request"
-          );
-          if (!response.ok || !response.body) {
-            throw new Error("Download test failed");
-          }
-          const reader = response.body.getReader();
-          let total = 0;
-          while (true) {
-            const chunk = await reader.read();
-            if (chunk.done) {
-              break;
+          return withTimeout("Download request", async function (signal) {
+            const response = await fetch(
+              "/_coquic/speed/download?bytes=" + SPEED_CONFIG.downloadRequestBytes + "&ts=" + Date.now(),
+              { cache: "no-store", signal }
+            );
+            if (!response.ok || !response.body) {
+              throw new Error("Download test failed");
             }
-            total += chunk.value.byteLength;
-          }
-          return total;
+            const reader = response.body.getReader();
+            let total = 0;
+            while (true) {
+              const chunk = await reader.read();
+              if (chunk.done) {
+                break;
+              }
+              total += chunk.value.byteLength;
+            }
+            return total;
+          });
         });
       }
 
@@ -593,24 +595,23 @@
         const payload = new Uint8Array(SPEED_CONFIG.uploadRequestBytes);
         payload.fill(117);
         return runTimedWorkers(SPEED_CONFIG.uploadWorkers, async function () {
-          const response = await fetchWithTimeout(
-            "/_coquic/speed/upload?ts=" + Date.now(),
-            {
+          return withTimeout("Upload request", async function (signal) {
+            const response = await fetch("/_coquic/speed/upload?ts=" + Date.now(), {
               method: "POST",
               headers: { "content-type": "application/octet-stream" },
               body: payload,
               cache: "no-store",
-            },
-            "Upload request"
-          );
-          if (!response.ok) {
-            throw new Error("Upload test failed");
-          }
-          const json = await response.json();
-          if (json.received_bytes !== payload.byteLength) {
-            throw new Error("Upload byte count mismatch");
-          }
-          return payload.byteLength;
+              signal,
+            });
+            if (!response.ok) {
+              throw new Error("Upload test failed");
+            }
+            const json = await response.json();
+            if (json.received_bytes !== payload.byteLength) {
+              throw new Error("Upload byte count mismatch");
+            }
+            return payload.byteLength;
+          });
         });
       }
 

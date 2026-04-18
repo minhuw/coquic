@@ -144,6 +144,10 @@ if "install: restart existing service if already active" not in deploy_script:
     raise SystemExit("deploy script missing active-service restart install path marker")
 if "verification retry loop" not in deploy_script:
     raise SystemExit("deploy script missing verification retry-loop marker")
+if "verification marker: coquic-demo-v1" not in deploy_script:
+    raise SystemExit("deploy script missing stable verification marker check")
+if "normalized_headers" not in deploy_script or "grep -Eiq '^alt-svc:" not in deploy_script:
+    raise SystemExit("deploy script missing normalized case-insensitive Alt-Svc check")
 if "rollback: cleanup failed ${remote_release_dir}" not in deploy_script:
     raise SystemExit("deploy script missing failed release cleanup marker")
 if "service.was_active" not in deploy_script:
@@ -164,6 +168,10 @@ if "ln -sfnT" not in deploy_script:
     raise SystemExit("deploy script missing guarded symlink replacement")
 if "timeout 20s nix run .#curl-http3" not in deploy_script:
     raise SystemExit("deploy script missing bounded verification timeout wrapper")
+if "same-release gate: stop active service before in-place mutation" not in deploy_script:
+    raise SystemExit("deploy script missing same-release stop gate marker")
+if "same-release gate: ensure service is inactive before mutating files" not in deploy_script:
+    raise SystemExit("deploy script missing same-release inactive verification marker")
 same_release_backup_restore_markers = [
     "same-release backup /opt/coquic-demo/current/h3-server",
     "same-release backup /opt/coquic-demo/current/site",
@@ -269,6 +277,10 @@ if [[ "$*" == *"bash -s --"* ]]; then
   count=$((count + 1))
   printf '%s' "${count}" > "${count_path}"
   if [[ "${count}" -eq 1 ]]; then
+    if [[ "${COQUIC_TEST_NIX_MODE:?}" == "stop_gate_fail" ]]; then
+      printf 'stop-gate-failed\n' >> "${log_path}"
+      exit 61
+    fi
     printf 'remote-install-invoked\n' >> "${log_path}"
   else
     printf 'rollback-invoked\n' >> "${log_path}"
@@ -308,10 +320,7 @@ HEADERS
 
     if [[ "$*" == *"run .#curl-http3 -- --http3-only -sS https://"* ]]; then
       cat <<'PAGE'
-Showcase
-Technical
-Run Live Checks
-Browser Verification
+<meta name="coquic-demo-marker" content="coquic-demo-v1">
 PAGE
       exit 0
     fi
@@ -323,6 +332,8 @@ HTTP/1.1 503 Service Unavailable
 HEADERS
       exit 0
     fi
+    ;;
+  stop_gate_fail)
     ;;
 esac
 
@@ -370,9 +381,16 @@ EOF
       exit 1
     fi
   else
-    if [[ "${case_output}" != *"deployment verification failed"* ]]; then
-      echo "${case_name} expected verification failure output, got: ${case_output}" >&2
-      exit 1
+    if [[ "${nix_mode}" == "stop_gate_fail" ]]; then
+      if [[ "${case_output}" != *"deployment failed during remote install"* ]]; then
+        echo "${case_name} expected stop-gate install failure output, got: ${case_output}" >&2
+        exit 1
+      fi
+    else
+      if [[ "${case_output}" != *"deployment verification failed"* ]]; then
+        echo "${case_name} expected verification failure output, got: ${case_output}" >&2
+        exit 1
+      fi
     fi
   fi
 
@@ -388,16 +406,26 @@ EOF
     exit 1
   fi
 
-  if ! grep -Fq "remote-install-invoked" "${ssh_log}"; then
-    echo "${case_name} should invoke remote install" >&2
-    cat "${ssh_log}" >&2
-    exit 1
+  if [[ "${nix_mode}" == "stop_gate_fail" ]]; then
+    if ! grep -Fq "stop-gate-failed" "${ssh_log}"; then
+      echo "${case_name} should hit same-release stop gate failure" >&2
+      cat "${ssh_log}" >&2
+      exit 1
+    fi
+  else
+    if ! grep -Fq "remote-install-invoked" "${ssh_log}"; then
+      echo "${case_name} should invoke remote install" >&2
+      cat "${ssh_log}" >&2
+      exit 1
+    fi
   fi
 
-  if ! grep -Fq "run .#curl-http3 -- -I https://demo.example.test:4433/" "${nix_log}"; then
-    echo "${case_name} should invoke header verification command" >&2
-    cat "${nix_log}" >&2
-    exit 1
+  if [[ "${nix_mode}" != "stop_gate_fail" ]]; then
+    if ! grep -Fq "run .#curl-http3 -- -I https://demo.example.test:4433/" "${nix_log}"; then
+      echo "${case_name} should invoke header verification command" >&2
+      cat "${nix_log}" >&2
+      exit 1
+    fi
   fi
 
   if [[ "${expected_status}" == "success" ]]; then
@@ -433,6 +461,11 @@ EOF
       cat "${ssh_log}" >&2
       exit 1
     fi
+    if [[ "${nix_mode}" == "stop_gate_fail" && -s "${nix_log}" ]]; then
+      echo "${case_name} should not reach verification probes after stop-gate failure" >&2
+      cat "${nix_log}" >&2
+      exit 1
+    fi
   fi
 }
 
@@ -441,6 +474,9 @@ echo "same-SHA repair mode behaves correctly"
 
 run_same_release_case "same-sha-failure" "fail_after_install" "failure" "/opt/coquic-demo/releases/deadbeefcafe"
 echo "same-SHA repair rollback on verification failure behaves correctly"
+
+run_same_release_case "same-sha-stop-gate-failure" "stop_gate_fail" "failure" "/opt/coquic-demo/releases/deadbeefcafe"
+echo "same-SHA stop gate failure triggers rollback before verification probes"
 
 run_same_release_case "new-release-failure" "fail_after_install" "failure" "/opt/coquic-demo/releases/112233445566"
 echo "new-release rollback on verification failure behaves correctly"
@@ -463,6 +499,16 @@ run_dangling_preflight_case() {
   printf '<html>demo</html>\n' > "${fake_site}/index.html"
   printf 'known-host-entry\n' > "${fake_home}/.ssh/known_hosts"
   printf 'test-key\n' > "${fake_key}"
+
+  dangling_probe="${case_dir}/dangling-current"
+  ln -s "${case_dir}/missing-target" "${dangling_probe}"
+  if [[ ! -e "${dangling_probe}" && -L "${dangling_probe}" ]]; then
+    :
+  else
+    echo "local shell dangling-symlink semantics check failed in dangling-preflight harness" >&2
+    exit 1
+  fi
+
   : > "${ssh_log}"
   : > "${scp_log}"
   : > "${nix_log}"

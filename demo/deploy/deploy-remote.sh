@@ -382,7 +382,15 @@ else
     "/opt/coquic-demo/current/site" \
     "${remote_upload_dir}/current.site.bak" \
     "${remote_upload_dir}/current.site.absent"
-  sudo systemctl stop coquic-demo.service || true
+  # same-release gate: stop active service before in-place mutation
+  if [[ "${service_was_active}" == "1" ]]; then
+    sudo systemctl stop coquic-demo.service
+  fi
+  # same-release gate: ensure service is inactive before mutating files
+  if sudo systemctl is-active --quiet coquic-demo.service; then
+    echo "same-release gate failed: coquic-demo.service is still active before file mutation" >&2
+    exit 1
+  fi
   sudo install -d -m 755 "${remote_release_dir}"
 fi
 
@@ -415,8 +423,9 @@ for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: headers
   headers=""
   if headers="$(timeout 20s nix run .#curl-http3 -- -I "${url}" 2>/dev/null)"; then
-    if grep -Fq 'HTTP/1.1 200 OK' <<<"${headers}" &&
-       grep -Fq "Alt-Svc: h3=\":${public_port}\"; ma=60" <<<"${headers}"; then
+    normalized_headers="$(printf '%s' "${headers}" | tr -d '\r')"
+    if grep -Fq 'HTTP/1.1 200 OK' <<<"${normalized_headers}" &&
+       grep -Eiq '^alt-svc:[[:space:]].*h3=":'"${public_port}"'".*ma=60' <<<"${normalized_headers}"; then
       headers_verified=1
       break
     fi
@@ -452,14 +461,8 @@ for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: page-markers
   page=""
   if page="$(timeout 20s nix run .#curl-http3 -- --http3-only -sS "${url}" 2>/dev/null)"; then
-    missing_marker=""
-    for marker in "Showcase" "Technical" "Run Live Checks" "Browser Verification"; do
-      if ! grep -Fq "${marker}" <<<"${page}"; then
-        missing_marker="${marker}"
-        break
-      fi
-    done
-    if [[ -z "${missing_marker}" ]]; then
+    # verification marker: coquic-demo-v1
+    if grep -Fq "coquic-demo-v1" <<<"${page}"; then
       page_verified=1
       break
     fi

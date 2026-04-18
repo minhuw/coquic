@@ -50,10 +50,7 @@ for dockerignore_rule in \
 done
 
 for marker in \
-  "Showcase" \
-  "Technical" \
-  "Run Live Checks" \
-  "Browser Verification" \
+  "coquic-demo-v1" \
   "coquic.minhuw.dev:4433" \
   "/_coquic/inspect" \
   "/_coquic/echo" \

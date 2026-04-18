@@ -19,9 +19,18 @@ Http3ServerEndpointUpdate make_failure_update(bool handled_local_error = false) 
     };
 }
 
-Http3Response default_route_response(const Http3Request &request) {
+Http3Response built_in_or_buffered_handler_response(const Http3ServerConfig &config,
+                                                    const Http3Request &request) {
     if (const auto response = try_demo_route_response(request); response.has_value()) {
         return *response;
+    }
+
+    if (config.request_handler) {
+        return config.request_handler(request);
+    }
+
+    if (config.fallback_request_handler) {
+        return config.fallback_request_handler(request);
     }
 
     return Http3Response{
@@ -203,9 +212,6 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
                 response = config_.request_head_handler(head->head);
             }
             if (!response.has_value()) {
-                if (config_.request_handler) {
-                    continue;
-                }
                 response = default_route_head_response(head->head);
                 if (!response.has_value()) {
                     continue;
@@ -235,7 +241,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
                 continue;
             }
 
-            if (!config_.request_handler && pending_it != pending_requests_.end()) {
+            if (pending_it != pending_requests_.end()) {
                 const auto &pending = pending_it->second;
                 const auto &request_head = pending.head;
                 if (request_head.has_value() &&
@@ -333,8 +339,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             pending_requests_.clear();
             return make_failure_update();
         }
-        auto response = config_.request_handler ? config_.request_handler(request)
-                                                : default_route_response(request);
+        auto response = built_in_or_buffered_handler_response(config_, request);
 
         const auto submitted =
             submit_response(connection_, complete->stream_id, request.head, response);

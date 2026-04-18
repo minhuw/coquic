@@ -14,6 +14,7 @@ struct Http3ServerConfig {
     Http3SettingsSnapshot local_settings;
     std::function<std::optional<Http3Response>(const Http3RequestHead &)> request_head_handler;
     std::function<Http3Response(const Http3Request &)> request_handler;
+    std::function<Http3Response(const Http3Request &)> fallback_request_handler;
 };
 
 struct Http3ServerRequestCancelledEvent {

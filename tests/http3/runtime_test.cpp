@@ -724,7 +724,9 @@ TEST(QuicHttp3RuntimeTest, SpeedDownloadRouteWritesSizedBodyOverLoopback) {
         .output_path = output_root.path() / "download.bin",
     };
 
+    ScopedStdoutCapture capture;
     EXPECT_EQ(coquic::http3::run_http3_runtime(client), 0);
+    EXPECT_EQ(capture.finish_and_read(), "");
     EXPECT_EQ(std::filesystem::file_size(output_root.path() / "download.bin"), 131072u);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
 }
@@ -755,7 +757,9 @@ TEST(QuicHttp3RuntimeTest, SpeedUploadRouteReturnsReceivedByteSummaryOverLoopbac
         .output_path = output_root.path() / "upload.json",
     };
 
+    ScopedStdoutCapture capture;
     EXPECT_EQ(coquic::http3::run_http3_runtime(client), 0);
+    EXPECT_EQ(capture.finish_and_read(), "");
     EXPECT_EQ(coquic::quic::test::read_text_file(output_root.path() / "upload.json"),
               "{\"received_bytes\":4096}");
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());

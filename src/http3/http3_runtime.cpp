@@ -279,46 +279,6 @@ std::vector<std::byte> bytes_from_string(std::string_view text) {
                                   reinterpret_cast<const std::byte *>(text.data()) + text.size());
 }
 
-void append_json_escaped(std::string &out, std::string_view value) {
-    static constexpr char kHexDigits[] = "0123456789abcdef";
-    out.push_back('"');
-    for (const unsigned char ch : value) {
-        switch (ch) {
-        case '"':
-            out += "\\\"";
-            break;
-        case '\\':
-            out += "\\\\";
-            break;
-        case '\b':
-            out += "\\b";
-            break;
-        case '\f':
-            out += "\\f";
-            break;
-        case '\n':
-            out += "\\n";
-            break;
-        case '\r':
-            out += "\\r";
-            break;
-        case '\t':
-            out += "\\t";
-            break;
-        default:
-            if (ch < 0x20u) {
-                out += "\\u00";
-                out.push_back(kHexDigits[(ch >> 4u) & 0x0fu]);
-                out.push_back(kHexDigits[ch & 0x0fu]);
-            } else {
-                out.push_back(static_cast<char>(ch));
-            }
-            break;
-        }
-    }
-    out.push_back('"');
-}
-
 bool path_has_prefix(const std::filesystem::path &path, const std::filesystem::path &prefix) {
     auto path_it = path.begin();
     auto prefix_it = prefix.begin();
@@ -840,7 +800,7 @@ class Http3ServerRuntime {
                 endpoints_.try_emplace(
                     lifecycle->connection,
                     Http3ServerEndpoint(Http3ServerConfig{
-                        .request_handler =
+                        .fallback_request_handler =
                             [document_root = config_.document_root](const Http3Request &request) {
                                 return runtime_server_response(document_root, request);
                             },

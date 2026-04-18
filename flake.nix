@@ -475,6 +475,21 @@
           WorkingDir = "/";
         };
       };
+      quictlsMuslPerfImageStream = pkgs.dockerTools.streamLayeredImage {
+        name = "coquic-perf";
+        tag = "quictls-musl";
+        fromImage = simulatorEndpointBase;
+        contents = [
+          (mkPerfEndpointOverlay {
+            name = "coquic-perf-quictls-musl";
+            coquicPackage = quictlsMuslPackage;
+          })
+        ];
+        config = {
+          Entrypoint = [ "/usr/local/bin/coquic-perf" ];
+          WorkingDir = "/";
+        };
+      };
       boringsslMuslImage = pkgs.dockerTools.buildLayeredImage {
         name = "coquic-interop";
         tag = "boringssl-musl";
@@ -581,6 +596,7 @@
         interop-image-quictls-musl = quictlsMuslImage;
         interop-image-boringssl-musl = boringsslMuslImage;
         perf-image-quictls-musl = quictlsMuslPerfImage;
+        perf-image-stream-quictls-musl = quictlsMuslPerfImageStream;
       };
 
       apps.${system} = {

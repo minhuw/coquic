@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 default_manifest_path="${repo_root}/.bench-results/manifest.json"
 results_root="${PERF_RESULTS_ROOT:-$(dirname "${default_manifest_path}")}"
 manifest_path="${results_root}/manifest.json"
-image_attr="${PERF_IMAGE_ATTR:-perf-image-quictls-musl}"
+image_attr="${PERF_IMAGE_ATTR:-perf-image-stream-quictls-musl}"
 image_tag="${PERF_IMAGE_TAG:-coquic-perf:quictls-musl}"
 server_name="${PERF_SERVER_NAME:-coquic-perf-server}"
 server_cpus="${PERF_SERVER_CPUS:-2}"
@@ -19,7 +19,7 @@ usage: bash bench/run-host-matrix.sh [--preset smoke|ci]
 
 environment overrides:
   PERF_RESULTS_ROOT  result directory (default: .bench-results)
-  PERF_IMAGE_ATTR    nix package attr to build/load (default: perf-image-quictls-musl)
+  PERF_IMAGE_ATTR    nix package attr to build/load (default: perf-image-stream-quictls-musl)
   PERF_IMAGE_TAG     docker tag to run (default: coquic-perf:quictls-musl)
   PERF_SERVER_CPUS   CPU set for server container (default: 2)
   PERF_CLIENT_CPUS   CPU set for client container (default: 3)
@@ -79,7 +79,11 @@ cleanup() {
 trap cleanup EXIT
 
 image_path="$(nix build --print-out-paths ".#${image_attr}")"
-docker load -i "${image_path}" >/dev/null
+if [ -x "${image_path}" ]; then
+  docker load < <("${image_path}") >/dev/null
+else
+  docker load -i "${image_path}" >/dev/null
+fi
 
 for run in "${runs[@]}"; do
   read -r backend mode direction request_bytes response_bytes limit streams connections inflight warmup duration <<<"${run}"

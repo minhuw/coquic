@@ -82,8 +82,18 @@ if grep -F -- '"io_uring ' "${script}" >/dev/null; then
   exit 1
 fi
 
-grep -F -- 'perf-image-quictls-musl' "${flake}" >/dev/null || {
-  echo 'missing perf image package export in flake.nix' >&2
+grep -F -- 'perf-image-stream-quictls-musl' "${script}" >/dev/null || {
+  echo 'missing streamed perf image default in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'docker load < <("${image_path}")' "${script}" >/dev/null || {
+  echo 'missing streamed docker load path in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'perf-image-stream-quictls-musl' "${flake}" >/dev/null || {
+  echo 'missing streamed perf image package export in flake.nix' >&2
   exit 1
 }
 

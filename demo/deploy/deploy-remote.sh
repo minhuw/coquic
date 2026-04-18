@@ -72,6 +72,7 @@ previous_release_target=""
 rollback_armed=0
 rollback_performed=0
 deploy_succeeded=0
+verification_attempts=5
 
 cleanup_local() {
   rm -rf "${staging_dir}"
@@ -95,11 +96,12 @@ rollback_remote() {
     return
   fi
 
-  ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_upload_dir}" "${remote_current_link}" "${previous_release_target}" <<'EOF'
+  ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_upload_dir}" "${remote_current_link}" "${previous_release_target}" "${remote_release_dir}" <<'EOF'
 set -euo pipefail
 remote_upload_dir="$1"
 remote_current_link="$2"
 previous_release_target="$3"
+remote_release_dir="$4"
 
 restore_or_remove() {
   local destination="$1"
@@ -119,6 +121,11 @@ if [[ -n "${previous_release_target}" ]]; then
   sudo ln -sfn "${previous_release_target}" "${remote_current_link}"
 else
   sudo rm -f "${remote_current_link}"
+fi
+
+# rollback: cleanup failed ${remote_release_dir}
+if [[ -n "${remote_release_dir}" && "${remote_release_dir}" != "${previous_release_target}" ]]; then
+  sudo rm -rf "${remote_release_dir}"
 fi
 
 # rollback: restore /etc/systemd/system/coquic-demo.service
@@ -194,6 +201,11 @@ previous_release_target="$(
     "if [ -L '${remote_current_link}' ]; then readlink '${remote_current_link}'; fi"
 )"
 
+if [[ "${previous_release_target}" == "${remote_release_dir}" ]]; then
+  echo "refusing to redeploy over live release dir: ${remote_release_dir}" >&2
+  exit 1
+fi
+
 remote_upload_dir="$(
   ssh "${ssh_opts[@]}" "${remote_target}" \
     "umask 077 && mktemp -d /tmp/coquic-demo-release-${release_id}-XXXXXX"
@@ -264,33 +276,67 @@ then
 fi
 
 url="https://${COQUIC_DEMO_PUBLIC_HOST}:${public_port}/"
-if ! headers="$(nix run .#curl-http3 -- -I "${url}")"; then
-  fail_with_rollback "deployment verification failed: unable to fetch response headers"
-fi
-
-if ! grep -Fq 'HTTP/1.1 200 OK' <<<"${headers}"; then
-  fail_with_rollback "deployment verification failed: missing HTTP/1.1 200 OK"
-fi
-
-if ! grep -Fq "Alt-Svc: h3=\":${public_port}\"; ma=60" <<<"${headers}"; then
-  fail_with_rollback "deployment verification failed: missing Alt-Svc header"
-fi
-
-if ! http3_version="$(nix run .#curl-http3 -- --http3-only -sS -o /dev/null -w '%{http_version}' "${url}")"; then
-  fail_with_rollback "deployment verification failed: unable to fetch HTTP/3 version"
-fi
-if [[ "${http3_version}" != "3" ]]; then
-  fail_with_rollback "deployment verification failed: expected HTTP/3, got ${http3_version}"
-fi
-
-if ! page="$(nix run .#curl-http3 -- --http3-only -sS "${url}")"; then
-  fail_with_rollback "deployment verification failed: unable to fetch page via HTTP/3"
-fi
-for marker in "Showcase" "Technical" "Run Live Checks" "Browser Verification"; do
-  if ! grep -Fq "${marker}" <<<"${page}"; then
-    fail_with_rollback "deployment verification failed: missing marker ${marker}"
+headers_verified=0
+for attempt in $(seq 1 "${verification_attempts}"); do
+  # verification retry loop: headers
+  headers=""
+  if headers="$(nix run .#curl-http3 -- -I "${url}" 2>/dev/null)"; then
+    if grep -Fq 'HTTP/1.1 200 OK' <<<"${headers}" &&
+       grep -Fq "Alt-Svc: h3=\":${public_port}\"; ma=60" <<<"${headers}"; then
+      headers_verified=1
+      break
+    fi
+  fi
+  if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
+    sleep "${attempt}"
   fi
 done
+if [[ ${headers_verified} -ne 1 ]]; then
+  fail_with_rollback "deployment verification failed: headers did not converge after retries"
+fi
+
+http3_verified=0
+for attempt in $(seq 1 "${verification_attempts}"); do
+  # verification retry loop: http3-version
+  http3_version=""
+  if http3_version="$(nix run .#curl-http3 -- --http3-only -sS -o /dev/null -w '%{http_version}' "${url}" 2>/dev/null)"; then
+    if [[ "${http3_version}" == "3" ]]; then
+      http3_verified=1
+      break
+    fi
+  fi
+  if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
+    sleep "${attempt}"
+  fi
+done
+if [[ ${http3_verified} -ne 1 ]]; then
+  fail_with_rollback "deployment verification failed: HTTP/3 version did not converge after retries"
+fi
+
+page_verified=0
+for attempt in $(seq 1 "${verification_attempts}"); do
+  # verification retry loop: page-markers
+  page=""
+  if page="$(nix run .#curl-http3 -- --http3-only -sS "${url}" 2>/dev/null)"; then
+    missing_marker=""
+    for marker in "Showcase" "Technical" "Run Live Checks" "Browser Verification"; do
+      if ! grep -Fq "${marker}" <<<"${page}"; then
+        missing_marker="${marker}"
+        break
+      fi
+    done
+    if [[ -z "${missing_marker}" ]]; then
+      page_verified=1
+      break
+    fi
+  fi
+  if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
+    sleep "${attempt}"
+  fi
+done
+if [[ ${page_verified} -ne 1 ]]; then
+  fail_with_rollback "deployment verification failed: page markers did not converge after retries"
+fi
 
 rollback_armed=0
 deploy_succeeded=1

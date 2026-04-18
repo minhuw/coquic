@@ -119,6 +119,12 @@ rollback_markers = [
 for marker in rollback_markers:
     if marker not in deploy_script:
         raise SystemExit(f"deploy script missing rollback marker: {marker}")
+if "refusing to redeploy over live release dir" not in deploy_script:
+    raise SystemExit("deploy script missing same-release refusal message")
+if "verification retry loop" not in deploy_script:
+    raise SystemExit("deploy script missing verification retry-loop marker")
+if "rollback: cleanup failed ${remote_release_dir}" not in deploy_script:
+    raise SystemExit("deploy script missing failed release cleanup marker")
 if not os.access(deploy_script_path, os.X_OK):
     raise SystemExit("deploy script is not executable")
 
@@ -134,3 +140,130 @@ if not os.access(contract_test_path, os.X_OK):
 
 print("demo remote deploy contract looks correct")
 PY
+
+test_tmp="$(mktemp -d)"
+cleanup_test_tmp() {
+  rm -rf "${test_tmp}"
+}
+trap cleanup_test_tmp EXIT
+
+stub_bin="${test_tmp}/bin"
+mkdir -p "${stub_bin}"
+
+cat > "${stub_bin}/ssh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+log_path="${COQUIC_TEST_SSH_LOG:?}"
+printf 'ssh %s\n' "$*" >> "${log_path}"
+
+if [[ "$*" == *"readlink '/opt/coquic-demo/current'"* ]]; then
+  printf '%s\n' "/opt/coquic-demo/releases/${COQUIC_TEST_SAME_SHA:?}"
+  exit 0
+fi
+
+if [[ "$*" == *"mktemp -d"* ]]; then
+  printf 'unexpected mktemp call\n' >> "${log_path}"
+  exit 70
+fi
+
+if [[ "$*" == *"bash -s --"* ]]; then
+  printf 'unexpected remote install call\n' >> "${log_path}"
+  exit 71
+fi
+
+exit 0
+EOF
+
+cat > "${stub_bin}/scp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'scp %s\n' "$*" >> "${COQUIC_TEST_SCP_LOG:?}"
+exit 0
+EOF
+
+cat > "${stub_bin}/nix" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'nix %s\n' "$*" >> "${COQUIC_TEST_NIX_LOG:?}"
+exit 0
+EOF
+
+chmod 755 "${stub_bin}/ssh" "${stub_bin}/scp" "${stub_bin}/nix"
+
+fake_binary="${test_tmp}/h3-server"
+fake_site="${test_tmp}/site"
+touch "${fake_binary}"
+chmod 755 "${fake_binary}"
+mkdir -p "${fake_site}"
+printf '<html>demo</html>\n' > "${fake_site}/index.html"
+
+fake_home="${test_tmp}/home"
+mkdir -p "${fake_home}/.ssh"
+printf 'known-host-entry\n' > "${fake_home}/.ssh/known_hosts"
+
+fake_key="${test_tmp}/coquic-demo.key"
+printf 'test-key\n' > "${fake_key}"
+
+ssh_log="${test_tmp}/ssh.log"
+scp_log="${test_tmp}/scp.log"
+nix_log="${test_tmp}/nix.log"
+: > "${ssh_log}"
+: > "${scp_log}"
+: > "${nix_log}"
+
+set +e
+same_sha_output="$(
+  PATH="${stub_bin}:${PATH}" \
+  HOME="${fake_home}" \
+  GITHUB_SHA="deadbeefcafebabe1234" \
+  COQUIC_DEMO_REMOTE_HOST="example.test" \
+  COQUIC_DEMO_REMOTE_USER="deployer" \
+  COQUIC_DEMO_REMOTE_SSH_KEY_PATH="${fake_key}" \
+  COQUIC_DEMO_CERT_CHAIN_PEM="chain" \
+  COQUIC_DEMO_PRIVATE_KEY_PEM="key" \
+  COQUIC_DEMO_PUBLIC_HOST="demo.example.test" \
+  COQUIC_TEST_SAME_SHA="deadbeefcafe" \
+  COQUIC_TEST_SSH_LOG="${ssh_log}" \
+  COQUIC_TEST_SCP_LOG="${scp_log}" \
+  COQUIC_TEST_NIX_LOG="${nix_log}" \
+  demo/deploy/deploy-remote.sh "${fake_binary}" "${fake_site}" 2>&1
+)"
+same_sha_status=$?
+set -e
+
+if [[ ${same_sha_status} -eq 0 ]]; then
+  echo "expected same-SHA redeploy refusal to fail" >&2
+  exit 1
+fi
+
+if [[ "${same_sha_output}" != *"refusing to redeploy over live release dir"* ]]; then
+  echo "expected same-SHA refusal message, got: ${same_sha_output}" >&2
+  exit 1
+fi
+
+if [[ -s "${scp_log}" ]]; then
+  echo "same-SHA refusal should not invoke scp" >&2
+  cat "${scp_log}" >&2
+  exit 1
+fi
+
+if grep -Fq "mktemp -d" "${ssh_log}"; then
+  echo "same-SHA refusal should happen before remote mktemp" >&2
+  cat "${ssh_log}" >&2
+  exit 1
+fi
+
+if grep -Fq "bash -s --" "${ssh_log}"; then
+  echo "same-SHA refusal should happen before remote install" >&2
+  cat "${ssh_log}" >&2
+  exit 1
+fi
+
+if [[ -s "${nix_log}" ]]; then
+  echo "same-SHA refusal should happen before verification commands" >&2
+  cat "${nix_log}" >&2
+  exit 1
+fi
+
+echo "same-SHA redeploy guard behaves correctly"

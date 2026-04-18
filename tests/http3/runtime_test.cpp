@@ -995,11 +995,45 @@ TEST(QuicHttp3RuntimeTest, RuntimeTransferPlansRejectInvalidJobSets) {
                 .output_path = "a.bin",
             },
             coquic::http3::Http3RuntimeTransferJob{
-                .url = "https://127.0.0.1:9443/b",
+                .url = "https://localhost:9444/b",
                 .output_path = "b.bin",
             },
         };
         EXPECT_FALSE(coquic::http3::runtime_make_client_transfer_plans_for_test(config, jobs));
+    }
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeParserDispatchesServerAndClientSubcommands) {
+    {
+        const char *argv[] = {
+            "coquic-http3", "h3-server", "--host", "127.0.0.1", "--port", "9555",
+        };
+        const auto config = coquic::http3::parse_http3_runtime_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        ASSERT_TRUE(config.has_value());
+        if (!config.has_value()) {
+            return;
+        }
+        EXPECT_EQ(config->mode, coquic::http3::Http3RuntimeMode::server);
+        EXPECT_EQ(config->host, "127.0.0.1");
+        EXPECT_EQ(config->port, 9555);
+    }
+
+    {
+        const char *argv[] = {
+            "coquic-http3",  "h3-client", "https://localhost:9443/ok", "--method", "HEAD",
+            "--server-name", "localhost",
+        };
+        const auto config = coquic::http3::parse_http3_runtime_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        ASSERT_TRUE(config.has_value());
+        if (!config.has_value()) {
+            return;
+        }
+        EXPECT_EQ(config->mode, coquic::http3::Http3RuntimeMode::client);
+        EXPECT_EQ(config->url, "https://localhost:9443/ok");
+        EXPECT_EQ(config->method, "HEAD");
+        EXPECT_EQ(config->server_name, "localhost");
     }
 }
 

@@ -31,6 +31,7 @@ namespace coquic::http3 {
 bool bootstrap_scoped_fd_move_constructor_for_test();
 bool bootstrap_scoped_fd_move_assignment_for_test();
 bool bootstrap_scoped_fd_self_move_assignment_for_test();
+bool bootstrap_parse_request_for_test(std::string_view request_text);
 std::string bootstrap_serialize_unknown_status_response_for_test(const Http3BootstrapConfig &config,
                                                                  int status_code);
 } // namespace coquic::http3
@@ -282,6 +283,47 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
                                 " HTTP/1.1\r\nHost: " + std::string(host) +
                                 "\r\nConnection: close\r\n\r\n";
     return https_request(host, port, request);
+}
+
+std::string raw_tcp_request(std::string_view host, std::uint16_t port,
+                            std::string_view request_text) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return {};
+    }
+    ScopedFd socket_guard(fd);
+
+    timeval timeout{
+        .tv_sec = 1,
+        .tv_usec = 0,
+    };
+    (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (::inet_pton(AF_INET, std::string(host).c_str(), &address.sin_addr) != 1) {
+        return {};
+    }
+    if (::connect(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+        return {};
+    }
+    if (::send(fd, request_text.data(), request_text.size(), 0) < 0) {
+        return {};
+    }
+    (void)::shutdown(fd, SHUT_WR);
+
+    std::string response_text;
+    std::array<char, 1024> buffer{};
+    while (true) {
+        const ssize_t read = ::recv(fd, buffer.data(), buffer.size(), 0);
+        if (read <= 0) {
+            break;
+        }
+        response_text.append(buffer.data(), static_cast<std::size_t>(read));
+    }
+
+    return response_text;
 }
 
 bool wake_bootstrap_listener(std::string_view host, std::uint16_t port) {
@@ -572,13 +614,13 @@ TEST(QuicHttp3BootstrapTest, HttpsMalformedRequestsReturnBadRequest) {
     const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
     ScopedBootstrapProcess server(config);
 
-    const auto no_request_line_terminator = https_request(
+    const auto merged_request_line_and_header = https_request(
         "127.0.0.1", bootstrap_port, "GET / HTTP/1.1Host: example\r\nConnection: close\r\n\r\n");
-    ASSERT_TRUE(no_request_line_terminator.has_value());
-    if (!no_request_line_terminator.has_value()) {
+    ASSERT_TRUE(merged_request_line_and_header.has_value());
+    if (!merged_request_line_and_header.has_value()) {
         return;
     }
-    EXPECT_EQ(no_request_line_terminator.value().status_code, 400);
+    EXPECT_EQ(merged_request_line_and_header.value().status_code, 400);
 
     const auto missing_method = https_request(
         "127.0.0.1", bootstrap_port, " / HTTP/1.1\r\nHost: example\r\nConnection: close\r\n\r\n");
@@ -625,6 +667,30 @@ TEST(QuicHttp3BootstrapTest, HttpsOversizedRequestWithoutTerminatorReturnsBadReq
         return;
     }
     EXPECT_EQ(response.value().status_code, 400);
+}
+
+TEST(QuicHttp3BootstrapTest, RawTcpClientFailsTlsAcceptAndServerKeepsServing) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello-bootstrap");
+
+    const auto bootstrap_port = allocate_tcp_loopback_port();
+    ASSERT_NE(bootstrap_port, 0);
+
+    const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
+    ScopedBootstrapProcess server(config);
+
+    const auto raw_response =
+        raw_tcp_request("127.0.0.1", bootstrap_port,
+                        "GET /hello.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    EXPECT_NE(raw_response.rfind("HTTP/1.1 ", 0), 0U);
+
+    const auto response = https_request("127.0.0.1", bootstrap_port, "GET", "/hello.txt");
+    ASSERT_TRUE(response.has_value());
+    if (!response.has_value()) {
+        return;
+    }
+    EXPECT_EQ(response.value().status_code, 200);
+    EXPECT_EQ(response.value().body, "hello-bootstrap");
 }
 
 TEST(QuicHttp3BootstrapTest, InvalidCertificateChainReturnsFailure) {
@@ -705,6 +771,10 @@ TEST(QuicHttp3BootstrapTest, TestHookExercisesScopedFdMoveOperations) {
     EXPECT_TRUE(coquic::http3::bootstrap_scoped_fd_move_constructor_for_test());
     EXPECT_TRUE(coquic::http3::bootstrap_scoped_fd_move_assignment_for_test());
     EXPECT_TRUE(coquic::http3::bootstrap_scoped_fd_self_move_assignment_for_test());
+}
+
+TEST(QuicHttp3BootstrapTest, TestHookRejectsRequestWithoutRequestLineTerminator) {
+    EXPECT_FALSE(coquic::http3::bootstrap_parse_request_for_test("GET / HTTP/1.1"));
 }
 
 TEST(QuicHttp3BootstrapTest, TestHookSerializesUnknownStatusWithFallbackReasonPhrase) {

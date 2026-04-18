@@ -538,6 +538,10 @@ bool bootstrap_scoped_fd_self_move_assignment_for_test() {
     return fd.get() == original_fd && peer.get() == original_peer_fd;
 }
 
+bool bootstrap_parse_request_for_test(std::string_view request_text) {
+    return parse_bootstrap_request(request_text).has_value();
+}
+
 std::string bootstrap_serialize_unknown_status_response_for_test(const Http3BootstrapConfig &config,
                                                                  int status_code) {
     BootstrapResponse response{

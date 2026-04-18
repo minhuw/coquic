@@ -187,8 +187,8 @@ class PacketSpaceRecovery {
     void on_packet_declared_lost(std::uint64_t packet_number);
     void retire_packet(RecoveryPacketHandle handle);
     void retire_packet(std::uint64_t packet_number);
-    AckProcessingResult on_ack_received(std::span<const AckPacketNumberRange> ack_ranges,
-                                        std::uint64_t largest_acknowledged, QuicCoreTimePoint now);
+    AckProcessingResult on_ack_received(AckRangeCursor cursor, std::uint64_t largest_acknowledged,
+                                        QuicCoreTimePoint now);
     AckProcessingResult on_ack_received(const AckFrame &ack, QuicCoreTimePoint now);
     std::optional<RecoveryPacketHandle> handle_for_packet_number(std::uint64_t packet_number) const;
     SentPacketRecord *packet_for_handle(RecoveryPacketHandle handle);

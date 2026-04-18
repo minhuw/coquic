@@ -720,9 +720,9 @@ void PacketSpaceRecovery::retire_packet(std::uint64_t packet_number) {
     retire_packet(*handle);
 }
 
-AckProcessingResult
-PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_ranges,
-                                     std::uint64_t largest_acknowledged, QuicCoreTimePoint now) {
+AckProcessingResult PacketSpaceRecovery::on_ack_received(AckRangeCursor cursor,
+                                                         std::uint64_t largest_acknowledged,
+                                                         QuicCoreTimePoint now) {
     AckProcessingResult result;
     struct BufferedAckResult {
         RecoveryPacketHandle handle;
@@ -748,22 +748,13 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
         return previous;
     };
 
-    std::vector<AckPacketNumberRange> ack_ranges_descending(ack_ranges.begin(), ack_ranges.end());
-    std::sort(ack_ranges_descending.begin(), ack_ranges_descending.end(),
-              [](const AckPacketNumberRange &lhs, const AckPacketNumberRange &rhs) {
-                  if (lhs.largest != rhs.largest) {
-                      return lhs.largest > rhs.largest;
-                  }
-                  return lhs.smallest > rhs.smallest;
-              });
-
     auto current = newest_live_slot_at_or_below(largest_acknowledged);
-    for (const auto &range : ack_ranges_descending) {
-        while (current.has_value() && *current > range.largest) {
+    while (const auto range = next_ack_range(cursor)) {
+        while (current.has_value() && *current > range->largest) {
             current = previous_live_slot(*current);
         }
 
-        while (current.has_value() && *current >= range.smallest) {
+        while (current.has_value() && *current >= range->smallest) {
             const auto slot_index = *current;
             const auto previous = previous_live_slot(slot_index);
             auto &slot = slots_[slot_index];
@@ -855,13 +846,20 @@ PacketSpaceRecovery::on_ack_received(std::span<const AckPacketNumberRange> ack_r
 
 AckProcessingResult PacketSpaceRecovery::on_ack_received(const AckFrame &ack,
                                                          QuicCoreTimePoint now) {
-    const auto ack_ranges = ack_frame_packet_number_ranges(ack);
-    if (!ack_ranges.has_value()) {
-        return on_ack_received(std::span<const AckPacketNumberRange>{}, ack.largest_acknowledged,
-                               now);
+    const auto cursor = make_ack_range_cursor(ack);
+    if (!cursor.has_value()) {
+        return on_ack_received(
+            AckRangeCursor{
+                .largest_acknowledged = ack.largest_acknowledged,
+                .first_ack_range = 0,
+                .additional_ranges = {},
+                .next_additional_index = 0,
+                .previous_smallest = ack.largest_acknowledged,
+                .first_range_pending = false,
+            },
+            ack.largest_acknowledged, now);
     }
-    return on_ack_received(std::span<const AckPacketNumberRange>(ack_ranges.value()),
-                           ack.largest_acknowledged, now);
+    return on_ack_received(cursor.value(), ack.largest_acknowledged, now);
 }
 
 std::optional<std::uint64_t> PacketSpaceRecovery::largest_acked_packet_number() const {

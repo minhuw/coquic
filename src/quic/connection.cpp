@@ -3751,14 +3751,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
                                                       std::uint64_t ack_delay_exponent,
                                                       std::uint64_t max_ack_delay_ms,
                                                       bool suppress_pto_reset) {
-    const auto ack_ranges = ack_frame_packet_number_ranges(ack);
-    if (!ack_ranges.has_value()) {
-        return CodecResult<bool>::success(true);
-    }
-
     packet_space.recovery.rtt_state() = shared_recovery_rtt_state();
-    auto ack_result = packet_space.recovery.on_ack_received(
-        std::span<const AckPacketNumberRange>(ack_ranges.value()), ack.largest_acknowledged, now);
+    auto ack_result = packet_space.recovery.on_ack_received(ack, now);
     std::vector<SentPacketRecord> acked_packets;
     acked_packets.reserve(ack_result.acked_packets.size());
     for (const auto handle : ack_result.acked_packets.handles()) {

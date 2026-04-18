@@ -1,3 +1,343 @@
 <!doctype html>
-<title>Hello HTTP/3</title>
-<body>Hello HTTP/3</body>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>coquic live diagnostics</title>
+    <style>
+      :root {
+        --bg: #f4f8f7;
+        --panel: #ffffff;
+        --ink: #0e2b2b;
+        --muted: #4a6767;
+        --line: #c9d9d8;
+        --accent: #0b8f7b;
+        --accent-strong: #066f5f;
+        --danger: #9b2f2f;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 10% 10%, #d8f3ee 0%, rgba(216, 243, 238, 0) 38%),
+          radial-gradient(circle at 90% 20%, #d8e9fb 0%, rgba(216, 233, 251, 0) 34%),
+          linear-gradient(145deg, #f8fbfa, #eef3f4 60%, #eaf0f1);
+        min-height: 100vh;
+      }
+
+      main {
+        width: min(1000px, 92vw);
+        margin: 2rem auto 3rem;
+        display: grid;
+        gap: 1rem;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 1rem;
+        box-shadow: 0 8px 22px rgba(16, 37, 38, 0.08);
+      }
+
+      .hero h1 {
+        margin: 0 0 0.4rem;
+        font-size: clamp(1.35rem, 2vw, 2rem);
+      }
+
+      .hero p {
+        margin: 0.2rem 0;
+        color: var(--muted);
+      }
+
+      .toggle {
+        display: inline-flex;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+
+      .toggle button {
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        padding: 0.55rem 0.95rem;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .toggle button.active {
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      #runChecks {
+        border: 0;
+        border-radius: 10px;
+        background: var(--accent);
+        color: #fff;
+        font: inherit;
+        font-weight: 600;
+        padding: 0.62rem 0.95rem;
+        cursor: pointer;
+      }
+
+      #runChecks:disabled {
+        background: #83b7ae;
+        cursor: wait;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .grid {
+        display: grid;
+        gap: 1rem;
+      }
+
+      @media (min-width: 860px) {
+        .grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+
+      h2, h3 {
+        margin: 0 0 0.6rem;
+      }
+
+      pre {
+        margin: 0;
+        padding: 0.7rem;
+        border-radius: 10px;
+        background: #0f1819;
+        color: #ddf9f4;
+        overflow-x: auto;
+        font-size: 0.82rem;
+      }
+
+      .status {
+        font-weight: 600;
+      }
+
+      .status.error {
+        color: var(--danger);
+      }
+
+      .status.ok {
+        color: var(--accent-strong);
+      }
+
+      .pill {
+        display: inline-block;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #f7fbfa;
+        padding: 0.2rem 0.5rem;
+      }
+
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card hero">
+        <h1>coquic live diagnostics page</h1>
+        <p>Deployment target: <strong>https://coquic.minhuw.dev:4433/</strong> with same-origin checks for <code>/_coquic/inspect</code> and <code>/_coquic/echo</code>.</p>
+        <p class="muted">This page can report browser-observable HTTP responses and headers. Protocol negotiation details should be confirmed in DevTools.</p>
+      </section>
+
+      <section class="card controls">
+        <div class="toggle" role="tablist" aria-label="Page mode">
+          <button id="modeShowcase" type="button" role="tab" aria-selected="true">Showcase</button>
+          <button id="modeTechnical" type="button" role="tab" aria-selected="false">Technical</button>
+        </div>
+        <button id="runChecks" type="button">Run Live Checks</button>
+        <span class="muted">Current URL: <code id="currentLocation"></code></span>
+      </section>
+
+      <section id="showcasePanel" class="card">
+        <h2>How To Verify In Chrome</h2>
+        <p>Use this page to trigger live checks, then confirm transport details in Chrome DevTools:</p>
+        <ol>
+          <li>Open DevTools Network tab and reload after first visit.</li>
+          <li>Inspect the main document request and check the Protocol column.</li>
+          <li>Look for Alt-Svc in response headers and confirm later reloads advertise h3 usage.</li>
+        </ol>
+        <p class="muted">First load can still appear as HTTP/1.1 before Alt-Svc is cached.</p>
+      </section>
+
+      <section id="technicalPanel" class="card hidden">
+        <h2>Browser Verification</h2>
+        <p>Page-observed data:</p>
+        <ul>
+          <li><code>window.location</code> and request timestamps</li>
+          <li>HEAD <code>/</code> status plus <code>Alt-Svc</code> header if visible</li>
+          <li>JSON response from POST <code>/_coquic/inspect</code></li>
+          <li>POST <code>/_coquic/echo</code> round-trip success/failure</li>
+        </ul>
+        <p class="muted">Treat ALPN, negotiated transport, and QUIC version as DevTools-verified facts, not page-observed facts.</p>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h3>Latest Run</h3>
+          <p class="status" id="latestStatus">No checks run yet.</p>
+          <p class="muted">Last attempt: <span id="lastAttempt">never</span></p>
+          <p class="muted">Last successful run: <span id="lastSuccess">never</span></p>
+          <p><span class="pill">Alt-Svc</span> <code id="altSvcValue">n/a</code></p>
+        </article>
+        <article class="card">
+          <h3>HEAD /</h3>
+          <pre id="headResult">No data yet.</pre>
+        </article>
+        <article class="card">
+          <h3>POST /_coquic/inspect</h3>
+          <pre id="inspectResult">No data yet.</pre>
+        </article>
+        <article class="card">
+          <h3>POST /_coquic/echo</h3>
+          <pre id="echoResult">No data yet.</pre>
+        </article>
+      </section>
+
+      <section class="card">
+        <h3>Last Successful Probe Data</h3>
+        <pre id="lastSuccessPayload">No successful run yet.</pre>
+      </section>
+    </main>
+    <script>
+      const MODE_KEY = "coquic-demo-mode";
+      const state = {
+        mode: "Showcase",
+        lastSuccessful: null,
+      };
+
+      const ui = {
+        modeShowcase: document.getElementById("modeShowcase"),
+        modeTechnical: document.getElementById("modeTechnical"),
+        showcasePanel: document.getElementById("showcasePanel"),
+        technicalPanel: document.getElementById("technicalPanel"),
+        runChecks: document.getElementById("runChecks"),
+        latestStatus: document.getElementById("latestStatus"),
+        lastAttempt: document.getElementById("lastAttempt"),
+        lastSuccess: document.getElementById("lastSuccess"),
+        altSvcValue: document.getElementById("altSvcValue"),
+        currentLocation: document.getElementById("currentLocation"),
+        headResult: document.getElementById("headResult"),
+        inspectResult: document.getElementById("inspectResult"),
+        echoResult: document.getElementById("echoResult"),
+        lastSuccessPayload: document.getElementById("lastSuccessPayload"),
+      };
+
+      function toJson(value) {
+        return JSON.stringify(value, null, 2);
+      }
+
+      function setMode(mode) {
+        state.mode = mode === "Technical" ? "Technical" : "Showcase";
+        localStorage.setItem(MODE_KEY, state.mode);
+        const showcase = state.mode === "Showcase";
+        ui.modeShowcase.classList.toggle("active", showcase);
+        ui.modeTechnical.classList.toggle("active", !showcase);
+        ui.modeShowcase.setAttribute("aria-selected", showcase ? "true" : "false");
+        ui.modeTechnical.setAttribute("aria-selected", showcase ? "false" : "true");
+        ui.showcasePanel.classList.toggle("hidden", !showcase);
+        ui.technicalPanel.classList.toggle("hidden", showcase);
+      }
+
+      async function runLiveChecks() {
+        const startedAt = new Date();
+        ui.runChecks.disabled = true;
+        ui.latestStatus.textContent = "Running probes...";
+        ui.latestStatus.className = "status";
+        ui.lastAttempt.textContent = startedAt.toISOString();
+
+        const headInfo = {};
+        const inspectInfo = {};
+        const echoInfo = {};
+        let completeSuccess = false;
+
+        try {
+          const headResponse = await fetch("/", { method: "HEAD", cache: "no-store" });
+          headInfo.ok = headResponse.ok;
+          headInfo.status = headResponse.status;
+          headInfo.altSvc = headResponse.headers.get("alt-svc");
+          ui.altSvcValue.textContent = headInfo.altSvc || "not exposed";
+          ui.headResult.textContent = toJson(headInfo);
+
+          const inspectResponse = await fetch("/_coquic/inspect", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ source: "browser-demo", location: window.location.href }),
+          });
+          inspectInfo.ok = inspectResponse.ok;
+          inspectInfo.status = inspectResponse.status;
+          inspectInfo.body = await inspectResponse.json();
+          ui.inspectResult.textContent = toJson(inspectInfo);
+
+          const echoPayload = { ping: "coquic-live-check", sent_at: new Date().toISOString() };
+          const echoResponse = await fetch("/_coquic/echo", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(echoPayload),
+          });
+          echoInfo.ok = echoResponse.ok;
+          echoInfo.status = echoResponse.status;
+          echoInfo.body = await echoResponse.json();
+          ui.echoResult.textContent = toJson(echoInfo);
+
+          completeSuccess = Boolean(headInfo.ok && inspectInfo.ok && echoInfo.ok);
+          if (completeSuccess) {
+            state.lastSuccessful = {
+              completedAt: new Date().toISOString(),
+              location: window.location.href,
+              altSvc: headInfo.altSvc || null,
+              head: headInfo,
+              inspect: inspectInfo,
+              echo: echoInfo,
+            };
+            ui.lastSuccess.textContent = state.lastSuccessful.completedAt;
+            ui.lastSuccessPayload.textContent = toJson(state.lastSuccessful);
+            ui.latestStatus.textContent = "All probes succeeded.";
+            ui.latestStatus.className = "status ok";
+          } else {
+            throw new Error("one or more probes returned a non-OK status");
+          }
+        } catch (error) {
+          ui.latestStatus.textContent = "Probe run failed: " + error.message;
+          ui.latestStatus.className = "status error";
+          if (state.lastSuccessful) {
+            ui.lastSuccessPayload.textContent = toJson(state.lastSuccessful);
+          }
+        } finally {
+          ui.runChecks.disabled = false;
+        }
+      }
+
+      (function startup() {
+        ui.currentLocation.textContent = window.location.href;
+        const savedMode = localStorage.getItem(MODE_KEY);
+        setMode(savedMode || "Showcase");
+        ui.modeShowcase.addEventListener("click", function () { setMode("Showcase"); });
+        ui.modeTechnical.addEventListener("click", function () { setMode("Technical"); });
+        ui.runChecks.addEventListener("click", runLiveChecks);
+      })();
+    </script>
+  </body>
+</html>

@@ -354,6 +354,183 @@ TEST(QuicHttp3ServerTest, DefaultInspectRouteReturnsDeterministicJson) {
     EXPECT_TRUE(sends[1].fin);
 }
 
+TEST(QuicHttp3ServerTest, DefaultSpeedPingRouteReturnsNoContent) {
+    coquic::http3::Http3ServerEndpoint endpoint;
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/_coquic/speed/ping"},
+    };
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields), true),
+                                coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+
+    const std::array response_headers{
+        coquic::http3::Http3Field{"cache-control", "no-store"},
+    };
+    const auto expected_headers =
+        headers_frame_bytes(0, response_fields(204, response_headers, 0u));
+
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends[0].bytes, expected_headers);
+    EXPECT_TRUE(sends[0].fin);
+}
+
+TEST(QuicHttp3ServerTest, DefaultSpeedDownloadRouteReturnsSizedPayload) {
+    coquic::http3::Http3ServerEndpoint endpoint;
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/_coquic/speed/download?bytes=16"},
+    };
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields), true),
+                                coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+
+    const std::array response_headers{
+        coquic::http3::Http3Field{"content-type", "application/octet-stream"},
+        coquic::http3::Http3Field{"cache-control", "no-store"},
+    };
+    const auto expected_headers =
+        headers_frame_bytes(0, response_fields(200, response_headers, 16u));
+    const auto expected_body = data_frame_bytes("ABCDEFGHIJKLMNOP");
+
+    ASSERT_EQ(sends.size(), 2u);
+    EXPECT_EQ(sends[0].bytes, expected_headers);
+    EXPECT_FALSE(sends[0].fin);
+    EXPECT_EQ(sends[1].bytes, expected_body);
+    EXPECT_TRUE(sends[1].fin);
+}
+
+TEST(QuicHttp3ServerTest, DefaultSpeedUploadRouteReturnsReceivedByteSummary) {
+    coquic::http3::Http3ServerEndpoint endpoint;
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "POST"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/_coquic/speed/upload"},
+        coquic::http3::Http3Field{"content-length", "4"},
+    };
+
+    auto bytes = headers_frame_bytes(0, request_fields);
+    const auto body = data_frame_bytes("ping");
+    bytes.insert(bytes.end(), body.begin(), body.end());
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, bytes, true), coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+
+    const std::string json = "{\"received_bytes\":4}";
+    const std::array response_headers{
+        coquic::http3::Http3Field{"content-type", "application/json"},
+        coquic::http3::Http3Field{"cache-control", "no-store"},
+    };
+    const auto expected_headers =
+        headers_frame_bytes(0, response_fields(200, response_headers, json.size()));
+    const auto expected_body = data_frame_bytes(json);
+
+    ASSERT_EQ(sends.size(), 2u);
+    EXPECT_EQ(sends[0].bytes, expected_headers);
+    EXPECT_FALSE(sends[0].fin);
+    EXPECT_EQ(sends[1].bytes, expected_body);
+    EXPECT_TRUE(sends[1].fin);
+}
+
+TEST(QuicHttp3ServerTest, DefaultSpeedDownloadRouteRejectsMissingBytesQuery) {
+    coquic::http3::Http3ServerEndpoint endpoint;
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/_coquic/speed/download"},
+    };
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields), true),
+                                coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+
+    const std::array response_headers{
+        coquic::http3::Http3Field{"cache-control", "no-store"},
+    };
+    const auto expected_headers =
+        headers_frame_bytes(0, response_fields(400, response_headers, 0u));
+
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends[0].bytes, expected_headers);
+    EXPECT_TRUE(sends[0].fin);
+}
+
+TEST(QuicHttp3ServerTest, DefaultSpeedDownloadRouteRejectsOversizedBytesQuery) {
+    coquic::http3::Http3ServerEndpoint endpoint;
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/_coquic/speed/download?bytes=4194305"},
+    };
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields), true),
+                                coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+
+    const std::array response_headers{
+        coquic::http3::Http3Field{"cache-control", "no-store"},
+    };
+    const auto expected_headers =
+        headers_frame_bytes(0, response_fields(400, response_headers, 0u));
+
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends[0].bytes, expected_headers);
+    EXPECT_TRUE(sends[0].fin);
+}
+
+TEST(QuicHttp3ServerTest, DefaultSpeedUploadRouteRejectsNonPostMethod) {
+    coquic::http3::Http3ServerEndpoint endpoint;
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/_coquic/speed/upload"},
+    };
+
+    const auto update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields), true),
+                                coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+    const auto expected_headers = headers_frame_bytes(
+        0, response_fields(405, std::array{coquic::http3::Http3Field{"allow", "POST"}}, 0u));
+
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends[0].bytes, expected_headers);
+    EXPECT_TRUE(sends[0].fin);
+}
+
 TEST(QuicHttp3ServerTest, UnknownRouteReturns404) {
     coquic::http3::Http3ServerEndpoint endpoint;
 

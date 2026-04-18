@@ -1,7 +1,7 @@
 #include "src/http3/http3_server.h"
+#include "src/http3/http3_demo_routes.h"
 
 #include <limits>
-#include <string>
 #include <unordered_set>
 #include <utility>
 
@@ -16,120 +16,9 @@ Http3ServerEndpointUpdate make_failure_update(bool handled_local_error = false) 
     };
 }
 
-void append_json_escaped(std::string &out, std::string_view value) {
-    static constexpr char kHexDigits[] = "0123456789abcdef";
-    out.push_back('"');
-    for (const unsigned char ch : value) {
-        switch (ch) {
-        case '"':
-            out += "\\\"";
-            break;
-        case '\\':
-            out += "\\\\";
-            break;
-        case '\b':
-            out += "\\b";
-            break;
-        case '\f':
-            out += "\\f";
-            break;
-        case '\n':
-            out += "\\n";
-            break;
-        case '\r':
-            out += "\\r";
-            break;
-        case '\t':
-            out += "\\t";
-            break;
-        default:
-            if (ch < 0x20u) {
-                out += "\\u00";
-                out.push_back(kHexDigits[(ch >> 4u) & 0x0fu]);
-                out.push_back(kHexDigits[ch & 0x0fu]);
-            } else {
-                out.push_back(static_cast<char>(ch));
-            }
-            break;
-        }
-    }
-    out.push_back('"');
-}
-
-std::vector<std::byte> inspect_json_body(const Http3Request &request) {
-    std::string json = "{\"method\":";
-    append_json_escaped(json, request.head.method);
-    json += ",\"content_length\":";
-    if (request.head.content_length.has_value()) {
-        json += std::to_string(*request.head.content_length);
-    } else {
-        json += "null";
-    }
-    json += ",\"body_bytes\":";
-    json += std::to_string(request.body.size());
-    json += ",\"trailers\":[";
-    for (std::size_t index = 0; index < request.trailers.size(); ++index) {
-        if (index != 0) {
-            json.push_back(',');
-        }
-        json += "{\"name\":";
-        append_json_escaped(json, request.trailers[index].name);
-        json += ",\"value\":";
-        append_json_escaped(json, request.trailers[index].value);
-        json.push_back('}');
-    }
-    json += "]}";
-
-    return std::vector<std::byte>(reinterpret_cast<const std::byte *>(json.data()),
-                                  reinterpret_cast<const std::byte *>(json.data()) + json.size());
-}
-
 Http3Response default_route_response(const Http3Request &request) {
-    if (request.head.path == "/_coquic/echo") {
-        if (request.head.method != "POST") {
-            return Http3Response{
-                .head =
-                    {
-                        .status = 405,
-                        .content_length = 0,
-                        .headers = {{"allow", "POST"}},
-                    },
-            };
-        }
-
-        return Http3Response{
-            .head =
-                {
-                    .status = 200,
-                    .content_length = static_cast<std::uint64_t>(request.body.size()),
-                    .headers = {{"content-type", "application/octet-stream"}},
-                },
-            .body = request.body,
-        };
-    }
-
-    if (request.head.path == "/_coquic/inspect") {
-        if (request.head.method != "POST") {
-            return Http3Response{
-                .head =
-                    {
-                        .status = 405,
-                        .content_length = 0,
-                        .headers = {{"allow", "POST"}},
-                    },
-            };
-        }
-
-        auto body = inspect_json_body(request);
-        return Http3Response{
-            .head =
-                {
-                    .status = 200,
-                    .content_length = static_cast<std::uint64_t>(body.size()),
-                    .headers = {{"content-type", "application/json"}},
-                },
-            .body = std::move(body),
-        };
+    if (const auto response = try_demo_route_response(request); response.has_value()) {
+        return *response;
     }
 
     return Http3Response{

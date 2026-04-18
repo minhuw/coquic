@@ -144,6 +144,7 @@ fn addProjectLibrary(
         "src/http3/http3_bootstrap.cpp",
         "src/http3/http3_protocol.cpp",
         "src/http3/http3_qpack.cpp",
+        "src/http3/http3_demo_routes.cpp",
         "src/http3/http3_runtime.cpp",
         "src/http3/http3_server.cpp",
         "src/http3/http3_interop.cpp",

@@ -42,7 +42,22 @@ docker run --rm \
 If your cert files are elsewhere, adjust only the host-side paths; keep
 container paths as `/run/certs/cert.pem` and `/run/certs/key.pem`.
 
-## Browser Validation
+## Demo Page Behavior
 
-Open `https://localhost:4433/` once, then reload the page. In Chrome DevTools
-Network, confirm the `Protocol` column shows `h3` on the reload.
+The bundled page now defaults to `Showcase` mode and exposes a visible
+`Showcase`/`Technical` toggle.
+
+- Use `Run Live Checks` to run browser-side same-origin probes.
+- The page performs `POST /_coquic/inspect` and `POST /_coquic/echo` from
+  browser JavaScript and reports the observed results in-page.
+
+## Browser Validation Flow
+
+1. Open `https://localhost:4433/` once. The first load uses the bootstrap HTTPS
+   path before Alt-Svc state is cached.
+2. Reload the page and check Chrome DevTools Network `Protocol` for the main
+   document request. Confirm it shows `h3`.
+3. Switch to `Technical` mode and review the same-origin probe output for
+   `/_coquic/inspect` and `/_coquic/echo`.
+4. Treat page-visible diagnostics as application-level checks only; use DevTools
+   transport details as the source of truth for HTTP/3 verification.

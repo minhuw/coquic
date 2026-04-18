@@ -39,10 +39,23 @@ if [[ "${cmd}" != *"/run/certs/cert.pem"* ]] || [[ "${cmd}" != *"/run/certs/key.
   exit 1
 fi
 
-if [[ "${bundled_page}" != *"<body>Hello HTTP/3</body>"* ]]; then
-  echo "Bundled page did not contain expected body tag" >&2
-  exit 1
-fi
+required_page_markers=(
+  "Showcase"
+  "Technical"
+  "Run Live Checks"
+  "Browser Verification"
+  "coquic.minhuw.dev:4433"
+  "/_coquic/inspect"
+  "/_coquic/echo"
+  "localStorage"
+)
+
+for marker in "${required_page_markers[@]}"; do
+  if [[ "${bundled_page}" != *"${marker}"* ]]; then
+    echo "Bundled page missing expected marker: ${marker}" >&2
+    exit 1
+  fi
+done
 
 if [[ "${binary_help_ok}" != "runnable" ]]; then
   echo "Packaged /usr/local/bin/h3-server is not runnable or missing usage: h3-server from --help" >&2

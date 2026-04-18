@@ -1,5 +1,9 @@
 name: Deploy Demo
 
+concurrency:
+  group: deploy-demo
+  cancel-in-progress: false
+
 on:
   push:
     branches:
@@ -34,14 +38,13 @@ jobs:
 
       - name: Configure SSH
         env:
-          COQUIC_DEMO_REMOTE_HOST: ${{ vars.COQUIC_DEMO_REMOTE_HOST }}
-          COQUIC_DEMO_REMOTE_SSH_PORT: ${{ vars.COQUIC_DEMO_REMOTE_SSH_PORT }}
           COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}
+          COQUIC_DEMO_REMOTE_KNOWN_HOSTS: ${{ vars.COQUIC_DEMO_REMOTE_KNOWN_HOSTS }}
         run: |
           install -d -m 700 ~/.ssh
           printf '%s' "${COQUIC_DEMO_REMOTE_SSH_KEY}" > "${RUNNER_TEMP}/coquic-demo.key"
-          chmod 600 "${RUNNER_TEMP}/coquic-demo.key"
-          ssh-keyscan -p "${COQUIC_DEMO_REMOTE_SSH_PORT:-22}" "${COQUIC_DEMO_REMOTE_HOST}" >> ~/.ssh/known_hosts
+          printf '%s' "${COQUIC_DEMO_REMOTE_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+          chmod 600 "${RUNNER_TEMP}/coquic-demo.key" "${HOME}/.ssh/known_hosts"
 
       - name: Deploy demo
         env:

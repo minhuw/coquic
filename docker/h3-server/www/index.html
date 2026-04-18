@@ -267,12 +267,13 @@
       }
 
       async function safeReadJson(response) {
+        const clone = response.clone();
         try {
           return await response.json();
         } catch (error) {
           let rawText = null;
           try {
-            rawText = await response.text();
+            rawText = await clone.text();
           } catch (_) {
             rawText = null;
           }
@@ -382,7 +383,8 @@
             }
           }
         } catch (error) {
-          ui.latestStatus.textContent = "Probe run failed unexpectedly: " + error.message;
+          const message = error instanceof Error ? error.message : String(error);
+          ui.latestStatus.textContent = "Probe run failed unexpectedly: " + message;
           ui.latestStatus.className = "status error";
         } finally {
           ui.runChecks.disabled = false;

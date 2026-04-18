@@ -75,28 +75,41 @@ if [[ -e tests/nix/h3_demo_page_contract_test.sh ]]; then
   exit 1
 fi
 
-install -d "${safety_repo}/demo/deploy" "${safety_repo}/demo/site"
-cp demo/deploy/package-demo.sh "${safety_repo}/demo/deploy/package-demo.sh"
-cp demo/site/index.html "${safety_repo}/demo/site/index.html"
+run_rejection_case() {
+  local target_suffix="$1"
 
-set +e
-overlap_output="$("${safety_repo}/demo/deploy/package-demo.sh" "${safety_repo}/demo/site" 2>&1)"
-overlap_status=$?
-set -e
+  local case_repo
+  case_repo="$(mktemp -d "${safety_repo}/case.XXXXXX")"
+  install -d "${case_repo}/demo/deploy" "${case_repo}/demo/site"
+  cp demo/deploy/package-demo.sh "${case_repo}/demo/deploy/package-demo.sh"
+  cp demo/site/index.html "${case_repo}/demo/site/index.html"
 
-if [[ ${overlap_status} -eq 0 ]]; then
-  echo "expected overlap output path to be rejected" >&2
-  exit 1
-fi
+  local target_path="${case_repo}/${target_suffix}"
 
-if [[ "${overlap_output}" != *"must not be demo/site or inside it"* ]]; then
-  echo "unexpected overlap rejection output: ${overlap_output}" >&2
-  exit 1
-fi
+  set +e
+  local rejection_output
+  rejection_output="$("${case_repo}/demo/deploy/package-demo.sh" "${target_path}" 2>&1)"
+  local rejection_status=$?
+  set -e
 
-if [[ ! -f "${safety_repo}/demo/site/index.html" ]]; then
-  echo "overlap rejection did not preserve demo/site source content" >&2
-  exit 1
-fi
+  if [[ ${rejection_status} -eq 0 ]]; then
+    echo "expected dangerous output path to be rejected: ${target_suffix}" >&2
+    exit 1
+  fi
+
+  if [[ "${rejection_output}" != *"must not overlap demo/site ancestry"* ]]; then
+    echo "unexpected overlap rejection output for ${target_suffix}: ${rejection_output}" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "${case_repo}/demo/site/index.html" ]]; then
+    echo "overlap rejection did not preserve demo/site source content for ${target_suffix}" >&2
+    exit 1
+  fi
+}
+
+run_rejection_case "demo/site"
+run_rejection_case "demo"
+run_rejection_case "."
 
 echo "demo package contract looks correct"

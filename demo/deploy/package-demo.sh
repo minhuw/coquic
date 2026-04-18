@@ -11,8 +11,14 @@ if [[ ! -d "${source_dir}" ]]; then
   exit 1
 fi
 
-if [[ "${output_dir}" == "${source_dir}" || "${output_dir}" == "${source_dir}/"* ]]; then
-  echo "output directory must not be demo/site or inside it: ${output_dir}" >&2
+is_same_or_descendant() {
+  local path="$1"
+  local root="$2"
+  [[ "${path}" == "${root}" || "${path}" == "${root}/"* ]]
+}
+
+if is_same_or_descendant "${output_dir}" "${source_dir}" || is_same_or_descendant "${source_dir}" "${output_dir}"; then
+  echo "output directory must not overlap demo/site ancestry: ${output_dir}" >&2
   exit 1
 fi
 

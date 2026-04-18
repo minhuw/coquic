@@ -1197,6 +1197,11 @@ class Http3ClientRuntime {
 
 } // namespace
 
+Http3Response runtime_server_response_for_test(const std::filesystem::path &document_root,
+                                               const Http3Request &request) {
+    return runtime_server_response(document_root, request);
+}
+
 std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3CliMode mode) {
     if (argc < 1) {
         print_usage(mode);

@@ -122,11 +122,39 @@ restore_or_remove() {
   fi
 }
 
+restore_dir_or_remove() {
+  local destination="$1"
+  local backup_path="$2"
+  local absent_marker="$3"
+
+  if sudo test -d "${backup_path}"; then
+    sudo rm -rf "${destination}"
+    sudo install -d -m 755 "${destination}"
+    sudo cp -a "${backup_path}/." "${destination}/"
+  elif sudo test -f "${absent_marker}"; then
+    sudo rm -rf "${destination}"
+  fi
+}
+
 # rollback: restore /opt/coquic-demo/current
 if [[ -n "${previous_release_target}" ]]; then
   sudo ln -sfn "${previous_release_target}" "${remote_current_link}"
 else
   sudo rm -f "${remote_current_link}"
+fi
+
+# rollback: restore same-release /opt/coquic-demo/current/h3-server
+if [[ "${same_release_repair_mode}" == "1" ]]; then
+  restore_or_remove \
+    "/opt/coquic-demo/current/h3-server" \
+    "${remote_upload_dir}/current.h3-server.bak" \
+    "${remote_upload_dir}/current.h3-server.absent" \
+    "755"
+  # rollback: restore same-release /opt/coquic-demo/current/site
+  restore_dir_or_remove \
+    "/opt/coquic-demo/current/site" \
+    "${remote_upload_dir}/current.site.bak" \
+    "${remote_upload_dir}/current.site.absent"
 fi
 
 # rollback: cleanup failed ${remote_release_dir}
@@ -249,6 +277,11 @@ backup_or_mark_absent() {
   fi
 }
 
+service_was_active=0
+if sudo systemctl is-active --quiet coquic-demo.service; then
+  service_was_active=1
+fi
+
 sudo install -d -m 755 /opt/coquic-demo/releases
 sudo install -d -m 755 /etc/coquic-demo/tls
 
@@ -265,11 +298,24 @@ backup_or_mark_absent \
   "${remote_upload_dir}/privkey.pem.bak" \
   "${remote_upload_dir}/privkey.pem.absent"
 
-sudo install -d -m 755 "${remote_release_dir}"
 if [[ "${same_release_repair_mode}" != "1" ]]; then
   sudo rm -rf "${remote_release_dir}"
   sudo install -d -m 755 "${remote_release_dir}"
+else
+  # same-release backup /opt/coquic-demo/current/h3-server
+  backup_or_mark_absent \
+    "/opt/coquic-demo/current/h3-server" \
+    "${remote_upload_dir}/current.h3-server.bak" \
+    "${remote_upload_dir}/current.h3-server.absent"
+  # same-release backup /opt/coquic-demo/current/site
+  backup_or_mark_absent \
+    "/opt/coquic-demo/current/site" \
+    "${remote_upload_dir}/current.site.bak" \
+    "${remote_upload_dir}/current.site.absent"
+  sudo systemctl stop coquic-demo.service || true
+  sudo install -d -m 755 "${remote_release_dir}"
 fi
+
 sudo install -m 755 "${remote_upload_dir}/h3-server" "${remote_release_dir}/h3-server"
 sudo rm -rf "${remote_release_dir}/site"
 sudo install -d -m 755 "${remote_release_dir}/site"
@@ -281,7 +327,12 @@ sudo install -m 600 "${remote_upload_dir}/privkey.pem" /etc/coquic-demo/tls/priv
 
 sudo ln -sfn "${remote_release_dir}" "${remote_current_link}"
 sudo systemctl daemon-reload
-sudo systemctl enable --now coquic-demo.service
+# install: restart existing service if already active
+if [[ "${service_was_active}" == "1" ]]; then
+  sudo systemctl restart coquic-demo.service
+else
+  sudo systemctl enable --now coquic-demo.service
+fi
 sudo systemctl is-active --quiet coquic-demo.service
 EOF
 then

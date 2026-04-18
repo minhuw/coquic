@@ -131,10 +131,21 @@ if "same-release repair mode" not in deploy_script:
     raise SystemExit("deploy script missing same-release repair mode marker")
 if "COQUIC_DEMO_PUBLIC_PORT must be 4433 for the current service template" not in deploy_script:
     raise SystemExit("deploy script missing COQUIC_DEMO_PUBLIC_PORT guard")
+if "install: restart existing service if already active" not in deploy_script:
+    raise SystemExit("deploy script missing active-service restart install path marker")
 if "verification retry loop" not in deploy_script:
     raise SystemExit("deploy script missing verification retry-loop marker")
 if "rollback: cleanup failed ${remote_release_dir}" not in deploy_script:
     raise SystemExit("deploy script missing failed release cleanup marker")
+same_release_backup_restore_markers = [
+    "same-release backup /opt/coquic-demo/current/h3-server",
+    "same-release backup /opt/coquic-demo/current/site",
+    "rollback: restore same-release /opt/coquic-demo/current/h3-server",
+    "rollback: restore same-release /opt/coquic-demo/current/site",
+]
+for marker in same_release_backup_restore_markers:
+    if marker not in deploy_script:
+        raise SystemExit(f"deploy script missing same-release backup/restore marker: {marker}")
 if not os.access(deploy_script_path, os.X_OK):
     raise SystemExit("deploy script is not executable")
 
@@ -157,10 +168,34 @@ cleanup_test_tmp() {
 }
 trap cleanup_test_tmp EXIT
 
-stub_bin="${test_tmp}/bin"
-mkdir -p "${stub_bin}"
+run_same_release_case() {
+  local case_name="$1"
+  local nix_mode="$2"
+  local expected_status="$3"
 
-cat > "${stub_bin}/ssh" <<'EOF'
+  local case_dir="${test_tmp}/${case_name}"
+  local stub_bin="${case_dir}/bin"
+  local fake_home="${case_dir}/home"
+  local fake_site="${case_dir}/site"
+  local fake_binary="${case_dir}/h3-server"
+  local fake_key="${case_dir}/coquic-demo.key"
+  local ssh_log="${case_dir}/ssh.log"
+  local scp_log="${case_dir}/scp.log"
+  local nix_log="${case_dir}/nix.log"
+  local ssh_bash_count="${case_dir}/ssh_bash_count.txt"
+
+  mkdir -p "${stub_bin}" "${fake_home}/.ssh" "${fake_site}"
+  touch "${fake_binary}"
+  chmod 755 "${fake_binary}"
+  printf '<html>demo</html>\n' > "${fake_site}/index.html"
+  printf 'known-host-entry\n' > "${fake_home}/.ssh/known_hosts"
+  printf 'test-key\n' > "${fake_key}"
+  : > "${ssh_log}"
+  : > "${scp_log}"
+  : > "${nix_log}"
+  : > "${ssh_bash_count}"
+
+  cat > "${stub_bin}/ssh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -173,137 +208,168 @@ if [[ "$*" == *"readlink '/opt/coquic-demo/current'"* ]]; then
 fi
 
 if [[ "$*" == *"mktemp -d"* ]]; then
-  printf '%s\n' "/tmp/coquic-demo-release-testtmp"
+  printf '%s\n' "/tmp/coquic-demo-release-${COQUIC_TEST_CASE_NAME:?}"
   exit 0
 fi
 
 if [[ "$*" == *"bash -s --"* ]]; then
-  printf 'remote-install-invoked\n' >> "${log_path}"
+  count_path="${COQUIC_TEST_SSH_BASH_COUNT_PATH:?}"
+  count="$(cat "${count_path}")"
+  count=$((count + 1))
+  printf '%s' "${count}" > "${count_path}"
+  if [[ "${count}" -eq 1 ]]; then
+    printf 'remote-install-invoked\n' >> "${log_path}"
+  else
+    printf 'rollback-invoked\n' >> "${log_path}"
+  fi
   exit 0
 fi
 
 exit 0
 EOF
 
-cat > "${stub_bin}/scp" <<'EOF'
+  cat > "${stub_bin}/scp" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'scp %s\n' "$*" >> "${COQUIC_TEST_SCP_LOG:?}"
 exit 0
 EOF
 
-cat > "${stub_bin}/nix" <<'EOF'
+  cat > "${stub_bin}/nix" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'nix %s\n' "$*" >> "${COQUIC_TEST_NIX_LOG:?}"
 
-if [[ "$*" == *"run .#curl-http3 -- -I "* ]]; then
-  cat <<'HEADERS'
+case "${COQUIC_TEST_NIX_MODE:?}" in
+  success)
+    if [[ "$*" == *"run .#curl-http3 -- -I "* ]]; then
+      cat <<'HEADERS'
 HTTP/1.1 200 OK
 Alt-Svc: h3=":4433"; ma=60
 HEADERS
-  exit 0
-fi
+      exit 0
+    fi
 
-if [[ "$*" == *"--http3-only -sS -o /dev/null -w %{http_version}"* ]]; then
-  printf '3'
-  exit 0
-fi
+    if [[ "$*" == *"--http3-only -sS -o /dev/null -w %{http_version}"* ]]; then
+      printf '3'
+      exit 0
+    fi
 
-if [[ "$*" == *"run .#curl-http3 -- --http3-only -sS https://"* ]]; then
-  cat <<'PAGE'
+    if [[ "$*" == *"run .#curl-http3 -- --http3-only -sS https://"* ]]; then
+      cat <<'PAGE'
 Showcase
 Technical
 Run Live Checks
 Browser Verification
 PAGE
-  exit 0
-fi
+      exit 0
+    fi
+    ;;
+  fail_after_install)
+    if [[ "$*" == *"run .#curl-http3 -- -I "* ]]; then
+      cat <<'HEADERS'
+HTTP/1.1 503 Service Unavailable
+HEADERS
+      exit 0
+    fi
+    ;;
+esac
 
 exit 0
 EOF
 
-chmod 755 "${stub_bin}/ssh" "${stub_bin}/scp" "${stub_bin}/nix"
+  chmod 755 "${stub_bin}/ssh" "${stub_bin}/scp" "${stub_bin}/nix"
 
-fake_binary="${test_tmp}/h3-server"
-fake_site="${test_tmp}/site"
-touch "${fake_binary}"
-chmod 755 "${fake_binary}"
-mkdir -p "${fake_site}"
-printf '<html>demo</html>\n' > "${fake_site}/index.html"
+  set +e
+  case_output="$(
+    PATH="${stub_bin}:${PATH}" \
+    HOME="${fake_home}" \
+    GITHUB_SHA="deadbeefcafebabe1234" \
+    COQUIC_DEMO_REMOTE_HOST="example.test" \
+    COQUIC_DEMO_REMOTE_USER="deployer" \
+    COQUIC_DEMO_REMOTE_SSH_KEY_PATH="${fake_key}" \
+    COQUIC_DEMO_CERT_CHAIN_PEM="chain" \
+    COQUIC_DEMO_PRIVATE_KEY_PEM="key" \
+    COQUIC_DEMO_PUBLIC_HOST="demo.example.test" \
+    COQUIC_DEMO_PUBLIC_PORT="4433" \
+    COQUIC_TEST_CASE_NAME="${case_name}" \
+    COQUIC_TEST_NIX_MODE="${nix_mode}" \
+    COQUIC_TEST_SAME_SHA="deadbeefcafe" \
+    COQUIC_TEST_SSH_LOG="${ssh_log}" \
+    COQUIC_TEST_SCP_LOG="${scp_log}" \
+    COQUIC_TEST_NIX_LOG="${nix_log}" \
+    COQUIC_TEST_SSH_BASH_COUNT_PATH="${ssh_bash_count}" \
+    demo/deploy/deploy-remote.sh "${fake_binary}" "${fake_site}" 2>&1
+  )"
+  case_status=$?
+  set -e
 
-fake_home="${test_tmp}/home"
-mkdir -p "${fake_home}/.ssh"
-printf 'known-host-entry\n' > "${fake_home}/.ssh/known_hosts"
+  if [[ "${expected_status}" == "success" && ${case_status} -ne 0 ]]; then
+    echo "${case_name} expected success, got: ${case_output}" >&2
+    exit 1
+  fi
+  if [[ "${expected_status}" == "failure" && ${case_status} -eq 0 ]]; then
+    echo "${case_name} expected failure but command succeeded" >&2
+    exit 1
+  fi
 
-fake_key="${test_tmp}/coquic-demo.key"
-printf 'test-key\n' > "${fake_key}"
+  if [[ "${expected_status}" == "success" ]]; then
+    if [[ "${case_output}" != *"remote demo deploy verified"* ]]; then
+      echo "${case_name} expected success output, got: ${case_output}" >&2
+      exit 1
+    fi
+  else
+    if [[ "${case_output}" != *"deployment verification failed"* ]]; then
+      echo "${case_name} expected verification failure output, got: ${case_output}" >&2
+      exit 1
+    fi
+  fi
 
-ssh_log="${test_tmp}/ssh.log"
-scp_log="${test_tmp}/scp.log"
-nix_log="${test_tmp}/nix.log"
-: > "${ssh_log}"
-: > "${scp_log}"
-: > "${nix_log}"
+  if ! grep -Fq "mktemp -d" "${ssh_log}"; then
+    echo "${case_name} should invoke remote mktemp" >&2
+    cat "${ssh_log}" >&2
+    exit 1
+  fi
 
-set +e
-same_sha_output="$(
-  PATH="${stub_bin}:${PATH}" \
-  HOME="${fake_home}" \
-  GITHUB_SHA="deadbeefcafebabe1234" \
-  COQUIC_DEMO_REMOTE_HOST="example.test" \
-  COQUIC_DEMO_REMOTE_USER="deployer" \
-  COQUIC_DEMO_REMOTE_SSH_KEY_PATH="${fake_key}" \
-  COQUIC_DEMO_CERT_CHAIN_PEM="chain" \
-  COQUIC_DEMO_PRIVATE_KEY_PEM="key" \
-  COQUIC_DEMO_PUBLIC_HOST="demo.example.test" \
-  COQUIC_DEMO_PUBLIC_PORT="4433" \
-  COQUIC_TEST_SAME_SHA="deadbeefcafe" \
-  COQUIC_TEST_SSH_LOG="${ssh_log}" \
-  COQUIC_TEST_SCP_LOG="${scp_log}" \
-  COQUIC_TEST_NIX_LOG="${nix_log}" \
-  demo/deploy/deploy-remote.sh "${fake_binary}" "${fake_site}" 2>&1
-)"
-same_sha_status=$?
-set -e
+  if [[ ! -s "${scp_log}" ]]; then
+    echo "${case_name} should invoke scp uploads" >&2
+    cat "${scp_log}" >&2
+    exit 1
+  fi
 
-if [[ ${same_sha_status} -ne 0 ]]; then
-  echo "expected same-SHA repair mode to succeed, got: ${same_sha_output}" >&2
-  exit 1
-fi
+  if ! grep -Fq "remote-install-invoked" "${ssh_log}"; then
+    echo "${case_name} should invoke remote install" >&2
+    cat "${ssh_log}" >&2
+    exit 1
+  fi
 
-if [[ "${same_sha_output}" != *"remote demo deploy verified"* ]]; then
-  echo "expected successful deploy output, got: ${same_sha_output}" >&2
-  exit 1
-fi
-
-if ! grep -Fq "mktemp -d" "${ssh_log}"; then
-  echo "same-SHA repair should invoke remote mktemp" >&2
-  cat "${ssh_log}" >&2
-  exit 1
-fi
-
-if [[ ! -s "${scp_log}" ]]; then
-  echo "same-SHA repair should invoke scp uploads" >&2
-  cat "${scp_log}" >&2
-  exit 1
-fi
-
-if ! grep -Fq "remote-install-invoked" "${ssh_log}"; then
-  echo "same-SHA repair should invoke remote install" >&2
-  cat "${ssh_log}" >&2
-  exit 1
-fi
-
-for nix_expected in \
-  "run .#curl-http3 -- -I https://demo.example.test:4433/" \
-  "run .#curl-http3 -- --http3-only -sS -o /dev/null -w %{http_version} https://demo.example.test:4433/" \
-  "run .#curl-http3 -- --http3-only -sS https://demo.example.test:4433/"; do
-  if ! grep -Fq "${nix_expected}" "${nix_log}"; then
-    echo "same-SHA repair should invoke nix verification command: ${nix_expected}" >&2
+  if ! grep -Fq "run .#curl-http3 -- -I https://demo.example.test:4433/" "${nix_log}"; then
+    echo "${case_name} should invoke header verification command" >&2
     cat "${nix_log}" >&2
     exit 1
   fi
-done
 
+  if [[ "${expected_status}" == "success" ]]; then
+    for nix_expected in \
+      "run .#curl-http3 -- --http3-only -sS -o /dev/null -w %{http_version} https://demo.example.test:4433/" \
+      "run .#curl-http3 -- --http3-only -sS https://demo.example.test:4433/"; do
+      if ! grep -Fq "${nix_expected}" "${nix_log}"; then
+        echo "${case_name} should invoke nix verification command: ${nix_expected}" >&2
+        cat "${nix_log}" >&2
+        exit 1
+      fi
+    done
+  else
+    if ! grep -Fq "rollback-invoked" "${ssh_log}"; then
+      echo "${case_name} should invoke rollback ssh path after verification failure" >&2
+      cat "${ssh_log}" >&2
+      exit 1
+    fi
+  fi
+}
+
+run_same_release_case "same-sha-success" "success" "success"
 echo "same-SHA repair mode behaves correctly"
+
+run_same_release_case "same-sha-failure" "fail_after_install" "failure"
+echo "same-SHA repair rollback on verification failure behaves correctly"

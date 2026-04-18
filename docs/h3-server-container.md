@@ -50,6 +50,9 @@ The bundled page now defaults to `Showcase` mode and exposes a visible
 - Use `Run Live Checks` to run browser-side same-origin probes.
 - The page performs `POST /_coquic/inspect` and `POST /_coquic/echo` from
   browser JavaScript and reports the observed results in-page.
+- The UI text includes `coquic.minhuw.dev:4433` as a public-demo deployment
+  target string. For local validation, use the actual local URL/origin you are
+  serving (for example, `https://localhost:4433/`).
 
 ## Browser Validation Flow
 

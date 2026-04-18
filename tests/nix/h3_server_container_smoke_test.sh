@@ -5,6 +5,12 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 cd "${repo_root}"
 
+contains_fixed_string() {
+  local haystack="$1"
+  local needle="$2"
+  grep -Fq -- "${needle}" <<<"${haystack}"
+}
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required for h3_server_container_smoke_test.sh" >&2
   exit 1
@@ -23,10 +29,17 @@ bundled_page="$(
 )"
 binary_help_ok="$(
   docker run --rm --entrypoint /bin/sh "${image_tag}" -lc '
-    test -x /usr/local/bin/h3-server &&
+    if test -x /usr/local/bin/h3-server; then
       /usr/local/bin/h3-server --help >/tmp/help 2>&1 || true
-    grep -F "usage: h3-server" /tmp/help >/dev/null && echo runnable
-  '
+      if grep -Fq "usage: h3-server" /tmp/help; then
+        echo runnable
+      else
+        echo not_runnable
+      fi
+    else
+      echo not_runnable
+    fi
+  ' || echo not_runnable
 )"
 
 if [[ "${entrypoint}" != *"/usr/local/bin/h3-server"* ]]; then
@@ -51,7 +64,7 @@ required_page_markers=(
 )
 
 for marker in "${required_page_markers[@]}"; do
-  if [[ "${bundled_page}" != *"${marker}"* ]]; then
+  if ! contains_fixed_string "${bundled_page}" "${marker}"; then
     echo "Bundled page missing expected marker: ${marker}" >&2
     exit 1
   fi

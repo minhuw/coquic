@@ -43,21 +43,18 @@ jobs:
       - name: Configure SSH
         env:
           COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}
-          COQUIC_DEMO_REMOTE_KNOWN_HOSTS: ${{ vars.COQUIC_DEMO_REMOTE_KNOWN_HOSTS }}
         run: |
           install -d -m 700 ~/.ssh
           printf '%s' "${COQUIC_DEMO_REMOTE_SSH_KEY}" > "${RUNNER_TEMP}/coquic-demo.key"
-          printf '%s' "${COQUIC_DEMO_REMOTE_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+          cat > "${HOME}/.ssh/known_hosts" <<'EOF'
+          coquic.minhuw.dev ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC/itFBGPd3dJ3Lgn1gx9n3i2HZox12SEmEAexK2fNT0F/PcwbxWuLX8oy08dEUu40IH3DIT1vTlf5bFzZKLVr3+pZn0JpGLSR2MAE14bvsfaoXbiZkZcliCv5tmvPx041qgAfOhQarqkKoi9J5AMxttWkc/Cr2huzVLlG/t3PJ0D3aB4XOzPCB+orSfbY4D4QWvlkEK29HN6mbGwJhSj+/V1YMubges/di6x9HNm0AGHRwSr4PAPFxQx2KMKfTFdrl21eOTQi29UHk1sI7C0Vg02TCO4TMCDRb99akAA0+Qrw8kt1d7Fh8k+3qNDY+tCnBmjAum74ATgRyvIrgLQ4Wk5QXE3NMPWNyLgNY2vYXv9Izl2GeH9PSjU6aACIXVpKEnWBCo0y6x9DZEA3Dfz4EiV9cy4fs7+W1likxhEVaPouTDtQH7EibHIdOoO++vdlmyYk2EG9Kn6W/Zqo55K+sOQ/K0S0sMuWIZQW2czAOpzs4R519WOIUNBzXkZ6rZqE=
+          coquic.minhuw.dev ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCjTT5KdjyCQ3G04Z8mUUOkXAqsdDuU4K5bB3jXi5B3aIzYK+2f0TT0XE3G0/r/KmZoSHYxb21TtjykFa47XFSA=
+          coquic.minhuw.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILi5VjtrGcYlzyYEXd4/PzQJXBjZ028DA6nJ7Xu50CJh
+          EOF
           chmod 600 "${RUNNER_TEMP}/coquic-demo.key" "${HOME}/.ssh/known_hosts"
 
       - name: Deploy demo
         env:
-          COQUIC_DEMO_REMOTE_HOST: ${{ vars.COQUIC_DEMO_REMOTE_HOST }}
-          COQUIC_DEMO_REMOTE_USER: ${{ vars.COQUIC_DEMO_REMOTE_USER }}
-          COQUIC_DEMO_REMOTE_SSH_PORT: ${{ vars.COQUIC_DEMO_REMOTE_SSH_PORT }}
-          COQUIC_DEMO_PUBLIC_HOST: ${{ vars.COQUIC_DEMO_PUBLIC_HOST }}
-          COQUIC_DEMO_PUBLIC_PORT: ${{ vars.COQUIC_DEMO_PUBLIC_PORT }}
           COQUIC_DEMO_CERT_CHAIN_PEM: ${{ secrets.COQUIC_DEMO_CERT_CHAIN_PEM }}
           COQUIC_DEMO_PRIVATE_KEY_PEM: ${{ secrets.COQUIC_DEMO_PRIVATE_KEY_PEM }}
-          COQUIC_DEMO_REMOTE_SSH_KEY_PATH: ${{ runner.temp }}/coquic-demo.key
         run: demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-site"

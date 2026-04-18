@@ -28,12 +28,14 @@ GitHub Actions secrets:
 
 GitHub Actions variables:
 
-- `COQUIC_DEMO_REMOTE_HOST`
-- `COQUIC_DEMO_REMOTE_USER`
-- `COQUIC_DEMO_REMOTE_SSH_PORT`
-- `COQUIC_DEMO_PUBLIC_HOST`
-- `COQUIC_DEMO_PUBLIC_PORT`
-- `COQUIC_DEMO_REMOTE_KNOWN_HOSTS`
+The workflow currently hardcodes both the SSH target host and the public
+verification host to `coquic.minhuw.dev`, and it hardcodes the public port to
+`443`. It also hardcodes the deploy user to `minhuw` and the SSH port to `22`.
+The workflow writes `COQUIC_DEMO_REMOTE_SSH_KEY` to
+`${RUNNER_TEMP}/coquic-demo.key`, and the deploy script uses that path by
+default. The workflow also writes a pinned `known_hosts` file for
+`coquic.minhuw.dev`, including its `ssh-rsa`, `ecdsa-sha2-nistp256`, and
+`ssh-ed25519` host keys.
 
 The workflow runs on pushes to `main` that touch the demo deployment surface,
 and it also supports manual `workflow_dispatch` runs.

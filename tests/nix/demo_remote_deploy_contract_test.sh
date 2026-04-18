@@ -86,9 +86,11 @@ if build_step.get("run") != expected_build_command:
     raise SystemExit(f"unexpected Build h3-server command: {build_step.get('run')!r}")
 
 configure_ssh_env = step_by_name["Configure SSH"].get("env", {})
-for env_name in ["COQUIC_DEMO_REMOTE_SSH_KEY", "COQUIC_DEMO_REMOTE_KNOWN_HOSTS"]:
+for env_name in ["COQUIC_DEMO_REMOTE_SSH_KEY"]:
     if env_name not in configure_ssh_env:
         raise SystemExit(f"Configure SSH missing env: {env_name}")
+if "COQUIC_DEMO_REMOTE_KNOWN_HOSTS" in configure_ssh_env:
+    raise SystemExit("Configure SSH should not require COQUIC_DEMO_REMOTE_KNOWN_HOSTS")
 
 deploy_step = step_by_name["Deploy demo"]
 expected_deploy_command = 'demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-site"'
@@ -97,12 +99,6 @@ if deploy_step.get("run") != expected_deploy_command:
 
 deploy_env = deploy_step.get("env", {})
 expected_deploy_env_names = [
-    "COQUIC_DEMO_REMOTE_HOST",
-    "COQUIC_DEMO_REMOTE_USER",
-    "COQUIC_DEMO_REMOTE_SSH_PORT",
-    "COQUIC_DEMO_PUBLIC_HOST",
-    "COQUIC_DEMO_PUBLIC_PORT",
-    "COQUIC_DEMO_REMOTE_SSH_KEY_PATH",
     "COQUIC_DEMO_CERT_CHAIN_PEM",
     "COQUIC_DEMO_PRIVATE_KEY_PEM",
 ]
@@ -110,6 +106,16 @@ if set(deploy_env.keys()) != set(expected_deploy_env_names):
     raise SystemExit(f"unexpected Deploy demo env keys: {sorted(deploy_env.keys())!r}")
 
 print("deploy-demo workflow structure looks correct")
+
+workflow_text = workflow_path.read_text()
+required_known_hosts_markers = [
+    "coquic.minhuw.dev ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC/itFBGPd3dJ3Lgn1gx9n3i2HZox12SEmEAexK2fNT0F/PcwbxWuLX8oy08dEUu40IH3DIT1vTlf5bFzZKLVr3+pZn0JpGLSR2MAE14bvsfaoXbiZkZcliCv5tmvPx041qgAfOhQarqkKoi9J5AMxttWkc/Cr2huzVLlG/t3PJ0D3aB4XOzPCB+orSfbY4D4QWvlkEK29HN6mbGwJhSj+/V1YMubges/di6x9HNm0AGHRwSr4PAPFxQx2KMKfTFdrl21eOTQi29UHk1sI7C0Vg02TCO4TMCDRb99akAA0+Qrw8kt1d7Fh8k+3qNDY+tCnBmjAum74ATgRyvIrgLQ4Wk5QXE3NMPWNyLgNY2vYXv9Izl2GeH9PSjU6aACIXVpKEnWBCo0y6x9DZEA3Dfz4EiV9cy4fs7+W1likxhEVaPouTDtQH7EibHIdOoO++vdlmyYk2EG9Kn6W/Zqo55K+sOQ/K0S0sMuWIZQW2czAOpzs4R519WOIUNBzXkZ6rZqE=",
+    "coquic.minhuw.dev ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCjTT5KdjyCQ3G04Z8mUUOkXAqsdDuU4K5bB3jXi5B3aIzYK+2f0TT0XE3G0/r/KmZoSHYxb21TtjykFa47XFSA=",
+    "coquic.minhuw.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILi5VjtrGcYlzyYEXd4/PzQJXBjZ028DA6nJ7Xu50CJh",
+]
+for marker in required_known_hosts_markers:
+    if marker not in workflow_text:
+        raise SystemExit(f"workflow missing pinned known_hosts marker: {marker}")
 
 deploy_script_path = pathlib.Path("demo/deploy/deploy-remote.sh")
 deploy_script = deploy_script_path.read_text()
@@ -138,8 +144,18 @@ for marker in rollback_markers:
         raise SystemExit(f"deploy script missing rollback marker: {marker}")
 if "same-release repair mode" not in deploy_script:
     raise SystemExit("deploy script missing same-release repair mode marker")
-if "COQUIC_DEMO_PUBLIC_PORT must be 4433 for the current service template" not in deploy_script:
-    raise SystemExit("deploy script missing COQUIC_DEMO_PUBLIC_PORT guard")
+if 'ssh_port="22"' not in deploy_script:
+    raise SystemExit("deploy script missing hardcoded ssh port")
+if 'remote_user="minhuw"' not in deploy_script:
+    raise SystemExit("deploy script missing hardcoded remote user")
+if 'remote_target="minhuw@coquic.minhuw.dev"' not in deploy_script:
+    raise SystemExit("deploy script missing hardcoded remote target")
+if 'ssh_key_path="${COQUIC_DEMO_REMOTE_SSH_KEY_PATH:-${RUNNER_TEMP:-/tmp}/coquic-demo.key}"' not in deploy_script:
+    raise SystemExit("deploy script missing default SSH key path resolution")
+if 'public_host="coquic.minhuw.dev"' not in deploy_script:
+    raise SystemExit("deploy script missing hardcoded public host")
+if 'public_port="443"' not in deploy_script:
+    raise SystemExit("deploy script missing hardcoded public port")
 if "install: restart existing service if already active" not in deploy_script:
     raise SystemExit("deploy script missing active-service restart install path marker")
 if "install success invariant: service enabled and active" not in deploy_script:
@@ -195,6 +211,8 @@ if "/etc/coquic-demo/tls/fullchain.pem" not in service_unit:
     raise SystemExit("service unit missing fullchain path")
 if "ExecStart=/opt/coquic-demo/current/h3-server" not in service_unit:
     raise SystemExit("service unit missing ExecStart path")
+if "--port 443 --bootstrap-port 443" not in service_unit:
+    raise SystemExit("service unit missing public port 443 configuration")
 
 contract_test_path = pathlib.Path("tests/nix/demo_remote_deploy_contract_test.sh")
 if not os.access(contract_test_path, os.X_OK):
@@ -328,20 +346,20 @@ printf 'curl-http3 %s\n' "$*" >> "${COQUIC_TEST_CURL_LOG:?}"
 
 case "${COQUIC_TEST_NIX_MODE:?}" in
   success)
-    if [[ "$*" == *"-I https://demo.example.test:4433/"* ]]; then
+    if [[ "$*" == *"-I https://coquic.minhuw.dev/"* ]]; then
       cat <<'HEADERS'
 HTTP/1.1 200 OK
-alt-svc: h3=":4433"; ma=60
+alt-svc: h3=":443"; ma=60
 HEADERS
       exit 0
     fi
 
-    if [[ "$*" == *"--http3-only -sS -o /dev/null -w %{http_version} https://demo.example.test:4433/"* ]]; then
+    if [[ "$*" == *"--http3-only -sS -o /dev/null -w %{http_version} https://coquic.minhuw.dev/"* ]]; then
       printf '3'
       exit 0
     fi
 
-    if [[ "$*" == *"--http3-only -sS https://demo.example.test:4433/"* ]]; then
+    if [[ "$*" == *"--http3-only -sS https://coquic.minhuw.dev/"* ]]; then
       cat <<'PAGE'
 <meta name="coquic-demo-marker" content="coquic-demo-v1">
 PAGE
@@ -349,7 +367,7 @@ PAGE
     fi
     ;;
   fail_after_install)
-    if [[ "$*" == *"-I https://demo.example.test:4433/"* ]]; then
+    if [[ "$*" == *"-I https://coquic.minhuw.dev/"* ]]; then
       cat <<'HEADERS'
 HTTP/1.1 503 Service Unavailable
 HEADERS
@@ -370,13 +388,9 @@ EOF
     PATH="${stub_bin}:${PATH}" \
     HOME="${fake_home}" \
     GITHUB_SHA="deadbeefcafebabe1234" \
-    COQUIC_DEMO_REMOTE_HOST="example.test" \
-    COQUIC_DEMO_REMOTE_USER="deployer" \
     COQUIC_DEMO_REMOTE_SSH_KEY_PATH="${fake_key}" \
     COQUIC_DEMO_CERT_CHAIN_PEM="chain" \
     COQUIC_DEMO_PRIVATE_KEY_PEM="key" \
-    COQUIC_DEMO_PUBLIC_HOST="demo.example.test" \
-    COQUIC_DEMO_PUBLIC_PORT="4433" \
     COQUIC_TEST_CASE_NAME="${case_name}" \
     COQUIC_TEST_NIX_MODE="${nix_mode}" \
     COQUIC_TEST_READLINK_TARGET="${readlink_target}" \
@@ -451,7 +465,7 @@ EOF
       cat "${nix_log}" >&2
       exit 1
     fi
-    if ! grep -Fq "curl-http3 -I https://demo.example.test:4433/" "${curl_log}"; then
+    if ! grep -Fq "curl-http3 -I https://coquic.minhuw.dev/" "${curl_log}"; then
       echo "${case_name} should invoke header verification probe command" >&2
       cat "${curl_log}" >&2
       exit 1
@@ -460,8 +474,8 @@ EOF
 
   if [[ "${expected_status}" == "success" ]]; then
     for curl_expected in \
-      "curl-http3 --http3-only -sS -o /dev/null -w %{http_version} https://demo.example.test:4433/" \
-      "curl-http3 --http3-only -sS https://demo.example.test:4433/"; do
+      "curl-http3 --http3-only -sS -o /dev/null -w %{http_version} https://coquic.minhuw.dev/" \
+      "curl-http3 --http3-only -sS https://coquic.minhuw.dev/"; do
       if ! grep -Fq "${curl_expected}" "${curl_log}"; then
         echo "${case_name} should invoke verification probe command: ${curl_expected}" >&2
         cat "${curl_log}" >&2
@@ -591,13 +605,9 @@ EOF
     PATH="${stub_bin}:${PATH}" \
     HOME="${fake_home}" \
     GITHUB_SHA="deadbeefcafebabe1234" \
-    COQUIC_DEMO_REMOTE_HOST="example.test" \
-    COQUIC_DEMO_REMOTE_USER="deployer" \
     COQUIC_DEMO_REMOTE_SSH_KEY_PATH="${fake_key}" \
     COQUIC_DEMO_CERT_CHAIN_PEM="chain" \
     COQUIC_DEMO_PRIVATE_KEY_PEM="key" \
-    COQUIC_DEMO_PUBLIC_HOST="demo.example.test" \
-    COQUIC_DEMO_PUBLIC_PORT="4433" \
     COQUIC_TEST_SSH_LOG="${ssh_log}" \
     COQUIC_TEST_SCP_LOG="${scp_log}" \
     COQUIC_TEST_NIX_LOG="${nix_log}" \

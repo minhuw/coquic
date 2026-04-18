@@ -22,12 +22,8 @@ if [[ ! -d "${site_dir}" ]]; then
 fi
 
 required_env_vars=(
-  COQUIC_DEMO_REMOTE_HOST
-  COQUIC_DEMO_REMOTE_USER
-  COQUIC_DEMO_REMOTE_SSH_KEY_PATH
   COQUIC_DEMO_CERT_CHAIN_PEM
   COQUIC_DEMO_PRIVATE_KEY_PEM
-  COQUIC_DEMO_PUBLIC_HOST
 )
 for env_var in "${required_env_vars[@]}"; do
   if [[ -z "${!env_var:-}" ]]; then
@@ -36,27 +32,31 @@ for env_var in "${required_env_vars[@]}"; do
   fi
 done
 
-ssh_port="${COQUIC_DEMO_REMOTE_SSH_PORT:-22}"
-public_port="${COQUIC_DEMO_PUBLIC_PORT:-4433}"
-if [[ "${public_port}" != "4433" ]]; then
-  echo "COQUIC_DEMO_PUBLIC_PORT must be 4433 for the current service template" >&2
-  exit 1
-fi
+ssh_port="22"
+remote_user="minhuw"
+remote_host="coquic.minhuw.dev"
+public_host="coquic.minhuw.dev"
+public_port="443"
+ssh_key_path="${COQUIC_DEMO_REMOTE_SSH_KEY_PATH:-${RUNNER_TEMP:-/tmp}/coquic-demo.key}"
 release_id_source="${GITHUB_SHA:-$(git -C "${repo_root}" rev-parse --short=12 HEAD)}"
 release_id="${release_id_source:0:12}"
 if [[ -z "${release_id}" ]]; then
   echo "failed to resolve release id" >&2
   exit 1
 fi
+if [[ ! -f "${ssh_key_path}" ]]; then
+  echo "missing SSH key path: ${ssh_key_path}" >&2
+  exit 1
+fi
 
 remote_releases_root="/opt/coquic-demo/releases"
 remote_release_dir="${remote_releases_root}/${release_id}"
 remote_current_link="/opt/coquic-demo/current"
-remote_target="${COQUIC_DEMO_REMOTE_USER}@${COQUIC_DEMO_REMOTE_HOST}"
+remote_target="minhuw@coquic.minhuw.dev"
 
 ssh_opts=(
   -p "${ssh_port}"
-  -i "${COQUIC_DEMO_REMOTE_SSH_KEY_PATH}"
+  -i "${ssh_key_path}"
   -o BatchMode=yes
   -o ConnectTimeout=10
   -o ServerAliveInterval=10
@@ -66,7 +66,7 @@ ssh_opts=(
 )
 scp_opts=(
   -P "${ssh_port}"
-  -i "${COQUIC_DEMO_REMOTE_SSH_KEY_PATH}"
+  -i "${ssh_key_path}"
   -o BatchMode=yes
   -o ConnectTimeout=10
   -o ServerAliveInterval=10
@@ -420,7 +420,7 @@ then
   fail_with_rollback "deployment failed during remote install"
 fi
 
-url="https://${COQUIC_DEMO_PUBLIC_HOST}:${public_port}/"
+url="https://${public_host}/"
 curl_http3_out="$(nix build --no-link --print-out-paths .#curl-http3)"
 curl_http3_bin="${curl_http3_out}/bin/curl-http3"
 if [[ ! -x "${curl_http3_bin}" ]]; then

@@ -51,7 +51,7 @@ done
 
 for marker in \
   "coquic-demo-v1" \
-  "coquic.minhuw.dev:4433" \
+  "https://coquic.minhuw.dev/" \
   "/_coquic/inspect" \
   "/_coquic/echo" \
   "localStorage" \

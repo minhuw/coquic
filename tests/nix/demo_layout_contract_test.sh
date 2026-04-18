@@ -45,15 +45,16 @@ required_doc_markers = [
     "demo/deploy/deploy-remote.sh",
     "demo/deploy/coquic-demo.service",
     ".github/workflows/deploy-demo.yml",
-    "COQUIC_DEMO_REMOTE_HOST",
-    "COQUIC_DEMO_REMOTE_USER",
-    "COQUIC_DEMO_REMOTE_SSH_PORT",
-    "COQUIC_DEMO_PUBLIC_HOST",
-    "COQUIC_DEMO_PUBLIC_PORT",
-    "COQUIC_DEMO_REMOTE_KNOWN_HOSTS",
     "COQUIC_DEMO_REMOTE_SSH_KEY",
     "COQUIC_DEMO_CERT_CHAIN_PEM",
     "COQUIC_DEMO_PRIVATE_KEY_PEM",
+    "coquic.minhuw.dev",
+    "minhuw",
+    "22",
+    "443",
+    "coquic-demo.key",
+    "known_hosts",
+    "ssh-ed25519",
     "/opt/coquic-demo/releases/<git-sha>/h3-server",
     "/opt/coquic-demo/current",
     "/etc/coquic-demo/tls/fullchain.pem",
@@ -65,6 +66,20 @@ required_doc_markers = [
 for marker in required_doc_markers:
     if marker not in doc:
         raise SystemExit(f"demo deployment doc missing marker: {marker}")
+
+removed_doc_markers = [
+    "COQUIC_DEMO_REMOTE_HOST",
+    "COQUIC_DEMO_REMOTE_USER",
+    "COQUIC_DEMO_REMOTE_SSH_PORT",
+    "COQUIC_DEMO_REMOTE_SSH_KEY_PATH",
+    "COQUIC_DEMO_REMOTE_KNOWN_HOSTS",
+    "COQUIC_DEMO_PUBLIC_HOST",
+    "COQUIC_DEMO_PUBLIC_PORT",
+]
+
+for marker in removed_doc_markers:
+    if marker in doc:
+        raise SystemExit(f"demo deployment doc should not mention removed config marker: {marker}")
 PY
 
 if [[ ! -x tests/nix/demo_layout_contract_test.sh ]]; then

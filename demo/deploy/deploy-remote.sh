@@ -107,13 +107,19 @@ rollback_remote() {
     return
   fi
 
-  ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_upload_dir}" "${remote_current_link}" "${previous_release_target}" "${remote_release_dir}" "${same_release_repair_mode}" <<'EOF'
+  previous_release_target_arg="${previous_release_target:-__COQUIC_EMPTY_PREVIOUS_RELEASE_TARGET__}"
+
+  ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_upload_dir}" "${remote_current_link}" "${previous_release_target_arg}" "${remote_release_dir}" "${same_release_repair_mode}" <<'EOF'
 set -euo pipefail
 remote_upload_dir="$1"
 remote_current_link="$2"
 previous_release_target="$3"
 remote_release_dir="$4"
 same_release_repair_mode="$5"
+
+if [[ "${previous_release_target}" == "__COQUIC_EMPTY_PREVIOUS_RELEASE_TARGET__" ]]; then
+  previous_release_target=""
+fi
 
 restore_or_remove() {
   local destination="$1"
@@ -421,10 +427,18 @@ then
 fi
 
 url="https://${public_host}/"
-curl_http3_out="$(nix build --no-link --print-out-paths .#curl-http3)"
-curl_http3_bin="${curl_http3_out}/bin/curl-http3"
-if [[ ! -x "${curl_http3_bin}" ]]; then
-  fail_with_rollback "deployment verification failed: missing curl-http3 binary at ${curl_http3_bin}"
+mapfile -t curl_http3_out_paths < <(nix build --no-link --print-out-paths .#curl-http3)
+curl_http3_bin=""
+for curl_http3_out in "${curl_http3_out_paths[@]}"; do
+  for candidate in "${curl_http3_out}/bin/curl-http3" "${curl_http3_out}/bin/curl"; do
+    if [[ -x "${candidate}" ]]; then
+      curl_http3_bin="${candidate}"
+      break 2
+    fi
+  done
+done
+if [[ -z "${curl_http3_bin}" ]]; then
+  fail_with_rollback "deployment verification failed: missing curl-http3 binary in realized outputs: ${curl_http3_out_paths[*]}"
 fi
 
 headers_verified=0

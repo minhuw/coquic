@@ -232,6 +232,8 @@ run_same_release_case() {
   local nix_mode="$2"
   local expected_status="$3"
   local readlink_target="$4"
+  local curl_layout="${5:-legacy_wrapper}"
+  local fail_on_empty_ssh_arg="${6:-0}"
 
   local case_dir="${test_tmp}/${case_name}"
   local stub_bin="${case_dir}/bin"
@@ -245,6 +247,8 @@ run_same_release_case() {
   local curl_log="${case_dir}/curl.log"
   local ssh_bash_count="${case_dir}/ssh_bash_count.txt"
   local curl_out="${case_dir}/nix-out"
+  local curl_man_out="${case_dir}/nix-man"
+  local curl_expected_name="curl-http3"
 
   mkdir -p "${stub_bin}" "${fake_home}/.ssh" "${fake_site}"
   touch "${fake_binary}"
@@ -268,6 +272,20 @@ run_same_release_case() {
   : > "${curl_log}"
   : > "${ssh_bash_count}"
   mkdir -p "${curl_out}/bin"
+  mkdir -p "${curl_man_out}"
+
+  case "${curl_layout}" in
+    legacy_wrapper)
+      curl_expected_name="curl-http3"
+      ;;
+    package_multi_output)
+      curl_expected_name="curl"
+      ;;
+    *)
+      echo "unknown curl layout: ${curl_layout}" >&2
+      exit 1
+      ;;
+  esac
 
   cat > "${stub_bin}/ssh" <<'EOF'
 #!/usr/bin/env bash
@@ -275,6 +293,20 @@ set -euo pipefail
 
 log_path="${COQUIC_TEST_SSH_LOG:?}"
 printf 'ssh %s\n' "$*" >> "${log_path}"
+
+if [[ "${COQUIC_TEST_FAIL_ON_EMPTY_SSH_ARG:-0}" == "1" ]]; then
+  saw_double_dash=0
+  for arg in "$@"; do
+    if [[ "${arg}" == "--" ]]; then
+      saw_double_dash=1
+      continue
+    fi
+    if [[ ${saw_double_dash} -eq 1 && -z "${arg}" ]]; then
+      echo "bash: line 6: \$5: unbound variable" >&2
+      exit 1
+    fi
+  done
+fi
 
 if [[ "$*" == *"readlink '/opt/coquic-demo/current'"* ]]; then
   if [[ -n "${COQUIC_TEST_READLINK_TARGET:-}" ]]; then
@@ -332,17 +364,21 @@ set -euo pipefail
 printf 'nix %s\n' "$*" >> "${COQUIC_TEST_NIX_LOG:?}"
 
 if [[ "$*" == "build --no-link --print-out-paths .#curl-http3" ]]; then
-  printf '%s\n' "${COQUIC_TEST_CURL_OUT:?}"
+  if [[ "${COQUIC_TEST_CURL_LAYOUT:?}" == "package_multi_output" ]]; then
+    printf '%s\n' "${COQUIC_TEST_CURL_OUT:?}" "${COQUIC_TEST_CURL_MAN_OUT:?}"
+  else
+    printf '%s\n' "${COQUIC_TEST_CURL_OUT:?}"
+  fi
   exit 0
 fi
 
 exit 0
 EOF
 
-  cat > "${curl_out}/bin/curl-http3" <<'EOF'
+  cat > "${curl_out}/bin/${curl_expected_name}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'curl-http3 %s\n' "$*" >> "${COQUIC_TEST_CURL_LOG:?}"
+printf '%s %s\n' "$(basename "$0")" "$*" >> "${COQUIC_TEST_CURL_LOG:?}"
 
 case "${COQUIC_TEST_NIX_MODE:?}" in
   success)
@@ -381,7 +417,7 @@ esac
 exit 0
 EOF
 
-  chmod 755 "${stub_bin}/ssh" "${stub_bin}/scp" "${stub_bin}/nix" "${curl_out}/bin/curl-http3"
+  chmod 755 "${stub_bin}/ssh" "${stub_bin}/scp" "${stub_bin}/nix" "${curl_out}/bin/${curl_expected_name}"
 
   set +e
   case_output="$(
@@ -399,6 +435,9 @@ EOF
     COQUIC_TEST_NIX_LOG="${nix_log}" \
     COQUIC_TEST_CURL_LOG="${curl_log}" \
     COQUIC_TEST_CURL_OUT="${curl_out}" \
+    COQUIC_TEST_CURL_MAN_OUT="${curl_man_out}" \
+    COQUIC_TEST_CURL_LAYOUT="${curl_layout}" \
+    COQUIC_TEST_FAIL_ON_EMPTY_SSH_ARG="${fail_on_empty_ssh_arg}" \
     COQUIC_TEST_SSH_BASH_COUNT_PATH="${ssh_bash_count}" \
     demo/deploy/deploy-remote.sh "${fake_binary}" "${fake_site}" 2>&1
   )"
@@ -465,7 +504,7 @@ EOF
       cat "${nix_log}" >&2
       exit 1
     fi
-    if ! grep -Fq "curl-http3 -I https://coquic.minhuw.dev/" "${curl_log}"; then
+    if ! grep -Fq "${curl_expected_name} -I https://coquic.minhuw.dev/" "${curl_log}"; then
       echo "${case_name} should invoke header verification probe command" >&2
       cat "${curl_log}" >&2
       exit 1
@@ -474,8 +513,8 @@ EOF
 
   if [[ "${expected_status}" == "success" ]]; then
     for curl_expected in \
-      "curl-http3 --http3-only -sS -o /dev/null -w %{http_version} https://coquic.minhuw.dev/" \
-      "curl-http3 --http3-only -sS https://coquic.minhuw.dev/"; do
+      "${curl_expected_name} --http3-only -sS -o /dev/null -w %{http_version} https://coquic.minhuw.dev/" \
+      "${curl_expected_name} --http3-only -sS https://coquic.minhuw.dev/"; do
       if ! grep -Fq "${curl_expected}" "${curl_log}"; then
         echo "${case_name} should invoke verification probe command: ${curl_expected}" >&2
         cat "${curl_log}" >&2
@@ -525,6 +564,9 @@ echo "same-SHA stop gate failure triggers rollback before verification probes"
 
 run_same_release_case "new-release-failure" "fail_after_install" "failure" "/opt/coquic-demo/releases/112233445566"
 echo "new-release rollback on verification failure behaves correctly"
+
+run_same_release_case "new-release-first-deploy-failure" "fail_after_install" "failure" "" "package_multi_output" "1"
+echo "first-release rollback tolerates empty previous target and multi-output curl package"
 
 run_dangling_preflight_case() {
   local case_name="dangling-preflight"

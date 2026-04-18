@@ -5,8 +5,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
 output_dir="$(mktemp -d)"
+safety_repo="$(mktemp -d)"
 cleanup() {
   rm -rf "${output_dir}"
+  rm -rf "${safety_repo}"
 }
 trap cleanup EXIT
 
@@ -70,6 +72,30 @@ done
 
 if [[ -e tests/nix/h3_demo_page_contract_test.sh ]]; then
   echo "obsolete test still present: tests/nix/h3_demo_page_contract_test.sh" >&2
+  exit 1
+fi
+
+install -d "${safety_repo}/demo/deploy" "${safety_repo}/demo/site"
+cp demo/deploy/package-demo.sh "${safety_repo}/demo/deploy/package-demo.sh"
+cp demo/site/index.html "${safety_repo}/demo/site/index.html"
+
+set +e
+overlap_output="$("${safety_repo}/demo/deploy/package-demo.sh" "${safety_repo}/demo/site" 2>&1)"
+overlap_status=$?
+set -e
+
+if [[ ${overlap_status} -eq 0 ]]; then
+  echo "expected overlap output path to be rejected" >&2
+  exit 1
+fi
+
+if [[ "${overlap_output}" != *"must not be demo/site or inside it"* ]]; then
+  echo "unexpected overlap rejection output: ${overlap_output}" >&2
+  exit 1
+fi
+
+if [[ ! -f "${safety_repo}/demo/site/index.html" ]]; then
+  echo "overlap rejection did not preserve demo/site source content" >&2
   exit 1
 fi
 

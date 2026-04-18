@@ -10,7 +10,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-demo/deploy/package-demo.sh "${output_dir}" >/dev/null
+packaged_output_dir="$(demo/deploy/package-demo.sh "${output_dir}")"
+
+if [[ "${packaged_output_dir}" != "${output_dir}" ]]; then
+  echo "package script reported unexpected output dir: ${packaged_output_dir}" >&2
+  exit 1
+fi
 
 if [[ ! -f demo/site/index.html ]]; then
   echo "missing demo/site/index.html" >&2
@@ -35,7 +40,7 @@ fi
 for dockerignore_rule in \
   "!demo/" \
   "!demo/site/" \
-  "!demo/site/index.html"; do
+  "!demo/site/**"; do
   if ! grep -Fxq -- "${dockerignore_rule}" .dockerignore; then
     echo ".dockerignore missing required demo whitelist rule: ${dockerignore_rule}" >&2
     exit 1

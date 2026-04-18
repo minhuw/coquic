@@ -12,7 +12,7 @@
 !docker/h3-server/
 !demo/
 !demo/site/
-!demo/site/index.html
+!demo/site/**
 !zig-out/
 !zig-out/bin/
 !zig-out/bin/h3-server

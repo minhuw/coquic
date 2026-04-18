@@ -28,6 +28,8 @@ expected_paths = [
     "src/**",
     "build.zig",
     "build.zig.zon",
+    "flake.nix",
+    "flake.lock",
     "docker/h3-server/Dockerfile",
     ".github/workflows/deploy-demo.yml",
 ]
@@ -69,6 +71,11 @@ for step_name in required_step_names:
 
 step_by_name = {step.get("name"): step for step in steps}
 
+install_nix_step = step_by_name["Install Nix"]
+expected_install_nix_uses = "DeterminateSystems/nix-installer-action@92148bb48b9a0c5458c53dd0b368fbfbfbaa3210"
+if install_nix_step.get("uses") != expected_install_nix_uses:
+    raise SystemExit(f"unexpected Install Nix uses: {install_nix_step.get('uses')!r}")
+
 build_step = step_by_name["Build h3-server"]
 expected_build_command = "nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false"
 if build_step.get("run") != expected_build_command:
@@ -85,7 +92,7 @@ if deploy_step.get("run") != expected_deploy_command:
     raise SystemExit(f"unexpected Deploy demo command: {deploy_step.get('run')!r}")
 
 deploy_env = deploy_step.get("env", {})
-required_deploy_env_names = [
+expected_deploy_env_names = [
     "COQUIC_DEMO_REMOTE_HOST",
     "COQUIC_DEMO_REMOTE_USER",
     "COQUIC_DEMO_REMOTE_SSH_PORT",
@@ -95,9 +102,8 @@ required_deploy_env_names = [
     "COQUIC_DEMO_CERT_CHAIN_PEM",
     "COQUIC_DEMO_PRIVATE_KEY_PEM",
 ]
-for env_name in required_deploy_env_names:
-    if env_name not in deploy_env:
-        raise SystemExit(f"Deploy demo missing env: {env_name}")
+if set(deploy_env.keys()) != set(expected_deploy_env_names):
+    raise SystemExit(f"unexpected Deploy demo env keys: {sorted(deploy_env.keys())!r}")
 
 print("deploy-demo workflow structure looks correct")
 
@@ -121,6 +127,8 @@ for marker in rollback_markers:
         raise SystemExit(f"deploy script missing rollback marker: {marker}")
 if "refusing to redeploy over live release dir" not in deploy_script:
     raise SystemExit("deploy script missing same-release refusal message")
+if "COQUIC_DEMO_PUBLIC_PORT must be 4433 for the current service template" not in deploy_script:
+    raise SystemExit("deploy script missing COQUIC_DEMO_PUBLIC_PORT guard")
 if "verification retry loop" not in deploy_script:
     raise SystemExit("deploy script missing verification retry-loop marker")
 if "rollback: cleanup failed ${remote_release_dir}" not in deploy_script:

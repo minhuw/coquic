@@ -13,6 +13,8 @@ on:
       - src/**
       - build.zig
       - build.zig.zon
+      - flake.nix
+      - flake.lock
       - docker/h3-server/Dockerfile
       - .github/workflows/deploy-demo.yml
   workflow_dispatch:
@@ -28,7 +30,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@92148bb48b9a0c5458c53dd0b368fbfbfbaa3210
 
       - name: Build h3-server
         run: nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false
@@ -53,7 +55,6 @@ jobs:
           COQUIC_DEMO_REMOTE_SSH_PORT: ${{ vars.COQUIC_DEMO_REMOTE_SSH_PORT }}
           COQUIC_DEMO_PUBLIC_HOST: ${{ vars.COQUIC_DEMO_PUBLIC_HOST }}
           COQUIC_DEMO_PUBLIC_PORT: ${{ vars.COQUIC_DEMO_PUBLIC_PORT }}
-          COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}
           COQUIC_DEMO_CERT_CHAIN_PEM: ${{ secrets.COQUIC_DEMO_CERT_CHAIN_PEM }}
           COQUIC_DEMO_PRIVATE_KEY_PEM: ${{ secrets.COQUIC_DEMO_PRIVATE_KEY_PEM }}
           COQUIC_DEMO_REMOTE_SSH_KEY_PATH: ${{ runner.temp }}/coquic-demo.key

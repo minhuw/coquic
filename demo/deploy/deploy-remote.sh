@@ -38,6 +38,10 @@ done
 
 ssh_port="${COQUIC_DEMO_REMOTE_SSH_PORT:-22}"
 public_port="${COQUIC_DEMO_PUBLIC_PORT:-4433}"
+if [[ "${public_port}" != "4433" ]]; then
+  echo "COQUIC_DEMO_PUBLIC_PORT must be 4433 for the current service template" >&2
+  exit 1
+fi
 release_id_source="${GITHUB_SHA:-$(git -C "${repo_root}" rev-parse --short=12 HEAD)}"
 release_id="${release_id_source:0:12}"
 if [[ -z "${release_id}" ]]; then

@@ -4,17 +4,27 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="coquic-demo-marker" content="coquic-demo-v1">
-    <title>coquic live diagnostics</title>
+    <title>coquic HTTP/3 speed test</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syncopate:wght@400;700&display=swap"
+      rel="stylesheet"
+    >
     <style>
       :root {
-        --bg: #f4f8f7;
+        --bg: #f4f7fb;
         --panel: #ffffff;
-        --ink: #0e2b2b;
-        --muted: #4a6767;
-        --line: #c9d9d8;
-        --accent: #0b8f7b;
-        --accent-strong: #066f5f;
-        --danger: #9b2f2f;
+        --panel-strong: #f9fbfe;
+        --ink: #102033;
+        --muted: #5b6b7e;
+        --line: #d7e0ea;
+        --accent: #1677ff;
+        --accent-strong: #0f5ecc;
+        --accent-warm: #ff8f1f;
+        --good: #0d8a5f;
+        --bad: #c43d34;
+        --shadow: 0 22px 48px rgba(18, 37, 58, 0.08);
       }
 
       * {
@@ -23,384 +33,600 @@
 
       body {
         margin: 0;
-        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        min-height: 100vh;
+        font-family: "Space Mono", "SFMono-Regular", Consolas, monospace;
         color: var(--ink);
         background:
-          radial-gradient(circle at 10% 10%, #d8f3ee 0%, rgba(216, 243, 238, 0) 38%),
-          radial-gradient(circle at 90% 20%, #d8e9fb 0%, rgba(216, 233, 251, 0) 34%),
-          linear-gradient(145deg, #f8fbfa, #eef3f4 60%, #eaf0f1);
-        min-height: 100vh;
+          radial-gradient(circle at top left, rgba(22, 119, 255, 0.12), transparent 30%),
+          radial-gradient(circle at top right, rgba(255, 143, 31, 0.12), transparent 24%),
+          linear-gradient(180deg, #fbfdff 0%, var(--bg) 48%, #eef3f8 100%);
       }
 
-      main {
-        width: min(1000px, 92vw);
-        margin: 2rem auto 3rem;
+      .shell {
+        width: min(980px, calc(100vw - 2rem));
+        margin: 0 auto;
+        padding: 2.5rem 0 3rem;
         display: grid;
         gap: 1rem;
       }
 
-      .card {
+      .hero,
+      .progress-card,
+      .metric-card,
+      .summary-card {
         background: var(--panel);
         border: 1px solid var(--line);
-        border-radius: 14px;
-        padding: 1rem;
-        box-shadow: 0 8px 22px rgba(16, 37, 38, 0.08);
+        box-shadow: var(--shadow);
       }
 
-      .hero h1 {
-        margin: 0 0 0.4rem;
-        font-size: clamp(1.35rem, 2vw, 2rem);
+      .hero,
+      .summary-card {
+        border-radius: 28px;
+        padding: 1.5rem;
       }
 
-      .hero p {
-        margin: 0.2rem 0;
-        color: var(--muted);
+      .progress-card,
+      .metric-card {
+        border-radius: 22px;
+        padding: 1.25rem;
       }
 
-      .toggle {
-        display: inline-flex;
-        border: 1px solid var(--line);
-        border-radius: 999px;
+      .hero {
+        position: relative;
         overflow: hidden;
+        background:
+          linear-gradient(135deg, rgba(255, 143, 31, 0.1), transparent 26%),
+          linear-gradient(180deg, #ffffff, #f8fbff);
       }
 
-      .toggle button {
-        border: 0;
-        background: transparent;
-        color: var(--muted);
-        padding: 0.55rem 0.95rem;
-        font: inherit;
-        cursor: pointer;
+      .hero::after {
+        content: "";
+        position: absolute;
+        inset: auto -4rem -4rem auto;
+        width: 12rem;
+        height: 12rem;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(22, 119, 255, 0.16), rgba(22, 119, 255, 0));
+        pointer-events: none;
       }
 
-      .toggle button.active {
-        background: var(--accent);
-        color: #fff;
+      .eyebrow,
+      h1,
+      h2,
+      button {
+        font-family: "Syncopate", "Avenir Next", sans-serif;
       }
 
-      .controls {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 0.75rem;
-      }
-
-      #runChecks {
-        border: 0;
-        border-radius: 10px;
-        background: var(--accent);
-        color: #fff;
-        font: inherit;
-        font-weight: 600;
-        padding: 0.62rem 0.95rem;
-        cursor: pointer;
-      }
-
-      #runChecks:disabled {
-        background: #83b7ae;
-        cursor: wait;
-      }
-
-      .muted {
-        color: var(--muted);
-      }
-
-      .grid {
-        display: grid;
-        gap: 1rem;
-      }
-
-      @media (min-width: 860px) {
-        .grid {
-          grid-template-columns: 1fr 1fr;
-        }
-      }
-
-      h2, h3 {
-        margin: 0 0 0.6rem;
-      }
-
-      pre {
-        margin: 0;
-        padding: 0.7rem;
-        border-radius: 10px;
-        background: #0f1819;
-        color: #ddf9f4;
-        overflow-x: auto;
-        font-size: 0.82rem;
-      }
-
-      .status {
-        font-weight: 600;
-      }
-
-      .status.error {
-        color: var(--danger);
-      }
-
-      .status.ok {
+      .eyebrow {
+        margin: 0 0 0.9rem;
+        font-size: 0.72rem;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
         color: var(--accent-strong);
       }
 
-      .pill {
-        display: inline-block;
-        border-radius: 999px;
-        border: 1px solid var(--line);
-        background: #f7fbfa;
-        padding: 0.2rem 0.5rem;
+      h1 {
+        margin: 0;
+        max-width: 11ch;
+        font-size: clamp(2rem, 6vw, 3.8rem);
+        line-height: 1.05;
       }
 
-      .hidden {
-        display: none;
+      .lede {
+        margin: 1rem 0 1.5rem;
+        max-width: 42rem;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+
+      #startTest {
+        border: 0;
+        border-radius: 999px;
+        padding: 0.95rem 1.35rem;
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        color: #ffffff;
+        font-size: 0.88rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+        box-shadow: 0 16px 28px rgba(15, 94, 204, 0.2);
+      }
+
+      #startTest:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 20px 36px rgba(15, 94, 204, 0.25);
+      }
+
+      #startTest:disabled {
+        cursor: wait;
+        opacity: 0.8;
+      }
+
+      .progress-card {
+        background: linear-gradient(180deg, var(--panel), var(--panel-strong));
+      }
+
+      .phase-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: baseline;
+        margin-bottom: 0.9rem;
+      }
+
+      #phaseLabel {
+        font-family: "Syncopate", "Avenir Next", sans-serif;
+        font-size: 0.96rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      #phaseDetail {
+        color: var(--muted);
+        text-align: right;
+        font-size: 0.88rem;
+      }
+
+      .progress-track {
+        width: 100%;
+        height: 0.5rem;
+        border-radius: 999px;
+        background: #e8eff7;
+        overflow: hidden;
+      }
+
+      .progress-bar {
+        width: 0%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--accent), var(--accent-warm));
+        transition: width 240ms ease;
+      }
+
+      .results-grid {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .metric-card {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .metric-card::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto auto 0;
+        width: 100%;
+        height: 0.24rem;
+        background: linear-gradient(90deg, var(--accent), rgba(255, 143, 31, 0.7));
+      }
+
+      .metric-card h2,
+      .summary-card h2 {
+        margin: 0 0 1rem;
+        font-size: 0.95rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .metric-value {
+        margin: 0;
+        font-size: clamp(2rem, 7vw, 3.25rem);
+        line-height: 1;
+        letter-spacing: -0.05em;
+      }
+
+      .metric-meta {
+        margin: 0.75rem 0 0;
+        color: var(--muted);
+        line-height: 1.6;
+        min-height: 3.2em;
+      }
+
+      .summary-card {
+        background:
+          linear-gradient(180deg, rgba(22, 119, 255, 0.03), transparent 38%),
+          var(--panel);
+      }
+
+      .summary-grid {
+        margin: 0;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.85rem 1.25rem;
+      }
+
+      .summary-grid dt {
+        color: var(--muted);
+      }
+
+      .summary-grid dd {
+        margin: 0;
+        text-align: right;
+      }
+
+      .summary-grid dt,
+      .summary-grid dd {
+        padding-top: 0.8rem;
+        border-top: 1px solid var(--line);
+      }
+
+      .is-complete #phaseLabel,
+      .is-complete .metric-value {
+        color: var(--good);
+      }
+
+      .is-failed #phaseLabel,
+      .is-failed .metric-value[data-failed="true"] {
+        color: var(--bad);
+      }
+
+      @media (min-width: 860px) {
+        .shell {
+          padding-top: 4rem;
+        }
+
+        .results-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .hero,
+        .summary-card {
+          padding: 2rem;
+        }
+
+        .progress-card,
+        .metric-card {
+          padding: 1.4rem;
+        }
+      }
+
+      @media (max-width: 680px) {
+        .shell {
+          width: min(100vw - 1rem, 980px);
+          padding-bottom: 2rem;
+        }
+
+        .hero,
+        .summary-card,
+        .progress-card,
+        .metric-card {
+          border-radius: 20px;
+        }
+
+        .phase-row {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        #phaseDetail,
+        .summary-grid dd {
+          text-align: left;
+        }
+
+        .summary-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation: none !important;
+          transition: none !important;
+          scroll-behavior: auto !important;
+        }
       }
     </style>
   </head>
   <body>
-    <main>
-      <section class="card hero">
-        <h1>coquic live diagnostics page</h1>
-        <p>Deployment target: <strong>https://coquic.minhuw.dev/</strong> with same-origin checks for <code>/_coquic/inspect</code> and <code>/_coquic/echo</code>.</p>
-        <p class="muted">This page can report browser-observable HTTP responses and headers. Protocol negotiation details should be confirmed in DevTools.</p>
+    <main id="appShell" class="shell">
+      <section class="hero">
+        <p class="eyebrow">HTTP/3 demo</p>
+        <h1>coquic HTTP/3 speed test</h1>
+        <p class="lede">
+          Measure browser-observable QUIC latency, download, and upload against
+          <strong>coquic.minhuw.dev</strong>.
+        </p>
+        <button id="startTest" type="button">Start test</button>
       </section>
 
-      <section class="card controls">
-        <div class="toggle" role="tablist" aria-label="Page mode">
-          <button id="modeShowcase" class="active" type="button" role="tab" aria-selected="true">Showcase</button>
-          <button id="modeTechnical" type="button" role="tab" aria-selected="false">Technical</button>
+      <section class="progress-card" aria-live="polite">
+        <div class="phase-row">
+          <span id="phaseLabel">Idle</span>
+          <span id="phaseDetail">Ready to test</span>
         </div>
-        <button id="runChecks" type="button">Run Live Checks</button>
-        <span class="muted">Current URL: <code id="currentLocation"></code></span>
+        <div class="progress-track" aria-hidden="true">
+          <div id="progressBar" class="progress-bar"></div>
+        </div>
       </section>
 
-      <section id="showcasePanel" class="card">
-        <h2>How To Verify In Chrome</h2>
-        <p>Use this page to trigger live checks, then confirm transport details in Chrome DevTools:</p>
-        <ol>
-          <li>Open DevTools Network tab and reload after first visit.</li>
-          <li>Inspect the main document request and check the Protocol column.</li>
-          <li>Look for Alt-Svc in response headers and confirm later reloads advertise h3 usage.</li>
-        </ol>
-        <p class="muted">First load can still appear as HTTP/1.1 before Alt-Svc is cached.</p>
-      </section>
-
-      <section id="technicalPanel" class="card hidden">
-        <h2>Browser Verification</h2>
-        <p>Page-observed data:</p>
-        <ul>
-          <li><code>window.location</code> and request timestamps</li>
-          <li>HEAD <code>/</code> status plus <code>Alt-Svc</code> header if visible</li>
-          <li>JSON response from POST <code>/_coquic/inspect</code></li>
-          <li>POST <code>/_coquic/echo</code> round-trip success/failure</li>
-        </ul>
-        <p class="muted">Treat ALPN, negotiated transport, and QUIC version as DevTools-verified facts, not page-observed facts.</p>
-      </section>
-
-      <section class="grid">
-        <article class="card">
-          <h3>Latest Run</h3>
-          <p class="status" id="latestStatus">No checks run yet.</p>
-          <p class="muted">Last attempt: <span id="lastAttempt">never</span></p>
-          <p class="muted">Last successful run: <span id="lastSuccess">never</span></p>
-          <p><span class="pill">Alt-Svc</span> <code id="altSvcValue">n/a</code></p>
+      <section class="results-grid">
+        <article class="metric-card">
+          <h2>Latency</h2>
+          <p id="latencyValue" class="metric-value">Not run</p>
+          <p id="latencyMeta" class="metric-meta">Median of 7 samples</p>
         </article>
-        <article class="card">
-          <h3>HEAD /</h3>
-          <pre id="headResult">No data yet.</pre>
+        <article class="metric-card">
+          <h2>Download</h2>
+          <p id="downloadValue" class="metric-value">Not run</p>
+          <p id="downloadMeta" class="metric-meta">4 workers · 4.5s window</p>
         </article>
-        <article class="card">
-          <h3>POST /_coquic/inspect</h3>
-          <pre id="inspectResult">No data yet.</pre>
-        </article>
-        <article class="card">
-          <h3>POST /_coquic/echo</h3>
-          <pre id="echoResult">No data yet.</pre>
+        <article class="metric-card">
+          <h2>Upload</h2>
+          <p id="uploadValue" class="metric-value">Not run</p>
+          <p id="uploadMeta" class="metric-meta">4 workers · 4.5s window</p>
         </article>
       </section>
 
-      <section class="card">
-        <h3>Last Successful Probe Data</h3>
-        <pre id="lastSuccessPayload">No successful run yet.</pre>
+      <section class="summary-card">
+        <h2>Summary</h2>
+        <dl class="summary-grid">
+          <dt>Host</dt>
+          <dd id="summaryHost">coquic.minhuw.dev</dd>
+          <dt>Time</dt>
+          <dd id="summaryTime">Not run</dd>
+          <dt>Run state</dt>
+          <dd id="summaryState">Idle</dd>
+          <dt>Configuration</dt>
+          <dd id="summaryConfig">7 pings · 4x4.5s throughput</dd>
+        </dl>
       </section>
     </main>
     <script>
-      const MODE_KEY = "coquic-demo-mode";
-      const state = {
-        mode: "Showcase",
-        lastSuccessful: null,
+      const SPEED_CONFIG = {
+        latencySamples: 7,
+        downloadWorkers: 4,
+        uploadWorkers: 4,
+        throughputWindowMs: 4500,
+        downloadRequestBytes: 262144,
+        uploadRequestBytes: 131072,
       };
 
       const ui = {
-        modeShowcase: document.getElementById("modeShowcase"),
-        modeTechnical: document.getElementById("modeTechnical"),
-        showcasePanel: document.getElementById("showcasePanel"),
-        technicalPanel: document.getElementById("technicalPanel"),
-        runChecks: document.getElementById("runChecks"),
-        latestStatus: document.getElementById("latestStatus"),
-        lastAttempt: document.getElementById("lastAttempt"),
-        lastSuccess: document.getElementById("lastSuccess"),
-        altSvcValue: document.getElementById("altSvcValue"),
-        currentLocation: document.getElementById("currentLocation"),
-        headResult: document.getElementById("headResult"),
-        inspectResult: document.getElementById("inspectResult"),
-        echoResult: document.getElementById("echoResult"),
-        lastSuccessPayload: document.getElementById("lastSuccessPayload"),
+        appShell: document.getElementById("appShell"),
+        startTest: document.getElementById("startTest"),
+        phaseLabel: document.getElementById("phaseLabel"),
+        phaseDetail: document.getElementById("phaseDetail"),
+        progressBar: document.getElementById("progressBar"),
+        latencyValue: document.getElementById("latencyValue"),
+        latencyMeta: document.getElementById("latencyMeta"),
+        downloadValue: document.getElementById("downloadValue"),
+        downloadMeta: document.getElementById("downloadMeta"),
+        uploadValue: document.getElementById("uploadValue"),
+        uploadMeta: document.getElementById("uploadMeta"),
+        summaryHost: document.getElementById("summaryHost"),
+        summaryTime: document.getElementById("summaryTime"),
+        summaryState: document.getElementById("summaryState"),
+        summaryConfig: document.getElementById("summaryConfig"),
       };
 
-      function toJson(value) {
-        return JSON.stringify(value, null, 2);
+      function formatLatency(valueMs) {
+        return valueMs.toFixed(1) + " ms";
       }
 
-      function safeStorageGet(key) {
-        try {
-          return localStorage.getItem(key);
-        } catch (_) {
-          return null;
-        }
+      function formatMbps(value) {
+        return value.toFixed(2) + " Mbps";
       }
 
-      function safeStorageSet(key, value) {
-        try {
-          localStorage.setItem(key, value);
-          return true;
-        } catch (_) {
-          return false;
-        }
+      function setPhase(label, detail, percent) {
+        ui.phaseLabel.textContent = label;
+        ui.phaseDetail.textContent = detail;
+        ui.progressBar.style.width = percent + "%";
       }
 
-      async function safeReadJson(response) {
-        const clone = response.clone();
-        try {
-          return await response.json();
-        } catch (error) {
-          let rawText = null;
-          try {
-            rawText = await clone.text();
-          } catch (_) {
-            rawText = null;
-          }
-          return {
-            parse_error: error instanceof Error ? error.message : String(error),
-            raw_text: rawText,
-          };
-        }
+      function setShellState(state) {
+        ui.appShell.classList.toggle("is-complete", state === "complete");
+        ui.appShell.classList.toggle("is-failed", state === "failed");
       }
 
-      async function runProbe(label, renderTarget, runner) {
-        const result = { probe: label, ok: false, status: null, error: null };
-        try {
-          Object.assign(result, await runner());
-        } catch (error) {
-          result.error = error instanceof Error ? error.message : String(error);
-        }
-        renderTarget.textContent = toJson(result);
-        return result;
+      function setDefaultMetricMeta() {
+        ui.latencyMeta.textContent = "Median of " + SPEED_CONFIG.latencySamples + " samples";
+        ui.downloadMeta.textContent =
+          SPEED_CONFIG.downloadWorkers + " workers · " +
+          (SPEED_CONFIG.throughputWindowMs / 1000).toFixed(1) + "s window";
+        ui.uploadMeta.textContent =
+          SPEED_CONFIG.uploadWorkers + " workers · " +
+          (SPEED_CONFIG.throughputWindowMs / 1000).toFixed(1) + "s window";
       }
 
-      function setMode(mode) {
-        state.mode = mode === "Technical" ? "Technical" : "Showcase";
-        safeStorageSet(MODE_KEY, state.mode);
-        const showcase = state.mode === "Showcase";
-        ui.modeShowcase.classList.toggle("active", showcase);
-        ui.modeTechnical.classList.toggle("active", !showcase);
-        ui.modeShowcase.setAttribute("aria-selected", showcase ? "true" : "false");
-        ui.modeTechnical.setAttribute("aria-selected", showcase ? "false" : "true");
-        ui.showcasePanel.classList.toggle("hidden", !showcase);
-        ui.technicalPanel.classList.toggle("hidden", showcase);
+      function markMetricHealthy() {
+        ui.latencyValue.dataset.failed = "false";
+        ui.downloadValue.dataset.failed = "false";
+        ui.uploadValue.dataset.failed = "false";
       }
 
-      async function runLiveChecks() {
-        const startedAt = new Date();
-        ui.runChecks.disabled = true;
-        ui.latestStatus.textContent = "Running probes...";
-        ui.latestStatus.className = "status";
-        ui.lastAttempt.textContent = startedAt.toISOString();
-        ui.altSvcValue.textContent = "checking...";
-        ui.headResult.textContent = toJson({ probe: "HEAD /", state: "running" });
-        ui.inspectResult.textContent = toJson({ probe: "POST /_coquic/inspect", state: "running" });
-        ui.echoResult.textContent = toJson({ probe: "POST /_coquic/echo", state: "running" });
-        try {
-          const headInfo = await runProbe("HEAD /", ui.headResult, async function () {
-            const response = await fetch("/", { method: "HEAD", cache: "no-store" });
-            return {
-              ok: response.ok,
-              status: response.status,
-              altSvc: response.headers.get("alt-svc") || null,
-            };
-          });
-          if (headInfo.altSvc) {
-            ui.altSvcValue.textContent = headInfo.altSvc;
-          } else if (headInfo.error) {
-            ui.altSvcValue.textContent = "unavailable (HEAD probe failed)";
-          } else {
-            ui.altSvcValue.textContent = "not exposed";
-          }
+      function initializeIdle() {
+        setShellState("idle");
+        setPhase("Idle", "Ready to test", 0);
+        ui.summaryHost.textContent = window.location.host || "coquic.minhuw.dev";
+        ui.summaryTime.textContent = "Not run";
+        ui.summaryState.textContent = "Idle";
+        ui.summaryConfig.textContent = "7 pings · 4x4.5s throughput";
+        ui.latencyValue.textContent = "Not run";
+        ui.downloadValue.textContent = "Not run";
+        ui.uploadValue.textContent = "Not run";
+        setDefaultMetricMeta();
+        markMetricHealthy();
+      }
 
-          const inspectInfo = await runProbe("POST /_coquic/inspect", ui.inspectResult, async function () {
-            const response = await fetch("/_coquic/inspect", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ source: "browser-demo", location: window.location.href }),
-            });
-            return {
-              ok: response.ok,
-              status: response.status,
-              body: await safeReadJson(response),
-            };
-          });
+      function resetRun() {
+        setShellState("running");
+        ui.latencyValue.textContent = "Not run";
+        ui.downloadValue.textContent = "Not run";
+        ui.uploadValue.textContent = "Not run";
+        ui.summaryHost.textContent = window.location.host || "coquic.minhuw.dev";
+        ui.summaryTime.textContent = "In progress";
+        ui.summaryState.textContent = "Running";
+        ui.summaryConfig.textContent = "7 pings · 4x4.5s throughput";
+        setDefaultMetricMeta();
+        markMetricHealthy();
+        setPhase("Connecting", "Preparing same-origin HTTP/3 checks", 8);
+      }
 
-          const echoPayload = { ping: "coquic-live-check", sent_at: new Date().toISOString() };
-          const echoInfo = await runProbe("POST /_coquic/echo", ui.echoResult, async function () {
-            const response = await fetch("/_coquic/echo", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify(echoPayload),
-            });
-            return {
-              ok: response.ok,
-              status: response.status,
-              body: await safeReadJson(response),
-            };
-          });
+      function renderLatency(result) {
+        ui.latencyValue.textContent = formatLatency(result.valueMs);
+        ui.latencyMeta.textContent = "Median of " + result.samples.length + " samples";
+      }
 
-          const completeSuccess = Boolean(headInfo.ok && inspectInfo.ok && echoInfo.ok);
-          if (completeSuccess) {
-            state.lastSuccessful = {
-              completedAt: new Date().toISOString(),
-              location: window.location.href,
-              altSvc: headInfo.altSvc || null,
-              head: headInfo,
-              inspect: inspectInfo,
-              echo: echoInfo,
-            };
-            ui.lastSuccess.textContent = state.lastSuccessful.completedAt;
-            ui.lastSuccessPayload.textContent = toJson(state.lastSuccessful);
-            ui.latestStatus.textContent = "All probes succeeded.";
-            ui.latestStatus.className = "status ok";
-          } else {
-            ui.latestStatus.textContent = "Probe run completed with one or more failures.";
-            ui.latestStatus.className = "status error";
-            if (state.lastSuccessful) {
-              ui.lastSuccessPayload.textContent = toJson(state.lastSuccessful);
+      function renderDownload(result) {
+        ui.downloadValue.textContent = formatMbps(result.mbps);
+        ui.downloadMeta.textContent =
+          result.totalBytes + " bytes in " + result.elapsedMs.toFixed(0) + " ms";
+      }
+
+      function renderUpload(result) {
+        ui.uploadValue.textContent = formatMbps(result.mbps);
+        ui.uploadMeta.textContent =
+          result.totalBytes + " bytes in " + result.elapsedMs.toFixed(0) + " ms";
+      }
+
+      function renderSummary(state) {
+        ui.summaryHost.textContent = window.location.host || "coquic.minhuw.dev";
+        ui.summaryTime.textContent = new Date().toISOString();
+        ui.summaryState.textContent = state;
+        ui.summaryConfig.textContent =
+          "7 pings · 4 download workers/4.5s · 4 upload workers/4.5s";
+      }
+
+      function renderFailure(error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setShellState("failed");
+        ui.summaryTime.textContent = new Date().toISOString();
+        ui.summaryState.textContent = "Failed";
+        ui.phaseLabel.textContent = "Failed";
+        ui.phaseDetail.textContent = message;
+        ui.progressBar.style.width = "100%";
+      }
+
+      function toMbps(bytes, elapsedMs) {
+        return (bytes * 8) / (elapsedMs / 1000) / 1000 / 1000;
+      }
+
+      async function runTimedWorkers(workerCount, worker) {
+        const deadline = performance.now() + SPEED_CONFIG.throughputWindowMs;
+        const started = performance.now();
+        const results = await Promise.all(
+          Array.from({ length: workerCount }, async function () {
+            let totalBytes = 0;
+            while (performance.now() < deadline) {
+              totalBytes += await worker();
             }
+            return totalBytes;
+          })
+        );
+        const totalBytes = results.reduce(function (sum, value) {
+          return sum + value;
+        }, 0);
+        const elapsedMs = performance.now() - started;
+        return {
+          totalBytes,
+          elapsedMs,
+          mbps: toMbps(totalBytes, elapsedMs),
+        };
+      }
+
+      async function runLatencyPhase() {
+        const samples = [];
+        for (let index = 0; index < SPEED_CONFIG.latencySamples; index += 1) {
+          const started = performance.now();
+          const response = await fetch("/_coquic/speed/ping?ts=" + Date.now() + "-" + index, {
+            cache: "no-store",
+          });
+          if (!response.ok && response.status !== 204) {
+            throw new Error("Latency test failed");
           }
+          samples.push(performance.now() - started);
+        }
+        samples.sort(function (lhs, rhs) {
+          return lhs - rhs;
+        });
+        return {
+          valueMs: samples[Math.floor(samples.length / 2)],
+          samples,
+        };
+      }
+
+      async function runDownloadPhase() {
+        return runTimedWorkers(SPEED_CONFIG.downloadWorkers, async function () {
+          const response = await fetch(
+            "/_coquic/speed/download?bytes=" + SPEED_CONFIG.downloadRequestBytes + "&ts=" + Date.now(),
+            { cache: "no-store" }
+          );
+          if (!response.ok || !response.body) {
+            throw new Error("Download test failed");
+          }
+          const reader = response.body.getReader();
+          let total = 0;
+          while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) {
+              break;
+            }
+            total += chunk.value.byteLength;
+          }
+          return total;
+        });
+      }
+
+      async function runUploadPhase() {
+        const payload = new Uint8Array(SPEED_CONFIG.uploadRequestBytes);
+        payload.fill(117);
+        return runTimedWorkers(SPEED_CONFIG.uploadWorkers, async function () {
+          const response = await fetch("/_coquic/speed/upload?ts=" + Date.now(), {
+            method: "POST",
+            headers: { "content-type": "application/octet-stream" },
+            body: payload,
+            cache: "no-store",
+          });
+          if (!response.ok) {
+            throw new Error("Upload test failed");
+          }
+          const json = await response.json();
+          if (json.received_bytes !== payload.byteLength) {
+            throw new Error("Upload byte count mismatch");
+          }
+          return payload.byteLength;
+        });
+      }
+
+      async function runSpeedTest() {
+        setPhase("Connecting", "Preparing same-origin HTTP/3 checks", 8);
+        try {
+          setPhase("Latency", "Measuring median round-trip time", 28);
+          const latency = await runLatencyPhase();
+          renderLatency(latency);
+
+          setPhase("Download", "Measuring aggregate download throughput", 58);
+          const download = await runDownloadPhase();
+          renderDownload(download);
+
+          setPhase("Upload", "Measuring aggregate upload throughput", 84);
+          const upload = await runUploadPhase();
+          renderUpload(upload);
+
+          setShellState("complete");
+          setPhase("Complete", "Run finished", 100);
+          renderSummary("Complete");
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          ui.latestStatus.textContent = "Probe run failed unexpectedly: " + message;
-          ui.latestStatus.className = "status error";
+          renderFailure(error);
         } finally {
-          ui.runChecks.disabled = false;
+          ui.startTest.disabled = false;
+          ui.startTest.textContent = "Run again";
         }
       }
 
-      (function startup() {
-        ui.currentLocation.textContent = window.location.href;
-        const savedMode = safeStorageGet(MODE_KEY);
-        setMode(savedMode || "Showcase");
-        ui.modeShowcase.addEventListener("click", function () { setMode("Showcase"); });
-        ui.modeTechnical.addEventListener("click", function () { setMode("Technical"); });
-        ui.runChecks.addEventListener("click", runLiveChecks);
-        runLiveChecks();
-      })();
+      ui.startTest.addEventListener("click", function () {
+        ui.startTest.disabled = true;
+        ui.startTest.textContent = "Running...";
+        resetRun();
+        void runSpeedTest();
+      });
+
+      initializeIdle();
     </script>
   </body>
 </html>

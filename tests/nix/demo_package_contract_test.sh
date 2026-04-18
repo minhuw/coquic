@@ -51,18 +51,36 @@ done
 
 for marker in \
   "coquic-demo-v1" \
-  "https://coquic.minhuw.dev/" \
+  "coquic HTTP/3 speed test" \
+  "Start test" \
+  "Latency" \
+  "Download" \
+  "Upload" \
+  "Connecting" \
+  "/_coquic/speed/ping" \
+  "/_coquic/speed/download" \
+  "/_coquic/speed/upload" \
+  "runSpeedTest" \
+  "runLatencyPhase" \
+  "runDownloadPhase" \
+  "runUploadPhase"; do
+  if ! grep -Fq -- "${marker}" "${output_dir}/index.html"; then
+    echo "packaged demo page missing marker: ${marker}" >&2
+    exit 1
+  fi
+done
+
+for removed_marker in \
+  "Run Live Checks" \
+  "How To Verify In Chrome" \
   "/_coquic/inspect" \
   "/_coquic/echo" \
-  "localStorage" \
-  "window.location" \
-  "How To Verify In Chrome" \
   "safeStorageGet" \
   "safeStorageSet" \
   "safeReadJson" \
   "runProbe"; do
-  if ! grep -Fq -- "${marker}" "${output_dir}/index.html"; then
-    echo "packaged demo page missing marker: ${marker}" >&2
+  if grep -Fq -- "${removed_marker}" "${output_dir}/index.html"; then
+    echo "packaged demo page still contains removed marker: ${removed_marker}" >&2
     exit 1
   fi
 done

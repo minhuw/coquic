@@ -480,6 +480,51 @@ TEST(QuicProtectedCodecTest, AppendsOneRttPacketViewIntoExistingDatagramBuffer) 
               encoded.value());
 }
 
+TEST(QuicProtectedCodecTest, DatagramBufferAppendZeroPadsPingOnlyOneRttPacketPlaintext) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames = {
+        coquic::quic::PingFrame{},
+    };
+
+    const auto context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    const auto deserialize_context = make_one_rtt_deserialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    const auto packet_view = coquic::quic::ProtectedOneRttPacketView{
+        .spin_bit = packet.spin_bit,
+        .key_phase = packet.key_phase,
+        .destination_connection_id = packet.destination_connection_id,
+        .packet_number_length = packet.packet_number_length,
+        .packet_number = packet.packet_number,
+        .frames = packet.frames,
+        .stream_frame_views = packet.stream_frame_views,
+    };
+
+    coquic::quic::DatagramBuffer datagram;
+    datagram.resize(64, std::byte{0xff});
+    datagram.clear();
+
+    const auto appended =
+        coquic::quic::append_protected_one_rtt_packet_to_datagram(datagram, packet_view, context);
+    ASSERT_TRUE(appended.has_value());
+    ASSERT_EQ(datagram.size(), appended.value());
+
+    const auto decoded =
+        coquic::quic::deserialize_protected_datagram(datagram.span(), deserialize_context);
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+
+    const auto *one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded.value().front());
+    ASSERT_NE(one_rtt, nullptr);
+    ASSERT_EQ(one_rtt->frames.size(), 2u);
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::PingFrame>(one_rtt->frames[0]));
+
+    const auto *padding = std::get_if<coquic::quic::PaddingFrame>(&one_rtt->frames[1]);
+    ASSERT_NE(padding, nullptr);
+    EXPECT_EQ(padding->length, 1u);
+}
+
 TEST(QuicProtectedCodecTest, AppendsOneRttPacketFragmentViewIntoExistingDatagramBuffer) {
     auto packet = make_minimal_one_rtt_packet();
     packet.frames.clear();

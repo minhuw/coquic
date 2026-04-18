@@ -334,12 +334,6 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
     }
 
     const auto current = QuicCoreClock::now();
-    if (pending_completions_.empty() && next_wakeup.has_value() && *next_wakeup <= current) {
-        return QuicIoEngineEvent{
-            .kind = QuicIoEngineEvent::Kind::timer_expired,
-            .now = current,
-        };
-    }
 
     int wait_timeout_ms = idle_timeout_ms;
     if (next_wakeup.has_value()) {

@@ -172,6 +172,11 @@ TEST(IoUringBackendTest, WaitWithoutCompletionYieldsIdleTimeout) {
         coquic::io::test::io_uring_backend_wait_without_completion_yields_idle_timeout_for_tests());
 }
 
+TEST(IoUringBackendTest, WaitPrefersReadyReceiveOverDueTimer) {
+    EXPECT_TRUE(
+        coquic::io::test::io_uring_backend_wait_prefers_ready_receive_over_due_timer_for_tests());
+}
+
 TEST(IoUringBackendTest, SendReturnsWhenReceiveCompletionPrecedesSendCompletion) {
     EXPECT_TRUE(io_uring_send_returns_when_receive_completion_precedes_send_completion());
 }

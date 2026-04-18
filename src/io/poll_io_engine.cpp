@@ -222,93 +222,101 @@ PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
         return std::nullopt;
     }
 
-    const auto current = internal::now();
-    int timeout_ms = idle_timeout_ms;
-    bool timer_due = false;
-    if (next_wakeup.has_value()) {
-        if (*next_wakeup <= current) {
-            timer_due = true;
-            timeout_ms = 0;
-        } else {
-            const auto remaining = *next_wakeup - current;
-            timeout_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                              remaining + std::chrono::milliseconds(1))
-                                              .count());
-        }
-    }
-
-    std::vector<pollfd> descriptors(socket_fds.size());
-    for (std::size_t index = 0; index < socket_fds.size(); ++index) {
-        descriptors[index] = pollfd{
-            .fd = socket_fds[index],
-            .events = POLLIN,
-            .revents = 0,
-        };
-    }
-
-    int poll_result = 0;
-    do {
-        poll_result = internal::socket_io_backend_ops_state().poll_fn(
-            descriptors.data(), descriptors.size(), timeout_ms);
-    } while (poll_result < 0 && errno == EINTR);
-
-    if (poll_result < 0) {
-        if (errno == ECANCELED) {
-            return QuicIoEngineEvent{
-                .kind = QuicIoEngineEvent::Kind::shutdown,
-                .now = internal::now(),
-            };
-        }
-        return std::nullopt;
-    }
-
-    if (poll_result == 0) {
+    for (;;) {
+        const auto current = internal::now();
+        int timeout_ms = idle_timeout_ms;
+        bool timer_due = false;
         if (next_wakeup.has_value()) {
-            return QuicIoEngineEvent{
-                .kind = QuicIoEngineEvent::Kind::timer_expired,
-                .now = timer_due ? current : internal::now(),
+            if (*next_wakeup <= current) {
+                timer_due = true;
+                timeout_ms = 0;
+            } else {
+                const auto remaining = *next_wakeup - current;
+                timeout_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  remaining + std::chrono::milliseconds(1))
+                                                  .count());
+            }
+        }
+
+        std::vector<pollfd> descriptors(socket_fds.size());
+        for (std::size_t index = 0; index < socket_fds.size(); ++index) {
+            descriptors[index] = pollfd{
+                .fd = socket_fds[index],
+                .events = POLLIN,
+                .revents = 0,
             };
         }
-        return QuicIoEngineEvent{
-            .kind = QuicIoEngineEvent::Kind::idle_timeout,
-            .now = internal::now(),
-        };
-    }
 
-    for (const auto &descriptor : descriptors) {
-        if ((descriptor.revents & POLLIN) == 0) {
-            continue;
-        }
+        int poll_result = 0;
+        do {
+            poll_result = internal::socket_io_backend_ops_state().poll_fn(
+                descriptors.data(), descriptors.size(), timeout_ms);
+        } while (poll_result < 0 && errno == EINTR);
 
-        auto received = internal::receive_datagram(descriptor.fd, role_name, 0);
-        if (received.status == internal::ReceiveDatagramStatus::would_block) {
-            continue;
-        }
-        if (received.status != internal::ReceiveDatagramStatus::ok) {
+        if (poll_result < 0) {
+            if (errno == ECANCELED) {
+                return QuicIoEngineEvent{
+                    .kind = QuicIoEngineEvent::Kind::shutdown,
+                    .now = internal::now(),
+                };
+            }
             return std::nullopt;
         }
 
-        return QuicIoEngineEvent{
-            .kind = QuicIoEngineEvent::Kind::rx_datagram,
-            .now = received.input_time,
-            .rx =
-                QuicIoEngineRxCompletion{
-                    .socket_fd = descriptor.fd,
-                    .bytes = std::move(received.bytes),
-                    .ecn = received.ecn,
-                    .peer = received.source,
-                    .peer_len = received.source_len,
-                    .now = received.input_time,
-                },
-        };
-    }
+        if (poll_result == 0) {
+            if (next_wakeup.has_value()) {
+                return QuicIoEngineEvent{
+                    .kind = QuicIoEngineEvent::Kind::timer_expired,
+                    .now = timer_due ? current : internal::now(),
+                };
+            }
+            return QuicIoEngineEvent{
+                .kind = QuicIoEngineEvent::Kind::idle_timeout,
+                .now = internal::now(),
+            };
+        }
 
-    if (std::any_of(descriptors.begin(), descriptors.end(),
-                    [](const pollfd &descriptor) { return descriptor.revents != 0; })) {
+        bool saw_readable_would_block = false;
+        for (const auto &descriptor : descriptors) {
+            if ((descriptor.revents & POLLIN) == 0) {
+                continue;
+            }
+
+            auto received = internal::receive_datagram(descriptor.fd, role_name, 0);
+            if (received.status == internal::ReceiveDatagramStatus::would_block) {
+                saw_readable_would_block = true;
+                continue;
+            }
+            if (received.status != internal::ReceiveDatagramStatus::ok) {
+                return std::nullopt;
+            }
+
+            return QuicIoEngineEvent{
+                .kind = QuicIoEngineEvent::Kind::rx_datagram,
+                .now = received.input_time,
+                .rx =
+                    QuicIoEngineRxCompletion{
+                        .socket_fd = descriptor.fd,
+                        .bytes = std::move(received.bytes),
+                        .ecn = received.ecn,
+                        .peer = received.source,
+                        .peer_len = received.source_len,
+                        .now = received.input_time,
+                    },
+            };
+        }
+
+        if (saw_readable_would_block) {
+            continue;
+        }
+
+        if (std::any_of(descriptors.begin(), descriptors.end(),
+                        [](const pollfd &descriptor) { return descriptor.revents != 0; })) {
+            return std::nullopt;
+        }
+
         return std::nullopt;
     }
-
-    return std::nullopt;
 }
 
 namespace test {
@@ -333,6 +341,13 @@ struct RecordedRecvMsgForTests {
 };
 
 thread_local RecordedRecvMsgForTests g_recorded_recvmsg_for_tests;
+
+struct RetryReadablePollForTests {
+    int poll_calls = 0;
+    int recvmsg_calls = 0;
+};
+
+thread_local RetryReadablePollForTests g_retry_readable_poll_for_tests;
 
 ssize_t record_sendmsg_for_tests(int socket_fd, const msghdr *message, int) {
     g_recorded_sendmsg_for_tests.calls += 1;
@@ -383,6 +398,25 @@ ssize_t record_recvmsg_for_tests(int, msghdr *message, int) {
     }
 
     return static_cast<ssize_t>(bytes_to_copy);
+}
+
+int readable_poll_then_retry_with_datagram_for_tests(pollfd *descriptors, nfds_t descriptor_count,
+                                                     int) {
+    g_retry_readable_poll_for_tests.poll_calls += 1;
+    for (nfds_t index = 0; index < descriptor_count; ++index) {
+        descriptors[index].revents = POLLIN;
+    }
+    return descriptor_count == 0 ? 0 : 1;
+}
+
+ssize_t would_block_then_record_recvmsg_for_wait_retry_tests(int, msghdr *message, int) {
+    g_retry_readable_poll_for_tests.recvmsg_calls += 1;
+    if (g_retry_readable_poll_for_tests.recvmsg_calls == 1) {
+        errno = EAGAIN;
+        return -1;
+    }
+
+    return record_recvmsg_for_tests(/*socket_fd=*/0, message, /*flags=*/0);
 }
 
 } // namespace
@@ -518,6 +552,35 @@ bool socket_io_backend_recvmsg_maps_ecn_for_tests() {
     return received.status == internal::ReceiveDatagramStatus::ok &&
            received.bytes == g_recorded_recvmsg_for_tests.bytes &&
            received.ecn == QuicEcnCodepoint::ce;
+}
+
+bool socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests() {
+    g_recorded_recvmsg_for_tests = {};
+    g_recorded_recvmsg_for_tests.ecn = QuicEcnCodepoint::ect0;
+    g_recorded_recvmsg_for_tests.bytes = {std::byte{0xcc}, std::byte{0xdd}};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&g_recorded_recvmsg_for_tests.peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(7443);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in);
+    g_retry_readable_poll_for_tests = {};
+
+    const ScopedSocketIoBackendOpsOverride runtime_ops{
+        SocketIoBackendOpsOverride{
+            .poll_fn = &readable_poll_then_retry_with_datagram_for_tests,
+            .recvmsg_fn = &would_block_then_record_recvmsg_for_wait_retry_tests,
+        },
+    };
+
+    PollIoEngine engine;
+    constexpr std::array<int, 1> kSockets = {41};
+    const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    return event.has_value() && event->kind == QuicIoEngineEvent::Kind::rx_datagram &&
+           event->rx.has_value() && event->rx->socket_fd == kSockets.front() &&
+           event->rx->bytes == g_recorded_recvmsg_for_tests.bytes &&
+           event->rx->ecn == QuicEcnCodepoint::ect0 &&
+           g_retry_readable_poll_for_tests.poll_calls == 2 &&
+           g_retry_readable_poll_for_tests.recvmsg_calls == 2;
 }
 
 } // namespace test

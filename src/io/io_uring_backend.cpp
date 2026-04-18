@@ -548,6 +548,38 @@ bool io_uring_backend_wait_without_completion_yields_idle_timeout_for_tests() {
     return event.has_value() && event->kind == QuicIoEngineEvent::Kind::idle_timeout;
 }
 
+bool io_uring_backend_wait_prefers_ready_receive_over_due_timer_for_tests() {
+    reset_io_uring_test_harness();
+    const ScopedIoUringBackendOpsOverride io_uring_ops{io_uring_ops_for_tests()};
+
+    auto engine = IoUringIoEngine::create();
+    if (engine == nullptr) {
+        return false;
+    }
+
+    constexpr int socket_fd = 112;
+    if (!engine->register_socket(socket_fd)) {
+        return false;
+    }
+
+    constexpr std::array<std::byte, 2> kPayload = {
+        std::byte{0x11},
+        std::byte{0x22},
+    };
+    const auto peer = make_ipv4_loopback_peer(9443);
+    enqueue_receive_completion_for_tests(socket_fd, kPayload, peer, sizeof(sockaddr_in),
+                                         QuicEcnCodepoint::not_ect);
+
+    const std::array<int, 1> sockets = {
+        socket_fd,
+    };
+    const auto event = engine->wait(sockets, 5, quic::QuicCoreClock::now(), "client");
+    return event.has_value() && event->kind == QuicIoEngineEvent::Kind::rx_datagram &&
+           event->rx.has_value() && event->rx->socket_fd == socket_fd &&
+           event->rx->ecn == QuicEcnCodepoint::not_ect &&
+           event->rx->bytes == std::vector<std::byte>(kPayload.begin(), kPayload.end());
+}
+
 } // namespace test
 
 } // namespace coquic::io

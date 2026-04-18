@@ -2059,6 +2059,13 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
         }
     }
 
+    if (payload_written < plaintext_payload_size) {
+        // DatagramBuffer growth leaves bytes uninitialized, but short-header padding must
+        // serialize as zero-valued PADDING frames before the payload is sealed.
+        std::fill(payload_bytes.begin() + static_cast<std::ptrdiff_t>(payload_written),
+                  payload_bytes.end(), std::byte{0x00});
+    }
+
     const auto plaintext_payload =
         std::span<const std::byte>(packet_bytes).subspan(payload_offset, plaintext_payload_size);
 

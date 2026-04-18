@@ -130,6 +130,7 @@ enum class ServerBackendSchedulingCaseForTests : std::uint8_t {
     ready_datagram_preempts_repeated_due_timers,
     ready_datagram_preempts_repeated_pending_work_pumps,
     pending_work_yields_to_wait_after_immediate_poll_miss,
+    elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait,
 };
 
 struct ServerLoopResultForTests {
@@ -137,6 +138,7 @@ struct ServerLoopResultForTests {
     std::size_t current_time_calls = 0;
     std::size_t receive_calls = 0;
     std::size_t wait_calls = 0;
+    std::vector<long long> wait_request_delta_ms;
     std::size_t process_expired_calls = 0;
     std::size_t process_datagram_calls = 0;
     std::size_t pump_calls = 0;

@@ -655,6 +655,20 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.wait_calls, 2U);
     EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.process_datagram_calls, 1U);
     EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.pump_calls, 1U);
+
+    const auto elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait =
+        coquic::http09::test::run_server_backend_scheduling_case_for_tests(
+            coquic::http09::test::ServerBackendSchedulingCaseForTests::
+                elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait);
+    EXPECT_EQ(elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait.exit_code, 1);
+    EXPECT_EQ(elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait.wait_calls, 2U);
+    EXPECT_EQ(
+        elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait.wait_request_delta_ms,
+        std::vector<long long>({0, 1}));
+    EXPECT_EQ(
+        elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait.process_datagram_calls,
+        1U);
+    EXPECT_EQ(elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait.pump_calls, 2U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveServerBackendLoopCases) {
@@ -733,6 +747,11 @@ TEST(QuicHttp09RuntimeTest, RuntimeLowLevelHooksExerciseSocketAndEcnFallbacks) {
         coquic::http09::test::runtime_low_level_socket_and_ecn_coverage_for_tests();
     const auto stderr_output = testing::internal::GetCapturedStderr();
     EXPECT_TRUE(covered) << stderr_output;
+}
+
+TEST(QuicHttp09RuntimeTest, SocketBackendWaitRetriesAfterSpuriousReadablePoll) {
+    EXPECT_TRUE(
+        coquic::io::test::socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeTraceHooksCoverIdleTimeoutAndServerFailureBranches) {

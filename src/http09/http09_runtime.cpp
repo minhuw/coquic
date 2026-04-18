@@ -3300,6 +3300,46 @@ int run_http09_server_loop(const ServerSocketSet &sockets, const ServerLoopIo &i
 int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
     bool server_failed = false;
     std::optional<QuicIoEvent> buffered_event;
+    const auto log_wait_request = [&](std::string_view source,
+                                      const std::optional<QuicCoreTimePoint> &deadline,
+                                      QuicCoreTimePoint current) {
+        with_runtime_trace([&](std::ostream &stream) {
+            const auto delta_ms =
+                deadline.has_value()
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - current)
+                          .count()
+                    : -1;
+            stream << "http09-server trace: backend-wait source=" << source
+                   << " has_deadline=" << static_cast<int>(deadline.has_value())
+                   << " delta_ms=" << delta_ms
+                   << " buffered=" << static_cast<int>(buffered_event.has_value()) << '\n';
+        });
+    };
+    const auto log_wait_event = [&](std::string_view source,
+                                    const std::optional<QuicIoEvent> &event) {
+        with_runtime_trace([&](std::ostream &stream) {
+            stream << "http09-server trace: backend-event source=" << source << " kind=";
+            if (!event.has_value()) {
+                stream << "null";
+            } else {
+                switch (event->kind) {
+                case QuicIoEvent::Kind::rx_datagram:
+                    stream << "rx";
+                    break;
+                case QuicIoEvent::Kind::timer_expired:
+                    stream << "timer";
+                    break;
+                case QuicIoEvent::Kind::idle_timeout:
+                    stream << "idle";
+                    break;
+                case QuicIoEvent::Kind::shutdown:
+                    stream << "shutdown";
+                    break;
+                }
+            }
+            stream << '\n';
+        });
+    };
 
     for (;;) {
         if (server_failed) {
@@ -3310,7 +3350,9 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
         const auto next_wakeup = driver.next_wakeup();
         if (!buffered_event.has_value() && next_wakeup.has_value() &&
             next_wakeup.value() <= current) {
+            log_wait_request("top_due", next_wakeup, current);
             const auto event = driver.wait(next_wakeup);
+            log_wait_event("top_due", event);
             if (!event.has_value()) {
                 return 1;
             }
@@ -3345,7 +3387,9 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
                 // Probe for ready RX without blocking. A zero-timeout wait reports
                 // timer_expired even when no core timer was due, so only treat
                 // that event as real when the wakeup is already due.
+                log_wait_request("ready_probe", poll_current, poll_current);
                 const auto ready_event = driver.wait(poll_current);
+                log_wait_event("ready_probe", ready_event);
                 if (!ready_event.has_value()) {
                     return 1;
                 }
@@ -3377,7 +3421,10 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
             event = buffered_event;
             buffered_event.reset();
         } else {
-            event = driver.wait(driver.next_wakeup());
+            const auto wait_next_wakeup = driver.next_wakeup();
+            log_wait_request("main", wait_next_wakeup, driver.current_time());
+            event = driver.wait(wait_next_wakeup);
+            log_wait_event("main", event);
         }
         if (!event.has_value()) {
             return 1;
@@ -3852,6 +3899,9 @@ struct ScriptedServerBackendSchedulingCaseForTests {
     std::vector<bool> pending_work_after_pump;
     std::vector<bool> pump_made_progress;
     std::vector<std::optional<QuicIoEvent>> wait_results;
+    bool blocking_rx_requires_future_wait = false;
+    std::optional<QuicIoEvent> blocking_rx_wait_result;
+    std::size_t max_immediate_waits_before_failure = 0;
     bool process_timer_event_result = true;
     bool process_datagram_result = true;
 };
@@ -4116,6 +4166,42 @@ make_pending_work_yields_to_wait_after_immediate_poll_miss_case_for_tests() {
     };
 }
 
+ScriptedServerBackendSchedulingCaseForTests
+make_elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait_case_for_tests() {
+    const auto base_time = now();
+    return ScriptedServerBackendSchedulingCaseForTests{
+        .current_times =
+            {
+                base_time,
+                base_time,
+                base_time,
+                base_time,
+                base_time,
+            },
+        .next_wakeup_results =
+            {
+                base_time + std::chrono::milliseconds(5),
+                base_time,
+                base_time + std::chrono::milliseconds(1),
+            },
+        .pending_work_after_pump = {true},
+        .pump_made_progress = {true},
+        .blocking_rx_requires_future_wait = true,
+        .blocking_rx_wait_result =
+            QuicIoEvent{
+                .kind = QuicIoEvent::Kind::rx_datagram,
+                .now = base_time + std::chrono::milliseconds(1),
+                .datagram =
+                    QuicIoRxDatagram{
+                        .route_handle = QuicRouteHandle{17},
+                        .bytes = {std::byte{0x01}},
+                    },
+            },
+        .max_immediate_waits_before_failure = 3,
+        .process_datagram_result = false,
+    };
+}
+
 using ServerBackendSchedulingCaseFactoryForTests =
     ScriptedServerBackendSchedulingCaseForTests (*)();
 
@@ -4123,6 +4209,7 @@ ServerBackendSchedulingCaseFactoryForTests server_backend_scheduling_case_factor
     &make_ready_datagram_preempts_repeated_due_timers_case_for_tests,
     &make_ready_datagram_preempts_repeated_pending_work_pumps_case_for_tests,
     &make_pending_work_yields_to_wait_after_immediate_poll_miss_case_for_tests,
+    &make_elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait_case_for_tests,
 };
 
 std::vector<std::byte> bytes_from_string_for_runtime_tests(std::string_view text) {
@@ -7419,10 +7506,14 @@ run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests
     std::size_t current_time_calls = 0;
     std::size_t next_wakeup_calls = 0;
     std::size_t wait_calls = 0;
+    std::size_t immediate_wait_calls = 0;
+    std::vector<long long> wait_request_delta_ms;
     std::size_t process_expired_calls = 0;
     std::size_t process_datagram_calls = 0;
     std::size_t pump_calls = 0;
     bool endpoint_has_pending_work = false;
+    QuicCoreTimePoint last_current_time =
+        script.current_times.empty() ? now() : script.current_times.front();
 
     const auto driver = ServerBackendLoopDriver{
         .current_time =
@@ -7432,7 +7523,9 @@ run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests
                         ? std::size_t{0}
                         : std::min(current_time_calls, script.current_times.size() - 1);
                 current_time_calls += 1;
-                return script.current_times.empty() ? now() : script.current_times[index];
+                last_current_time =
+                    script.current_times.empty() ? now() : script.current_times[index];
+                return last_current_time;
             },
         .next_wakeup =
             [&] {
@@ -7468,8 +7561,35 @@ run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests
             },
         .has_pending_endpoint_work = [&] { return endpoint_has_pending_work; },
         .wait =
-            [&](const std::optional<QuicCoreTimePoint> &) {
+            [&](const std::optional<QuicCoreTimePoint> &next_wakeup) {
                 wait_calls += 1;
+                if (!next_wakeup.has_value()) {
+                    wait_request_delta_ms.push_back(-1);
+                } else {
+                    wait_request_delta_ms.push_back(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(*next_wakeup -
+                                                                              last_current_time)
+                            .count());
+                }
+                if (script.blocking_rx_requires_future_wait) {
+                    const bool immediate_wait =
+                        next_wakeup.has_value() && next_wakeup.value() <= last_current_time;
+                    if (immediate_wait) {
+                        immediate_wait_calls += 1;
+                        if (script.max_immediate_waits_before_failure != 0 &&
+                            immediate_wait_calls > script.max_immediate_waits_before_failure) {
+                            return std::optional<QuicIoEvent>{};
+                        }
+                        return std::optional<QuicIoEvent>(QuicIoEvent{
+                            .kind = QuicIoEvent::Kind::timer_expired,
+                            .now = last_current_time,
+                        });
+                    }
+                    if (script.blocking_rx_wait_result.has_value()) {
+                        return script.blocking_rx_wait_result;
+                    }
+                    return std::optional<QuicIoEvent>{};
+                }
                 if (wait_calls > script.wait_results.size()) {
                     return std::optional<QuicIoEvent>{};
                 }
@@ -7491,6 +7611,7 @@ run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests
         .exit_code = run_server_backend_loop_with_driver(driver),
         .current_time_calls = current_time_calls,
         .wait_calls = wait_calls,
+        .wait_request_delta_ms = std::move(wait_request_delta_ms),
         .process_expired_calls = process_expired_calls,
         .process_datagram_calls = process_datagram_calls,
         .pump_calls = pump_calls,

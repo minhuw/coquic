@@ -164,7 +164,7 @@
 
       <section class="card controls">
         <div class="toggle" role="tablist" aria-label="Page mode">
-          <button id="modeShowcase" type="button" role="tab" aria-selected="true">Showcase</button>
+          <button id="modeShowcase" class="active" type="button" role="tab" aria-selected="true">Showcase</button>
           <button id="modeTechnical" type="button" role="tab" aria-selected="false">Technical</button>
         </div>
         <button id="runChecks" type="button">Run Live Checks</button>
@@ -249,9 +249,54 @@
         return JSON.stringify(value, null, 2);
       }
 
+      function safeStorageGet(key) {
+        try {
+          return localStorage.getItem(key);
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function safeStorageSet(key, value) {
+        try {
+          localStorage.setItem(key, value);
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      async function safeReadJson(response) {
+        try {
+          return await response.json();
+        } catch (error) {
+          let rawText = null;
+          try {
+            rawText = await response.text();
+          } catch (_) {
+            rawText = null;
+          }
+          return {
+            parse_error: error instanceof Error ? error.message : String(error),
+            raw_text: rawText,
+          };
+        }
+      }
+
+      async function runProbe(label, renderTarget, runner) {
+        const result = { probe: label, ok: false, status: null, error: null };
+        try {
+          Object.assign(result, await runner());
+        } catch (error) {
+          result.error = error instanceof Error ? error.message : String(error);
+        }
+        renderTarget.textContent = toJson(result);
+        return result;
+      }
+
       function setMode(mode) {
         state.mode = mode === "Technical" ? "Technical" : "Showcase";
-        localStorage.setItem(MODE_KEY, state.mode);
+        safeStorageSet(MODE_KEY, state.mode);
         const showcase = state.mode === "Showcase";
         ui.modeShowcase.classList.toggle("active", showcase);
         ui.modeTechnical.classList.toggle("active", !showcase);
@@ -267,42 +312,55 @@
         ui.latestStatus.textContent = "Running probes...";
         ui.latestStatus.className = "status";
         ui.lastAttempt.textContent = startedAt.toISOString();
-
-        const headInfo = {};
-        const inspectInfo = {};
-        const echoInfo = {};
-        let completeSuccess = false;
-
+        ui.altSvcValue.textContent = "checking...";
+        ui.headResult.textContent = toJson({ probe: "HEAD /", state: "running" });
+        ui.inspectResult.textContent = toJson({ probe: "POST /_coquic/inspect", state: "running" });
+        ui.echoResult.textContent = toJson({ probe: "POST /_coquic/echo", state: "running" });
         try {
-          const headResponse = await fetch("/", { method: "HEAD", cache: "no-store" });
-          headInfo.ok = headResponse.ok;
-          headInfo.status = headResponse.status;
-          headInfo.altSvc = headResponse.headers.get("alt-svc");
-          ui.altSvcValue.textContent = headInfo.altSvc || "not exposed";
-          ui.headResult.textContent = toJson(headInfo);
-
-          const inspectResponse = await fetch("/_coquic/inspect", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ source: "browser-demo", location: window.location.href }),
+          const headInfo = await runProbe("HEAD /", ui.headResult, async function () {
+            const response = await fetch("/", { method: "HEAD", cache: "no-store" });
+            return {
+              ok: response.ok,
+              status: response.status,
+              altSvc: response.headers.get("alt-svc") || null,
+            };
           });
-          inspectInfo.ok = inspectResponse.ok;
-          inspectInfo.status = inspectResponse.status;
-          inspectInfo.body = await inspectResponse.json();
-          ui.inspectResult.textContent = toJson(inspectInfo);
+          if (headInfo.altSvc) {
+            ui.altSvcValue.textContent = headInfo.altSvc;
+          } else if (headInfo.error) {
+            ui.altSvcValue.textContent = "unavailable (HEAD probe failed)";
+          } else {
+            ui.altSvcValue.textContent = "not exposed";
+          }
+
+          const inspectInfo = await runProbe("POST /_coquic/inspect", ui.inspectResult, async function () {
+            const response = await fetch("/_coquic/inspect", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ source: "browser-demo", location: window.location.href }),
+            });
+            return {
+              ok: response.ok,
+              status: response.status,
+              body: await safeReadJson(response),
+            };
+          });
 
           const echoPayload = { ping: "coquic-live-check", sent_at: new Date().toISOString() };
-          const echoResponse = await fetch("/_coquic/echo", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(echoPayload),
+          const echoInfo = await runProbe("POST /_coquic/echo", ui.echoResult, async function () {
+            const response = await fetch("/_coquic/echo", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(echoPayload),
+            });
+            return {
+              ok: response.ok,
+              status: response.status,
+              body: await safeReadJson(response),
+            };
           });
-          echoInfo.ok = echoResponse.ok;
-          echoInfo.status = echoResponse.status;
-          echoInfo.body = await echoResponse.json();
-          ui.echoResult.textContent = toJson(echoInfo);
 
-          completeSuccess = Boolean(headInfo.ok && inspectInfo.ok && echoInfo.ok);
+          const completeSuccess = Boolean(headInfo.ok && inspectInfo.ok && echoInfo.ok);
           if (completeSuccess) {
             state.lastSuccessful = {
               completedAt: new Date().toISOString(),
@@ -317,14 +375,15 @@
             ui.latestStatus.textContent = "All probes succeeded.";
             ui.latestStatus.className = "status ok";
           } else {
-            throw new Error("one or more probes returned a non-OK status");
+            ui.latestStatus.textContent = "Probe run completed with one or more failures.";
+            ui.latestStatus.className = "status error";
+            if (state.lastSuccessful) {
+              ui.lastSuccessPayload.textContent = toJson(state.lastSuccessful);
+            }
           }
         } catch (error) {
-          ui.latestStatus.textContent = "Probe run failed: " + error.message;
+          ui.latestStatus.textContent = "Probe run failed unexpectedly: " + error.message;
           ui.latestStatus.className = "status error";
-          if (state.lastSuccessful) {
-            ui.lastSuccessPayload.textContent = toJson(state.lastSuccessful);
-          }
         } finally {
           ui.runChecks.disabled = false;
         }
@@ -332,7 +391,7 @@
 
       (function startup() {
         ui.currentLocation.textContent = window.location.href;
-        const savedMode = localStorage.getItem(MODE_KEY);
+        const savedMode = safeStorageGet(MODE_KEY);
         setMode(savedMode || "Showcase");
         ui.modeShowcase.addEventListener("click", function () { setMode("Showcase"); });
         ui.modeTechnical.addEventListener("click", function () { setMode("Technical"); });

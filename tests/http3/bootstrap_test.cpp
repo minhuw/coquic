@@ -32,6 +32,8 @@ bool bootstrap_scoped_fd_move_constructor_for_test();
 bool bootstrap_scoped_fd_move_assignment_for_test();
 bool bootstrap_scoped_fd_self_move_assignment_for_test();
 bool bootstrap_parse_request_for_test(std::string_view request_text);
+void bootstrap_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path);
+void bootstrap_clear_forced_file_read_failure_path_for_test();
 std::string bootstrap_serialize_unknown_status_response_for_test(const Http3BootstrapConfig &config,
                                                                  int status_code);
 } // namespace coquic::http3
@@ -103,10 +105,8 @@ int run_bootstrap_server_guarded(const coquic::http3::Http3BootstrapConfig &conf
 class ScopedBootstrapProcess {
   public:
     explicit ScopedBootstrapProcess(const coquic::http3::Http3BootstrapConfig &config)
-        : host_(config.host), port_(config.port),
-          stop_requested_(std::make_shared<std::atomic<bool>>(false)),
-          future_(std::async(std::launch::async, run_bootstrap_server_guarded, config,
-                             stop_requested_.get())) {
+        : host_(config.host), port_(config.port), config_(config),
+          thread_(&ScopedBootstrapProcess::run_server_thread, this) {
         std::this_thread::sleep_for(std::chrono::milliseconds{100});
     }
 
@@ -121,28 +121,48 @@ class ScopedBootstrapProcess {
         if (cached_status_.has_value()) {
             return cached_status_;
         }
-        if (!future_.valid()) {
-            return std::nullopt;
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!completed_.load()) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return std::nullopt;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
-        if (future_.wait_for(timeout) != std::future_status::ready) {
-            return std::nullopt;
+        if (thread_.joinable()) {
+            thread_.join();
         }
-        cached_status_ = future_.get();
+        cached_status_ = exit_status_.load();
         return cached_status_;
     }
 
     void terminate() {
-        if (cached_status_.has_value() || !future_.valid()) {
+        if (cached_status_.has_value()) {
+            if (thread_.joinable()) {
+                thread_.join();
+            }
             return;
         }
-        stop_requested_->store(true);
-        wake();
-        if (future_.wait_for(std::chrono::seconds{5}) == std::future_status::ready) {
-            cached_status_ = future_.get();
+        if (!thread_.joinable()) {
+            return;
         }
+        stop_requested_.store(true);
+        wake();
+        thread_.join();
+        completed_.store(true);
+        cached_status_ = exit_status_.load();
+    }
+
+    bool send_signal(int signal_number) {
+        return thread_.joinable() && ::pthread_kill(thread_.native_handle(), signal_number) == 0;
     }
 
   private:
+    static void run_server_thread(ScopedBootstrapProcess *self) noexcept {
+        const int status = run_bootstrap_server_guarded(self->config_, &self->stop_requested_);
+        self->exit_status_.store(status);
+        self->completed_.store(true);
+    }
+
     void wake() const {
         const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
@@ -165,8 +185,11 @@ class ScopedBootstrapProcess {
 
     std::string host_;
     std::uint16_t port_ = 0;
-    std::shared_ptr<std::atomic<bool>> stop_requested_;
-    std::future<int> future_;
+    coquic::http3::Http3BootstrapConfig config_;
+    std::atomic<bool> stop_requested_ = false;
+    std::atomic<bool> completed_ = false;
+    std::atomic<int> exit_status_ = 0;
+    std::thread thread_;
     std::optional<int> cached_status_;
 };
 
@@ -371,24 +394,18 @@ class ScopedSignalHandler {
     struct sigaction previous_{};
 };
 
-class ScopedPermissions {
+class ScopedForcedFileReadFailure {
   public:
-    explicit ScopedPermissions(const std::filesystem::path &path)
-        : path_(path), permissions_(std::filesystem::status(path).permissions()) {
+    explicit ScopedForcedFileReadFailure(const std::filesystem::path &path) {
+        coquic::http3::bootstrap_set_forced_file_read_failure_path_for_test(path);
     }
 
-    ~ScopedPermissions() {
-        std::error_code error;
-        std::filesystem::permissions(path_, permissions_, std::filesystem::perm_options::replace,
-                                     error);
+    ~ScopedForcedFileReadFailure() {
+        coquic::http3::bootstrap_clear_forced_file_read_failure_path_for_test();
     }
 
-    ScopedPermissions(const ScopedPermissions &) = delete;
-    ScopedPermissions &operator=(const ScopedPermissions &) = delete;
-
-  private:
-    std::filesystem::path path_;
-    std::filesystem::perms permissions_;
+    ScopedForcedFileReadFailure(const ScopedForcedFileReadFailure &) = delete;
+    ScopedForcedFileReadFailure &operator=(const ScopedForcedFileReadFailure &) = delete;
 };
 
 TEST(QuicHttp3BootstrapTest, FormatsAltSvcValueFromBootstrapConfig) {
@@ -560,13 +577,11 @@ TEST(QuicHttp3BootstrapTest, HttpsGetReturnsNotFoundForRejectedOrUnavailableTarg
     EXPECT_EQ(directory.value().status_code, 404);
 }
 
-TEST(QuicHttp3BootstrapTest, HttpsGetReturnsInternalServerErrorForUnreadableFile) {
+TEST(QuicHttp3BootstrapTest, HttpsGetReturnsInternalServerErrorForForcedFileReadFailure) {
     coquic::quic::test::ScopedTempDir document_root;
     document_root.write_file("secret.txt", "hidden");
     const auto unreadable_path = document_root.path() / "secret.txt";
-    ScopedPermissions restore_permissions(unreadable_path);
-    std::filesystem::permissions(unreadable_path, std::filesystem::perms::none,
-                                 std::filesystem::perm_options::replace);
+    ScopedForcedFileReadFailure forced_failure(unreadable_path);
 
     const auto bootstrap_port = allocate_tcp_loopback_port();
     ASSERT_NE(bootstrap_port, 0);
@@ -744,13 +759,8 @@ TEST(QuicHttp3BootstrapTest, PollEintrKeepsServingRequests) {
 
     const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
     ScopedSignalHandler signal_handler(SIGUSR1);
-    std::promise<int> exit_status;
-    std::atomic<bool> stop_requested = false;
-    std::thread server_thread(
-        [&]() { exit_status.set_value(run_bootstrap_server_guarded(config, &stop_requested)); });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds{100});
-    ASSERT_EQ(::pthread_kill(server_thread.native_handle(), SIGUSR1), 0);
+    ScopedBootstrapProcess server(config);
+    ASSERT_TRUE(server.send_signal(SIGUSR1));
     std::this_thread::sleep_for(std::chrono::milliseconds{50});
 
     const auto response = https_request("127.0.0.1", bootstrap_port, "GET", "/hello.txt");
@@ -761,10 +771,13 @@ TEST(QuicHttp3BootstrapTest, PollEintrKeepsServingRequests) {
     EXPECT_EQ(response.value().status_code, 200);
     EXPECT_EQ(response.value().body, "hello-bootstrap");
 
-    stop_requested.store(true);
-    ASSERT_TRUE(wake_bootstrap_listener("127.0.0.1", bootstrap_port));
-    server_thread.join();
-    EXPECT_EQ(exit_status.get_future().get(), 0);
+    server.terminate();
+    const auto exit_status = server.wait_for_exit(std::chrono::seconds{5});
+    ASSERT_TRUE(exit_status.has_value());
+    if (!exit_status.has_value()) {
+        return;
+    }
+    EXPECT_EQ(*exit_status, 0);
 }
 
 TEST(QuicHttp3BootstrapTest, TestHookExercisesScopedFdMoveOperations) {

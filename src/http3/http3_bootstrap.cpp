@@ -114,6 +114,11 @@ bool has_raw_dot_segment(const std::filesystem::path &path) {
     });
 }
 
+std::optional<std::filesystem::path> &forced_read_failure_path_for_test() {
+    static std::optional<std::filesystem::path> path;
+    return path;
+}
+
 std::optional<std::filesystem::path>
 resolve_bootstrap_path_under_root(const std::filesystem::path &root,
                                   std::string_view request_path) {
@@ -148,6 +153,11 @@ resolve_bootstrap_path_under_root(const std::filesystem::path &root,
 }
 
 std::optional<std::string> read_binary_file(const std::filesystem::path &path) {
+    const auto normalized_path = path.lexically_normal();
+    if (forced_read_failure_path_for_test() == normalized_path) {
+        return std::nullopt;
+    }
+
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         return std::nullopt;
@@ -540,6 +550,14 @@ bool bootstrap_scoped_fd_self_move_assignment_for_test() {
 
 bool bootstrap_parse_request_for_test(std::string_view request_text) {
     return parse_bootstrap_request(request_text).has_value();
+}
+
+void bootstrap_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path) {
+    forced_read_failure_path_for_test() = path.lexically_normal();
+}
+
+void bootstrap_clear_forced_file_read_failure_path_for_test() {
+    forced_read_failure_path_for_test().reset();
 }
 
 std::string bootstrap_serialize_unknown_status_response_for_test(const Http3BootstrapConfig &config,

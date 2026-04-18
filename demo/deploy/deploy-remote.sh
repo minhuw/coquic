@@ -87,7 +87,7 @@ remote_cleanup() {
   if [[ -z "${remote_upload_dir}" ]]; then
     return
   fi
-  ssh "${ssh_opts[@]}" "${remote_target}" "rm -rf '${remote_upload_dir}'" >/dev/null 2>&1 || true
+  ssh "${ssh_opts[@]}" "${remote_target}" "sudo rm -rf '${remote_upload_dir}'" >/dev/null 2>&1 || true
 }
 
 rollback_remote() {
@@ -183,15 +183,33 @@ restore_or_remove \
   "600"
 
 sudo systemctl daemon-reload
-if sudo test -f /etc/systemd/system/coquic-demo.service &&
-   sudo test -f /etc/coquic-demo/tls/fullchain.pem &&
-   sudo test -f /etc/coquic-demo/tls/privkey.pem; then
+
+service_was_active=0
+service_was_enabled=0
+if sudo test -f "${remote_upload_dir}/service.was_active"; then
+  service_was_active=1
+fi
+if sudo test -f "${remote_upload_dir}/service.was_enabled"; then
+  service_was_enabled=1
+fi
+
+if [[ "${service_was_enabled}" == "1" ]]; then
+  sudo systemctl enable coquic-demo.service || true
+else
+  sudo systemctl disable coquic-demo.service || true
+fi
+
+if [[ "${service_was_active}" == "1" ]]; then
   if ! sudo systemctl restart coquic-demo.service; then
-    sudo systemctl enable --now coquic-demo.service
+    sudo systemctl start coquic-demo.service
   fi
   sudo systemctl is-active --quiet coquic-demo.service
 else
-  sudo systemctl disable --now coquic-demo.service || true
+  sudo systemctl stop coquic-demo.service || true
+  if sudo systemctl is-active --quiet coquic-demo.service; then
+    echo "rollback failed: coquic-demo.service should be inactive" >&2
+    exit 1
+  fi
 fi
 EOF
 
@@ -281,9 +299,24 @@ service_was_active=0
 if sudo systemctl is-active --quiet coquic-demo.service; then
   service_was_active=1
 fi
+service_was_enabled=0
+if sudo systemctl is-enabled --quiet coquic-demo.service; then
+  service_was_enabled=1
+fi
 
 sudo install -d -m 755 /opt/coquic-demo/releases
 sudo install -d -m 755 /etc/coquic-demo/tls
+
+if [[ "${service_was_active}" == "1" ]]; then
+  sudo touch "${remote_upload_dir}/service.was_active"
+else
+  sudo rm -f "${remote_upload_dir}/service.was_active"
+fi
+if [[ "${service_was_enabled}" == "1" ]]; then
+  sudo touch "${remote_upload_dir}/service.was_enabled"
+else
+  sudo rm -f "${remote_upload_dir}/service.was_enabled"
+fi
 
 backup_or_mark_absent \
   "/etc/systemd/system/coquic-demo.service" \

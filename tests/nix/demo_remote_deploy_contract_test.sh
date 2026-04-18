@@ -137,6 +137,12 @@ if "verification retry loop" not in deploy_script:
     raise SystemExit("deploy script missing verification retry-loop marker")
 if "rollback: cleanup failed ${remote_release_dir}" not in deploy_script:
     raise SystemExit("deploy script missing failed release cleanup marker")
+if "service.was_active" not in deploy_script:
+    raise SystemExit("deploy script missing pre-deploy active-state marker")
+if "service.was_enabled" not in deploy_script:
+    raise SystemExit("deploy script missing pre-deploy enabled-state marker")
+if "sudo rm -rf '${remote_upload_dir}'" not in deploy_script:
+    raise SystemExit("deploy script missing sudo-based remote cleanup")
 same_release_backup_restore_markers = [
     "same-release backup /opt/coquic-demo/current/h3-server",
     "same-release backup /opt/coquic-demo/current/site",
@@ -362,6 +368,23 @@ EOF
   else
     if ! grep -Fq "rollback-invoked" "${ssh_log}"; then
       echo "${case_name} should invoke rollback ssh path after verification failure" >&2
+      cat "${ssh_log}" >&2
+      exit 1
+    fi
+    if [[ "$(cat "${ssh_bash_count}")" -lt 2 ]]; then
+      echo "${case_name} should invoke distinct install and rollback ssh bash paths" >&2
+      cat "${ssh_log}" >&2
+      exit 1
+    fi
+    cleanup_line="$(grep -Fn "sudo rm -rf '/tmp/coquic-demo-release-${case_name}'" "${ssh_log}" | tail -n1 | cut -d: -f1)"
+    rollback_line="$(grep -Fn "rollback-invoked" "${ssh_log}" | tail -n1 | cut -d: -f1)"
+    if [[ -z "${cleanup_line}" ]]; then
+      echo "${case_name} should invoke remote cleanup after rollback" >&2
+      cat "${ssh_log}" >&2
+      exit 1
+    fi
+    if [[ "${cleanup_line}" -le "${rollback_line}" ]]; then
+      echo "${case_name} remote cleanup should occur after rollback" >&2
       cat "${ssh_log}" >&2
       exit 1
     fi

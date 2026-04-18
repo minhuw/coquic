@@ -572,6 +572,99 @@ TEST(QuicHttp3ConnectionTest, PeerQpackCriticalStreamFinClosesConnection) {
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::closed_critical_stream));
 }
 
+TEST(QuicHttp3ConnectionTest, PeerControlStreamFinAfterSettingsClosesConnection) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    const auto registered = connection.on_core_result(
+        receive_result(3, settings_stream_bytes(coquic::http3::Http3SettingsSnapshot{})),
+        coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(registered).has_value());
+
+    const auto update = connection.on_core_result(
+        receive_result(3, std::span<const std::byte>{}, true), coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::closed_critical_stream));
+}
+
+TEST(QuicHttp3ConnectionTest, PeerQpackDecoderCriticalStreamFinClosesConnection) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    const auto update = connection.on_core_result(receive_result(11, bytes_from_ints({0x03}), true),
+                                                  coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::closed_critical_stream));
+}
+
+TEST(QuicHttp3ConnectionTest, PeerResetOnRemoteQpackDecoderStreamClosesConnection) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    const auto registered = connection.on_core_result(receive_result(11, bytes_from_ints({0x03})),
+                                                      coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(registered).has_value());
+
+    const auto update =
+        connection.on_core_result(reset_result(11), coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::closed_critical_stream));
+}
+
+TEST(QuicHttp3ConnectionTest, PeerStopSendingOnLocalControlStreamClosesConnection) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    prime_client_transport(connection);
+
+    const auto update =
+        connection.on_core_result(stop_sending_result(2), coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::closed_critical_stream));
+}
+
+TEST(QuicHttp3ConnectionTest, PeerStopSendingOnLocalQpackEncoderStreamClosesConnection) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    prime_client_transport(connection);
+
+    const auto update =
+        connection.on_core_result(stop_sending_result(6), coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::closed_critical_stream));
+}
+
+TEST(QuicHttp3ConnectionTest, PeerStopSendingOnLocalQpackDecoderStreamClosesConnection) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    prime_client_transport(connection);
+
+    const auto update =
+        connection.on_core_result(stop_sending_result(10), coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::closed_critical_stream));
+}
+
 TEST(QuicHttp3ConnectionTest, IgnoresUnknownPeerUnidirectionalStreamTypes) {
     coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
         .role = coquic::http3::Http3ConnectionRole::client,
@@ -610,6 +703,42 @@ TEST(QuicHttp3ConnectionTest, CleansUpPartialPeerUnidirectionalStreamTypeStateOn
     EXPECT_EQ(coquic::http3::Http3ConnectionPeerUniStreamAccess::size(connection), 0u);
 }
 
+TEST(QuicHttp3ConnectionTest, FragmentedPeerUniStreamTypeLaterResolvesToControlStream) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    const auto first_fragment = connection.on_core_result(
+        receive_result(15, bytes_from_ints({0x40})), coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(first_fragment).has_value());
+    EXPECT_FALSE(connection.peer_settings_received());
+
+    auto second_fragment = bytes_from_ints({0x00});
+    const auto control_stream = settings_stream_bytes(coquic::http3::Http3SettingsSnapshot{});
+    second_fragment.insert(second_fragment.end(), control_stream.begin() + 1, control_stream.end());
+
+    const auto update = connection.on_core_result(receive_result(15, second_fragment),
+                                                  coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(update).has_value());
+    EXPECT_TRUE(connection.peer_settings_received());
+}
+
+TEST(QuicHttp3ConnectionTest, FragmentedPeerUniStreamTypeLaterResolvesToQpackDecoderStream) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    const auto first_fragment = connection.on_core_result(
+        receive_result(15, bytes_from_ints({0x40})), coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(first_fragment).has_value());
+
+    const auto update = connection.on_core_result(receive_result(15, bytes_from_ints({0x03})),
+                                                  coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(update).has_value());
+    EXPECT_TRUE(update.events.empty());
+    EXPECT_TRUE(update.core_inputs.empty());
+}
+
 TEST(QuicHttp3ConnectionTest, RejectsDuplicateSettingsFrameOnPeerControlStream) {
     coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
         .role = coquic::http3::Http3ConnectionRole::client,
@@ -646,6 +775,29 @@ TEST(QuicHttp3ConnectionTest, InvalidPeerSettingsMapToSettingsError) {
                                                                         },
                                                                     })),
                                                   coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::settings_error));
+}
+
+TEST(QuicHttp3ConnectionTest, DuplicateSettingsIdentifiersInSingleFrameMapToSettingsError) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    const auto update = connection.on_core_result(
+        receive_result(3, settings_stream_bytes({
+                              coquic::http3::Http3Setting{
+                                  .id = coquic::http3::kHttp3SettingsQpackMaxTableCapacity,
+                                  .value = 16,
+                              },
+                              coquic::http3::Http3Setting{
+                                  .id = coquic::http3::kHttp3SettingsQpackMaxTableCapacity,
+                                  .value = 32,
+                              },
+                          })),
+        coquic::quic::QuicCoreTimePoint{});
     const auto close = close_input_from(update);
 
     EXPECT_EQ(close_application_error_code(close),
@@ -719,6 +871,48 @@ TEST(QuicHttp3ConnectionTest, RejectsIncreasingPeerGoawayIdentifier) {
 
     EXPECT_EQ(close_application_error_code(close),
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::id_error));
+}
+
+TEST(QuicHttp3ConnectionTest, MalformedGoawayPayloadOnControlStreamMapsToFrameError) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    const auto registered = connection.on_core_result(
+        receive_result(3, settings_stream_bytes(coquic::http3::Http3SettingsSnapshot{})),
+        coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(registered).has_value());
+
+    const auto update = connection.on_core_result(
+        receive_result(
+            3, bytes_from_ints(
+                   {static_cast<std::uint8_t>(coquic::http3::kHttp3FrameTypeGoaway), 0x01, 0x40})),
+        coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::frame_error));
+}
+
+TEST(QuicHttp3ConnectionTest, MalformedMaxPushIdPayloadOnControlStreamMapsToFrameError) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    const auto registered = connection.on_core_result(
+        receive_result(3, settings_stream_bytes(coquic::http3::Http3SettingsSnapshot{})),
+        coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(registered).has_value());
+
+    const auto update = connection.on_core_result(
+        receive_result(
+            3, bytes_from_ints({static_cast<std::uint8_t>(coquic::http3::kHttp3FrameTypeMaxPushId),
+                                0x01, 0x40})),
+        coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::frame_error));
 }
 
 TEST(QuicHttp3ConnectionTest, BuffersFragmentedPeerQpackEncoderInstructions) {

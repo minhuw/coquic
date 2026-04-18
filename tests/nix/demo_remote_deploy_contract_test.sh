@@ -143,6 +143,12 @@ if "service.was_enabled" not in deploy_script:
     raise SystemExit("deploy script missing pre-deploy enabled-state marker")
 if "sudo rm -rf '${remote_upload_dir}'" not in deploy_script:
     raise SystemExit("deploy script missing sudo-based remote cleanup")
+if "preflight: current must be symlink if present" not in deploy_script:
+    raise SystemExit("deploy script missing current-symlink preflight marker")
+if "preflight: current target must resolve within /opt/coquic-demo/releases" not in deploy_script:
+    raise SystemExit("deploy script missing current-target preflight marker")
+if "ln -sfnT" not in deploy_script:
+    raise SystemExit("deploy script missing guarded symlink replacement")
 same_release_backup_restore_markers = [
     "same-release backup /opt/coquic-demo/current/h3-server",
     "same-release backup /opt/coquic-demo/current/site",
@@ -178,6 +184,7 @@ run_same_release_case() {
   local case_name="$1"
   local nix_mode="$2"
   local expected_status="$3"
+  local readlink_target="$4"
 
   local case_dir="${test_tmp}/${case_name}"
   local stub_bin="${case_dir}/bin"
@@ -209,12 +216,25 @@ log_path="${COQUIC_TEST_SSH_LOG:?}"
 printf 'ssh %s\n' "$*" >> "${log_path}"
 
 if [[ "$*" == *"readlink '/opt/coquic-demo/current'"* ]]; then
-  printf '%s\n' "/opt/coquic-demo/releases/${COQUIC_TEST_SAME_SHA:?}"
+  if [[ -n "${COQUIC_TEST_READLINK_TARGET:-}" ]]; then
+    printf '%s\n' "${COQUIC_TEST_READLINK_TARGET}"
+  fi
   exit 0
 fi
 
 if [[ "$*" == *"mktemp -d"* ]]; then
   printf '%s\n' "/tmp/coquic-demo-release-${COQUIC_TEST_CASE_NAME:?}"
+  exit 0
+fi
+
+if [[ "$*" == *"bash -s --"* &&
+      "$*" == *"/opt/coquic-demo/current"* &&
+      "$*" == *"/opt/coquic-demo/releases"* &&
+      "$*" != *"/tmp/coquic-demo-release-"* ]]; then
+  printf 'preflight-invoked\n' >> "${log_path}"
+  if [[ -n "${COQUIC_TEST_READLINK_TARGET:-}" ]]; then
+    printf '%s\n' "${COQUIC_TEST_READLINK_TARGET}"
+  fi
   exit 0
 fi
 
@@ -300,7 +320,7 @@ EOF
     COQUIC_DEMO_PUBLIC_PORT="4433" \
     COQUIC_TEST_CASE_NAME="${case_name}" \
     COQUIC_TEST_NIX_MODE="${nix_mode}" \
-    COQUIC_TEST_SAME_SHA="deadbeefcafe" \
+    COQUIC_TEST_READLINK_TARGET="${readlink_target}" \
     COQUIC_TEST_SSH_LOG="${ssh_log}" \
     COQUIC_TEST_SCP_LOG="${scp_log}" \
     COQUIC_TEST_NIX_LOG="${nix_log}" \
@@ -391,8 +411,11 @@ EOF
   fi
 }
 
-run_same_release_case "same-sha-success" "success" "success"
+run_same_release_case "same-sha-success" "success" "success" "/opt/coquic-demo/releases/deadbeefcafe"
 echo "same-SHA repair mode behaves correctly"
 
-run_same_release_case "same-sha-failure" "fail_after_install" "failure"
+run_same_release_case "same-sha-failure" "fail_after_install" "failure" "/opt/coquic-demo/releases/deadbeefcafe"
 echo "same-SHA repair rollback on verification failure behaves correctly"
+
+run_same_release_case "new-release-failure" "fail_after_install" "failure" "/opt/coquic-demo/releases/112233445566"
+echo "new-release rollback on verification failure behaves correctly"

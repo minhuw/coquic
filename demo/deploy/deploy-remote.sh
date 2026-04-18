@@ -138,7 +138,7 @@ restore_dir_or_remove() {
 
 # rollback: restore /opt/coquic-demo/current
 if [[ -n "${previous_release_target}" ]]; then
-  sudo ln -sfn "${previous_release_target}" "${remote_current_link}"
+  sudo ln -sfnT "${previous_release_target}" "${remote_current_link}"
 else
   sudo rm -f "${remote_current_link}"
 fi
@@ -251,8 +251,38 @@ printf '%s' "${COQUIC_DEMO_CERT_CHAIN_PEM}" > "${staging_dir}/fullchain.pem"
 printf '%s' "${COQUIC_DEMO_PRIVATE_KEY_PEM}" > "${staging_dir}/privkey.pem"
 
 previous_release_target="$(
-  ssh "${ssh_opts[@]}" "${remote_target}" \
-    "if [ -L '${remote_current_link}' ]; then readlink '${remote_current_link}'; fi"
+  ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_current_link}" "${remote_releases_root}" <<'EOF'
+set -euo pipefail
+remote_current_link="$1"
+remote_releases_root="$2"
+
+# preflight: current must be symlink if present
+if [[ ! -e "${remote_current_link}" ]]; then
+  exit 0
+fi
+
+if [[ ! -L "${remote_current_link}" ]]; then
+  echo "remote preflight failed: ${remote_current_link} exists but is not a symlink" >&2
+  exit 1
+fi
+
+canonical_target="$(readlink -m "${remote_current_link}")"
+if [[ -z "${canonical_target}" ]]; then
+  echo "remote preflight failed: unable to resolve ${remote_current_link} target" >&2
+  exit 1
+fi
+
+# preflight: current target must resolve within /opt/coquic-demo/releases
+case "${canonical_target}" in
+  "${remote_releases_root}/"*) ;;
+  *)
+    echo "remote preflight failed: ${remote_current_link} target resolves outside ${remote_releases_root}: ${canonical_target}" >&2
+    exit 1
+    ;;
+esac
+
+printf '%s\n' "${canonical_target}"
+EOF
 )"
 
 if [[ "${previous_release_target}" == "${remote_release_dir}" ]]; then
@@ -358,7 +388,7 @@ sudo install -m 644 "${remote_upload_dir}/coquic-demo.service" /etc/systemd/syst
 sudo install -m 644 "${remote_upload_dir}/fullchain.pem" /etc/coquic-demo/tls/fullchain.pem
 sudo install -m 600 "${remote_upload_dir}/privkey.pem" /etc/coquic-demo/tls/privkey.pem
 
-sudo ln -sfn "${remote_release_dir}" "${remote_current_link}"
+sudo ln -sfnT "${remote_release_dir}" "${remote_current_link}"
 sudo systemctl daemon-reload
 # install: restart existing service if already active
 if [[ "${service_was_active}" == "1" ]]; then

@@ -409,8 +409,11 @@ sudo systemctl daemon-reload
 if [[ "${service_was_active}" == "1" ]]; then
   sudo systemctl restart coquic-demo.service
 else
-  sudo systemctl enable --now coquic-demo.service
+  sudo systemctl start coquic-demo.service
 fi
+# install success invariant: service enabled and active
+sudo systemctl enable coquic-demo.service
+sudo systemctl is-enabled --quiet coquic-demo.service
 sudo systemctl is-active --quiet coquic-demo.service
 EOF
 then
@@ -418,11 +421,17 @@ then
 fi
 
 url="https://${COQUIC_DEMO_PUBLIC_HOST}:${public_port}/"
+curl_http3_out="$(nix build --no-link --print-out-paths .#curl-http3)"
+curl_http3_bin="${curl_http3_out}/bin/curl-http3"
+if [[ ! -x "${curl_http3_bin}" ]]; then
+  fail_with_rollback "deployment verification failed: missing curl-http3 binary at ${curl_http3_bin}"
+fi
+
 headers_verified=0
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: headers
   headers=""
-  if headers="$(timeout 20s nix run .#curl-http3 -- -I "${url}" 2>/dev/null)"; then
+  if headers="$(timeout 20s "${curl_http3_bin}" -I "${url}" 2>/dev/null)"; then
     normalized_headers="$(printf '%s' "${headers}" | tr -d '\r')"
     if grep -Fq 'HTTP/1.1 200 OK' <<<"${normalized_headers}" &&
        grep -Eiq '^alt-svc:[[:space:]].*h3=":'"${public_port}"'".*ma=60' <<<"${normalized_headers}"; then
@@ -442,7 +451,7 @@ http3_verified=0
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: http3-version
   http3_version=""
-  if http3_version="$(timeout 20s nix run .#curl-http3 -- --http3-only -sS -o /dev/null -w '%{http_version}' "${url}" 2>/dev/null)"; then
+  if http3_version="$(timeout 20s "${curl_http3_bin}" --http3-only -sS -o /dev/null -w '%{http_version}' "${url}" 2>/dev/null)"; then
     if [[ "${http3_version}" == "3" ]]; then
       http3_verified=1
       break
@@ -460,7 +469,7 @@ page_verified=0
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: page-markers
   page=""
-  if page="$(timeout 20s nix run .#curl-http3 -- --http3-only -sS "${url}" 2>/dev/null)"; then
+  if page="$(timeout 20s "${curl_http3_bin}" --http3-only -sS "${url}" 2>/dev/null)"; then
     # verification marker: coquic-demo-v1
     if grep -Fq "coquic-demo-v1" <<<"${page}"; then
       page_verified=1

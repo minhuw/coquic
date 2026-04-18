@@ -142,6 +142,10 @@ if "COQUIC_DEMO_PUBLIC_PORT must be 4433 for the current service template" not i
     raise SystemExit("deploy script missing COQUIC_DEMO_PUBLIC_PORT guard")
 if "install: restart existing service if already active" not in deploy_script:
     raise SystemExit("deploy script missing active-service restart install path marker")
+if "install success invariant: service enabled and active" not in deploy_script:
+    raise SystemExit("deploy script missing success-state enablement invariant marker")
+if "sudo systemctl enable coquic-demo.service" not in deploy_script:
+    raise SystemExit("deploy script missing explicit enable call for active-service success path")
 if "verification retry loop" not in deploy_script:
     raise SystemExit("deploy script missing verification retry-loop marker")
 if "verification marker: coquic-demo-v1" not in deploy_script:
@@ -166,8 +170,10 @@ if "preflight: current target must resolve to existing directory" not in deploy_
     raise SystemExit("deploy script missing existing-directory preflight marker")
 if "ln -sfnT" not in deploy_script:
     raise SystemExit("deploy script missing guarded symlink replacement")
-if "timeout 20s nix run .#curl-http3" not in deploy_script:
-    raise SystemExit("deploy script missing bounded verification timeout wrapper")
+if "nix build --no-link --print-out-paths .#curl-http3" not in deploy_script:
+    raise SystemExit("deploy script missing up-front curl-http3 realization")
+if 'timeout 20s "${curl_http3_bin}"' not in deploy_script:
+    raise SystemExit("deploy script missing bounded probe timeout wrapper")
 if "same-release gate: stop active service before in-place mutation" not in deploy_script:
     raise SystemExit("deploy script missing same-release stop gate marker")
 if "same-release gate: ensure service is inactive before mutating files" not in deploy_script:
@@ -218,7 +224,9 @@ run_same_release_case() {
   local ssh_log="${case_dir}/ssh.log"
   local scp_log="${case_dir}/scp.log"
   local nix_log="${case_dir}/nix.log"
+  local curl_log="${case_dir}/curl.log"
   local ssh_bash_count="${case_dir}/ssh_bash_count.txt"
+  local curl_out="${case_dir}/nix-out"
 
   mkdir -p "${stub_bin}" "${fake_home}/.ssh" "${fake_site}"
   touch "${fake_binary}"
@@ -239,7 +247,9 @@ run_same_release_case() {
   : > "${ssh_log}"
   : > "${scp_log}"
   : > "${nix_log}"
+  : > "${curl_log}"
   : > "${ssh_bash_count}"
+  mkdir -p "${curl_out}/bin"
 
   cat > "${stub_bin}/ssh" <<'EOF'
 #!/usr/bin/env bash
@@ -303,22 +313,35 @@ EOF
 set -euo pipefail
 printf 'nix %s\n' "$*" >> "${COQUIC_TEST_NIX_LOG:?}"
 
+if [[ "$*" == "build --no-link --print-out-paths .#curl-http3" ]]; then
+  printf '%s\n' "${COQUIC_TEST_CURL_OUT:?}"
+  exit 0
+fi
+
+exit 0
+EOF
+
+  cat > "${curl_out}/bin/curl-http3" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'curl-http3 %s\n' "$*" >> "${COQUIC_TEST_CURL_LOG:?}"
+
 case "${COQUIC_TEST_NIX_MODE:?}" in
   success)
-    if [[ "$*" == *"run .#curl-http3 -- -I "* ]]; then
+    if [[ "$*" == *"-I https://demo.example.test:4433/"* ]]; then
       cat <<'HEADERS'
 HTTP/1.1 200 OK
-Alt-Svc: h3=":4433"; ma=60
+alt-svc: h3=":4433"; ma=60
 HEADERS
       exit 0
     fi
 
-    if [[ "$*" == *"--http3-only -sS -o /dev/null -w %{http_version}"* ]]; then
+    if [[ "$*" == *"--http3-only -sS -o /dev/null -w %{http_version} https://demo.example.test:4433/"* ]]; then
       printf '3'
       exit 0
     fi
 
-    if [[ "$*" == *"run .#curl-http3 -- --http3-only -sS https://"* ]]; then
+    if [[ "$*" == *"--http3-only -sS https://demo.example.test:4433/"* ]]; then
       cat <<'PAGE'
 <meta name="coquic-demo-marker" content="coquic-demo-v1">
 PAGE
@@ -326,7 +349,7 @@ PAGE
     fi
     ;;
   fail_after_install)
-    if [[ "$*" == *"run .#curl-http3 -- -I "* ]]; then
+    if [[ "$*" == *"-I https://demo.example.test:4433/"* ]]; then
       cat <<'HEADERS'
 HTTP/1.1 503 Service Unavailable
 HEADERS
@@ -340,7 +363,7 @@ esac
 exit 0
 EOF
 
-  chmod 755 "${stub_bin}/ssh" "${stub_bin}/scp" "${stub_bin}/nix"
+  chmod 755 "${stub_bin}/ssh" "${stub_bin}/scp" "${stub_bin}/nix" "${curl_out}/bin/curl-http3"
 
   set +e
   case_output="$(
@@ -360,6 +383,8 @@ EOF
     COQUIC_TEST_SSH_LOG="${ssh_log}" \
     COQUIC_TEST_SCP_LOG="${scp_log}" \
     COQUIC_TEST_NIX_LOG="${nix_log}" \
+    COQUIC_TEST_CURL_LOG="${curl_log}" \
+    COQUIC_TEST_CURL_OUT="${curl_out}" \
     COQUIC_TEST_SSH_BASH_COUNT_PATH="${ssh_bash_count}" \
     demo/deploy/deploy-remote.sh "${fake_binary}" "${fake_site}" 2>&1
   )"
@@ -421,20 +446,25 @@ EOF
   fi
 
   if [[ "${nix_mode}" != "stop_gate_fail" ]]; then
-    if ! grep -Fq "run .#curl-http3 -- -I https://demo.example.test:4433/" "${nix_log}"; then
-      echo "${case_name} should invoke header verification command" >&2
+    if ! grep -Fxq "nix build --no-link --print-out-paths .#curl-http3" "${nix_log}"; then
+      echo "${case_name} should realize curl-http3 once before probes" >&2
       cat "${nix_log}" >&2
+      exit 1
+    fi
+    if ! grep -Fq "curl-http3 -I https://demo.example.test:4433/" "${curl_log}"; then
+      echo "${case_name} should invoke header verification probe command" >&2
+      cat "${curl_log}" >&2
       exit 1
     fi
   fi
 
   if [[ "${expected_status}" == "success" ]]; then
-    for nix_expected in \
-      "run .#curl-http3 -- --http3-only -sS -o /dev/null -w %{http_version} https://demo.example.test:4433/" \
-      "run .#curl-http3 -- --http3-only -sS https://demo.example.test:4433/"; do
-      if ! grep -Fq "${nix_expected}" "${nix_log}"; then
-        echo "${case_name} should invoke nix verification command: ${nix_expected}" >&2
-        cat "${nix_log}" >&2
+    for curl_expected in \
+      "curl-http3 --http3-only -sS -o /dev/null -w %{http_version} https://demo.example.test:4433/" \
+      "curl-http3 --http3-only -sS https://demo.example.test:4433/"; do
+      if ! grep -Fq "${curl_expected}" "${curl_log}"; then
+        echo "${case_name} should invoke verification probe command: ${curl_expected}" >&2
+        cat "${curl_log}" >&2
         exit 1
       fi
     done
@@ -461,9 +491,10 @@ EOF
       cat "${ssh_log}" >&2
       exit 1
     fi
-    if [[ "${nix_mode}" == "stop_gate_fail" && -s "${nix_log}" ]]; then
-      echo "${case_name} should not reach verification probes after stop-gate failure" >&2
+    if [[ "${nix_mode}" == "stop_gate_fail" && ( -s "${nix_log}" || -s "${curl_log}" ) ]]; then
+      echo "${case_name} should not reach realization/probes after stop-gate failure" >&2
       cat "${nix_log}" >&2
+      cat "${curl_log}" >&2
       exit 1
     fi
   fi

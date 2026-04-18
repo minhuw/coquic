@@ -485,4 +485,65 @@ int run_http3_bootstrap_server(const Http3BootstrapConfig &config,
     return 0;
 }
 
+bool bootstrap_scoped_fd_move_constructor_for_test() {
+    int pipe_fds[2] = {-1, -1};
+    if (::pipe(pipe_fds) != 0) {
+        return false;
+    }
+
+    const int original_read_fd = pipe_fds[0];
+    const int original_write_fd = pipe_fds[1];
+    ScopedFd read_end(pipe_fds[0]);
+    ScopedFd write_end(pipe_fds[1]);
+    ScopedFd moved(std::move(read_end));
+    return moved.get() == original_read_fd && write_end.get() == original_write_fd;
+}
+
+bool bootstrap_scoped_fd_move_assignment_for_test() {
+    int pipe_a[2] = {-1, -1};
+    if (::pipe(pipe_a) != 0) {
+        return false;
+    }
+    int pipe_b[2] = {-1, -1};
+    if (::pipe(pipe_b) != 0) {
+        ::close(pipe_a[0]);
+        ::close(pipe_a[1]);
+        return false;
+    }
+
+    const int original_source_fd = pipe_a[0];
+    const int original_source_peer_fd = pipe_a[1];
+    const int original_destination_peer_fd = pipe_b[1];
+    ScopedFd source(pipe_a[0]);
+    ScopedFd source_peer(pipe_a[1]);
+    ScopedFd destination(pipe_b[0]);
+    ScopedFd destination_peer(pipe_b[1]);
+    destination = std::move(source);
+    return destination.get() == original_source_fd &&
+           source_peer.get() == original_source_peer_fd &&
+           destination_peer.get() == original_destination_peer_fd;
+}
+
+bool bootstrap_scoped_fd_self_move_assignment_for_test() {
+    int pipe_fds[2] = {-1, -1};
+    if (::pipe(pipe_fds) != 0) {
+        return false;
+    }
+
+    const int original_fd = pipe_fds[0];
+    const int original_peer_fd = pipe_fds[1];
+    ScopedFd fd(pipe_fds[0]);
+    ScopedFd peer(pipe_fds[1]);
+    fd = std::move(fd);
+    return fd.get() == original_fd && peer.get() == original_peer_fd;
+}
+
+std::string bootstrap_serialize_unknown_status_response_for_test(const Http3BootstrapConfig &config,
+                                                                 int status_code) {
+    BootstrapResponse response{
+        .status_code = status_code,
+    };
+    return serialize_response(config, response);
+}
+
 } // namespace coquic::http3

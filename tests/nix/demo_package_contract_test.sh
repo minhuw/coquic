@@ -32,6 +32,16 @@ if ! grep -Fq 'COPY demo/site /app/www' docker/h3-server/Dockerfile; then
   exit 1
 fi
 
+for dockerignore_rule in \
+  "!demo/" \
+  "!demo/site/" \
+  "!demo/site/index.html"; do
+  if ! grep -Fxq -- "${dockerignore_rule}" .dockerignore; then
+    echo ".dockerignore missing required demo whitelist rule: ${dockerignore_rule}" >&2
+    exit 1
+  fi
+done
+
 for marker in \
   "Showcase" \
   "Technical" \

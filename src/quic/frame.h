@@ -47,6 +47,13 @@ struct OutboundAckHeader {
     std::optional<AckEcnCounts> ecn_counts;
 };
 
+class ReceivedPacketHistory;
+
+struct OutboundAckFrame {
+    const ReceivedPacketHistory *history = nullptr;
+    OutboundAckHeader header;
+};
+
 struct AckPacketNumberRange {
     std::uint64_t smallest = 0;
     std::uint64_t largest = 0;
@@ -180,7 +187,7 @@ using Frame =
                  DataBlockedFrame, StreamDataBlockedFrame, StreamsBlockedFrame,
                  NewConnectionIdFrame, RetireConnectionIdFrame, PathChallengeFrame,
                  PathResponseFrame, TransportConnectionCloseFrame, ApplicationConnectionCloseFrame,
-                 HandshakeDoneFrame>;
+                 HandshakeDoneFrame, OutboundAckFrame>;
 
 using ReceivedFrame =
     std::variant<PaddingFrame, PingFrame, AckFrame, ResetStreamFrame, StopSendingFrame,
@@ -205,6 +212,8 @@ CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &ack);
 CodecResult<AckRangeCursor> make_ack_range_cursor(AckFrame &&ack) = delete;
 CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &&ack) = delete;
 std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor);
+CodecResult<std::size_t> frame_wire_size(const Frame &frame);
+CodecResult<std::size_t> write_frame_wire_bytes(std::span<std::byte> output, const Frame &frame);
 CodecResult<std::size_t> serialized_frame_size(const Frame &frame);
 CodecResult<std::size_t> serialize_frame_into(std::span<std::byte> output, const Frame &frame);
 CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame);

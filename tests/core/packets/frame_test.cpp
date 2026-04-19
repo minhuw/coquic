@@ -12,6 +12,8 @@
 #include <gtest/gtest.h>
 
 #include "src/quic/frame.h"
+#include "src/quic/recovery.h"
+#include "tests/support/quic_test_utils.h"
 
 namespace {
 
@@ -1611,6 +1613,35 @@ TEST(QuicFrameTest, PreserveInvalidVarintOffsetForApplicationCloseSerialization)
             .error_code = kInvalidQuicVarInt,
         },
         CodecErrorCode::invalid_varint, 0);
+}
+
+TEST(QuicFrameTest, OutboundAckFrameWireHelpersMatchMaterializedAckFrame) {
+    coquic::quic::ReceivedPacketHistory history;
+    history.record_received(0, true, coquic::quic::test::test_time(1));
+    history.record_received(1, true, coquic::quic::test::test_time(2));
+    history.record_received(4, true, coquic::quic::test::test_time(3));
+
+    const auto header = history.build_outbound_ack_header(/*ack_delay_exponent=*/3,
+                                                          coquic::quic::test::test_time(4));
+    ASSERT_TRUE(header.has_value());
+
+    const auto materialized =
+        history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(4));
+    ASSERT_TRUE(materialized.has_value());
+
+    const auto encoded_materialized =
+        coquic::quic::serialize_frame(coquic::quic::Frame{*materialized});
+    ASSERT_TRUE(encoded_materialized.has_value());
+
+    std::vector<std::byte> output(encoded_materialized.value().size());
+    const auto written = coquic::quic::write_frame_wire_bytes(
+        std::span<std::byte>(output), coquic::quic::Frame{coquic::quic::OutboundAckFrame{
+                                          .history = &history,
+                                          .header = *header,
+                                      }});
+
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(output, encoded_materialized.value());
 }
 
 } // namespace

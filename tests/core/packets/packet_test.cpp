@@ -8,6 +8,8 @@
 #include <gtest/gtest.h>
 
 #include "src/quic/packet.h"
+#include "src/quic/recovery.h"
+#include "tests/support/quic_test_utils.h"
 
 namespace {
 
@@ -823,6 +825,32 @@ TEST(QuicPacketTest, RejectsForbiddenFramesAndFrameDecodeErrorsInLongHeaders) {
             std::byte{0x1f},
         },
         {}, CodecErrorCode::unknown_frame_type);
+}
+
+TEST(QuicPacketTest, RejectsOutboundAckFrameInZeroRttPacket) {
+    coquic::quic::ReceivedPacketHistory history;
+    history.record_received(5, true, coquic::quic::test::test_time(1));
+    const auto header = history.build_outbound_ack_header(/*ack_delay_exponent=*/3,
+                                                          coquic::quic::test::test_time(2));
+    ASSERT_TRUE(header.has_value());
+
+    const auto encoded = coquic::quic::serialize_packet(coquic::quic::ZeroRttPacket{
+        .version = 1,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 7,
+        .frames =
+            {
+                coquic::quic::Frame{coquic::quic::OutboundAckFrame{
+                    .history = &history,
+                    .header = *header,
+                }},
+            },
+    });
+
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::frame_not_allowed_in_packet_type);
 }
 
 TEST(QuicPacketTest, RejectsMalformedRetryAndShortHeaderPackets) {

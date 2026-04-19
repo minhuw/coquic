@@ -15,7 +15,9 @@
 #include "src/quic/core.h"
 #include "src/quic/protected_codec.h"
 #include "src/quic/protected_codec_test_hooks.h"
+#include "src/quic/recovery.h"
 #include "src/quic/streams.h"
+#include "tests/support/quic_test_utils.h"
 
 namespace {
 
@@ -2771,6 +2773,41 @@ TEST(QuicProtectedCodecTest, IgnoresProtectedCodecFaultUntilConfiguredOccurrence
     ASSERT_TRUE(decoded.has_value());
     ASSERT_EQ(decoded.value().size(), 1u);
     EXPECT_NE(std::get_if<coquic::quic::ProtectedInitialPacket>(&decoded.value()[0]), nullptr);
+}
+
+TEST(QuicProtectedCodecTest, OutboundAckFrameSerializesLikeMaterializedAckFrame) {
+    auto history = coquic::quic::ReceivedPacketHistory{};
+    history.record_received(0, true, coquic::quic::test::test_time(1));
+    history.record_received(3, true, coquic::quic::test::test_time(2));
+
+    const auto header = history.build_outbound_ack_header(/*ack_delay_exponent=*/3,
+                                                          coquic::quic::test::test_time(3));
+    ASSERT_TRUE(header.has_value());
+
+    const auto materialized =
+        history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(3));
+    ASSERT_TRUE(materialized.has_value());
+
+    auto outbound_packet = make_minimal_one_rtt_packet();
+    outbound_packet.frames = {
+        coquic::quic::Frame{coquic::quic::OutboundAckFrame{
+            .history = &history,
+            .header = *header,
+        }},
+    };
+    auto materialized_packet = make_minimal_one_rtt_packet();
+    materialized_packet.frames = {coquic::quic::Frame{*materialized}};
+
+    const auto context =
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+    const auto encoded_view = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{outbound_packet}, context);
+    const auto encoded_frame = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{materialized_packet}, context);
+
+    ASSERT_TRUE(encoded_view.has_value());
+    ASSERT_TRUE(encoded_frame.has_value());
+    EXPECT_EQ(encoded_view.value(), encoded_frame.value());
 }
 
 INSTANTIATE_TEST_SUITE_P(

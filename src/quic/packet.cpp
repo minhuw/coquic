@@ -160,23 +160,27 @@ CodecResult<ConnectionId> read_connection_id(BufferReader &reader, bool enforce_
 }
 
 bool frame_allowed_in_packet_type(const Frame &frame, ProtectedPacketType packet_type) {
+    const auto is_ack_like =
+        std::holds_alternative<AckFrame>(frame) || std::holds_alternative<OutboundAckFrame>(frame);
     if (packet_type == ProtectedPacketType::one_rtt) {
         return true;
     }
 
-    const auto frame_index = frame.index();
     const auto packet_type_allows_handshake_space_frames =
         packet_type == ProtectedPacketType::initial ||
         packet_type == ProtectedPacketType::handshake;
     if (packet_type_allows_handshake_space_frames) {
-        return (frame_index == 0) | (frame_index == 1) | (frame_index == 2) | (frame_index == 5) |
-               (frame_index == 18);
+        return std::holds_alternative<PaddingFrame>(frame) ||
+               std::holds_alternative<PingFrame>(frame) || is_ack_like ||
+               std::holds_alternative<CryptoFrame>(frame) ||
+               std::holds_alternative<TransportConnectionCloseFrame>(frame);
     }
 
-    const auto forbidden_in_zero_rtt = (frame_index == 2) | (frame_index == 5) |
-                                       (frame_index == 20) | (frame_index == 6) |
-                                       (frame_index == 17) | (frame_index == 15);
-    return !forbidden_in_zero_rtt;
+    return !is_ack_like && !std::holds_alternative<CryptoFrame>(frame) &&
+           !std::holds_alternative<HandshakeDoneFrame>(frame) &&
+           !std::holds_alternative<NewTokenFrame>(frame) &&
+           !std::holds_alternative<PathResponseFrame>(frame) &&
+           !std::holds_alternative<RetireConnectionIdFrame>(frame);
 }
 
 CodecResult<std::vector<std::byte>> serialize_frame_sequence(const std::vector<Frame> &frames,

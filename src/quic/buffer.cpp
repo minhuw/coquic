@@ -283,17 +283,16 @@ std::optional<CodecError> CountingBufferWriter::write_bytes(std::span<const std:
 }
 
 std::optional<CodecError> CountingBufferWriter::write_varint(std::uint64_t value) {
+    constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
     const auto start_offset = offset_;
-    std::array<std::byte, 8> encoded{};
-    const auto written = encode_varint_into(encoded, value);
-    if (!written.has_value()) {
+    if (value > kMaxQuicVarInt) {
         return CodecError{
-            .code = written.error().code,
+            .code = CodecErrorCode::invalid_varint,
             .offset = start_offset,
         };
     }
 
-    offset_ += written.value();
+    offset_ += encoded_varint_size(value);
     return std::nullopt;
 }
 

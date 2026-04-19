@@ -109,6 +109,17 @@ TEST(QuicBufferTest, CountingBufferWriterTracksWrittenSizeWithoutStorage) {
     EXPECT_EQ(writer.offset(), 7u);
 }
 
+TEST(QuicBufferTest, CountingBufferWriterUsesEncodedVarintBoundaries) {
+    coquic::quic::CountingBufferWriter writer;
+
+    ASSERT_FALSE(writer.write_varint(63).has_value());
+    ASSERT_FALSE(writer.write_varint(64).has_value());
+    ASSERT_FALSE(writer.write_varint(16383).has_value());
+    ASSERT_FALSE(writer.write_varint(16384).has_value());
+
+    EXPECT_EQ(writer.offset(), 1u + 2u + 2u + 4u);
+}
+
 TEST(QuicBufferTest, CountingBufferWriterUncheckedVarintTracksSize) {
     coquic::quic::CountingBufferWriter writer;
 

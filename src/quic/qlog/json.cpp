@@ -48,6 +48,10 @@ std::string serialize_frame_json(const Frame &frame) {
                 return "{\"frame_type\":\"ack\",\"largest_acknowledged\":" +
                        std::to_string(value.largest_acknowledged) +
                        ",\"ack_delay\":" + std::to_string(value.ack_delay) + "}";
+            } else if constexpr (std::is_same_v<FrameType, OutboundAckFrame>) {
+                return "{\"frame_type\":\"ack\",\"largest_acknowledged\":" +
+                       std::to_string(value.header.largest_acknowledged) +
+                       ",\"ack_delay\":" + std::to_string(value.header.ack_delay) + "}";
             } else if constexpr (std::is_same_v<FrameType, ResetStreamFrame>) {
                 return "{\"frame_type\":\"reset_stream\",\"stream_id\":" +
                        std::to_string(value.stream_id) +

@@ -86,6 +86,21 @@ TEST(QuicCoreTest, ApplicationAckFramesIncludeEcnCountsWhenReceiveMetadataIsAvai
     EXPECT_EQ(ecn_counts.ecn_ce, 1u);
 }
 
+TEST(QuicCoreTest, LargeAckOnlyHistoryStillEmitsTrimmedAckDatagram) {
+    auto connection = make_connected_server_connection();
+    for (std::uint64_t packet_number = 0; packet_number != 2048; ++packet_number) {
+        connection.application_space_.received_packets.record_received(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+    }
+    connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(4096);
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(4096));
+
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_TRUE(datagram_has_application_ack(connection, datagram));
+}
+
 TEST(QuicCoreTest, ServerProcessesOneRttPingBeforeHandshakeCompletesWhenApplicationKeysExist) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;

@@ -542,6 +542,7 @@ template <typename FrameType> bool is_ack_eliciting_frame(const FrameType &frame
         false, // TransportConnectionCloseFrame
         false, // ApplicationConnectionCloseFrame
         true,  // HandshakeDoneFrame
+        false, // OutboundAckFrame
     });
 
     return kAckElicitingByFrameIndex[frame.index()];
@@ -4175,7 +4176,7 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
                                                               QuicCoreTimePoint now,
                                                               bool allow_preconnected_frames,
                                                               QuicPathId path_id) {
-    static_assert(std::variant_size_v<Frame> == 21,
+    static_assert(std::variant_size_v<Frame> == 22,
                   "Update process_inbound_application when Frame gains new variants");
     const bool require_connected = !allow_preconnected_frames;
     const bool traces_this_packet = packet_trace_matches_connection(config_.source_connection_id);
@@ -6883,10 +6884,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
         !application_crypto_frames.empty();
     if ((can_send_one_rtt_packets || use_zero_rtt_packet_protection) &&
         has_pending_application_payload) {
-        const auto base_ack_frame = use_zero_rtt_packet_protection
-                                        ? std::optional<AckFrame>{}
-                                        : application_space_.received_packets.build_ack_frame(
-                                              local_transport_parameters_.ack_delay_exponent, now);
+        const auto base_ack_frame =
+            use_zero_rtt_packet_protection
+                ? std::optional<OutboundAckHeader>{}
+                : application_space_.received_packets.build_outbound_ack_header(
+                      local_transport_parameters_.ack_delay_exponent, now);
         const auto maybe_queue_client_ack_only_receive_keepalive_challenge = [&]() {
             const bool has_receive_interest = std::ranges::any_of(
                 streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
@@ -7274,9 +7276,19 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 });
             }
         };
+        const auto append_application_ack_frame =
+            [&](std::vector<Frame> &frames, const std::optional<OutboundAckHeader> &ack_frame) {
+                if (!ack_frame.has_value()) {
+                    return;
+                }
+                frames.emplace_back(OutboundAckFrame{
+                    .history = &application_space_.received_packets,
+                    .header = *ack_frame,
+                });
+            };
         const auto build_application_candidate_frames =
             [&](std::span<const Frame> crypto_frames, bool include_handshake_done,
-                const std::optional<AckFrame> &ack_frame,
+                const std::optional<OutboundAckHeader> &ack_frame,
                 const std::optional<MaxDataFrame> &max_data_frame,
                 std::span<const NewConnectionIdFrame> new_connection_id_frames,
                 std::span<const RetireConnectionIdFrame> retire_connection_id_frames,
@@ -7302,9 +7314,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 (application_close_frame.has_value() ? 1u : 0u) + (include_ping ? 1u : 0u));
             candidate_frames.insert(candidate_frames.end(), crypto_frames.begin(),
                                     crypto_frames.end());
-            if (ack_frame.has_value()) {
-                candidate_frames.emplace_back(*ack_frame);
-            }
+            append_application_ack_frame(candidate_frames, ack_frame);
             if (include_handshake_done) {
                 candidate_frames.emplace_back(HandshakeDoneFrame{});
             }
@@ -7393,7 +7403,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
         };
         const auto serialize_application_candidate =
             [&](std::span<const ByteRange> crypto_ranges, bool include_handshake_done,
-                const std::optional<AckFrame> &ack_frame,
+                const std::optional<OutboundAckHeader> &ack_frame,
                 const std::optional<MaxDataFrame> &max_data_frame,
                 std::span<const NewConnectionIdFrame> new_connection_id_frames,
                 std::span<const RetireConnectionIdFrame> retire_connection_id_frames,
@@ -7487,7 +7497,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
             };
         const auto trim_application_ack_frame =
             [&](std::span<const ByteRange> crypto_ranges, bool include_handshake_done,
-                const std::optional<AckFrame> &candidate_ack_frame,
+                const std::optional<OutboundAckHeader> &candidate_ack_frame,
                 const std::optional<MaxDataFrame> &max_data_frame,
                 std::span<const NewConnectionIdFrame> new_connection_id_frames,
                 std::span<const RetireConnectionIdFrame> retire_connection_id_frames,
@@ -7499,7 +7509,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 const std::optional<DataBlockedFrame> &data_blocked_frame,
                 std::span<const StreamDataBlockedFrame> stream_data_blocked_frames,
                 std::span<const StreamFrameSendFragment> stream_fragments,
-                bool include_ping) -> std::optional<AckFrame> {
+                bool include_ping) -> std::optional<OutboundAckHeader> {
             if (!candidate_ack_frame.has_value()) {
                 return std::nullopt;
             }
@@ -7521,13 +7531,15 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
 
             std::size_t retained_ranges_low = 0;
             std::size_t retained_ranges_high = candidate_ack_frame->additional_ranges.size();
-            std::optional<AckFrame> best_trimmed_ack_frame;
+            std::optional<OutboundAckHeader> best_trimmed_ack_frame;
 
             while (retained_ranges_low <= retained_ranges_high) {
                 const auto retained_ranges =
                     retained_ranges_low + (retained_ranges_high - retained_ranges_low) / 2;
                 auto trimmed_ack_frame = candidate_ack_frame;
                 trimmed_ack_frame->additional_ranges.resize(retained_ranges);
+                trimmed_ack_frame->additional_range_count =
+                    trimmed_ack_frame->additional_ranges.size();
 
                 candidate_datagram = serialize_application_candidate(
                     crypto_ranges, include_handshake_done, trimmed_ack_frame, max_data_frame,
@@ -7683,10 +7695,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 }
             }
             const auto probe_base_ack_frame =
-                probe_packet.force_ack ? application_space_.received_packets.build_ack_frame(
-                                             local_transport_parameters_.ack_delay_exponent, now,
-                                             /*allow_non_pending=*/true)
-                                       : base_ack_frame;
+                probe_packet.force_ack
+                    ? application_space_.received_packets.build_outbound_ack_header(
+                          local_transport_parameters_.ack_delay_exponent, now,
+                          /*allow_non_pending=*/true)
+                    : base_ack_frame;
             const auto &probe_crypto_ranges = application_crypto_ranges.empty()
                                                   ? probe_packet.crypto_ranges
                                                   : application_crypto_ranges;
@@ -7779,7 +7792,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 }
             }
             const auto trim_probe_candidate_to_fit =
-                [&](const std::optional<AckFrame> &candidate_ack_frame,
+                [&](const std::optional<OutboundAckHeader> &candidate_ack_frame,
                     std::vector<StreamFrameSendFragment> &fragments) -> bool {
                 while (datagram.value().bytes.size() > max_outbound_datagram_size &&
                        !fragments.empty()) {
@@ -7954,9 +7967,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 (probe_packet.data_blocked_frame.has_value() ? 1u : 0u) +
                 probe_packet.stream_data_blocked_frames.size() + (include_ping ? 1u : 0u));
             append_application_crypto_frames(frames, probe_crypto_ranges);
-            if (ack_frame.has_value()) {
-                frames.emplace_back(*ack_frame);
-            }
+            append_application_ack_frame(frames, ack_frame);
             if (probe_packet.has_handshake_done) {
                 frames.emplace_back(HandshakeDoneFrame{});
             }
@@ -8083,7 +8094,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 send_application_close_only ? std::span<const Frame>{}
                                             : std::span<const Frame>(application_crypto_frames);
             const auto send_application_ack_only =
-                [&](const AckFrame &ack_frame) -> DatagramBuffer {
+                [&](const OutboundAckHeader &ack_frame) -> DatagramBuffer {
                 const auto restore_unsent_path_validation_frames =
                     [&](const PendingPathValidationFrames &path_validation_frames) {
                         if (path_validation_frames.response.has_value()) {
@@ -8101,7 +8112,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                         ? std::optional<QuicPathId>{path_validation_frames.path_id}
                         : current_send_path_id_;
                 std::vector<Frame> ack_only_frames;
-                ack_only_frames.emplace_back(ack_frame);
+                append_application_ack_frame(ack_only_frames,
+                                             std::optional<OutboundAckHeader>{ack_frame});
                 if (path_validation_frames.response.has_value()) {
                     ack_only_frames.emplace_back(*path_validation_frames.response);
                 }
@@ -8185,7 +8197,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                                             prefer_fresh_application_stream_data);
             auto selected_ack_frame =
                 send_application_close_only
-                    ? std::optional<AckFrame>{}
+                    ? std::optional<OutboundAckHeader>{}
                     : trim_application_ack_frame(
                           application_candidate_crypto_ranges, include_handshake_done,
                           base_ack_frame, max_data_frame, new_connection_id_frames,
@@ -8248,7 +8260,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
             }
 
             const auto trim_candidate_to_fit =
-                [&](const std::optional<AckFrame> &ack_frame,
+                [&](const std::optional<OutboundAckHeader> &ack_frame,
                     CodecResult<SerializedProtectedDatagram> &datagram,
                     std::vector<StreamFrameSendFragment> &fragments) -> bool {
                 while (datagram.value().bytes.size() > max_outbound_datagram_size &&
@@ -8540,9 +8552,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
             for (const auto &frame : application_candidate_crypto_frames) {
                 frames.emplace_back(frame);
             }
-            if (selected_ack_frame.has_value()) {
-                frames.emplace_back(*selected_ack_frame);
-            }
+            append_application_ack_frame(frames, selected_ack_frame);
             if (include_handshake_done) {
                 frames.emplace_back(HandshakeDoneFrame{});
             }

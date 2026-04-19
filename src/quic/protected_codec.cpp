@@ -288,16 +288,20 @@ CodecResult<ConnectionId> read_connection_id(BufferReader &reader, bool enforce_
 
 bool frame_allowed_in_long_header_packet_type(const Frame &frame,
                                               LongHeaderPacketType packet_type) {
-    const auto frame_index = frame.index();
+    const auto is_ack_like =
+        std::holds_alternative<AckFrame>(frame) || std::holds_alternative<OutboundAckFrame>(frame);
     if (packet_type == LongHeaderPacketType::zero_rtt) {
-        const auto forbidden_in_zero_rtt = (frame_index == 2) | (frame_index == 5) |
-                                           (frame_index == 20) | (frame_index == 6) |
-                                           (frame_index == 17) | (frame_index == 15);
-        return !forbidden_in_zero_rtt;
+        return !is_ack_like && !std::holds_alternative<CryptoFrame>(frame) &&
+               !std::holds_alternative<HandshakeDoneFrame>(frame) &&
+               !std::holds_alternative<NewTokenFrame>(frame) &&
+               !std::holds_alternative<PathResponseFrame>(frame) &&
+               !std::holds_alternative<RetireConnectionIdFrame>(frame);
     }
 
-    return (frame_index == 0) | (frame_index == 1) | (frame_index == 2) | (frame_index == 5) |
-           (frame_index == 18);
+    return std::holds_alternative<PaddingFrame>(frame) ||
+           std::holds_alternative<PingFrame>(frame) || is_ack_like ||
+           std::holds_alternative<CryptoFrame>(frame) ||
+           std::holds_alternative<TransportConnectionCloseFrame>(frame);
 }
 
 CodecResult<bool> validate_long_header_frames(std::span<const Frame> frames,
@@ -1322,7 +1326,7 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
     auto payload_bytes = packet_bytes.subspan(header_end, plaintext_payload_size);
     std::size_t payload_offset = 0;
     for (const auto &frame : frames) {
-        const auto written = serialize_frame_into(payload_bytes.subspan(payload_offset), frame);
+        const auto written = write_frame_wire_bytes(payload_bytes.subspan(payload_offset), frame);
         if (!written.has_value()) {
             rollback();
             return CodecResult<std::size_t>::failure(written.error().code, written.error().offset);
@@ -1959,7 +1963,7 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
 
             for (const auto &frame : packet.frames) {
                 const auto written =
-                    serialize_frame_into(payload_bytes.subspan(plaintext_offset), frame);
+                    write_frame_wire_bytes(payload_bytes.subspan(plaintext_offset), frame);
                 if (!written.has_value()) {
                     rollback();
                     return CodecResult<std::size_t>::failure(written.error().code,
@@ -2026,7 +2030,7 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
     std::size_t payload_written = 0;
     std::size_t frame_index = 0;
     for (const auto &frame : packet.frames) {
-        const auto written = serialize_frame_into(payload_bytes.subspan(payload_written), frame);
+        const auto written = write_frame_wire_bytes(payload_bytes.subspan(payload_written), frame);
         if (!written.has_value()) {
             rollback();
             return CodecResult<std::size_t>::failure(written.error().code, written.error().offset);

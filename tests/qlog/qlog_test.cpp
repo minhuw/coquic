@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "src/quic/frame.h"
+#include "src/quic/recovery.h"
 #include "src/quic/qlog/json.h"
 #include "src/quic/qlog/session.h"
 #include "src/quic/qlog/sink.h"
@@ -382,6 +383,29 @@ TEST(QuicQlogTest, SinkPathAndDisabledWritesRemainObservable) {
     ASSERT_TRUE(full_sink.open());
     EXPECT_FALSE(full_sink.write_record("\x1e{\"time\":1}\n"));
     EXPECT_FALSE(full_sink.write_record("\x1e{\"time\":2}\n"));
+}
+
+TEST(QuicQlogTest, PacketSnapshotSerializesOutboundAckFrameAsAck) {
+    coquic::quic::ReceivedPacketHistory history;
+    history.record_received(9, true, coquic::quic::test::test_time(1));
+    const auto header = history.build_outbound_ack_header(/*ack_delay_exponent=*/3,
+                                                          coquic::quic::test::test_time(2));
+    ASSERT_TRUE(header.has_value());
+
+    const auto snapshot_json =
+        coquic::quic::qlog::serialize_packet_snapshot(coquic::quic::qlog::PacketSnapshot{
+            .header = coquic::quic::qlog::PacketHeader{.packet_type = "1RTT"},
+            .frames =
+                {
+                    coquic::quic::Frame{coquic::quic::OutboundAckFrame{
+                        .history = &history,
+                        .header = *header,
+                    }},
+                },
+        });
+
+    EXPECT_NE(snapshot_json.find("\"frame_type\":\"ack\""), std::string::npos);
+    EXPECT_NE(snapshot_json.find("\"largest_acknowledged\":9"), std::string::npos);
 }
 
 } // namespace

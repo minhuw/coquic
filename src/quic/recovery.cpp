@@ -780,7 +780,7 @@ void PacketSpaceRecovery::apply_ack_range_descending(AckApplyState &state,
         const auto handle = packet_handle(slot, slot_index);
 
         if (slot.state == LedgerSlotState::sent) {
-            state.acked_packets_descending.push_back(handle);
+            state.result.acked_packets.push_back(handle);
             if (!state.result.largest_newly_acked_packet.has_value() ||
                 slot.packet.packet_number >
                     state.result.largest_newly_acked_packet->packet_number) {
@@ -802,7 +802,7 @@ void PacketSpaceRecovery::apply_ack_range_descending(AckApplyState &state,
             slot.acknowledged = true;
             state.mutated = true;
         } else if (slot.state == LedgerSlotState::declared_lost) {
-            state.late_acked_packets_descending.push_back(handle);
+            state.result.late_acked_packets.push_back(handle);
             unlink_live_slot(slot_index);
             slot.acknowledged = true;
             state.mutated = true;
@@ -814,15 +814,12 @@ void PacketSpaceRecovery::apply_ack_range_descending(AckApplyState &state,
 
 AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &state,
                                                               QuicCoreTimePoint now) {
-    state.result.acked_packets.reserve(state.acked_packets_descending.size());
-    for (auto it = state.acked_packets_descending.rbegin();
-         it != state.acked_packets_descending.rend(); ++it) {
-        state.result.acked_packets.push_back(*it);
+    if (state.result.acked_packets.size() > 1) {
+        std::reverse(state.result.acked_packets.begin(), state.result.acked_packets.end());
     }
-    state.result.late_acked_packets.reserve(state.late_acked_packets_descending.size());
-    for (auto it = state.late_acked_packets_descending.rbegin();
-         it != state.late_acked_packets_descending.rend(); ++it) {
-        state.result.late_acked_packets.push_back(*it);
+    if (state.result.late_acked_packets.size() > 1) {
+        std::reverse(state.result.late_acked_packets.begin(),
+                     state.result.late_acked_packets.end());
     }
 
     if (slots_.empty()) {

@@ -259,8 +259,6 @@ class PacketSpaceRecovery {
 
     struct AckApplyState {
         AckApplyResult result;
-        std::vector<RecoveryPacketHandle> acked_packets_descending;
-        std::vector<RecoveryPacketHandle> late_acked_packets_descending;
         std::optional<std::size_t> current_live_slot;
         std::uint64_t largest_acknowledged = 0;
         std::uint64_t effective_largest_acked = 0;

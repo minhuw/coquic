@@ -841,6 +841,60 @@ TEST(QuicRecoveryTest, CompatibilityAckResultKeepsAscendingOrderAfterFastApply) 
               (std::vector<std::uint64_t>{1, 5}));
 }
 
+TEST(QuicRecoveryTest, AckApplyResultKeepsAscendingOrderAcrossSparseRanges) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(2)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/9, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(3)));
+    recovery.on_packet_declared_lost(3);
+    recovery.on_packet_declared_lost(7);
+
+    const AckFrame ack{
+        .largest_acknowledged = 9,
+        .first_ack_range = 0,
+        .additional_ranges =
+            {
+                AckRange{
+                    .gap = 0,
+                    .range_length = 0,
+                },
+                AckRange{
+                    .gap = 0,
+                    .range_length = 0,
+                },
+                AckRange{
+                    .gap = 0,
+                    .range_length = 0,
+                },
+            },
+    };
+    auto cursor = make_ack_range_cursor(ack);
+    ASSERT_TRUE(cursor.has_value());
+    if (!cursor.has_value()) {
+        GTEST_FAIL() << "expected ACK range cursor";
+        return;
+    }
+
+    const auto result = recovery.apply_ack_received(cursor.value(), /*largest_acknowledged=*/9,
+                                                    coquic::quic::test::test_time(10));
+
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets),
+              (std::vector<std::uint64_t>{5, 9}));
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets),
+              (std::vector<std::uint64_t>{3, 7}));
+    ASSERT_TRUE(result.largest_newly_acked_packet.has_value());
+    if (!result.largest_newly_acked_packet.has_value()) {
+        GTEST_FAIL() << "expected largest newly acknowledged packet";
+        return;
+    }
+    EXPECT_EQ(result.largest_newly_acked_packet->packet_number, 9u);
+}
+
 TEST(QuicRecoveryTest,
      AckProcessingTracksLargestNewlyAcknowledgedPacketSeparatelyFromAckElicitingStatus) {
     PacketSpaceRecovery recovery;

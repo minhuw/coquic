@@ -38,6 +38,16 @@ struct AckFrame {
     std::optional<AckEcnCounts> ecn_counts;
 };
 
+struct ReceivedAckFrame {
+    std::uint64_t largest_acknowledged = 0;
+    std::uint64_t ack_delay = 0;
+    std::uint64_t first_ack_range = 0;
+    std::uint64_t additional_range_count = 0;
+    SharedBytes additional_range_bytes;
+    bool additional_ranges_validated = false;
+    std::optional<AckEcnCounts> ecn_counts;
+};
+
 struct OutboundAckHeader {
     std::uint64_t largest_acknowledged = 0;
     std::uint64_t ack_delay = 0;
@@ -64,9 +74,13 @@ struct AckRangeCursor {
     std::uint64_t largest_acknowledged = 0;
     std::uint64_t first_ack_range = 0;
     std::span<const AckRange> additional_ranges;
+    std::span<const std::byte> encoded_additional_ranges;
     std::size_t next_additional_index = 0;
+    std::size_t next_encoded_offset = 0;
+    std::uint64_t additional_range_count = 0;
     std::uint64_t previous_smallest = 0;
     bool first_range_pending = true;
+    bool uses_encoded_additional_ranges = false;
 };
 
 struct ResetStreamFrame {
@@ -190,7 +204,7 @@ using Frame =
                  HandshakeDoneFrame, OutboundAckFrame>;
 
 using ReceivedFrame =
-    std::variant<PaddingFrame, PingFrame, AckFrame, ResetStreamFrame, StopSendingFrame,
+    std::variant<PaddingFrame, PingFrame, ReceivedAckFrame, ResetStreamFrame, StopSendingFrame,
                  ReceivedCryptoFrame, NewTokenFrame, ReceivedStreamFrame, MaxDataFrame,
                  MaxStreamDataFrame, MaxStreamsFrame, DataBlockedFrame, StreamDataBlockedFrame,
                  StreamsBlockedFrame, NewConnectionIdFrame, RetireConnectionIdFrame,
@@ -211,6 +225,8 @@ CodecResult<std::vector<AckPacketNumberRange>> ack_frame_packet_number_ranges(co
 CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &ack);
 CodecResult<AckRangeCursor> make_ack_range_cursor(AckFrame &&ack) = delete;
 CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &&ack) = delete;
+CodecResult<AckRangeCursor> make_ack_range_cursor(const ReceivedAckFrame &ack);
+CodecResult<AckRangeCursor> make_ack_range_cursor(ReceivedAckFrame &&ack) = delete;
 std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor);
 CodecResult<std::size_t> frame_wire_size(const Frame &frame);
 CodecResult<std::size_t> write_frame_wire_bytes(std::span<std::byte> output, const Frame &frame);

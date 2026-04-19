@@ -202,6 +202,26 @@ std::string format_ack_ranges(const AckFrame &ack) {
     return ranges.str();
 }
 
+std::string format_ack_ranges(const ReceivedAckFrame &ack) {
+    auto cursor = make_ack_range_cursor(ack);
+    if (!cursor.has_value()) {
+        return "[invalid]";
+    }
+
+    std::ostringstream ranges;
+    ranges << '[';
+    bool first = true;
+    while (const auto range = next_ack_range(cursor.value())) {
+        if (!first) {
+            ranges << ',';
+        }
+        ranges << range->smallest << '-' << range->largest;
+        first = false;
+    }
+    ranges << ']';
+    return ranges.str();
+}
+
 std::string summarize_packets(std::span<const SentPacketRecord> packets) {
     if (packets.empty()) {
         return "count=0";
@@ -796,7 +816,8 @@ earliest_of(std::initializer_list<std::optional<QuicCoreTimePoint>> deadlines) {
     return earliest;
 }
 
-std::chrono::milliseconds decode_ack_delay(const AckFrame &ack, std::uint64_t ack_delay_exponent) {
+std::chrono::milliseconds decode_ack_delay(std::uint64_t ack_delay,
+                                           std::uint64_t ack_delay_exponent) {
     if (ack_delay_exponent >= std::numeric_limits<std::uint64_t>::digits) {
         return std::chrono::milliseconds(0);
     }
@@ -804,9 +825,18 @@ std::chrono::milliseconds decode_ack_delay(const AckFrame &ack, std::uint64_t ac
     const auto max_microseconds =
         static_cast<std::uint64_t>(std::numeric_limits<std::chrono::microseconds::rep>::max()) >>
         ack_delay_exponent;
-    const auto bounded_ack_delay = std::min<std::uint64_t>(ack.ack_delay, max_microseconds);
+    const auto bounded_ack_delay = std::min<std::uint64_t>(ack_delay, max_microseconds);
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::microseconds(bounded_ack_delay << ack_delay_exponent));
+}
+
+std::chrono::milliseconds decode_ack_delay(const AckFrame &ack, std::uint64_t ack_delay_exponent) {
+    return decode_ack_delay(ack.ack_delay, ack_delay_exponent);
+}
+
+std::chrono::milliseconds decode_ack_delay(const ReceivedAckFrame &ack,
+                                           std::uint64_t ack_delay_exponent) {
+    return decode_ack_delay(ack.ack_delay, ack_delay_exponent);
 }
 
 std::size_t stream_fragment_bytes(std::span<const StreamFrameSendFragment> fragments) {
@@ -3693,7 +3723,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_crypto(
             continue;
         }
 
-        if (const auto *ack_frame = std::get_if<AckFrame>(&frame)) {
+        if (const auto *ack_frame = std::get_if<ReceivedAckFrame>(&frame)) {
             static_cast<void>(process_inbound_ack(
                 packet_space, *ack_frame, now, /*ack_delay_exponent=*/0, /*max_ack_delay_ms=*/0,
                 config_.role == EndpointRole::client && level == EncryptionLevel::initial));
@@ -3757,9 +3787,38 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         return CodecResult<bool>::success(true);
     }
 
+    const bool traces_ack = packet_space_is_application(packet_space, application_space_) &&
+                            packet_trace_matches_connection(config_.source_connection_id);
+    return process_inbound_ack_cursor(packet_space, cursor.value(), ack.largest_acknowledged,
+                                      decode_ack_delay(ack, ack_delay_exponent), ack.ecn_counts,
+                                      traces_ack ? format_ack_ranges(ack) : std::string{}, now,
+                                      max_ack_delay_ms, suppress_pto_reset);
+}
+
+CodecResult<bool>
+QuicConnection::process_inbound_ack(PacketSpaceState &packet_space, const ReceivedAckFrame &ack,
+                                    QuicCoreTimePoint now, std::uint64_t ack_delay_exponent,
+                                    std::uint64_t max_ack_delay_ms, bool suppress_pto_reset) {
+    const auto cursor = make_ack_range_cursor(ack);
+    if (!cursor.has_value()) {
+        return CodecResult<bool>::success(true);
+    }
+
+    const bool traces_ack = packet_space_is_application(packet_space, application_space_) &&
+                            packet_trace_matches_connection(config_.source_connection_id);
+    return process_inbound_ack_cursor(packet_space, cursor.value(), ack.largest_acknowledged,
+                                      decode_ack_delay(ack, ack_delay_exponent), ack.ecn_counts,
+                                      traces_ack ? format_ack_ranges(ack) : std::string{}, now,
+                                      max_ack_delay_ms, suppress_pto_reset);
+}
+
+CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
+    PacketSpaceState &packet_space, AckRangeCursor cursor, std::uint64_t largest_acknowledged,
+    std::chrono::milliseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
+    std::string ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
+    bool suppress_pto_reset) {
     packet_space.recovery.rtt_state() = shared_recovery_rtt_state();
-    auto ack_result =
-        packet_space.recovery.on_ack_received(cursor.value(), ack.largest_acknowledged, now);
+    auto ack_result = packet_space.recovery.on_ack_received(cursor, largest_acknowledged, now);
     std::vector<SentPacketRecord> acked_packets;
     acked_packets.reserve(ack_result.acked_packets.size());
     for (const auto handle : ack_result.acked_packets.handles()) {
@@ -3789,10 +3848,9 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         newly_lost_packets.push_back(*lost_packet);
     }
     for (const auto &packet : newly_lost_packets) {
-        const auto trigger =
-            is_packet_threshold_lost(packet.packet_number, ack.largest_acknowledged)
-                ? "reordering_threshold"
-                : "time_threshold";
+        const auto trigger = is_packet_threshold_lost(packet.packet_number, largest_acknowledged)
+                                 ? "reordering_threshold"
+                                 : "time_threshold";
         emit_qlog_packet_lost(packet, trigger, now);
     }
 
@@ -3841,7 +3899,7 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
                     continue;
                 }
 
-                if (!ack.ecn_counts.has_value()) {
+                if (!ecn_counts.has_value()) {
                     disable_ecn_on_path(path_id);
                     continue;
                 }
@@ -3849,7 +3907,7 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
                 const auto previous_counts = path.ecn.has_last_peer_counts[packet_space_index]
                                                  ? path.ecn.last_peer_counts[packet_space_index]
                                                  : AckEcnCounts{};
-                const auto &current_counts = *ack.ecn_counts;
+                const auto &current_counts = *ecn_counts;
                 const bool counts_decreased = current_counts.ect0 < previous_counts.ect0 ||
                                               current_counts.ect1 < previous_counts.ect1 ||
                                               current_counts.ecn_ce < previous_counts.ecn_ce;
@@ -3895,8 +3953,7 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         ack_result.largest_newly_acked_packet.has_value()) {
         update_rtt(packet_space.recovery.rtt_state(), now,
                    SentPacketRecord{.sent_time = ack_result.largest_newly_acked_packet->sent_time},
-                   decode_ack_delay(ack, ack_delay_exponent),
-                   std::chrono::milliseconds(max_ack_delay_ms));
+                   decoded_ack_delay, std::chrono::milliseconds(max_ack_delay_ms));
         recovery_rtt_state_ = packet_space.recovery.rtt_state();
         synchronize_recovery_rtt_state();
     }
@@ -3943,8 +4000,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         packet_trace_matches_connection(config_.source_connection_id)) {
         std::cerr << "quic-packet-trace ack scid="
                   << format_connection_id_hex(config_.source_connection_id)
-                  << " path=" << last_inbound_path_id_ << " ranges=" << format_ack_ranges(ack)
-                  << " acked={" << summarize_packets(acked_packets) << "}"
+                  << " path=" << last_inbound_path_id_ << " ranges=" << ack_ranges << " acked={"
+                  << summarize_packets(acked_packets) << "}"
                   << " late={" << summarize_packets(late_acked_packets) << "}"
                   << " lost={" << summarize_packets(newly_lost_packets) << "}"
                   << " pending_send=" << static_cast<int>(has_pending_application_send())
@@ -4594,8 +4651,9 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                   "Update process_inbound_received_application when ReceivedFrame changes");
     const bool require_connected = !allow_preconnected_frames;
     const bool traces_this_packet = packet_trace_matches_connection(config_.source_connection_id);
-    const bool has_ack_frame = std::ranges::any_of(
-        frames, [](const ReceivedFrame &frame) { return std::holds_alternative<AckFrame>(frame); });
+    const bool has_ack_frame = std::ranges::any_of(frames, [](const ReceivedFrame &frame) {
+        return std::holds_alternative<ReceivedAckFrame>(frame);
+    });
     const bool has_path_challenge_frame =
         std::ranges::any_of(frames, [](const ReceivedFrame &frame) {
             return std::holds_alternative<PathChallengeFrame>(frame);
@@ -4651,7 +4709,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             continue;
         }
 
-        if (const auto *ack_frame = std::get_if<AckFrame>(&frame)) {
+        if (const auto *ack_frame = std::get_if<ReceivedAckFrame>(&frame)) {
             const auto ack_delay_exponent = peer_transport_parameters_.has_value()
                                                 ? peer_transport_parameters_->ack_delay_exponent
                                                 : TransportParameters{}.ack_delay_exponent;

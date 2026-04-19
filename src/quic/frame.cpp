@@ -279,92 +279,189 @@ CodecResult<std::array<std::byte, 8>> read_path_bytes(BufferReader &reader) {
     return CodecResult<std::array<std::byte, 8>>::success(data);
 }
 
-CodecResult<AckFrame> decode_ack_frame(BufferReader &reader, bool has_ecn_counts) {
-    AckFrame frame{};
+struct DecodedAckHeader {
+    std::uint64_t largest_acknowledged = 0;
+    std::uint64_t ack_delay = 0;
+    std::uint64_t additional_range_count = 0;
+    std::uint64_t first_ack_range = 0;
+    std::uint64_t first_range_smallest = 0;
+};
 
+CodecResult<DecodedAckHeader> decode_ack_header(BufferReader &reader) {
     const auto largest_acknowledged = read_varint(reader);
     if (!largest_acknowledged.has_value()) {
-        return CodecResult<AckFrame>::failure(largest_acknowledged.error().code,
-                                              largest_acknowledged.error().offset);
+        return CodecResult<DecodedAckHeader>::failure(largest_acknowledged.error().code,
+                                                      largest_acknowledged.error().offset);
     }
-    frame.largest_acknowledged = largest_acknowledged.value();
 
     const auto ack_delay = read_varint(reader);
     if (!ack_delay.has_value()) {
-        return CodecResult<AckFrame>::failure(ack_delay.error().code, ack_delay.error().offset);
+        return CodecResult<DecodedAckHeader>::failure(ack_delay.error().code,
+                                                      ack_delay.error().offset);
     }
-    frame.ack_delay = ack_delay.value();
 
     const auto ack_range_count = read_varint(reader);
     if (!ack_range_count.has_value()) {
-        return CodecResult<AckFrame>::failure(ack_range_count.error().code,
-                                              ack_range_count.error().offset);
+        return CodecResult<DecodedAckHeader>::failure(ack_range_count.error().code,
+                                                      ack_range_count.error().offset);
     }
 
     const auto first_ack_range = read_varint(reader);
     if (!first_ack_range.has_value()) {
-        return CodecResult<AckFrame>::failure(first_ack_range.error().code,
-                                              first_ack_range.error().offset);
-    }
-    frame.first_ack_range = first_ack_range.value();
-
-    if (frame.largest_acknowledged < frame.first_ack_range) {
-        return CodecResult<AckFrame>::failure(CodecErrorCode::invalid_varint, reader.offset());
+        return CodecResult<DecodedAckHeader>::failure(first_ack_range.error().code,
+                                                      first_ack_range.error().offset);
     }
 
-    std::uint64_t previous_smallest = frame.largest_acknowledged - frame.first_ack_range;
+    if (largest_acknowledged.value() < first_ack_range.value()) {
+        return CodecResult<DecodedAckHeader>::failure(CodecErrorCode::invalid_varint,
+                                                      reader.offset());
+    }
 
-    for (std::uint64_t i = 0; i < ack_range_count.value(); ++i) {
+    return CodecResult<DecodedAckHeader>::success(DecodedAckHeader{
+        .largest_acknowledged = largest_acknowledged.value(),
+        .ack_delay = ack_delay.value(),
+        .additional_range_count = ack_range_count.value(),
+        .first_ack_range = first_ack_range.value(),
+        .first_range_smallest = largest_acknowledged.value() - first_ack_range.value(),
+    });
+}
+
+template <typename OnRange>
+CodecResult<std::uint64_t>
+decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_range_count,
+                             std::uint64_t previous_smallest, OnRange &&on_range) {
+    for (std::uint64_t i = 0; i < additional_range_count; ++i) {
         const auto gap = read_varint(reader);
         if (!gap.has_value()) {
-            return CodecResult<AckFrame>::failure(gap.error().code, gap.error().offset);
+            return CodecResult<std::uint64_t>::failure(gap.error().code, gap.error().offset);
         }
 
         const auto range_length = read_varint(reader);
         if (!range_length.has_value()) {
-            return CodecResult<AckFrame>::failure(range_length.error().code,
-                                                  range_length.error().offset);
+            return CodecResult<std::uint64_t>::failure(range_length.error().code,
+                                                       range_length.error().offset);
         }
 
         if (previous_smallest < gap.value() + 2) {
-            return CodecResult<AckFrame>::failure(CodecErrorCode::invalid_varint, reader.offset());
+            return CodecResult<std::uint64_t>::failure(CodecErrorCode::invalid_varint,
+                                                       reader.offset());
         }
 
         const auto largest = previous_smallest - gap.value() - 2;
         if (largest < range_length.value()) {
-            return CodecResult<AckFrame>::failure(CodecErrorCode::invalid_varint, reader.offset());
+            return CodecResult<std::uint64_t>::failure(CodecErrorCode::invalid_varint,
+                                                       reader.offset());
         }
 
-        frame.additional_ranges.push_back(AckRange{
-            .gap = gap.value(),
-            .range_length = range_length.value(),
-        });
+        on_range(gap.value(), range_length.value());
         previous_smallest = largest - range_length.value();
     }
 
-    if (has_ecn_counts) {
-        AckEcnCounts counts{};
+    return CodecResult<std::uint64_t>::success(previous_smallest);
+}
 
-        const auto ect0 = read_varint(reader);
-        const auto ect1 = read_varint(reader);
-        const auto ecn_ce = read_varint(reader);
-        if (!ect0.has_value()) {
-            return CodecResult<AckFrame>::failure(ect0.error().code, ect0.error().offset);
-        }
-        if (!ect1.has_value()) {
-            return CodecResult<AckFrame>::failure(ect1.error().code, ect1.error().offset);
-        }
-        if (!ecn_ce.has_value()) {
-            return CodecResult<AckFrame>::failure(ecn_ce.error().code, ecn_ce.error().offset);
-        }
-
-        counts.ect0 = ect0.value();
-        counts.ect1 = ect1.value();
-        counts.ecn_ce = ecn_ce.value();
-        frame.ecn_counts = counts;
+CodecResult<std::optional<AckEcnCounts>> decode_ack_ecn_counts(BufferReader &reader,
+                                                               bool has_ecn_counts) {
+    if (!has_ecn_counts) {
+        return CodecResult<std::optional<AckEcnCounts>>::success(std::nullopt);
     }
 
+    const auto ect0 = read_varint(reader);
+    const auto ect1 = read_varint(reader);
+    const auto ecn_ce = read_varint(reader);
+    if (!ect0.has_value()) {
+        return CodecResult<std::optional<AckEcnCounts>>::failure(ect0.error().code,
+                                                                 ect0.error().offset);
+    }
+    if (!ect1.has_value()) {
+        return CodecResult<std::optional<AckEcnCounts>>::failure(ect1.error().code,
+                                                                 ect1.error().offset);
+    }
+    if (!ecn_ce.has_value()) {
+        return CodecResult<std::optional<AckEcnCounts>>::failure(ecn_ce.error().code,
+                                                                 ecn_ce.error().offset);
+    }
+
+    return CodecResult<std::optional<AckEcnCounts>>::success(AckEcnCounts{
+        .ect0 = ect0.value(),
+        .ect1 = ect1.value(),
+        .ecn_ce = ecn_ce.value(),
+    });
+}
+
+CodecResult<AckFrame> decode_ack_frame(BufferReader &reader, bool has_ecn_counts) {
+    const auto header = decode_ack_header(reader);
+    if (!header.has_value()) {
+        return CodecResult<AckFrame>::failure(header.error().code, header.error().offset);
+    }
+
+    AckFrame frame{};
+    frame.largest_acknowledged = header.value().largest_acknowledged;
+    frame.ack_delay = header.value().ack_delay;
+    frame.first_ack_range = header.value().first_ack_range;
+
+    if (header.value().additional_range_count >
+        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        return CodecResult<AckFrame>::failure(CodecErrorCode::invalid_varint, reader.offset());
+    }
+    frame.additional_ranges.reserve(
+        static_cast<std::size_t>(header.value().additional_range_count));
+
+    const auto decoded_ranges = decode_ack_additional_ranges(
+        reader, header.value().additional_range_count, header.value().first_range_smallest,
+        [&frame](std::uint64_t gap, std::uint64_t range_length) {
+            frame.additional_ranges.push_back(AckRange{
+                .gap = gap,
+                .range_length = range_length,
+            });
+        });
+    if (!decoded_ranges.has_value()) {
+        return CodecResult<AckFrame>::failure(decoded_ranges.error().code,
+                                              decoded_ranges.error().offset);
+    }
+
+    const auto ecn_counts = decode_ack_ecn_counts(reader, has_ecn_counts);
+    if (!ecn_counts.has_value()) {
+        return CodecResult<AckFrame>::failure(ecn_counts.error().code, ecn_counts.error().offset);
+    }
+    frame.ecn_counts = ecn_counts.value();
+
     return CodecResult<AckFrame>::success(std::move(frame));
+}
+
+CodecResult<ReceivedAckFrame> decode_received_ack_frame(BufferReader &reader, bool has_ecn_counts,
+                                                        const SharedBytes &bytes) {
+    const auto header = decode_ack_header(reader);
+    if (!header.has_value()) {
+        return CodecResult<ReceivedAckFrame>::failure(header.error().code, header.error().offset);
+    }
+
+    ReceivedAckFrame frame{};
+    frame.largest_acknowledged = header.value().largest_acknowledged;
+    frame.ack_delay = header.value().ack_delay;
+    frame.first_ack_range = header.value().first_ack_range;
+    frame.additional_range_count = header.value().additional_range_count;
+
+    const auto additional_range_begin = reader.offset();
+    const auto decoded_ranges = decode_ack_additional_ranges(
+        reader, header.value().additional_range_count, header.value().first_range_smallest,
+        [](std::uint64_t, std::uint64_t) {});
+    if (!decoded_ranges.has_value()) {
+        return CodecResult<ReceivedAckFrame>::failure(decoded_ranges.error().code,
+                                                      decoded_ranges.error().offset);
+    }
+    frame.additional_range_bytes =
+        bytes.subspan(additional_range_begin, reader.offset() - additional_range_begin);
+    frame.additional_ranges_validated = true;
+
+    const auto ecn_counts = decode_ack_ecn_counts(reader, has_ecn_counts);
+    if (!ecn_counts.has_value()) {
+        return CodecResult<ReceivedAckFrame>::failure(ecn_counts.error().code,
+                                                      ecn_counts.error().offset);
+    }
+    frame.ecn_counts = ecn_counts.value();
+
+    return CodecResult<ReceivedAckFrame>::success(std::move(frame));
 }
 
 CodecResult<ResetStreamFrame> decode_reset_stream_frame(BufferReader &reader) {
@@ -568,7 +665,22 @@ ReceivedFrame to_received_frame(Frame frame) {
         [](auto value) -> ReceivedFrame {
             using Value = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<Value, OutboundAckFrame>) {
-                return materialize_outbound_ack_frame(value).value();
+                const auto owned = materialize_outbound_ack_frame(value).value();
+                return ReceivedAckFrame{
+                    .largest_acknowledged = owned.largest_acknowledged,
+                    .ack_delay = owned.ack_delay,
+                    .first_ack_range = owned.first_ack_range,
+                    .additional_range_count = owned.additional_ranges.size(),
+                    .ecn_counts = owned.ecn_counts,
+                };
+            } else if constexpr (std::is_same_v<Value, AckFrame>) {
+                return ReceivedAckFrame{
+                    .largest_acknowledged = value.largest_acknowledged,
+                    .ack_delay = value.ack_delay,
+                    .first_ack_range = value.first_ack_range,
+                    .additional_range_count = value.additional_ranges.size(),
+                    .ecn_counts = value.ecn_counts,
+                };
             } else if constexpr (std::is_same_v<Value, CryptoFrame>) {
                 return ReceivedCryptoFrame{
                     .offset = value.offset,
@@ -1429,6 +1541,17 @@ CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(const SharedBy
         });
     }
 
+    if (frame_type == 0x02 || frame_type == 0x03) {
+        const auto frame = decode_received_ack_frame(reader, frame_type == 0x03, bytes);
+        if (!frame.has_value()) {
+            return received_decode_failure(frame.error().code, frame.error().offset);
+        }
+        return CodecResult<ReceivedFrameDecodeResult>::success(ReceivedFrameDecodeResult{
+            .frame = frame.value(),
+            .bytes_consumed = reader.offset(),
+        });
+    }
+
     auto decoded = deserialize_frame(span);
     if (!decoded.has_value()) {
         return received_decode_failure(decoded.error().code, decoded.error().offset);
@@ -1502,9 +1625,38 @@ CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &ack) {
         .largest_acknowledged = ack.largest_acknowledged,
         .first_ack_range = ack.first_ack_range,
         .additional_ranges = ack.additional_ranges,
-        .next_additional_index = 0,
         .previous_smallest = ack.largest_acknowledged - ack.first_ack_range,
-        .first_range_pending = true,
+    });
+}
+
+CodecResult<AckRangeCursor> make_ack_range_cursor(const ReceivedAckFrame &ack) {
+    if (ack.largest_acknowledged < ack.first_ack_range) {
+        return CodecResult<AckRangeCursor>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    if (!ack.additional_ranges_validated) {
+        BufferReader reader(ack.additional_range_bytes.span());
+        const auto decoded_ranges = decode_ack_additional_ranges(
+            reader, ack.additional_range_count, ack.largest_acknowledged - ack.first_ack_range,
+            [](std::uint64_t, std::uint64_t) {});
+        if (!decoded_ranges.has_value()) {
+            return CodecResult<AckRangeCursor>::failure(decoded_ranges.error().code,
+                                                        decoded_ranges.error().offset);
+        }
+        if (reader.remaining() != 0) {
+            return CodecResult<AckRangeCursor>::failure(CodecErrorCode::invalid_varint,
+                                                        reader.offset());
+        }
+    }
+
+    return CodecResult<AckRangeCursor>::success(AckRangeCursor{
+        .largest_acknowledged = ack.largest_acknowledged,
+        .first_ack_range = ack.first_ack_range,
+        .encoded_additional_ranges = ack.additional_range_bytes.span(),
+        .next_encoded_offset = 0,
+        .additional_range_count = ack.additional_range_count,
+        .previous_smallest = ack.largest_acknowledged - ack.first_ack_range,
+        .uses_encoded_additional_ranges = true,
     });
 }
 
@@ -1514,6 +1666,55 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
         return AckPacketNumberRange{
             .smallest = cursor.previous_smallest,
             .largest = cursor.largest_acknowledged,
+        };
+    }
+
+    if (cursor.uses_encoded_additional_ranges) {
+        if (cursor.next_additional_index >= cursor.additional_range_count) {
+            return std::nullopt;
+        }
+
+        if (cursor.next_encoded_offset > cursor.encoded_additional_ranges.size()) {
+            cursor.next_additional_index = cursor.additional_range_count;
+            cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
+            return std::nullopt;
+        }
+
+        BufferReader reader(cursor.encoded_additional_ranges.subspan(cursor.next_encoded_offset));
+        const auto gap = read_varint(reader);
+        if (!gap.has_value()) {
+            cursor.next_additional_index = cursor.additional_range_count;
+            cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
+            return std::nullopt;
+        }
+
+        const auto range_length = read_varint(reader);
+        if (!range_length.has_value()) {
+            cursor.next_additional_index = cursor.additional_range_count;
+            cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
+            return std::nullopt;
+        }
+
+        cursor.next_encoded_offset += reader.offset();
+        ++cursor.next_additional_index;
+
+        if (cursor.previous_smallest < gap.value() + 2) {
+            cursor.next_additional_index = cursor.additional_range_count;
+            cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
+            return std::nullopt;
+        }
+
+        const auto range_largest = cursor.previous_smallest - gap.value() - 2;
+        if (range_largest < range_length.value()) {
+            cursor.next_additional_index = cursor.additional_range_count;
+            cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
+            return std::nullopt;
+        }
+
+        cursor.previous_smallest = range_largest - range_length.value();
+        return AckPacketNumberRange{
+            .smallest = cursor.previous_smallest,
+            .largest = range_largest,
         };
     }
 

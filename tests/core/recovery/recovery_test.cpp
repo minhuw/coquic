@@ -4,10 +4,12 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "src/quic/frame.h"
 #include "src/quic/recovery.h"
 #include "tests/support/core/connection_test_fixtures.h"
 #include "tests/support/quic_test_utils.h"
@@ -805,6 +807,73 @@ TEST(QuicRecoveryTest, AckApplyResultMatchesCompatibilityResult) {
     EXPECT_EQ(fast.largest_acknowledged_was_newly_acked,
               compatibility.largest_acknowledged_was_newly_acked);
     EXPECT_EQ(fast.has_newly_acked_ack_eliciting, compatibility.has_newly_acked_ack_eliciting);
+}
+
+TEST(QuicRecoveryTest, ReceivedAckCursorMatchesOwnedAckApply) {
+    PacketSpaceRecovery owned_recovery;
+    PacketSpaceRecovery received_recovery;
+
+    for (std::uint64_t packet_number = 0; packet_number != 32; ++packet_number) {
+        const auto sent = make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+        owned_recovery.on_packet_sent(sent);
+        received_recovery.on_packet_sent(sent);
+    }
+    owned_recovery.on_packet_declared_lost(11);
+    received_recovery.on_packet_declared_lost(11);
+
+    const AckFrame ack{
+        .largest_acknowledged = 15,
+        .ack_delay = 3,
+        .first_ack_range = 1,
+        .additional_ranges =
+            {
+                AckRange{
+                    .gap = 1,
+                    .range_length = 0,
+                },
+            },
+    };
+
+    const auto encoded = coquic::quic::serialize_frame(coquic::quic::Frame{ack});
+    ASSERT_TRUE(encoded.has_value());
+    auto storage = std::make_shared<std::vector<std::byte>>(encoded.value());
+    const auto decoded = coquic::quic::deserialize_received_frame(
+        coquic::quic::SharedBytes(storage, 0, storage->size()));
+    ASSERT_TRUE(decoded.has_value());
+    const auto *received_ack = std::get_if<coquic::quic::ReceivedAckFrame>(&decoded.value().frame);
+    ASSERT_NE(received_ack, nullptr);
+
+    auto owned_cursor = coquic::quic::make_ack_range_cursor(ack);
+    ASSERT_TRUE(owned_cursor.has_value());
+    auto received_cursor = coquic::quic::make_ack_range_cursor(*received_ack);
+    ASSERT_TRUE(received_cursor.has_value());
+
+    const auto owned = owned_recovery.apply_ack_received(
+        owned_cursor.value(), ack.largest_acknowledged, coquic::quic::test::test_time(100));
+    const auto received = received_recovery.apply_ack_received(received_cursor.value(),
+                                                               received_ack->largest_acknowledged,
+                                                               coquic::quic::test::test_time(100));
+
+    EXPECT_EQ(packet_numbers_from_handles(owned_recovery, owned.acked_packets),
+              packet_numbers_from_handles(received_recovery, received.acked_packets));
+    EXPECT_EQ(packet_numbers_from_handles(owned_recovery, owned.late_acked_packets),
+              packet_numbers_from_handles(received_recovery, received.late_acked_packets));
+    EXPECT_EQ(packet_numbers_from_handles(owned_recovery, owned.lost_packets),
+              packet_numbers_from_handles(received_recovery, received.lost_packets));
+    EXPECT_EQ(owned.largest_acknowledged_was_newly_acked,
+              received.largest_acknowledged_was_newly_acked);
+    EXPECT_EQ(owned.has_newly_acked_ack_eliciting, received.has_newly_acked_ack_eliciting);
+    ASSERT_EQ(owned.largest_newly_acked_packet.has_value(),
+              received.largest_newly_acked_packet.has_value());
+    if (owned.largest_newly_acked_packet.has_value() &&
+        received.largest_newly_acked_packet.has_value()) {
+        EXPECT_EQ(owned.largest_newly_acked_packet->packet_number,
+                  received.largest_newly_acked_packet->packet_number);
+        EXPECT_EQ(owned.largest_newly_acked_packet->sent_time,
+                  received.largest_newly_acked_packet->sent_time);
+    }
 }
 
 TEST(QuicRecoveryTest, CompatibilityAckResultKeepsAscendingOrderAfterFastApply) {

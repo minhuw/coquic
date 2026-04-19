@@ -187,6 +187,21 @@ struct AckProcessingResult {
     bool has_newly_acked_ack_eliciting = false;
 };
 
+struct AckApplyLargestNewlyAckedPacket {
+    RecoveryPacketHandle handle;
+    std::uint64_t packet_number = 0;
+    QuicCoreTimePoint sent_time{};
+};
+
+struct AckApplyResult {
+    std::vector<RecoveryPacketHandle> acked_packets;
+    std::vector<RecoveryPacketHandle> late_acked_packets;
+    std::vector<RecoveryPacketHandle> lost_packets;
+    std::optional<AckApplyLargestNewlyAckedPacket> largest_newly_acked_packet;
+    bool largest_acknowledged_was_newly_acked = false;
+    bool has_newly_acked_ack_eliciting = false;
+};
+
 class PacketSpaceRecovery {
   public:
     PacketSpaceRecovery();
@@ -199,6 +214,8 @@ class PacketSpaceRecovery {
     void on_packet_declared_lost(std::uint64_t packet_number);
     void retire_packet(RecoveryPacketHandle handle);
     void retire_packet(std::uint64_t packet_number);
+    AckApplyResult apply_ack_received(AckRangeCursor cursor, std::uint64_t largest_acknowledged,
+                                      QuicCoreTimePoint now);
     AckProcessingResult on_ack_received(std::span<const AckPacketNumberRange> ack_ranges,
                                         std::uint64_t largest_acknowledged, QuicCoreTimePoint now);
     AckProcessingResult on_ack_received(AckRangeCursor cursor, std::uint64_t largest_acknowledged,
@@ -267,6 +284,10 @@ class PacketSpaceRecovery {
     void track_new_loss_candidates(std::optional<std::uint64_t> previous_largest_acked,
                                    std::uint64_t largest_acked);
     std::size_t ensure_slot_for_packet_number(std::uint64_t packet_number);
+    AckApplyResult
+    apply_ack_received_descending(std::span<const AckPacketNumberRange> ack_ranges_descending,
+                                  std::uint64_t largest_acknowledged, QuicCoreTimePoint now);
+    AckProcessingResult ack_processing_result_from_apply(const AckApplyResult &apply_result) const;
 
     std::vector<SentPacketLedgerSlot> slots_;
     std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> in_flight_ack_eliciting_packets_;

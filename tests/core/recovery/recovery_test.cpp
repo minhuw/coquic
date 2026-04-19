@@ -735,6 +735,101 @@ TEST(QuicRecoveryTest, AckFrameDirectRecoveryMatchesExpandedRangeRecovery) {
     EXPECT_EQ(direct.has_newly_acked_ack_eliciting, expanded.has_newly_acked_ack_eliciting);
 }
 
+TEST(QuicRecoveryTest, AckApplyResultMatchesCompatibilityResult) {
+    coquic::quic::PacketSpaceRecovery fast_recovery;
+    coquic::quic::PacketSpaceRecovery compatibility_recovery;
+
+    for (std::uint64_t packet_number = 0; packet_number != 32; ++packet_number) {
+        const auto sent = make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+        fast_recovery.on_packet_sent(sent);
+        compatibility_recovery.on_packet_sent(sent);
+    }
+    fast_recovery.on_packet_declared_lost(11);
+    compatibility_recovery.on_packet_declared_lost(11);
+
+    const coquic::quic::AckFrame ack{
+        .largest_acknowledged = 15,
+        .ack_delay = 0,
+        .first_ack_range = 1,
+        .additional_ranges =
+            {
+                coquic::quic::AckRange{
+                    .gap = 1,
+                    .range_length = 0,
+                },
+            },
+    };
+
+    auto cursor = coquic::quic::make_ack_range_cursor(ack);
+    ASSERT_TRUE(cursor.has_value());
+
+    const auto fast = fast_recovery.apply_ack_received(cursor.value(), ack.largest_acknowledged,
+                                                       coquic::quic::test::test_time(100));
+    const auto compatibility =
+        compatibility_recovery.on_ack_received(ack, coquic::quic::test::test_time(100));
+
+    EXPECT_EQ(
+        packet_numbers_from_handles(fast_recovery, fast.acked_packets),
+        packet_numbers_from_handles(compatibility_recovery, compatibility.acked_packets.handles()));
+    EXPECT_EQ(packet_numbers_from_handles(fast_recovery, fast.late_acked_packets),
+              packet_numbers_from_handles(compatibility_recovery,
+                                          compatibility.late_acked_packets.handles()));
+    EXPECT_EQ(
+        packet_numbers_from_handles(fast_recovery, fast.lost_packets),
+        packet_numbers_from_handles(compatibility_recovery, compatibility.lost_packets.handles()));
+    if (!fast.largest_newly_acked_packet.has_value()) {
+        GTEST_FAIL() << "expected fast largest newly ACKed packet";
+        return;
+    }
+    if (!compatibility.largest_newly_acked_packet.has_value()) {
+        GTEST_FAIL() << "expected compatibility largest newly ACKed packet";
+        return;
+    }
+    const auto fast_largest = *fast.largest_newly_acked_packet;
+    const auto compatibility_largest = compatibility.largest_newly_acked_packet.value();
+    EXPECT_EQ(fast_largest.packet_number, compatibility_largest.packet_number);
+    EXPECT_EQ(fast_largest.sent_time, compatibility_largest.sent_time);
+    EXPECT_EQ(fast.largest_acknowledged_was_newly_acked,
+              compatibility.largest_acknowledged_was_newly_acked);
+    EXPECT_EQ(fast.has_newly_acked_ack_eliciting, compatibility.has_newly_acked_ack_eliciting);
+}
+
+TEST(QuicRecoveryTest, CompatibilityAckResultKeepsAscendingOrderAfterFastApply) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(2)));
+    recovery.on_packet_declared_lost(1);
+    recovery.on_packet_declared_lost(5);
+
+    const auto result = recovery.on_ack_received(
+        AckFrame{
+            .largest_acknowledged = 7,
+            .first_ack_range = 0,
+            .additional_ranges =
+                {
+                    AckRange{
+                        .gap = 0,
+                        .range_length = 0,
+                    },
+                    AckRange{
+                        .gap = 2,
+                        .range_length = 0,
+                    },
+                },
+        },
+        coquic::quic::test::test_time(10));
+
+    EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{7}));
+    EXPECT_EQ(packet_numbers_from_handles(recovery, result.late_acked_packets.handles()),
+              (std::vector<std::uint64_t>{1, 5}));
+}
+
 TEST(QuicRecoveryTest,
      AckProcessingTracksLargestNewlyAcknowledgedPacketSeparatelyFromAckElicitingStatus) {
     PacketSpaceRecovery recovery;

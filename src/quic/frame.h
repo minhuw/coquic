@@ -38,6 +38,14 @@ struct AckFrame {
     std::optional<AckEcnCounts> ecn_counts;
 };
 
+struct OutboundAckHeader {
+    std::uint64_t largest_acknowledged = 0;
+    std::uint64_t ack_delay = 0;
+    std::uint64_t first_ack_range = 0;
+    std::size_t additional_range_count = 0;
+    std::optional<AckEcnCounts> ecn_counts;
+};
+
 struct AckPacketNumberRange {
     std::uint64_t smallest = 0;
     std::uint64_t largest = 0;

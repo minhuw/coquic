@@ -174,6 +174,27 @@ TEST(QuicRecoveryTest, AckHistoryBuildsMultipleAckRanges) {
     EXPECT_EQ(ack_frame.additional_ranges[0].range_length, 1u);
 }
 
+TEST(QuicRecoveryTest, AckHistoryBuildsOutboundAckHeaderWithoutMaterializingAckRanges) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/0, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1));
+    history.record_received(/*packet_number=*/1, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(2));
+    history.record_received(/*packet_number=*/4, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(3));
+
+    const auto header = history.build_outbound_ack_header(/*ack_delay_exponent=*/3,
+                                                          coquic::quic::test::test_time(4));
+    ASSERT_TRUE(header.has_value());
+    if (!header.has_value()) {
+        GTEST_FAIL() << "expected outbound ACK header";
+        return;
+    }
+    EXPECT_EQ(header->largest_acknowledged, 4u);
+    EXPECT_EQ(header->first_ack_range, 0u);
+    EXPECT_EQ(header->additional_range_count, 1u);
+}
+
 TEST(QuicRecoveryTest, AckHistoryCoalescesContiguousPacketsIntoSingleRange) {
     ReceivedPacketHistory history;
     for (std::uint64_t packet_number = 0; packet_number < 4096; ++packet_number) {

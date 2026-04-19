@@ -79,6 +79,26 @@ class ReceivedPacketHistory {
                          QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
     bool has_ack_to_send() const;
     bool requests_immediate_ack() const;
+    std::optional<OutboundAckHeader>
+    build_outbound_ack_header(std::uint64_t ack_delay_exponent, QuicCoreTimePoint now,
+                              bool allow_non_pending = false) const;
+
+    template <typename Callback>
+    void for_each_additional_ack_range_descending(const OutboundAckHeader &header,
+                                                  Callback &&callback) const {
+        auto it = std::next(ranges_.rbegin());
+        auto previous_smallest = header.largest_acknowledged - header.first_ack_range;
+        for (; it != ranges_.rend(); ++it) {
+            const auto range_start = it->first;
+            const auto range_end = it->second.largest_packet_number;
+            callback(AckRange{
+                .gap = previous_smallest - range_end - 2,
+                .range_length = range_end - range_start,
+            });
+            previous_smallest = range_start;
+        }
+    }
+
     std::optional<AckFrame> build_ack_frame(std::uint64_t ack_delay_exponent, QuicCoreTimePoint now,
                                             bool allow_non_pending = false) const;
     void on_ack_sent();

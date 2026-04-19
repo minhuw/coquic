@@ -257,6 +257,16 @@ class PacketSpaceRecovery {
         retired,
     };
 
+    struct AckApplyState {
+        AckApplyResult result;
+        std::vector<RecoveryPacketHandle> acked_packets_descending;
+        std::vector<RecoveryPacketHandle> late_acked_packets_descending;
+        std::optional<std::size_t> current_live_slot;
+        std::uint64_t largest_acknowledged = 0;
+        std::uint64_t effective_largest_acked = 0;
+        bool mutated = false;
+    };
+
     static constexpr std::size_t kInvalidLedgerSlotIndex = std::numeric_limits<std::size_t>::max();
 
     struct SentPacketLedgerSlot {
@@ -284,6 +294,9 @@ class PacketSpaceRecovery {
     void track_new_loss_candidates(std::optional<std::uint64_t> previous_largest_acked,
                                    std::uint64_t largest_acked);
     std::size_t ensure_slot_for_packet_number(std::uint64_t packet_number);
+    AckApplyState begin_ack_received_apply(std::uint64_t largest_acknowledged);
+    void apply_ack_range_descending(AckApplyState &state, const AckPacketNumberRange &range);
+    AckApplyResult finish_ack_received_apply(AckApplyState &state, QuicCoreTimePoint now);
     AckApplyResult
     apply_ack_received_descending(std::span<const AckPacketNumberRange> ack_ranges_descending,
                                   std::uint64_t largest_acknowledged, QuicCoreTimePoint now);

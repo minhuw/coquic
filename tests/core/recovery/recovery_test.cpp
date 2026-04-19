@@ -779,6 +779,17 @@ TEST(QuicRecoveryTest, AckApplyResultMatchesCompatibilityResult) {
     EXPECT_EQ(
         packet_numbers_from_handles(fast_recovery, fast.lost_packets),
         packet_numbers_from_handles(compatibility_recovery, compatibility.lost_packets.handles()));
+    ASSERT_FALSE(fast.lost_packets.empty());
+    for (const auto handle : fast.lost_packets) {
+        const auto *packet = fast_recovery.packet_for_handle(handle);
+        ASSERT_NE(packet, nullptr);
+        EXPECT_TRUE(packet->in_flight);
+        EXPECT_FALSE(packet->declared_lost);
+    }
+    for (const auto packet : compatibility.lost_packets) {
+        EXPECT_FALSE(packet.in_flight);
+        EXPECT_TRUE(packet.declared_lost);
+    }
     if (!fast.largest_newly_acked_packet.has_value()) {
         GTEST_FAIL() << "expected fast largest newly ACKed packet";
         return;

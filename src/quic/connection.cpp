@@ -3758,11 +3758,11 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
     }
 
     packet_space.recovery.rtt_state() = shared_recovery_rtt_state();
-    auto ack_result =
-        packet_space.recovery.on_ack_received(cursor.value(), ack.largest_acknowledged, now);
+    const auto ack_result =
+        packet_space.recovery.apply_ack_received(cursor.value(), ack.largest_acknowledged, now);
     std::vector<SentPacketRecord> acked_packets;
     acked_packets.reserve(ack_result.acked_packets.size());
-    for (const auto handle : ack_result.acked_packets.handles()) {
+    for (const auto handle : ack_result.acked_packets) {
         auto retired_packet = retire_acked_packet(packet_space, handle);
         if (!retired_packet.has_value()) {
             continue;
@@ -3771,7 +3771,7 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
     }
     std::vector<SentPacketRecord> late_acked_packets;
     late_acked_packets.reserve(ack_result.late_acked_packets.size());
-    for (const auto handle : ack_result.late_acked_packets.handles()) {
+    for (const auto handle : ack_result.late_acked_packets) {
         auto retired_packet = retire_acked_packet(packet_space, handle);
         if (!retired_packet.has_value()) {
             continue;
@@ -3780,7 +3780,7 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
     }
     std::vector<SentPacketRecord> newly_lost_packets;
     newly_lost_packets.reserve(ack_result.lost_packets.size());
-    for (const auto handle : ack_result.lost_packets.handles()) {
+    for (const auto handle : ack_result.lost_packets) {
         auto lost_packet =
             mark_lost_packet(packet_space, handle, /*already_marked_in_recovery=*/true);
         if (!lost_packet.has_value()) {

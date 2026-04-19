@@ -742,6 +742,53 @@ TEST(QuicCoreTest, AckProcessingUsesLargestNewlyAcknowledgedPacketForRttSample) 
               std::chrono::milliseconds(60));
 }
 
+TEST(QuicCoreTest, AckProcessingPreservesRttAndAckTriggeredLossAcrossSparseRanges) {
+    auto connection = make_connected_client_connection();
+    auto &rtt = connection.application_space_.recovery.rtt_state();
+    rtt.latest_rtt = std::chrono::milliseconds(10);
+    rtt.min_rtt = std::chrono::milliseconds(10);
+    rtt.smoothed_rtt = std::chrono::milliseconds(10);
+    rtt.rttvar = std::chrono::milliseconds(1);
+
+    for (std::uint64_t packet_number = 1; packet_number <= 5; ++packet_number) {
+        connection.track_sent_packet(connection.application_space_,
+                                     coquic::quic::SentPacketRecord{
+                                         .packet_number = packet_number,
+                                         .sent_time = coquic::quic::test::test_time(
+                                             static_cast<std::int64_t>(100u + packet_number)),
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .bytes_in_flight = 1200,
+                                     });
+    }
+    connection.application_space_.recovery.on_packet_declared_lost(2);
+
+    const auto processed = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 5,
+            .first_ack_range = 0,
+            .additional_ranges =
+                {
+                    coquic::quic::AckRange{
+                        .gap = 1,
+                        .range_length = 0,
+                    },
+                },
+        },
+        coquic::quic::test::test_time(120), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+        /*suppress_pto_reset=*/false);
+
+    ASSERT_TRUE(processed.has_value());
+    const auto latest_rtt = connection.application_space_.recovery.rtt_state().latest_rtt;
+    ASSERT_TRUE(latest_rtt.has_value());
+    EXPECT_EQ(latest_rtt, std::optional{std::chrono::milliseconds(15)});
+    const auto *lost_packet = connection.application_space_.recovery.find_packet(1);
+    ASSERT_NE(lost_packet, nullptr);
+    EXPECT_TRUE(lost_packet->declared_lost);
+    EXPECT_EQ(connection.congestion_controller_.congestion_window(), 6000u);
+}
+
 TEST(QuicCoreTest, AckProcessingClampsAckDelayWhenExponentIsTooLarge) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
 

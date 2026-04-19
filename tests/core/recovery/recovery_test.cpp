@@ -195,6 +195,82 @@ TEST(QuicRecoveryTest, AckHistoryBuildsOutboundAckHeaderWithoutMaterializingAckR
     EXPECT_EQ(header->additional_range_count, 1u);
 }
 
+TEST(QuicRecoveryTest, AckHistoryOutboundAckSnapshotWalkerBuildsTwoAdditionalRanges) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/0, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1));
+    history.record_received(/*packet_number=*/1, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(2));
+    history.record_received(/*packet_number=*/4, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(3));
+    history.record_received(/*packet_number=*/7, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(4));
+
+    const auto header = history.build_outbound_ack_header(/*ack_delay_exponent=*/3,
+                                                          coquic::quic::test::test_time(5));
+    ASSERT_TRUE(header.has_value());
+    if (!header.has_value()) {
+        GTEST_FAIL() << "expected outbound ACK header";
+        return;
+    }
+
+    std::vector<AckRange> additional_ranges;
+    history.for_each_additional_ack_range_descending(
+        *header, [&](AckRange range) { additional_ranges.push_back(range); });
+
+    EXPECT_EQ(header->largest_acknowledged, 7u);
+    EXPECT_EQ(header->first_ack_range, 0u);
+    EXPECT_EQ(header->additional_range_count, 2u);
+    ASSERT_EQ(additional_ranges.size(), 2u);
+    EXPECT_EQ(additional_ranges[0].gap, 1u);
+    EXPECT_EQ(additional_ranges[0].range_length, 0u);
+    EXPECT_EQ(additional_ranges[1].gap, 1u);
+    EXPECT_EQ(additional_ranges[1].range_length, 1u);
+}
+
+TEST(QuicRecoveryTest, AckHistoryOutboundSnapshotWalkerIgnoresPostSnapshotHistoryMutations) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/0, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(1));
+    history.record_received(/*packet_number=*/1, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(2));
+    history.record_received(/*packet_number=*/4, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(3));
+    history.record_received(/*packet_number=*/7, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(4));
+
+    const auto snapshot_header = history.build_outbound_ack_header(
+        /*ack_delay_exponent=*/3, coquic::quic::test::test_time(5));
+    ASSERT_TRUE(snapshot_header.has_value());
+    if (!snapshot_header.has_value()) {
+        GTEST_FAIL() << "expected outbound ACK snapshot";
+        return;
+    }
+    EXPECT_EQ(snapshot_header->largest_acknowledged, 7u);
+    EXPECT_EQ(snapshot_header->additional_range_count, 2u);
+
+    history.record_received(/*packet_number=*/10, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(6));
+    const auto mutated_header = history.build_outbound_ack_header(/*ack_delay_exponent=*/3,
+                                                                  coquic::quic::test::test_time(7));
+    ASSERT_TRUE(mutated_header.has_value());
+    if (!mutated_header.has_value()) {
+        GTEST_FAIL() << "expected outbound ACK header after mutation";
+        return;
+    }
+    EXPECT_EQ(mutated_header->largest_acknowledged, 10u);
+    EXPECT_EQ(mutated_header->additional_range_count, 3u);
+
+    std::vector<AckRange> snapshot_ranges;
+    history.for_each_additional_ack_range_descending(
+        *snapshot_header, [&](AckRange range) { snapshot_ranges.push_back(range); });
+    ASSERT_EQ(snapshot_ranges.size(), 2u);
+    EXPECT_EQ(snapshot_ranges[0].gap, 1u);
+    EXPECT_EQ(snapshot_ranges[0].range_length, 0u);
+    EXPECT_EQ(snapshot_ranges[1].gap, 1u);
+    EXPECT_EQ(snapshot_ranges[1].range_length, 1u);
+}
+
 TEST(QuicRecoveryTest, AckHistoryCoalescesContiguousPacketsIntoSingleRange) {
     ReceivedPacketHistory history;
     for (std::uint64_t packet_number = 0; packet_number < 4096; ++packet_number) {

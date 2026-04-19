@@ -161,15 +161,30 @@ std::optional<OutboundAckHeader> ReceivedPacketHistory::build_outbound_ack_heade
         });
     const auto ack_delay = std::chrono::duration_cast<std::chrono::microseconds>(std::max(
         now - largest_received_packet_record.received_time, QuicCoreClock::duration::zero()));
-
-    return OutboundAckHeader{
+    OutboundAckHeader header{
         .largest_acknowledged = largest_range->second.largest_packet_number,
         .ack_delay = encode_ack_delay(ack_delay, ack_delay_exponent),
         .first_ack_range = largest_range->second.largest_packet_number - largest_range->first,
-        .additional_range_count = ranges_.size() - 1,
+        .additional_range_count = 0,
+        .additional_ranges = {},
         .ecn_counts =
             ecn_feedback_accessible_ ? std::optional<AckEcnCounts>{ecn_counts_} : std::nullopt,
     };
+    header.additional_ranges.reserve(ranges_.size() - 1);
+
+    auto previous_smallest = largest_range->first;
+    for (auto it = std::next(ranges_.rbegin()); it != ranges_.rend(); ++it) {
+        const auto range_start = it->first;
+        const auto range_end = it->second.largest_packet_number;
+        header.additional_ranges.push_back(AckRange{
+            .gap = previous_smallest - range_end - 2,
+            .range_length = range_end - range_start,
+        });
+        previous_smallest = range_start;
+    }
+    header.additional_range_count = header.additional_ranges.size();
+
+    return header;
 }
 
 std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack_delay_exponent,
@@ -187,7 +202,7 @@ std::optional<AckFrame> ReceivedPacketHistory::build_ack_frame(std::uint64_t ack
         .additional_ranges = {},
         .ecn_counts = header->ecn_counts,
     };
-    ack.additional_ranges.reserve(header->additional_range_count);
+    ack.additional_ranges.reserve(header->additional_ranges.size());
     for_each_additional_ack_range_descending(
         *header, [&](AckRange range) { ack.additional_ranges.push_back(range); });
 

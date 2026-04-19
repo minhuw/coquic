@@ -43,6 +43,7 @@ struct OutboundAckHeader {
     std::uint64_t ack_delay = 0;
     std::uint64_t first_ack_range = 0;
     std::size_t additional_range_count = 0;
+    std::vector<AckRange> additional_ranges;
     std::optional<AckEcnCounts> ecn_counts;
 };
 

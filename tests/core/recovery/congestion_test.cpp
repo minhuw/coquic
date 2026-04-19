@@ -119,6 +119,19 @@ TEST(QuicCongestionTest, AckBatchOrderDoesNotChangeRecoveryExit) {
     EXPECT_EQ(ascending.bytes_in_flight(), descending.bytes_in_flight());
     EXPECT_EQ(ascending.congestion_window(), 7200u);
     EXPECT_EQ(ascending.bytes_in_flight(), 6000u);
+
+    const std::array<SentPacketRecord, 1> post_batch_packet{
+        make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/7200, coquic::quic::test::test_time(5)),
+    };
+
+    ascending.on_packets_acked(post_batch_packet, /*app_limited=*/false);
+    descending.on_packets_acked(post_batch_packet, /*app_limited=*/false);
+
+    EXPECT_EQ(ascending.congestion_window(), descending.congestion_window());
+    EXPECT_EQ(ascending.bytes_in_flight(), descending.bytes_in_flight());
+    EXPECT_EQ(ascending.congestion_window(), 8400u);
+    EXPECT_EQ(ascending.bytes_in_flight(), 0u);
 }
 
 TEST(QuicCongestionTest, LossAccountingIgnoresNonInflightPacketsAndSaturatesToZero) {

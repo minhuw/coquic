@@ -34,6 +34,9 @@ void NewRenoCongestionController::on_packet_sent(std::size_t bytes_sent, bool ac
 
 void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRecord> packets,
                                                    bool app_limited) {
+    const auto recovery_boundary = recovery_start_time_;
+    bool exit_recovery = false;
+
     for (const auto &packet : packets) {
         if (packet.in_flight) {
             bytes_in_flight_ = packet.bytes_in_flight > bytes_in_flight_
@@ -41,12 +44,14 @@ void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRec
                                    : bytes_in_flight_ - packet.bytes_in_flight;
         }
 
-        if (!packet.ack_eliciting || in_recovery(packet) || app_limited) {
+        const bool in_batch_recovery =
+            recovery_boundary.has_value() && packet.sent_time <= *recovery_boundary;
+        if (!packet.ack_eliciting || in_batch_recovery || app_limited) {
             continue;
         }
 
-        if (recovery_start_time_.has_value()) {
-            recovery_start_time_ = std::nullopt;
+        if (recovery_boundary.has_value()) {
+            exit_recovery = true;
         }
 
         if (congestion_window_ < slow_start_threshold_) {
@@ -59,6 +64,10 @@ void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRec
             congestion_avoidance_credit_ -= congestion_window_;
             congestion_window_ += max_datagram_size_;
         }
+    }
+
+    if (exit_recovery) {
+        recovery_start_time_ = std::nullopt;
     }
 }
 

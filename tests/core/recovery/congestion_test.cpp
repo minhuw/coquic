@@ -83,6 +83,44 @@ TEST(QuicCongestionTest, RecoveryAckTransitionsToCongestionAvoidance) {
     EXPECT_EQ(controller.bytes_in_flight(), 6000u);
 }
 
+TEST(QuicCongestionTest, AckBatchOrderDoesNotChangeRecoveryExit) {
+    NewRenoCongestionController ascending(/*max_datagram_size=*/1200);
+    NewRenoCongestionController descending(/*max_datagram_size=*/1200);
+
+    for (auto *controller : {&ascending, &descending}) {
+        controller->on_packet_sent(/*bytes_sent=*/18000, /*ack_eliciting=*/true);
+        controller->on_loss_event(coquic::quic::test::test_time(5),
+                                  coquic::quic::test::test_time(1));
+        ASSERT_EQ(controller->congestion_window(), 6000u);
+        controller->on_packet_sent(/*bytes_sent=*/6000, /*ack_eliciting=*/true);
+    }
+
+    const std::array<SentPacketRecord, 3> ascending_packets{
+        make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/6000, coquic::quic::test::test_time(1)),
+        make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/6000, coquic::quic::test::test_time(2)),
+        make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/6000, coquic::quic::test::test_time(6)),
+    };
+    const std::array<SentPacketRecord, 3> descending_packets{
+        make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/6000, coquic::quic::test::test_time(6)),
+        make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/6000, coquic::quic::test::test_time(2)),
+        make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/6000, coquic::quic::test::test_time(1)),
+    };
+
+    ascending.on_packets_acked(ascending_packets, /*app_limited=*/false);
+    descending.on_packets_acked(descending_packets, /*app_limited=*/false);
+
+    EXPECT_EQ(ascending.congestion_window(), descending.congestion_window());
+    EXPECT_EQ(ascending.bytes_in_flight(), descending.bytes_in_flight());
+    EXPECT_EQ(ascending.congestion_window(), 7200u);
+    EXPECT_EQ(ascending.bytes_in_flight(), 6000u);
+}
+
 TEST(QuicCongestionTest, LossAccountingIgnoresNonInflightPacketsAndSaturatesToZero) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     controller.on_packet_sent(/*bytes_sent=*/1200, /*ack_eliciting=*/true);

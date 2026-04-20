@@ -43,6 +43,7 @@ bool runtime_loop_internal_coverage_for_test();
 std::uint64_t runtime_loop_internal_coverage_mask_for_test();
 std::uint64_t runtime_connection_handle_effect_coverage_mask_for_test();
 bool runtime_additional_internal_coverage_for_test();
+bool runtime_server_local_error_without_connection_coverage_for_test();
 bool runtime_tail_internal_coverage_for_test();
 void runtime_set_force_bootstrap_guard_failure_for_test(bool enabled);
 void runtime_set_forced_server_endpoint_config_for_test(
@@ -1465,6 +1466,10 @@ TEST(QuicHttp3RuntimeTest, RuntimeConnectionHandleCoverageMaskIncludesEventEffec
 
 TEST(QuicHttp3RuntimeTest, RuntimeAdditionalInternalCoverageHookReturnsTrue) {
     EXPECT_TRUE(coquic::http3::runtime_additional_internal_coverage_for_test());
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeServerCoverageHookHandlesLocalErrorWithoutConnection) {
+    EXPECT_TRUE(coquic::http3::runtime_server_local_error_without_connection_coverage_for_test());
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeTailInternalCoverageHookReturnsTrue) {

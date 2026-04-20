@@ -5039,6 +5039,36 @@ TEST(QuicCoreTest, ProcessInboundDatagramQlogPathFailsWhenPreviousReadSecretCont
     EXPECT_TRUE(connection.has_failed());
 }
 
+TEST(QuicCoreTest, ProcessInboundDatagramQlogPathAcceptsPeerKeyUpdatePacket) {
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    auto connection = make_connected_client_connection();
+    enable_qlog_session_for_test(connection, qlog_dir.path());
+    ASSERT_TRUE(connection.application_space_.read_secret.has_value());
+    if (!connection.application_space_.read_secret.has_value()) {
+        return;
+    }
+
+    const auto original_read_key_phase = connection.application_read_key_phase_;
+    const auto original_write_key_phase = connection.application_write_key_phase_;
+    const auto next_read_secret =
+        coquic::quic::derive_next_traffic_secret(connection.application_space_.read_secret.value());
+    ASSERT_TRUE(next_read_secret.has_value());
+    if (!next_read_secret.has_value()) {
+        return;
+    }
+
+    const auto encoded = serialize_one_rtt_ack_datagram_for_test(
+        connection, next_read_secret.value(), 193, !original_read_key_phase);
+    ASSERT_FALSE(encoded.empty());
+
+    connection.process_inbound_datagram(encoded, coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 193u);
+    EXPECT_EQ(connection.application_read_key_phase_, !original_read_key_phase);
+    EXPECT_EQ(connection.application_write_key_phase_, !original_write_key_phase);
+}
+
 TEST(QuicCoreTest,
      ProcessInboundDatagramQlogPathDiscardsPacketWhenPreviousReadSecretRetryStillFails) {
     coquic::quic::test::ScopedTempDir qlog_dir;

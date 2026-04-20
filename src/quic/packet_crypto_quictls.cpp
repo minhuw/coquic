@@ -1065,6 +1065,80 @@ void reset_packet_crypto_runtime_caches_for_tests() {
     reset_runtime_caches_for_tests_impl();
 }
 
+bool packet_crypto_cached_header_protection_mismatch_branch_coverage_for_tests() {
+    TrafficSecret secret{
+        .cipher_suite = CipherSuite::tls_aes_128_gcm_sha256,
+        .secret = {std::byte{0x00}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                   std::byte{0x04}, std::byte{0x05}, std::byte{0x06}, std::byte{0x07},
+                   std::byte{0x08}, std::byte{0x09}, std::byte{0x0a}, std::byte{0x0b},
+                   std::byte{0x0c}, std::byte{0x0d}, std::byte{0x0e}, std::byte{0x0f},
+                   std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13},
+                   std::byte{0x14}, std::byte{0x15}, std::byte{0x16}, std::byte{0x17},
+                   std::byte{0x18}, std::byte{0x19}, std::byte{0x1a}, std::byte{0x1b},
+                   std::byte{0x1c}, std::byte{0x1d}, std::byte{0x1e}, std::byte{0x1f}},
+        .header_protection_key =
+            std::vector<std::byte>{
+                std::byte{0x40},
+                std::byte{0x41},
+                std::byte{0x42},
+                std::byte{0x43},
+                std::byte{0x44},
+                std::byte{0x45},
+                std::byte{0x46},
+                std::byte{0x47},
+                std::byte{0x48},
+                std::byte{0x49},
+                std::byte{0x4a},
+                std::byte{0x4b},
+                std::byte{0x4c},
+                std::byte{0x4d},
+                std::byte{0x4e},
+                std::byte{0x4f},
+            },
+    };
+    secret.cached_packet_protection_keys = PacketProtectionKeys{
+        .key = {std::byte{0x20}, std::byte{0x21}, std::byte{0x22}, std::byte{0x23}, std::byte{0x24},
+                std::byte{0x25}, std::byte{0x26}, std::byte{0x27}, std::byte{0x28}, std::byte{0x29},
+                std::byte{0x2a}, std::byte{0x2b}, std::byte{0x2c}, std::byte{0x2d}, std::byte{0x2e},
+                std::byte{0x2f}},
+        .iv = {std::byte{0x30}, std::byte{0x31}, std::byte{0x32}, std::byte{0x33}, std::byte{0x34},
+               std::byte{0x35}, std::byte{0x36}, std::byte{0x37}, std::byte{0x38}, std::byte{0x39},
+               std::byte{0x3a}, std::byte{0x3b}},
+        .hp_key = {std::byte{0x50}, std::byte{0x51}, std::byte{0x52}, std::byte{0x53},
+                   std::byte{0x54}, std::byte{0x55}, std::byte{0x56}, std::byte{0x57},
+                   std::byte{0x58}, std::byte{0x59}, std::byte{0x5a}, std::byte{0x5b},
+                   std::byte{0x5c}, std::byte{0x5d}, std::byte{0x5e}, std::byte{0x5f}},
+    };
+    secret.cached_packet_protection_inputs = TrafficSecretCacheInputs{
+        .secret = secret.secret,
+        .header_protection_key =
+            std::vector<std::byte>{
+                std::byte{0x60},
+                std::byte{0x61},
+                std::byte{0x62},
+                std::byte{0x63},
+                std::byte{0x64},
+                std::byte{0x65},
+                std::byte{0x66},
+                std::byte{0x67},
+                std::byte{0x68},
+                std::byte{0x69},
+                std::byte{0x6a},
+                std::byte{0x6b},
+                std::byte{0x6c},
+                std::byte{0x6d},
+                std::byte{0x6e},
+                std::byte{0x6f},
+            },
+        .quic_version = secret.quic_version,
+    };
+
+    const auto expanded = expand_traffic_secret_cached(secret);
+    return (secret.cached_packet_protection_inputs.value().header_protection_key ==
+            secret.header_protection_key) &
+           (expanded.value().get().hp_key == secret.header_protection_key.value());
+}
+
 ScopedPacketCryptoFaultInjector::ScopedPacketCryptoFaultInjector(PacketCryptoFaultPoint fault_point,
                                                                  std::size_t occurrence)
     : previous_fault_point_(detail::packet_crypto_fault_state().fault_point),

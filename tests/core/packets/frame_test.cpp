@@ -17,6 +17,8 @@ bool frame_length_prefixed_span_fault_coverage_for_tests();
 bool frame_single_varint_writer_fault_coverage_for_tests();
 std::uint64_t frame_to_received_variant_coverage_mask_for_tests();
 bool frame_matches_codec_error_branch_coverage_for_tests();
+bool frame_matches_codec_error_success_branch_coverage_for_tests();
+bool frame_received_unknown_type_branch_coverage_for_tests();
 bool frame_streams_blocked_writer_success_coverage_for_tests(coquic::quic::StreamLimitType);
 } // namespace coquic::quic::test
 
@@ -1564,6 +1566,14 @@ TEST(QuicFrameTest, SingleVarintWriterFaultCoverageHookExercisesRemainingBranche
 
 TEST(QuicFrameTest, MatchesCodecErrorCoverageHookExercisesMismatchBranches) {
     EXPECT_TRUE(coquic::quic::test::frame_matches_codec_error_branch_coverage_for_tests());
+}
+
+TEST(QuicFrameTest, MatchesCodecErrorCoverageHookExercisesSuccessBranch) {
+    EXPECT_TRUE(coquic::quic::test::frame_matches_codec_error_success_branch_coverage_for_tests());
+}
+
+TEST(QuicFrameTest, ReceivedFrameCoverageHookExercisesUnknownFrameTypeBranch) {
+    EXPECT_TRUE(coquic::quic::test::frame_received_unknown_type_branch_coverage_for_tests());
 }
 
 TEST(QuicFrameTest, StreamsBlockedWriterCoverageHookExercisesCountingAndSpanVisitors) {

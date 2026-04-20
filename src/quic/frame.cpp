@@ -1807,6 +1807,68 @@ bool frame_matches_codec_error_branch_coverage_for_tests() {
            (!matches_codec_error(error, CodecErrorCode::invalid_varint, 8));
 }
 
+bool frame_matches_codec_error_success_branch_coverage_for_tests() {
+    bool ok = true;
+
+    ok &= !matches_codec_error(serialize_frame(Frame{PingFrame{}}), CodecErrorCode::truncated_input,
+                               0);
+    ok &= !matches_codec_error(serialized_frame_size(Frame{PingFrame{}}),
+                               CodecErrorCode::truncated_input, 0);
+
+    {
+        std::array<std::byte, 8> output{};
+        ok &= !matches_codec_error(serialize_frame_into(output, Frame{PingFrame{}}),
+                                   CodecErrorCode::truncated_input, 0);
+    }
+
+    {
+        const std::array<std::byte, 1> bytes{std::byte{0x01}};
+        ok &= !matches_codec_error(deserialize_frame(bytes), CodecErrorCode::truncated_input, 0);
+    }
+
+    ok &= !matches_codec_error(deserialize_received_frame(SharedBytes{std::byte{0x01}}),
+                               CodecErrorCode::truncated_input, 0);
+
+    {
+        const SharedBytes bytes{
+            std::byte{0x01},
+            std::byte{0xaa},
+        };
+        BufferReader reader(bytes.span());
+        ok &= !matches_codec_error(read_length_prefixed_shared_bytes(reader, bytes),
+                                   CodecErrorCode::truncated_input, 0);
+    }
+
+    {
+        const SharedBytes bytes{
+            std::byte{0x00},
+            std::byte{0x01},
+            std::byte{0xaa},
+        };
+        BufferReader reader(bytes.span());
+        ok &= !matches_codec_error(decode_received_crypto_frame(reader, bytes),
+                                   CodecErrorCode::truncated_input, 0);
+    }
+
+    {
+        const SharedBytes bytes{
+            std::byte{0x01},
+            std::byte{0x01},
+            std::byte{0xbb},
+        };
+        BufferReader reader(bytes.span());
+        ok &= !matches_codec_error(decode_received_stream_frame(reader, 0x0a, bytes),
+                                   CodecErrorCode::truncated_input, 0);
+    }
+
+    return ok;
+}
+
+bool frame_received_unknown_type_branch_coverage_for_tests() {
+    return matches_codec_error(deserialize_received_frame(SharedBytes{std::byte{0x1f}}),
+                               CodecErrorCode::unknown_frame_type, 0);
+}
+
 bool frame_streams_blocked_writer_success_coverage_for_tests(StreamLimitType stream_type) {
     const Frame frame{StreamsBlockedFrame{
         .stream_type = stream_type,

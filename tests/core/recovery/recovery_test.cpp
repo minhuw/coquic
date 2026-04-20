@@ -1303,6 +1303,22 @@ TEST(QuicRecoveryTest, LossCandidateHelpersSkipDeclaredLostPacketsAndAcknowledge
     EXPECT_FALSE(recovery.earliest_loss_packet().has_value());
 }
 
+TEST(QuicRecoveryTest, TrackNewLossCandidatesReturnsWhenNextCandidateSlotIsPastEnd) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+
+    const auto past_end = coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_count(recovery) + 1;
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_next_loss_candidate_slot(recovery,
+                                                                                  past_end);
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::track_new_loss_candidates(recovery,
+                                                                               std::nullopt, 5);
+
+    EXPECT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::next_loss_candidate_slot(recovery),
+              past_end);
+    EXPECT_FALSE(recovery.earliest_loss_packet().has_value());
+}
+
 TEST(QuicRecoveryTest,
      TimeThresholdLossCollectionHandlesEmptyStateNonInflightAndNotYetLostPackets) {
     PacketSpaceRecovery empty_recovery;

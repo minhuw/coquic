@@ -592,6 +592,12 @@ TEST(QuicPacketCryptoTest, ExpandTrafficSecretCachedRecomputesWhenCachedQuicVers
     EXPECT_EQ(secret.cached_packet_protection_inputs->quic_version, secret.quic_version);
 }
 
+TEST(QuicPacketCryptoTest,
+     ExpandTrafficSecretCachedCoverageHookExercisesHeaderProtectionMismatchBranch) {
+    EXPECT_TRUE(coquic::quic::test::
+                    packet_crypto_cached_header_protection_mismatch_branch_coverage_for_tests());
+}
+
 TEST(QuicPacketCryptoTest, ExpandTrafficSecretRefreshesCacheWhenHeaderProtectionKeyChanges) {
     coquic::quic::TrafficSecret secret{
         .cipher_suite = coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,

@@ -50,6 +50,7 @@ struct PacketCryptoRuntimeCacheStats {
 
 PacketCryptoRuntimeCacheStats packet_crypto_runtime_cache_stats_for_tests();
 void reset_packet_crypto_runtime_caches_for_tests();
+bool packet_crypto_cached_header_protection_mismatch_branch_coverage_for_tests();
 
 class ScopedPacketCryptoFaultInjector {
   public:

@@ -33,6 +33,7 @@ bool runtime_loop_internal_coverage_for_test();
 std::uint64_t runtime_loop_internal_coverage_mask_for_test();
 std::uint64_t runtime_connection_handle_effect_coverage_mask_for_test();
 bool runtime_additional_internal_coverage_for_test();
+bool runtime_server_local_error_without_connection_coverage_for_test();
 bool runtime_tail_internal_coverage_for_test();
 std::optional<io::QuicIoEvent> first_send_datagram_as_rx_event(const quic::QuicCoreResult &result,
                                                                quic::QuicCoreTimePoint now);
@@ -1198,6 +1199,7 @@ class Http3ServerRuntime {
     friend bool coquic::http3::runtime_loop_internal_coverage_for_test();
     friend std::uint64_t coquic::http3::runtime_loop_internal_coverage_mask_for_test();
     friend bool coquic::http3::runtime_additional_internal_coverage_for_test();
+    friend bool coquic::http3::runtime_server_local_error_without_connection_coverage_for_test();
     friend bool coquic::http3::runtime_tail_internal_coverage_for_test();
 
     bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now) {
@@ -1253,7 +1255,7 @@ class Http3ServerRuntime {
             }
         }
 
-        if (result.local_error.has_value() && result.local_error->connection.has_value()) {
+        if (result.local_error.has_value()) {
             endpoints_.erase(*result.local_error->connection);
         }
         for (const auto connection : closed_connections) {
@@ -2768,6 +2770,9 @@ bool runtime_additional_internal_coverage_for_test() {
               "server handle_result fails when draining a filtered endpoint update fails");
     }
 
+    check(runtime_server_local_error_without_connection_coverage_for_test(),
+          "server handle_result rejects local errors without connection ids");
+
     RuntimeScopedTempDir output_root;
     const auto client_config = make_runtime_client_config_for_test();
     const auto plan = make_client_execution_plan(client_config);
@@ -3134,6 +3139,20 @@ bool runtime_additional_internal_coverage_for_test() {
     }
 
     return ok;
+}
+
+bool runtime_server_local_error_without_connection_coverage_for_test() {
+    const auto now = quic::QuicCoreClock::now();
+    const auto server_config = make_runtime_server_config_for_test(std::filesystem::current_path());
+    auto backend = std::make_unique<RuntimeTestBackend>();
+    Http3ServerRuntime runtime(server_config, *make_http3_server_endpoint_config(server_config),
+                               std::move(backend));
+
+    quic::QuicCoreResult local_error_without_connection;
+    local_error_without_connection.local_error = quic::QuicCoreLocalError{
+        .code = quic::QuicCoreLocalErrorCode::unsupported_operation,
+    };
+    return !runtime.handle_result(local_error_without_connection, now);
 }
 
 bool runtime_tail_internal_coverage_for_test() {

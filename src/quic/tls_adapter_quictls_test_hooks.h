@@ -131,9 +131,12 @@ class TlsAdapterTestPeer {
     static void set_peer_transport_parameters(TlsAdapter &adapter, std::vector<std::byte> bytes);
     static void clear_peer_transport_parameters(TlsAdapter &adapter);
     static void update_runtime_status(TlsAdapter &adapter);
+    static void update_early_data_status(TlsAdapter &adapter);
+    static void update_resumed_resumption_state(TlsAdapter &adapter);
     static void set_early_data_attempted(TlsAdapter &adapter, bool attempted);
     static void apply_early_data_status(TlsAdapter &adapter, int early_data_status,
                                         bool handshake_complete);
+    static bool internal_coverage_for_tests();
 };
 
 } // namespace coquic::quic::test

@@ -589,6 +589,54 @@ TEST(QuicCoreTest, ClientUsesProtectedZeroRttPacketForEarlyApplicationSend) {
     EXPECT_TRUE(saw_stream);
 }
 
+TEST(QuicCoreTest, ClientEarlyApplicationSendFailsWhenZeroRttPacketSerializationFails) {
+    auto connection = make_connected_client_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.application_space_.read_secret.reset();
+    connection.application_space_.write_secret.reset();
+    connection.zero_rtt_space_.write_secret =
+        make_test_traffic_secret(invalid_cipher_suite(), std::byte{0x44});
+
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("early-data"), false)
+            .has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(0));
+
+    EXPECT_TRUE(datagram.empty());
+    EXPECT_TRUE(connection.has_failed());
+}
+
+TEST(QuicCoreTest, QlogCapturesZeroRttPacketTypeForOutboundEarlyData) {
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    auto connection = make_connected_client_connection();
+    connection.config_.qlog = coquic::quic::QuicQlogConfig{.directory = qlog_dir.path()};
+    connection.qlog_session_ = coquic::quic::qlog::Session::try_open(
+        *connection.config_.qlog, connection.config_.role,
+        connection.config_.initial_destination_connection_id, coquic::quic::test::test_time(0));
+    ASSERT_TRUE(connection.qlog_session_ != nullptr);
+
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.application_space_.read_secret.reset();
+    connection.application_space_.write_secret.reset();
+    connection.zero_rtt_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("early-data"), false)
+            .has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+
+    const auto records = coquic::quic::test::qlog_seq_records_from_file(
+        coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:packet_sent"), 1u);
+    EXPECT_TRUE(coquic::quic::test::qlog_any_record_contains(records, "\"packet_type\":\"0RTT\""));
+}
+
 TEST(QuicCoreTest, ZeroRttApplicationCloseWithoutOneRttKeysReturnsEmpty) {
     auto connection = make_connected_client_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
@@ -1262,6 +1310,134 @@ TEST(QuicCoreTest, ServerOneRttPacketDiscardsWriteOnlyZeroRttState) {
             .destination_connection_id = server.config_.source_connection_id,
             .packet_number_length = 2,
             .packet_number = 10,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_FALSE(server.zero_rtt_space_.write_secret.has_value());
+    EXPECT_FALSE(server.zero_rtt_space_.read_secret.has_value());
+    EXPECT_FALSE(server.server_zero_rtt_discard_deadline_.has_value());
+}
+
+TEST(QuicCoreTest, ReceivedZeroRttPacketSchedulesApplicationAck) {
+    auto connection = make_connected_server_connection();
+    connection.application_space_.pending_ack_deadline = std::nullopt;
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+
+    const auto processed = connection.process_inbound_received_packet(
+        coquic::quic::ReceivedProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
+            .packet_number_length = 1,
+            .packet_number = 11,
+            .plaintext_storage = std::make_shared<std::vector<std::byte>>(),
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 11u);
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+    ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+    EXPECT_EQ(optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
+              coquic::quic::test::test_time(1));
+}
+
+TEST(QuicCoreTest, ReceivedZeroRttAckOnlyPacketDoesNotScheduleApplicationAck) {
+    auto connection = make_connected_server_connection();
+    connection.application_space_.pending_ack_deadline = std::nullopt;
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+
+    const auto processed = connection.process_inbound_received_packet(
+        coquic::quic::ReceivedProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
+            .packet_number_length = 1,
+            .packet_number = 12,
+            .plaintext_storage = std::make_shared<std::vector<std::byte>>(),
+            .frames =
+                {
+                    coquic::quic::AckFrame{
+                        .largest_acknowledged = 0,
+                        .first_ack_range = 0,
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 12u);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_FALSE(connection.application_space_.pending_ack_deadline.has_value());
+    EXPECT_EQ(connection.last_peer_activity_time_, std::optional{coquic::quic::test::test_time(1)});
+}
+
+TEST(QuicCoreTest, ReceivedZeroRttPacketRejectsInvalidApplicationFrame) {
+    auto server = make_connected_server_connection();
+
+    const auto processed = server.process_inbound_received_packet(
+        coquic::quic::ReceivedProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = server.config_.source_connection_id,
+            .source_connection_id = optional_value_or_terminate(server.peer_source_connection_id_),
+            .packet_number_length = 2,
+            .packet_number = 3,
+            .plaintext_storage = std::make_shared<std::vector<std::byte>>(),
+            .frames =
+                {
+                    coquic::quic::NewTokenFrame{.token = bytes_from_ints({0xaa})},
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(processed.has_value());
+    EXPECT_EQ(processed.error().code,
+              coquic::quic::CodecErrorCode::frame_not_allowed_in_packet_type);
+    EXPECT_FALSE(server.processed_peer_packet_);
+    EXPECT_FALSE(server.application_space_.received_packets.has_ack_to_send());
+}
+
+TEST(QuicCoreTest, ClientReceivedOneRttPacketDiscardsWriteOnlyZeroRttState) {
+    auto client = make_connected_client_connection();
+    client.zero_rtt_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x66});
+    client.zero_rtt_space_.read_secret.reset();
+
+    const auto processed = client.process_inbound_received_packet(
+        coquic::quic::ReceivedProtectedOneRttPacket{
+            .destination_connection_id = client.config_.source_connection_id,
+            .packet_number_length = 2,
+            .packet_number = 12,
+            .plaintext_storage = std::make_shared<std::vector<std::byte>>(),
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_FALSE(client.zero_rtt_space_.write_secret.has_value());
+    EXPECT_FALSE(client.zero_rtt_space_.read_secret.has_value());
+}
+
+TEST(QuicCoreTest, ServerReceivedOneRttPacketDiscardsWriteOnlyZeroRttState) {
+    auto server = make_connected_server_connection();
+    server.zero_rtt_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x66});
+    server.zero_rtt_space_.read_secret.reset();
+    server.server_zero_rtt_discard_deadline_.reset();
+
+    const auto processed = server.process_inbound_received_packet(
+        coquic::quic::ReceivedProtectedOneRttPacket{
+            .destination_connection_id = server.config_.source_connection_id,
+            .packet_number_length = 2,
+            .packet_number = 13,
+            .plaintext_storage = std::make_shared<std::vector<std::byte>>(),
             .frames = {coquic::quic::PingFrame{}},
         },
         coquic::quic::test::test_time(1));

@@ -31,19 +31,13 @@ std::chrono::milliseconds latest_loss_delay(const RecoveryRttState &rtt) {
 }
 
 void note_received_ecn(AckEcnCounts &counts, QuicEcnCodepoint ecn) {
-    switch (ecn) {
-    case QuicEcnCodepoint::ect0:
+    const auto raw = static_cast<std::uint8_t>(ecn);
+    if (raw == static_cast<std::uint8_t>(QuicEcnCodepoint::ect0)) {
         ++counts.ect0;
-        break;
-    case QuicEcnCodepoint::ect1:
+    } else if (raw == static_cast<std::uint8_t>(QuicEcnCodepoint::ect1)) {
         ++counts.ect1;
-        break;
-    case QuicEcnCodepoint::ce:
+    } else if (raw == static_cast<std::uint8_t>(QuicEcnCodepoint::ce)) {
         ++counts.ecn_ce;
-        break;
-    case QuicEcnCodepoint::unavailable:
-    case QuicEcnCodepoint::not_ect:
-        break;
     }
 }
 
@@ -571,7 +565,10 @@ const SentPacketRecord *PacketSpaceRecovery::packet_for_handle(RecoveryPacketHan
     }
 
     const auto *slot = slot_for_packet_number(handle.packet_number);
-    return slot == nullptr ? nullptr : &slot->packet;
+    if (slot == nullptr) {
+        return nullptr;
+    }
+    return &slot->packet;
 }
 
 SentPacketRecord *PacketSpaceRecovery::find_packet(std::uint64_t packet_number) {
@@ -675,19 +672,17 @@ void PacketSpaceRecovery::on_packet_sent(const SentPacketRecord &packet) {
 }
 
 void PacketSpaceRecovery::on_packet_declared_lost(std::uint64_t packet_number) {
-    auto *packet = find_packet(packet_number);
-    if (packet == nullptr) {
+    auto *slot = slot_for_packet_number(packet_number);
+    if (slot == nullptr) {
         return;
     }
 
-    erase_from_tracked_sets(*packet);
-    packet->in_flight = false;
-    packet->declared_lost = true;
-    packet->bytes_in_flight = 0;
-
-    if (const auto handle = handle_for_packet_number(packet_number); handle.has_value()) {
-        slots_[handle->slot_index].state = LedgerSlotState::declared_lost;
-    }
+    auto &packet = slot->packet;
+    erase_from_tracked_sets(packet);
+    packet.in_flight = false;
+    packet.declared_lost = true;
+    packet.bytes_in_flight = 0;
+    slot->state = LedgerSlotState::declared_lost;
     ++compatibility_version_;
 }
 

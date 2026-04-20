@@ -64,12 +64,16 @@ enum class ClientConnectionLoopCaseForTests : std::uint8_t {
     wait_input_then_terminal_success_with_followup_input,
     wait_input_then_drive_failure,
     wait_input_missing_failure,
+    wait_input_then_nonterminal_idle_timeout_failure,
     peer_input_then_outer_pump_terminal_success,
     wait_input_then_terminal_success_exits_after_drain_window,
     nonblocking_drain_repeats_pending_endpoint_progress,
     idle_timeout_with_future_wakeup_trace,
     idle_timeout_with_elapsed_wakeup_trace,
     timer_due_emits_send_trace_with_future_wakeup,
+    pending_work_terminal_failure_state_after_pump,
+    nonblocking_receive_terminal_failure_state,
+    advanced_core_without_pending_work_returns_success,
 };
 
 enum class ClientConnectionBackendLoopCaseForTests : std::uint8_t {
@@ -79,6 +83,7 @@ enum class ClientConnectionBackendLoopCaseForTests : std::uint8_t {
     shutdown,
     missing_rx_datagram,
     timer_event_then_wait_failure,
+    timer_due_before_wait_then_drive_failure,
     timer_event_then_drive_failure,
     timer_event_then_terminal_success,
     rx_datagram_then_drive_failure,
@@ -108,11 +113,13 @@ enum class ServerLoopCaseForTests : std::uint8_t {
     blocking_timer_then_receive_error,
     blocking_processed_timers_then_receive_error,
     blocking_wait_failure,
+    blocking_wait_failure_with_preferred_socket,
     blocking_wait_missing_input,
     nonblocking_drain_repeats_pending_endpoint_progress,
     outer_pump_repeats_pending_endpoint_progress,
     ready_datagram_preempts_next_pending_work_pump,
     pending_endpoint_without_transport_progress_waits_instead_of_spinning,
+    blocking_wait_input_then_receive_error,
 };
 
 enum class ServerBackendLoopCaseForTests : std::uint8_t {
@@ -131,6 +138,11 @@ enum class ServerBackendSchedulingCaseForTests : std::uint8_t {
     ready_datagram_preempts_repeated_pending_work_pumps,
     pending_work_yields_to_wait_after_immediate_poll_miss,
     elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait,
+    ready_probe_due_timer_failure,
+    ready_probe_idle_timeout_then_shutdown,
+    buffered_top_due_idle_timeout_skips_ready_probe,
+    ready_probe_rx_datagram_success_then_shutdown,
+    ready_probe_timer_without_wakeup_falls_back_to_main_wait,
 };
 
 struct ServerLoopResultForTests {
@@ -206,6 +218,7 @@ bool runtime_backend_regular_transfer_does_not_queue_preferred_address_migration
 bool expired_server_timer_failure_cleans_up_for_tests();
 bool expired_server_timer_success_preserves_session_for_tests();
 bool pending_server_work_failure_cleans_up_for_tests();
+bool pending_server_work_success_preserves_session_for_tests();
 bool resumed_client_warmup_failure_exits_early_for_tests();
 bool zero_rtt_request_allowance_for_tests();
 bool version_negotiation_without_source_connection_id_fails_for_tests();
@@ -225,6 +238,12 @@ bool runtime_server_route_handles_are_stable_per_peer_tuple_for_tests();
 bool runtime_server_send_effect_uses_route_handle_for_tests();
 bool runtime_misc_internal_coverage_for_tests();
 bool runtime_additional_internal_coverage_for_tests();
+bool runtime_parser_and_utility_coverage_for_tests();
+bool runtime_retry_and_probe_coverage_for_tests();
+bool runtime_routing_and_driver_coverage_for_tests();
+bool runtime_server_endpoint_driver_coverage_for_tests();
+bool runtime_server_loop_and_trace_coverage_for_tests();
+bool runtime_wait_and_receive_coverage_for_tests();
 bool runtime_low_level_socket_and_ecn_coverage_for_tests();
 bool runtime_connectionmigration_failure_paths_for_tests();
 bool runtime_restart_failure_paths_for_tests();

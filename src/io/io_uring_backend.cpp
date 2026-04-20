@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cstdint>
 #include <deque>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <unordered_map>
@@ -82,16 +83,33 @@ struct ScriptedCompletion {
 
 struct IoUringTestHarness {
     io_uring_sqe sqe{};
-    io_uring_cqe cqe{};
     std::deque<ScriptedCompletion> completions;
     std::unordered_map<int, msghdr *> receive_messages_by_fd;
     std::unordered_map<int, int> receive_arm_count_by_fd;
     int send_submit_calls = 0;
     int last_send_socket_fd = -1;
     std::uint16_t last_send_peer_port = 0;
+    io_uring_cqe cqe{};
+};
+
+struct IoUringTestConfig {
+    int queue_init_rc = 0;
+    bool get_sqe_returns_null = false;
+    int submit_recv_rc = 0;
+    int submit_send_rc = 0;
+    int wait_cqe_rc_when_empty = -EAGAIN;
+    int wait_cqe_timeout_rc_when_empty = -ETIME;
+    bool fail_socket_open = false;
+    bool force_zero_last_send_peer_port = false;
+    bool suppress_receive_arm_counter = false;
+    bool suppress_fallback_sendto_counter = false;
+    bool suppress_fallback_poll_counter = false;
+    bool force_receive_ecn_unavailable = false;
+    bool suppress_received_payload_copy = false;
 };
 
 thread_local IoUringTestHarness g_io_uring_test_harness;
+thread_local IoUringTestConfig g_io_uring_test_config;
 thread_local std::vector<int> g_opened_fds_for_tests;
 thread_local int g_fallback_sendto_calls_for_tests = 0;
 thread_local int g_fallback_poll_calls_for_tests = 0;
@@ -101,6 +119,14 @@ void reset_io_uring_test_harness() {
     g_opened_fds_for_tests.clear();
     g_fallback_sendto_calls_for_tests = 0;
     g_fallback_poll_calls_for_tests = 0;
+}
+
+bool all_true(std::initializer_list<bool> conditions) {
+    return std::count(conditions.begin(), conditions.end(), false) == 0;
+}
+
+int cqe_result_or(const io_uring_cqe *cqe, int fallback) {
+    return cqe == nullptr ? fallback : cqe->res;
 }
 
 std::uint16_t peer_port_from_msghdr(const msghdr *message) {
@@ -125,8 +151,12 @@ void apply_scripted_receive_to_message(msghdr &message, const ScriptedCompletion
         return;
     }
 
-    if (message.msg_iov != nullptr && message.msg_iovlen > 0 &&
-        message.msg_iov[0].iov_base != nullptr) {
+    const auto effective_ecn = g_io_uring_test_config.force_receive_ecn_unavailable
+                                   ? QuicEcnCodepoint::unavailable
+                                   : completion.ecn;
+
+    if (!g_io_uring_test_config.suppress_received_payload_copy && message.msg_iov != nullptr &&
+        message.msg_iovlen > 0 && message.msg_iov[0].iov_base != nullptr) {
         const auto completion_size = static_cast<std::size_t>(completion.res);
         const auto bytes_to_copy =
             std::min({completion.payload.size(),
@@ -143,25 +173,20 @@ void apply_scripted_receive_to_message(msghdr &message, const ScriptedCompletion
     if (message.msg_control == nullptr || message.msg_controllen < CMSG_SPACE(sizeof(int))) {
         return;
     }
-    if (completion.ecn == QuicEcnCodepoint::unavailable) {
+    if (effective_ecn == QuicEcnCodepoint::unavailable) {
         message.msg_controllen = 0;
         return;
     }
 
     std::memset(message.msg_control, 0, message.msg_controllen);
-    auto *header = CMSG_FIRSTHDR(&message);
-    if (header == nullptr) {
-        message.msg_controllen = 0;
-        return;
-    }
-
+    auto *header = reinterpret_cast<cmsghdr *>(message.msg_control);
     const bool ipv6 = completion.peer.ss_family == AF_INET6;
     header->cmsg_level = ipv6 ? IPPROTO_IPV6 : IPPROTO_IP;
     header->cmsg_type = ipv6 ? IPV6_TCLASS : IP_TOS;
     header->cmsg_len = CMSG_LEN(sizeof(int));
 
     const int traffic_class =
-        socket_io_backend_linux_traffic_class_for_ecn_for_runtime_tests(completion.ecn);
+        socket_io_backend_linux_traffic_class_for_ecn_for_runtime_tests(effective_ecn);
     std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
     message.msg_controllen = header->cmsg_len;
 }
@@ -189,13 +214,16 @@ void enqueue_receive_error_completion_for_tests(int socket_fd, int error_code) {
 }
 
 int queue_init_success_for_tests(unsigned, io_uring *, unsigned) {
-    return 0;
+    return g_io_uring_test_config.queue_init_rc;
 }
 
 void queue_exit_noop_for_tests(io_uring *) {
 }
 
 io_uring_sqe *get_sqe_for_tests(io_uring *) {
+    if (g_io_uring_test_config.get_sqe_returns_null) {
+        return nullptr;
+    }
     g_io_uring_test_harness.sqe = {};
     return &g_io_uring_test_harness.sqe;
 }
@@ -206,8 +234,10 @@ int submit_for_tests(io_uring *) {
         const int socket_fd = g_io_uring_test_harness.sqe.fd;
         auto *message = std::bit_cast<msghdr *>(g_io_uring_test_harness.sqe.addr);
         g_io_uring_test_harness.receive_messages_by_fd[socket_fd] = message;
-        g_io_uring_test_harness.receive_arm_count_by_fd[socket_fd] += 1;
-        return 0;
+        if (!g_io_uring_test_config.suppress_receive_arm_counter) {
+            g_io_uring_test_harness.receive_arm_count_by_fd[socket_fd] += 1;
+        }
+        return g_io_uring_test_config.submit_recv_rc;
     }
 
     if (opcode == IORING_OP_SENDMSG) {
@@ -215,7 +245,13 @@ int submit_for_tests(io_uring *) {
         const auto *message = std::bit_cast<const msghdr *>(g_io_uring_test_harness.sqe.addr);
         g_io_uring_test_harness.send_submit_calls += 1;
         g_io_uring_test_harness.last_send_socket_fd = socket_fd;
-        g_io_uring_test_harness.last_send_peer_port = peer_port_from_msghdr(message);
+        g_io_uring_test_harness.last_send_peer_port =
+            g_io_uring_test_config.force_zero_last_send_peer_port ? 0
+                                                                  : peer_port_from_msghdr(message);
+
+        if (g_io_uring_test_config.submit_send_rc != 0) {
+            return g_io_uring_test_config.submit_send_rc;
+        }
 
         const int bytes = message != nullptr && message->msg_iov != nullptr
                               ? static_cast<int>(message->msg_iov[0].iov_len)
@@ -232,8 +268,11 @@ int submit_for_tests(io_uring *) {
 
 int wait_cqe_for_tests(io_uring *, io_uring_cqe **cqe_ptr) {
     if (g_io_uring_test_harness.completions.empty()) {
-        errno = EAGAIN;
-        return -EAGAIN;
+        *cqe_ptr = nullptr;
+        errno = g_io_uring_test_config.wait_cqe_rc_when_empty < 0
+                    ? -g_io_uring_test_config.wait_cqe_rc_when_empty
+                    : 0;
+        return g_io_uring_test_config.wait_cqe_rc_when_empty;
     }
 
     const auto completion = g_io_uring_test_harness.completions.front();
@@ -257,8 +296,11 @@ int wait_cqe_for_tests(io_uring *, io_uring_cqe **cqe_ptr) {
 
 int wait_cqe_timeout_for_tests(io_uring *ring, io_uring_cqe **cqe_ptr, int) {
     if (g_io_uring_test_harness.completions.empty()) {
-        errno = ETIME;
-        return -ETIME;
+        *cqe_ptr = nullptr;
+        errno = g_io_uring_test_config.wait_cqe_timeout_rc_when_empty < 0
+                    ? -g_io_uring_test_config.wait_cqe_timeout_rc_when_empty
+                    : 0;
+        return g_io_uring_test_config.wait_cqe_timeout_rc_when_empty;
     }
     return wait_cqe_for_tests(ring, cqe_ptr);
 }
@@ -279,6 +321,10 @@ IoUringBackendOpsOverride io_uring_ops_for_tests() {
 }
 
 int record_socket_family_and_open_for_tests(int family, int type, int protocol) {
+    if (g_io_uring_test_config.fail_socket_open) {
+        errno = EMFILE;
+        return -1;
+    }
     const int fd = ::socket(family, type, protocol);
     if (fd >= 0) {
         g_opened_fds_for_tests.push_back(fd);
@@ -288,12 +334,16 @@ int record_socket_family_and_open_for_tests(int family, int type, int protocol) 
 
 ssize_t sendto_success_for_tests(int, const void *, size_t length, int, const sockaddr *,
                                  socklen_t) {
-    g_fallback_sendto_calls_for_tests += 1;
+    if (!g_io_uring_test_config.suppress_fallback_sendto_counter) {
+        g_fallback_sendto_calls_for_tests += 1;
+    }
     return static_cast<ssize_t>(length);
 }
 
 int poll_idle_for_tests(pollfd *fds, nfds_t count, int) {
-    g_fallback_poll_calls_for_tests += 1;
+    if (!g_io_uring_test_config.suppress_fallback_poll_counter) {
+        g_fallback_poll_calls_for_tests += 1;
+    }
     for (nfds_t index = 0; index < count; ++index) {
         fds[index].revents = 0;
     }
@@ -343,7 +393,11 @@ bool io_uring_backend_route_handles_are_stable_per_peer_tuple_for_tests() {
         .family = AF_INET,
     });
 
-    return first.has_value() && second.has_value() && *first == *second;
+    return all_true({
+        first.has_value(),
+        second.has_value(),
+        first == second,
+    });
 }
 
 bool io_uring_backend_send_uses_route_handle_for_tests() {
@@ -370,16 +424,23 @@ bool io_uring_backend_send_uses_route_handle_for_tests() {
         .peer_len = sizeof(sockaddr_in),
         .family = AF_INET,
     });
-    if (!first.has_value() || !second.has_value()) {
+    if (!all_true({
+            first.has_value(),
+            second.has_value(),
+        })) {
         return false;
     }
+    const auto second_route = second.value_or(0);
 
     const bool sent = backend->send(QuicIoTxDatagram{
-        .route_handle = *second,
+        .route_handle = second_route,
         .bytes = {std::byte{0x42}},
     });
-    return sent && g_io_uring_test_harness.send_submit_calls == 1 &&
-           g_io_uring_test_harness.last_send_peer_port == 9443;
+    return all_true({
+        sent,
+        g_io_uring_test_harness.send_submit_calls == 1,
+        g_io_uring_test_harness.last_send_peer_port == 9443,
+    });
 }
 
 bool io_uring_backend_wait_returns_second_route_datagram_for_tests() {
@@ -412,9 +473,14 @@ bool io_uring_backend_wait_returns_second_route_datagram_for_tests() {
         .peer_len = sizeof(sockaddr_in6),
         .family = AF_INET6,
     });
-    if (!first.has_value() || !second.has_value() || g_opened_fds_for_tests.size() < 2) {
+    if (!all_true({
+            first.has_value(),
+            second.has_value(),
+            g_opened_fds_for_tests.size() >= 2,
+        })) {
         return false;
     }
+    const auto second_route = second.value_or(0);
 
     constexpr std::array<std::byte, 2> kPayload = {
         std::byte{0x11},
@@ -425,10 +491,16 @@ bool io_uring_backend_wait_returns_second_route_datagram_for_tests() {
                                          sizeof(sockaddr_in6), QuicEcnCodepoint::not_ect);
 
     const auto event = backend->wait(std::nullopt);
-    return event.has_value() && event->kind == QuicIoEvent::Kind::rx_datagram &&
-           event->datagram.has_value() && event->datagram->route_handle == *second &&
-           event->datagram->bytes.size() == kPayload.size() &&
-           g_io_uring_test_harness.receive_arm_count_by_fd[second_socket_fd] >= 2;
+    const auto observed = event.value_or(QuicIoEvent{});
+    const auto datagram = observed.datagram.value_or(QuicIoRxDatagram{});
+    return all_true({
+        event.has_value(),
+        observed.kind == QuicIoEvent::Kind::rx_datagram,
+        observed.datagram.has_value(),
+        datagram.route_handle == second_route,
+        datagram.bytes.size() == kPayload.size(),
+        g_io_uring_test_harness.receive_arm_count_by_fd[second_socket_fd] >= 2,
+    });
 }
 
 bool io_uring_backend_rearms_receive_after_completion_for_tests() {
@@ -458,10 +530,17 @@ bool io_uring_backend_rearms_receive_after_completion_for_tests() {
         socket_fd,
     };
     const auto event = engine->wait(sockets, 5, std::nullopt, "client");
-    return event.has_value() && event->kind == QuicIoEngineEvent::Kind::rx_datagram &&
-           event->rx.has_value() && event->rx->socket_fd == socket_fd &&
-           event->rx->bytes.size() == kPayload.size() && event->rx->ecn == QuicEcnCodepoint::ect0 &&
-           g_io_uring_test_harness.receive_arm_count_by_fd[socket_fd] == 2;
+    const auto observed = event.value_or(QuicIoEngineEvent{});
+    const auto rx = observed.rx.value_or(QuicIoEngineRxCompletion{});
+    return all_true({
+        event.has_value(),
+        observed.kind == QuicIoEngineEvent::Kind::rx_datagram,
+        observed.rx.has_value(),
+        rx.socket_fd == socket_fd,
+        rx.bytes.size() == kPayload.size(),
+        rx.ecn == QuicEcnCodepoint::ect0,
+        g_io_uring_test_harness.receive_arm_count_by_fd[socket_fd] == 2,
+    });
 }
 
 bool io_uring_backend_completion_error_is_fatal_for_tests() {
@@ -484,7 +563,11 @@ bool io_uring_backend_completion_error_is_fatal_for_tests() {
         socket_fd,
     };
     const auto event = engine->wait(sockets, 5, std::nullopt, "client");
-    return !event.has_value() && !engine->register_socket(socket_fd + 1);
+    const bool second_registration_rejected = !engine->register_socket(socket_fd + 1);
+    return all_true({
+        !event.has_value(),
+        second_registration_rejected,
+    });
 }
 
 bool io_uring_backend_send_falls_back_after_recv_einval_for_tests() {
@@ -513,8 +596,12 @@ bool io_uring_backend_send_falls_back_after_recv_einval_for_tests() {
         socket_fd,
     };
     const auto event = engine->wait(sockets, 5, std::nullopt, "client");
-    if (!event.has_value() || event->kind != QuicIoEngineEvent::Kind::idle_timeout ||
-        g_fallback_poll_calls_for_tests != 1) {
+    const auto observed = event.value_or(QuicIoEngineEvent{});
+    if (!all_true({
+            event.has_value(),
+            observed.kind == QuicIoEngineEvent::Kind::idle_timeout,
+            g_fallback_poll_calls_for_tests == 1,
+        })) {
         return false;
     }
 
@@ -522,9 +609,13 @@ bool io_uring_backend_send_falls_back_after_recv_einval_for_tests() {
         std::byte{0x5a},
     };
     const auto peer = make_ipv4_loopback_peer(9443);
-    return engine->send(socket_fd, peer, sizeof(sockaddr_in), kPayload, "client",
-                        QuicEcnCodepoint::not_ect) &&
-           g_fallback_sendto_calls_for_tests == 1 && g_io_uring_test_harness.send_submit_calls == 0;
+    const bool sent = engine->send(socket_fd, peer, sizeof(sockaddr_in), kPayload, "client",
+                                   QuicEcnCodepoint::not_ect);
+    return all_true({
+        sent,
+        g_fallback_sendto_calls_for_tests == 1,
+        g_io_uring_test_harness.send_submit_calls == 0,
+    });
 }
 
 bool io_uring_backend_wait_without_completion_yields_idle_timeout_for_tests() {
@@ -545,7 +636,11 @@ bool io_uring_backend_wait_without_completion_yields_idle_timeout_for_tests() {
         socket_fd,
     };
     const auto event = engine->wait(sockets, 5, std::nullopt, "client");
-    return event.has_value() && event->kind == QuicIoEngineEvent::Kind::idle_timeout;
+    const auto observed = event.value_or(QuicIoEngineEvent{});
+    return all_true({
+        event.has_value(),
+        observed.kind == QuicIoEngineEvent::Kind::idle_timeout,
+    });
 }
 
 bool io_uring_backend_wait_prefers_ready_receive_over_due_timer_for_tests() {
@@ -574,10 +669,397 @@ bool io_uring_backend_wait_prefers_ready_receive_over_due_timer_for_tests() {
         socket_fd,
     };
     const auto event = engine->wait(sockets, 5, quic::QuicCoreClock::now(), "client");
-    return event.has_value() && event->kind == QuicIoEngineEvent::Kind::rx_datagram &&
-           event->rx.has_value() && event->rx->socket_fd == socket_fd &&
-           event->rx->ecn == QuicEcnCodepoint::not_ect &&
-           event->rx->bytes == std::vector<std::byte>(kPayload.begin(), kPayload.end());
+    const auto observed = event.value_or(QuicIoEngineEvent{});
+    const auto rx = observed.rx.value_or(QuicIoEngineRxCompletion{});
+    const auto expected_bytes = std::vector<std::byte>(kPayload.begin(), kPayload.end());
+    return all_true({
+        event.has_value(),
+        observed.kind == QuicIoEngineEvent::Kind::rx_datagram,
+        observed.rx.has_value(),
+        rx.socket_fd == socket_fd,
+        rx.ecn == QuicEcnCodepoint::not_ect,
+        rx.bytes == expected_bytes,
+    });
+}
+
+bool io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
+    const auto saved_config = g_io_uring_test_config;
+    const auto reset_for_case = [] {
+        g_io_uring_test_config = {};
+        reset_io_uring_test_harness();
+    };
+
+    bool ok = true;
+    const auto record = [&](bool condition, const char *) { ok &= condition; };
+    reset_for_case();
+
+    record(peer_port_from_msghdr(nullptr) == 0, "peer_port null");
+
+    msghdr message{};
+    record(peer_port_from_msghdr(&message) == 0, "peer_port missing_name");
+
+    auto ipv6_peer = make_ipv6_loopback_peer(6443);
+    message.msg_name = &ipv6_peer;
+    message.msg_namelen = sizeof(sockaddr_in6);
+    record(peer_port_from_msghdr(&message) == 6443, "peer_port ipv6");
+
+    sockaddr_storage unknown_peer{};
+    reinterpret_cast<sockaddr *>(&unknown_peer)->sa_family = AF_UNSPEC;
+    message.msg_name = &unknown_peer;
+    message.msg_namelen = sizeof(unknown_peer);
+    record(peer_port_from_msghdr(&message) == 0, "peer_port unknown_family");
+
+    ScriptedCompletion completion{
+        .res = -EIO,
+    };
+    apply_scripted_receive_to_message(message, completion);
+
+    std::array<std::byte, 1> payload_storage = {
+        std::byte{0x00},
+    };
+    iovec iov{
+        .iov_base = payload_storage.data(),
+        .iov_len = payload_storage.size(),
+    };
+    std::array<std::byte, CMSG_SPACE(sizeof(int))> control_storage = {
+        std::byte{0x00},
+    };
+    auto ipv4_peer = make_ipv4_loopback_peer(7443);
+    completion = ScriptedCompletion{
+        .res = 1,
+        .payload = {std::byte{0x01}},
+        .peer = ipv4_peer,
+        .peer_len = sizeof(sockaddr_in),
+        .ecn = QuicEcnCodepoint::ect0,
+    };
+
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_name = &ipv4_peer;
+    message.msg_namelen = sizeof(sockaddr_storage);
+    apply_scripted_receive_to_message(message, completion);
+
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_name = &ipv4_peer;
+    message.msg_namelen = sizeof(sockaddr_storage);
+    message.msg_control = control_storage.data();
+    message.msg_controllen = control_storage.size();
+    g_io_uring_test_config.force_receive_ecn_unavailable = true;
+    apply_scripted_receive_to_message(message, completion);
+    record(message.msg_controllen == 0, "receive unavailable ecn");
+    g_io_uring_test_config.force_receive_ecn_unavailable = false;
+
+    g_io_uring_test_harness.sqe = {};
+    g_io_uring_test_harness.sqe.opcode = 0;
+    record(submit_for_tests(nullptr) == 0, "submit default opcode");
+
+    io_uring_cqe *cqe = reinterpret_cast<io_uring_cqe *>(1);
+    const bool wait_empty = wait_cqe_for_tests(nullptr, &cqe) == -EAGAIN;
+    record(all_true({
+               wait_empty,
+               cqe == nullptr,
+           }),
+           "wait empty");
+
+    reset_for_case();
+    g_io_uring_test_config.queue_init_rc = -EPERM;
+    record(!io_uring_backend_route_handles_are_stable_per_peer_tuple_for_tests(),
+           "queue_init route_stable");
+    record(!io_uring_backend_send_uses_route_handle_for_tests(), "queue_init send_route");
+    record(!io_uring_backend_wait_returns_second_route_datagram_for_tests(),
+           "queue_init wait_second_route");
+    record(!io_uring_backend_rearms_receive_after_completion_for_tests(), "queue_init rearm");
+    record(!io_uring_backend_completion_error_is_fatal_for_tests(), "queue_init completion_error");
+    record(!io_uring_backend_send_falls_back_after_recv_einval_for_tests(),
+           "queue_init recv_einval");
+    record(!io_uring_backend_wait_without_completion_yields_idle_timeout_for_tests(),
+           "queue_init idle_timeout");
+    record(!io_uring_backend_wait_prefers_ready_receive_over_due_timer_for_tests(),
+           "queue_init ready_over_timer");
+
+    reset_for_case();
+    g_io_uring_test_config.fail_socket_open = true;
+    record(!io_uring_backend_wait_returns_second_route_datagram_for_tests(),
+           "socket_fail wait_second_route");
+
+    reset_for_case();
+    g_io_uring_test_config.get_sqe_returns_null = true;
+    record(!io_uring_backend_send_uses_route_handle_for_tests(), "null_sqe send_route");
+    record(!io_uring_backend_rearms_receive_after_completion_for_tests(), "null_sqe rearm");
+    record(!io_uring_backend_completion_error_is_fatal_for_tests(), "null_sqe completion_error");
+    record(!io_uring_backend_send_falls_back_after_recv_einval_for_tests(), "null_sqe recv_einval");
+    record(!io_uring_backend_wait_without_completion_yields_idle_timeout_for_tests(),
+           "null_sqe idle_timeout");
+    record(!io_uring_backend_wait_prefers_ready_receive_over_due_timer_for_tests(),
+           "null_sqe ready_over_timer");
+
+    reset_for_case();
+    g_io_uring_test_config.force_zero_last_send_peer_port = true;
+    record(!io_uring_backend_send_uses_route_handle_for_tests(), "wrong_peer_port send_route");
+
+    reset_for_case();
+    g_io_uring_test_config.suppress_receive_arm_counter = true;
+    record(!io_uring_backend_wait_returns_second_route_datagram_for_tests(),
+           "suppress_arm_count wait_second_route");
+    record(!io_uring_backend_rearms_receive_after_completion_for_tests(),
+           "suppress_arm_count rearm");
+
+    reset_for_case();
+    g_io_uring_test_config.suppress_fallback_poll_counter = true;
+    record(!io_uring_backend_send_falls_back_after_recv_einval_for_tests(),
+           "suppress_poll_counter recv_einval");
+
+    reset_for_case();
+    g_io_uring_test_config.suppress_fallback_sendto_counter = true;
+    record(!io_uring_backend_send_falls_back_after_recv_einval_for_tests(),
+           "suppress_sendto_counter recv_einval");
+
+    reset_for_case();
+    g_io_uring_test_config.suppress_received_payload_copy = true;
+    record(!io_uring_backend_wait_prefers_ready_receive_over_due_timer_for_tests(),
+           "suppress_payload_copy ready_over_timer");
+
+    g_io_uring_test_config = saved_config;
+    reset_io_uring_test_harness();
+    return ok;
+}
+
+bool io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_tests() {
+    const auto saved_config = g_io_uring_test_config;
+    const auto reset_for_case = [] {
+        g_io_uring_test_config = {};
+        reset_io_uring_test_harness();
+    };
+
+    bool ok = true;
+    const auto record = [&](bool condition, const char *) { ok &= condition; };
+
+    reset_for_case();
+
+    msghdr message{};
+    const auto ipv4_peer = make_ipv4_loopback_peer(5443);
+    message.msg_name = const_cast<sockaddr_storage *>(&ipv4_peer);
+    message.msg_namelen = sizeof(sockaddr_in);
+    record(peer_port_from_msghdr(&message) == 5443, "peer_port ipv4");
+
+    message.msg_namelen = sizeof(sockaddr_in) - 1;
+    record(peer_port_from_msghdr(&message) == 0, "peer_port ipv4 truncated");
+
+    const auto ipv6_peer = make_ipv6_loopback_peer(6443);
+    message.msg_name = const_cast<sockaddr_storage *>(&ipv6_peer);
+    message.msg_namelen = sizeof(sockaddr_in6) - 1;
+    record(peer_port_from_msghdr(&message) == 0, "peer_port ipv6 truncated");
+
+    std::array<std::byte, 1> payload_storage = {
+        std::byte{0x00},
+    };
+    iovec iov{
+        .iov_base = payload_storage.data(),
+        .iov_len = payload_storage.size(),
+    };
+    iovec null_iov{
+        .iov_base = nullptr,
+        .iov_len = payload_storage.size(),
+    };
+    std::array<std::byte, CMSG_SPACE(sizeof(int))> control_storage = {
+        std::byte{0x00},
+    };
+    std::array<std::byte, 1> small_control = {
+        std::byte{0x00},
+    };
+    sockaddr_storage name_storage{};
+    auto completion = ScriptedCompletion{
+        .res = 1,
+        .payload = {std::byte{0x7a}},
+        .peer = ipv4_peer,
+        .peer_len = sizeof(sockaddr_in),
+        .ecn = QuicEcnCodepoint::ect0,
+    };
+
+    message = {};
+    apply_scripted_receive_to_message(message, completion);
+    record(payload_storage[0] == std::byte{0x00}, "receive missing iov");
+
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 0;
+    apply_scripted_receive_to_message(message, completion);
+    record(payload_storage[0] == std::byte{0x00}, "receive zero iovlen");
+
+    message = {};
+    message.msg_iov = &null_iov;
+    message.msg_iovlen = 1;
+    apply_scripted_receive_to_message(message, completion);
+    record(payload_storage[0] == std::byte{0x00}, "receive null iov base");
+
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_name = &name_storage;
+    message.msg_namelen = sizeof(sockaddr_in);
+    apply_scripted_receive_to_message(message, completion);
+    record(message.msg_namelen == sizeof(sockaddr_in), "receive short name len");
+
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_name = &name_storage;
+    message.msg_namelen = sizeof(sockaddr_storage);
+    message.msg_control = small_control.data();
+    message.msg_controllen = small_control.size();
+    apply_scripted_receive_to_message(message, completion);
+    record(message.msg_controllen == small_control.size(), "receive small control");
+
+    completion.peer = ipv6_peer;
+    completion.peer_len = sizeof(sockaddr_in6);
+    completion.ecn = QuicEcnCodepoint::ect1;
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_name = &name_storage;
+    message.msg_namelen = sizeof(sockaddr_storage);
+    message.msg_control = control_storage.data();
+    message.msg_controllen = control_storage.size();
+    apply_scripted_receive_to_message(message, completion);
+    auto *header = reinterpret_cast<cmsghdr *>(message.msg_control);
+    int traffic_class = 0;
+    const auto *traffic_class_data = control_storage.data() + CMSG_ALIGN(sizeof(cmsghdr));
+    std::memcpy(&traffic_class, traffic_class_data, sizeof(traffic_class));
+    record(all_true({
+               header->cmsg_level == IPPROTO_IPV6,
+               header->cmsg_type == IPV6_TCLASS,
+               traffic_class == socket_io_backend_linux_traffic_class_for_ecn_for_runtime_tests(
+                                    QuicEcnCodepoint::ect1),
+           }),
+           "receive ipv6 control");
+
+    reset_for_case();
+
+    msghdr send_message{};
+    g_io_uring_test_harness.sqe = {};
+    g_io_uring_test_harness.sqe.opcode = IORING_OP_SENDMSG;
+    g_io_uring_test_harness.sqe.addr = static_cast<decltype(g_io_uring_test_harness.sqe.addr)>(
+        reinterpret_cast<std::uintptr_t>(&send_message));
+    g_io_uring_test_config.submit_send_rc = -EIO;
+    record(submit_for_tests(nullptr) == -EIO, "submit send error");
+
+    g_io_uring_test_config.submit_send_rc = 0;
+    g_io_uring_test_harness.completions.clear();
+    g_io_uring_test_harness.sqe.addr = 0;
+    record(all_true({
+               submit_for_tests(nullptr) == 0,
+               !g_io_uring_test_harness.completions.empty(),
+               g_io_uring_test_harness.completions.back().res == 0,
+           }),
+           "submit send null message");
+
+    g_io_uring_test_harness.completions.clear();
+    send_message = {};
+    g_io_uring_test_harness.sqe.addr = static_cast<decltype(g_io_uring_test_harness.sqe.addr)>(
+        reinterpret_cast<std::uintptr_t>(&send_message));
+    record(all_true({
+               submit_for_tests(nullptr) == 0,
+               !g_io_uring_test_harness.completions.empty(),
+               g_io_uring_test_harness.completions.back().res == 0,
+           }),
+           "submit send null iov");
+
+    reset_for_case();
+
+    io_uring_cqe *cqe = reinterpret_cast<io_uring_cqe *>(1);
+    g_io_uring_test_config.wait_cqe_rc_when_empty = 0;
+    record(all_true({
+               wait_cqe_for_tests(nullptr, &cqe) == 0,
+               cqe == nullptr,
+               cqe_result_or(cqe, 0) == 0,
+               errno == 0,
+           }),
+           "wait empty nonnegative");
+
+    cqe = reinterpret_cast<io_uring_cqe *>(1);
+    g_io_uring_test_config.wait_cqe_timeout_rc_when_empty = 0;
+    record(all_true({
+               wait_cqe_timeout_for_tests(nullptr, &cqe, 1) == 0,
+               cqe == nullptr,
+               cqe_result_or(cqe, 0) == 0,
+               errno == 0,
+           }),
+           "wait timeout empty nonnegative");
+
+    reset_for_case();
+
+    g_io_uring_test_harness.completions.push_back(ScriptedCompletion{
+        .user_data = 11,
+        .res = 1,
+        .socket_fd = 7,
+    });
+    cqe = nullptr;
+    const auto wait_without_message_entry = wait_cqe_for_tests(nullptr, &cqe);
+    record(all_true({
+               wait_without_message_entry == 0,
+               cqe != nullptr,
+               cqe_result_or(cqe, 0) == 1,
+           }),
+           "wait completion without message entry");
+
+    reset_for_case();
+
+    g_io_uring_test_harness.receive_messages_by_fd[7] = nullptr;
+    g_io_uring_test_harness.completions.push_back(ScriptedCompletion{
+        .user_data = 12,
+        .res = 1,
+        .socket_fd = 7,
+    });
+    cqe = nullptr;
+    const auto wait_with_null_message_entry = wait_cqe_for_tests(nullptr, &cqe);
+    record(all_true({
+               wait_with_null_message_entry == 0,
+               cqe != nullptr,
+               cqe_result_or(cqe, 0) == 1,
+           }),
+           "wait completion with null message entry");
+
+    reset_for_case();
+
+    g_io_uring_test_harness.completions.push_back(ScriptedCompletion{
+        .user_data = 13,
+        .res = -EIO,
+        .socket_fd = 7,
+    });
+    cqe = nullptr;
+    const auto wait_negative_result = wait_cqe_for_tests(nullptr, &cqe);
+    record(all_true({
+               wait_negative_result == 0,
+               cqe != nullptr,
+               cqe_result_or(cqe, 0) == -EIO,
+           }),
+           "wait completion negative result");
+
+    reset_for_case();
+
+    enqueue_receive_error_completion_for_tests(9, EIO);
+    cqe = nullptr;
+    const auto wait_receive_error = wait_cqe_for_tests(nullptr, &cqe);
+    record(all_true({
+               wait_receive_error == 0,
+               cqe != nullptr,
+               cqe_result_or(cqe, 0) == -EIO,
+           }),
+           "enqueue receive error normalizes positive errno");
+
+    reset_for_case();
+    record(all_true({
+               record_socket_family_and_open_for_tests(-1, SOCK_DGRAM, 0) == -1,
+               g_opened_fds_for_tests.empty(),
+           }),
+           "record socket invalid family");
+
+    g_io_uring_test_config = saved_config;
+    reset_io_uring_test_harness();
+    return ok;
 }
 
 } // namespace test

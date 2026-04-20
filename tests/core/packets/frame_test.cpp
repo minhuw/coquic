@@ -10,6 +10,15 @@
 #include <gtest/gtest.h>
 
 #include "src/quic/frame.h"
+#include "src/quic/frame_test_hooks.h"
+
+namespace coquic::quic::test {
+bool frame_length_prefixed_span_fault_coverage_for_tests();
+bool frame_single_varint_writer_fault_coverage_for_tests();
+std::uint64_t frame_to_received_variant_coverage_mask_for_tests();
+bool frame_matches_codec_error_branch_coverage_for_tests();
+bool frame_streams_blocked_writer_success_coverage_for_tests(coquic::quic::StreamLimitType);
+} // namespace coquic::quic::test
 
 namespace {
 
@@ -583,6 +592,13 @@ TEST(QuicFrameTest, RoundTripsHandshakeDone) {
 TEST(QuicFrameTest, RejectsNonShortestFrameTypeEncoding) {
     std::array<std::byte, 2> bytes{std::byte{0x40}, std::byte{0x01}};
     auto decoded = coquic::quic::deserialize_frame(bytes);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::non_shortest_frame_type_encoding);
+}
+
+TEST(QuicFrameTest, RejectsNonShortestReceivedFrameTypeEncoding) {
+    const auto decoded =
+        coquic::quic::deserialize_received_frame(SharedBytes{std::byte{0x40}, std::byte{0x01}});
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, CodecErrorCode::non_shortest_frame_type_encoding);
 }
@@ -1265,6 +1281,8 @@ TEST(QuicFrameTest, ReceivedDecodeMatchesDecodeErrorsForMalformedFrames) {
         std::byte{0x01},
         std::byte{0xaa},
     }));
+    expect_received_decode_matches_decode_error(
+        as_span(std::array<std::byte, 2>{std::byte{0x40}, std::byte{0x20}}));
 }
 
 TEST(QuicFrameTest, RejectsMalformedFlowControlConnectionIdAndCloseFrames) {
@@ -1519,6 +1537,44 @@ TEST(QuicFrameTest, PreserveInvalidVarintOffsetForApplicationCloseSerialization)
             .error_code = kInvalidQuicVarInt,
         },
         CodecErrorCode::invalid_varint, 0);
+}
+
+TEST(QuicFrameTest, ToReceivedVariantCoverageMaskIncludesColdAlternatives) {
+    constexpr std::uint64_t kExpectedMask =
+        (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 3) | (1ull << 4);
+    EXPECT_EQ(coquic::quic::test::frame_to_received_variant_coverage_mask_for_tests(),
+              kExpectedMask);
+}
+
+TEST(QuicFrameTest, InternalCoverageHookExercisesRemainingFrameBranches) {
+    EXPECT_TRUE(coquic::quic::test::frame_internal_coverage_for_tests());
+}
+
+TEST(QuicFrameTest, FaultHelperCoverageHookExercisesSpanWriterBranches) {
+    EXPECT_TRUE(coquic::quic::test::frame_fault_helper_branch_coverage_for_tests());
+}
+
+TEST(QuicFrameTest, LengthPrefixedSpanWriterFaultCoverageHookExercisesVarintFailureBranch) {
+    EXPECT_TRUE(coquic::quic::test::frame_length_prefixed_span_fault_coverage_for_tests());
+}
+
+TEST(QuicFrameTest, SingleVarintWriterFaultCoverageHookExercisesRemainingBranches) {
+    EXPECT_TRUE(coquic::quic::test::frame_single_varint_writer_fault_coverage_for_tests());
+}
+
+TEST(QuicFrameTest, MatchesCodecErrorCoverageHookExercisesMismatchBranches) {
+    EXPECT_TRUE(coquic::quic::test::frame_matches_codec_error_branch_coverage_for_tests());
+}
+
+TEST(QuicFrameTest, StreamsBlockedWriterCoverageHookExercisesCountingAndSpanVisitors) {
+    EXPECT_TRUE(coquic::quic::test::frame_streams_blocked_writer_success_coverage_for_tests(
+        StreamLimitType::bidirectional));
+    EXPECT_TRUE(coquic::quic::test::frame_streams_blocked_writer_success_coverage_for_tests(
+        StreamLimitType::unidirectional));
+}
+
+TEST(QuicFrameTest, WriterCoverageHookExercisesRemainingSerializeBranches) {
+    EXPECT_TRUE(coquic::quic::test::frame_writer_branch_coverage_for_tests());
 }
 
 } // namespace

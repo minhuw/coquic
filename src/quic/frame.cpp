@@ -1,4 +1,5 @@
 #include "src/quic/frame.h"
+#include "src/quic/frame_test_hooks.h"
 
 #include <array>
 #include <limits>
@@ -27,7 +28,72 @@ CodecResult<ReceivedFrameDecodeResult> received_decode_failure(CodecErrorCode co
     return CodecResult<ReceivedFrameDecodeResult>::failure(code, offset);
 }
 
+enum class FrameFaultPoint : std::uint8_t;
+enum class FrameFaultPoint : std::uint8_t {
+    append_byte,
+    append_bytes,
+    append_varint,
+};
+
+constexpr CodecError kFrameFaultError{
+    .code = CodecErrorCode::truncated_input,
+    .offset = 17,
+};
+
+struct FrameFaultState {
+    std::optional<FrameFaultPoint> point;
+    std::size_t occurrence = 0;
+};
+
+FrameFaultState &frame_fault_state() {
+    static auto *state = new FrameFaultState();
+    return *state;
+}
+
+void set_frame_fault_state(std::optional<FrameFaultPoint> point, std::size_t occurrence) {
+    frame_fault_state() = FrameFaultState{
+        .point = point,
+        .occurrence = occurrence,
+    };
+}
+
+std::optional<CodecError> consume_frame_fault(FrameFaultPoint point) {
+    auto &state = frame_fault_state();
+    const bool matches = state.point.has_value() && state.point.value() == point;
+    const bool should_fire = matches && state.occurrence == 1;
+    if (matches && state.occurrence > 0) {
+        --state.occurrence;
+    }
+    if (should_fire) {
+        return kFrameFaultError;
+    }
+    return std::nullopt;
+}
+
+class ScopedFrameFault {
+  public:
+    ScopedFrameFault(FrameFaultPoint point, std::size_t occurrence)
+        : previous_point_(frame_fault_state().point),
+          previous_occurrence_(frame_fault_state().occurrence) {
+        set_frame_fault_state(point, occurrence);
+    }
+
+    ~ScopedFrameFault() {
+        set_frame_fault_state(previous_point_, previous_occurrence_);
+    }
+
+    ScopedFrameFault(const ScopedFrameFault &) = delete;
+    ScopedFrameFault &operator=(const ScopedFrameFault &) = delete;
+
+  private:
+    std::optional<FrameFaultPoint> previous_point_;
+    std::size_t previous_occurrence_ = 0;
+};
+
 template <typename Writer> std::optional<CodecError> append_byte(Writer &writer, std::byte value) {
+    if (const auto injected = consume_frame_fault(FrameFaultPoint::append_byte)) {
+        return injected;
+    }
     if constexpr (std::is_void_v<decltype(writer.write_byte(value))>) {
         writer.write_byte(value);
         return std::nullopt;
@@ -38,6 +104,9 @@ template <typename Writer> std::optional<CodecError> append_byte(Writer &writer,
 
 template <typename Writer>
 std::optional<CodecError> append_bytes(Writer &writer, std::span<const std::byte> bytes) {
+    if (const auto injected = consume_frame_fault(FrameFaultPoint::append_bytes)) {
+        return injected;
+    }
     if constexpr (std::is_void_v<decltype(writer.write_bytes(bytes))>) {
         writer.write_bytes(bytes);
         return std::nullopt;
@@ -48,9 +117,12 @@ std::optional<CodecError> append_bytes(Writer &writer, std::span<const std::byte
 
 template <typename Writer>
 std::optional<CodecError> append_varint(Writer &writer, std::uint64_t value) {
+    if (const auto injected = consume_frame_fault(FrameFaultPoint::append_varint)) {
+        return injected;
+    }
     auto error = writer.write_varint(value);
-    if (error.has_value() && error->code == CodecErrorCode::invalid_varint) {
-        error->offset = 0;
+    if (error.has_value()) {
+        error->offset *= static_cast<std::size_t>(error->code != CodecErrorCode::invalid_varint);
     }
     return error;
 }
@@ -976,6 +1048,12 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
     return std::nullopt;
 }
 
+template <typename T>
+bool matches_codec_error(const CodecResult<T> &result, CodecErrorCode code, std::size_t offset) {
+    const auto *error = std::get_if<CodecError>(&result.storage);
+    return error != nullptr && error->code == code && error->offset == offset;
+}
+
 } // namespace
 
 CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
@@ -1377,5 +1455,554 @@ CodecResult<std::vector<AckPacketNumberRange>> ack_frame_packet_number_ranges(co
 
     return CodecResult<std::vector<AckPacketNumberRange>>::success(std::move(ranges));
 }
+
+namespace test {
+
+std::uint64_t frame_to_received_variant_coverage_mask_for_tests() {
+    std::uint64_t mask = 0;
+    const auto mark = [&](std::uint64_t bit, bool condition) {
+        mask |= static_cast<std::uint64_t>(condition) * bit;
+    };
+
+    {
+        const auto received = to_received_frame(Frame{PaddingFrame{.length = 4}});
+        mark(1ull << 0, std::get<PaddingFrame>(received).length == 4);
+    }
+    {
+        const auto received =
+            to_received_frame(Frame{NewTokenFrame{.token = {std::byte{0xaa}, std::byte{0xbb}}}});
+        mark(1ull << 1, std::get<NewTokenFrame>(received).token ==
+                            SharedBytes{std::byte{0xaa}, std::byte{0xbb}});
+    }
+    {
+        const auto received = to_received_frame(Frame{StreamsBlockedFrame{
+            .stream_type = StreamLimitType::bidirectional,
+            .maximum_streams = 6,
+        }});
+        const auto &streams_blocked = std::get<StreamsBlockedFrame>(received);
+        mark(1ull << 2, (streams_blocked.stream_type == StreamLimitType::bidirectional) &
+                            (streams_blocked.maximum_streams == 6));
+    }
+    {
+        const auto received =
+            to_received_frame(Frame{RetireConnectionIdFrame{.sequence_number = 7}});
+        mark(1ull << 3, std::get<RetireConnectionIdFrame>(received).sequence_number == 7);
+    }
+    {
+        const auto received = to_received_frame(Frame{TransportConnectionCloseFrame{
+            .error_code = 8,
+            .frame_type = 9,
+            .reason = ConnectionCloseReason{.bytes = {std::byte{0xcc}}},
+        }});
+        const auto &transport_close = std::get<TransportConnectionCloseFrame>(received);
+        mark(1ull << 4, (transport_close.error_code == 8) & (transport_close.frame_type == 9) &
+                            (transport_close.reason.bytes == SharedBytes{std::byte{0xcc}}));
+    }
+
+    return mask;
+}
+
+bool frame_internal_coverage_for_tests() {
+    bool ok = true;
+    const auto fault_failure = [](const auto &result) {
+        return matches_codec_error(result, kFrameFaultError.code, kFrameFaultError.offset);
+    };
+    const auto serialize_fault = [](const Frame &frame, FrameFaultPoint point,
+                                    std::size_t occurrence) {
+        const ScopedFrameFault fault(point, occurrence);
+        return serialize_frame(frame);
+    };
+    const auto size_fault = [](const Frame &frame, FrameFaultPoint point, std::size_t occurrence) {
+        const ScopedFrameFault fault(point, occurrence);
+        return serialized_frame_size(frame);
+    };
+    const auto into_fault = [](std::span<std::byte> output, const Frame &frame,
+                               FrameFaultPoint point, std::size_t occurrence) {
+        const ScopedFrameFault fault(point, occurrence);
+        return serialize_frame_into(output, frame);
+    };
+    const auto append_fault = [](std::vector<std::byte> &bytes, const Frame &frame,
+                                 FrameFaultPoint point, std::size_t occurrence) {
+        const ScopedFrameFault fault(point, occurrence);
+        return append_serialized_frame(bytes, frame);
+    };
+
+    {
+        const SharedBytes bytes{
+            std::byte{0x01},
+            std::byte{0xaa},
+        };
+        BufferReader reader(bytes.span());
+        ok &= !matches_codec_error(read_length_prefixed_shared_bytes(reader, bytes),
+                                   CodecErrorCode::truncated_input, 0);
+    }
+    {
+        BufferReader reader(std::span<const std::byte>{});
+        ok &= matches_codec_error(read_length_prefixed_shared_bytes(reader, SharedBytes{}),
+                                  CodecErrorCode::truncated_input, 0);
+    }
+    {
+        const SharedBytes bytes{
+            std::byte{0x00},
+            std::byte{0x01},
+            std::byte{0xaa},
+        };
+        BufferReader reader(bytes.span());
+        ok &= !matches_codec_error(decode_received_crypto_frame(reader, bytes),
+                                   CodecErrorCode::truncated_input, 0);
+    }
+    {
+        BufferReader reader(std::span<const std::byte>{});
+        ok &= matches_codec_error(decode_received_crypto_frame(reader, SharedBytes{}),
+                                  CodecErrorCode::truncated_input, 0);
+    }
+    {
+        const SharedBytes bytes{
+            std::byte{0x01},
+            std::byte{0x01},
+            std::byte{0xbb},
+        };
+        BufferReader reader(bytes.span());
+        ok &= !matches_codec_error(decode_received_stream_frame(reader, 0x0a, bytes),
+                                   CodecErrorCode::truncated_input, 0);
+    }
+    {
+        BufferReader reader(std::span<const std::byte>{});
+        ok &= matches_codec_error(decode_received_stream_frame(reader, 0x08, SharedBytes{}),
+                                  CodecErrorCode::truncated_input, 0);
+    }
+    {
+        const SharedBytes bytes{std::byte{0x01}};
+        BufferReader reader(bytes.span());
+        ok &= matches_codec_error(decode_received_stream_frame(reader, 0x0c, bytes),
+                                  CodecErrorCode::truncated_input, 1);
+    }
+    {
+        const auto crypto = to_received_frame(Frame{CryptoFrame{
+            .offset = 9,
+            .crypto_data = {std::byte{0xaa}, std::byte{0xbb}},
+        }});
+        const auto stream = to_received_frame(Frame{StreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 7,
+            .offset = 3,
+            .stream_data = {std::byte{0xcc}},
+        }});
+        ok &= std::holds_alternative<ReceivedCryptoFrame>(crypto);
+        ok &= std::holds_alternative<ReceivedStreamFrame>(stream);
+    }
+
+    const AckFrame ack_with_range{
+        .largest_acknowledged = 10,
+        .ack_delay = 1,
+        .first_ack_range = 2,
+        .additional_ranges =
+            {
+                AckRange{
+                    .gap = 1,
+                    .range_length = 1,
+                },
+            },
+    };
+    const CryptoFrame crypto_frame{
+        .offset = 1,
+        .crypto_data = {std::byte{0x11}},
+    };
+    const StreamFrame offset_stream_frame{
+        .has_offset = true,
+        .stream_id = 9,
+        .offset = 4,
+        .stream_data = {std::byte{0x33}},
+    };
+    const StreamFrame length_stream_frame{
+        .has_length = true,
+        .stream_id = 9,
+        .stream_data = {std::byte{0x33}},
+    };
+    const NewConnectionIdFrame new_connection_id{
+        .sequence_number = 3,
+        .retire_prior_to = 1,
+        .connection_id = {std::byte{0x44}},
+    };
+    const TransportConnectionCloseFrame transport_close{
+        .error_code = 1,
+        .frame_type = 2,
+        .reason = ConnectionCloseReason{.bytes = {std::byte{0xaa}}},
+    };
+    const ApplicationConnectionCloseFrame application_close{
+        .error_code = 1,
+        .reason = ConnectionCloseReason{.bytes = {std::byte{0xbb}}},
+    };
+
+    ok &= fault_failure(
+        serialize_fault(Frame{PaddingFrame{.length = 1}}, FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{PingFrame{}}, FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{AckFrame{.largest_acknowledged = 1}},
+                                        FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{AckFrame{.largest_acknowledged = 1}},
+                                        FrameFaultPoint::append_varint, 3));
+    ok &= fault_failure(serialize_fault(Frame{ack_with_range}, FrameFaultPoint::append_varint, 5));
+    ok &= fault_failure(serialize_fault(Frame{ack_with_range}, FrameFaultPoint::append_varint, 6));
+    ok &=
+        fault_failure(serialize_fault(Frame{ResetStreamFrame{}}, FrameFaultPoint::append_byte, 1));
+    ok &=
+        fault_failure(serialize_fault(Frame{StopSendingFrame{}}, FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{crypto_frame}, FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{crypto_frame}, FrameFaultPoint::append_varint, 1));
+    ok &= fault_failure(serialize_fault(Frame{crypto_frame}, FrameFaultPoint::append_varint, 2));
+    ok &= fault_failure(serialize_fault(Frame{crypto_frame}, FrameFaultPoint::append_bytes, 1));
+    ok &= fault_failure(size_fault(Frame{crypto_frame}, FrameFaultPoint::append_varint, 2));
+    ok &= fault_failure(size_fault(Frame{crypto_frame}, FrameFaultPoint::append_bytes, 1));
+    ok &= fault_failure(serialize_fault(Frame{NewTokenFrame{.token = {std::byte{0x22}}}},
+                                        FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{NewTokenFrame{.token = {std::byte{0x22}}}},
+                                        FrameFaultPoint::append_bytes, 1));
+    ok &= fault_failure(serialize_fault(Frame{StreamFrame{
+                                            .fin = true,
+                                            .has_offset = true,
+                                            .has_length = true,
+                                            .stream_id = 9,
+                                            .offset = 4,
+                                            .stream_data = {std::byte{0x33}},
+                                        }},
+                                        FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(
+        serialize_fault(Frame{offset_stream_frame}, FrameFaultPoint::append_varint, 2));
+    ok &= fault_failure(
+        serialize_fault(Frame{length_stream_frame}, FrameFaultPoint::append_varint, 2));
+    ok &= fault_failure(
+        serialize_fault(Frame{length_stream_frame}, FrameFaultPoint::append_bytes, 1));
+    ok &= fault_failure(
+        serialize_fault(Frame{MaxDataFrame{.maximum_data = 1}}, FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(
+        serialize_fault(Frame{MaxStreamDataFrame{.stream_id = 1, .maximum_stream_data = 2}},
+                        FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{MaxStreamsFrame{.maximum_streams = 1}},
+                                        FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{MaxStreamsFrame{.maximum_streams = 1}},
+                                        FrameFaultPoint::append_varint, 1));
+    ok &= fault_failure(
+        serialize_fault(Frame{StreamDataBlockedFrame{.stream_id = 1, .maximum_stream_data = 2}},
+                        FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{StreamsBlockedFrame{.maximum_streams = 1}},
+                                        FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{StreamsBlockedFrame{.maximum_streams = 1}},
+                                        FrameFaultPoint::append_varint, 1));
+    ok &= fault_failure(serialize_fault(Frame{new_connection_id}, FrameFaultPoint::append_byte, 1));
+    ok &=
+        fault_failure(serialize_fault(Frame{new_connection_id}, FrameFaultPoint::append_varint, 2));
+    ok &= fault_failure(serialize_fault(Frame{new_connection_id}, FrameFaultPoint::append_byte, 2));
+    ok &=
+        fault_failure(serialize_fault(Frame{new_connection_id}, FrameFaultPoint::append_bytes, 1));
+    ok &=
+        fault_failure(serialize_fault(Frame{new_connection_id}, FrameFaultPoint::append_bytes, 2));
+    ok &= fault_failure(
+        serialize_fault(Frame{PathChallengeFrame{}}, FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(
+        serialize_fault(Frame{PathChallengeFrame{}}, FrameFaultPoint::append_bytes, 1));
+    ok &=
+        fault_failure(serialize_fault(Frame{PathResponseFrame{}}, FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(
+        serialize_fault(Frame{PathResponseFrame{}}, FrameFaultPoint::append_bytes, 1));
+    ok &= fault_failure(serialize_fault(Frame{transport_close}, FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(serialize_fault(Frame{transport_close}, FrameFaultPoint::append_bytes, 1));
+    ok &= fault_failure(serialize_fault(Frame{application_close}, FrameFaultPoint::append_byte, 1));
+    ok &=
+        fault_failure(serialize_fault(Frame{application_close}, FrameFaultPoint::append_bytes, 1));
+    ok &= fault_failure(
+        serialize_fault(Frame{HandshakeDoneFrame{}}, FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(size_fault(Frame{PingFrame{}}, FrameFaultPoint::append_byte, 1));
+
+    {
+        std::vector<std::byte> output(8, std::byte{0xee});
+        ok &= fault_failure(
+            into_fault(output, Frame{crypto_frame}, FrameFaultPoint::append_bytes, 2));
+    }
+    {
+        std::array<std::byte, 1> output{};
+        ok &= matches_codec_error(serialize_frame_into(output, PaddingFrame{.length = 0}),
+                                  CodecErrorCode::invalid_varint, 0);
+    }
+    {
+        std::vector<std::byte> bytes{std::byte{0xee}};
+        ok &=
+            fault_failure(append_fault(bytes, Frame{PingFrame{}}, FrameFaultPoint::append_byte, 1));
+        ok &= bytes == std::vector<std::byte>{std::byte{0xee}};
+    }
+    ok &= !matches_codec_error(serialize_frame(Frame{PingFrame{}}), CodecErrorCode::truncated_input,
+                               0);
+    ok &= !matches_codec_error(serialized_frame_size(Frame{PingFrame{}}),
+                               CodecErrorCode::truncated_input, 0);
+    ok &= !matches_codec_error(deserialize_received_frame(SharedBytes{std::byte{0x01}}),
+                               CodecErrorCode::truncated_input, 0);
+    ok &= matches_codec_error(deserialize_received_frame(SharedBytes{}),
+                              CodecErrorCode::truncated_input, 0);
+    ok &= matches_codec_error(deserialize_received_frame(SharedBytes{std::byte{0x40}}),
+                              CodecErrorCode::truncated_input, 1);
+
+    return ok;
+}
+
+bool frame_fault_helper_branch_coverage_for_tests() {
+    bool ok = true;
+    const auto fault_failure = [](const auto &result) {
+        return matches_codec_error(result, kFrameFaultError.code, kFrameFaultError.offset);
+    };
+
+    {
+        const ScopedFrameFault fault(FrameFaultPoint::append_byte, 0);
+        ok &= serialize_frame(Frame{PingFrame{}}).has_value();
+    }
+    {
+        std::array<std::byte, 8> output{};
+        const ScopedFrameFault fault(FrameFaultPoint::append_byte, 2);
+        ok &= fault_failure(serialize_frame_into(output, Frame{PingFrame{}}));
+    }
+    {
+        std::array<std::byte, 8> output{};
+        const ScopedFrameFault fault(FrameFaultPoint::append_varint, 2);
+        ok &= fault_failure(serialize_frame_into(output, Frame{MaxDataFrame{.maximum_data = 1}}));
+    }
+    {
+        std::array<std::byte, 8> output{};
+        SpanBufferWriter writer(output);
+        const auto error = append_varint(writer, kMaxVarInt + 1);
+        ok &= error.has_value();
+        const auto codec_error = error.value_or(CodecError{});
+        ok &= codec_error.code == CodecErrorCode::invalid_varint;
+        ok &= codec_error.offset == 0;
+    }
+
+    return ok;
+}
+
+bool frame_single_varint_writer_fault_coverage_for_tests() {
+    bool ok = true;
+    const auto fault_failure = [](const auto &result) {
+        return matches_codec_error(result, kFrameFaultError.code, kFrameFaultError.offset);
+    };
+
+    {
+        const ScopedFrameFault fault(FrameFaultPoint::append_byte, 1);
+        ok &= fault_failure(serialized_frame_size(Frame{MaxDataFrame{.maximum_data = 1}}));
+    }
+    {
+        const ScopedFrameFault fault(FrameFaultPoint::append_varint, 1);
+        ok &= fault_failure(serialized_frame_size(Frame{MaxDataFrame{.maximum_data = 1}}));
+    }
+    {
+        std::array<std::byte, 8> output{};
+        const ScopedFrameFault fault(FrameFaultPoint::append_byte, 2);
+        ok &= fault_failure(serialize_frame_into(output, Frame{MaxDataFrame{.maximum_data = 1}}));
+    }
+
+    return ok;
+}
+
+bool frame_matches_codec_error_branch_coverage_for_tests() {
+    const auto error = failure_result(CodecErrorCode::invalid_varint, 7);
+    return (!matches_codec_error(error, CodecErrorCode::truncated_input, 7)) &
+           (!matches_codec_error(error, CodecErrorCode::invalid_varint, 8));
+}
+
+bool frame_streams_blocked_writer_success_coverage_for_tests(StreamLimitType stream_type) {
+    const Frame frame{StreamsBlockedFrame{
+        .stream_type = stream_type,
+        .maximum_streams = 3,
+    }};
+
+    const auto encoded_result = serialize_frame(frame);
+    const auto &encoded = encoded_result.value();
+    const auto size_result = serialized_frame_size(frame);
+    const auto size = size_result.value();
+    std::vector<std::byte> output(size);
+    const auto written_result = serialize_frame_into(output, frame);
+    const auto written = written_result.value();
+    return (size == encoded.size()) & (written == size) & (output == encoded);
+}
+
+bool frame_writer_branch_coverage_for_tests() {
+    bool ok = true;
+    const auto round_trip = [](const Frame &frame) {
+        const auto encoded = serialize_frame(frame).value();
+        const auto size = serialized_frame_size(frame).value();
+        std::vector<std::byte> output(size);
+        const auto written = serialize_frame_into(output, frame).value();
+        return (written == size) & (output == encoded);
+    };
+
+    ok &= round_trip(Frame{PaddingFrame{.length = 2}});
+    ok &= round_trip(Frame{AckFrame{
+        .largest_acknowledged = 3,
+        .ack_delay = 1,
+        .first_ack_range = 1,
+    }});
+    ok &= round_trip(Frame{AckFrame{
+        .largest_acknowledged = 10,
+        .ack_delay = 2,
+        .first_ack_range = 1,
+        .additional_ranges =
+            {
+                AckRange{
+                    .gap = 1,
+                    .range_length = 1,
+                },
+            },
+        .ecn_counts =
+            AckEcnCounts{
+                .ect0 = 1,
+                .ect1 = 2,
+                .ecn_ce = 3,
+            },
+    }});
+    ok &= matches_codec_error(serialize_frame(Frame{AckFrame{
+                                  .largest_acknowledged = 0,
+                                  .first_ack_range = 1,
+                              }}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= matches_codec_error(serialize_frame(Frame{AckFrame{
+                                  .largest_acknowledged = 3,
+                                  .first_ack_range = 1,
+                                  .additional_ranges =
+                                      {
+                                          AckRange{
+                                              .gap = 2,
+                                              .range_length = 0,
+                                          },
+                                      },
+                              }}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= matches_codec_error(serialize_frame(Frame{AckFrame{
+                                  .largest_acknowledged = 4,
+                                  .first_ack_range = 0,
+                                  .additional_ranges =
+                                      {
+                                          AckRange{
+                                              .gap = 0,
+                                              .range_length = 3,
+                                          },
+                                      },
+                              }}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= round_trip(Frame{ResetStreamFrame{
+        .stream_id = 3,
+        .application_protocol_error_code = 4,
+        .final_size = 5,
+    }});
+    ok &= round_trip(Frame{StopSendingFrame{
+        .stream_id = 6,
+        .application_protocol_error_code = 7,
+    }});
+    ok &= round_trip(Frame{CryptoFrame{
+        .offset = 1,
+        .crypto_data = {std::byte{0x11}, std::byte{0x22}},
+    }});
+    ok &= matches_codec_error(serialize_frame(Frame{CryptoFrame{
+                                  .offset = kMaxVarInt,
+                                  .crypto_data = {std::byte{0x33}},
+                              }}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= round_trip(Frame{NewTokenFrame{.token = {std::byte{0x44}}}});
+    ok &= matches_codec_error(serialize_frame(Frame{NewTokenFrame{}}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= round_trip(Frame{StreamFrame{
+        .fin = true,
+        .has_offset = true,
+        .has_length = true,
+        .stream_id = 9,
+        .offset = 1,
+        .stream_data = {std::byte{0x55}, std::byte{0x66}},
+    }});
+    ok &= round_trip(Frame{StreamFrame{
+        .stream_id = 10,
+        .stream_data = {std::byte{0x77}},
+    }});
+    ok &= matches_codec_error(serialize_frame(Frame{StreamFrame{
+                                  .has_offset = true,
+                                  .stream_id = 11,
+                                  .offset = kMaxVarInt,
+                                  .stream_data = {std::byte{0x88}},
+                              }}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= round_trip(Frame{MaxDataFrame{.maximum_data = 8}});
+    ok &= round_trip(Frame{MaxStreamDataFrame{
+        .stream_id = 1,
+        .maximum_stream_data = 9,
+    }});
+    ok &= round_trip(Frame{MaxStreamsFrame{
+        .stream_type = StreamLimitType::bidirectional,
+        .maximum_streams = 10,
+    }});
+    ok &= round_trip(Frame{MaxStreamsFrame{
+        .stream_type = StreamLimitType::unidirectional,
+        .maximum_streams = 11,
+    }});
+    ok &= matches_codec_error(serialize_frame(Frame{MaxStreamsFrame{
+                                  .maximum_streams = kMaxStreamsLimit + 1,
+                              }}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= round_trip(Frame{DataBlockedFrame{.maximum_data = 12}});
+    ok &= round_trip(Frame{StreamDataBlockedFrame{
+        .stream_id = 2,
+        .maximum_stream_data = 13,
+    }});
+    ok &= round_trip(Frame{StreamsBlockedFrame{
+        .stream_type = StreamLimitType::bidirectional,
+        .maximum_streams = 14,
+    }});
+    ok &= round_trip(Frame{StreamsBlockedFrame{
+        .stream_type = StreamLimitType::unidirectional,
+        .maximum_streams = 15,
+    }});
+    ok &= matches_codec_error(serialize_frame(Frame{StreamsBlockedFrame{
+                                  .maximum_streams = kMaxStreamsLimit + 1,
+                              }}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= round_trip(Frame{NewConnectionIdFrame{
+        .sequence_number = 2,
+        .retire_prior_to = 1,
+        .connection_id = {std::byte{0x10}, std::byte{0x11}},
+    }});
+    ok &= matches_codec_error(serialize_frame(Frame{NewConnectionIdFrame{}}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= matches_codec_error(serialize_frame(Frame{NewConnectionIdFrame{
+                                  .sequence_number = 1,
+                                  .retire_prior_to = 2,
+                                  .connection_id = {std::byte{0x12}},
+                              }}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= matches_codec_error(serialize_frame(Frame{NewConnectionIdFrame{
+                                  .sequence_number = 1,
+                                  .connection_id = std::vector<std::byte>(21, std::byte{0x13}),
+                              }}),
+                              CodecErrorCode::invalid_varint, 0);
+    ok &= round_trip(Frame{RetireConnectionIdFrame{.sequence_number = 4}});
+    ok &= round_trip(Frame{PathChallengeFrame{}});
+    ok &= round_trip(Frame{PathResponseFrame{}});
+    ok &= round_trip(Frame{TransportConnectionCloseFrame{
+        .error_code = 1,
+        .frame_type = 2,
+        .reason = ConnectionCloseReason{.bytes = {std::byte{0x14}}},
+    }});
+    ok &= round_trip(Frame{ApplicationConnectionCloseFrame{
+        .error_code = 3,
+        .reason = ConnectionCloseReason{.bytes = {std::byte{0x15}}},
+    }});
+    ok &= round_trip(Frame{HandshakeDoneFrame{}});
+    return ok;
+}
+
+bool frame_length_prefixed_span_fault_coverage_for_tests() {
+    std::array<std::byte, 8> output{};
+    const ScopedFrameFault fault(FrameFaultPoint::append_varint, 2);
+    return matches_codec_error(serialize_frame_into(output, Frame{NewTokenFrame{
+                                                                .token = {std::byte{0xaa}},
+                                                            }}),
+                               kFrameFaultError.code, kFrameFaultError.offset);
+}
+
+} // namespace test
 
 } // namespace coquic::quic

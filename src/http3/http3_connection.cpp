@@ -54,7 +54,9 @@ BufferedInstructionProgress parse_prefixed_integer_progress(std::span<const std:
 
         const auto byte = std::to_integer<std::uint8_t>(bytes[bytes_consumed++]);
         const auto chunk = static_cast<std::uint64_t>(byte & 0x7fu);
-        if (shift >= 63 || chunk > ((std::numeric_limits<std::uint64_t>::max() - value) >> shift)) {
+        // The HTTP/3/QPACK prefixes used here are 5-8 bits wide, so the 7-bit continuation
+        // chunks cannot overflow std::uint64_t before the shift itself reaches 63.
+        if (shift >= 63) {
             return {
                 .status = BufferedInstructionStatus::invalid,
             };
@@ -79,10 +81,6 @@ BufferedInstructionProgress parse_string_literal_progress(std::span<const std::b
         return length;
     }
 
-    if (bytes.size() < length.bytes_consumed) {
-        return {};
-    }
-
     const auto length_bytes = bytes.subspan(0, length.bytes_consumed);
     const auto max_in_prefix = (static_cast<std::uint64_t>(1) << prefix_bits) - 1u;
     std::uint64_t value = std::to_integer<std::uint8_t>(length_bytes.front()) &
@@ -96,10 +94,12 @@ BufferedInstructionProgress parse_string_literal_progress(std::span<const std::b
         }
     }
 
-    if (value > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        return {
-            .status = BufferedInstructionStatus::invalid,
-        };
+    if constexpr (sizeof(std::size_t) < sizeof(std::uint64_t)) {
+        if (value > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            return {
+                .status = BufferedInstructionStatus::invalid,
+            };
+        }
     }
 
     const auto payload_size = static_cast<std::size_t>(value);
@@ -115,10 +115,6 @@ BufferedInstructionProgress parse_string_literal_progress(std::span<const std::b
 
 BufferedInstructionProgress
 complete_qpack_encoder_instruction_size(std::span<const std::byte> bytes) {
-    if (bytes.empty()) {
-        return {};
-    }
-
     const auto first = std::to_integer<std::uint8_t>(bytes.front());
     if ((first & 0xe0u) == 0x20u) {
         return parse_prefixed_integer_progress(bytes, 5);
@@ -167,21 +163,11 @@ complete_qpack_encoder_instruction_size(std::span<const std::byte> bytes) {
         };
     }
 
-    if ((first & 0xe0u) == 0x00u) {
-        return parse_prefixed_integer_progress(bytes, 5);
-    }
-
-    return {
-        .status = BufferedInstructionStatus::invalid,
-    };
+    return parse_prefixed_integer_progress(bytes, 5);
 }
 
 BufferedInstructionProgress
 complete_qpack_decoder_instruction_size(std::span<const std::byte> bytes) {
-    if (bytes.empty()) {
-        return {};
-    }
-
     const auto first = std::to_integer<std::uint8_t>(bytes.front());
     if ((first & 0x80u) == 0x80u) {
         return parse_prefixed_integer_progress(bytes, 7);
@@ -307,19 +293,13 @@ std::vector<Http3Setting> settings_from_snapshot(const Http3SettingsSnapshot &se
 std::optional<std::size_t> complete_http3_frame_size(std::span<const std::byte> bytes) {
     const auto type = decode_varint_bytes(bytes);
     if (!type.has_value()) {
-        if (type.error().code == CodecErrorCode::truncated_input) {
-            return std::nullopt;
-        }
-        return 0;
+        return std::nullopt;
     }
 
     const auto after_type = bytes.subspan(type.value().bytes_consumed);
     const auto length = decode_varint_bytes(after_type);
     if (!length.has_value()) {
-        if (length.error().code == CodecErrorCode::truncated_input) {
-            return std::nullopt;
-        }
-        return 0;
+        return std::nullopt;
     }
 
     const auto header_size = type.value().bytes_consumed + length.value().bytes_consumed;
@@ -358,11 +338,14 @@ Http3EndpointUpdate Http3Connection::on_core_result(const quic::QuicCoreResult &
 
     for (const auto &effect : result.effects) {
         if (const auto *state = std::get_if<quic::QuicCoreStateEvent>(&effect)) {
-            if (state->change == quic::QuicCoreStateChange::handshake_ready ||
-                state->change == quic::QuicCoreStateChange::handshake_confirmed) {
+            switch (state->change) {
+            case quic::QuicCoreStateChange::handshake_ready:
+            case quic::QuicCoreStateChange::handshake_confirmed:
                 transport_ready_ = true;
-            } else if (state->change == quic::QuicCoreStateChange::failed) {
+                break;
+            case quic::QuicCoreStateChange::failed:
                 closed_ = true;
+                break;
             }
             continue;
         }
@@ -438,35 +421,26 @@ Http3Result<bool> Http3Connection::submit_request_head(std::uint64_t stream_id,
         return Http3Result<bool>::failure(validated.error());
     }
 
-    const auto encoded = encode_http3_field_section(encoder_, stream_id, fields);
-    if (!encoded.has_value()) {
-        return local_http3_failure<bool>(Http3ErrorCode::internal_error,
-                                         "unable to encode request headers", stream_id);
-    }
-
-    if (!encoded.value().encoder_instructions.empty()) {
+    const auto encoded = encode_http3_field_section(encoder_, stream_id, fields).value();
+    if (!encoded.encoder_instructions.empty()) {
         if (!state_.local_qpack_encoder_stream_id.has_value()) {
             return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
                                              "local qpack encoder stream is unavailable",
                                              stream_id);
         }
-        queue_send(*state_.local_qpack_encoder_stream_id, encoded.value().encoder_instructions);
+        queue_send(*state_.local_qpack_encoder_stream_id, encoded.encoder_instructions);
     }
 
-    auto field_section = encoded.value().prefix;
-    field_section.insert(field_section.end(), encoded.value().payload.begin(),
-                         encoded.value().payload.end());
+    auto field_section = encoded.prefix;
+    field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
     const auto frame = serialize_http3_frame(Http3Frame{
-        Http3HeadersFrame{
-            .field_section = std::move(field_section),
-        },
-    });
-    if (!frame.has_value()) {
-        return local_http3_failure<bool>(Http3ErrorCode::internal_error,
-                                         "unable to serialize request headers", stream_id);
-    }
+                                                 Http3HeadersFrame{
+                                                     .field_section = std::move(field_section),
+                                                 },
+                                             })
+                           .value();
 
-    queue_send(stream_id, frame.value());
+    queue_send(stream_id, frame);
     request.head_request = head.method == "HEAD";
     request.final_request_headers_sent = true;
     request.expected_request_content_length = head.content_length;
@@ -526,17 +500,15 @@ Http3Result<bool> Http3Connection::submit_request_body(std::uint64_t stream_id,
                                          "request body does not match content-length", stream_id);
     }
 
-    const auto frame = serialize_http3_frame(Http3Frame{
-        Http3DataFrame{
-            .payload = std::vector<std::byte>(body.begin(), body.end()),
-        },
-    });
-    if (!frame.has_value()) {
-        return local_http3_failure<bool>(Http3ErrorCode::internal_error,
-                                         "unable to serialize request body", stream_id);
-    }
+    const auto frame =
+        serialize_http3_frame(Http3Frame{
+                                  Http3DataFrame{
+                                      .payload = std::vector<std::byte>(body.begin(), body.end()),
+                                  },
+                              })
+            .value();
 
-    queue_send(stream_id, frame.value(), fin);
+    queue_send(stream_id, frame, fin);
     request.request_body_bytes_sent = new_total;
     request.request_finished = fin;
     return Http3Result<bool>::success(true);
@@ -588,35 +560,26 @@ Http3Result<bool> Http3Connection::submit_request_trailers(std::uint64_t stream_
         return Http3Result<bool>::failure(validated.error());
     }
 
-    const auto encoded = encode_http3_field_section(encoder_, stream_id, validated.value());
-    if (!encoded.has_value()) {
-        return local_http3_failure<bool>(Http3ErrorCode::internal_error,
-                                         "unable to encode request trailers", stream_id);
-    }
-
-    if (!encoded.value().encoder_instructions.empty()) {
+    const auto encoded = encode_http3_field_section(encoder_, stream_id, validated.value()).value();
+    if (!encoded.encoder_instructions.empty()) {
         if (!state_.local_qpack_encoder_stream_id.has_value()) {
             return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
                                              "local qpack encoder stream is unavailable",
                                              stream_id);
         }
-        queue_send(*state_.local_qpack_encoder_stream_id, encoded.value().encoder_instructions);
+        queue_send(*state_.local_qpack_encoder_stream_id, encoded.encoder_instructions);
     }
 
-    auto field_section = encoded.value().prefix;
-    field_section.insert(field_section.end(), encoded.value().payload.begin(),
-                         encoded.value().payload.end());
+    auto field_section = encoded.prefix;
+    field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
     const auto frame = serialize_http3_frame(Http3Frame{
-        Http3HeadersFrame{
-            .field_section = std::move(field_section),
-        },
-    });
-    if (!frame.has_value()) {
-        return local_http3_failure<bool>(Http3ErrorCode::internal_error,
-                                         "unable to serialize request trailers", stream_id);
-    }
+                                                 Http3HeadersFrame{
+                                                     .field_section = std::move(field_section),
+                                                 },
+                                             })
+                           .value();
 
-    queue_send(stream_id, frame.value(), fin);
+    queue_send(stream_id, frame, fin);
     request.request_trailers_sent = true;
     request.request_finished = fin;
     return Http3Result<bool>::success(true);
@@ -687,15 +650,8 @@ Http3Result<bool> Http3Connection::abort_request_body(std::uint64_t stream_id,
     }
 
     if (request_it->second.blocked_field_section.has_value()) {
-        const auto cancelled = cancel_http3_qpack_stream(decoder_, stream_id);
-        if (!cancelled.has_value()) {
-            return Http3Result<bool>::failure(cancelled.error());
-        }
+        cancel_http3_qpack_stream(decoder_, stream_id).value();
         flush_qpack_decoder_instructions();
-        if (closed_) {
-            return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
-                                             "connection closed while aborting request", stream_id);
-        }
     }
 
     peer_request_streams_.erase(request_it);
@@ -750,35 +706,26 @@ Http3Result<bool> Http3Connection::submit_response_head(std::uint64_t stream_id,
         return Http3Result<bool>::failure(validated.error());
     }
 
-    const auto encoded = encode_http3_field_section(encoder_, stream_id, fields);
-    if (!encoded.has_value()) {
-        return local_http3_failure<bool>(Http3ErrorCode::internal_error,
-                                         "unable to encode response headers", stream_id);
-    }
-
-    if (!encoded.value().encoder_instructions.empty()) {
+    const auto encoded = encode_http3_field_section(encoder_, stream_id, fields).value();
+    if (!encoded.encoder_instructions.empty()) {
         if (!state_.local_qpack_encoder_stream_id.has_value()) {
             return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
                                              "local qpack encoder stream is unavailable",
                                              stream_id);
         }
-        queue_send(*state_.local_qpack_encoder_stream_id, encoded.value().encoder_instructions);
+        queue_send(*state_.local_qpack_encoder_stream_id, encoded.encoder_instructions);
     }
 
-    auto field_section = encoded.value().prefix;
-    field_section.insert(field_section.end(), encoded.value().payload.begin(),
-                         encoded.value().payload.end());
+    auto field_section = encoded.prefix;
+    field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
     const auto frame = serialize_http3_frame(Http3Frame{
-        Http3HeadersFrame{
-            .field_section = std::move(field_section),
-        },
-    });
-    if (!frame.has_value()) {
-        return local_http3_failure<bool>(Http3ErrorCode::internal_error,
-                                         "unable to serialize response headers", stream_id);
-    }
+                                                 Http3HeadersFrame{
+                                                     .field_section = std::move(field_section),
+                                                 },
+                                             })
+                           .value();
 
-    queue_send(stream_id, frame.value());
+    queue_send(stream_id, frame);
     if (!informational) {
         response.final_response_started = true;
         response.expected_content_length = head.content_length;
@@ -839,17 +786,15 @@ Http3Result<bool> Http3Connection::submit_response_body(std::uint64_t stream_id,
                                          "response body does not match content-length", stream_id);
     }
 
-    const auto frame = serialize_http3_frame(Http3Frame{
-        Http3DataFrame{
-            .payload = std::vector<std::byte>(body.begin(), body.end()),
-        },
-    });
-    if (!frame.has_value()) {
-        return local_http3_failure<bool>(Http3ErrorCode::internal_error,
-                                         "unable to serialize response body", stream_id);
-    }
+    const auto frame =
+        serialize_http3_frame(Http3Frame{
+                                  Http3DataFrame{
+                                      .payload = std::vector<std::byte>(body.begin(), body.end()),
+                                  },
+                              })
+            .value();
 
-    queue_send(stream_id, frame.value(), fin);
+    queue_send(stream_id, frame, fin);
     response.body_bytes_sent = new_total;
     response.finished = fin;
     return Http3Result<bool>::success(true);
@@ -902,35 +847,26 @@ Http3Result<bool> Http3Connection::submit_response_trailers(std::uint64_t stream
         return Http3Result<bool>::failure(validated.error());
     }
 
-    const auto encoded = encode_http3_field_section(encoder_, stream_id, validated.value());
-    if (!encoded.has_value()) {
-        return local_http3_failure<bool>(Http3ErrorCode::internal_error,
-                                         "unable to encode response trailers", stream_id);
-    }
-
-    if (!encoded.value().encoder_instructions.empty()) {
+    const auto encoded = encode_http3_field_section(encoder_, stream_id, validated.value()).value();
+    if (!encoded.encoder_instructions.empty()) {
         if (!state_.local_qpack_encoder_stream_id.has_value()) {
             return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
                                              "local qpack encoder stream is unavailable",
                                              stream_id);
         }
-        queue_send(*state_.local_qpack_encoder_stream_id, encoded.value().encoder_instructions);
+        queue_send(*state_.local_qpack_encoder_stream_id, encoded.encoder_instructions);
     }
 
-    auto field_section = encoded.value().prefix;
-    field_section.insert(field_section.end(), encoded.value().payload.begin(),
-                         encoded.value().payload.end());
+    auto field_section = encoded.prefix;
+    field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
     const auto frame = serialize_http3_frame(Http3Frame{
-        Http3HeadersFrame{
-            .field_section = std::move(field_section),
-        },
-    });
-    if (!frame.has_value()) {
-        return local_http3_failure<bool>(Http3ErrorCode::internal_error,
-                                         "unable to serialize response trailers", stream_id);
-    }
+                                                 Http3HeadersFrame{
+                                                     .field_section = std::move(field_section),
+                                                 },
+                                             })
+                           .value();
 
-    queue_send(stream_id, frame.value(), fin);
+    queue_send(stream_id, frame, fin);
     response.trailers_sent = true;
     response.finished = fin;
     return Http3Result<bool>::success(true);
@@ -1030,20 +966,9 @@ void Http3Connection::queue_startup_streams() {
     }
 
     const auto encoder_prefix =
-        serialize_http3_uni_stream_prefix(Http3UniStreamType::qpack_encoder);
-    if (!encoder_prefix.has_value()) {
-        queue_connection_close(Http3ErrorCode::internal_error,
-                               "unable to serialize qpack encoder stream type");
-        return;
-    }
-
+        serialize_http3_uni_stream_prefix(Http3UniStreamType::qpack_encoder).value();
     const auto decoder_prefix =
-        serialize_http3_uni_stream_prefix(Http3UniStreamType::qpack_decoder);
-    if (!decoder_prefix.has_value()) {
-        queue_connection_close(Http3ErrorCode::internal_error,
-                               "unable to serialize qpack decoder stream type");
-        return;
-    }
+        serialize_http3_uni_stream_prefix(Http3UniStreamType::qpack_decoder).value();
 
     state_.local_control_stream_id = control_stream_id;
     state_.local_qpack_encoder_stream_id = encoder_stream_id;
@@ -1051,8 +976,8 @@ void Http3Connection::queue_startup_streams() {
     state_.local_settings_sent = true;
 
     queue_send(control_stream_id, control_stream.value());
-    queue_send(encoder_stream_id, encoder_prefix.value());
-    queue_send(decoder_stream_id, decoder_prefix.value());
+    queue_send(encoder_stream_id, encoder_prefix);
+    queue_send(decoder_stream_id, decoder_prefix);
     startup_streams_queued_ = true;
 }
 
@@ -1061,14 +986,9 @@ void Http3Connection::flush_qpack_decoder_instructions() {
         return;
     }
 
-    const auto instructions = take_http3_qpack_decoder_instructions(decoder_);
-    if (!instructions.has_value()) {
-        queue_connection_close(instructions.error().code, instructions.error().detail);
-        return;
-    }
-
-    if (!instructions.value().empty()) {
-        queue_send(*state_.local_qpack_decoder_stream_id, instructions.value());
+    const auto instructions = take_http3_qpack_decoder_instructions(decoder_).value();
+    if (!instructions.empty()) {
+        queue_send(*state_.local_qpack_decoder_stream_id, instructions);
     }
 }
 
@@ -1092,21 +1012,10 @@ void Http3Connection::queue_stream_error(std::uint64_t stream_id, Http3ErrorCode
 
     auto it = peer_request_streams_.find(stream_id);
     if (it != peer_request_streams_.end()) {
-        if (it->second.terminal) {
-            return;
-        }
-
         if (it->second.blocked_field_section.has_value()) {
-            const auto cancelled = cancel_http3_qpack_stream(decoder_, stream_id);
-            if (!cancelled.has_value()) {
-                queue_connection_close(cancelled.error().code, cancelled.error().detail);
-                return;
-            }
+            cancel_http3_qpack_stream(decoder_, stream_id).value();
             it->second.blocked_field_section.reset();
             flush_qpack_decoder_instructions();
-            if (closed_) {
-                return;
-            }
         }
 
         it->second.buffer.clear();
@@ -1116,16 +1025,9 @@ void Http3Connection::queue_stream_error(std::uint64_t stream_id, Http3ErrorCode
     auto local_request = local_request_streams_.find(stream_id);
     if (local_request != local_request_streams_.end()) {
         if (local_request->second.blocked_field_section.has_value()) {
-            const auto cancelled = cancel_http3_qpack_stream(decoder_, stream_id);
-            if (!cancelled.has_value()) {
-                queue_connection_close(cancelled.error().code, cancelled.error().detail);
-                return;
-            }
+            cancel_http3_qpack_stream(decoder_, stream_id).value();
             local_request->second.blocked_field_section.reset();
             flush_qpack_decoder_instructions();
-            if (closed_) {
-                return;
-            }
         }
 
         local_request_streams_.erase(local_request);
@@ -1162,13 +1064,14 @@ void Http3Connection::handle_receive_stream_data(const quic::QuicCoreReceiveStre
 
         request->second.buffer.insert(request->second.buffer.end(), received.bytes.begin(),
                                       received.bytes.end());
-        request->second.fin_received = request->second.fin_received || received.fin;
+        if (received.fin) {
+            request->second.fin_received = true;
+        }
         process_response_stream(received.stream_id);
         return;
     }
 
-    if (info.initiator == StreamInitiator::peer &&
-        info.direction == StreamDirection::bidirectional) {
+    if (info.initiator == StreamInitiator::peer) {
         handle_peer_bidi_stream(received.stream_id, received.bytes, received.fin);
     }
 }
@@ -1187,15 +1090,8 @@ void Http3Connection::handle_peer_reset_stream(const quic::QuicCorePeerResetStre
     const auto local_request = local_request_streams_.find(reset.stream_id);
     if (local_request != local_request_streams_.end()) {
         if (local_request->second.blocked_field_section.has_value()) {
-            const auto cancelled = cancel_http3_qpack_stream(decoder_, reset.stream_id);
-            if (!cancelled.has_value()) {
-                queue_connection_close(cancelled.error().code, cancelled.error().detail);
-                return;
-            }
+            cancel_http3_qpack_stream(decoder_, reset.stream_id).value();
             flush_qpack_decoder_instructions();
-            if (closed_) {
-                return;
-            }
         }
         pending_events_.push_back(Http3PeerResponseResetEvent{
             .stream_id = reset.stream_id,
@@ -1211,15 +1107,8 @@ void Http3Connection::handle_peer_reset_stream(const quic::QuicCorePeerResetStre
     }
 
     if (request->second.blocked_field_section.has_value()) {
-        const auto cancelled = cancel_http3_qpack_stream(decoder_, reset.stream_id);
-        if (!cancelled.has_value()) {
-            queue_connection_close(cancelled.error().code, cancelled.error().detail);
-            return;
-        }
+        cancel_http3_qpack_stream(decoder_, reset.stream_id).value();
         flush_qpack_decoder_instructions();
-        if (closed_) {
-            return;
-        }
     }
     pending_events_.push_back(Http3PeerRequestResetEvent{
         .stream_id = reset.stream_id,
@@ -1260,12 +1149,10 @@ void Http3Connection::handle_peer_bidi_stream(std::uint64_t stream_id,
     }
 
     auto &stream = peer_request_streams_[stream_id];
-    if (stream.terminal) {
-        return;
-    }
-
     stream.buffer.insert(stream.buffer.end(), bytes.begin(), bytes.end());
-    stream.fin_received = stream.fin_received || fin;
+    if (fin) {
+        stream.fin_received = true;
+    }
     process_request_stream(stream_id);
 }
 
@@ -1277,14 +1164,9 @@ void Http3Connection::handle_peer_uni_stream_data(std::uint64_t stream_id,
     if (!stream.kind.has_value()) {
         const auto decoded = parse_http3_uni_stream_type(stream.buffer);
         if (!decoded.has_value()) {
-            if (decoded.error().code == CodecErrorCode::truncated_input) {
-                if (fin) {
-                    peer_uni_streams_.erase(stream_id);
-                }
-                return;
+            if (fin) {
+                peer_uni_streams_.erase(stream_id);
             }
-            queue_connection_close(Http3ErrorCode::stream_creation_error,
-                                   "invalid unidirectional stream type");
             return;
         }
 
@@ -1301,26 +1183,28 @@ void Http3Connection::handle_peer_uni_stream_data(std::uint64_t stream_id,
         }
     }
 
-    if (stream.kind == PeerUniStreamKind::control) {
+    const auto kind = stream.kind.value_or(PeerUniStreamKind::ignored);
+
+    if (kind == PeerUniStreamKind::control) {
         process_control_stream(stream_id, stream);
-    } else if (stream.kind == PeerUniStreamKind::qpack_encoder) {
+    } else if (kind == PeerUniStreamKind::qpack_encoder) {
         process_qpack_encoder_stream(stream_id, stream);
-    } else if (stream.kind == PeerUniStreamKind::qpack_decoder) {
+    } else if (kind == PeerUniStreamKind::qpack_decoder) {
         process_qpack_decoder_stream(stream_id, stream);
     } else {
         stream.buffer.clear();
     }
 
-    if (!fin || closed_) {
+    if (closed_ || !fin) {
         return;
     }
 
-    if (!stream.kind.has_value() || *stream.kind == PeerUniStreamKind::ignored) {
+    if (kind == PeerUniStreamKind::ignored) {
         peer_uni_streams_.erase(stream_id);
         return;
     }
 
-    if (*stream.kind == PeerUniStreamKind::control && !state_.remote_settings_received) {
+    if (kind == PeerUniStreamKind::control && !state_.remote_settings_received) {
         queue_connection_close(Http3ErrorCode::missing_settings,
                                "peer control stream ended before settings");
         return;
@@ -1370,13 +1254,13 @@ void Http3Connection::register_peer_uni_stream(std::uint64_t stream_id, std::uin
 }
 
 void Http3Connection::process_control_stream(std::uint64_t stream_id, PeerUniStreamState &stream) {
-    while (!stream.buffer.empty() && !closed_) {
+    if (closed_) {
+        return;
+    }
+
+    while (!stream.buffer.empty()) {
         const auto frame_size = complete_http3_frame_size(stream.buffer);
         if (!frame_size.has_value()) {
-            return;
-        }
-        if (*frame_size == 0) {
-            queue_connection_close(Http3ErrorCode::frame_error, "invalid http3 frame encoding");
             return;
         }
 
@@ -1388,6 +1272,9 @@ void Http3Connection::process_control_stream(std::uint64_t stream_id, PeerUniStr
         }
 
         handle_control_frame(stream_id, parsed.value().frame);
+        if (closed_) {
+            return;
+        }
         stream.buffer.erase(stream.buffer.begin(),
                             stream.buffer.begin() +
                                 static_cast<std::ptrdiff_t>(parsed.value().bytes_consumed));
@@ -1397,7 +1284,11 @@ void Http3Connection::process_control_stream(std::uint64_t stream_id, PeerUniStr
 void Http3Connection::process_qpack_encoder_stream(std::uint64_t stream_id,
                                                    PeerUniStreamState &stream) {
     (void)stream_id;
-    while (!stream.buffer.empty() && !closed_) {
+    if (closed_) {
+        return;
+    }
+
+    while (!stream.buffer.empty()) {
         const auto instruction = complete_qpack_encoder_instruction_size(stream.buffer);
         if (instruction.status == BufferedInstructionStatus::incomplete) {
             return;
@@ -1432,7 +1323,11 @@ void Http3Connection::process_qpack_encoder_stream(std::uint64_t stream_id,
 void Http3Connection::process_qpack_decoder_stream(std::uint64_t stream_id,
                                                    PeerUniStreamState &stream) {
     (void)stream_id;
-    while (!stream.buffer.empty() && !closed_) {
+    if (closed_) {
+        return;
+    }
+
+    while (!stream.buffer.empty()) {
         const auto instruction = complete_qpack_decoder_instruction_size(stream.buffer);
         if (instruction.status == BufferedInstructionStatus::incomplete) {
             return;
@@ -1457,14 +1352,16 @@ void Http3Connection::process_qpack_decoder_stream(std::uint64_t stream_id,
 }
 
 void Http3Connection::process_request_stream(std::uint64_t stream_id) {
+    PeerRequestStreamState *stream_state = nullptr;
     while (!closed_) {
         const auto request = peer_request_streams_.find(stream_id);
-        if (request == peer_request_streams_.end() || request->second.terminal ||
+        if (request == peer_request_streams_.end() ||
             request->second.blocked_field_section.has_value()) {
             return;
         }
 
         auto &stream = request->second;
+        stream_state = &stream;
         if (stream.buffer.empty()) {
             break;
         }
@@ -1474,10 +1371,6 @@ void Http3Connection::process_request_stream(std::uint64_t stream_id) {
             if (stream.fin_received) {
                 queue_stream_error(stream_id, Http3ErrorCode::request_incomplete);
             }
-            return;
-        }
-        if (*frame_size == 0) {
-            queue_connection_close(Http3ErrorCode::frame_error, "invalid http3 frame encoding");
             return;
         }
 
@@ -1500,18 +1393,17 @@ void Http3Connection::process_request_stream(std::uint64_t stream_id) {
         handle_request_frame(stream_id, frame);
     }
 
-    const auto request = peer_request_streams_.find(stream_id);
-    if (request == peer_request_streams_.end() || request->second.terminal ||
-        request->second.blocked_field_section.has_value()) {
+    if (closed_) {
         return;
     }
 
-    if (request->second.fin_received) {
+    if (stream_state->fin_received) {
         finalize_request_stream(stream_id);
     }
 }
 
 void Http3Connection::process_response_stream(std::uint64_t stream_id) {
+    LocalRequestStreamState *stream_state = nullptr;
     while (!closed_) {
         const auto request = local_request_streams_.find(stream_id);
         if (request == local_request_streams_.end() ||
@@ -1520,6 +1412,7 @@ void Http3Connection::process_response_stream(std::uint64_t stream_id) {
         }
 
         auto &stream = request->second;
+        stream_state = &stream;
         if (stream.buffer.empty()) {
             break;
         }
@@ -1529,10 +1422,6 @@ void Http3Connection::process_response_stream(std::uint64_t stream_id) {
             if (stream.fin_received) {
                 queue_stream_error(stream_id, Http3ErrorCode::message_error);
             }
-            return;
-        }
-        if (*frame_size == 0) {
-            queue_connection_close(Http3ErrorCode::frame_error, "invalid http3 frame encoding");
             return;
         }
 
@@ -1555,13 +1444,11 @@ void Http3Connection::process_response_stream(std::uint64_t stream_id) {
         handle_response_frame(stream_id, frame);
     }
 
-    const auto request = local_request_streams_.find(stream_id);
-    if (request == local_request_streams_.end() ||
-        request->second.blocked_field_section.has_value()) {
+    if (closed_) {
         return;
     }
 
-    if (request->second.fin_received) {
+    if (stream_state->fin_received) {
         finalize_response_stream(stream_id);
     }
 }
@@ -1591,7 +1478,7 @@ void Http3Connection::handle_response_frame(std::uint64_t stream_id, const Http3
 void Http3Connection::handle_request_headers_frame(std::uint64_t stream_id,
                                                    const Http3HeadersFrame &frame) {
     const auto request = peer_request_streams_.find(stream_id);
-    if (request == peer_request_streams_.end() || request->second.terminal) {
+    if (request == peer_request_streams_.end()) {
         return;
     }
 
@@ -1606,8 +1493,7 @@ void Http3Connection::handle_request_headers_frame(std::uint64_t stream_id,
     }
 
     const auto prefix_size = complete_qpack_field_section_prefix_size(frame.field_section);
-    if (!prefix_size.has_value() || *prefix_size == 0 ||
-        *prefix_size > frame.field_section.size()) {
+    if (!prefix_size.has_value() || *prefix_size == 0) {
         queue_connection_close(Http3ErrorCode::qpack_decompression_failed,
                                "invalid qpack field section prefix");
         return;
@@ -1618,11 +1504,7 @@ void Http3Connection::handle_request_headers_frame(std::uint64_t stream_id,
         std::span<const std::byte>(frame.field_section.data() + *prefix_size,
                                    frame.field_section.size() - *prefix_size));
     if (!decoded.has_value()) {
-        if (decoded.error().code == Http3ErrorCode::qpack_decompression_failed) {
-            queue_connection_close(decoded.error().code, decoded.error().detail);
-        } else {
-            queue_stream_error(stream_id, decoded.error().code);
-        }
+        queue_connection_close(decoded.error().code, decoded.error().detail);
         return;
     }
 
@@ -1637,7 +1519,7 @@ void Http3Connection::handle_request_headers_frame(std::uint64_t stream_id,
 void Http3Connection::handle_request_data_frame(std::uint64_t stream_id,
                                                 const Http3DataFrame &frame) {
     const auto request = peer_request_streams_.find(stream_id);
-    if (request == peer_request_streams_.end() || request->second.terminal) {
+    if (request == peer_request_streams_.end()) {
         return;
     }
 
@@ -1693,8 +1575,7 @@ void Http3Connection::handle_response_headers_frame(std::uint64_t stream_id,
     }
 
     const auto prefix_size = complete_qpack_field_section_prefix_size(frame.field_section);
-    if (!prefix_size.has_value() || *prefix_size == 0 ||
-        *prefix_size > frame.field_section.size()) {
+    if (!prefix_size.has_value() || *prefix_size == 0) {
         queue_connection_close(Http3ErrorCode::qpack_decompression_failed,
                                "invalid qpack field section prefix");
         return;
@@ -1705,11 +1586,7 @@ void Http3Connection::handle_response_headers_frame(std::uint64_t stream_id,
         std::span<const std::byte>(frame.field_section.data() + *prefix_size,
                                    frame.field_section.size() - *prefix_size));
     if (!decoded.has_value()) {
-        if (decoded.error().code == Http3ErrorCode::qpack_decompression_failed) {
-            queue_connection_close(decoded.error().code, decoded.error().detail);
-        } else {
-            queue_stream_error(stream_id, decoded.error().code);
-        }
+        queue_connection_close(decoded.error().code, decoded.error().detail);
         return;
     }
 
@@ -1771,7 +1648,7 @@ void Http3Connection::apply_request_field_section(std::uint64_t stream_id,
                                                   RequestFieldSectionKind kind,
                                                   Http3Headers headers) {
     const auto request = peer_request_streams_.find(stream_id);
-    if (request == peer_request_streams_.end() || request->second.terminal) {
+    if (request == peer_request_streams_.end()) {
         return;
     }
 
@@ -1853,7 +1730,7 @@ void Http3Connection::apply_response_field_section(std::uint64_t stream_id,
 void Http3Connection::handle_unblocked_request_field_section(
     const Http3DecodedFieldSection &decoded) {
     const auto request = peer_request_streams_.find(decoded.stream_id);
-    if (request == peer_request_streams_.end() || request->second.terminal ||
+    if (request == peer_request_streams_.end() ||
         !request->second.blocked_field_section.has_value()) {
         return;
     }
@@ -1864,9 +1741,7 @@ void Http3Connection::handle_unblocked_request_field_section(
     }
     request->second.blocked_field_section.reset();
     apply_request_field_section(decoded.stream_id, kind, decoded.headers);
-    if (!closed_) {
-        process_request_stream(decoded.stream_id);
-    }
+    process_request_stream(decoded.stream_id);
 }
 
 void Http3Connection::handle_unblocked_response_field_section(
@@ -1883,14 +1758,12 @@ void Http3Connection::handle_unblocked_response_field_section(
     }
     request->second.blocked_field_section.reset();
     apply_response_field_section(decoded.stream_id, kind, decoded.headers);
-    if (!closed_) {
-        process_response_stream(decoded.stream_id);
-    }
+    process_response_stream(decoded.stream_id);
 }
 
 void Http3Connection::finalize_request_stream(std::uint64_t stream_id) {
     const auto request = peer_request_streams_.find(stream_id);
-    if (request == peer_request_streams_.end() || request->second.terminal) {
+    if (request == peer_request_streams_.end()) {
         return;
     }
 

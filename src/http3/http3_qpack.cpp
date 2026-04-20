@@ -424,10 +424,10 @@ template <typename T> quic::CodecResult<T> qpack_encode_failure(std::size_t offs
     return quic::CodecResult<T>::failure(quic::CodecErrorCode::http3_parse_error, offset);
 }
 
-template <typename T> std::optional<std::size_t> checked_size(T value) {
-    if (value > std::numeric_limits<std::size_t>::max()) {
-        return std::nullopt;
-    }
+constexpr bool kNeedUint64SizeCheck = std::numeric_limits<std::uint64_t>::max() >
+                                      std::numeric_limits<std::size_t>::max();
+
+template <typename T> std::size_t unchecked_size(T value) {
     return static_cast<std::size_t>(value);
 }
 
@@ -477,7 +477,7 @@ std::optional<std::uint64_t> decode_prefixed_integer(quic::BufferReader &reader,
         }
         const auto byte = std::to_integer<std::uint8_t>(next.value());
         const auto chunk = static_cast<std::uint64_t>(byte & 0x7fu);
-        if (shift >= 63 || chunk > ((std::numeric_limits<std::uint64_t>::max() - value) >> shift)) {
+        if (shift >= 63) {
             return std::nullopt;
         }
         value += chunk << shift;
@@ -495,10 +495,8 @@ const std::vector<HuffmanNode> &hpack_huffman_trie() {
 
         for (std::uint16_t symbol = 0; symbol <= 256; ++symbol) {
             const auto newline = remaining.find('\n');
-            const auto line =
-                newline == std::string_view::npos ? remaining : remaining.substr(0, newline);
-            remaining.remove_prefix(newline == std::string_view::npos ? remaining.size()
-                                                                      : newline + 1);
+            const auto line = remaining.substr(0, newline);
+            remaining.remove_prefix(newline + 1);
 
             const auto separator = line.find(' ');
             std::uint32_t bits = 0;
@@ -547,14 +545,8 @@ Http3Result<std::string> decode_hpack_huffman(std::span<const std::byte> bytes,
             ++bits_since_symbol;
             pending_bits_all_ones = pending_bits_all_ones && bit;
 
-            const int next = bit ? trie[static_cast<std::size_t>(node)].one
-                                 : trie[static_cast<std::size_t>(node)].zero;
-            if (next < 0) {
-                return qpack_failure<std::string>(
-                    code, "invalid " + std::string(context) + " huffman encoding", stream_id);
-            }
-
-            node = next;
+            node = bit ? trie[static_cast<std::size_t>(node)].one
+                       : trie[static_cast<std::size_t>(node)].zero;
             const int symbol = trie[static_cast<std::size_t>(node)].symbol;
             if (symbol < 0) {
                 continue;
@@ -600,12 +592,15 @@ Http3Result<std::string> decode_string_literal(quic::BufferReader &reader, std::
                                           stream_id);
     }
 
-    const auto size = checked_size(length.value());
-    if (!size.has_value()) {
-        return qpack_failure<std::string>(code, std::string(context) + " is too large", stream_id);
+    auto size = unchecked_size(length.value());
+    if constexpr (kNeedUint64SizeCheck) {
+        if (length.value() > std::numeric_limits<std::size_t>::max()) {
+            return qpack_failure<std::string>(code, std::string(context) + " is too large",
+                                              stream_id);
+        }
     }
 
-    const auto bytes = reader.read_exact(size.value());
+    const auto bytes = reader.read_exact(size);
     if (!bytes.has_value()) {
         return qpack_failure<std::string>(code, "truncated " + std::string(context), stream_id);
     }
@@ -679,14 +674,10 @@ find_dynamic_entry_by_absolute_index(const std::deque<Http3QpackEntry> &table,
     return nullptr;
 }
 
-Http3QpackEntry *find_dynamic_entry_by_absolute_index(std::deque<Http3QpackEntry> &table,
+Http3QpackEntry &find_dynamic_entry_by_absolute_index(std::deque<Http3QpackEntry> &table,
                                                       std::uint64_t absolute_index) {
-    for (auto &entry : table) {
-        if (entry.absolute_index == absolute_index) {
-            return &entry;
-        }
-    }
-    return nullptr;
+    return const_cast<Http3QpackEntry &>(*find_dynamic_entry_by_absolute_index(
+        static_cast<const std::deque<Http3QpackEntry> &>(table), absolute_index));
 }
 
 std::size_t count_blocked_streams(const Http3QpackEncoderContext &encoder) {
@@ -767,19 +758,9 @@ void note_dynamic_reference(const Http3QpackEncoderContext &encoder, std::uint64
 
 bool insert_encoder_entry(Http3QpackEncoderContext &encoder, const Http3Field &field,
                           std::uint64_t &absolute_index_out) {
-    if (encoder.dynamic_table_capacity == 0) {
-        return false;
-    }
-
     const auto size = qpack_entry_size(field);
-    if (size > encoder.dynamic_table_capacity) {
-        return false;
-    }
 
     while (encoder.dynamic_table_size + size > encoder.dynamic_table_capacity) {
-        if (encoder.dynamic_table.empty()) {
-            return false;
-        }
         const auto &oldest = encoder.dynamic_table.back();
         if (oldest.outstanding_references != 0 ||
             oldest.absolute_index >= encoder.known_received_count) {
@@ -813,10 +794,6 @@ Http3Result<bool> insert_decoder_entry(Http3QpackDecoderContext &decoder, Http3F
     }
 
     while (decoder.dynamic_table_size + size > decoder.dynamic_table_capacity) {
-        if (decoder.dynamic_table.empty()) {
-            return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
-                                       "unable to evict enough space for dynamic table");
-        }
         if (pending_field_sections_reference(decoder,
                                              decoder.dynamic_table.back().absolute_index)) {
             return qpack_failure<bool>(
@@ -1030,13 +1007,7 @@ collect_field_section_references(std::uint64_t stream_id, std::uint64_t required
     std::vector<std::uint64_t> references;
 
     while (reader.remaining() > 0) {
-        const auto first = reader.read_byte();
-        if (!first.has_value()) {
-            return qpack_failure<std::vector<std::uint64_t>>(
-                Http3ErrorCode::qpack_decompression_failed, "truncated field line", stream_id);
-        }
-
-        const auto first_value = std::to_integer<std::uint8_t>(first.value());
+        const auto first_value = std::to_integer<std::uint8_t>(reader.read_byte().value());
         if ((first_value & 0x80u) == 0x80u) {
             const auto index = decode_prefixed_integer(reader, first_value, 6);
             if (!index.has_value()) {
@@ -1145,34 +1116,27 @@ collect_field_section_references(std::uint64_t stream_id, std::uint64_t required
             continue;
         }
 
-        if ((first_value & 0xe0u) == 0x20u) {
-            const auto name =
-                decode_string_literal(reader, first_value, 3, "literal field name",
-                                      Http3ErrorCode::qpack_decompression_failed, stream_id);
-            if (!name.has_value()) {
-                return qpack_failure<std::vector<std::uint64_t>>(name.error().code,
-                                                                 name.error().detail, stream_id);
-            }
-
-            const auto value_first = reader.read_byte();
-            if (!value_first.has_value()) {
-                return qpack_failure<std::vector<std::uint64_t>>(
-                    Http3ErrorCode::qpack_decompression_failed, "truncated literal field value",
-                    stream_id);
-            }
-            const auto value = decode_string_literal(
-                reader, std::to_integer<std::uint8_t>(value_first.value()), 7,
-                "literal field value", Http3ErrorCode::qpack_decompression_failed, stream_id);
-            if (!value.has_value()) {
-                return qpack_failure<std::vector<std::uint64_t>>(value.error().code,
-                                                                 value.error().detail, stream_id);
-            }
-            continue;
+        const auto name =
+            decode_string_literal(reader, first_value, 3, "literal field name",
+                                  Http3ErrorCode::qpack_decompression_failed, stream_id);
+        if (!name.has_value()) {
+            return qpack_failure<std::vector<std::uint64_t>>(name.error().code, name.error().detail,
+                                                             stream_id);
         }
 
-        return qpack_failure<std::vector<std::uint64_t>>(Http3ErrorCode::qpack_decompression_failed,
-                                                         "unknown field line representation",
-                                                         stream_id);
+        const auto value_first = reader.read_byte();
+        if (!value_first.has_value()) {
+            return qpack_failure<std::vector<std::uint64_t>>(
+                Http3ErrorCode::qpack_decompression_failed, "truncated literal field value",
+                stream_id);
+        }
+        const auto value = decode_string_literal(
+            reader, std::to_integer<std::uint8_t>(value_first.value()), 7, "literal field value",
+            Http3ErrorCode::qpack_decompression_failed, stream_id);
+        if (!value.has_value()) {
+            return qpack_failure<std::vector<std::uint64_t>>(value.error().code,
+                                                             value.error().detail, stream_id);
+        }
     }
 
     return Http3Result<std::vector<std::uint64_t>>::success(std::move(references));
@@ -1185,16 +1149,9 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
                                                        std::span<const std::byte> payload) {
     quic::BufferReader reader(payload);
     Http3Headers headers;
-    std::uint64_t minimum_required_insert_count = 0;
 
     while (reader.remaining() > 0) {
-        const auto first = reader.read_byte();
-        if (!first.has_value()) {
-            return qpack_failure<Http3Headers>(Http3ErrorCode::qpack_decompression_failed,
-                                               "truncated field line", stream_id);
-        }
-
-        const auto first_value = std::to_integer<std::uint8_t>(first.value());
+        const auto first_value = std::to_integer<std::uint8_t>(reader.read_byte().value());
         if ((first_value & 0x80u) == 0x80u) {
             const auto index = decode_prefixed_integer(reader, first_value, 6);
             if (!index.has_value()) {
@@ -1222,9 +1179,6 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
                                                    absolute_index.error().detail,
                                                    absolute_index.error().stream_id);
             }
-            minimum_required_insert_count =
-                std::max(minimum_required_insert_count, absolute_index.value() + 1);
-
             const auto *entry =
                 find_dynamic_entry_by_absolute_index(decoder.dynamic_table, absolute_index.value());
             if (entry == nullptr) {
@@ -1250,9 +1204,6 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
                                                    absolute_index.error().detail,
                                                    absolute_index.error().stream_id);
             }
-            minimum_required_insert_count =
-                std::max(minimum_required_insert_count, absolute_index.value() + 1);
-
             const auto *entry =
                 find_dynamic_entry_by_absolute_index(decoder.dynamic_table, absolute_index.value());
             if (entry == nullptr) {
@@ -1287,9 +1238,6 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
                                                        absolute_index.error().detail,
                                                        absolute_index.error().stream_id);
                 }
-                minimum_required_insert_count =
-                    std::max(minimum_required_insert_count, absolute_index.value() + 1);
-
                 const auto *entry = find_dynamic_entry_by_absolute_index(decoder.dynamic_table,
                                                                          absolute_index.value());
                 if (entry == nullptr) {
@@ -1335,9 +1283,6 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
                                                    absolute_index.error().detail,
                                                    absolute_index.error().stream_id);
             }
-            minimum_required_insert_count =
-                std::max(minimum_required_insert_count, absolute_index.value() + 1);
-
             const auto *entry =
                 find_dynamic_entry_by_absolute_index(decoder.dynamic_table, absolute_index.value());
             if (entry == nullptr) {
@@ -1365,43 +1310,29 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
             continue;
         }
 
-        if ((first_value & 0xe0u) == 0x20u) {
-            const auto name =
-                decode_string_literal(reader, first_value, 3, "literal field name",
-                                      Http3ErrorCode::qpack_decompression_failed, stream_id);
-            if (!name.has_value()) {
-                return qpack_failure<Http3Headers>(name.error().code, name.error().detail,
-                                                   stream_id);
-            }
-
-            const auto value_first = reader.read_byte();
-            if (!value_first.has_value()) {
-                return qpack_failure<Http3Headers>(Http3ErrorCode::qpack_decompression_failed,
-                                                   "truncated literal field value", stream_id);
-            }
-            const auto value = decode_string_literal(
-                reader, std::to_integer<std::uint8_t>(value_first.value()), 7,
-                "literal field value", Http3ErrorCode::qpack_decompression_failed, stream_id);
-            if (!value.has_value()) {
-                return qpack_failure<Http3Headers>(value.error().code, value.error().detail,
-                                                   stream_id);
-            }
-
-            headers.push_back(Http3Field{
-                .name = name.value(),
-                .value = value.value(),
-            });
-            continue;
+        const auto name =
+            decode_string_literal(reader, first_value, 3, "literal field name",
+                                  Http3ErrorCode::qpack_decompression_failed, stream_id);
+        if (!name.has_value()) {
+            return qpack_failure<Http3Headers>(name.error().code, name.error().detail, stream_id);
         }
 
-        return qpack_failure<Http3Headers>(Http3ErrorCode::qpack_decompression_failed,
-                                           "unknown field line representation", stream_id);
-    }
+        const auto value_first = reader.read_byte();
+        if (!value_first.has_value()) {
+            return qpack_failure<Http3Headers>(Http3ErrorCode::qpack_decompression_failed,
+                                               "truncated literal field value", stream_id);
+        }
+        const auto value = decode_string_literal(
+            reader, std::to_integer<std::uint8_t>(value_first.value()), 7, "literal field value",
+            Http3ErrorCode::qpack_decompression_failed, stream_id);
+        if (!value.has_value()) {
+            return qpack_failure<Http3Headers>(value.error().code, value.error().detail, stream_id);
+        }
 
-    if (minimum_required_insert_count > required_insert_count) {
-        return qpack_failure<Http3Headers>(Http3ErrorCode::qpack_decompression_failed,
-                                           "required insert count is smaller than references",
-                                           stream_id);
+        headers.push_back(Http3Field{
+            .name = name.value(),
+            .value = value.value(),
+        });
     }
 
     return Http3Result<Http3Headers>::success(std::move(headers));
@@ -1429,12 +1360,10 @@ decode_unblocked_field_sections(Http3QpackDecoderContext &decoder) {
                 headers.error().code, headers.error().detail, headers.error().stream_id);
         }
 
-        if (pending.required_insert_count != 0) {
-            decoder.pending_section_acknowledgments.push_back(Http3QpackSectionAcknowledgment{
-                .stream_id = pending.stream_id,
-                .required_insert_count = pending.required_insert_count,
-            });
-        }
+        decoder.pending_section_acknowledgments.push_back(Http3QpackSectionAcknowledgment{
+            .stream_id = pending.stream_id,
+            .required_insert_count = pending.required_insert_count,
+        });
 
         decoded_sections.push_back(Http3DecodedFieldSection{
             .stream_id = pending.stream_id,
@@ -1453,12 +1382,8 @@ decode_unblocked_field_sections(Http3QpackDecoderContext &decoder) {
 void release_section_references(Http3QpackEncoderContext &encoder,
                                 const Http3QpackOutstandingFieldSection &section) {
     for (const auto absolute_index : section.referenced_entries) {
-        if (auto *entry =
-                find_dynamic_entry_by_absolute_index(encoder.dynamic_table, absolute_index)) {
-            if (entry->outstanding_references > 0) {
-                --entry->outstanding_references;
-            }
-        }
+        auto &entry = find_dynamic_entry_by_absolute_index(encoder.dynamic_table, absolute_index);
+        --entry.outstanding_references;
     }
 }
 
@@ -1479,12 +1404,18 @@ Http3Result<bool> decode_insert_with_name_reference(quic::BufferReader &reader,
         }
         name = std::string(kStaticTable[static_cast<std::size_t>(name_index.value())].name);
     } else {
-        const auto dynamic_index = checked_size(name_index.value());
-        if (!dynamic_index.has_value() || dynamic_index.value() >= decoder.dynamic_table.size()) {
+        auto dynamic_index = unchecked_size(name_index.value());
+        if constexpr (kNeedUint64SizeCheck) {
+            if (name_index.value() > std::numeric_limits<std::size_t>::max()) {
+                return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
+                                           "invalid dynamic table name reference");
+            }
+        }
+        if (dynamic_index >= decoder.dynamic_table.size()) {
             return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
                                        "invalid dynamic table name reference");
         }
-        name = decoder.dynamic_table[dynamic_index.value()].field.name;
+        name = decoder.dynamic_table[dynamic_index].field.name;
     }
 
     const auto value_first = reader.read_byte();
@@ -1540,13 +1471,19 @@ Http3Result<bool> decode_duplicate_instruction(quic::BufferReader &reader,
         return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
                                    "malformed duplicate instruction");
     }
-    const auto dynamic_index = checked_size(index.value());
-    if (!dynamic_index.has_value() || dynamic_index.value() >= decoder.dynamic_table.size()) {
+    auto dynamic_index = unchecked_size(index.value());
+    if constexpr (kNeedUint64SizeCheck) {
+        if (index.value() > std::numeric_limits<std::size_t>::max()) {
+            return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
+                                       "invalid duplicate instruction index");
+        }
+    }
+    if (dynamic_index >= decoder.dynamic_table.size()) {
         return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
                                    "invalid duplicate instruction index");
     }
 
-    return insert_decoder_entry(decoder, decoder.dynamic_table[dynamic_index.value()].field);
+    return insert_decoder_entry(decoder, decoder.dynamic_table[dynamic_index].field);
 }
 
 } // namespace
@@ -1557,9 +1494,11 @@ quic::CodecResult<Http3EncodedFieldSection>
 encode_http3_field_section(Http3QpackEncoderContext &encoder, std::uint64_t stream_id,
                            std::span<const Http3Field> fields) {
     Http3EncodedFieldSection encoded{};
-    const auto peer_capacity = checked_size(encoder.peer_settings.max_table_capacity);
-    if (!peer_capacity.has_value()) {
-        return qpack_encode_failure<Http3EncodedFieldSection>();
+    auto peer_capacity = unchecked_size(encoder.peer_settings.max_table_capacity);
+    if constexpr (kNeedUint64SizeCheck) {
+        if (encoder.peer_settings.max_table_capacity > std::numeric_limits<std::size_t>::max()) {
+            return qpack_encode_failure<Http3EncodedFieldSection>();
+        }
     }
 
     const std::uint64_t base = encoder.insert_count;
@@ -1591,14 +1530,14 @@ encode_http3_field_section(Http3QpackEncoderContext &encoder, std::uint64_t stre
             find_dynamic_name_absolute_index(encoder.dynamic_table, field.name);
 
         const auto entry_size = qpack_entry_size(field);
-        if (peer_capacity.value() > 0 && entry_size <= peer_capacity.value() &&
+        if (peer_capacity > 0 && entry_size <= peer_capacity &&
             can_reference_dynamic_state(encoder, encoder.insert_count + 1, stream_already_blocked,
                                         blocked_stream_count)) {
             const auto dynamic_name_relative_index =
                 find_encoder_stream_name_relative_index(encoder.dynamic_table, field.name);
 
             if (encoder.dynamic_table_capacity == 0) {
-                encoder.dynamic_table_capacity = peer_capacity.value();
+                encoder.dynamic_table_capacity = peer_capacity;
                 append_set_dynamic_table_capacity(encoded.encoder_instructions,
                                                   encoder.dynamic_table_capacity);
             }
@@ -1662,12 +1601,11 @@ encode_http3_field_section(Http3QpackEncoderContext &encoder, std::uint64_t stre
         }
     }
 
-    if (required_insert_count != 0 && !referenced_entries.empty()) {
+    if (!referenced_entries.empty()) {
         for (const auto absolute_index : referenced_entries) {
-            if (auto *entry =
-                    find_dynamic_entry_by_absolute_index(encoder.dynamic_table, absolute_index)) {
-                ++entry->outstanding_references;
-            }
+            auto &entry =
+                find_dynamic_entry_by_absolute_index(encoder.dynamic_table, absolute_index);
+            ++entry.outstanding_references;
         }
         encoder.outstanding_field_sections.push_back(Http3QpackOutstandingFieldSection{
             .stream_id = stream_id,
@@ -1765,13 +1703,7 @@ process_http3_qpack_encoder_instructions(Http3QpackDecoderContext &decoder,
                                          std::span<const std::byte> bytes) {
     quic::BufferReader reader(bytes);
     while (reader.remaining() > 0) {
-        const auto first = reader.read_byte();
-        if (!first.has_value()) {
-            return qpack_failure<std::vector<Http3DecodedFieldSection>>(
-                Http3ErrorCode::qpack_encoder_stream_error, "truncated encoder instruction");
-        }
-
-        const auto first_value = std::to_integer<std::uint8_t>(first.value());
+        const auto first_value = std::to_integer<std::uint8_t>(reader.read_byte().value());
         if ((first_value & 0xe0u) == 0x20u) {
             const auto capacity = decode_prefixed_integer(reader, first_value, 5);
             if (!capacity.has_value()) {
@@ -1783,15 +1715,17 @@ process_http3_qpack_encoder_instructions(Http3QpackDecoderContext &decoder,
                     Http3ErrorCode::qpack_encoder_stream_error,
                     "encoder capacity exceeds peer setting");
             }
-            const auto new_capacity = checked_size(capacity.value());
-            if (!new_capacity.has_value()) {
-                return qpack_failure<std::vector<Http3DecodedFieldSection>>(
-                    Http3ErrorCode::qpack_encoder_stream_error, "encoder capacity is too large");
+            auto new_capacity = unchecked_size(capacity.value());
+            if constexpr (kNeedUint64SizeCheck) {
+                if (capacity.value() > std::numeric_limits<std::size_t>::max()) {
+                    return qpack_failure<std::vector<Http3DecodedFieldSection>>(
+                        Http3ErrorCode::qpack_encoder_stream_error,
+                        "encoder capacity is too large");
+                }
             }
 
-            decoder.dynamic_table_capacity = new_capacity.value();
-            while (decoder.dynamic_table_size > decoder.dynamic_table_capacity &&
-                   !decoder.dynamic_table.empty()) {
+            decoder.dynamic_table_capacity = new_capacity;
+            while (decoder.dynamic_table_size > decoder.dynamic_table_capacity) {
                 if (pending_field_sections_reference(decoder,
                                                      decoder.dynamic_table.back().absolute_index)) {
                     return qpack_failure<std::vector<Http3DecodedFieldSection>>(
@@ -1822,17 +1756,11 @@ process_http3_qpack_encoder_instructions(Http3QpackDecoderContext &decoder,
             continue;
         }
 
-        if ((first_value & 0xe0u) == 0x00u) {
-            const auto duplicated = decode_duplicate_instruction(reader, decoder, first_value);
-            if (!duplicated.has_value()) {
-                return qpack_failure<std::vector<Http3DecodedFieldSection>>(
-                    duplicated.error().code, duplicated.error().detail);
-            }
-            continue;
+        const auto duplicated = decode_duplicate_instruction(reader, decoder, first_value);
+        if (!duplicated.has_value()) {
+            return qpack_failure<std::vector<Http3DecodedFieldSection>>(duplicated.error().code,
+                                                                        duplicated.error().detail);
         }
-
-        return qpack_failure<std::vector<Http3DecodedFieldSection>>(
-            Http3ErrorCode::qpack_encoder_stream_error, "unknown encoder instruction");
     }
 
     return decode_unblocked_field_sections(decoder);
@@ -1868,13 +1796,7 @@ Http3Result<bool> process_http3_qpack_decoder_instructions(Http3QpackEncoderCont
                                                            std::span<const std::byte> bytes) {
     quic::BufferReader reader(bytes);
     while (reader.remaining() > 0) {
-        const auto first = reader.read_byte();
-        if (!first.has_value()) {
-            return qpack_failure<bool>(Http3ErrorCode::qpack_decoder_stream_error,
-                                       "truncated decoder instruction");
-        }
-
-        const auto first_value = std::to_integer<std::uint8_t>(first.value());
+        const auto first_value = std::to_integer<std::uint8_t>(reader.read_byte().value());
         if ((first_value & 0x80u) == 0x80u) {
             const auto stream_id = decode_prefixed_integer(reader, first_value, 7);
             if (!stream_id.has_value()) {

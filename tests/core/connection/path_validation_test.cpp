@@ -731,6 +731,40 @@ TEST(QuicCoreTest, ApplicationProbeIgnoresMissingCurrentSendPathValidationState)
     EXPECT_FALSE(saw_path_response);
 }
 
+TEST(QuicCoreTest, ApplicationSendIgnoresMissingCurrentSendPathValidationState) {
+    auto connection = make_connected_client_connection();
+    connection.current_send_path_id_ = 77;
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("payload"), false)
+            .has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_FALSE(connection.paths_.contains(77));
+
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+
+    bool saw_stream = false;
+    bool saw_path_challenge = false;
+    bool saw_path_response = false;
+    for (const auto &frame : application->frames) {
+        saw_stream = saw_stream || std::holds_alternative<coquic::quic::StreamFrame>(frame);
+        saw_path_challenge =
+            saw_path_challenge || std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+        saw_path_response =
+            saw_path_response || std::holds_alternative<coquic::quic::PathResponseFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_stream);
+    EXPECT_FALSE(saw_path_challenge);
+    EXPECT_FALSE(saw_path_response);
+}
+
 TEST(QuicCoreTest, AckOnlyResponseOnNewPathStillIncludesPathChallenge) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;
@@ -840,6 +874,74 @@ TEST(QuicCoreTest, ClientAckOnlyReceiveKeepaliveAddsPathChallengeBeforePto) {
 
     EXPECT_TRUE(saw_ack);
     EXPECT_TRUE(saw_path_challenge);
+}
+
+TEST(QuicCoreTest, ClientAckOnlyReceiveKeepaliveReusesOutstandingPathChallenge) {
+    auto connection = make_connected_client_connection();
+    connection.streams_.emplace(
+        0, coquic::quic::make_implicit_stream_state(0, connection.config_.role));
+    connection.last_peer_activity_time_ = coquic::quic::test::test_time(0);
+    constexpr std::array<std::byte, 8> existing_challenge = {
+        std::byte{0x31}, std::byte{0x32}, std::byte{0x33}, std::byte{0x34},
+        std::byte{0x35}, std::byte{0x36}, std::byte{0x37}, std::byte{0x38}};
+    connection.ensure_path_state(0).outstanding_challenge = existing_challenge;
+    connection.ensure_path_state(0).challenge_pending = false;
+
+    const auto datagram = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 17,
+                .frames =
+                    {
+                        coquic::quic::PingFrame{},
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(datagram.has_value());
+
+    connection.process_inbound_datagram(datagram.value(), coquic::quic::test::test_time(1),
+                                        /*path_id=*/0);
+    ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+    EXPECT_FALSE(connection.ensure_path_state(0).challenge_pending);
+
+    const auto ack_deadline =
+        optional_value_or_terminate(connection.application_space_.pending_ack_deadline);
+    connection.on_timeout(ack_deadline);
+
+    const auto response = connection.drain_outbound_datagram(ack_deadline);
+    ASSERT_FALSE(response.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 0u);
+    EXPECT_TRUE(connection.ensure_path_state(0).outstanding_challenge.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(connection.ensure_path_state(0).outstanding_challenge),
+              existing_challenge);
+    EXPECT_FALSE(connection.ensure_path_state(0).challenge_pending);
+
+    const auto packets = decode_sender_datagram(connection, response);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *first_packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(first_packet, nullptr);
+
+    bool saw_ack = false;
+    std::optional<std::array<std::byte, 8>> path_challenge;
+    for (const auto &frame : first_packet->frames) {
+        saw_ack = saw_ack || std::holds_alternative<coquic::quic::AckFrame>(frame);
+        if (const auto *challenge = std::get_if<coquic::quic::PathChallengeFrame>(&frame);
+            challenge != nullptr) {
+            path_challenge = challenge->data;
+        }
+    }
+
+    EXPECT_TRUE(saw_ack);
+    ASSERT_TRUE(path_challenge.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(path_challenge), existing_challenge);
 }
 
 TEST(QuicCoreTest, AckOnlyResponseOnNewPathAlsoIncludesPathResponse) {
@@ -1254,6 +1356,87 @@ TEST(QuicCoreTest, MismatchedPathResponseDoesNotValidatePath) {
 
     ASSERT_TRUE(connection.paths_.contains(7));
     EXPECT_FALSE(connection.paths_.at(7).validated);
+}
+
+TEST(QuicCoreTest, ReceivedApplicationMismatchedPathResponseDoesNotValidatePath) {
+    auto connection = make_connected_client_connection();
+    connection.start_path_validation(7, /*initiated_locally=*/true);
+
+    const auto processed = connection.process_inbound_received_application(
+        std::array<coquic::quic::ReceivedFrame, 1>{coquic::quic::PathResponseFrame{
+            .data = {std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}, std::byte{0xdd},
+                     std::byte{0xee}, std::byte{0xff}, std::byte{0x11}, std::byte{0x22}},
+        }},
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/7);
+
+    ASSERT_TRUE(processed.has_value());
+    ASSERT_TRUE(connection.paths_.contains(7));
+    EXPECT_FALSE(connection.paths_.at(7).validated);
+    EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+}
+
+TEST(QuicCoreTest, PathResponseWithoutOutstandingChallengeDoesNotValidatePath) {
+    auto connection = make_connected_client_connection();
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 7,
+        {coquic::quic::PathResponseFrame{
+            .data = {std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}, std::byte{0xdd},
+                     std::byte{0xee}, std::byte{0xff}, std::byte{0x11}, std::byte{0x22}},
+        }}));
+
+    ASSERT_TRUE(connection.paths_.contains(7));
+    EXPECT_FALSE(connection.paths_.at(7).validated);
+    EXPECT_FALSE(connection.paths_.at(7).outstanding_challenge.has_value());
+}
+
+TEST(QuicCoreTest, NewPathNonProbingPacketSwitchesEvenWhenCurrentSendPathStateIsMissing) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 9;
+    connection.paths_.erase(9);
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 7,
+        {coquic::quic::PingFrame{}, coquic::quic::MaxDataFrame{.maximum_data = 1024}}));
+
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+}
+
+TEST(QuicCoreTest, ReceivedApplicationSwitchesWhenCurrentSendPathStateIsMissing) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 9;
+    connection.paths_.erase(9);
+
+    const auto processed = connection.process_inbound_received_application(
+        std::array<coquic::quic::ReceivedFrame, 2>{
+            coquic::quic::PingFrame{}, coquic::quic::MaxDataFrame{.maximum_data = 1024}},
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/7);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+}
+
+TEST(QuicCoreTest, ReceivedApplicationSwitchesWhenCurrentAndInboundPathsAreValidated) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    auto &current_path = connection.ensure_path_state(3);
+    current_path.validated = true;
+    current_path.is_current_send_path = true;
+    connection.ensure_path_state(7).validated = true;
+
+    const auto processed = connection.process_inbound_received_application(
+        std::array<coquic::quic::ReceivedFrame, 2>{
+            coquic::quic::PingFrame{},
+            coquic::quic::MaxDataFrame{.maximum_data = 1024},
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/7);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(processed.value());
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
 }
 
 TEST(QuicCoreTest, NewPathNonProbingPacketStartsValidationAndSwitchesSendPath) {

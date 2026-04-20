@@ -32,10 +32,21 @@ bool bootstrap_scoped_fd_move_constructor_for_test();
 bool bootstrap_scoped_fd_move_assignment_for_test();
 bool bootstrap_scoped_fd_self_move_assignment_for_test();
 bool bootstrap_parse_request_for_test(std::string_view request_text);
+bool bootstrap_accept_errno_is_transient_for_test(int accept_errno);
+bool bootstrap_path_has_prefix_for_test(const std::filesystem::path &path,
+                                        const std::filesystem::path &prefix);
+std::optional<std::filesystem::path>
+bootstrap_resolve_path_under_root_for_test(const std::filesystem::path &root,
+                                           std::string_view request_path);
+std::optional<std::string> bootstrap_read_binary_file_for_test(const std::filesystem::path &path);
+std::string bootstrap_content_type_for_path_for_test(const std::filesystem::path &path);
 void bootstrap_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path);
 void bootstrap_clear_forced_file_read_failure_path_for_test();
+void bootstrap_set_forced_file_size_failure_path_for_test(const std::filesystem::path &path);
+void bootstrap_clear_forced_file_size_failure_path_for_test();
 std::string bootstrap_serialize_unknown_status_response_for_test(const Http3BootstrapConfig &config,
                                                                  int status_code);
+bool bootstrap_internal_coverage_for_test();
 } // namespace coquic::http3
 
 namespace {
@@ -308,6 +319,46 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
     return https_request(host, port, request);
 }
 
+bool https_connect_and_close(std::string_view host, std::uint16_t port) {
+    SSL_library_init();
+    SSL_load_error_strings();
+
+    std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> ctx(SSL_CTX_new(TLS_client_method()),
+                                                          &SSL_CTX_free);
+    if (ctx == nullptr) {
+        return false;
+    }
+    SSL_CTX_set_verify(ctx.get(), SSL_VERIFY_NONE, nullptr);
+
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+    ScopedFd socket_guard(fd);
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (::inet_pton(AF_INET, std::string(host).c_str(), &address.sin_addr) != 1) {
+        return false;
+    }
+    if (::connect(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+        return false;
+    }
+
+    std::unique_ptr<SSL, decltype(&SSL_free)> ssl(SSL_new(ctx.get()), &SSL_free);
+    if (ssl == nullptr) {
+        return false;
+    }
+    SSL_set_fd(ssl.get(), fd);
+    SSL_set_tlsext_host_name(ssl.get(), std::string(host).c_str());
+    if (SSL_connect(ssl.get()) != 1) {
+        return false;
+    }
+    (void)SSL_shutdown(ssl.get());
+    return true;
+}
+
 std::string raw_tcp_request(std::string_view host, std::uint16_t port,
                             std::string_view request_text) {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -407,6 +458,50 @@ class ScopedForcedFileReadFailure {
     ScopedForcedFileReadFailure(const ScopedForcedFileReadFailure &) = delete;
     ScopedForcedFileReadFailure &operator=(const ScopedForcedFileReadFailure &) = delete;
 };
+
+class ScopedForcedFileSizeFailure {
+  public:
+    explicit ScopedForcedFileSizeFailure(const std::filesystem::path &path) {
+        coquic::http3::bootstrap_set_forced_file_size_failure_path_for_test(path);
+    }
+
+    ~ScopedForcedFileSizeFailure() {
+        coquic::http3::bootstrap_clear_forced_file_size_failure_path_for_test();
+    }
+
+    ScopedForcedFileSizeFailure(const ScopedForcedFileSizeFailure &) = delete;
+    ScopedForcedFileSizeFailure &operator=(const ScopedForcedFileSizeFailure &) = delete;
+};
+
+constexpr std::string_view kMismatchedPrivateKeyPem = R"(-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCtHe/u9TNfeq+J
+lQIG5uv3uD7X6kGo1FvI2NNAMWfhdihmNIuSxWKwXxBy+Z6iZtFXMq4jG0gEXtOH
+hr0/9U1mno7FtfRBL89MvvAT62NfgXS7X8hNxZlsJLIVeas14e9kj0IFHFW67yXr
+UAlAinDPWs2JIseBy2vQIwdIarliAF1IpyxpqYJDbF3a/W1ZegvffcYHROUp3wIc
+x+gyRXBWXwkA/hx323HS4CVESV7qiwQ4tzbfrusiqXZTBcO3qEIXFviiOHxCI+Vw
+Qvg5Jyx01jV4m12bL5DN/xlXHlb15+++/h8nDDPEAOOUgEnZWKOqLCseDCxOYkcv
+aaKd2bnDAgMBAAECggEAftO47PrMmT2bjpMQ+heBdmmP+MURN2vkll9rXNMVRNM4
+w6/pNSzQoV/0ABeqRVZINbbWZrfc6f7Cv75RtaK0AuNUu7oS6RLqr1IPNrizg8um
+xoNkjr2eKeE0apFJgl808BoYBwB8OkhsIlnvfU4vWWovvDEzsn5iTQjsk/xENmvT
+c2mFHQbVMNCi++0zNy+xrlqivI116RT3g+4E6oCn/zDLqGjbZvDZvRYF/Blw1oEJ
+yIoj44Fpo5pPpV1fnAjxE6425P8oknbJ3MXzU/7rO2hRhPvDQR/D9LlGIPy+j8IQ
+MOOHMBKVPBDSJhUhPvzuyPKfi/uvCa7D9QOdKTsv0QKBgQDUMdIczFMC89wsCWSJ
+BLrWX8NbKzftNNZ2M3oFsZvZg8uvvQmh9ITS+GuMAXFSC7y6UIjpOfZJEVpUF8Km
+yAsmTGWEDk7VD3SHSw5GGI0o+O9wHZw8EsIpZ33oUVKKIPMbA4uxlkPHjVacvqih
+HsrfrJsQLrft/+4XRQdtCHMK6QKBgQDQ2usBFm5CqDeuVNMgRSQVbWf4TYyuTK9Z
+++z5IjiSXwo8ESJOofagfDiOTwqBm2U45+NVrHmhda6kfGbY9SJ1YVQCzgevQwZ9
+NLehZsixbge/wV9puNMm5IGy5TlpAWvGaThXjAcwJXbUAh3v3bzqrIqPcw1bFgcL
+merDbb2bywKBgQC0uFnCvSJV+Wsi9jzxlV2rBpRTKVPQapfcw6rA/qtFbcIkQlPZ
+427cX0b5TqE8x1JNPBneyMbBJE5SIIpfkTAtxhMPjUAGpcsRDxNxD6fppVoHmrBd
+WXyT1tic6+XoTne+Ih7veJLxeaayiI8F6jvOlCrcdW2g/b/BgcD5U6DnQQKBgGQH
+NV6D+7L5FhHslmFyO+H3UEBgA+zG1YTnX4vClA2mbyRtoFzAvXoHhJ7DxGhmoIgs
+p3i07lwiHM6yth9a6HIHd1EQlCWgmE8HHJu0upIf/J4eYzAjUR3jeyrPFjvwbknM
+wytK6XZpuwu3J9dl/8D1ejdSByeE2UL5KLMIsDMZAoGAQ+stK23A3ccb9o3SkzcU
+ZFctldLN95+eaCcqnR8vILsSECfctiOofyoH1n6YefmbA+Co6ax+vRXHvcF60Tt/
+Kau/F5cMXFnQIj6NdsobMoUBKbIb9cg604QFSxkFxqUsYCmNq5xcVYBjQaQIjUxe
+HVIEkjmpV5WKd5WM5QI3Mlo=
+-----END PRIVATE KEY-----
+)";
 
 TEST(QuicHttp3BootstrapTest, FormatsAltSvcValueFromBootstrapConfig) {
     const auto config = coquic::http3::Http3BootstrapConfig{
@@ -597,6 +692,50 @@ TEST(QuicHttp3BootstrapTest, HttpsGetReturnsInternalServerErrorForForcedFileRead
     EXPECT_EQ(response.value().status_code, 500);
 }
 
+TEST(QuicHttp3BootstrapTest, HttpsGetReturnsInternalServerErrorForForcedFileSizeFailure) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("secret.txt", "hidden");
+    const auto failing_path = document_root.path() / "secret.txt";
+    ScopedForcedFileSizeFailure forced_failure(failing_path);
+
+    const auto bootstrap_port = allocate_tcp_loopback_port();
+    ASSERT_NE(bootstrap_port, 0);
+
+    const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
+    ScopedBootstrapProcess server(config);
+    const auto response = https_request("127.0.0.1", bootstrap_port, "GET", "/secret.txt");
+
+    ASSERT_TRUE(response.has_value());
+    if (!response.has_value()) {
+        return;
+    }
+    EXPECT_EQ(response.value().status_code, 500);
+}
+
+TEST(QuicHttp3BootstrapTest, HttpsHeadIgnoresForcedFileSizeFailureForOtherPaths) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("secret.txt", "hidden");
+    document_root.write_file("other.txt", "other");
+    const auto unrelated_path = document_root.path() / "other.txt";
+    ScopedForcedFileSizeFailure forced_failure(unrelated_path);
+
+    const auto bootstrap_port = allocate_tcp_loopback_port();
+    ASSERT_NE(bootstrap_port, 0);
+
+    const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
+    ScopedBootstrapProcess server(config);
+    const auto response = https_request("127.0.0.1", bootstrap_port, "HEAD", "/secret.txt");
+
+    ASSERT_TRUE(response.has_value());
+    if (!response.has_value()) {
+        return;
+    }
+    EXPECT_EQ(response.value().status_code, 200);
+    EXPECT_TRUE(response.value().body.empty());
+    ASSERT_TRUE(response.value().headers.contains("Content-Length"));
+    EXPECT_EQ(response.value().headers.at("Content-Length"), "6");
+}
+
 TEST(QuicHttp3BootstrapTest, HttpsPostReturnsMethodNotAllowedAndAllowHeader) {
     coquic::quic::test::ScopedTempDir document_root;
     document_root.write_file("hello.txt", "hello-bootstrap");
@@ -708,7 +847,95 @@ TEST(QuicHttp3BootstrapTest, RawTcpClientFailsTlsAcceptAndServerKeepsServing) {
     EXPECT_EQ(response.value().body, "hello-bootstrap");
 }
 
+TEST(QuicHttp3BootstrapTest, TlsClientWithoutRequestKeepsServerServing) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello-bootstrap");
+    ScopedSignalHandler signal_handler(SIGPIPE);
+
+    const auto bootstrap_port = allocate_tcp_loopback_port();
+    ASSERT_NE(bootstrap_port, 0);
+
+    const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
+    ScopedBootstrapProcess server(config);
+    ASSERT_TRUE(https_connect_and_close("127.0.0.1", bootstrap_port));
+
+    const auto response = https_request("127.0.0.1", bootstrap_port, "GET", "/hello.txt");
+    ASSERT_TRUE(response.has_value());
+    if (!response.has_value()) {
+        return;
+    }
+    EXPECT_EQ(response.value().status_code, 200);
+    EXPECT_EQ(response.value().body, "hello-bootstrap");
+}
+
+TEST(QuicHttp3BootstrapTest, EmptyHostUsesPassiveWildcardBinding) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello-bootstrap");
+
+    const auto bootstrap_port = allocate_tcp_loopback_port();
+    ASSERT_NE(bootstrap_port, 0);
+
+    auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
+    config.host.clear();
+
+    ScopedBootstrapProcess server(config);
+    const auto response = https_request("127.0.0.1", bootstrap_port, "GET", "/hello.txt");
+
+    ASSERT_TRUE(response.has_value());
+    if (!response.has_value()) {
+        return;
+    }
+    EXPECT_EQ(response.value().status_code, 200);
+    EXPECT_EQ(response.value().body, "hello-bootstrap");
+}
+
+TEST(QuicHttp3BootstrapTest, InvalidHostReturnsFailure) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello-bootstrap");
+
+    auto config = make_bootstrap_config(document_root.path(), 443);
+    config.host = "bad host name";
+
+    EXPECT_EQ(coquic::http3::run_http3_bootstrap_server(config), 1);
+}
+
+TEST(QuicHttp3BootstrapTest, TestHooksCoverBootstrapPathReadAndContentTypeColdBranches) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("legacy.htm", "legacy");
+
+    EXPECT_TRUE(coquic::http3::bootstrap_path_has_prefix_for_test(
+        document_root.path() / "legacy.htm", document_root.path()));
+    EXPECT_FALSE(coquic::http3::bootstrap_path_has_prefix_for_test(
+        document_root.path(), document_root.path() / "legacy.htm"));
+    EXPECT_FALSE(coquic::http3::bootstrap_path_has_prefix_for_test(document_root.path(),
+                                                                   document_root.path() / "other"));
+    EXPECT_FALSE(coquic::http3::bootstrap_path_has_prefix_for_test(
+        document_root.path() / "legacy.htm", document_root.path() / "other"));
+    EXPECT_FALSE(coquic::http3::bootstrap_resolve_path_under_root_for_test(document_root.path(), "")
+                     .has_value());
+    EXPECT_FALSE(coquic::http3::bootstrap_resolve_path_under_root_for_test(document_root.path(),
+                                                                           "legacy.htm")
+                     .has_value());
+    EXPECT_FALSE(coquic::http3::bootstrap_resolve_path_under_root_for_test(document_root.path(),
+                                                                           "/./legacy.htm")
+                     .has_value());
+    const auto resolved = coquic::http3::bootstrap_resolve_path_under_root_for_test(
+        document_root.path(), "/legacy.htm");
+    if (!resolved.has_value()) {
+        FAIL() << "expected resolved document path";
+        return;
+    }
+    EXPECT_EQ(*resolved, document_root.path() / "legacy.htm");
+    EXPECT_FALSE(
+        coquic::http3::bootstrap_read_binary_file_for_test(document_root.path() / "missing.txt")
+            .has_value());
+    EXPECT_EQ(coquic::http3::bootstrap_content_type_for_path_for_test(document_root.path() /
+                                                                      "legacy.htm"),
+              "text/html; charset=utf-8");
+}
+
 TEST(QuicHttp3BootstrapTest, InvalidCertificateChainReturnsFailure) {
+
     coquic::quic::test::ScopedTempDir document_root;
     const auto config = coquic::http3::Http3BootstrapConfig{
         .document_root = document_root.path(),
@@ -725,6 +952,19 @@ TEST(QuicHttp3BootstrapTest, InvalidPrivateKeyReturnsFailure) {
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = document_root.path() / "missing-key.pem",
+    };
+
+    EXPECT_EQ(coquic::http3::run_http3_bootstrap_server(config), 1);
+}
+
+TEST(QuicHttp3BootstrapTest, MismatchedPrivateKeyReturnsFailure) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("mismatched-key.pem", std::string(kMismatchedPrivateKeyPem));
+
+    const auto config = coquic::http3::Http3BootstrapConfig{
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = document_root.path() / "mismatched-key.pem",
     };
 
     EXPECT_EQ(coquic::http3::run_http3_bootstrap_server(config), 1);
@@ -788,6 +1028,20 @@ TEST(QuicHttp3BootstrapTest, TestHookExercisesScopedFdMoveOperations) {
 
 TEST(QuicHttp3BootstrapTest, TestHookRejectsRequestWithoutRequestLineTerminator) {
     EXPECT_FALSE(coquic::http3::bootstrap_parse_request_for_test("GET / HTTP/1.1"));
+}
+
+TEST(QuicHttp3BootstrapTest, AcceptErrnoTransientClassificationMatchesBootstrapRetryRules) {
+    EXPECT_TRUE(coquic::http3::bootstrap_accept_errno_is_transient_for_test(EINTR));
+    EXPECT_TRUE(coquic::http3::bootstrap_accept_errno_is_transient_for_test(EAGAIN));
+    EXPECT_TRUE(coquic::http3::bootstrap_accept_errno_is_transient_for_test(EWOULDBLOCK));
+    EXPECT_FALSE(coquic::http3::bootstrap_accept_errno_is_transient_for_test(EMFILE));
+}
+
+TEST(QuicHttp3BootstrapTest, TestHooksCoverAdditionalRequestParsingAndFailureBranches) {
+    EXPECT_FALSE(coquic::http3::bootstrap_parse_request_for_test("GET/HTTP/1.1\r\n\r\n"));
+    EXPECT_FALSE(coquic::http3::bootstrap_parse_request_for_test("GET /\r\n\r\n"));
+    EXPECT_TRUE(coquic::http3::bootstrap_parse_request_for_test("GET / HTTP/1.0\r\n\r\n"));
+    EXPECT_TRUE(coquic::http3::bootstrap_internal_coverage_for_test());
 }
 
 TEST(QuicHttp3BootstrapTest, TestHookSerializesUnknownStatusWithFallbackReasonPhrase) {

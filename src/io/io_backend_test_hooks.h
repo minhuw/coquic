@@ -130,6 +130,9 @@ bool socket_io_backend_configures_linux_ecn_socket_options_for_tests();
 bool socket_io_backend_sendmsg_uses_outbound_ecn_for_tests();
 bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests();
 bool socket_io_backend_recvmsg_maps_ecn_for_tests();
+bool socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests();
+bool socket_io_backend_internal_coverage_hook_exercises_remaining_branches_for_tests();
+bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_tests();
 
 bool io_uring_backend_rearms_receive_after_completion_for_tests();
 bool io_uring_backend_completion_error_is_fatal_for_tests();
@@ -139,9 +142,12 @@ bool io_uring_backend_wait_prefers_ready_receive_over_due_timer_for_tests();
 bool io_uring_backend_route_handles_are_stable_per_peer_tuple_for_tests();
 bool io_uring_backend_send_uses_route_handle_for_tests();
 bool io_uring_backend_wait_returns_second_route_datagram_for_tests();
+bool io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests();
+bool io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_tests();
 
 bool io_backend_route_handles_are_stable_for_tests(QuicIoBackendKind kind);
 bool io_backend_send_uses_route_handle_for_tests(QuicIoBackendKind kind);
 bool io_backend_wait_returns_second_route_datagram_for_tests(QuicIoBackendKind kind);
+bool io_backend_factory_coverage_for_tests();
 
 } // namespace coquic::io::test

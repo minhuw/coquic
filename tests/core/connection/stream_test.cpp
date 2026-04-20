@@ -1320,6 +1320,43 @@ TEST(QuicCoreTest, LargeDatagramSchedulingLimitsFreshDataToLeadingBulkStreamsPer
               (std::vector<std::uint64_t>{0, 4}));
 }
 
+TEST(QuicCoreTest, LastPtoProbeFreshSchedulingTreatsSingleFinOnlyStreamAsActive) {
+    auto connection = make_connected_client_connection();
+    constexpr std::size_t kLargeDatagramSize = std::size_t{16} * 1024u;
+    connection.config_.max_outbound_datagram_size = kLargeDatagramSize;
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.max_udp_payload_size = static_cast<std::uint64_t>(kLargeDatagramSize);
+    connection.congestion_controller_.congestion_window_ = kLargeDatagramSize;
+
+    ASSERT_TRUE(connection.queue_stream_send(/*stream_id=*/0, {}, /*fin=*/true).has_value());
+    connection.application_space_.pending_probe_packet = coquic::quic::SentPacketRecord{
+        .packet_number = 17,
+        .ack_eliciting = true,
+        .in_flight = true,
+    };
+    connection.remaining_pto_probe_datagrams_ = 1;
+    ASSERT_TRUE(connection.has_pending_fresh_application_stream_send());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+
+    const auto stream_it =
+        std::find_if(application->frames.begin(), application->frames.end(), [](const auto &frame) {
+            return std::holds_alternative<coquic::quic::StreamFrame>(frame);
+        });
+    ASSERT_NE(stream_it, application->frames.end());
+    const auto &stream = std::get<coquic::quic::StreamFrame>(*stream_it);
+    EXPECT_EQ(stream.stream_id, 0u);
+    EXPECT_TRUE(stream.fin);
+    EXPECT_TRUE(stream.stream_data.empty());
+}
+
 TEST(QuicCoreTest, RetransmissionPreservesStreamIdentityAcrossMultipleStreams) {
     auto connection = make_connected_client_connection();
     const auto payload = std::vector<std::byte>(static_cast<std::size_t>(2000), std::byte{0x62});
@@ -1433,6 +1470,63 @@ TEST(QuicCoreTest, QueueStreamSendRejectsInvalidIdsAndClosedSendSide) {
     const auto closed = connection.queue_stream_send(/*stream_id=*/0, payload, /*fin=*/false);
     ASSERT_FALSE(closed.has_value());
     EXPECT_EQ(closed.error().code, coquic::quic::StreamStateErrorCode::send_side_closed);
+}
+
+TEST(QuicCoreTest, QueueStreamSendReturnsSuccessWithoutOpeningStreamWhenConnectionAlreadyFailed) {
+    auto connection = make_connected_client_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::failed;
+
+    const auto queued = connection.queue_stream_send(/*stream_id=*/0, bytes_from_ints({0x61}),
+                                                     /*fin=*/false);
+
+    ASSERT_TRUE(queued.has_value());
+    EXPECT_TRUE(queued.value());
+    EXPECT_FALSE(connection.streams_.contains(0));
+}
+
+TEST(QuicCoreTest, QueueStreamSendSharedBuffersPayloadAndTracksCommittedFlowControl) {
+    auto connection = make_connected_client_connection();
+    const auto payload =
+        coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("shared-payload"));
+
+    const auto queued =
+        connection.queue_stream_send_shared(/*stream_id=*/0, payload, /*fin=*/false);
+
+    ASSERT_TRUE(queued.has_value());
+    EXPECT_TRUE(queued.value());
+    ASSERT_TRUE(connection.streams_.contains(0));
+    const auto &stream = connection.streams_.at(0);
+    EXPECT_TRUE(stream.send_buffer.has_pending_data());
+    EXPECT_EQ(stream.send_flow_control_committed, static_cast<std::uint64_t>(payload.size()));
+}
+
+TEST(QuicCoreTest, QueueStreamSendSharedReturnsSuccessWithoutOpeningStreamForEmptySharedPayload) {
+    auto connection = make_connected_client_connection();
+
+    const auto queued =
+        connection.queue_stream_send_shared(/*stream_id=*/0, coquic::quic::SharedBytes{},
+                                            /*fin=*/false);
+
+    ASSERT_TRUE(queued.has_value());
+    EXPECT_TRUE(queued.value());
+    EXPECT_FALSE(connection.streams_.contains(0));
+}
+
+TEST(QuicCoreTest, QueueStreamSendSharedAllowsFinOnlySendWithEmptySharedPayload) {
+    auto connection = make_connected_client_connection();
+
+    const auto queued =
+        connection.queue_stream_send_shared(/*stream_id=*/0, coquic::quic::SharedBytes{},
+                                            /*fin=*/true);
+
+    ASSERT_TRUE(queued.has_value());
+    EXPECT_TRUE(queued.value());
+    ASSERT_TRUE(connection.streams_.contains(0));
+    const auto &stream = connection.streams_.at(0);
+    EXPECT_FALSE(stream.send_buffer.has_pending_data());
+    EXPECT_EQ(stream.send_fin_state, coquic::quic::StreamSendFinState::pending);
+    ASSERT_TRUE(stream.send_final_size.has_value());
+    EXPECT_EQ(optional_value_or_terminate(stream.send_final_size), 0u);
 }
 
 TEST(QuicCoreTest, RetireAckedPacketAcknowledgesConnectionAndStreamControlState) {
@@ -2600,6 +2694,84 @@ TEST(QuicCoreTest, PendingUnidirectionalMaxStreamsFrameCountsAsPendingApplicatio
     EXPECT_FALSE(connection.has_pending_application_send());
 }
 
+TEST(QuicCoreTest, FinOnlyStreamBlockedByPeerCreditIsNotPendingApplicationSend) {
+    auto connection = make_connected_client_connection();
+    auto &stream = connection.streams_
+                       .emplace(0, coquic::quic::make_implicit_stream_state(
+                                       /*stream_id=*/0, connection.config_.role))
+                       .first->second;
+    stream.send_fin_state = coquic::quic::StreamSendFinState::pending;
+    stream.send_final_size = 1;
+    stream.flow_control.peer_max_stream_data = 0;
+
+    EXPECT_FALSE(connection.has_pending_fresh_application_stream_send());
+    EXPECT_FALSE(connection.has_pending_application_send());
+}
+
+TEST(QuicCoreTest,
+     PendingUnidirectionalMaxStreamsFrameCountsAsPendingApplicationSendOnBareConnection) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+
+    connection.handshake_done_state_ = coquic::quic::StreamControlFrameState::none;
+    connection.connection_flow_control_.max_data_state =
+        coquic::quic::StreamControlFrameState::none;
+    connection.connection_flow_control_.data_blocked_state =
+        coquic::quic::StreamControlFrameState::none;
+    connection.local_stream_limit_state_.max_streams_bidi_state =
+        coquic::quic::StreamControlFrameState::none;
+    connection.local_stream_limit_state_.max_streams_uni_state =
+        coquic::quic::StreamControlFrameState::pending;
+    EXPECT_TRUE(connection.has_pending_application_send());
+
+    connection.local_stream_limit_state_.max_streams_uni_state =
+        coquic::quic::StreamControlFrameState::none;
+    EXPECT_FALSE(connection.has_pending_application_send());
+}
+
+TEST(QuicCoreTest, FinOnlyStreamWithoutCreditIsNotPendingApplicationSend) {
+    auto connection = make_connected_client_connection();
+    auto &stream = connection.streams_
+                       .emplace(0, coquic::quic::make_implicit_stream_state(
+                                       /*stream_id=*/0, connection.config_.role))
+                       .first->second;
+
+    stream.send_fin_state = coquic::quic::StreamSendFinState::pending;
+    stream.send_final_size = 1;
+    stream.flow_control.peer_max_stream_data = 0;
+
+    EXPECT_FALSE(connection.has_pending_fresh_application_stream_send());
+    EXPECT_FALSE(connection.has_pending_application_send());
+}
+
+TEST(QuicCoreTest, FinBlockedByStreamCreditDoesNotCountAsPendingSend) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    auto &stream =
+        connection.streams_
+            .emplace(0, coquic::quic::make_implicit_stream_state(0, connection.config_.role))
+            .first->second;
+
+    stream.send_fin_state = coquic::quic::StreamSendFinState::pending;
+    stream.send_final_size = 1;
+    stream.flow_control.peer_max_stream_data = 0;
+
+    EXPECT_FALSE(connection.has_pending_fresh_application_stream_send());
+    EXPECT_FALSE(connection.has_pending_application_send());
+}
+
+TEST(QuicCoreTest, BlockedFinByStreamCreditIsNotPendingApplicationSend) {
+    auto connection = make_connected_client_connection();
+    auto &stream = connection.streams_
+                       .emplace(0, coquic::quic::make_implicit_stream_state(
+                                       /*stream_id=*/0, connection.config_.role))
+                       .first->second;
+    stream.send_fin_state = coquic::quic::StreamSendFinState::pending;
+    stream.send_final_size = 2;
+    stream.flow_control.peer_max_stream_data = 1;
+
+    EXPECT_FALSE(connection.has_pending_application_send());
+    EXPECT_FALSE(connection.has_pending_fresh_application_stream_send());
+}
+
 TEST(QuicCoreTest, ClosingPeerInitiatedUnidirectionalStreamRefreshesStreamLimit) {
     auto connection = make_connected_server_connection();
     auto &stream =
@@ -2649,6 +2821,23 @@ TEST(QuicCoreTest, ReleasedPeerStreamDoesNotRefreshStreamLimitAgain) {
     EXPECT_TRUE(stream.peer_stream_limit_released);
     EXPECT_EQ(connection.local_stream_limit_state_.max_streams_uni_state,
               coquic::quic::StreamControlFrameState::none);
+}
+
+TEST(QuicCoreTest, TerminalPeerStreamWithPendingOrOutstandingSendIsNotRetired) {
+    auto connection = make_connected_server_connection();
+    auto &stream =
+        connection.streams_
+            .emplace(2, coquic::quic::make_implicit_stream_state(2, connection.config_.role))
+            .first->second;
+    stream.peer_fin_delivered = true;
+
+    stream.stop_sending_state = coquic::quic::StreamControlFrameState::pending;
+    connection.maybe_retire_stream(2);
+    EXPECT_TRUE(connection.streams_.contains(2));
+
+    stream.stop_sending_state = coquic::quic::StreamControlFrameState::sent;
+    connection.maybe_retire_stream(2);
+    EXPECT_TRUE(connection.streams_.contains(2));
 }
 
 TEST(QuicCoreTest, MarkLostPacketRequeuesUnidirectionalMaxStreamsFrame) {

@@ -29,7 +29,6 @@ fn withSpdlogFlags(
     }
     extra.appendSlice(&.{
         "-DSPDLOG_COMPILED_LIB",
-        "-DSPDLOG_FMT_EXTERNAL",
     }) catch @panic("failed to append spdlog flags");
     return withExtraFlags(b, base, extra.items);
 }
@@ -311,6 +310,7 @@ pub fn build(b: *std.Build) void {
         "tests/core/endpoint/open_test.cpp",
         "tests/core/endpoint/multiplex_test.cpp",
         "tests/core/endpoint/server_routing_test.cpp",
+        "tests/core/endpoint/internal_test.cpp",
     };
     const http09_test_files = &.{
         "tests/http09/protocol/http09_test.cpp",

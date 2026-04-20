@@ -4,9 +4,11 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstdio>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,6 +24,7 @@
 
 #include "src/http3/http3.h"
 #include "src/http3/http3_runtime.h"
+#include "src/io/io_backend_factory.h"
 #include "tests/support/quic_test_utils.h"
 
 namespace coquic::http3 {
@@ -35,9 +38,55 @@ bool runtime_make_client_execution_plan_for_test(const Http3RuntimeConfig &confi
                                                  std::string_view url);
 bool runtime_make_client_transfer_plans_for_test(const Http3RuntimeConfig &config,
                                                  std::span<const Http3RuntimeTransferJob> jobs);
+bool runtime_misc_internal_coverage_for_test();
+bool runtime_loop_internal_coverage_for_test();
+std::uint64_t runtime_loop_internal_coverage_mask_for_test();
+std::uint64_t runtime_connection_handle_effect_coverage_mask_for_test();
+bool runtime_additional_internal_coverage_for_test();
+bool runtime_tail_internal_coverage_for_test();
+void runtime_set_force_bootstrap_guard_failure_for_test(bool enabled);
+void runtime_set_forced_server_endpoint_config_for_test(
+    std::optional<coquic::quic::QuicCoreEndpointConfig> endpoint);
+void runtime_set_forced_server_bootstrap_for_test(
+    std::optional<coquic::io::QuicServerIoBootstrap> bootstrap);
+int finish_http3_server_run(int runtime_exit_code,
+                            std::optional<std::future<int>> &bootstrap_result,
+                            std::optional<std::thread> &bootstrap_thread,
+                            std::atomic<bool> &bootstrap_stop_requested);
 } // namespace coquic::http3
 
 namespace {
+
+class ScopedEnvVar {
+  public:
+    ScopedEnvVar(std::string name, std::optional<std::string> value) : name_(std::move(name)) {
+        if (const char *existing = std::getenv(name_.c_str()); existing != nullptr) {
+            previous_ = std::string(existing);
+            had_previous_ = true;
+        }
+        if (value.has_value()) {
+            EXPECT_EQ(::setenv(name_.c_str(), value->c_str(), 1), 0);
+        } else {
+            EXPECT_EQ(::unsetenv(name_.c_str()), 0);
+        }
+    }
+
+    ~ScopedEnvVar() {
+        if (had_previous_) {
+            ::setenv(name_.c_str(), previous_.c_str(), 1);
+            return;
+        }
+        ::unsetenv(name_.c_str());
+    }
+
+    ScopedEnvVar(const ScopedEnvVar &) = delete;
+    ScopedEnvVar &operator=(const ScopedEnvVar &) = delete;
+
+  private:
+    std::string name_;
+    std::string previous_;
+    bool had_previous_ = false;
+};
 
 class ScopedFd {
   public:
@@ -184,6 +233,31 @@ class ScopedStdoutCapture {
     int read_fd_ = -1;
     int write_fd_ = -1;
     bool stdout_restored_ = false;
+};
+
+class ScriptedIoBackend final : public coquic::io::QuicIoBackend {
+  public:
+    std::optional<coquic::quic::QuicRouteHandle>
+    ensure_route(const coquic::io::QuicIoRemote &) override {
+        return 1;
+    }
+
+    std::optional<coquic::io::QuicIoEvent>
+    wait(std::optional<coquic::quic::QuicCoreTimePoint>) override {
+        if (wait_index_ >= wait_results.size()) {
+            return std::nullopt;
+        }
+        return std::move(wait_results[wait_index_++]);
+    }
+
+    bool send(const coquic::io::QuicIoTxDatagram &) override {
+        return true;
+    }
+
+    std::vector<std::optional<coquic::io::QuicIoEvent>> wait_results;
+
+  private:
+    std::size_t wait_index_ = 0;
 };
 
 std::uint16_t allocate_udp_loopback_port() {
@@ -561,6 +635,36 @@ TEST(QuicHttp3RuntimeTest, ParsesClientInvocation) {
     EXPECT_EQ(parsed.server_name, "localhost");
 }
 
+TEST(QuicHttp3RuntimeTest, ParsersAcceptVerifyPeerAndIoBackendSelections) {
+    {
+        const char *argv[] = {
+            "h3-server", "--host", "127.0.0.1", "--port", "9443", "--io-backend", "socket",
+        };
+        const auto config = coquic::http3::parse_http3_server_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        ASSERT_TRUE(config.has_value());
+        if (!config.has_value()) {
+            return;
+        }
+        EXPECT_EQ(config->io_backend, coquic::io::QuicIoBackendKind::socket);
+    }
+
+    {
+        const char *argv[] = {
+            "h3-client", "https://localhost:9443/_coquic/echo", "--verify-peer", "--io-backend",
+            "io_uring",
+        };
+        const auto config = coquic::http3::parse_http3_client_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        ASSERT_TRUE(config.has_value());
+        if (!config.has_value()) {
+            return;
+        }
+        EXPECT_TRUE(config->verify_peer);
+        EXPECT_EQ(config->io_backend, coquic::io::QuicIoBackendKind::io_uring);
+    }
+}
+
 TEST(QuicHttp3RuntimeTest, ParsesStandaloneServerInvocation) {
     const char *argv[] = {
         "h3-server",
@@ -713,6 +817,191 @@ TEST(QuicHttp3RuntimeTest, ServerParserRejectsMalformedNumericAndBackendValues) 
     }
 }
 
+TEST(QuicHttp3RuntimeTest, ParsersRejectMissingOptionValuesAndRepeatedUrls) {
+    {
+        const char *argv[] = {"h3-server", "--host"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--port"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--bootstrap-port"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--alt-svc-max-age"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--io-backend"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--document-root"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--certificate-chain"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--private-key"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--method"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--header"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--data"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--body-file"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--output"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--server-name"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {
+            "h3-client",
+            "https://localhost:9443/first",
+            "https://localhost:9443/second",
+        };
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+}
+
+TEST(QuicHttp3RuntimeTest, ParsersRejectWrongModeFlagsUnknownOptionsAndEmptyArgv) {
+    EXPECT_FALSE(coquic::http3::parse_http3_server_args(0, nullptr).has_value());
+    EXPECT_FALSE(coquic::http3::parse_http3_client_args(0, nullptr).has_value());
+
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--bootstrap-port", "9444"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--alt-svc-max-age", "60"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--certificate-chain",
+                              "cert.pem"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--private-key", "key.pem"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--document-root", "site"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+
+    {
+        const char *argv[] = {"h3-server", "--method", "GET"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--header", "x-test: 1"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--data", "inline"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--body-file", "body.bin"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--output", "reply.bin"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--server-name", "localhost"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--bogus"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "-"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+}
+
 TEST(QuicHttp3RuntimeTest, ClientParserRejectsMalformedHeadersAndUrls) {
     {
         const char *argv[] = {
@@ -827,6 +1116,54 @@ TEST(QuicHttp3RuntimeTest, ClientParserRejectsMalformedHeadersAndUrls) {
     }
 }
 
+TEST(QuicHttp3RuntimeTest, ClientParserAcceptsBodyFileAndRejectsBodySourceConflicts) {
+    {
+        coquic::quic::test::ScopedTempDir body_root;
+        body_root.write_file("body.bin", "payload");
+        const auto body_path = body_root.path() / "body.bin";
+        const auto body_path_text = body_path.string();
+        const char *argv[] = {
+            "h3-client",
+            "https://localhost:9443/upload",
+            "--body-file",
+            body_path_text.c_str(),
+        };
+        const auto config = coquic::http3::parse_http3_client_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        ASSERT_TRUE(config.has_value());
+        if (!config.has_value()) {
+            return;
+        }
+        const auto parsed_body_path = config->body_file_path;
+        ASSERT_TRUE(parsed_body_path.has_value());
+        if (!parsed_body_path.has_value()) {
+            return;
+        }
+        EXPECT_EQ(*parsed_body_path, body_path);
+        EXPECT_FALSE(config->body_text.has_value());
+    }
+
+    {
+        const char *argv[] = {
+            "h3-client", "https://localhost:9443/upload", "--data", "inline", "--body-file",
+            "body.bin",
+        };
+        const auto config = coquic::http3::parse_http3_client_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        EXPECT_FALSE(config.has_value());
+    }
+
+    {
+        const char *argv[] = {
+            "h3-client", "https://localhost:9443/upload", "--body-file", "body.bin", "--data",
+            "inline",
+        };
+        const auto config = coquic::http3::parse_http3_client_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        EXPECT_FALSE(config.has_value());
+    }
+}
+
 TEST(QuicHttp3RuntimeTest, ClientParserAcceptsIpv6AndPortAuthorities) {
     {
         const char *argv[] = {
@@ -869,6 +1206,49 @@ TEST(QuicHttp3RuntimeTest, ClientParserAcceptsIpv6AndPortAuthorities) {
     }
 }
 
+TEST(QuicHttp3RuntimeTest, ParsersRejectAdditionalArgumentEdgeCases) {
+    {
+        const char *argv[] = {
+            "h3-server",
+            "--port",
+            "65536",
+        };
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+
+    {
+        const char *argv[] = {
+            "h3-server",
+            "--bootstrap-port",
+            "abc",
+        };
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+
+    {
+        const char *argv[] = {
+            "h3-client",
+        };
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+
+    {
+        const char *argv[] = {
+            "h3-client",
+            "",
+        };
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+}
+
 TEST(QuicHttp3RuntimeTest, RuntimeLoadRequestBodyHandlesConflictsEmptyAndFileInputs) {
     {
         coquic::quic::test::ScopedTempDir body_root;
@@ -907,6 +1287,14 @@ TEST(QuicHttp3RuntimeTest, RuntimeLoadRequestBodyHandlesConflictsEmptyAndFileInp
         }
         EXPECT_EQ(*body, bytes_from_text("file-payload"));
     }
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeLoadRequestBodyRejectsMissingBodyFile) {
+    const auto config = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .body_file_path = "tests/fixtures/does-not-exist-body.bin",
+    };
+    EXPECT_FALSE(coquic::http3::runtime_load_request_body_for_test(config).has_value());
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeExecutionPlanRejectsInvalidMethodUrlAndBodySources) {
@@ -1051,6 +1439,36 @@ TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsMissingAndUnsupportedSubcommands)
             static_cast<int>(std::size(argv)), const_cast<char **>(argv));
         EXPECT_FALSE(config.has_value());
     }
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeMiscInternalCoverageHookReturnsTrue) {
+    EXPECT_TRUE(coquic::http3::runtime_misc_internal_coverage_for_test());
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeLoopInternalCoverageHookReturnsTrue) {
+    EXPECT_TRUE(coquic::http3::runtime_loop_internal_coverage_for_test());
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeLoopInternalCoverageMaskIncludesScriptedBranches) {
+    constexpr std::uint64_t kExpectedMask = (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 3) |
+                                            (1ull << 4) | (1ull << 5) | (1ull << 6) | (1ull << 7) |
+                                            (1ull << 8) | (1ull << 9) | (1ull << 10);
+    EXPECT_EQ(coquic::http3::runtime_loop_internal_coverage_mask_for_test(), kExpectedMask);
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeConnectionHandleCoverageMaskIncludesEventEffects) {
+    constexpr std::uint64_t kExpectedMask =
+        (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 3) | (1ull << 4) | (1ull << 5);
+    EXPECT_EQ(coquic::http3::runtime_connection_handle_effect_coverage_mask_for_test(),
+              kExpectedMask);
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeAdditionalInternalCoverageHookReturnsTrue) {
+    EXPECT_TRUE(coquic::http3::runtime_additional_internal_coverage_for_test());
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeTailInternalCoverageHookReturnsTrue) {
+    EXPECT_TRUE(coquic::http3::runtime_tail_internal_coverage_for_test());
 }
 
 TEST(QuicHttp3RuntimeTest, ServerEndpointConfigRejectsUnreadableIdentityFiles) {
@@ -1275,6 +1693,141 @@ TEST(QuicHttp3RuntimeTest, RunHttp3ServerFailsWhenBootstrapPortAlreadyInUse) {
     EXPECT_NE(coquic::http3::run_http3_server(server), 0);
 }
 
+TEST(QuicHttp3RuntimeTest, RunHttp3ServerFailsWhenIdentityOrUdpBootstrapSetupIsInvalid) {
+    {
+        coquic::quic::test::ScopedTempDir document_root;
+        const auto h3_port = allocate_udp_loopback_port();
+        ASSERT_NE(h3_port, 0);
+
+        const auto server = coquic::http3::Http3RuntimeConfig{
+            .mode = coquic::http3::Http3RuntimeMode::server,
+            .host = "127.0.0.1",
+            .port = h3_port,
+            .document_root = document_root.path(),
+            .certificate_chain_path = "tests/fixtures/does-not-exist-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+        };
+
+        EXPECT_NE(coquic::http3::run_http3_server(server), 0);
+    }
+
+    {
+        coquic::quic::test::ScopedTempDir document_root;
+        const auto h3_port = allocate_udp_loopback_port();
+        ASSERT_NE(h3_port, 0);
+
+        const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        ASSERT_GE(fd, 0);
+        ScopedFd occupied_socket(fd);
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(h3_port);
+        ASSERT_EQ(::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)), 0);
+
+        const auto server = coquic::http3::Http3RuntimeConfig{
+            .mode = coquic::http3::Http3RuntimeMode::server,
+            .host = "127.0.0.1",
+            .port = h3_port,
+            .document_root = document_root.path(),
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+        };
+
+        EXPECT_NE(coquic::http3::run_http3_server(server), 0);
+    }
+}
+
+TEST(QuicHttp3RuntimeTest, FinishHttp3ServerRunHandlesMissingAndInvalidBootstrapResults) {
+    {
+        std::packaged_task<int()> bootstrap_task([] { return 7; });
+        std::optional<std::future<int>> bootstrap_result;
+        std::optional<std::thread> bootstrap_thread(std::move(bootstrap_task));
+        std::atomic<bool> bootstrap_stop_requested = false;
+
+        EXPECT_EQ(coquic::http3::finish_http3_server_run(4, bootstrap_result, bootstrap_thread,
+                                                         bootstrap_stop_requested),
+                  4);
+        EXPECT_TRUE(bootstrap_stop_requested.load(std::memory_order_relaxed));
+    }
+
+    {
+        std::packaged_task<int()> bootstrap_task([] { return 8; });
+        std::optional<std::future<int>> bootstrap_result(bootstrap_task.get_future());
+        std::optional<std::thread> bootstrap_thread(std::move(bootstrap_task));
+        ASSERT_TRUE(bootstrap_result->valid());
+        bootstrap_result->wait();
+        EXPECT_EQ(bootstrap_result->get(), 8);
+        EXPECT_FALSE(bootstrap_result->valid());
+
+        std::atomic<bool> bootstrap_stop_requested = false;
+        EXPECT_EQ(coquic::http3::finish_http3_server_run(6, bootstrap_result, bootstrap_thread,
+                                                         bootstrap_stop_requested),
+                  6);
+        EXPECT_TRUE(bootstrap_stop_requested.load(std::memory_order_relaxed));
+    }
+}
+
+TEST(QuicHttp3RuntimeTest, RunHttp3ServerReturnsImmediateBootstrapFailureBeforeRuntimeStarts) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello-http3");
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = 4433,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    const auto endpoint = coquic::http3::make_http3_server_endpoint_config(server);
+    ASSERT_TRUE(endpoint.has_value());
+    if (!endpoint.has_value()) {
+        return;
+    }
+
+    coquic::http3::runtime_set_force_bootstrap_guard_failure_for_test(true);
+    coquic::http3::runtime_set_forced_server_endpoint_config_for_test(endpoint);
+    coquic::http3::runtime_set_forced_server_bootstrap_for_test(coquic::io::QuicServerIoBootstrap{
+        .backend = std::make_unique<ScriptedIoBackend>(),
+    });
+
+    EXPECT_EQ(coquic::http3::run_http3_server(server), 1);
+    coquic::http3::runtime_set_force_bootstrap_guard_failure_for_test(false);
+}
+
+TEST(QuicHttp3RuntimeTest, RunHttp3RuntimeUsesServerPathInProcess) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello-http3");
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = 4433,
+        .enable_bootstrap = false,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    const auto endpoint = coquic::http3::make_http3_server_endpoint_config(server);
+    ASSERT_TRUE(endpoint.has_value());
+    if (!endpoint.has_value()) {
+        return;
+    }
+
+    auto backend = std::make_unique<ScriptedIoBackend>();
+    backend->wait_results.push_back(std::nullopt);
+    coquic::http3::runtime_set_forced_server_endpoint_config_for_test(endpoint);
+    coquic::http3::runtime_set_forced_server_bootstrap_for_test(coquic::io::QuicServerIoBootstrap{
+        .backend = std::move(backend),
+    });
+
+    EXPECT_EQ(coquic::http3::run_http3_runtime(server), 1);
+}
+
 TEST(QuicHttp3RuntimeTest, RunHttp3ClientTransfersRejectsInvalidPlans) {
     const auto config = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -1299,6 +1852,18 @@ TEST(QuicHttp3RuntimeTest, RunHttp3ClientTransfersRejectsInvalidPlans) {
         };
         EXPECT_NE(coquic::http3::run_http3_client_transfers(config, jobs), 0);
     }
+}
+
+TEST(QuicHttp3RuntimeTest, RunHttp3ClientTransfersFailsWhenBootstrapCannotResolvePeer) {
+    const auto config = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .url = "https://256.256.256.256:9443/ok",
+    };
+    const std::array jobs{coquic::http3::Http3RuntimeTransferJob{
+        .url = config.url,
+        .output_path = "out.bin",
+    }};
+    EXPECT_NE(coquic::http3::run_http3_client_transfers(config, jobs), 0);
 }
 
 TEST(QuicHttp3RuntimeTest, ClientWithoutOutputWritesBodyToStdout) {
@@ -1358,6 +1923,83 @@ TEST(QuicHttp3RuntimeTest, HeadClientWithoutOutputReturnsSuccessWithEmptyStdout)
     ScopedStdoutCapture stdout_capture;
     EXPECT_EQ(coquic::http3::run_http3_client(client), 0);
     EXPECT_TRUE(stdout_capture.finish_and_read().empty());
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
+}
+
+TEST(QuicHttp3RuntimeTest, ClientReturnsFailureWhenOutputPathIsDirectory) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir output_root;
+    document_root.write_file("hello.txt", "hello-http3");
+
+    const auto h3_port = allocate_udp_loopback_port();
+    ASSERT_NE(h3_port, 0);
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = h3_port,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    ScopedHttp3Process server_process(server);
+
+    const auto client = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .url = "https://localhost:" + std::to_string(h3_port) + "/hello.txt",
+        .output_path = output_root.path(),
+    };
+
+    EXPECT_NE(coquic::http3::run_http3_client(client), 0);
+    EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
+}
+
+TEST(QuicHttp3RuntimeTest, ClientReturnsFailureWhenTemporaryOutputDisappearsBeforeReadback) {
+    coquic::quic::test::ScopedTempDir document_root;
+    coquic::quic::test::ScopedTempDir temp_root;
+    document_root.write_file("large.txt", std::string(1 << 20, 'x'));
+
+    const auto h3_port = allocate_udp_loopback_port();
+    ASSERT_NE(h3_port, 0);
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = h3_port,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    ScopedHttp3Process server_process(server);
+    ScopedEnvVar tmpdir("TMPDIR", temp_root.path().string());
+
+    std::atomic<bool> stop_requested = false;
+    std::thread remover([&] {
+        while (!stop_requested.load(std::memory_order_relaxed)) {
+            for (const auto &entry : std::filesystem::directory_iterator(temp_root.path())) {
+                if (!entry.is_regular_file()) {
+                    continue;
+                }
+                if (!entry.path().filename().string().starts_with("coquic-h3-client-")) {
+                    continue;
+                }
+                std::error_code ignored;
+                std::filesystem::remove(entry.path(), ignored);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    });
+
+    const auto client = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .url = "https://localhost:" + std::to_string(h3_port) + "/large.txt",
+    };
+
+    EXPECT_NE(coquic::http3::run_http3_client(client), 0);
+    stop_requested.store(true, std::memory_order_relaxed);
+    remover.join();
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
 }
 

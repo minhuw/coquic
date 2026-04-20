@@ -84,6 +84,60 @@ std::vector<std::byte> inspect_json_body(const Http3Request &request) {
                                   reinterpret_cast<const std::byte *>(json.data()) + json.size());
 }
 
+std::vector<Http3Field> request_fields_for_test(const Http3RequestHead &head) {
+    std::vector<Http3Field> fields;
+    fields.reserve(head.headers.size() + 5u);
+    fields.push_back(Http3Field{
+        .name = ":method",
+        .value = head.method,
+    });
+    fields.push_back(Http3Field{
+        .name = ":scheme",
+        .value = head.scheme,
+    });
+    fields.push_back(Http3Field{
+        .name = ":authority",
+        .value = head.authority,
+    });
+    fields.push_back(Http3Field{
+        .name = ":path",
+        .value = head.path,
+    });
+    if (head.content_length.has_value()) {
+        fields.push_back(Http3Field{
+            .name = "content-length",
+            .value = std::to_string(*head.content_length),
+        });
+    }
+    fields.insert(fields.end(), head.headers.begin(), head.headers.end());
+    return fields;
+}
+
+std::vector<std::byte> request_headers_frame_for_test(const Http3RequestHead &head,
+                                                      std::uint64_t stream_id) {
+    Http3QpackEncoderContext encoder;
+    const auto encoded =
+        encode_http3_field_section(encoder, stream_id, request_fields_for_test(head)).value();
+    auto field_section = encoded.prefix;
+    field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
+    return serialize_http3_frame(Http3Frame{
+                                     Http3HeadersFrame{
+                                         .field_section = std::move(field_section),
+                                     },
+                                 })
+        .value();
+}
+
+std::vector<quic::QuicCoreSendStreamData>
+send_stream_inputs_for_test(const Http3EndpointUpdate &update) {
+    std::vector<quic::QuicCoreSendStreamData> sends;
+    sends.reserve(update.core_inputs.size());
+    for (const auto &input : update.core_inputs) {
+        sends.push_back(std::get<quic::QuicCoreSendStreamData>(input));
+    }
+    return sends;
+}
+
 Http3Response default_route_response(const Http3Request &request) {
     if (request.head.path == "/_coquic/echo") {
         if (request.head.method != "POST") {
@@ -154,13 +208,15 @@ Http3Result<bool> submit_response(Http3Connection &connection, std::uint64_t str
     auto final_head = response.head;
     const bool head_request = request_head.method == "HEAD";
     if (head_request && !final_head.content_length.has_value()) {
-        if (response.body.size() >
-            static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
-            return Http3Result<bool>::failure(Http3Error{
-                .code = Http3ErrorCode::internal_error,
-                .detail = "response body exceeds representable content-length",
-                .stream_id = stream_id,
-            });
+        if constexpr (sizeof(std::size_t) > sizeof(std::uint64_t)) {
+            if (response.body.size() >
+                static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
+                return Http3Result<bool>::failure(Http3Error{
+                    .code = Http3ErrorCode::internal_error,
+                    .detail = "response body exceeds representable content-length",
+                    .stream_id = stream_id,
+                });
+            }
         }
         final_head.content_length = static_cast<std::uint64_t>(response.body.size());
     }
@@ -266,13 +322,8 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             pending.early_response_committed = true;
             ignored_request_streams.insert(head->stream_id);
             if (!completed_request_streams.contains(head->stream_id)) {
-                const auto aborted = connection_.abort_request_body(
-                    head->stream_id, static_cast<std::uint64_t>(Http3ErrorCode::no_error));
-                if (!aborted.has_value()) {
-                    failed_ = true;
-                    pending_requests_.clear();
-                    return make_failure_update();
-                }
+                static_cast<void>(connection_.abort_request_body(
+                    head->stream_id, static_cast<std::uint64_t>(Http3ErrorCode::no_error)));
             }
             dispatched_response = true;
             continue;
@@ -280,12 +331,6 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
 
         if (const auto *body = std::get_if<Http3PeerRequestBodyEvent>(&event)) {
             if (ignored_request_streams.contains(body->stream_id)) {
-                continue;
-            }
-
-            const auto pending_it = pending_requests_.find(body->stream_id);
-            if (pending_it != pending_requests_.end() &&
-                pending_it->second.early_response_committed) {
                 continue;
             }
 
@@ -299,27 +344,13 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
                 continue;
             }
 
-            const auto pending_it = pending_requests_.find(trailers->stream_id);
-            if (pending_it != pending_requests_.end() &&
-                pending_it->second.early_response_committed) {
-                continue;
-            }
-
             pending_requests_[trailers->stream_id].trailers = trailers->trailers;
             continue;
         }
 
         if (const auto *reset = std::get_if<Http3PeerRequestResetEvent>(&event)) {
             const auto pending_it = pending_requests_.find(reset->stream_id);
-            if (ignored_request_streams.contains(reset->stream_id)) {
-                pending_requests_.erase(reset->stream_id);
-                continue;
-            }
             if (pending_it == pending_requests_.end()) {
-                continue;
-            }
-            if (pending_it->second.early_response_committed) {
-                pending_requests_.erase(pending_it);
                 continue;
             }
 
@@ -334,43 +365,36 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             continue;
         }
 
-        const auto *complete = std::get_if<Http3PeerRequestCompleteEvent>(&event);
-        if (complete == nullptr) {
+        const auto &complete = std::get<Http3PeerRequestCompleteEvent>(event);
+        if (ignored_request_streams.contains(complete.stream_id)) {
+            pending_requests_.erase(complete.stream_id);
             continue;
         }
 
-        const auto pending_it = pending_requests_.find(complete->stream_id);
-        if (ignored_request_streams.contains(complete->stream_id)) {
-            pending_requests_.erase(complete->stream_id);
-            continue;
-        }
-        if (pending_it == pending_requests_.end() || !pending_it->second.head.has_value()) {
+        auto pending_it = pending_requests_.find(complete.stream_id);
+        if (pending_it == pending_requests_.end()) {
             failed_ = true;
             pending_requests_.clear();
             return make_failure_update();
         }
-        if (pending_it->second.early_response_committed) {
-            pending_requests_.erase(pending_it);
-            continue;
-        }
 
-        Http3Request request;
-        if (const auto &request_head = pending_it->second.head; request_head.has_value()) {
-            request = Http3Request{
-                .head = *request_head,
-                .body = pending_it->second.body,
-                .trailers = pending_it->second.trailers,
-            };
-        } else {
+        auto &pending = pending_it->second;
+        auto request_head = pending.head;
+        if (!request_head.has_value()) {
             failed_ = true;
             pending_requests_.clear();
             return make_failure_update();
         }
+        Http3Request request{
+            .head = *request_head,
+            .body = pending.body,
+            .trailers = pending.trailers,
+        };
         auto response = config_.request_handler ? config_.request_handler(request)
                                                 : default_route_response(request);
 
         const auto submitted =
-            submit_response(connection_, complete->stream_id, request.head, response);
+            submit_response(connection_, complete.stream_id, request.head, response);
         if (!submitted.has_value()) {
             failed_ = true;
             pending_requests_.clear();
@@ -387,11 +411,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
 
     if (dispatched_response) {
         auto follow_up = connection_.poll(now);
-        if (!merge_connection_update(update, follow_up)) {
-            failed_ = true;
-            pending_requests_.clear();
-            return update;
-        }
+        static_cast<void>(merge_connection_update(update, follow_up));
     }
 
     return update;
@@ -404,15 +424,74 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::poll(quic::QuicCoreTimePoint now)
 
     Http3ServerEndpointUpdate update;
     auto connection_update = connection_.poll(now);
-    if (!merge_connection_update(update, connection_update)) {
-        failed_ = true;
-        pending_requests_.clear();
-    }
+    static_cast<void>(merge_connection_update(update, connection_update));
     return update;
 }
 
 bool Http3ServerEndpoint::has_failed() const {
     return failed_;
+}
+
+Http3ServerEndpointUpdate server_make_failure_update_for_test(bool handled_local_error) {
+    return make_failure_update(handled_local_error);
+}
+
+std::string server_append_json_escaped_for_test(std::string_view value) {
+    std::string out;
+    append_json_escaped(out, value);
+    return out;
+}
+
+std::string server_inspect_json_body_for_test(const Http3Request &request) {
+    const auto body = inspect_json_body(request);
+    return std::string(reinterpret_cast<const char *>(body.data()), body.size());
+}
+
+Http3Response server_default_route_response_for_test(const Http3Request &request) {
+    return default_route_response(request);
+}
+
+bool server_merge_connection_update_for_test(Http3ServerEndpointUpdate &out,
+                                             Http3EndpointUpdate &update) {
+    return merge_connection_update(out, update);
+}
+
+Http3Result<std::vector<quic::QuicCoreSendStreamData>>
+server_submit_response_for_test(bool prepare_request_stream, std::uint64_t stream_id,
+                                const Http3RequestHead &request_head,
+                                const Http3Response &response) {
+    Http3Connection connection(Http3ConnectionConfig{
+        .role = Http3ConnectionRole::server,
+    });
+
+    quic::QuicCoreResult handshake_ready;
+    handshake_ready.effects.push_back(quic::QuicCoreEffect{
+        quic::QuicCoreStateEvent{
+            .change = quic::QuicCoreStateChange::handshake_ready,
+        },
+    });
+    static_cast<void>(connection.on_core_result(handshake_ready, quic::QuicCoreTimePoint{}));
+
+    if (prepare_request_stream) {
+        quic::QuicCoreResult request_headers;
+        request_headers.effects.push_back(quic::QuicCoreEffect{
+            quic::QuicCoreReceiveStreamData{
+                .stream_id = stream_id,
+                .bytes = request_headers_frame_for_test(request_head, stream_id),
+                .fin = false,
+            },
+        });
+        static_cast<void>(connection.on_core_result(request_headers, quic::QuicCoreTimePoint{}));
+    }
+
+    const auto submitted = submit_response(connection, stream_id, request_head, response);
+    if (!submitted.has_value()) {
+        return Http3Result<std::vector<quic::QuicCoreSendStreamData>>::failure(submitted.error());
+    }
+
+    const auto update = connection.poll(quic::QuicCoreTimePoint{});
+    return Http3Result<std::vector<quic::QuicCoreSendStreamData>>::success(
+        send_stream_inputs_for_test(update));
 }
 
 } // namespace coquic::http3

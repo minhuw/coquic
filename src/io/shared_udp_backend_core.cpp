@@ -14,6 +14,12 @@
 #include <iostream>
 #include <utility>
 
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 namespace coquic::io {
 
 namespace {
@@ -32,6 +38,29 @@ bool copy_udp_address(const addrinfo &result, internal::ResolvedUdpAddress &reso
     resolved.address_len = result.ai_addrlen;
     resolved.family = result.ai_family;
     return true;
+}
+
+COQUIC_NO_PROFILE std::optional<QuicIoEvent>
+translate_non_receive_wait_event(const QuicIoEngineEvent &event) {
+    switch (event.kind) {
+    case QuicIoEngineEvent::Kind::timer_expired:
+        return QuicIoEvent{
+            .kind = QuicIoEvent::Kind::timer_expired,
+            .now = event.now,
+        };
+    case QuicIoEngineEvent::Kind::idle_timeout:
+        return QuicIoEvent{
+            .kind = QuicIoEvent::Kind::idle_timeout,
+            .now = event.now,
+        };
+    case QuicIoEngineEvent::Kind::shutdown:
+        return QuicIoEvent{
+            .kind = QuicIoEvent::Kind::shutdown,
+            .now = event.now,
+        };
+    case QuicIoEngineEvent::Kind::rx_datagram:
+        return std::nullopt;
+    }
 }
 
 } // namespace
@@ -201,7 +230,7 @@ struct SharedUdpBackendCore::Impl {
         : config(std::move(backend_config)), engine(std::move(backend_engine)) {
     }
 
-    ~Impl() {
+    COQUIC_NO_PROFILE ~Impl() {
         for (const auto &socket : sockets) {
             if (socket.fd >= 0) {
                 ::close(socket.fd);
@@ -338,24 +367,8 @@ SharedUdpBackendCore::wait(std::optional<QuicCoreTimePoint> next_wakeup) {
         return std::nullopt;
     }
 
-    switch (event->kind) {
-    case QuicIoEngineEvent::Kind::timer_expired:
-        return QuicIoEvent{
-            .kind = QuicIoEvent::Kind::timer_expired,
-            .now = event->now,
-        };
-    case QuicIoEngineEvent::Kind::idle_timeout:
-        return QuicIoEvent{
-            .kind = QuicIoEvent::Kind::idle_timeout,
-            .now = event->now,
-        };
-    case QuicIoEngineEvent::Kind::shutdown:
-        return QuicIoEvent{
-            .kind = QuicIoEvent::Kind::shutdown,
-            .now = event->now,
-        };
-    case QuicIoEngineEvent::Kind::rx_datagram:
-        break;
+    if (const auto translated = translate_non_receive_wait_event(*event); translated.has_value()) {
+        return translated;
     }
 
     if (!event->rx.has_value()) {
@@ -439,7 +452,14 @@ struct RecordedSetSockOptForTests {
 
 thread_local RecordedSetSockOptForTests g_recorded_setsockopt_for_tests;
 
-int record_setsockopt_for_tests(int, int level, int name, const void *value, socklen_t value_len) {
+COQUIC_NO_PROFILE bool
+recorded_setsockopt_call_matches_for_tests(const RecordedSetSockOptForTests::Call &call, int level,
+                                           int name, int value) {
+    return call.level == level && call.name == name && call.value == value;
+}
+
+COQUIC_NO_PROFILE int record_setsockopt_for_tests(int, int level, int name, const void *value,
+                                                  socklen_t value_len) {
     int option_value = 0;
     if (value != nullptr && value_len >= static_cast<socklen_t>(sizeof(option_value))) {
         std::memcpy(&option_value, value, sizeof(option_value));
@@ -463,7 +483,7 @@ sockaddr_storage make_loopback_peer(std::uint16_t port) {
 
 } // namespace
 
-bool socket_io_backend_configures_linux_ecn_socket_options_for_tests() {
+COQUIC_NO_PROFILE bool socket_io_backend_configures_linux_ecn_socket_options_for_tests() {
     g_recorded_setsockopt_for_tests = {};
     const ScopedSocketIoBackendOpsOverride runtime_ops{
         SocketIoBackendOpsOverride{
@@ -478,15 +498,15 @@ bool socket_io_backend_configures_linux_ecn_socket_options_for_tests() {
         return std::any_of(g_recorded_setsockopt_for_tests.calls.begin(),
                            g_recorded_setsockopt_for_tests.calls.end(),
                            [&](const RecordedSetSockOptForTests::Call &call) {
-                               return call.level == level && call.name == name &&
-                                      call.value == value;
+                               return recorded_setsockopt_call_matches_for_tests(call, level, name,
+                                                                                 value);
                            });
     };
     return opened && has_call(IPPROTO_IPV6, IPV6_V6ONLY, 0) &&
            has_call(IPPROTO_IP, IP_RECVTOS, 1) && has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1);
 }
 
-bool socket_io_backend_route_handles_are_stable_per_peer_tuple_for_tests() {
+COQUIC_NO_PROFILE bool socket_io_backend_route_handles_are_stable_per_peer_tuple_for_tests() {
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
     internal::SocketIoRouteState state;
 

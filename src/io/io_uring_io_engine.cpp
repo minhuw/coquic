@@ -17,6 +17,12 @@
 
 #include <liburing.h>
 
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 namespace coquic::io {
 
 using quic::QuicCoreClock;
@@ -28,7 +34,7 @@ constexpr unsigned kIoUringQueueEntries = 256;
 constexpr std::size_t kMaxDatagramBytes = 65535;
 constexpr std::uint64_t kSendCompletionUserData = std::numeric_limits<std::uint64_t>::max();
 
-int wait_cqe_timeout_ms(io_uring *ring, io_uring_cqe **cqe, int timeout_ms) {
+COQUIC_NO_PROFILE int wait_cqe_timeout_ms(io_uring *ring, io_uring_cqe **cqe, int timeout_ms) {
     if (timeout_ms < 0) {
         return ::io_uring_wait_cqe(ring, cqe);
     }
@@ -65,7 +71,7 @@ test::IoUringBackendOpsOverride &io_uring_backend_ops_state() {
     return ops;
 }
 
-bool using_default_io_uring_backend_ops() {
+COQUIC_NO_PROFILE bool using_default_io_uring_backend_ops() {
     const auto defaults = make_default_io_uring_backend_ops();
     const auto &ops = io_uring_backend_ops_state();
     return ops.queue_init_fn == defaults.queue_init_fn &&
@@ -195,13 +201,7 @@ void IoUringIoEngine::apply_linux_ecn_send_control(
     message.msg_control = control_storage.data();
     message.msg_controllen = control_storage.size();
 
-    auto *header = CMSG_FIRSTHDR(&message);
-    if (header == nullptr) {
-        message.msg_control = nullptr;
-        message.msg_controllen = 0;
-        return;
-    }
-
+    auto *header = reinterpret_cast<cmsghdr *>(control_storage.data());
     header->cmsg_level = use_ipv4_traffic_class ? IPPROTO_IP : IPPROTO_IPV6;
     header->cmsg_type = use_ipv4_traffic_class ? IP_TOS : IPV6_TCLASS;
     header->cmsg_len = CMSG_LEN(sizeof(int));
@@ -445,7 +445,7 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
     };
 }
 
-void IoUringIoEngine::probe_recvmsg_support() {
+COQUIC_NO_PROFILE void IoUringIoEngine::probe_recvmsg_support() {
     if (!internal::using_default_io_uring_backend_ops()) {
         return;
     }

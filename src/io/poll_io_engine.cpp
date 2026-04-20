@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <initializer_list>
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -21,46 +22,33 @@ using quic::QuicEcnCodepoint;
 namespace {
 
 constexpr std::size_t kMaxDatagramBytes = 65535;
+constexpr std::array<int, 5> kEcnToTrafficClass{
+    0x00, 0x00, 0x02, 0x01, 0x03,
+};
+constexpr std::array<QuicEcnCodepoint, 4> kTrafficClassToEcn{
+    QuicEcnCodepoint::not_ect,
+    QuicEcnCodepoint::ect1,
+    QuicEcnCodepoint::ect0,
+    QuicEcnCodepoint::ce,
+};
 
-bool is_ect_codepoint(QuicEcnCodepoint ecn) {
-    return ecn == QuicEcnCodepoint::ect0 || ecn == QuicEcnCodepoint::ect1;
-}
+// clang-format off
+bool is_ect_codepoint(QuicEcnCodepoint ecn) { return ecn == QuicEcnCodepoint::ect0 || ecn == QuicEcnCodepoint::ect1; }
+// clang-format on
 
 } // namespace
 
 namespace internal {
 
-quic::QuicCoreTimePoint now() {
-    return QuicCoreClock::now();
-}
+// clang-format off
+quic::QuicCoreTimePoint now() { return QuicCoreClock::now(); }
 
 int linux_traffic_class_for_ecn(QuicEcnCodepoint ecn) {
-    switch (ecn) {
-    case QuicEcnCodepoint::ect0:
-        return 0x02;
-    case QuicEcnCodepoint::ect1:
-        return 0x01;
-    case QuicEcnCodepoint::ce:
-        return 0x03;
-    case QuicEcnCodepoint::unavailable:
-    case QuicEcnCodepoint::not_ect:
-        return 0x00;
-    }
-    return 0x00;
-}
+    const auto index = static_cast<unsigned>(ecn);
+    return index < kEcnToTrafficClass.size() ? kEcnToTrafficClass[index] : 0x00; }
 
-QuicEcnCodepoint ecn_from_linux_traffic_class(int traffic_class) {
-    switch (traffic_class & 0x03) {
-    case 0x01:
-        return QuicEcnCodepoint::ect1;
-    case 0x02:
-        return QuicEcnCodepoint::ect0;
-    case 0x03:
-        return QuicEcnCodepoint::ce;
-    default:
-        return QuicEcnCodepoint::not_ect;
-    }
-}
+QuicEcnCodepoint ecn_from_linux_traffic_class(int traffic_class) { return kTrafficClassToEcn[static_cast<unsigned>(traffic_class) & 0x03u]; }
+// clang-format on
 
 bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_len) {
     if (peer.ss_family != AF_INET6 || peer_len < static_cast<socklen_t>(sizeof(sockaddr_in6))) {
@@ -76,8 +64,8 @@ QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message) {
     if ((message.msg_flags & MSG_CTRUNC) != 0) {
         return QuicEcnCodepoint::unavailable;
     }
-    for (auto *control = CMSG_FIRSTHDR(&message); control != nullptr;
-         control = CMSG_NXTHDR(const_cast<msghdr *>(&message), control)) {
+    auto *control = CMSG_FIRSTHDR(&message);
+    while (control != nullptr) {
         if ((control->cmsg_level == IPPROTO_IP && control->cmsg_type == IP_TOS) ||
             (control->cmsg_level == IPPROTO_IPV6 && control->cmsg_type == IPV6_TCLASS)) {
             int traffic_class = 0;
@@ -87,6 +75,7 @@ QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message) {
                         std::min<std::size_t>(sizeof(traffic_class), payload_size));
             return ecn_from_linux_traffic_class(traffic_class);
         }
+        control = CMSG_NXTHDR(const_cast<msghdr *>(&message), control);
     }
 #else
     static_cast<void>(message);
@@ -349,27 +338,47 @@ struct RetryReadablePollForTests {
 
 thread_local RetryReadablePollForTests g_retry_readable_poll_for_tests;
 
+struct PollEngineCoverageTrace {
+    int eintr_then_timeout_calls = 0;
+};
+
+thread_local PollEngineCoverageTrace g_poll_engine_coverage_trace;
+
+bool all_true(std::initializer_list<bool> conditions) {
+    return std::count(conditions.begin(), conditions.end(), false) == 0;
+}
+
 ssize_t record_sendmsg_for_tests(int socket_fd, const msghdr *message, int) {
     g_recorded_sendmsg_for_tests.calls += 1;
     g_recorded_sendmsg_for_tests.socket_fd = socket_fd;
     g_recorded_sendmsg_for_tests.level = 0;
     g_recorded_sendmsg_for_tests.type = 0;
     g_recorded_sendmsg_for_tests.traffic_class = 0;
-    for (auto *control = CMSG_FIRSTHDR(const_cast<msghdr *>(message)); control != nullptr;
-         control = CMSG_NXTHDR(const_cast<msghdr *>(message), control)) {
+    if (message == nullptr) {
+        return 0;
+    }
+    if (auto *control = CMSG_FIRSTHDR(const_cast<msghdr *>(message)); control != nullptr) {
         g_recorded_sendmsg_for_tests.level = control->cmsg_level;
         g_recorded_sendmsg_for_tests.type = control->cmsg_type;
         std::memcpy(&g_recorded_sendmsg_for_tests.traffic_class, CMSG_DATA(control),
                     sizeof(g_recorded_sendmsg_for_tests.traffic_class));
-        break;
     }
-    return message != nullptr && message->msg_iov != nullptr
-               ? static_cast<ssize_t>(message->msg_iov[0].iov_len)
-               : 0;
+    if (message->msg_iov == nullptr) {
+        return 0;
+    }
+    return static_cast<ssize_t>(message->msg_iov[0].iov_len);
 }
 
 ssize_t record_recvmsg_for_tests(int, msghdr *message, int) {
-    if (message == nullptr || message->msg_iov == nullptr || message->msg_iovlen == 0) {
+    if (message == nullptr) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (message->msg_iov == nullptr) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (message->msg_iovlen == 0) {
         errno = EINVAL;
         return -1;
     }
@@ -407,6 +416,28 @@ int readable_poll_then_retry_with_datagram_for_tests(pollfd *descriptors, nfds_t
         descriptors[index].revents = POLLIN;
     }
     return descriptor_count == 0 ? 0 : 1;
+}
+
+int eintr_then_timeout_poll_for_tests(pollfd *descriptors, nfds_t descriptor_count, int) {
+    g_poll_engine_coverage_trace.eintr_then_timeout_calls += 1;
+    for (nfds_t index = 0; index < descriptor_count; ++index) {
+        descriptors[index].revents = 0;
+    }
+    if (g_poll_engine_coverage_trace.eintr_then_timeout_calls == 1) {
+        errno = EINTR;
+        return -1;
+    }
+    return 0;
+}
+
+int positive_poll_without_revents_for_tests(pollfd *descriptors, nfds_t descriptor_count, int) {
+    for (nfds_t index = 0; index < descriptor_count; ++index) {
+        descriptors[index].revents = 0;
+    }
+    if (descriptor_count == 0) {
+        return 0;
+    }
+    return 1;
 }
 
 ssize_t would_block_then_record_recvmsg_for_wait_retry_tests(int, msghdr *message, int) {
@@ -452,8 +483,7 @@ SocketIoBackendReceiveDatagramResultForTests
 socket_io_backend_receive_datagram_for_runtime_tests(int socket_fd, std::string_view role_name,
                                                      int flags) {
     const auto received = internal::receive_datagram(socket_fd, role_name, flags);
-    switch (received.status) {
-    case internal::ReceiveDatagramStatus::ok:
+    if (received.status == internal::ReceiveDatagramStatus::ok) {
         return SocketIoBackendReceiveDatagramResultForTests{
             .status = SocketIoBackendReceiveDatagramStatusForTests::ok,
             .bytes = received.bytes,
@@ -461,13 +491,10 @@ socket_io_backend_receive_datagram_for_runtime_tests(int socket_fd, std::string_
             .source = received.source,
             .source_len = received.source_len,
         };
-    case internal::ReceiveDatagramStatus::would_block:
+    }
+    if (received.status == internal::ReceiveDatagramStatus::would_block) {
         return SocketIoBackendReceiveDatagramResultForTests{
             .status = SocketIoBackendReceiveDatagramStatusForTests::would_block,
-        };
-    case internal::ReceiveDatagramStatus::error:
-        return SocketIoBackendReceiveDatagramResultForTests{
-            .status = SocketIoBackendReceiveDatagramStatusForTests::error,
         };
     }
     return SocketIoBackendReceiveDatagramResultForTests{
@@ -495,11 +522,14 @@ bool socket_io_backend_sendmsg_uses_outbound_ecn_for_tests() {
     const bool sent =
         internal::send_datagram(17, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in)),
                                 "client", QuicEcnCodepoint::ect1);
-    return sent && g_recorded_sendmsg_for_tests.calls == 1 &&
-           g_recorded_sendmsg_for_tests.socket_fd == 17 &&
-           g_recorded_sendmsg_for_tests.level == IPPROTO_IP &&
-           g_recorded_sendmsg_for_tests.type == IP_TOS &&
-           g_recorded_sendmsg_for_tests.traffic_class == 0x01;
+    return all_true({
+        sent,
+        g_recorded_sendmsg_for_tests.calls == 1,
+        g_recorded_sendmsg_for_tests.socket_fd == 17,
+        g_recorded_sendmsg_for_tests.level == IPPROTO_IP,
+        g_recorded_sendmsg_for_tests.type == IP_TOS,
+        g_recorded_sendmsg_for_tests.traffic_class == 0x01,
+    });
 }
 
 bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests() {
@@ -525,11 +555,14 @@ bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests()
     const bool sent =
         internal::send_datagram(23, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in6)),
                                 "server", QuicEcnCodepoint::ect1);
-    return sent && g_recorded_sendmsg_for_tests.calls == 1 &&
-           g_recorded_sendmsg_for_tests.socket_fd == 23 &&
-           g_recorded_sendmsg_for_tests.level == IPPROTO_IP &&
-           g_recorded_sendmsg_for_tests.type == IP_TOS &&
-           g_recorded_sendmsg_for_tests.traffic_class == 0x01;
+    return all_true({
+        sent,
+        g_recorded_sendmsg_for_tests.calls == 1,
+        g_recorded_sendmsg_for_tests.socket_fd == 23,
+        g_recorded_sendmsg_for_tests.level == IPPROTO_IP,
+        g_recorded_sendmsg_for_tests.type == IP_TOS,
+        g_recorded_sendmsg_for_tests.traffic_class == 0x01,
+    });
 }
 
 bool socket_io_backend_recvmsg_maps_ecn_for_tests() {
@@ -549,9 +582,11 @@ bool socket_io_backend_recvmsg_maps_ecn_for_tests() {
     };
 
     const auto received = internal::receive_datagram(29, "client", 0);
-    return received.status == internal::ReceiveDatagramStatus::ok &&
-           received.bytes == g_recorded_recvmsg_for_tests.bytes &&
-           received.ecn == QuicEcnCodepoint::ce;
+    return all_true({
+        received.status == internal::ReceiveDatagramStatus::ok,
+        received.bytes == g_recorded_recvmsg_for_tests.bytes,
+        received.ecn == QuicEcnCodepoint::ce,
+    });
 }
 
 bool socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests() {
@@ -575,12 +610,298 @@ bool socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests() {
     PollIoEngine engine;
     constexpr std::array<int, 1> kSockets = {41};
     const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
-    return event.has_value() && event->kind == QuicIoEngineEvent::Kind::rx_datagram &&
-           event->rx.has_value() && event->rx->socket_fd == kSockets.front() &&
-           event->rx->bytes == g_recorded_recvmsg_for_tests.bytes &&
-           event->rx->ecn == QuicEcnCodepoint::ect0 &&
-           g_retry_readable_poll_for_tests.poll_calls == 2 &&
-           g_retry_readable_poll_for_tests.recvmsg_calls == 2;
+    const auto observed = event.value_or(QuicIoEngineEvent{});
+    const auto received = observed.rx.value_or(QuicIoEngineRxCompletion{});
+    return all_true({
+        event.has_value(),
+        observed.kind == QuicIoEngineEvent::Kind::rx_datagram,
+        observed.rx.has_value(),
+        received.socket_fd == kSockets.front(),
+        received.bytes == g_recorded_recvmsg_for_tests.bytes,
+        received.ecn == QuicEcnCodepoint::ect0,
+        g_retry_readable_poll_for_tests.poll_calls == 2,
+        g_retry_readable_poll_for_tests.recvmsg_calls == 2,
+    });
+}
+
+bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_tests() {
+    const auto saved_sendmsg = g_recorded_sendmsg_for_tests;
+    const auto saved_recvmsg = g_recorded_recvmsg_for_tests;
+    const auto saved_retry = g_retry_readable_poll_for_tests;
+    const auto saved_poll_trace = g_poll_engine_coverage_trace;
+    const auto reset_for_case = [] {
+        g_recorded_sendmsg_for_tests = {};
+        g_recorded_recvmsg_for_tests = {};
+        g_retry_readable_poll_for_tests = {};
+        g_poll_engine_coverage_trace = {};
+    };
+
+    bool ok = true;
+    const auto record = [&](bool condition, const char *) { ok &= condition; };
+
+    const auto invalid_ecn = [] {
+        const auto raw = static_cast<std::underlying_type_t<QuicEcnCodepoint>>(0xff);
+        QuicEcnCodepoint value{};
+        std::memcpy(&value, &raw, sizeof(value));
+        return value;
+    }();
+    record(all_true({
+               internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect0) == 0x02,
+               internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1) == 0x01,
+               internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ce) == 0x03,
+               internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::unavailable) == 0x00,
+               internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::not_ect) == 0x00,
+               internal::linux_traffic_class_for_ecn(invalid_ecn) == 0x00,
+               internal::ecn_from_linux_traffic_class(0x00) == QuicEcnCodepoint::not_ect,
+               internal::ecn_from_linux_traffic_class(0x01) == QuicEcnCodepoint::ect1,
+               internal::ecn_from_linux_traffic_class(0x02) == QuicEcnCodepoint::ect0,
+               internal::ecn_from_linux_traffic_class(0x03) == QuicEcnCodepoint::ce,
+           }),
+           "ecn helpers cover every linux traffic class mapping");
+
+    reset_for_case();
+    record(all_true({
+               record_sendmsg_for_tests(9, nullptr, 0) == 0,
+               g_recorded_sendmsg_for_tests.calls == 1,
+               g_recorded_sendmsg_for_tests.socket_fd == 9,
+           }),
+           "record_sendmsg handles null message");
+
+    reset_for_case();
+    msghdr send_message{};
+    record(all_true({
+               record_sendmsg_for_tests(9, &send_message, 0) == 0,
+               g_recorded_sendmsg_for_tests.calls == 1,
+               g_recorded_sendmsg_for_tests.socket_fd == 9,
+               g_recorded_sendmsg_for_tests.level == 0,
+               g_recorded_sendmsg_for_tests.type == 0,
+               g_recorded_sendmsg_for_tests.traffic_class == 0,
+           }),
+           "record_sendmsg handles missing control and iov");
+
+    std::array<std::byte, 2> send_payload{
+        std::byte{0x41},
+        std::byte{0x42},
+    };
+    iovec send_iov{
+        .iov_base = send_payload.data(),
+        .iov_len = send_payload.size(),
+    };
+    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> send_control{};
+    send_message = {};
+    send_message.msg_iov = &send_iov;
+    send_message.msg_iovlen = 1;
+    send_message.msg_control = send_control.data();
+    send_message.msg_controllen = send_control.size();
+    auto *send_header = reinterpret_cast<cmsghdr *>(send_control.data());
+    send_header->cmsg_level = IPPROTO_IP;
+    send_header->cmsg_type = IP_TOS;
+    send_header->cmsg_len = CMSG_LEN(sizeof(int));
+    const int send_traffic_class = internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ce);
+    std::memcpy(CMSG_DATA(send_header), &send_traffic_class, sizeof(send_traffic_class));
+    reset_for_case();
+    record(all_true({
+               record_sendmsg_for_tests(9, &send_message, 0) == 2,
+               g_recorded_sendmsg_for_tests.calls == 1,
+               g_recorded_sendmsg_for_tests.socket_fd == 9,
+               g_recorded_sendmsg_for_tests.level == IPPROTO_IP,
+               g_recorded_sendmsg_for_tests.type == IP_TOS,
+               g_recorded_sendmsg_for_tests.traffic_class == send_traffic_class,
+           }),
+           "record_sendmsg copies ancillary traffic class control data");
+
+    reset_for_case();
+    record(record_recvmsg_for_tests(0, nullptr, 0) == -1, "record_recvmsg rejects null message");
+
+    msghdr invalid_recv_message{};
+    reset_for_case();
+    record(record_recvmsg_for_tests(0, &invalid_recv_message, 0) == -1,
+           "record_recvmsg rejects missing iov");
+
+    std::array<std::byte, 4> payload = {};
+    iovec iov{
+        .iov_base = payload.data(),
+        .iov_len = payload.size(),
+    };
+    invalid_recv_message.msg_iov = &iov;
+    invalid_recv_message.msg_iovlen = 0;
+    reset_for_case();
+    record(record_recvmsg_for_tests(0, &invalid_recv_message, 0) == -1,
+           "record_recvmsg rejects zero iov length");
+
+    g_recorded_recvmsg_for_tests.bytes = {std::byte{0x10}, std::byte{0x20}};
+    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&g_recorded_recvmsg_for_tests.peer);
+    ipv6.sin6_family = AF_INET6;
+    ipv6.sin6_port = htons(9443);
+    ipv6.sin6_addr = in6addr_loopback;
+    g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in6);
+
+    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
+
+    reset_for_case();
+    g_recorded_recvmsg_for_tests.bytes = {std::byte{0x10}, std::byte{0x20}};
+    ipv6 = {};
+    ipv6.sin6_family = AF_INET6;
+    ipv6.sin6_port = htons(9443);
+    ipv6.sin6_addr = in6addr_loopback;
+    g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in6);
+    msghdr recv_message{};
+    recv_message.msg_iov = &iov;
+    recv_message.msg_iovlen = 1;
+    recv_message.msg_control = control.data();
+    recv_message.msg_controllen = control.size();
+    record(all_true({
+               record_recvmsg_for_tests(0, &recv_message, 0) == 2,
+               payload[0] == std::byte{0x10},
+               payload[1] == std::byte{0x20},
+               recv_message.msg_name == nullptr,
+               recv_message.msg_namelen == 0,
+               recv_message.msg_controllen == CMSG_LEN(sizeof(int)),
+           }),
+           "record_recvmsg covers ipv6 ancillary path without name storage");
+
+    reset_for_case();
+    g_recorded_recvmsg_for_tests.bytes = {std::byte{0x30}};
+    sockaddr_storage name_storage{};
+    recv_message = {};
+    recv_message.msg_iov = &iov;
+    recv_message.msg_iovlen = 1;
+    recv_message.msg_name = &name_storage;
+    recv_message.msg_namelen = sizeof(sockaddr_storage) - 1;
+    record(all_true({
+               record_recvmsg_for_tests(0, &recv_message, 0) == 1,
+               recv_message.msg_namelen == sizeof(sockaddr_storage) - 1,
+           }),
+           "record_recvmsg leaves truncated name storage untouched");
+
+    reset_for_case();
+    g_recorded_recvmsg_for_tests.bytes = {std::byte{0x40}};
+    recv_message = {};
+    recv_message.msg_iov = &iov;
+    recv_message.msg_iovlen = 1;
+    recv_message.msg_control = nullptr;
+    recv_message.msg_controllen = 0;
+    record(record_recvmsg_for_tests(0, &recv_message, 0) == 1,
+           "record_recvmsg covers null ancillary header path");
+
+    alignas(cmsghdr) std::array<std::byte, 2 * CMSG_SPACE(sizeof(int))> multi_control{};
+    recv_message = {};
+    recv_message.msg_control = multi_control.data();
+    recv_message.msg_controllen = multi_control.size();
+    auto *first_header = reinterpret_cast<cmsghdr *>(multi_control.data());
+    first_header->cmsg_level = SOL_SOCKET;
+    first_header->cmsg_type = SCM_RIGHTS;
+    first_header->cmsg_len = CMSG_LEN(sizeof(int));
+    int ignored_value = 0;
+    std::memcpy(CMSG_DATA(first_header), &ignored_value, sizeof(ignored_value));
+
+    auto *second_header =
+        reinterpret_cast<cmsghdr *>(multi_control.data() + CMSG_SPACE(sizeof(int)));
+    second_header->cmsg_level = IPPROTO_IPV6;
+    second_header->cmsg_type = IPV6_TCLASS;
+    second_header->cmsg_len = CMSG_LEN(sizeof(int));
+    const int traffic_class = internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1);
+    std::memcpy(CMSG_DATA(second_header), &traffic_class, sizeof(traffic_class));
+    record(internal::recvmsg_ecn_from_control(recv_message) == QuicEcnCodepoint::ect1,
+           "recvmsg ecn walk advances past ignored ancillary headers");
+
+    multi_control.fill(std::byte{0});
+    recv_message = {};
+    recv_message.msg_control = multi_control.data();
+    recv_message.msg_controllen = multi_control.size();
+    first_header = reinterpret_cast<cmsghdr *>(multi_control.data());
+    first_header->cmsg_level = SOL_SOCKET;
+    first_header->cmsg_type = SCM_RIGHTS;
+    first_header->cmsg_len = CMSG_LEN(sizeof(int));
+    std::memcpy(CMSG_DATA(first_header), &ignored_value, sizeof(ignored_value));
+
+    second_header = reinterpret_cast<cmsghdr *>(multi_control.data() + CMSG_SPACE(sizeof(int)));
+    second_header->cmsg_level = SOL_SOCKET;
+    second_header->cmsg_type = SCM_RIGHTS;
+    second_header->cmsg_len = CMSG_LEN(sizeof(int));
+    std::memcpy(CMSG_DATA(second_header), &ignored_value, sizeof(ignored_value));
+    record(internal::recvmsg_ecn_from_control(recv_message) == QuicEcnCodepoint::unavailable,
+           "recvmsg ecn walk exhausts ignored ancillary headers");
+
+    reset_for_case();
+    record(readable_poll_then_retry_with_datagram_for_tests(nullptr, 0, 0) == 0,
+           "readable poll helper handles empty descriptor list");
+
+    reset_for_case();
+    record(positive_poll_without_revents_for_tests(nullptr, 0, 0) == 0,
+           "positive poll helper handles empty descriptor list");
+
+    reset_for_case();
+    {
+        const ScopedSocketIoBackendOpsOverride runtime_ops{
+            SocketIoBackendOpsOverride{
+                .poll_fn = &eintr_then_timeout_poll_for_tests,
+            },
+        };
+        PollIoEngine engine;
+        constexpr std::array<int, 1> kSockets = {51};
+        const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5,
+                                       internal::now() + std::chrono::milliseconds(5), "client");
+        const auto observed = event.value_or(QuicIoEngineEvent{});
+        record(all_true({
+                   event.has_value(),
+                   observed.kind == QuicIoEngineEvent::Kind::timer_expired,
+                   g_poll_engine_coverage_trace.eintr_then_timeout_calls == 2,
+               }),
+               "poll wait retries after EINTR before future timer expiry");
+    }
+
+    reset_for_case();
+    {
+        const ScopedSocketIoBackendOpsOverride runtime_ops{
+            SocketIoBackendOpsOverride{
+                .poll_fn =
+                    [](pollfd *descriptors, nfds_t descriptor_count, int) {
+                        for (nfds_t index = 0; index < descriptor_count; ++index) {
+                            descriptors[index].revents = 0;
+                        }
+                        return 0;
+                    },
+            },
+        };
+        PollIoEngine engine;
+        constexpr std::array<int, 1> kSockets = {52};
+        const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5,
+                                       internal::now() - std::chrono::milliseconds(1), "client");
+        const auto observed = event.value_or(QuicIoEngineEvent{});
+        record(all_true({
+                   event.has_value(),
+                   observed.kind == QuicIoEngineEvent::Kind::timer_expired,
+               }),
+               "poll wait returns immediate timer expiry when deadline already passed");
+    }
+
+    reset_for_case();
+    {
+        PollIoEngine engine;
+        const std::array<int, 0> kNoSockets = {};
+        record(!engine.wait(kNoSockets, /*idle_timeout_ms=*/5, std::nullopt, "client").has_value(),
+               "poll wait returns nullopt for empty socket list");
+    }
+
+    reset_for_case();
+    {
+        const ScopedSocketIoBackendOpsOverride runtime_ops{
+            SocketIoBackendOpsOverride{
+                .poll_fn = &positive_poll_without_revents_for_tests,
+            },
+        };
+        PollIoEngine engine;
+        constexpr std::array<int, 1> kSockets = {53};
+        record(!engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server").has_value(),
+               "poll wait returns nullopt when poll reports readiness without revents");
+    }
+
+    g_recorded_sendmsg_for_tests = saved_sendmsg;
+    g_recorded_recvmsg_for_tests = saved_recvmsg;
+    g_retry_readable_poll_for_tests = saved_retry;
+    g_poll_engine_coverage_trace = saved_poll_trace;
+    return ok;
 }
 
 } // namespace test

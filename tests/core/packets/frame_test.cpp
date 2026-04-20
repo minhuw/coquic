@@ -520,6 +520,115 @@ TEST(QuicFrameTest, ReceivedAckCursorTrustsValidatedAdditionalRanges) {
               }));
 }
 
+TEST(QuicFrameTest, RoundTripsAckFrameWithWideVarints) {
+    const AckFrame ack{
+        .largest_acknowledged = 0x40000010,
+        .ack_delay = 0x1234,
+        .first_ack_range = 0x123,
+        .additional_ranges =
+            {
+                AckRange{.gap = 0x3fff, .range_length = 0x123456},
+                AckRange{.gap = 0x12345678, .range_length = 0x3fff},
+            },
+        .ecn_counts =
+            AckEcnCounts{
+                .ect0 = 0x12345678,
+                .ect1 = 0x1234,
+                .ecn_ce = 0x123456789abc,
+            },
+    };
+
+    const auto encoded = coquic::quic::serialize_frame(Frame{ack});
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().bytes_consumed, encoded.value().size());
+
+    const auto *decoded_ack = std::get_if<AckFrame>(&decoded.value().frame);
+    ASSERT_NE(decoded_ack, nullptr);
+    EXPECT_EQ(decoded_ack->largest_acknowledged, ack.largest_acknowledged);
+    EXPECT_EQ(decoded_ack->ack_delay, ack.ack_delay);
+    EXPECT_EQ(decoded_ack->first_ack_range, ack.first_ack_range);
+    ASSERT_EQ(decoded_ack->additional_ranges.size(), ack.additional_ranges.size());
+    for (std::size_t i = 0; i < ack.additional_ranges.size(); ++i) {
+        EXPECT_EQ(decoded_ack->additional_ranges[i].gap, ack.additional_ranges[i].gap);
+        EXPECT_EQ(decoded_ack->additional_ranges[i].range_length,
+                  ack.additional_ranges[i].range_length);
+    }
+    const auto &decoded_ecn_counts_opt = decoded_ack->ecn_counts;
+    if (!decoded_ecn_counts_opt.has_value()) {
+        ADD_FAILURE() << "missing decoded ECN counts";
+        return;
+    }
+    const auto &expected_ecn_counts_opt = ack.ecn_counts;
+    if (!expected_ecn_counts_opt.has_value()) {
+        ADD_FAILURE() << "missing expected ECN counts";
+        return;
+    }
+    const auto &decoded_ecn_counts = *decoded_ecn_counts_opt;
+    const auto &expected_ecn_counts = *expected_ecn_counts_opt;
+    EXPECT_EQ(decoded_ecn_counts.ect0, expected_ecn_counts.ect0);
+    EXPECT_EQ(decoded_ecn_counts.ect1, expected_ecn_counts.ect1);
+    EXPECT_EQ(decoded_ecn_counts.ecn_ce, expected_ecn_counts.ecn_ce);
+}
+
+TEST(QuicFrameTest, ReceivedAckFrameWithWideVarintsMatchesOwnedCursor) {
+    const AckFrame ack{
+        .largest_acknowledged = 0x40000010,
+        .ack_delay = 0x1234,
+        .first_ack_range = 0x123,
+        .additional_ranges =
+            {
+                AckRange{.gap = 0x3fff, .range_length = 0x123456},
+                AckRange{.gap = 0x12345678, .range_length = 0x3fff},
+            },
+        .ecn_counts =
+            AckEcnCounts{
+                .ect0 = 0x12345678,
+                .ect1 = 0x1234,
+                .ecn_ce = 0x123456789abc,
+            },
+    };
+    const auto encoded = coquic::quic::serialize_frame(Frame{ack});
+    ASSERT_TRUE(encoded.has_value());
+
+    auto storage = std::make_shared<std::vector<std::byte>>(encoded.value());
+    const auto decoded =
+        coquic::quic::deserialize_received_frame(SharedBytes(storage, 0, storage->size()));
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *received_ack = std::get_if<coquic::quic::ReceivedAckFrame>(&decoded.value().frame);
+    ASSERT_NE(received_ack, nullptr);
+    EXPECT_EQ(received_ack->largest_acknowledged, ack.largest_acknowledged);
+    EXPECT_EQ(received_ack->ack_delay, ack.ack_delay);
+    EXPECT_EQ(received_ack->first_ack_range, ack.first_ack_range);
+    EXPECT_EQ(received_ack->additional_range_count, ack.additional_ranges.size());
+    EXPECT_TRUE(received_ack->additional_ranges_validated);
+    const auto &received_ecn_counts_opt = received_ack->ecn_counts;
+    if (!received_ecn_counts_opt.has_value()) {
+        ADD_FAILURE() << "missing received ECN counts";
+        return;
+    }
+    const auto &expected_ecn_counts_opt = ack.ecn_counts;
+    if (!expected_ecn_counts_opt.has_value()) {
+        ADD_FAILURE() << "missing expected ECN counts";
+        return;
+    }
+    const auto &received_ecn_counts = *received_ecn_counts_opt;
+    const auto &expected_ecn_counts = *expected_ecn_counts_opt;
+    EXPECT_EQ(received_ecn_counts.ect0, expected_ecn_counts.ect0);
+    EXPECT_EQ(received_ecn_counts.ect1, expected_ecn_counts.ect1);
+    EXPECT_EQ(received_ecn_counts.ecn_ce, expected_ecn_counts.ecn_ce);
+
+    const auto owned_cursor = coquic::quic::make_ack_range_cursor(ack);
+    ASSERT_TRUE(owned_cursor.has_value());
+    const auto received_cursor = coquic::quic::make_ack_range_cursor(*received_ack);
+    ASSERT_TRUE(received_cursor.has_value());
+    EXPECT_EQ(collect_ack_ranges(owned_cursor.value()),
+              collect_ack_ranges(received_cursor.value()));
+}
+
 TEST(QuicFrameTest, ReceivedAckDecodeMatchesOwnedDecodeErrors) {
     const std::array<std::byte, 7> invalid_ack{
         std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
@@ -1758,17 +1867,26 @@ TEST(QuicFrameTest, OutboundAckFrameWireHelpersMatchMaterializedAckFrame) {
 
     const auto materialized =
         history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(4));
-    ASSERT_TRUE(materialized.has_value());
+    if (!materialized.has_value()) {
+        ADD_FAILURE() << "missing materialized ACK frame";
+        return;
+    }
+    const auto &materialized_ack = *materialized;
 
     const auto encoded_materialized =
-        coquic::quic::serialize_frame(coquic::quic::Frame{*materialized});
+        coquic::quic::serialize_frame(coquic::quic::Frame{materialized_ack});
     ASSERT_TRUE(encoded_materialized.has_value());
+    if (!header.has_value()) {
+        ADD_FAILURE() << "missing ACK header";
+        return;
+    }
+    const auto &ack_header = *header;
 
     std::vector<std::byte> output(encoded_materialized.value().size());
     const auto written = coquic::quic::write_frame_wire_bytes(
         std::span<std::byte>(output), coquic::quic::Frame{coquic::quic::OutboundAckFrame{
                                           .history = &history,
-                                          .header = *header,
+                                          .header = ack_header,
                                       }});
 
     ASSERT_TRUE(written.has_value());

@@ -206,6 +206,10 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
 
 bool PollIoEngine::register_socket(int socket_fd) {
     static_cast<void>(socket_fd);
+    ++registered_socket_count_;
+    if (descriptor_scratch_.capacity() < registered_socket_count_) {
+        descriptor_scratch_.reserve(registered_socket_count_);
+    }
     return true;
 }
 
@@ -238,7 +242,8 @@ PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
             }
         }
 
-        std::vector<pollfd> descriptors(socket_fds.size());
+        descriptor_scratch_.resize(socket_fds.size());
+        auto descriptors = std::span<pollfd>(descriptor_scratch_.data(), socket_fds.size());
         for (std::size_t index = 0; index < socket_fds.size(); ++index) {
             descriptors[index] = pollfd{
                 .fd = socket_fds[index],
@@ -581,6 +586,27 @@ bool socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests() {
            event->rx->ecn == QuicEcnCodepoint::ect0 &&
            g_retry_readable_poll_for_tests.poll_calls == 2 &&
            g_retry_readable_poll_for_tests.recvmsg_calls == 2;
+}
+
+bool socket_io_backend_poll_engine_primes_descriptor_cache_for_tests() {
+    PollIoEngine engine;
+    if (!engine.descriptor_scratch_.empty() || engine.descriptor_scratch_.capacity() != 0 ||
+        engine.registered_socket_count_ != 0) {
+        return false;
+    }
+
+    if (!engine.register_socket(41) || engine.registered_socket_count_ != 1 ||
+        !engine.descriptor_scratch_.empty() || engine.descriptor_scratch_.capacity() < 1) {
+        return false;
+    }
+    const auto first_capacity = engine.descriptor_scratch_.capacity();
+
+    if (!engine.register_socket(42) || engine.registered_socket_count_ != 2 ||
+        !engine.descriptor_scratch_.empty() || engine.descriptor_scratch_.capacity() < 2) {
+        return false;
+    }
+
+    return engine.descriptor_scratch_.capacity() >= first_capacity;
 }
 
 } // namespace test

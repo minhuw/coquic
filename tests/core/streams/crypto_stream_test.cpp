@@ -26,6 +26,94 @@ std::vector<std::byte> bytes_from_string(std::string_view text) {
     return bytes;
 }
 
+constexpr std::size_t send_buffer_state_index(ReliableSendBuffer::SegmentState state) {
+    return static_cast<std::size_t>(state);
+}
+
+TEST(QuicCryptoStreamTest, SendBufferSegmentStateCountsTrackTransitions) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcd"));
+
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              1u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        0u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)],
+        0u);
+
+    const auto initial = buffer.take_ranges(2);
+    ASSERT_EQ(initial.size(), 1u);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              1u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        1u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)],
+        0u);
+
+    buffer.mark_lost(0, 2);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              1u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        0u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)],
+        1u);
+
+    buffer.mark_sent(0, 2);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              1u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        1u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)],
+        0u);
+
+    buffer.acknowledge(0, 2);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              1u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        0u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)],
+        0u);
+
+    buffer.acknowledge(2, 2);
+    EXPECT_TRUE(buffer.segments_.empty());
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              0u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        0u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)],
+        0u);
+}
+
 TEST(QuicCryptoStreamTest, SendBufferProducesIncreasingOffsets) {
     CryptoSendBuffer buffer;
     buffer.append(std::vector<std::byte>{

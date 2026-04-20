@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -71,6 +72,13 @@ class ReliableSendBuffer {
         std::size_t end = 0;
     };
 
+    static constexpr std::size_t segment_state_index(SegmentState state) {
+        return static_cast<std::size_t>(state);
+    }
+
+    void note_segment_inserted(const Segment &segment);
+    void note_segment_erased(const Segment &segment);
+    void transition_segment_state(Segment &segment, SegmentState new_state);
     std::vector<ByteRange>
     take_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
                          std::optional<std::uint64_t> max_offset = std::nullopt);
@@ -78,6 +86,7 @@ class ReliableSendBuffer {
     void merge_adjacent_segments();
 
     std::map<std::uint64_t, Segment> segments_;
+    std::array<std::size_t, 3> segment_state_counts_{};
     std::uint64_t next_append_offset_ = 0;
 };
 

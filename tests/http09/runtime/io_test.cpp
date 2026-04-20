@@ -754,6 +754,11 @@ TEST(QuicHttp09RuntimeTest, SocketBackendWaitRetriesAfterSpuriousReadablePoll) {
         coquic::io::test::socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests());
 }
 
+TEST(QuicHttp09RuntimeTest, SocketBackendPollEnginePrimesDescriptorCacheOnRegistration) {
+    EXPECT_TRUE(
+        coquic::io::test::socket_io_backend_poll_engine_primes_descriptor_cache_for_tests());
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeTraceHooksCoverIdleTimeoutAndServerFailureBranches) {
     ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
 

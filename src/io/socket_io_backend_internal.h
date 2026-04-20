@@ -3,6 +3,7 @@
 #include <netdb.h>
 #include <sys/socket.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -44,8 +45,21 @@ struct SocketIoSocket {
     int family = AF_UNSPEC;
 };
 
+struct SocketIoPeerTupleKey {
+    int socket_fd = -1;
+    socklen_t peer_len = 0;
+    std::array<std::byte, sizeof(sockaddr_storage)> peer_bytes{};
+
+    bool operator==(const SocketIoPeerTupleKey &) const = default;
+};
+
+struct SocketIoPeerTupleKeyHash {
+    std::size_t operator()(const SocketIoPeerTupleKey &key) const;
+};
+
 struct SocketIoRouteState {
-    std::unordered_map<std::string, QuicRouteHandle> route_handles_by_peer_tuple;
+    std::unordered_map<SocketIoPeerTupleKey, QuicRouteHandle, SocketIoPeerTupleKeyHash>
+        route_handles_by_peer_tuple;
     std::unordered_map<QuicRouteHandle, SocketIoRoute> routes_by_handle;
     QuicRouteHandle next_route_handle = 1;
 };
@@ -89,7 +103,8 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
                    socklen_t peer_len, std::string_view role_name, QuicEcnCodepoint ecn);
 ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name, int flags);
 
-std::string peer_tuple_key(int socket_fd, const sockaddr_storage &peer, socklen_t peer_len);
+SocketIoPeerTupleKey peer_tuple_key(int socket_fd, const sockaddr_storage &peer,
+                                    socklen_t peer_len);
 QuicRouteHandle remember_route_handle(SocketIoRouteState &state, const sockaddr_storage &peer,
                                       socklen_t peer_len, int socket_fd);
 

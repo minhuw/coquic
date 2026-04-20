@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -163,34 +164,50 @@ bool resolve_udp_address(UdpAddressResolutionQuery query, ResolvedUdpAddress &re
     return false;
 }
 
-std::string peer_tuple_key(int socket_fd, const sockaddr_storage &peer, socklen_t peer_len) {
+std::size_t SocketIoPeerTupleKeyHash::operator()(const SocketIoPeerTupleKey &key) const {
+    std::size_t hash = 1469598103934665603ull;
+    const auto mix_byte = [&](std::byte byte) {
+        hash ^= static_cast<std::size_t>(std::to_integer<unsigned char>(byte));
+        hash *= 1099511628211ull;
+    };
+    for (const auto byte : std::as_bytes(std::span(&key.socket_fd, 1))) {
+        mix_byte(byte);
+    }
+    for (const auto byte : std::as_bytes(std::span(&key.peer_len, 1))) {
+        mix_byte(byte);
+    }
     const auto encoded_peer_len =
-        std::min<std::size_t>(static_cast<std::size_t>(peer_len), sizeof(sockaddr_storage));
-    std::string key(sizeof(socket_fd) + sizeof(encoded_peer_len) + encoded_peer_len, '\0');
-    std::size_t offset = 0;
-    std::memcpy(key.data() + offset, &socket_fd, sizeof(socket_fd));
-    offset += sizeof(socket_fd);
-    std::memcpy(key.data() + offset, &encoded_peer_len, sizeof(encoded_peer_len));
-    offset += sizeof(encoded_peer_len);
-    std::memcpy(key.data() + offset, &peer, encoded_peer_len);
+        std::min<std::size_t>(static_cast<std::size_t>(key.peer_len), key.peer_bytes.size());
+    for (std::size_t index = 0; index < encoded_peer_len; ++index) {
+        mix_byte(key.peer_bytes[index]);
+    }
+    return hash;
+}
+
+SocketIoPeerTupleKey peer_tuple_key(int socket_fd, const sockaddr_storage &peer,
+                                    socklen_t peer_len) {
+    SocketIoPeerTupleKey key{};
+    key.socket_fd = socket_fd;
+    key.peer_len = std::min<socklen_t>(peer_len, sizeof(sockaddr_storage));
+    std::memcpy(key.peer_bytes.data(), &peer, static_cast<std::size_t>(key.peer_len));
     return key;
 }
 
 QuicRouteHandle remember_route_handle(SocketIoRouteState &state, const sockaddr_storage &peer,
                                       socklen_t peer_len, int socket_fd) {
     const auto key = peer_tuple_key(socket_fd, peer, peer_len);
-    const auto existing = state.route_handles_by_peer_tuple.find(key);
-    const auto handle = existing != state.route_handles_by_peer_tuple.end()
-                            ? existing->second
-                            : state.next_route_handle++;
-    if (existing == state.route_handles_by_peer_tuple.end()) {
-        state.route_handles_by_peer_tuple.emplace(key, handle);
+    if (const auto existing = state.route_handles_by_peer_tuple.find(key);
+        existing != state.route_handles_by_peer_tuple.end()) {
+        return existing->second;
     }
-    state.routes_by_handle[handle] = SocketIoRoute{
-        .socket_fd = socket_fd,
-        .peer = peer,
-        .peer_len = peer_len,
-    };
+
+    const auto handle = state.next_route_handle++;
+    state.route_handles_by_peer_tuple.emplace(key, handle);
+    state.routes_by_handle.try_emplace(handle, SocketIoRoute{
+                                                   .socket_fd = socket_fd,
+                                                   .peer = peer,
+                                                   .peer_len = peer_len,
+                                               });
     return handle;
 }
 
@@ -500,6 +517,29 @@ bool socket_io_backend_route_handles_are_stable_per_peer_tuple_for_tests() {
     return first != 0 && first == second && first != third &&
            state.routes_by_handle.at(first).socket_fd == 4 &&
            state.routes_by_handle.at(third).socket_fd == 7;
+}
+
+bool socket_io_backend_duplicate_route_lookup_reuses_cached_route_entry_for_tests() {
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+    internal::SocketIoRouteState state;
+    const auto peer = make_loopback_peer(4444);
+
+    const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
+    if (handle == 0 || state.routes_by_handle.size() != 1 ||
+        state.route_handles_by_peer_tuple.size() != 1) {
+        return false;
+    }
+
+    auto &cached_route = state.routes_by_handle.at(handle);
+    cached_route.socket_fd = -1;
+    cached_route.peer_len = 0;
+    std::memset(&cached_route.peer, 0x5a, sizeof(cached_route.peer));
+
+    const auto duplicate = internal::remember_route_handle(state, peer, peer_len, 4);
+    return duplicate == handle && state.routes_by_handle.size() == 1 &&
+           state.route_handles_by_peer_tuple.size() == 1 &&
+           state.routes_by_handle.at(handle).socket_fd == -1 &&
+           state.routes_by_handle.at(handle).peer_len == 0;
 }
 
 } // namespace test

@@ -287,6 +287,11 @@ class PacketSpaceRecovery {
     SentPacketLedgerSlot *outstanding_slot_for_packet_number(std::uint64_t packet_number);
     const SentPacketLedgerSlot *
     outstanding_slot_for_packet_number(std::uint64_t packet_number) const;
+    const SentPacketLedgerSlot *slot_for_tracked_packet(const DeadlineTrackedPacket &packet) const;
+    bool is_valid_in_flight_ack_eliciting_tracked_packet(const DeadlineTrackedPacket &packet) const;
+    bool is_valid_eligible_loss_tracked_packet(const DeadlineTrackedPacket &packet) const;
+    void prune_stale_in_flight_ack_eliciting_packets() const;
+    void prune_stale_eligible_loss_packets() const;
     void erase_from_tracked_sets(const SentPacketRecord &packet);
     void maybe_track_as_loss_candidate(const SentPacketRecord &packet);
     void track_new_loss_candidates(std::optional<std::uint64_t> previous_largest_acked,
@@ -301,8 +306,9 @@ class PacketSpaceRecovery {
     AckProcessingResult ack_processing_result_from_apply(const AckApplyResult &apply_result) const;
 
     std::vector<SentPacketLedgerSlot> slots_;
-    std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> in_flight_ack_eliciting_packets_;
-    std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> eligible_loss_packets_;
+    mutable std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess>
+        in_flight_ack_eliciting_packets_;
+    mutable std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> eligible_loss_packets_;
     std::optional<std::uint64_t> largest_acked_packet_number_;
     std::size_t first_live_slot_ = kInvalidLedgerSlotIndex;
     std::size_t last_live_slot_ = kInvalidLedgerSlotIndex;

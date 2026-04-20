@@ -539,6 +539,52 @@ PacketSpaceRecovery::outstanding_slot_for_packet_number(std::uint64_t packet_num
     return slot;
 }
 
+const PacketSpaceRecovery::SentPacketLedgerSlot *
+PacketSpaceRecovery::slot_for_tracked_packet(const DeadlineTrackedPacket &packet) const {
+    const auto *slot = slot_for_packet_number(packet.packet_number);
+    if (slot == nullptr || slot->acknowledged || slot->packet.sent_time != packet.sent_time) {
+        return nullptr;
+    }
+
+    return slot;
+}
+
+bool PacketSpaceRecovery::is_valid_in_flight_ack_eliciting_tracked_packet(
+    const DeadlineTrackedPacket &packet) const {
+    const auto *slot = slot_for_tracked_packet(packet);
+    return slot != nullptr && slot->state == LedgerSlotState::sent && slot->packet.ack_eliciting &&
+           slot->packet.in_flight && !slot->packet.declared_lost;
+}
+
+bool PacketSpaceRecovery::is_valid_eligible_loss_tracked_packet(
+    const DeadlineTrackedPacket &packet) const {
+    const auto *slot = slot_for_tracked_packet(packet);
+    return slot != nullptr && slot->state == LedgerSlotState::sent && slot->packet.in_flight &&
+           !slot->packet.declared_lost;
+}
+
+void PacketSpaceRecovery::prune_stale_in_flight_ack_eliciting_packets() const {
+    while (!in_flight_ack_eliciting_packets_.empty()) {
+        const auto it = std::prev(in_flight_ack_eliciting_packets_.end());
+        if (is_valid_in_flight_ack_eliciting_tracked_packet(*it)) {
+            break;
+        }
+
+        in_flight_ack_eliciting_packets_.erase(it);
+    }
+}
+
+void PacketSpaceRecovery::prune_stale_eligible_loss_packets() const {
+    while (!eligible_loss_packets_.empty()) {
+        const auto it = eligible_loss_packets_.begin();
+        if (is_valid_eligible_loss_tracked_packet(*it)) {
+            break;
+        }
+
+        eligible_loss_packets_.erase(it);
+    }
+}
+
 void PacketSpaceRecovery::erase_from_tracked_sets(const SentPacketRecord &packet) {
     const auto tracked = tracked_packet(packet);
     in_flight_ack_eliciting_packets_.erase(tracked);
@@ -715,7 +761,6 @@ void PacketSpaceRecovery::on_packet_declared_lost(std::uint64_t packet_number) {
         return;
     }
 
-    erase_from_tracked_sets(*packet);
     packet->in_flight = false;
     packet->declared_lost = true;
     packet->bytes_in_flight = 0;
@@ -735,7 +780,6 @@ void PacketSpaceRecovery::retire_packet(RecoveryPacketHandle handle) {
     }
 
     auto &slot = slots_[current_handle->slot_index];
-    erase_from_tracked_sets(slot.packet);
     if (!slot.acknowledged) {
         unlink_live_slot(current_handle->slot_index);
     }
@@ -810,7 +854,6 @@ void PacketSpaceRecovery::apply_ack_range_descending(AckApplyState &state,
                 state.result.has_newly_acked_ack_eliciting = true;
             }
 
-            erase_from_tracked_sets(slot.packet);
             unlink_live_slot(slot_index);
             slot.acknowledged = true;
             state.mutated = true;
@@ -849,7 +892,6 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
         }
 
         // Keep the live packet metadata unchanged until connection-level loss handling consumes it.
-        erase_from_tracked_sets(slot.packet);
         slot.state = LedgerSlotState::declared_lost;
         state.result.lost_packets.push_back(packet_handle(slot, slot_index));
         state.mutated = true;
@@ -859,6 +901,11 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
 
     std::vector<std::size_t> time_threshold_loss_slots;
     while (!eligible_loss_packets_.empty()) {
+        prune_stale_eligible_loss_packets();
+        if (eligible_loss_packets_.empty()) {
+            break;
+        }
+
         const auto tracked = *eligible_loss_packets_.begin();
         if (!is_time_threshold_lost(rtt_state_, tracked.sent_time, now)) {
             break;
@@ -872,7 +919,8 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
 
         const auto &slot = slots_[slot_index];
         if (slot.state != LedgerSlotState::sent || slot.acknowledged || !slot.packet.in_flight ||
-            slot.packet.packet_number != tracked.packet_number) {
+            slot.packet.packet_number != tracked.packet_number ||
+            slot.packet.sent_time != tracked.sent_time) {
             continue;
         }
 
@@ -889,7 +937,6 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
         }
 
         // Keep the live packet metadata unchanged until connection-level loss handling consumes it.
-        erase_from_tracked_sets(slot.packet);
         slot.state = LedgerSlotState::declared_lost;
         state.result.lost_packets.push_back(packet_handle(slot, slot_index));
         state.mutated = true;
@@ -1021,6 +1068,7 @@ std::optional<std::uint64_t> PacketSpaceRecovery::largest_acked_packet_number() 
 
 std::optional<DeadlineTrackedPacket>
 PacketSpaceRecovery::latest_in_flight_ack_eliciting_packet() const {
+    prune_stale_in_flight_ack_eliciting_packets();
     if (in_flight_ack_eliciting_packets_.empty()) {
         return std::nullopt;
     }
@@ -1029,6 +1077,7 @@ PacketSpaceRecovery::latest_in_flight_ack_eliciting_packet() const {
 }
 
 std::optional<DeadlineTrackedPacket> PacketSpaceRecovery::earliest_loss_packet() const {
+    prune_stale_eligible_loss_packets();
     if (eligible_loss_packets_.empty()) {
         return std::nullopt;
     }

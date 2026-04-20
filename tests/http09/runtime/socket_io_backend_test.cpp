@@ -121,6 +121,11 @@ TEST(SocketIoBackendTest, RouteHandlesStayStablePerPeerTuple) {
         coquic::io::test::socket_io_backend_route_handles_are_stable_per_peer_tuple_for_tests());
 }
 
+TEST(SocketIoBackendTest, DuplicateRouteLookupReusesCachedRouteEntry) {
+    EXPECT_TRUE(coquic::io::test::
+                    socket_io_backend_duplicate_route_lookup_reuses_cached_route_entry_for_tests());
+}
+
 TEST(SocketIoBackendTest, SendUsesRouteHandleRouting) {
     EXPECT_TRUE(coquic::io::test::socket_io_backend_send_uses_route_handle_for_tests());
 }

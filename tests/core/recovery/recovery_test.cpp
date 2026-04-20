@@ -41,6 +41,72 @@ struct PacketSpaceRecoveryTestPeer {
                                                   std::size_t slot_index) {
         return recovery.slots_.at(slot_index).packet;
     }
+
+    static std::size_t next_packet_threshold_loss_slot(const PacketSpaceRecovery &recovery) {
+        return recovery.next_packet_threshold_loss_slot_;
+    }
+
+    static AckApplyResult
+    apply_ack_received_descending_fast(PacketSpaceRecovery &recovery,
+                                       std::span<const AckPacketNumberRange> ack_ranges_descending,
+                                       std::uint64_t largest_acknowledged, QuicCoreTimePoint now) {
+        return recovery.apply_ack_received_descending(ack_ranges_descending, largest_acknowledged,
+                                                      now);
+    }
+
+    static AckApplyResult apply_ack_received_descending_reference(
+        PacketSpaceRecovery &recovery, std::span<const AckPacketNumberRange> ack_ranges_descending,
+        std::uint64_t largest_acknowledged, QuicCoreTimePoint now) {
+        auto state = recovery.begin_ack_received_apply(largest_acknowledged);
+        for (const auto &range : ack_ranges_descending) {
+            recovery.apply_ack_range_descending(state, range);
+        }
+
+        if (state.result.acked_packets.size() > 1) {
+            std::reverse(state.result.acked_packets.begin(), state.result.acked_packets.end());
+        }
+        if (state.result.late_acked_packets.size() > 1) {
+            std::reverse(state.result.late_acked_packets.begin(),
+                         state.result.late_acked_packets.end());
+        }
+
+        if (recovery.slots_.empty()) {
+            return std::move(state.result);
+        }
+
+        const auto loss_scan_end = std::min<std::size_t>(
+            static_cast<std::size_t>(state.effective_largest_acked), recovery.slots_.size());
+        for (auto slot_index = recovery.first_live_slot_;
+             slot_index != PacketSpaceRecovery::kInvalidLedgerSlotIndex &&
+             slot_index < loss_scan_end;) {
+            auto &slot = recovery.slots_[slot_index];
+            const auto next_live_slot = slot.next_live_slot;
+            const auto packet_number = slot.packet.packet_number;
+            if (slot.state != PacketSpaceRecovery::LedgerSlotState::sent ||
+                !slot.packet.in_flight) {
+                slot_index = next_live_slot;
+                continue;
+            }
+
+            if (!is_packet_threshold_lost(packet_number, state.effective_largest_acked) &&
+                !is_time_threshold_lost(recovery.rtt_state_, slot.packet.sent_time, now)) {
+                slot_index = next_live_slot;
+                continue;
+            }
+
+            recovery.erase_from_tracked_sets(slot.packet);
+            slot.state = PacketSpaceRecovery::LedgerSlotState::declared_lost;
+            state.result.lost_packets.push_back(recovery.packet_handle(slot, slot_index));
+            state.mutated = true;
+            slot_index = next_live_slot;
+        }
+
+        if (state.mutated) {
+            ++recovery.compatibility_version_;
+        }
+
+        return std::move(state.result);
+    }
 };
 
 } // namespace coquic::quic::test
@@ -131,6 +197,106 @@ coquic::quic::QuicEcnCodepoint invalid_ecn_codepoint() {
     coquic::quic::QuicEcnCodepoint value{};
     std::memcpy(&value, &raw, sizeof(value));
     return value;
+}
+
+std::vector<AckPacketNumberRange>
+ack_ranges_descending_from(const std::vector<bool> &acknowledged_by_peer) {
+    std::vector<AckPacketNumberRange> ranges;
+    std::size_t index = acknowledged_by_peer.size();
+    while (index != 0) {
+        --index;
+        if (!acknowledged_by_peer[index]) {
+            continue;
+        }
+
+        const auto largest = static_cast<std::uint64_t>(index);
+        auto smallest_index = index;
+        while (smallest_index != 0 && acknowledged_by_peer[smallest_index - 1]) {
+            --smallest_index;
+        }
+        ranges.push_back(AckPacketNumberRange{
+            .smallest = static_cast<std::uint64_t>(smallest_index),
+            .largest = largest,
+        });
+        index = smallest_index;
+    }
+    return ranges;
+}
+
+void consume_ack_apply_result(PacketSpaceRecovery &recovery,
+                              const coquic::quic::AckApplyResult &result) {
+    for (const auto handle : result.acked_packets) {
+        recovery.retire_packet(handle);
+    }
+    for (const auto handle : result.late_acked_packets) {
+        recovery.retire_packet(handle);
+    }
+    for (const auto handle : result.lost_packets) {
+        recovery.on_packet_declared_lost(handle.packet_number);
+    }
+}
+
+TEST(QuicRecoveryTest, FastAckApplyMatchesReferenceLossScanAcrossSparseAckBatches) {
+    PacketSpaceRecovery fast_recovery;
+    PacketSpaceRecovery reference_recovery;
+    fast_recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
+    fast_recovery.rtt_state().min_rtt = std::chrono::milliseconds(10);
+    fast_recovery.rtt_state().smoothed_rtt = std::chrono::milliseconds(10);
+    fast_recovery.rtt_state().rttvar = std::chrono::milliseconds(5);
+    reference_recovery.rtt_state() = fast_recovery.rtt_state();
+
+    constexpr std::uint64_t total_packets = 256;
+    for (std::uint64_t packet_number = 0; packet_number != total_packets; ++packet_number) {
+        const auto sent = make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+        fast_recovery.on_packet_sent(sent);
+        reference_recovery.on_packet_sent(sent);
+    }
+
+    std::vector<bool> acknowledged_by_peer(total_packets, false);
+    std::uint64_t largest_acknowledged = 0;
+    for (std::uint64_t step = 0; step != 96; ++step) {
+        largest_acknowledged = std::min<std::uint64_t>(largest_acknowledged + 3, total_packets - 1);
+        for (std::uint64_t packet_number = 0; packet_number <= largest_acknowledged;
+             ++packet_number) {
+            if (acknowledged_by_peer[packet_number]) {
+                continue;
+            }
+
+            const auto should_ack =
+                packet_number == largest_acknowledged ||
+                ((packet_number + step) % 11 != 0 && (packet_number + step * 3) % 17 != 0);
+            if (should_ack) {
+                acknowledged_by_peer[packet_number] = true;
+            }
+        }
+
+        const auto ack_ranges = ack_ranges_descending_from(acknowledged_by_peer);
+        ASSERT_FALSE(ack_ranges.empty());
+        const auto now = coquic::quic::test::test_time(1000 + static_cast<std::int64_t>(step));
+        const auto fast =
+            coquic::quic::test::PacketSpaceRecoveryTestPeer::apply_ack_received_descending_fast(
+                fast_recovery, std::span<const AckPacketNumberRange>(ack_ranges),
+                largest_acknowledged, now);
+        const auto reference = coquic::quic::test::PacketSpaceRecoveryTestPeer::
+            apply_ack_received_descending_reference(
+                reference_recovery, std::span<const AckPacketNumberRange>(ack_ranges),
+                largest_acknowledged, now);
+
+        EXPECT_EQ(packet_numbers_from_handles(fast_recovery, fast.acked_packets),
+                  packet_numbers_from_handles(reference_recovery, reference.acked_packets))
+            << "step=" << step;
+        EXPECT_EQ(packet_numbers_from_handles(fast_recovery, fast.late_acked_packets),
+                  packet_numbers_from_handles(reference_recovery, reference.late_acked_packets))
+            << "step=" << step;
+        EXPECT_EQ(packet_numbers_from_handles(fast_recovery, fast.lost_packets),
+                  packet_numbers_from_handles(reference_recovery, reference.lost_packets))
+            << "step=" << step;
+
+        consume_ack_apply_result(fast_recovery, fast);
+        consume_ack_apply_result(reference_recovery, reference);
+    }
 }
 
 TEST(QuicRecoveryTest, AckHistoryBuildsSingleContiguousAckRange) {
@@ -575,6 +741,39 @@ TEST(QuicRecoveryTest, PacketThresholdLossKeepsRunningLargestAcknowledgedState) 
         return;
     }
     EXPECT_EQ(*stale_largest_acked, 6u);
+}
+
+TEST(QuicRecoveryTest, PacketThresholdLossFrontierAdvancesAcrossAckBatches) {
+    PacketSpaceRecovery recovery;
+    for (std::uint64_t packet_number = 0; packet_number <= 4; ++packet_number) {
+        recovery.on_packet_sent(make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number))));
+    }
+
+    const auto first_ack =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(10));
+    EXPECT_EQ(packet_numbers_from(first_ack.acked_packets), (std::vector<std::uint64_t>{3}));
+    EXPECT_EQ(packet_numbers_from(first_ack.lost_packets), (std::vector<std::uint64_t>{0}));
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::next_packet_threshold_loss_slot(recovery),
+        1u);
+
+    const auto second_ack =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/4), coquic::quic::test::test_time(11));
+    EXPECT_EQ(packet_numbers_from(second_ack.acked_packets), (std::vector<std::uint64_t>{4}));
+    EXPECT_EQ(packet_numbers_from(second_ack.lost_packets), (std::vector<std::uint64_t>{1}));
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::next_packet_threshold_loss_slot(recovery),
+        2u);
+
+    const auto stale_ack =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/4), coquic::quic::test::test_time(12));
+    EXPECT_TRUE(stale_ack.acked_packets.empty());
+    EXPECT_TRUE(stale_ack.lost_packets.empty());
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::next_packet_threshold_loss_slot(recovery),
+        2u);
 }
 
 TEST(QuicRecoveryTest, AckProcessingRejectsMalformedFirstAckRange) {

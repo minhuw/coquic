@@ -307,6 +307,7 @@ class PacketSpaceRecovery {
     std::size_t first_live_slot_ = kInvalidLedgerSlotIndex;
     std::size_t last_live_slot_ = kInvalidLedgerSlotIndex;
     std::size_t next_loss_candidate_slot_ = 0;
+    std::size_t next_packet_threshold_loss_slot_ = 0;
     std::uint64_t compatibility_version_ = 0;
     RecoveryRttState rtt_state_;
     SentPacketsView sent_packets_{};

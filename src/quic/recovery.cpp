@@ -30,6 +30,15 @@ std::chrono::milliseconds latest_loss_delay(const RecoveryRttState &rtt) {
     return std::max(kGranularity, rounded_up_loss_delay);
 }
 
+std::size_t packet_threshold_loss_scan_end(std::uint64_t largest_acked, std::size_t slot_count) {
+    if (largest_acked < kPacketThreshold) {
+        return 0;
+    }
+
+    return std::min<std::size_t>(static_cast<std::size_t>(largest_acked - kPacketThreshold + 1),
+                                 slot_count);
+}
+
 void note_received_ecn(AckEcnCounts &counts, QuicEcnCodepoint ecn) {
     switch (ecn) {
     case QuicEcnCodepoint::ect0:
@@ -225,6 +234,7 @@ PacketSpaceRecovery::PacketSpaceRecovery(const PacketSpaceRecovery &other)
       largest_acked_packet_number_(other.largest_acked_packet_number_),
       first_live_slot_(other.first_live_slot_), last_live_slot_(other.last_live_slot_),
       next_loss_candidate_slot_(other.next_loss_candidate_slot_),
+      next_packet_threshold_loss_slot_(other.next_packet_threshold_loss_slot_),
       compatibility_version_(other.compatibility_version_), rtt_state_(other.rtt_state_),
       sent_packets_{this} {
 }
@@ -236,6 +246,7 @@ PacketSpaceRecovery::PacketSpaceRecovery(PacketSpaceRecovery &&other) noexcept
       largest_acked_packet_number_(other.largest_acked_packet_number_),
       first_live_slot_(other.first_live_slot_), last_live_slot_(other.last_live_slot_),
       next_loss_candidate_slot_(other.next_loss_candidate_slot_),
+      next_packet_threshold_loss_slot_(other.next_packet_threshold_loss_slot_),
       compatibility_version_(other.compatibility_version_), rtt_state_(other.rtt_state_),
       sent_packets_{this} {
 }
@@ -252,6 +263,7 @@ PacketSpaceRecovery &PacketSpaceRecovery::operator=(const PacketSpaceRecovery &o
     first_live_slot_ = other.first_live_slot_;
     last_live_slot_ = other.last_live_slot_;
     next_loss_candidate_slot_ = other.next_loss_candidate_slot_;
+    next_packet_threshold_loss_slot_ = other.next_packet_threshold_loss_slot_;
     compatibility_version_ = other.compatibility_version_;
     rtt_state_ = other.rtt_state_;
     sent_packets_.owner = this;
@@ -270,6 +282,7 @@ PacketSpaceRecovery &PacketSpaceRecovery::operator=(PacketSpaceRecovery &&other)
     first_live_slot_ = other.first_live_slot_;
     last_live_slot_ = other.last_live_slot_;
     next_loss_candidate_slot_ = other.next_loss_candidate_slot_;
+    next_packet_threshold_loss_slot_ = other.next_packet_threshold_loss_slot_;
     compatibility_version_ = other.compatibility_version_;
     rtt_state_ = other.rtt_state_;
     sent_packets_.owner = this;
@@ -826,21 +839,12 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
         return std::move(state.result);
     }
 
-    const auto loss_scan_end = std::min<std::size_t>(
-        static_cast<std::size_t>(state.effective_largest_acked), slots_.size());
-    for (auto slot_index = first_live_slot_;
-         slot_index != kInvalidLedgerSlotIndex && slot_index < loss_scan_end;) {
+    const auto packet_threshold_scan_end =
+        packet_threshold_loss_scan_end(state.effective_largest_acked, slots_.size());
+    for (std::size_t slot_index = next_packet_threshold_loss_slot_;
+         slot_index < packet_threshold_scan_end; ++slot_index) {
         auto &slot = slots_[slot_index];
-        const auto next_live_slot = slot.next_live_slot;
-        const auto packet_number = slot.packet.packet_number;
-        if (slot.state != LedgerSlotState::sent || !slot.packet.in_flight) {
-            slot_index = next_live_slot;
-            continue;
-        }
-
-        if (!is_packet_threshold_lost(packet_number, state.effective_largest_acked) &&
-            !is_time_threshold_lost(rtt_state_, slot.packet.sent_time, now)) {
-            slot_index = next_live_slot;
+        if (slot.state != LedgerSlotState::sent || slot.acknowledged || !slot.packet.in_flight) {
             continue;
         }
 
@@ -849,7 +853,46 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
         slot.state = LedgerSlotState::declared_lost;
         state.result.lost_packets.push_back(packet_handle(slot, slot_index));
         state.mutated = true;
-        slot_index = next_live_slot;
+    }
+    next_packet_threshold_loss_slot_ =
+        std::max(next_packet_threshold_loss_slot_, packet_threshold_scan_end);
+
+    std::vector<std::size_t> time_threshold_loss_slots;
+    while (!eligible_loss_packets_.empty()) {
+        const auto tracked = *eligible_loss_packets_.begin();
+        if (!is_time_threshold_lost(rtt_state_, tracked.sent_time, now)) {
+            break;
+        }
+
+        eligible_loss_packets_.erase(eligible_loss_packets_.begin());
+        const auto slot_index = static_cast<std::size_t>(tracked.packet_number);
+        if (slot_index >= slots_.size()) {
+            continue;
+        }
+
+        const auto &slot = slots_[slot_index];
+        if (slot.state != LedgerSlotState::sent || slot.acknowledged || !slot.packet.in_flight ||
+            slot.packet.packet_number != tracked.packet_number) {
+            continue;
+        }
+
+        time_threshold_loss_slots.push_back(slot_index);
+    }
+
+    if (time_threshold_loss_slots.size() > 1) {
+        std::sort(time_threshold_loss_slots.begin(), time_threshold_loss_slots.end());
+    }
+    for (const auto slot_index : time_threshold_loss_slots) {
+        auto &slot = slots_[slot_index];
+        if (slot.state != LedgerSlotState::sent || slot.acknowledged || !slot.packet.in_flight) {
+            continue;
+        }
+
+        // Keep the live packet metadata unchanged until connection-level loss handling consumes it.
+        erase_from_tracked_sets(slot.packet);
+        slot.state = LedgerSlotState::declared_lost;
+        state.result.lost_packets.push_back(packet_handle(slot, slot_index));
+        state.mutated = true;
     }
 
     if (state.mutated) {
@@ -1003,6 +1046,7 @@ void PacketSpaceRecovery::rebuild_auxiliary_indexes() {
             ? std::min<std::size_t>(static_cast<std::size_t>(*largest_acked_packet_number_),
                                     slots_.size())
             : 0;
+    next_packet_threshold_loss_slot_ = 0;
     for (std::size_t slot_index = 0; slot_index < slots_.size(); ++slot_index) {
         auto &slot = slots_[slot_index];
         slot.prev_live_slot = kInvalidLedgerSlotIndex;

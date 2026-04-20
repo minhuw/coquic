@@ -89,5 +89,7 @@ CodecResult<std::size_t> encode_varint_into(std::span<std::byte> output, std::ui
 CodecResult<std::vector<std::byte>> encode_varint(std::uint64_t value);
 CodecResult<VarIntDecoded> decode_varint(BufferReader &reader);
 CodecResult<VarIntDecoded> decode_varint_bytes(std::span<const std::byte> bytes);
+CodecResult<VarIntDecoded> decode_varint_bytes(std::span<const std::byte> bytes,
+                                               std::size_t offset);
 
 } // namespace coquic::quic

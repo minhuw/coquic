@@ -116,3 +116,42 @@ TEST(QuicVarIntTest, DecodeVarintRejectsEmptyReader) {
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
     EXPECT_EQ(decoded.error().offset, 0u);
 }
+
+TEST(QuicVarIntTest, DecodeVarintBytesFromOffsetReadsSequentialMixedWidths) {
+    const std::array<std::uint64_t, 4> values{37ull, 15293ull, 70000ull, 1073741824ull};
+
+    std::vector<std::byte> bytes;
+    for (const auto value : values) {
+        const auto encoded = coquic::quic::encode_varint(value);
+        ASSERT_TRUE(encoded.has_value());
+        bytes.insert(bytes.end(), encoded.value().begin(), encoded.value().end());
+    }
+
+    std::size_t offset = 0;
+    for (const auto expected : values) {
+        const auto decoded = coquic::quic::decode_varint_bytes(bytes, offset);
+        ASSERT_TRUE(decoded.has_value());
+        EXPECT_EQ(decoded.value().value, expected);
+        offset += decoded.value().bytes_consumed;
+    }
+
+    EXPECT_EQ(offset, bytes.size());
+}
+
+TEST(QuicVarIntTest, DecodeVarintBytesFromOffsetRejectsTruncatedEncoding) {
+    const std::array<std::byte, 2> bytes{std::byte{0x00}, std::byte{0x40}};
+
+    const auto decoded = coquic::quic::decode_varint_bytes(bytes, 1);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+    EXPECT_EQ(decoded.error().offset, bytes.size());
+}
+
+TEST(QuicVarIntTest, DecodeVarintBytesFromOffsetRejectsOffsetPastEnd) {
+    const std::array<std::byte, 1> bytes{std::byte{0x00}};
+
+    const auto decoded = coquic::quic::decode_varint_bytes(bytes, 2);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+    EXPECT_EQ(decoded.error().offset, 2u);
+}

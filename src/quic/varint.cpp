@@ -71,13 +71,15 @@ CodecResult<VarIntDecoded> decode_varint(BufferReader &reader) {
     const auto length = std::size_t{1} << prefix;
 
     std::uint64_t value = static_cast<std::uint64_t>(first_value & 0x3fu);
-
-    for (std::size_t i = 1; i < length; ++i) {
-        const auto byte = reader.read_byte();
-        if (!byte.has_value()) {
-            return CodecResult<VarIntDecoded>::failure(byte.error().code, byte.error().offset);
+    if (length != 1) {
+        const auto tail = reader.read_exact(length - 1);
+        if (!tail.has_value()) {
+            return CodecResult<VarIntDecoded>::failure(tail.error().code, tail.error().offset);
         }
-        value = (value << 8) | static_cast<std::uint8_t>(byte.value());
+
+        for (const auto byte : tail.value()) {
+            value = (value << 8) | static_cast<std::uint8_t>(byte);
+        }
     }
 
     return CodecResult<VarIntDecoded>::success(VarIntDecoded{
@@ -87,8 +89,31 @@ CodecResult<VarIntDecoded> decode_varint(BufferReader &reader) {
 }
 
 CodecResult<VarIntDecoded> decode_varint_bytes(std::span<const std::byte> bytes) {
-    BufferReader reader(bytes);
-    return decode_varint(reader);
+    return decode_varint_bytes(bytes, 0);
+}
+
+CodecResult<VarIntDecoded> decode_varint_bytes(std::span<const std::byte> bytes,
+                                               std::size_t offset) {
+    if (offset >= bytes.size()) {
+        return CodecResult<VarIntDecoded>::failure(CodecErrorCode::truncated_input, offset);
+    }
+
+    const auto first_value = static_cast<std::uint8_t>(bytes[offset]);
+    const auto prefix = first_value >> 6;
+    const auto length = std::size_t{1} << prefix;
+    if (bytes.size() - offset < length) {
+        return CodecResult<VarIntDecoded>::failure(CodecErrorCode::truncated_input, bytes.size());
+    }
+
+    std::uint64_t value = static_cast<std::uint64_t>(first_value & 0x3fu);
+    for (std::size_t i = 1; i < length; ++i) {
+        value = (value << 8) | static_cast<std::uint8_t>(bytes[offset + i]);
+    }
+
+    return CodecResult<VarIntDecoded>::success(VarIntDecoded{
+        .value = value,
+        .bytes_consumed = length,
+    });
 }
 
 } // namespace coquic::quic

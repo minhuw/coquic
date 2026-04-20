@@ -114,6 +114,37 @@ TEST(QuicCryptoStreamTest, SendBufferSegmentStateCountsTrackTransitions) {
         0u);
 }
 
+bool crypto_stream_internal_coverage_for_tests();
+
+bool crypto_stream_internal_coverage_for_tests() {
+    ReliableReceiveBuffer receive_buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcd"));
+    receive_buffer.buffered_bytes_.emplace(0, SharedBytes(storage, 0, 2));
+    receive_buffer.buffered_bytes_.emplace(2, SharedBytes(storage, 2, 4));
+
+    const auto contiguous = receive_buffer.take_contiguous_buffered_bytes({});
+    if (contiguous.owned.size() != 0 || contiguous.shared.storage().get() != storage.get() ||
+        contiguous.shared.begin_offset() != 0 || contiguous.shared.end_offset() != 4 ||
+        contiguous.to_vector() != bytes_from_string("abcd") ||
+        !receive_buffer.buffered_bytes_.empty() || receive_buffer.next_contiguous_offset_ != 4) {
+        return false;
+    }
+
+    ReliableReceiveBuffer gapped_receive_buffer;
+    gapped_receive_buffer.buffered_bytes_.emplace(0, SharedBytes(storage, 0, 2));
+    gapped_receive_buffer.buffered_bytes_.emplace(2, SharedBytes(storage, 3, 4));
+    const auto gapped = gapped_receive_buffer.take_contiguous_buffered_bytes({});
+    if (!gapped.shared.empty() || gapped.owned != bytes_from_string("abd") ||
+        !gapped_receive_buffer.buffered_bytes_.empty() ||
+        gapped_receive_buffer.next_contiguous_offset_ != 3) {
+        return false;
+    }
+
+    ReliableSendBuffer send_buffer;
+    send_buffer.append(SharedBytes{});
+    return send_buffer.segments_.empty() && send_buffer.next_append_offset_ == 0;
+}
+
 TEST(QuicCryptoStreamTest, SendBufferProducesIncreasingOffsets) {
     CryptoSendBuffer buffer;
     buffer.append(std::vector<std::byte>{
@@ -627,6 +658,10 @@ TEST(QuicCryptoStreamTest, ReceiveBufferSharedPushCoalescesSeparateStorageOnlyAt
     ASSERT_TRUE(released.has_value());
     EXPECT_TRUE(released.value().shared.empty());
     EXPECT_EQ(released.value().owned, bytes_from_string("abcdef"));
+}
+
+TEST(QuicCryptoStreamTest, InternalCoverageHelperExercisesSharedCoalescingAndEmptySharedAppend) {
+    EXPECT_TRUE(crypto_stream_internal_coverage_for_tests());
 }
 
 TEST(QuicCryptoStreamTest, ReceiveBufferReleasesOnlyContiguousBytes) {

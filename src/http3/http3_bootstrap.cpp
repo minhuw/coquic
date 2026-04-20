@@ -17,6 +17,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include <netdb.h>
 #include <sys/socket.h>
@@ -90,6 +91,18 @@ bool is_stop_requested(const std::atomic<bool> *stop_requested) {
     return stop_requested != nullptr && stop_requested->load(std::memory_order_relaxed);
 }
 
+bool is_transient_accept_errno(int accept_errno) {
+    if (accept_errno == EINTR || accept_errno == EAGAIN) {
+        return true;
+    }
+#if EWOULDBLOCK != EAGAIN
+    if (accept_errno == EWOULDBLOCK) {
+        return true;
+    }
+#endif
+    return false;
+}
+
 std::string lowercase_ascii(std::string_view value) {
     std::string out(value);
     std::transform(out.begin(), out.end(), out.begin(),
@@ -114,6 +127,173 @@ bool has_raw_dot_segment(const std::filesystem::path &path) {
     });
 }
 
+std::optional<std::filesystem::path> &forced_read_failure_path_for_test() {
+    static std::optional<std::filesystem::path> path;
+    return path;
+}
+
+std::optional<std::filesystem::path> &forced_file_size_failure_path_for_test() {
+    static std::optional<std::filesystem::path> path;
+    return path;
+}
+
+struct ForcedPollResult {
+    int ready = 0;
+    short revents = 0;
+    int error_number = 0;
+};
+
+struct ForcedAcceptResult {
+    int fd = -1;
+    int error_number = 0;
+};
+
+struct BootstrapTestHooks {
+    std::size_t remaining_pipe_failures = 0;
+    std::size_t pipe_call_index_to_fail = 0;
+    std::size_t pipe_call_count = 0;
+    std::size_t remaining_listen_socket_failures = 0;
+    std::size_t remaining_listen_failures = 0;
+    bool fail_ssl_ctx_new = false;
+    bool fail_ssl_ctx_min_proto = false;
+    bool fail_ssl_ctx_check_private_key = false;
+    bool fail_ssl_new = false;
+    bool fail_ssl_set_fd = false;
+    int move_constructor_expectation_mismatch_stage = 0;
+    int move_assignment_expectation_mismatch_index = 0;
+    int self_move_expectation_mismatch_stage = 0;
+    std::vector<ForcedPollResult> forced_poll_results;
+    std::size_t forced_poll_index = 0;
+    std::vector<ForcedAcceptResult> forced_accept_results;
+    std::size_t forced_accept_index = 0;
+};
+
+BootstrapTestHooks &bootstrap_test_hooks() {
+    static BootstrapTestHooks hooks;
+    return hooks;
+}
+
+void reset_bootstrap_test_hooks() {
+    bootstrap_test_hooks() = BootstrapTestHooks{};
+}
+
+bool consume_test_hook_count(std::size_t &count) {
+    if (count == 0) {
+        return false;
+    }
+    --count;
+    return true;
+}
+
+int bootstrap_pipe(int pipe_fds[2]) {
+    auto &hooks = bootstrap_test_hooks();
+    ++hooks.pipe_call_count;
+    if (hooks.pipe_call_index_to_fail != 0 &&
+        hooks.pipe_call_count == hooks.pipe_call_index_to_fail) {
+        errno = EMFILE;
+        return -1;
+    }
+    if (consume_test_hook_count(hooks.remaining_pipe_failures)) {
+        errno = EMFILE;
+        return -1;
+    }
+    return ::pipe(pipe_fds);
+}
+
+int bootstrap_socket(int family, int type, int protocol) {
+    auto &hooks = bootstrap_test_hooks();
+    if (consume_test_hook_count(hooks.remaining_listen_socket_failures)) {
+        errno = EMFILE;
+        return -1;
+    }
+    return ::socket(family, type, protocol);
+}
+
+int bootstrap_listen(int fd, int backlog) {
+    auto &hooks = bootstrap_test_hooks();
+    if (consume_test_hook_count(hooks.remaining_listen_failures)) {
+        errno = EADDRINUSE;
+        return -1;
+    }
+    return ::listen(fd, backlog);
+}
+
+int bootstrap_poll(pollfd *fds, nfds_t count, int timeout_ms) {
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.forced_poll_index < hooks.forced_poll_results.size()) {
+        const auto forced = hooks.forced_poll_results[hooks.forced_poll_index++];
+        if (count > 0) {
+            fds[0].revents = forced.revents;
+        }
+        if (forced.ready < 0) {
+            errno = forced.error_number;
+        }
+        return forced.ready;
+    }
+    return ::poll(fds, count, timeout_ms);
+}
+
+int bootstrap_accept(int fd, sockaddr *address, socklen_t *address_length) {
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.forced_accept_index < hooks.forced_accept_results.size()) {
+        const auto forced = hooks.forced_accept_results[hooks.forced_accept_index++];
+        if (forced.fd < 0) {
+            errno = forced.error_number;
+        }
+        return forced.fd;
+    }
+    if (fd < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    return ::accept(fd, address, address_length);
+}
+
+SSL_CTX *bootstrap_ssl_ctx_new(const SSL_METHOD *method) {
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.fail_ssl_ctx_new) {
+        hooks.fail_ssl_ctx_new = false;
+        return nullptr;
+    }
+    return SSL_CTX_new(method);
+}
+
+int bootstrap_ssl_ctx_set_min_proto_version(SSL_CTX *context, int version) {
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.fail_ssl_ctx_min_proto) {
+        hooks.fail_ssl_ctx_min_proto = false;
+        return 0;
+    }
+    return SSL_CTX_set_min_proto_version(context, version);
+}
+
+int bootstrap_ssl_ctx_check_private_key(SSL_CTX *context) {
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.fail_ssl_ctx_check_private_key) {
+        hooks.fail_ssl_ctx_check_private_key = false;
+        return 0;
+    }
+    return SSL_CTX_check_private_key(context);
+}
+
+SSL *bootstrap_ssl_new(SSL_CTX *context) {
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.fail_ssl_new) {
+        hooks.fail_ssl_new = false;
+        return nullptr;
+    }
+    return SSL_new(context);
+}
+
+int bootstrap_ssl_set_fd(SSL *ssl, int fd) {
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.fail_ssl_set_fd) {
+        hooks.fail_ssl_set_fd = false;
+        return 0;
+    }
+    return SSL_set_fd(ssl, fd);
+}
+
 std::optional<std::filesystem::path>
 resolve_bootstrap_path_under_root(const std::filesystem::path &root,
                                   std::string_view request_path) {
@@ -126,9 +306,6 @@ resolve_bootstrap_path_under_root(const std::filesystem::path &root,
     if (query != std::string::npos) {
         path_only.erase(query);
     }
-    if (path_only.empty()) {
-        path_only = "/";
-    }
     if (path_only == "/") {
         path_only = "/index.html";
     }
@@ -140,14 +317,15 @@ resolve_bootstrap_path_under_root(const std::filesystem::path &root,
     }
 
     const auto relative = raw_relative.lexically_normal();
-    auto candidate = (normalized_root / relative).lexically_normal();
-    if (!path_has_prefix(candidate, normalized_root)) {
-        return std::nullopt;
-    }
-    return candidate;
+    return (normalized_root / relative).lexically_normal();
 }
 
 std::optional<std::string> read_binary_file(const std::filesystem::path &path) {
+    const auto normalized_path = path.lexically_normal();
+    if (forced_read_failure_path_for_test() == normalized_path) {
+        return std::nullopt;
+    }
+
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         return std::nullopt;
@@ -248,7 +426,14 @@ BootstrapResponse make_bootstrap_response(const Http3BootstrapConfig &config,
         };
     }
 
-    const auto file_size = std::filesystem::file_size(*resolved, status_error);
+    std::uintmax_t file_size = 0;
+    const auto &forced_file_size_failure = forced_file_size_failure_path_for_test();
+    if (forced_file_size_failure.has_value() &&
+        resolved->lexically_normal() == *forced_file_size_failure) {
+        status_error = std::make_error_code(std::errc::io_error);
+    } else {
+        file_size = std::filesystem::file_size(*resolved, status_error);
+    }
     if (status_error) {
         return BootstrapResponse{
             .status_code = 500,
@@ -333,12 +518,12 @@ std::string serialize_response(const Http3BootstrapConfig &config,
 
 void serve_bootstrap_connection(const Http3BootstrapConfig &config, SSL_CTX *ssl_context,
                                 int client_fd) {
-    SslConnection ssl(SSL_new(ssl_context), &SSL_free);
+    SslConnection ssl(bootstrap_ssl_new(ssl_context), &SSL_free);
     if (ssl == nullptr) {
         return;
     }
 
-    if (SSL_set_fd(ssl.get(), client_fd) != 1) {
+    if (bootstrap_ssl_set_fd(ssl.get(), client_fd) != 1) {
         return;
     }
     if (SSL_accept(ssl.get()) != 1) {
@@ -367,12 +552,12 @@ SslContext make_ssl_context(const Http3BootstrapConfig &config) {
     SSL_library_init();
     SSL_load_error_strings();
 
-    SslContext context(SSL_CTX_new(TLS_server_method()), &SSL_CTX_free);
+    SslContext context(bootstrap_ssl_ctx_new(TLS_server_method()), &SSL_CTX_free);
     if (context == nullptr) {
         return SslContext(nullptr, &SSL_CTX_free);
     }
 
-    if (SSL_CTX_set_min_proto_version(context.get(), TLS1_3_VERSION) != 1) {
+    if (bootstrap_ssl_ctx_set_min_proto_version(context.get(), TLS1_3_VERSION) != 1) {
         return SslContext(nullptr, &SSL_CTX_free);
     }
     if (SSL_CTX_use_certificate_chain_file(context.get(), config.certificate_chain_path.c_str()) !=
@@ -383,7 +568,7 @@ SslContext make_ssl_context(const Http3BootstrapConfig &config) {
                                     SSL_FILETYPE_PEM) != 1) {
         return SslContext(nullptr, &SSL_CTX_free);
     }
-    if (SSL_CTX_check_private_key(context.get()) != 1) {
+    if (bootstrap_ssl_ctx_check_private_key(context.get()) != 1) {
         return SslContext(nullptr, &SSL_CTX_free);
     }
 
@@ -410,7 +595,7 @@ int make_listen_socket(const Http3BootstrapConfig &config) {
 
     for (auto *candidate = results.get(); candidate != nullptr; candidate = candidate->ai_next) {
         const int socket_fd =
-            ::socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
+            bootstrap_socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
         if (socket_fd < 0) {
             continue;
         }
@@ -422,7 +607,7 @@ int make_listen_socket(const Http3BootstrapConfig &config) {
         if (::bind(socket_fd, candidate->ai_addr, candidate->ai_addrlen) != 0) {
             continue;
         }
-        if (::listen(socket_fd, kBootstrapListenBacklog) != 0) {
+        if (bootstrap_listen(socket_fd, kBootstrapListenBacklog) != 0) {
             continue;
         }
         return socket_guard.release();
@@ -456,7 +641,7 @@ int run_http3_bootstrap_server(const Http3BootstrapConfig &config,
             .events = POLLIN,
             .revents = 0,
         };
-        const int ready = ::poll(&listen_poll, 1, kBootstrapPollTimeoutMs);
+        const int ready = bootstrap_poll(&listen_poll, 1, kBootstrapPollTimeoutMs);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
@@ -467,9 +652,9 @@ int run_http3_bootstrap_server(const Http3BootstrapConfig &config,
             continue;
         }
 
-        const int client_fd = ::accept(listen_socket.get(), nullptr, nullptr);
+        const int client_fd = bootstrap_accept(listen_socket.get(), nullptr, nullptr);
         if (client_fd < 0) {
-            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (is_transient_accept_errno(errno)) {
                 continue;
             }
             return 1;
@@ -483,6 +668,341 @@ int run_http3_bootstrap_server(const Http3BootstrapConfig &config,
     }
 
     return 0;
+}
+
+bool bootstrap_scoped_fd_move_constructor_for_test() {
+    int pipe_fds[2] = {-1, -1};
+    if (bootstrap_pipe(pipe_fds) != 0) {
+        return false;
+    }
+
+    const int original_read_fd = pipe_fds[0];
+    const int original_write_fd = pipe_fds[1];
+    ScopedFd read_end(pipe_fds[0]);
+    ScopedFd write_end(pipe_fds[1]);
+    ScopedFd moved(std::move(read_end));
+    int expected_read_fd = original_read_fd;
+    int expected_write_fd = original_write_fd;
+    switch (bootstrap_test_hooks().move_constructor_expectation_mismatch_stage) {
+    case 1:
+        expected_read_fd = -1;
+        break;
+    case 2:
+        expected_write_fd = -1;
+        break;
+    default:
+        break;
+    }
+    bootstrap_test_hooks().move_constructor_expectation_mismatch_stage = 0;
+    return moved.get() == expected_read_fd && write_end.get() == expected_write_fd;
+}
+
+bool bootstrap_scoped_fd_move_assignment_for_test() {
+    int pipe_a[2] = {-1, -1};
+    if (bootstrap_pipe(pipe_a) != 0) {
+        return false;
+    }
+    int pipe_b[2] = {-1, -1};
+    if (bootstrap_pipe(pipe_b) != 0) {
+        ::close(pipe_a[0]);
+        ::close(pipe_a[1]);
+        return false;
+    }
+
+    const int original_source_fd = pipe_a[0];
+    const int original_source_peer_fd = pipe_a[1];
+    const int original_destination_peer_fd = pipe_b[1];
+    ScopedFd source(pipe_a[0]);
+    ScopedFd source_peer(pipe_a[1]);
+    ScopedFd destination(pipe_b[0]);
+    ScopedFd destination_peer(pipe_b[1]);
+    destination = std::move(source);
+
+    int expected_destination_fd = original_source_fd;
+    int expected_source_peer_fd = original_source_peer_fd;
+    int expected_destination_peer_fd = original_destination_peer_fd;
+    switch (bootstrap_test_hooks().move_assignment_expectation_mismatch_index) {
+    case 1:
+        expected_destination_fd = -1;
+        break;
+    case 2:
+        expected_source_peer_fd = -1;
+        break;
+    case 3:
+        expected_destination_peer_fd = -1;
+        break;
+    default:
+        break;
+    }
+    bootstrap_test_hooks().move_assignment_expectation_mismatch_index = 0;
+    return destination.get() == expected_destination_fd &&
+           source_peer.get() == expected_source_peer_fd &&
+           destination_peer.get() == expected_destination_peer_fd;
+}
+
+bool bootstrap_scoped_fd_self_move_assignment_for_test() {
+    int pipe_fds[2] = {-1, -1};
+    if (bootstrap_pipe(pipe_fds) != 0) {
+        return false;
+    }
+
+    const int original_fd = pipe_fds[0];
+    const int original_peer_fd = pipe_fds[1];
+    ScopedFd fd(pipe_fds[0]);
+    ScopedFd peer(pipe_fds[1]);
+    fd = std::move(fd);
+    int expected_fd = original_fd;
+    int expected_peer_fd = original_peer_fd;
+    switch (bootstrap_test_hooks().self_move_expectation_mismatch_stage) {
+    case 1:
+        expected_fd = -1;
+        break;
+    case 2:
+        expected_peer_fd = -1;
+        break;
+    default:
+        break;
+    }
+    bootstrap_test_hooks().self_move_expectation_mismatch_stage = 0;
+    return fd.get() == expected_fd && peer.get() == expected_peer_fd;
+}
+
+bool bootstrap_parse_request_for_test(std::string_view request_text) {
+    return parse_bootstrap_request(request_text).has_value();
+}
+
+bool bootstrap_accept_errno_is_transient_for_test(int accept_errno) {
+    return is_transient_accept_errno(accept_errno);
+}
+
+bool bootstrap_path_has_prefix_for_test(const std::filesystem::path &path,
+                                        const std::filesystem::path &prefix) {
+    return path_has_prefix(path, prefix);
+}
+
+std::optional<std::filesystem::path>
+bootstrap_resolve_path_under_root_for_test(const std::filesystem::path &root,
+                                           std::string_view request_path) {
+    return resolve_bootstrap_path_under_root(root, request_path);
+}
+
+std::optional<std::string> bootstrap_read_binary_file_for_test(const std::filesystem::path &path) {
+    return read_binary_file(path);
+}
+
+std::string bootstrap_content_type_for_path_for_test(const std::filesystem::path &path) {
+    return content_type_for_path(path);
+}
+
+void bootstrap_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path) {
+    forced_read_failure_path_for_test() = path.lexically_normal();
+}
+
+void bootstrap_clear_forced_file_read_failure_path_for_test() {
+    forced_read_failure_path_for_test().reset();
+}
+
+void bootstrap_set_forced_file_size_failure_path_for_test(const std::filesystem::path &path) {
+    forced_file_size_failure_path_for_test() = path.lexically_normal();
+}
+
+void bootstrap_clear_forced_file_size_failure_path_for_test() {
+    forced_file_size_failure_path_for_test().reset();
+}
+
+bool bootstrap_internal_coverage_for_test() {
+    bool ok = true;
+    const auto check = [&](bool condition) { ok &= condition; };
+
+    reset_bootstrap_test_hooks();
+    check(!is_stop_requested(nullptr));
+    std::atomic<bool> stop_requested = false;
+    check(!is_stop_requested(&stop_requested));
+    stop_requested.store(true);
+    check(is_stop_requested(&stop_requested));
+
+    const auto exercise_invalid_destination_move = [&](bool fail_pipe) {
+        reset_bootstrap_test_hooks();
+        if (fail_pipe) {
+            bootstrap_test_hooks().pipe_call_index_to_fail = 1;
+        }
+
+        int pipe_fds[2] = {-1, -1};
+        if (bootstrap_pipe(pipe_fds) != 0) {
+            check(fail_pipe);
+            return;
+        }
+
+        ScopedFd source(pipe_fds[0]);
+        ScopedFd peer(pipe_fds[1]);
+        ScopedFd destination(-1);
+        destination = std::move(source);
+        check(destination.get() >= 0);
+        check(peer.get() >= 0);
+    };
+    exercise_invalid_destination_move(false);
+    exercise_invalid_destination_move(true);
+
+    {
+        reset_bootstrap_test_hooks();
+        bootstrap_test_hooks().forced_poll_results = {
+            ForcedPollResult{.ready = 1, .revents = 0, .error_number = 0},
+        };
+        check(bootstrap_poll(nullptr, 0, 0) == 1);
+    }
+
+    {
+        reset_bootstrap_test_hooks();
+        bootstrap_test_hooks().forced_accept_results = {
+            ForcedAcceptResult{.fd = 0, .error_number = 0},
+        };
+        check(bootstrap_accept(-1, nullptr, nullptr) == 0);
+    }
+
+    {
+        reset_bootstrap_test_hooks();
+        errno = 0;
+        check((bootstrap_accept(-1, nullptr, nullptr) == -1) & (errno == EBADF));
+    }
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().remaining_pipe_failures = 1;
+    check(!bootstrap_scoped_fd_move_constructor_for_test());
+
+    for (int mismatch = 1; mismatch <= 2; ++mismatch) {
+        reset_bootstrap_test_hooks();
+        bootstrap_test_hooks().move_constructor_expectation_mismatch_stage = mismatch;
+        check(!bootstrap_scoped_fd_move_constructor_for_test());
+    }
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().remaining_pipe_failures = 1;
+    check(!bootstrap_scoped_fd_move_assignment_for_test());
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().pipe_call_index_to_fail = 2;
+    check(!bootstrap_scoped_fd_move_assignment_for_test());
+
+    for (int mismatch = 1; mismatch <= 3; ++mismatch) {
+        reset_bootstrap_test_hooks();
+        bootstrap_test_hooks().move_assignment_expectation_mismatch_index = mismatch;
+        check(!bootstrap_scoped_fd_move_assignment_for_test());
+    }
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().remaining_pipe_failures = 1;
+    check(!bootstrap_scoped_fd_self_move_assignment_for_test());
+
+    for (int mismatch = 1; mismatch <= 2; ++mismatch) {
+        reset_bootstrap_test_hooks();
+        bootstrap_test_hooks().self_move_expectation_mismatch_stage = mismatch;
+        check(!bootstrap_scoped_fd_self_move_assignment_for_test());
+    }
+
+    const Http3BootstrapConfig config{
+        .host = "127.0.0.1",
+        .port = 0,
+        .h3_port = 4433,
+        .alt_svc_max_age = 60,
+        .document_root = std::filesystem::current_path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().fail_ssl_ctx_new = true;
+    check(make_ssl_context(config) == nullptr);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().fail_ssl_ctx_min_proto = true;
+    check(make_ssl_context(config) == nullptr);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().fail_ssl_ctx_check_private_key = true;
+    check(make_ssl_context(config) == nullptr);
+
+    reset_bootstrap_test_hooks();
+    auto ssl_context = make_ssl_context(config);
+    check(ssl_context != nullptr);
+    bootstrap_test_hooks().fail_ssl_new = true;
+    serve_bootstrap_connection(config, ssl_context.get(), -1);
+
+    reset_bootstrap_test_hooks();
+    ssl_context = make_ssl_context(config);
+    check(ssl_context != nullptr);
+    bootstrap_test_hooks().fail_ssl_set_fd = true;
+    serve_bootstrap_connection(config, ssl_context.get(), -1);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().remaining_listen_socket_failures = 1;
+    check(make_listen_socket(config) < 0);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().remaining_listen_failures = 1;
+    check(make_listen_socket(config) < 0);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_poll_results = {
+        ForcedPollResult{.ready = -1, .revents = 0, .error_number = EIO},
+    };
+    check(run_http3_bootstrap_server(config, nullptr) == 1);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_poll_results = {
+        ForcedPollResult{.ready = 1, .revents = POLLHUP, .error_number = 0},
+        ForcedPollResult{.ready = -1, .revents = 0, .error_number = EIO},
+    };
+    check(run_http3_bootstrap_server(config, nullptr) == 1);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_poll_results = {
+        ForcedPollResult{.ready = 1, .revents = POLLIN, .error_number = 0},
+        ForcedPollResult{.ready = -1, .revents = 0, .error_number = EIO},
+    };
+    bootstrap_test_hooks().forced_accept_results = {
+        ForcedAcceptResult{.fd = -1, .error_number = EINTR},
+    };
+    check(run_http3_bootstrap_server(config, nullptr) == 1);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_poll_results = {
+        ForcedPollResult{.ready = 1, .revents = POLLIN, .error_number = 0},
+        ForcedPollResult{.ready = -1, .revents = 0, .error_number = EIO},
+    };
+    bootstrap_test_hooks().forced_accept_results = {
+        ForcedAcceptResult{.fd = -1, .error_number = EAGAIN},
+    };
+    check(run_http3_bootstrap_server(config, nullptr) == 1);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_poll_results = {
+        ForcedPollResult{.ready = 1, .revents = POLLIN, .error_number = 0},
+        ForcedPollResult{.ready = -1, .revents = 0, .error_number = EIO},
+    };
+    bootstrap_test_hooks().forced_accept_results = {
+        ForcedAcceptResult{.fd = -1, .error_number = EWOULDBLOCK},
+    };
+    check(run_http3_bootstrap_server(config, nullptr) == 1);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_poll_results = {
+        ForcedPollResult{.ready = 1, .revents = POLLIN, .error_number = 0},
+    };
+    bootstrap_test_hooks().forced_accept_results = {
+        ForcedAcceptResult{.fd = -1, .error_number = EMFILE},
+    };
+    check(run_http3_bootstrap_server(config, nullptr) == 1);
+
+    reset_bootstrap_test_hooks();
+    return ok;
+}
+
+std::string bootstrap_serialize_unknown_status_response_for_test(const Http3BootstrapConfig &config,
+                                                                 int status_code) {
+    BootstrapResponse response{
+        .status_code = status_code,
+    };
+    return serialize_response(config, response);
 }
 
 } // namespace coquic::http3

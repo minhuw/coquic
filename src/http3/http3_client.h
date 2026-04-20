@@ -11,6 +11,8 @@
 
 namespace coquic::http3 {
 
+struct Http3ClientEndpointTestAccess;
+
 struct Http3ClientConfig {
     Http3SettingsSnapshot local_settings;
 };
@@ -48,6 +50,8 @@ class Http3ClientEndpoint {
     bool has_failed() const;
 
   private:
+    friend struct Http3ClientEndpointTestAccess;
+
     struct PendingRequest {
         std::uint64_t stream_id = 0;
         Http3Request request;

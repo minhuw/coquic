@@ -100,6 +100,48 @@ TEST(QuicHttp09RuntimeTest, RuntimeInternalCoverageHooksExerciseRemainingBranche
     EXPECT_TRUE(covered) << stderr_output;
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeParserAndUtilityCoverageHookExercisesColdPaths) {
+    testing::internal::CaptureStderr();
+    const bool covered = coquic::http09::test::runtime_parser_and_utility_coverage_for_tests();
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(covered) << stderr_output;
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeRetryAndProbeCoverageHookExercisesColdPaths) {
+    testing::internal::CaptureStderr();
+    const bool covered = coquic::http09::test::runtime_retry_and_probe_coverage_for_tests();
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(covered) << stderr_output;
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeRoutingAndDriverCoverageHookExercisesColdPaths) {
+    testing::internal::CaptureStderr();
+    const bool covered = coquic::http09::test::runtime_routing_and_driver_coverage_for_tests();
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(covered) << stderr_output;
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeServerEndpointDriverCoverageHookExercisesColdPaths) {
+    testing::internal::CaptureStderr();
+    const bool covered = coquic::http09::test::runtime_server_endpoint_driver_coverage_for_tests();
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(covered) << stderr_output;
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeServerLoopAndTraceCoverageHookExercisesColdPaths) {
+    testing::internal::CaptureStderr();
+    const bool covered = coquic::http09::test::runtime_server_loop_and_trace_coverage_for_tests();
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(covered) << stderr_output;
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimeWaitAndReceiveCoverageHookExercisesColdPaths) {
+    testing::internal::CaptureStderr();
+    const bool covered = coquic::http09::test::runtime_wait_and_receive_coverage_for_tests();
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(covered) << stderr_output;
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeRestartFailureHooksExerciseRestartFailures) {
     EXPECT_TRUE(coquic::http09::test::runtime_restart_failure_paths_for_tests());
 }

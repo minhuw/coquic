@@ -1030,16 +1030,18 @@ class TlsAdapter::Impl {
     }
 
     void update_runtime_status() {
-        if (ssl_ != nullptr) {
-            const uint8_t *selected = nullptr;
-            unsigned selected_len = 0;
-            SSL_get0_alpn_selected(ssl_.get(), &selected, &selected_len);
-            const unsigned safe_selected_len = selected != nullptr ? selected_len : 0;
-            if (safe_selected_len != 0) {
-                selected_application_protocol_ = std::vector<std::byte>(
-                    reinterpret_cast<const std::byte *>(selected),
-                    reinterpret_cast<const std::byte *>(selected + safe_selected_len));
-            }
+        if (ssl_ == nullptr) {
+            return;
+        }
+
+        const uint8_t *selected = nullptr;
+        unsigned selected_len = 0;
+        SSL_get0_alpn_selected(ssl_.get(), &selected, &selected_len);
+        const unsigned safe_selected_len = selected != nullptr ? selected_len : 0;
+        if (safe_selected_len != 0) {
+            selected_application_protocol_ = std::vector<std::byte>(
+                reinterpret_cast<const std::byte *>(selected),
+                reinterpret_cast<const std::byte *>(selected + safe_selected_len));
         }
         update_early_data_status();
         update_resumed_resumption_state();
@@ -1075,8 +1077,13 @@ class TlsAdapter::Impl {
     }
 
     void update_resumed_resumption_state() {
-        if (ssl_ == nullptr || resumed_resumption_state_.has_value() ||
-            SSL_session_reused(ssl_.get()) != 1) {
+        if (ssl_ == nullptr) {
+            return;
+        }
+        if (resumed_resumption_state_.has_value()) {
+            return;
+        }
+        if (SSL_session_reused(ssl_.get()) != 1) {
             return;
         }
 
@@ -1474,6 +1481,14 @@ void TlsAdapterTestPeer::update_runtime_status(TlsAdapter &adapter) {
     adapter.impl_->update_runtime_status();
 }
 
+void TlsAdapterTestPeer::update_early_data_status(TlsAdapter &adapter) {
+    adapter.impl_->update_early_data_status();
+}
+
+void TlsAdapterTestPeer::update_resumed_resumption_state(TlsAdapter &adapter) {
+    adapter.impl_->update_resumed_resumption_state();
+}
+
 void TlsAdapterTestPeer::set_early_data_attempted(TlsAdapter &adapter, bool attempted) {
     adapter.impl_->early_data_attempted_ = attempted;
 }
@@ -1481,6 +1496,53 @@ void TlsAdapterTestPeer::set_early_data_attempted(TlsAdapter &adapter, bool atte
 void TlsAdapterTestPeer::apply_early_data_status(TlsAdapter &adapter, int early_data_status,
                                                  bool handshake_complete) {
     adapter.impl_->update_early_data_status_value(early_data_status, handshake_complete);
+}
+
+bool TlsAdapterTestPeer::internal_coverage_for_tests() {
+    const auto make_client_config = [] {
+        return TlsAdapterConfig{
+            .role = EndpointRole::client,
+            .verify_peer = false,
+            .server_name = "localhost",
+            .local_transport_parameters =
+                {
+                    std::byte{0x0f},
+                    std::byte{0x04},
+                    std::byte{0x03},
+                    std::byte{0x02},
+                    std::byte{0x01},
+                    std::byte{0x00},
+                    std::byte{0x0e},
+                    std::byte{0x01},
+                    std::byte{0x02},
+                },
+        };
+    };
+
+    TlsAdapter handshake_adapter(make_client_config());
+    const bool started = handshake_adapter.start().has_value();
+
+    bool handshake_failed_with_fault = false;
+    {
+        const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::drive_handshake);
+        handshake_failed_with_fault = !handshake_adapter.impl_->drive_handshake().has_value();
+    }
+    const CodecError observed_sticky_error =
+        handshake_adapter.impl_->sticky_error_.value_or(CodecError{
+            .code = CodecErrorCode::unsupported_cipher_suite,
+            .offset = 0,
+        });
+    const bool sticky_error_matches =
+        observed_sticky_error.code == CodecErrorCode::invalid_packet_protection_state;
+
+    TlsAdapter null_ssl_adapter(make_client_config());
+    null_ssl_adapter.impl_->ssl_.reset();
+    null_ssl_adapter.impl_->update_runtime_status();
+    const bool selected_protocol_unset =
+        !null_ssl_adapter.impl_->selected_application_protocol_.has_value();
+    const bool early_data_unset = !null_ssl_adapter.impl_->early_data_accepted_.has_value();
+    return started & handshake_failed_with_fault & sticky_error_matches & selected_protocol_unset &
+           early_data_unset;
 }
 
 } // namespace test

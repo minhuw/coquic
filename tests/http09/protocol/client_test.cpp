@@ -28,6 +28,98 @@ using coquic::quic::QuicCoreSendStreamData;
 using coquic::quic::QuicCoreStateChange;
 using coquic::quic::QuicCoreStateEvent;
 
+bool http09_client_internal_coverage_for_tests();
+
+bool http09_client_internal_coverage_for_tests() {
+    const auto make_request = [](std::string target) {
+        const auto path = std::filesystem::path(target).relative_path();
+        return QuicHttp09Request{
+            .url = std::string("https://example.test") + target,
+            .authority = "example.test",
+            .request_target = std::move(target),
+            .relative_output_path = path,
+        };
+    };
+    QuicHttp09ClientEndpoint blocked_endpoint(QuicHttp09ClientConfig{
+        .requests =
+            {
+                make_request("/alpha.txt"),
+                make_request("/beta.txt"),
+                make_request("/gamma.txt"),
+            },
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    blocked_endpoint.pending_open_requests_.push_back(QuicHttp09ClientEndpoint::PendingOpenRequest{
+        .request_index = 0,
+        .stream_id = 0,
+    });
+    blocked_endpoint.pending_open_requests_.push_back(QuicHttp09ClientEndpoint::PendingOpenRequest{
+        .request_index = 1,
+        .stream_id = 4,
+    });
+    blocked_endpoint.pending_open_requests_.push_back(QuicHttp09ClientEndpoint::PendingOpenRequest{
+        .request_index = 2,
+        .stream_id = 8,
+    });
+
+    if (!blocked_endpoint.handle_local_error(coquic::quic::QuicCoreLocalError{
+            .code = QuicCoreLocalErrorCode::invalid_stream_id,
+            .stream_id = 8,
+        }) ||
+        blocked_endpoint.request_streams_.size() != 2 ||
+        blocked_endpoint.request_streams_.count(0) != 1 ||
+        blocked_endpoint.request_streams_.count(4) != 1 ||
+        blocked_endpoint.pending_open_requests_.size() != 0 ||
+        blocked_endpoint.retry_open_requests_.size() != 1 ||
+        blocked_endpoint.retry_open_requests_.front().stream_id != 8 ||
+        !blocked_endpoint.max_concurrent_requests_.has_value() ||
+        *blocked_endpoint.max_concurrent_requests_ != 2 ||
+        !blocked_endpoint.blocked_on_stream_limit_) {
+        return false;
+    }
+
+    QuicHttp09ClientEndpoint exhausted_endpoint(QuicHttp09ClientConfig{
+        .requests = {make_request("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    exhausted_endpoint.next_request_index_ = exhausted_endpoint.config_.requests.size();
+    if (exhausted_endpoint.take_next_request_to_issue().has_value()) {
+        return false;
+    }
+
+    QuicHttp09ClientEndpoint pending_completion_endpoint(QuicHttp09ClientConfig{
+        .requests = {make_request("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    pending_completion_endpoint.next_request_index_ =
+        pending_completion_endpoint.config_.requests.size();
+    pending_completion_endpoint.pending_open_requests_.push_back(
+        QuicHttp09ClientEndpoint::PendingOpenRequest{
+            .request_index = 0,
+            .stream_id = 0,
+        });
+    const auto pending_completion = pending_completion_endpoint.on_core_result(
+        QuicCoreResult{}, coquic::quic::test::test_time());
+    if (pending_completion.terminal_success || pending_completion_endpoint.complete_) {
+        return false;
+    }
+
+    QuicHttp09ClientEndpoint active_completion_endpoint(QuicHttp09ClientConfig{
+        .requests = {make_request("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    active_completion_endpoint.next_request_index_ =
+        active_completion_endpoint.config_.requests.size();
+    active_completion_endpoint.request_streams_.insert_or_assign(
+        0, QuicHttp09ClientEndpoint::RequestState{
+               .request_target = "/alpha.txt",
+               .complete = false,
+           });
+    const auto active_completion = active_completion_endpoint.on_core_result(
+        QuicCoreResult{}, coquic::quic::test::test_time());
+    return !active_completion.terminal_success && !active_completion_endpoint.complete_;
+}
+
 QuicCoreResult handshake_ready_result() {
     QuicCoreResult result;
     result.effects.push_back(QuicCoreEffect{
@@ -604,6 +696,10 @@ TEST(QuicHttp09ClientTest, HandleLocalErrorRejectsMismatchedPendingOpenStreamId)
     }));
     EXPECT_FALSE(endpoint.pending_open_requests_.empty());
     EXPECT_FALSE(endpoint.blocked_on_stream_limit_);
+}
+
+TEST(QuicHttp09ClientTest, InternalCoverageHelperExercisesPendingActivationAndExhaustedRequests) {
+    EXPECT_TRUE(http09_client_internal_coverage_for_tests());
 }
 
 TEST(QuicHttp09ClientTest, ActivatePendingRequestWithoutPendingOpenRequestIsNoOp) {

@@ -2,6 +2,7 @@
 #include "src/http3/http3_demo_routes.h"
 
 #include <limits>
+#include <string>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -16,6 +17,74 @@ Http3ServerEndpointUpdate make_failure_update(bool handled_local_error = false) 
     return Http3ServerEndpointUpdate{
         .terminal_failure = true,
         .handled_local_error = handled_local_error,
+    };
+}
+
+std::vector<Http3Field> request_fields_for_test(const Http3RequestHead &head) {
+    std::vector<Http3Field> fields;
+    fields.reserve(head.headers.size() + 5u);
+    fields.push_back(Http3Field{
+        .name = ":method",
+        .value = head.method,
+    });
+    fields.push_back(Http3Field{
+        .name = ":scheme",
+        .value = head.scheme,
+    });
+    fields.push_back(Http3Field{
+        .name = ":authority",
+        .value = head.authority,
+    });
+    fields.push_back(Http3Field{
+        .name = ":path",
+        .value = head.path,
+    });
+    if (head.content_length.has_value()) {
+        fields.push_back(Http3Field{
+            .name = "content-length",
+            .value = std::to_string(*head.content_length),
+        });
+    }
+    fields.insert(fields.end(), head.headers.begin(), head.headers.end());
+    return fields;
+}
+
+std::vector<std::byte> request_headers_frame_for_test(const Http3RequestHead &head,
+                                                      std::uint64_t stream_id) {
+    Http3QpackEncoderContext encoder;
+    const auto encoded =
+        encode_http3_field_section(encoder, stream_id, request_fields_for_test(head)).value();
+    auto field_section = encoded.prefix;
+    field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
+    return serialize_http3_frame(Http3Frame{
+                                     Http3HeadersFrame{
+                                         .field_section = std::move(field_section),
+                                     },
+                                 })
+        .value();
+}
+
+std::vector<quic::QuicCoreSendStreamData>
+send_stream_inputs_for_test(const Http3EndpointUpdate &update) {
+    std::vector<quic::QuicCoreSendStreamData> sends;
+    sends.reserve(update.core_inputs.size());
+    for (const auto &input : update.core_inputs) {
+        sends.push_back(std::get<quic::QuicCoreSendStreamData>(input));
+    }
+    return sends;
+}
+
+Http3Response default_route_response(const Http3Request &request) {
+    if (const auto response = try_demo_route_response(request); response.has_value()) {
+        return *response;
+    }
+
+    return Http3Response{
+        .head =
+            {
+                .status = 404,
+                .content_length = 0,
+            },
     };
 }
 
@@ -385,6 +454,68 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::poll(quic::QuicCoreTimePoint now)
 
 bool Http3ServerEndpoint::has_failed() const {
     return failed_;
+}
+
+Http3ServerEndpointUpdate server_make_failure_update_for_test(bool handled_local_error) {
+    return make_failure_update(handled_local_error);
+}
+
+std::string server_append_json_escaped_for_test(std::string_view value) {
+    std::string out;
+    append_json_escaped(out, value);
+    return out;
+}
+
+std::string server_inspect_json_body_for_test(const Http3Request &request) {
+    const auto body = inspect_json_body(request);
+    return std::string(reinterpret_cast<const char *>(body.data()), body.size());
+}
+
+Http3Response server_default_route_response_for_test(const Http3Request &request) {
+    return default_route_response(request);
+}
+
+bool server_merge_connection_update_for_test(Http3ServerEndpointUpdate &out,
+                                             Http3EndpointUpdate &update) {
+    return merge_connection_update(out, update);
+}
+
+Http3Result<std::vector<quic::QuicCoreSendStreamData>>
+server_submit_response_for_test(bool prepare_request_stream, std::uint64_t stream_id,
+                                const Http3RequestHead &request_head,
+                                const Http3Response &response) {
+    Http3Connection connection(Http3ConnectionConfig{
+        .role = Http3ConnectionRole::server,
+    });
+
+    quic::QuicCoreResult handshake_ready;
+    handshake_ready.effects.push_back(quic::QuicCoreEffect{
+        quic::QuicCoreStateEvent{
+            .change = quic::QuicCoreStateChange::handshake_ready,
+        },
+    });
+    static_cast<void>(connection.on_core_result(handshake_ready, quic::QuicCoreTimePoint{}));
+
+    if (prepare_request_stream) {
+        quic::QuicCoreResult request_headers;
+        request_headers.effects.push_back(quic::QuicCoreEffect{
+            quic::QuicCoreReceiveStreamData{
+                .stream_id = stream_id,
+                .bytes = request_headers_frame_for_test(request_head, stream_id),
+                .fin = false,
+            },
+        });
+        static_cast<void>(connection.on_core_result(request_headers, quic::QuicCoreTimePoint{}));
+    }
+
+    const auto submitted = submit_response(connection, stream_id, request_head, response);
+    if (!submitted.has_value()) {
+        return Http3Result<std::vector<quic::QuicCoreSendStreamData>>::failure(submitted.error());
+    }
+
+    const auto update = connection.poll(quic::QuicCoreTimePoint{});
+    return Http3Result<std::vector<quic::QuicCoreSendStreamData>>::success(
+        send_stream_inputs_for_test(update));
 }
 
 } // namespace coquic::http3

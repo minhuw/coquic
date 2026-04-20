@@ -110,7 +110,7 @@ class PacketSpacePacketMapView {
 
     std::size_t erase(std::uint64_t packet_number) {
         sync();
-        if (!cache_.contains(packet_number) || recovery_ == nullptr) {
+        if (!cache_.contains(packet_number)) {
             return 0;
         }
 

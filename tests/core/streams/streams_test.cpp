@@ -31,6 +31,36 @@ std::vector<std::byte> bytes_from_string(std::string_view text) {
     return bytes;
 }
 
+bool stream_frame_header_cache_internal_coverage_for_tests();
+
+bool stream_frame_header_cache_internal_coverage_for_tests() {
+    coquic::quic::StreamFrameSendFragment fragment{
+        .stream_id = 9,
+        .offset = 4,
+        .bytes = bytes_from_string("hello"),
+        .fin = true,
+    };
+
+    fragment.prime_stream_frame_header_cache();
+    if (!fragment.has_cached_stream_frame_header()) {
+        return false;
+    }
+
+    fragment.stream_id = 10;
+    if (fragment.has_cached_stream_frame_header()) {
+        return false;
+    }
+
+    fragment.stream_id = 9;
+    fragment.prime_stream_frame_header_cache();
+    if (!fragment.has_cached_stream_frame_header()) {
+        return false;
+    }
+
+    fragment.fin = false;
+    return !fragment.has_cached_stream_frame_header();
+}
+
 void expect_stream_id_info(std::uint64_t stream_id, EndpointRole local_role,
                            StreamInitiator initiator, StreamDirection direction,
                            bool local_can_send, bool local_can_receive) {
@@ -242,6 +272,10 @@ TEST(QuicStreamsTest, StreamFrameHeaderCacheRefreshesAfterFragmentMutation) {
               }));
     EXPECT_TRUE(fragment.has_cached_stream_frame_header());
     EXPECT_EQ(fragment.stream_frame_wire_size(), 7u);
+}
+
+TEST(QuicStreamsTest, StreamFrameHeaderCacheDetectsStreamIdAndFinMismatches) {
+    EXPECT_TRUE(stream_frame_header_cache_internal_coverage_for_tests());
 }
 
 TEST(QuicStreamsTest, TakeSendFragmentsSupportsFinOnlySend) {

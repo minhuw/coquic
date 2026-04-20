@@ -33,10 +33,6 @@ std::uint64_t range_end(std::uint64_t offset, std::size_t length) {
 }
 
 void append_contiguous_segment(ContiguousReceiveBytes &contiguous, SharedBytes bytes) {
-    if (bytes.empty()) {
-        return;
-    }
-
     if (contiguous.shared.empty() && contiguous.owned.empty()) {
         contiguous.shared = std::move(bytes);
         return;

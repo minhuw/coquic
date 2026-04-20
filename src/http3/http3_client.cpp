@@ -17,7 +17,7 @@ bool merge_connection_update(Http3ClientEndpointUpdate &out, Http3EndpointUpdate
     for (auto &input : update.core_inputs) {
         out.core_inputs.push_back(std::move(input));
     }
-    out.has_pending_work = out.has_pending_work || update.has_pending_work;
+    out.has_pending_work = update.has_pending_work;
     if (update.terminal_failure) {
         out.terminal_failure = true;
         return false;

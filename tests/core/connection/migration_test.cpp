@@ -252,13 +252,208 @@ bool connection_additional_internal_coverage_for_tests() {
 
     {
         auto connection = make_connected_client_connection();
-        connection.current_send_path_id_ = 11;
-        connection.paths_.erase(11);
-        const std::array payload = {std::byte{0x04}};
+        connection.streams_.emplace(
+            1, coquic::quic::make_implicit_stream_state(1, connection.config_.role));
+        connection.retired_streams_.emplace(
+            3, coquic::quic::make_implicit_stream_state(3, connection.config_.role));
+        const auto *active = connection.find_stream_state(1);
+        const auto *retired = connection.find_stream_state(3);
+        const auto *missing = connection.find_stream_state(5);
+        const auto &const_connection = connection;
+        ok &= active == &connection.streams_.at(1);
+        ok &= retired == &connection.retired_streams_.at(3);
+        ok &= missing == nullptr;
+        ok &= const_connection.find_stream_state(1) == &connection.streams_.at(1);
+        ok &= const_connection.find_stream_state(3) == &connection.retired_streams_.at(3);
+        ok &= const_connection.find_stream_state(5) == nullptr;
+        connection.maybe_retire_stream(5);
+        ok &= !connection.retired_streams_.contains(5);
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        auto &stream =
+            connection.streams_
+                .emplace(3, coquic::quic::make_implicit_stream_state(3, connection.config_.role))
+                .first->second;
+        stream.peer_fin_delivered = true;
+
+        connection.maybe_refresh_peer_stream_limit(stream);
+
+        ok &= stream.peer_stream_limit_released;
+        ok &= connection.local_stream_limit_state_.max_streams_uni_state ==
+              coquic::quic::StreamControlFrameState::pending;
+        ok &= connection.local_stream_limit_state_.pending_max_streams_uni_frame.has_value();
+        ok &=
+            connection.local_stream_limit_state_.pending_max_streams_uni_frame.has_value()
+                ? connection.local_stream_limit_state_.pending_max_streams_uni_frame->stream_type ==
+                      coquic::quic::StreamLimitType::unidirectional
+                : false;
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        constexpr auto missing_handle = coquic::quic::RecoveryPacketHandle{
+            .packet_number = 999,
+            .slot_index = 999,
+        };
+        ok &= !connection.retire_acked_packet(connection.application_space_, missing_handle)
+                   .has_value();
+        ok &=
+            !connection.mark_lost_packet(connection.application_space_, missing_handle).has_value();
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.peer_transport_parameters_.reset();
+        connection.current_send_path_id_ = 7;
+        auto &current_path = connection.ensure_path_state(7);
+        current_path.validated = false;
+        current_path.is_current_send_path = true;
+        auto &inbound_path = connection.ensure_path_state(9);
+        inbound_path.validated = true;
+        const std::array frames = {
+            coquic::quic::ReceivedFrame{coquic::quic::ReceivedAckFrame{
+                .largest_acknowledged = 0,
+                .first_ack_range = 0,
+                .additional_ranges_validated = true,
+            }},
+        };
+        const auto result = connection.process_inbound_received_application(
+            frames, coquic::quic::test::test_time(0), /*allow_preconnected_frames=*/false,
+            /*path_id=*/9);
+        ok &= result.has_value() && result.value();
+        ok &= connection.current_send_path_id_ == std::optional<coquic::quic::QuicPathId>{7};
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        const auto crypto_bytes = coquic::quic::SharedBytes(bytes_from_ints({0x01, 0x02}));
+        static_cast<void>(
+            connection.application_space_.receive_crypto.push_shared(0, crypto_bytes));
+        const std::array frames = {
+            coquic::quic::ReceivedFrame{coquic::quic::ReceivedCryptoFrame{
+                .offset = 0,
+                .crypto_data = crypto_bytes,
+            }},
+        };
+        const auto result = connection.process_inbound_received_application(
+            frames, coquic::quic::test::test_time(0));
+        ok &= result.has_value() && result.value();
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        const std::array frames = {
+            coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+                .has_offset = true,
+                .stream_id = 1,
+                .offset = std::nullopt,
+                .stream_data = coquic::quic::SharedBytes(bytes_from_ints({0x0a})),
+            }},
+        };
+        const auto result = connection.process_inbound_received_application(
+            frames, coquic::quic::test::test_time(0));
+        ok &= !result.has_value();
+        ok &= !result.has_value()
+                  ? result.error().code == coquic::quic::CodecErrorCode::invalid_varint
+                  : false;
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.streams_.emplace(
+            1, coquic::quic::make_implicit_stream_state(1, connection.config_.role));
+        connection.streams_.at(1).peer_reset_received = true;
+        const std::array frames = {
+            coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+                .stream_id = 1,
+                .offset = 0,
+                .stream_data = coquic::quic::SharedBytes(bytes_from_ints({0x0b})),
+            }},
+        };
+        const auto result = connection.process_inbound_received_application(
+            frames, coquic::quic::test::test_time(0));
+        ok &= result.has_value() && result.value();
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        auto stream = coquic::quic::make_implicit_stream_state(1, connection.config_.role);
+        stream.peer_final_size = 1;
+        connection.streams_.insert_or_assign(1, stream);
+        const std::array frames = {
+            coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+                .stream_id = 1,
+                .offset = 0,
+                .stream_data = coquic::quic::SharedBytes(bytes_from_ints({0x0c, 0x0d})),
+            }},
+        };
+        const auto result = connection.process_inbound_received_application(
+            frames, coquic::quic::test::test_time(0));
+        ok &= !result.has_value();
+        ok &= !result.has_value()
+                  ? result.error().code == coquic::quic::CodecErrorCode::invalid_varint
+                  : false;
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        const std::array frames = {
+            coquic::quic::ReceivedFrame{coquic::quic::NewTokenFrame{
+                .token = bytes_from_ints({0x72, 0x74}),
+            }},
+        };
+        const auto result = connection.process_inbound_received_application(
+            frames, coquic::quic::test::test_time(0));
+        ok &= result.has_value() && result.value();
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.handshake_space_.write_secret = make_test_traffic_secret();
+        const std::array payload = {std::byte{0x05}};
         ok &= connection.queue_stream_send(0, payload, /*fin=*/false).has_value();
+        const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
+            coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_context_new);
         static_cast<void>(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)));
-        ok &= connection.current_send_path_id_ == std::optional<coquic::quic::QuicPathId>{11};
-        ok &= !connection.paths_.contains(11);
+        ok &= connection.has_failed();
+    }
+
+    {
+        auto connection = make_connected_server_connection();
+        connection.zero_rtt_space_.write_secret =
+            make_test_traffic_secret(invalid_cipher_suite(), std::byte{0x06});
+        const std::array payload = {std::byte{0x06}};
+        ok &= connection.queue_stream_send(0, payload, /*fin=*/false).has_value();
+        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        ok &= datagram.empty();
+        ok &= connection.has_failed();
+    }
+
+    {
+        auto connection = make_connected_server_connection();
+        connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+        connection.handshake_confirmed_ = false;
+        connection.peer_address_validated_ = false;
+        connection.anti_amplification_received_bytes_ = 400;
+        connection.handshake_space_.write_secret = make_test_traffic_secret(
+            coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x67});
+        connection.zero_rtt_space_.write_secret =
+            make_test_traffic_secret(invalid_cipher_suite(), std::byte{0x68});
+        connection.handshake_space_.pending_probe_packet = coquic::quic::SentPacketRecord{
+            .packet_number = 11,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+        };
+        const std::array payload = {std::byte{0x07}};
+        ok &= connection.queue_stream_send(0, payload, /*fin=*/false).has_value();
+        connection.congestion_controller_.on_packet_sent(
+            connection.congestion_controller_.congestion_window(), /*ack_eliciting=*/true);
+        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        ok &= datagram.empty();
+        ok &= connection.has_failed();
     }
 
     return ok;

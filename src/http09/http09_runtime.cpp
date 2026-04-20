@@ -1229,14 +1229,22 @@ int client_socket_fd_for_family(const ClientSocketSet &sockets, int family) {
 }
 
 std::array<int, 2> active_client_socket_fds(const ClientSocketSet &sockets) {
-    return {
+    std::array<int, 2> socket_fds{
         sockets.primary.fd,
-        sockets.secondary.has_value() ? sockets.secondary->fd : -1,
+        -1,
     };
+    if (sockets.secondary.has_value()) {
+        socket_fds[1] = sockets.secondary->fd;
+    }
+    return socket_fds;
 }
 
 std::size_t active_client_socket_count(const ClientSocketSet &sockets) {
-    return sockets.secondary.has_value() ? 2u : 1u;
+    std::size_t socket_count = 1u;
+    if (sockets.secondary.has_value()) {
+        socket_count = 2u;
+    }
+    return socket_count;
 }
 
 std::optional<int> ensure_client_socket_for_family(ClientSocketSet &sockets, int family,
@@ -1295,16 +1303,22 @@ bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
             peer = &route_it->second.peer;
             peer_len = route_it->second.peer_len;
         }
-        if (socket_fd < 0 || peer == nullptr) {
+        if (socket_fd < 0) {
+            std::cerr << "http09-" << role_name
+                      << " failed: missing fallback route for send effect\n";
+            return false;
+        }
+        if (peer == nullptr) {
             std::cerr << "http09-" << role_name
                       << " failed: missing fallback route for send effect\n";
             return false;
         }
 
         with_runtime_trace([&](std::ostream &stream) {
-            stream << "http09-" << role_name << " trace: send_effect route_handle="
-                   << (send->route_handle.has_value() ? std::to_string(*send->route_handle)
-                                                      : std::string{"-"})
+            const std::string route_handle = send->route_handle.has_value()
+                                                 ? std::to_string(*send->route_handle)
+                                                 : std::string{"-"};
+            stream << "http09-" << role_name << " trace: send_effect route_handle=" << route_handle
                    << " socket_fd=" << socket_fd << " peer_len=" << peer_len;
             stream << " peer=" << format_sockaddr_for_trace(*peer, peer_len);
             stream << " bytes=" << send->bytes.size() << '\n';
@@ -2125,17 +2139,17 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
             return 1;
         }
 
-        switch (event->kind) {
-        case QuicIoEvent::Kind::idle_timeout: {
+        if (event->kind == QuicIoEvent::Kind::idle_timeout) {
             if (state.terminal_success) {
                 return 0;
             }
             std::cerr << "http09-client failed: timed out waiting for progress\n";
             return 1;
         }
-        case QuicIoEvent::Kind::shutdown:
+        if (event->kind == QuicIoEvent::Kind::shutdown) {
             return 1;
-        case QuicIoEvent::Kind::timer_expired:
+        }
+        if (event->kind == QuicIoEvent::Kind::timer_expired) {
             if (!drive_result(core.advance(QuicCoreTimerExpired{}, event->now))) {
                 return 1;
             }
@@ -2143,24 +2157,23 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
                 ensure_terminal_success_deadline(event->now);
             }
             continue;
-        case QuicIoEvent::Kind::rx_datagram: {
-            if (!event->datagram.has_value()) {
-                return 1;
-            }
-            auto inbound = make_inbound_datagram_from_io_event(*event->datagram);
-            saw_peer_input = true;
-            if (!drive_result(core.advance(std::move(inbound), event->now))) {
-                return 1;
-            }
-            if (state.terminal_success) {
-                refresh_terminal_success_deadline_from_peer_input(event->now);
-                if (should_exit_after_terminal_success(now())) {
-                    return 0;
-                }
-            }
-            continue;
         }
+
+        if (!event->datagram.has_value()) {
+            return 1;
         }
+        auto inbound = make_inbound_datagram_from_io_event(*event->datagram);
+        saw_peer_input = true;
+        if (!drive_result(core.advance(std::move(inbound), event->now))) {
+            return 1;
+        }
+        if (state.terminal_success) {
+            refresh_terminal_success_deadline_from_peer_input(event->now);
+            if (should_exit_after_terminal_success(now())) {
+                return 0;
+            }
+        }
+        continue;
     }
 }
 
@@ -2295,7 +2308,7 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
             if (!pump_result.ok) {
                 return false;
             }
-            const bool terminal = state.terminal_success | state.terminal_failure;
+            const bool terminal = state.terminal_success || state.terminal_failure;
             if (terminal) {
                 ensure_terminal_success_deadline(io.current_time());
                 return true;
@@ -2326,7 +2339,8 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
                     return false;
                 }
                 received_datagram = true;
-                const bool terminal_after_receive = state.terminal_success | state.terminal_failure;
+                const bool terminal_after_receive =
+                    state.terminal_success || state.terminal_failure;
                 if (terminal_after_receive) {
                     refresh_terminal_success_deadline_from_peer_input(receive.step.input_time);
                     return true;
@@ -2353,8 +2367,10 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
                        << " has_next_wakeup=" << state.next_wakeup.has_value()
                        << " next_wakeup_delta_ms=" << next_wakeup_delay_ms << '\n';
             });
-            if (pump_result.advanced_core && state.endpoint_has_pending_work) {
-                continue;
+            if (pump_result.advanced_core) {
+                if (state.endpoint_has_pending_work) {
+                    continue;
+                }
             }
             return true;
         }
@@ -2439,7 +2455,9 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
         auto step_input = std::move(*step->input);
         const bool step_has_peer_input =
             std::holds_alternative<QuicCoreInboundDatagram>(step_input);
-        saw_peer_input = step_has_peer_input || saw_peer_input;
+        if (step_has_peer_input) {
+            saw_peer_input = true;
+        }
         auto step_result = core.advance(std::move(step_input), step->input_time);
         if (!drive_endpoint_until_blocked(endpoint, core, client_sockets.primary.fd, &peer,
                                           peer_len, step_result, state, "client", &config,
@@ -2642,7 +2660,10 @@ void process_expired_server_sessions(ServerSessionMap &sessions, QuicCoreTimePoi
     std::vector<std::string> failed_sessions;
     for (const auto &[local_connection_id_key, session] : sessions) {
         const auto session_next_wakeup = session->state.next_wakeup;
-        if (!session_next_wakeup.has_value() || session_next_wakeup.value() > current) {
+        if (!session_next_wakeup.has_value()) {
+            continue;
+        }
+        if (session_next_wakeup.value() > current) {
             continue;
         }
 
@@ -2653,7 +2674,7 @@ void process_expired_server_sessions(ServerSessionMap &sessions, QuicCoreTimePoi
             &session->peer, session->peer_len, timer_result, session->state, "server");
         refresh_server_session_connection_id_routes(*session, connection_id_routes);
         const bool core_failed = session->core.has_failed();
-        if (endpoint_failed | core_failed) {
+        if (endpoint_failed || core_failed) {
             with_runtime_trace([&](std::ostream &stream) {
                 stream << "http09-server trace: timer-session-failed scid="
                        << format_connection_id_key_hex(local_connection_id_key)
@@ -2690,7 +2711,7 @@ bool pump_server_pending_endpoint_work(ServerSessionMap &sessions,
         made_progress = made_progress | observed_send_effects;
         refresh_server_session_connection_id_routes(*session, connection_id_routes);
         const bool core_failed = session->core.has_failed();
-        if (endpoint_failed | core_failed) {
+        if (endpoint_failed || core_failed) {
             with_runtime_trace([&](std::ostream &stream) {
                 stream << "http09-server trace: pending-work-session-failed scid="
                        << format_connection_id_key_hex(local_connection_id_key)
@@ -2752,7 +2773,10 @@ bool result_has_connection_lifecycle(const QuicCoreResult &result, QuicConnectio
                                      QuicCoreConnectionLifecycle lifecycle) {
     return std::any_of(result.effects.begin(), result.effects.end(), [&](const auto &effect) {
         const auto *event = std::get_if<QuicCoreConnectionLifecycleEvent>(&effect);
-        return event != nullptr && event->connection == connection && event->event == lifecycle;
+        if (event == nullptr) {
+            return false;
+        }
+        return event->connection == connection && event->event == lifecycle;
     });
 }
 
@@ -2766,8 +2790,10 @@ std::vector<QuicConnectionHandle> result_connection_handles(const QuicCoreResult
         handles.push_back(connection);
     };
 
-    if (result.local_error.has_value() && result.local_error->connection.has_value()) {
-        remember(*result.local_error->connection);
+    if (result.local_error.has_value()) {
+        if (result.local_error->connection.has_value()) {
+            remember(*result.local_error->connection);
+        }
     }
     for (const auto &effect : result.effects) {
         remember(effect_connection_handle(effect));
@@ -2821,20 +2847,25 @@ void erase_closed_server_connection_endpoints(ServerConnectionEndpointMap &endpo
 }
 
 std::optional<QuicCoreConnectionInput> to_connection_command_input(const QuicCoreInput &input) {
-    return std::visit(
-        [](const auto &value) -> std::optional<QuicCoreConnectionInput> {
-            using T = std::decay_t<decltype(value)>;
-            if constexpr (std::is_same_v<T, QuicCoreSendStreamData> ||
-                          std::is_same_v<T, QuicCoreResetStream> ||
-                          std::is_same_v<T, QuicCoreStopSending> ||
-                          std::is_same_v<T, QuicCoreCloseConnection> ||
-                          std::is_same_v<T, QuicCoreRequestKeyUpdate> ||
-                          std::is_same_v<T, QuicCoreRequestConnectionMigration>) {
-                return value;
-            }
-            return std::nullopt;
-        },
-        input);
+    if (const auto *send_stream = std::get_if<QuicCoreSendStreamData>(&input)) {
+        return *send_stream;
+    }
+    if (const auto *reset_stream = std::get_if<QuicCoreResetStream>(&input)) {
+        return *reset_stream;
+    }
+    if (const auto *stop_sending = std::get_if<QuicCoreStopSending>(&input)) {
+        return *stop_sending;
+    }
+    if (const auto *close_connection = std::get_if<QuicCoreCloseConnection>(&input)) {
+        return *close_connection;
+    }
+    if (const auto *request_key_update = std::get_if<QuicCoreRequestKeyUpdate>(&input)) {
+        return *request_key_update;
+    }
+    if (const auto *request_migration = std::get_if<QuicCoreRequestConnectionMigration>(&input)) {
+        return *request_migration;
+    }
+    return std::nullopt;
 }
 
 QuicCoreResult advance_endpoint_connection_inputs(QuicCore &core, QuicConnectionHandle connection,
@@ -2896,8 +2927,10 @@ bool process_server_endpoint_core_result(QuicCore &core, EndpointDriveState &tra
             !current_result.local_error->connection.has_value()) {
             return false;
         }
-        if (observed_send_effects != nullptr && result_has_send_effects(current_result)) {
-            *observed_send_effects = true;
+        if (observed_send_effects != nullptr) {
+            if (result_has_send_effects(current_result)) {
+                *observed_send_effects = true;
+            }
         }
         if (!handle_core_effects(fallback_socket_fd, current_result, fallback_peer,
                                  fallback_peer_len, transport_state.route_routes, "server")) {
@@ -2971,8 +3004,10 @@ bool process_server_endpoint_core_result_with_backend(
             !current_result.local_error->connection.has_value()) {
             return false;
         }
-        if (observed_send_effects != nullptr && result_has_send_effects(current_result)) {
-            *observed_send_effects = true;
+        if (observed_send_effects != nullptr) {
+            if (result_has_send_effects(current_result)) {
+                *observed_send_effects = true;
+            }
         }
         if (!handle_core_effects_with_backend(fallback_route_handle, backend, current_result,
                                               "server")) {
@@ -3040,16 +3075,13 @@ bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transp
     }
 
     for (const auto connection : pending_connections) {
-        auto endpoint_it = endpoints.find(connection);
-        if (endpoint_it == endpoints.end()) {
-            continue;
-        }
+        auto &endpoint_state = endpoints.at(connection);
 
-        auto update = endpoint_it->second.endpoint.poll(now());
-        endpoint_it->second.has_pending_work = update.has_pending_work;
+        auto update = endpoint_state.endpoint.poll(now());
+        endpoint_state.has_pending_work = update.has_pending_work;
 
         if (update.terminal_failure) {
-            endpoint_it->second.has_pending_work = false;
+            endpoint_state.has_pending_work = false;
             const auto close_result = core.advance_endpoint(
                 QuicCoreConnectionCommand{
                     .connection = connection,
@@ -3099,16 +3131,13 @@ bool pump_shared_server_endpoint_work_with_backend(QuicCore &core,
     }
 
     for (const auto connection : pending_connections) {
-        auto endpoint_it = endpoints.find(connection);
-        if (endpoint_it == endpoints.end()) {
-            continue;
-        }
+        auto &endpoint_state = endpoints.at(connection);
 
-        auto update = endpoint_it->second.endpoint.poll(now());
-        endpoint_it->second.has_pending_work = update.has_pending_work;
+        auto update = endpoint_state.endpoint.poll(now());
+        endpoint_state.has_pending_work = update.has_pending_work;
 
         if (update.terminal_failure) {
-            endpoint_it->second.has_pending_work = false;
+            endpoint_state.has_pending_work = false;
             bool observed_send_effects = false;
             if (!process_server_endpoint_core_result_with_backend(
                     core, transport_state, endpoints, document_root,
@@ -3166,9 +3195,11 @@ struct ServerLoopDriver {
 struct ServerBackendLoopDriver {
     std::function<QuicCoreTimePoint()> current_time;
     std::function<std::optional<QuicCoreTimePoint>()> next_wakeup;
-    std::function<bool(QuicCoreTimePoint)> process_expired_timer;
     std::function<bool(bool &)> pump_endpoint_work;
     std::function<bool()> has_pending_endpoint_work;
+    std::function<std::optional<QuicIoEvent>()> initial_buffered_event = [] {
+        return std::optional<QuicIoEvent>{};
+    };
     std::function<std::optional<QuicIoEvent>(const std::optional<QuicCoreTimePoint> &)> wait;
     std::function<bool(QuicCoreTimePoint)> process_wait_timer;
     std::function<bool(const QuicIoRxDatagram &, QuicCoreTimePoint)> process_datagram;
@@ -3267,10 +3298,13 @@ int run_http09_server_loop(const ServerSocketSet &sockets, const ServerLoopIo &i
             continue;
         }
 
+        const bool has_preferred_socket = sockets.preferred_fd.has_value();
+        const int preferred_socket_fd = sockets.preferred_fd.value_or(-1);
+        const std::size_t socket_fd_count = has_preferred_socket ? 2u : 1u;
         auto step = io.wait_for_socket_or_deadline(
             RuntimeWaitConfig{
-                .socket_fds = {sockets.primary_fd, sockets.preferred_fd.value_or(-1)},
-                .socket_fd_count = sockets.preferred_fd.has_value() ? 2u : 1u,
+                .socket_fds = {sockets.primary_fd, preferred_socket_fd},
+                .socket_fd_count = socket_fd_count,
                 .idle_timeout_ms = kServerIdleTimeoutMs,
                 .role_name = "server",
             },
@@ -3299,7 +3333,7 @@ int run_http09_server_loop(const ServerSocketSet &sockets, const ServerLoopIo &i
 
 int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
     bool server_failed = false;
-    std::optional<QuicIoEvent> buffered_event;
+    std::optional<QuicIoEvent> buffered_event = driver.initial_buffered_event();
     const auto log_wait_request = [&](std::string_view source,
                                       const std::optional<QuicCoreTimePoint> &deadline,
                                       QuicCoreTimePoint current) {
@@ -3321,21 +3355,14 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
             stream << "http09-server trace: backend-event source=" << source << " kind=";
             if (!event.has_value()) {
                 stream << "null";
+            } else if (event->kind == QuicIoEvent::Kind::rx_datagram) {
+                stream << "rx";
+            } else if (event->kind == QuicIoEvent::Kind::timer_expired) {
+                stream << "timer";
+            } else if (event->kind == QuicIoEvent::Kind::idle_timeout) {
+                stream << "idle";
             } else {
-                switch (event->kind) {
-                case QuicIoEvent::Kind::rx_datagram:
-                    stream << "rx";
-                    break;
-                case QuicIoEvent::Kind::timer_expired:
-                    stream << "timer";
-                    break;
-                case QuicIoEvent::Kind::idle_timeout:
-                    stream << "idle";
-                    break;
-                case QuicIoEvent::Kind::shutdown:
-                    stream << "shutdown";
-                    break;
-                }
+                stream << "shutdown";
             }
             stream << '\n';
         });
@@ -3348,31 +3375,36 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
 
         const auto current = driver.current_time();
         const auto next_wakeup = driver.next_wakeup();
-        if (!buffered_event.has_value() && next_wakeup.has_value() &&
-            next_wakeup.value() <= current) {
+        bool top_due = false;
+        if (!buffered_event.has_value()) {
+            if (next_wakeup.has_value()) {
+                top_due = next_wakeup.value() <= current;
+            }
+        }
+        if (top_due) {
             log_wait_request("top_due", next_wakeup, current);
             const auto event = driver.wait(next_wakeup);
             log_wait_event("top_due", event);
             if (!event.has_value()) {
                 return 1;
             }
-            switch (event->kind) {
-            case QuicIoEvent::Kind::rx_datagram:
-                if (!event->datagram.has_value() ||
-                    !driver.process_datagram(*event->datagram, event->now)) {
+            if (event->kind == QuicIoEvent::Kind::rx_datagram) {
+                if (!event->datagram.has_value()) {
+                    server_failed = true;
+                    continue;
+                }
+                if (!driver.process_datagram(*event->datagram, event->now)) {
                     server_failed = true;
                 }
                 continue;
-            case QuicIoEvent::Kind::timer_expired:
+            }
+            if (event->kind == QuicIoEvent::Kind::timer_expired) {
                 if (!driver.process_wait_timer(event->now)) {
                     server_failed = true;
                 }
                 continue;
-            case QuicIoEvent::Kind::shutdown:
-            case QuicIoEvent::Kind::idle_timeout:
-                buffered_event = event;
-                break;
             }
+            buffered_event = event;
         }
 
         bool made_progress = false;
@@ -3380,38 +3412,42 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
             server_failed = true;
             continue;
         }
-        if (made_progress && driver.has_pending_endpoint_work()) {
-            if (!buffered_event.has_value()) {
-                const auto poll_current = driver.current_time();
-                const auto poll_next_wakeup = driver.next_wakeup();
-                // Probe for ready RX without blocking. A zero-timeout wait reports
-                // timer_expired even when no core timer was due, so only treat
-                // that event as real when the wakeup is already due.
-                log_wait_request("ready_probe", poll_current, poll_current);
-                const auto ready_event = driver.wait(poll_current);
-                log_wait_event("ready_probe", ready_event);
-                if (!ready_event.has_value()) {
-                    return 1;
-                }
-                switch (ready_event->kind) {
-                case QuicIoEvent::Kind::rx_datagram:
-                    if (!ready_event->datagram.has_value() ||
-                        !driver.process_datagram(*ready_event->datagram, ready_event->now)) {
-                        server_failed = true;
+        if (made_progress) {
+            if (driver.has_pending_endpoint_work()) {
+                if (!buffered_event.has_value()) {
+                    const auto poll_current = driver.current_time();
+                    const auto poll_next_wakeup = driver.next_wakeup();
+                    // Probe for ready RX without blocking. A zero-timeout wait reports
+                    // timer_expired even when no core timer was due, so only treat
+                    // that event as real when the wakeup is already due.
+                    log_wait_request("ready_probe", poll_current, poll_current);
+                    const auto ready_event = driver.wait(poll_current);
+                    log_wait_event("ready_probe", ready_event);
+                    if (!ready_event.has_value()) {
+                        return 1;
                     }
-                    continue;
-                case QuicIoEvent::Kind::timer_expired:
-                    if (poll_next_wakeup.has_value() && poll_next_wakeup.value() <= poll_current) {
-                        if (!driver.process_wait_timer(ready_event->now)) {
+                    if (ready_event->kind == QuicIoEvent::Kind::rx_datagram) {
+                        if (!ready_event->datagram.has_value()) {
+                            server_failed = true;
+                            continue;
+                        }
+                        if (!driver.process_datagram(*ready_event->datagram, ready_event->now)) {
                             server_failed = true;
                         }
                         continue;
                     }
-                    break;
-                case QuicIoEvent::Kind::shutdown:
-                    return 1;
-                case QuicIoEvent::Kind::idle_timeout:
-                    break;
+                    if (ready_event->kind == QuicIoEvent::Kind::timer_expired) {
+                        if (poll_next_wakeup.has_value()) {
+                            if (poll_next_wakeup.value() <= poll_current) {
+                                if (!driver.process_wait_timer(ready_event->now)) {
+                                    server_failed = true;
+                                }
+                                continue;
+                            }
+                        }
+                    } else if (ready_event->kind == QuicIoEvent::Kind::shutdown) {
+                        return 1;
+                    }
                 }
             }
         }
@@ -3430,23 +3466,26 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
             return 1;
         }
 
-        switch (event->kind) {
-        case QuicIoEvent::Kind::idle_timeout:
+        if (event->kind == QuicIoEvent::Kind::idle_timeout) {
             continue;
-        case QuicIoEvent::Kind::shutdown:
+        }
+        if (event->kind == QuicIoEvent::Kind::shutdown) {
             return 1;
-        case QuicIoEvent::Kind::timer_expired:
+        }
+        if (event->kind == QuicIoEvent::Kind::timer_expired) {
             if (!driver.process_wait_timer(event->now)) {
                 server_failed = true;
             }
             continue;
-        case QuicIoEvent::Kind::rx_datagram:
-            if (!event->datagram.has_value() ||
-                !driver.process_datagram(*event->datagram, event->now)) {
-                server_failed = true;
-            }
+        }
+        if (!event->datagram.has_value()) {
+            server_failed = true;
             continue;
         }
+        if (!driver.process_datagram(*event->datagram, event->now)) {
+            server_failed = true;
+        }
+        continue;
     }
 }
 
@@ -3465,12 +3504,6 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
     return run_server_backend_loop_with_driver(ServerBackendLoopDriver{
         .current_time = [] { return now(); },
         .next_wakeup = [&] { return core.next_wakeup(); },
-        .process_expired_timer =
-            [&](QuicCoreTimePoint current) {
-                return process_server_endpoint_core_result_with_backend(
-                    core, transport_state, endpoints, config.document_root,
-                    core.advance_endpoint(QuicCoreTimerExpired{}, current), std::nullopt, backend);
-            },
         .pump_endpoint_work =
             [&](bool &made_progress) {
                 return pump_shared_server_endpoint_work_with_backend(
@@ -3758,6 +3791,31 @@ ClientLoopIo make_scripted_client_loop_io_for_tests(ScriptedClientLoopIoForTests
     };
 }
 
+struct FailureInjectingClientLoopIoForTests {
+    ScriptedClientLoopIoForTests *script = nullptr;
+    EndpointDriveState *state = nullptr;
+};
+
+QuicCoreTimePoint failure_injecting_client_loop_now_for_tests(void *context) {
+    auto &script = *static_cast<FailureInjectingClientLoopIoForTests *>(context)->script;
+    return scripted_client_loop_now_for_tests(&script);
+}
+
+ReceiveDatagramResult failure_injecting_client_loop_receive_for_tests(void *context, int socket_fd,
+                                                                      int flags,
+                                                                      std::string_view role_name) {
+    auto &wrapped = *static_cast<FailureInjectingClientLoopIoForTests *>(context);
+    wrapped.state->terminal_failure = true;
+    return scripted_client_loop_receive_for_tests(wrapped.script, socket_fd, flags, role_name);
+}
+
+std::optional<RuntimeWaitStep>
+failure_injecting_client_loop_wait_for_tests(void *context, const RuntimeWaitConfig &config,
+                                             const std::optional<QuicCoreTimePoint> &next_wakeup) {
+    auto &script = *static_cast<FailureInjectingClientLoopIoForTests *>(context)->script;
+    return scripted_client_loop_wait_for_tests(&script, config, next_wakeup);
+}
+
 class ScriptedIoBackendForTests final : public QuicIoBackend {
   public:
     std::vector<QuicIoRemote> ensure_route_calls;
@@ -3895,10 +3953,10 @@ struct ScriptedServerLoopCaseForTests {
 struct ScriptedServerBackendSchedulingCaseForTests {
     std::vector<QuicCoreTimePoint> current_times;
     std::vector<std::optional<QuicCoreTimePoint>> next_wakeup_results;
-    std::vector<bool> process_expired_timer_results;
     std::vector<bool> pending_work_after_pump;
     std::vector<bool> pump_made_progress;
     std::vector<std::optional<QuicIoEvent>> wait_results;
+    std::optional<QuicIoEvent> initial_buffered_event;
     bool blocking_rx_requires_future_wait = false;
     std::optional<QuicIoEvent> blocking_rx_wait_result;
     std::size_t max_immediate_waits_before_failure = 0;
@@ -4048,6 +4106,40 @@ make_pending_endpoint_without_transport_progress_waits_instead_of_spinning_case_
     };
 }
 
+ScriptedServerLoopCaseForTests make_blocking_wait_failure_with_preferred_socket_case_for_tests() {
+    return ScriptedServerLoopCaseForTests{
+        .receive_results =
+            {
+                make_would_block_receive_for_tests(),
+                make_would_block_receive_for_tests(),
+            },
+        .wait_steps =
+            {
+                std::nullopt,
+            },
+        .processed_timers_results = {false, false},
+    };
+}
+
+ScriptedServerLoopCaseForTests make_blocking_wait_input_then_receive_error_case_for_tests() {
+    return ScriptedServerLoopCaseForTests{
+        .receive_results =
+            {
+                make_would_block_receive_for_tests(),
+                make_error_receive_for_tests(),
+            },
+        .wait_steps =
+            {
+                make_input_wait_step_for_tests(QuicCoreInboundDatagram{
+                    .bytes = {std::byte{0x01}},
+                }),
+            },
+        .processed_timers_results = {false, false, false},
+        .pending_work_after_pump = {false, false},
+        .pump_made_progress = {false, false},
+    };
+}
+
 using ServerLoopCaseFactoryForTests = ScriptedServerLoopCaseForTests (*)();
 
 ServerLoopCaseFactoryForTests server_loop_case_factories_for_tests[] = {
@@ -4056,11 +4148,13 @@ ServerLoopCaseFactoryForTests server_loop_case_factories_for_tests[] = {
     &make_blocking_timer_then_receive_error_case_for_tests,
     &make_blocking_processed_timers_then_receive_error_case_for_tests,
     &make_blocking_wait_failure_case_for_tests,
+    &make_blocking_wait_failure_with_preferred_socket_case_for_tests,
     &make_blocking_wait_missing_input_case_for_tests,
     &make_nonblocking_drain_repeats_pending_endpoint_progress_case_for_tests,
     &make_outer_pump_repeats_pending_endpoint_progress_case_for_tests,
     &make_ready_datagram_preempts_next_pending_work_pump_case_for_tests,
     &make_pending_endpoint_without_transport_progress_waits_instead_of_spinning_case_for_tests,
+    &make_blocking_wait_input_then_receive_error_case_for_tests,
 };
 
 ScriptedServerBackendSchedulingCaseForTests
@@ -4080,7 +4174,6 @@ make_ready_datagram_preempts_repeated_due_timers_case_for_tests() {
                 base_time,
                 base_time,
             },
-        .process_expired_timer_results = {true, true, false},
         .wait_results =
             {
                 QuicIoEvent{
@@ -4202,6 +4295,156 @@ make_elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait_case_fo
     };
 }
 
+ScriptedServerBackendSchedulingCaseForTests make_ready_probe_due_timer_failure_case_for_tests() {
+    const auto base_time = now();
+    return ScriptedServerBackendSchedulingCaseForTests{
+        .current_times =
+            {
+                base_time,
+                base_time + std::chrono::milliseconds(5),
+            },
+        .next_wakeup_results =
+            {
+                base_time + std::chrono::milliseconds(5),
+                base_time + std::chrono::milliseconds(5),
+            },
+        .pending_work_after_pump = {true},
+        .pump_made_progress = {true},
+        .wait_results =
+            {
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::timer_expired,
+                    .now = base_time + std::chrono::milliseconds(5),
+                },
+            },
+        .process_timer_event_result = false,
+    };
+}
+
+ScriptedServerBackendSchedulingCaseForTests
+make_ready_probe_idle_timeout_then_shutdown_case_for_tests() {
+    const auto base_time = now();
+    return ScriptedServerBackendSchedulingCaseForTests{
+        .current_times =
+            {
+                base_time,
+                base_time,
+                base_time,
+            },
+        .next_wakeup_results =
+            {
+                base_time + std::chrono::milliseconds(5),
+                base_time + std::chrono::milliseconds(5),
+                base_time + std::chrono::milliseconds(5),
+            },
+        .pending_work_after_pump = {true},
+        .pump_made_progress = {true},
+        .wait_results =
+            {
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::idle_timeout,
+                    .now = base_time,
+                },
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::shutdown,
+                    .now = base_time + std::chrono::milliseconds(1),
+                },
+            },
+    };
+}
+
+ScriptedServerBackendSchedulingCaseForTests
+make_buffered_top_due_idle_timeout_skips_ready_probe_case_for_tests() {
+    const auto base_time = now();
+    return ScriptedServerBackendSchedulingCaseForTests{
+        .current_times =
+            {
+                base_time,
+                base_time + std::chrono::milliseconds(1),
+            },
+        .next_wakeup_results =
+            {
+                std::nullopt,
+            },
+        .pending_work_after_pump = {true, false},
+        .pump_made_progress = {true, false},
+        .wait_results =
+            {
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::shutdown,
+                    .now = base_time + std::chrono::milliseconds(1),
+                },
+            },
+        .initial_buffered_event =
+            QuicIoEvent{
+                .kind = QuicIoEvent::Kind::idle_timeout,
+                .now = base_time,
+            },
+    };
+}
+
+ScriptedServerBackendSchedulingCaseForTests
+make_ready_probe_rx_datagram_success_then_shutdown_case_for_tests() {
+    const auto base_time = now();
+    return ScriptedServerBackendSchedulingCaseForTests{
+        .current_times =
+            {
+                base_time,
+                base_time + std::chrono::milliseconds(1),
+            },
+        .next_wakeup_results =
+            {
+                std::nullopt,
+            },
+        .pending_work_after_pump = {true, false},
+        .pump_made_progress = {true, false},
+        .wait_results =
+            {
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::rx_datagram,
+                    .now = base_time,
+                    .datagram =
+                        QuicIoRxDatagram{
+                            .route_handle = QuicRouteHandle{17},
+                            .bytes = {std::byte{0x01}},
+                        },
+                },
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::shutdown,
+                    .now = base_time + std::chrono::milliseconds(1),
+                },
+            },
+    };
+}
+
+ScriptedServerBackendSchedulingCaseForTests
+make_ready_probe_timer_without_wakeup_falls_back_to_main_wait_case_for_tests() {
+    const auto base_time = now();
+    return ScriptedServerBackendSchedulingCaseForTests{
+        .current_times =
+            {
+                base_time,
+            },
+        .next_wakeup_results =
+            {
+                std::nullopt,
+            },
+        .pending_work_after_pump = {true},
+        .pump_made_progress = {true},
+        .wait_results =
+            {
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::timer_expired,
+                    .now = base_time,
+                },
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::shutdown,
+                    .now = base_time + std::chrono::milliseconds(1),
+                },
+            },
+    };
+}
+
 using ServerBackendSchedulingCaseFactoryForTests =
     ScriptedServerBackendSchedulingCaseForTests (*)();
 
@@ -4210,6 +4453,11 @@ ServerBackendSchedulingCaseFactoryForTests server_backend_scheduling_case_factor
     &make_ready_datagram_preempts_repeated_pending_work_pumps_case_for_tests,
     &make_pending_work_yields_to_wait_after_immediate_poll_miss_case_for_tests,
     &make_elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait_case_for_tests,
+    &make_ready_probe_due_timer_failure_case_for_tests,
+    &make_ready_probe_idle_timeout_then_shutdown_case_for_tests,
+    &make_buffered_top_due_idle_timeout_skips_ready_probe_case_for_tests,
+    &make_ready_probe_rx_datagram_success_then_shutdown_case_for_tests,
+    &make_ready_probe_timer_without_wakeup_falls_back_to_main_wait_case_for_tests,
 };
 
 std::vector<std::byte> bytes_from_string_for_runtime_tests(std::string_view text) {
@@ -4759,6 +5007,14 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
             });
         },
         [](ScriptedEndpointForTests &setup_endpoint, ScriptedClientLoopIoForTests &setup_io,
+           QuicCore &, QuicCoreResult &, QuicCoreTimePoint) {
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+            setup_io.receive_results.push_back(make_would_block_receive_for_tests());
+            setup_io.wait_steps.push_back(make_input_wait_step_for_tests(QuicCoreTimerExpired{}));
+            setup_io.wait_steps.push_back(make_idle_timeout_wait_step_for_tests());
+        },
+        [](ScriptedEndpointForTests &setup_endpoint, ScriptedClientLoopIoForTests &setup_io,
            QuicCore &, QuicCoreResult &, QuicCoreTimePoint setup_base_time) {
             setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
             setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
@@ -4876,9 +5132,38 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
                 timer_due,
             };
         },
+        [](ScriptedEndpointForTests &setup_endpoint, ScriptedClientLoopIoForTests &, QuicCore &,
+           QuicCoreResult &, QuicCoreTimePoint) {
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+                .has_pending_work = true,
+            });
+        },
+        [](ScriptedEndpointForTests &, ScriptedClientLoopIoForTests &setup_io, QuicCore &,
+           QuicCoreResult &, QuicCoreTimePoint) {
+            setup_io.receive_results.push_back(make_input_receive_for_tests(QuicCoreInboundDatagram{
+                .bytes = {std::byte{0x01}},
+            }));
+        },
+        [](ScriptedEndpointForTests &setup_endpoint, ScriptedClientLoopIoForTests &setup_io,
+           QuicCore &, QuicCoreResult &, QuicCoreTimePoint) {
+            setup_endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+                .has_pending_work = true,
+            });
+            setup_endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+                .core_inputs =
+                    {
+                        QuicCoreTimerExpired{},
+                    },
+            });
+            setup_io.receive_results.push_back(make_would_block_receive_for_tests());
+        },
     });
     kClientLoopCaseSetups[static_cast<std::size_t>(case_id)](endpoint, io_script, core,
                                                              start_result, base_time);
+    if (case_id ==
+        ClientConnectionLoopCaseForTests::pending_work_terminal_failure_state_after_pump) {
+        state.terminal_failure = true;
+    }
 
     const Http09RuntimeConfig config{
         .mode = Http09RuntimeMode::client,
@@ -4897,10 +5182,25 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
             .sendto_fn = &record_sendto_for_tests,
         },
     };
+    auto io = make_scripted_client_loop_io_for_tests(io_script);
+    std::unique_ptr<FailureInjectingClientLoopIoForTests> failure_injecting_io;
+    if (case_id == ClientConnectionLoopCaseForTests::nonblocking_receive_terminal_failure_state) {
+        failure_injecting_io = std::make_unique<FailureInjectingClientLoopIoForTests>(
+            FailureInjectingClientLoopIoForTests{
+                .script = &io_script,
+                .state = &state,
+            });
+        io = ClientLoopIo{
+            .context = failure_injecting_io.get(),
+            .now_fn = &failure_injecting_client_loop_now_for_tests,
+            .receive_datagram_fn = &failure_injecting_client_loop_receive_for_tests,
+            .wait_for_socket_or_deadline_fn = &failure_injecting_client_loop_wait_for_tests,
+        };
+    }
     const int exit_code = run_http09_client_connection_loop(
         config, make_endpoint_driver(endpoint), core, client_sockets,
         /*idle_timeout_ms=*/kDefaultClientReceiveTimeoutMs, peer, /*peer_len=*/0, state,
-        client_policy, make_scripted_client_loop_io_for_tests(io_script), start_result);
+        client_policy, io, start_result);
     return ClientConnectionLoopResultForTests{
         .exit_code = exit_code,
         .terminal_success = state.terminal_success,
@@ -4963,6 +5263,13 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
         backend_ptr->wait_results.push_back(QuicIoEvent{
             .kind = QuicIoEvent::Kind::timer_expired,
             .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::timer_due_before_wait_then_drive_failure:
+        start_result.next_wakeup = event_time;
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_failure = true,
         });
         break;
     case ClientConnectionBackendLoopCaseForTests::timer_event_then_drive_failure:
@@ -5448,28 +5755,43 @@ bool runtime_backend_regular_transfer_does_not_queue_preferred_address_migration
 }
 
 bool expired_server_timer_failure_cleans_up_for_tests() {
-    ServerSessionMap sessions;
-    sessions.emplace("expired-session",
-                     std::make_unique<ServerSession>(ServerSession{
-                         .core = make_failed_server_core_for_tests(),
-                         .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
-                             .document_root = std::filesystem::temp_directory_path(),
-                         }),
-                         .state =
-                             EndpointDriveState{
-                                 .next_wakeup = now(),
-                             },
-                         .peer = {},
-                         .peer_len = 0,
-                         .local_connection_id_key = "expired-session",
-                         .initial_destination_connection_id_key = "expired-route",
-                     }));
-    bool processed_any = false;
-    const auto erase_session = std::bind_front(erase_server_session_from_map, std::ref(sessions));
-    ServerConnectionIdRouteMap connection_id_routes;
-    process_expired_server_sessions(sessions, now(), connection_id_routes, erase_session,
-                                    processed_any);
-    return processed_any & sessions.empty();
+    const auto run_case = [](std::string_view local_connection_id_key, QuicCore core,
+                             QuicHttp09ServerEndpoint endpoint) {
+        ServerSessionMap sessions;
+        sessions.emplace(std::string(local_connection_id_key),
+                         std::make_unique<ServerSession>(ServerSession{
+                             .core = std::move(core),
+                             .endpoint = std::move(endpoint),
+                             .state =
+                                 EndpointDriveState{
+                                     .next_wakeup = now(),
+                                 },
+                             .peer = {},
+                             .peer_len = 0,
+                             .local_connection_id_key = std::string(local_connection_id_key),
+                             .initial_destination_connection_id_key = "expired-route",
+                         }));
+        bool processed_any = false;
+        const auto erase_session =
+            std::bind_front(erase_server_session_from_map, std::ref(sessions));
+        ServerConnectionIdRouteMap connection_id_routes;
+        process_expired_server_sessions(sessions, now(), connection_id_routes, erase_session,
+                                        processed_any);
+        return processed_any & sessions.empty();
+    };
+    const auto make_endpoint = [] {
+        return QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+            .document_root = std::filesystem::temp_directory_path(),
+        });
+    };
+
+    auto failed_endpoint = make_endpoint();
+    const auto failed_update =
+        failed_endpoint.on_core_result(single_receive_result_for_runtime_tests(0, "", true), now());
+    return run_case("expired-core-failure", make_failed_server_core_for_tests(), make_endpoint()) &
+           failed_update.terminal_failure &
+           run_case("expired-endpoint-failure", make_failing_server_core_for_tests(),
+                    std::move(failed_endpoint));
 }
 
 bool expired_server_timer_success_preserves_session_for_tests() {
@@ -5503,6 +5825,58 @@ bool pending_server_work_failure_cleans_up_for_tests() {
     ScopedRuntimeTempDirForTests document_root;
     document_root.write_file("large.bin", std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
 
+    const auto make_pending_endpoint = [&](bool fail_endpoint) {
+        QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
+            .document_root = document_root.path(),
+        });
+        const auto update = endpoint.on_core_result(
+            single_receive_result_for_runtime_tests(0, "GET /large.bin\r\n", true), now());
+        bool failed = false;
+        if (fail_endpoint) {
+            const auto failure_update = endpoint.on_core_result(
+                single_receive_result_for_runtime_tests(4, "", true), now());
+            failed = failure_update.terminal_failure;
+        }
+        return std::tuple{std::move(endpoint), update.has_pending_work, failed};
+    };
+    const auto run_case = [&](std::string_view local_connection_id_key, QuicCore core,
+                              QuicHttp09ServerEndpoint endpoint, bool has_pending_work) {
+        ServerSessionMap sessions;
+        sessions.emplace(std::string(local_connection_id_key),
+                         std::make_unique<ServerSession>(ServerSession{
+                             .core = std::move(core),
+                             .endpoint = std::move(endpoint),
+                             .state =
+                                 EndpointDriveState{
+                                     .endpoint_has_pending_work = has_pending_work,
+                                 },
+                             .peer = {},
+                             .peer_len = 0,
+                             .local_connection_id_key = std::string(local_connection_id_key),
+                             .initial_destination_connection_id_key = "pending-route",
+                         }));
+        ServerConnectionIdRouteMap connection_id_routes;
+        pump_server_pending_endpoint_work(
+            sessions, connection_id_routes,
+            [&](const std::string &erased_key) { sessions.erase(erased_key); });
+        return has_pending_work & sessions.empty();
+    };
+
+    auto [core_failed_endpoint, has_pending_work, ignored_failed] = make_pending_endpoint(false);
+    auto [endpoint_failed_endpoint, endpoint_has_pending_work, endpoint_failed] =
+        make_pending_endpoint(true);
+    return !ignored_failed &
+           run_case("pending-core-failure", make_failed_server_core_for_tests(),
+                    std::move(core_failed_endpoint), has_pending_work) &
+           endpoint_failed &
+           run_case("pending-endpoint-failure", make_failing_server_core_for_tests(),
+                    std::move(endpoint_failed_endpoint), endpoint_has_pending_work);
+}
+
+bool pending_server_work_success_preserves_session_for_tests() {
+    ScopedRuntimeTempDirForTests document_root;
+    document_root.write_file("large.bin", std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+
     QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
         .document_root = document_root.path(),
     });
@@ -5510,9 +5884,9 @@ bool pending_server_work_failure_cleans_up_for_tests() {
         single_receive_result_for_runtime_tests(0, "GET /large.bin\r\n", true), now());
 
     ServerSessionMap sessions;
-    sessions.emplace("pending-session",
+    sessions.emplace("pending-success",
                      std::make_unique<ServerSession>(ServerSession{
-                         .core = make_failed_server_core_for_tests(),
+                         .core = make_failing_server_core_for_tests(),
                          .endpoint = std::move(endpoint),
                          .state =
                              EndpointDriveState{
@@ -5520,7 +5894,7 @@ bool pending_server_work_failure_cleans_up_for_tests() {
                              },
                          .peer = {},
                          .peer_len = 0,
-                         .local_connection_id_key = "pending-session",
+                         .local_connection_id_key = "pending-success",
                          .initial_destination_connection_id_key = "pending-route",
                      }));
     ServerConnectionIdRouteMap connection_id_routes;
@@ -5528,7 +5902,9 @@ bool pending_server_work_failure_cleans_up_for_tests() {
                                       [&](const std::string &local_connection_id_key) {
                                           sessions.erase(local_connection_id_key);
                                       });
-    return update.has_pending_work & sessions.empty();
+    return update.has_pending_work & !sessions.empty() &
+           !sessions.begin()->second->core.has_failed() &
+           !sessions.begin()->second->state.terminal_failure;
 }
 
 bool resumed_client_warmup_failure_exits_early_for_tests() {
@@ -6391,6 +6767,42 @@ bool runtime_misc_internal_coverage_for_tests() {
             .port = 443,
             .testcase = QuicHttp09Testcase::connectionmigration,
         });
+        const auto preferred_address =
+            core_config.transport.preferred_address.value_or(PreferredAddress{});
+        check("connectionmigration config provides a preferred address",
+              core_config.transport.preferred_address.has_value());
+        const auto local_connection_id_key = connection_id_key(core_config.source_connection_id);
+        const auto preferred_connection_id_key = connection_id_key(preferred_address.connection_id);
+        ServerConnectionIdRouteMap connection_id_routes{
+            {preferred_connection_id_key, local_connection_id_key},
+        };
+        ServerSession session{
+            .core = QuicCore(std::move(core_config)),
+            .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                .document_root = std::filesystem::temp_directory_path(),
+            }),
+            .state = EndpointDriveState{},
+            .socket_fd = -1,
+            .peer = {},
+            .peer_len = 0,
+            .local_connection_id_key = local_connection_id_key,
+            .initial_destination_connection_id_key = "initial-route",
+            .alternate_connection_id_keys = {preferred_connection_id_key},
+        };
+        refresh_server_session_connection_id_routes(session, connection_id_routes);
+        check("refresh preserves live alternate routes",
+              connection_id_routes.contains(preferred_connection_id_key) &
+                  (session.alternate_connection_id_keys.size() == 1) &
+                  (session.alternate_connection_id_keys.front() == preferred_connection_id_key));
+    }
+
+    {
+        auto core_config = make_http09_server_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::server,
+            .host = "127.0.0.1",
+            .port = 443,
+            .testcase = QuicHttp09Testcase::connectionmigration,
+        });
         const auto local_connection_id_key = connection_id_key(core_config.source_connection_id);
         ServerSessionMap sessions;
         ServerConnectionIdRouteMap connection_id_routes{
@@ -6557,6 +6969,1496 @@ bool runtime_additional_internal_coverage_for_tests() {
         /*destination_len=*/0));
     check("null sendto destination keeps peer port zero",
           g_recorded_sendto_for_tests.peer_ports == std::vector<std::uint16_t>{0});
+
+    return ok;
+}
+
+bool runtime_parser_and_utility_coverage_for_tests() {
+    bool ok = true;
+    const auto check = [&](std::string_view label, bool condition) {
+        if (!condition) {
+            std::cerr << "runtime_parser_and_utility_coverage_for_tests failed: " << label << '\n';
+            ok = false;
+        }
+        return condition;
+    };
+
+    apply_runtime_ops_override(runtime_ops());
+    check("parse_io_backend_kind accepts socket",
+          parse_io_backend_kind("socket") == io::QuicIoBackendKind::socket);
+
+    sockaddr_storage trace_address{};
+    auto &trace_ipv4 = *reinterpret_cast<sockaddr_in *>(&trace_address);
+    trace_ipv4.sin_family = AF_INET;
+    trace_ipv4.sin_port = htons(443);
+    trace_ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    check("format_sockaddr_for_trace prints numeric host and port",
+          format_sockaddr_for_trace(trace_address, sizeof(sockaddr_in)) == "127.0.0.1:443");
+
+    ResolvedUdpAddress bind_address{};
+    auto &bind_ipv4 = *reinterpret_cast<sockaddr_in *>(&bind_address.address);
+    bind_ipv4.sin_family = AF_INET;
+    bind_ipv4.sin_port = htons(0);
+    bind_ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bind_address.address_len = sizeof(sockaddr_in);
+    bind_address.family = AF_INET;
+
+    {
+        const int socket_fd = open_and_bind_udp_socket(bind_address, "client");
+        check("open_and_bind_udp_socket succeeds for loopback ephemeral binds", socket_fd >= 0);
+        if (socket_fd >= 0) {
+            ::close(socket_fd);
+        }
+    }
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .socket_fn = [](int, int, int) -> int {
+                    errno = EMFILE;
+                    return -1;
+                },
+            },
+        };
+        check("open_and_bind_udp_socket reports socket creation failures",
+              open_and_bind_udp_socket(bind_address, "client") < 0);
+    }
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .socket_fn = &::socket,
+                .bind_fn = [](int, const sockaddr *, socklen_t) -> int {
+                    errno = EADDRINUSE;
+                    return -1;
+                },
+            },
+        };
+        check("open_and_bind_udp_socket reports bind failures",
+              open_and_bind_udp_socket(bind_address, "client") < 0);
+    }
+
+    check("v1 initial header type recognized", is_initial_long_header_type(kQuicVersion1, 0x00u));
+    check("v2 initial header type recognized", is_initial_long_header_type(kQuicVersion2, 0x01u));
+    check("big-endian u32 reader decodes version words", read_u32_be_at(
+                                                             std::array{
+                                                                 std::byte{0x01},
+                                                                 std::byte{0x23},
+                                                                 std::byte{0x45},
+                                                                 std::byte{0x67},
+                                                             },
+                                                             0) == 0x01234567u);
+
+    struct LongHeaderSpec {
+        std::uint8_t first_byte = 0;
+        std::uint32_t version = 0;
+        std::span<const std::byte> destination_connection_id;
+        std::span<const std::byte> source_connection_id;
+        std::span<const std::byte> tail = {};
+    };
+    const auto make_long_header = [](const LongHeaderSpec &spec) {
+        std::vector<std::byte> bytes;
+        bytes.push_back(static_cast<std::byte>(spec.first_byte));
+        bytes.push_back(static_cast<std::byte>((spec.version >> 24) & 0xffu));
+        bytes.push_back(static_cast<std::byte>((spec.version >> 16) & 0xffu));
+        bytes.push_back(static_cast<std::byte>((spec.version >> 8) & 0xffu));
+        bytes.push_back(static_cast<std::byte>(spec.version & 0xffu));
+        bytes.push_back(static_cast<std::byte>(spec.destination_connection_id.size()));
+        bytes.insert(bytes.end(), spec.destination_connection_id.begin(),
+                     spec.destination_connection_id.end());
+        bytes.push_back(static_cast<std::byte>(spec.source_connection_id.size()));
+        bytes.insert(bytes.end(), spec.source_connection_id.begin(),
+                     spec.source_connection_id.end());
+        bytes.insert(bytes.end(), spec.tail.begin(), spec.tail.end());
+        return bytes;
+    };
+
+    const auto destination_connection_id = make_runtime_connection_id(std::byte{0x41}, 1);
+    const auto source_connection_id = make_runtime_connection_id(std::byte{0x42}, 2);
+
+    check("empty datagram does not parse", !parse_server_datagram_for_routing({}).has_value());
+    check("short header without fixed bit is rejected",
+          !parse_server_datagram_for_routing(std::vector<std::byte>{std::byte{0x00}}).has_value());
+    check("short header shorter than runtime cid length is rejected",
+          !parse_server_datagram_for_routing(
+               std::vector<std::byte>{std::byte{0x40}, std::byte{0x01}, std::byte{0x02}})
+               .has_value());
+    {
+        std::vector<std::byte> short_header{std::byte{0x40}};
+        short_header.insert(short_header.end(), destination_connection_id.begin(),
+                            destination_connection_id.end());
+        const auto parsed = parse_server_datagram_for_routing(short_header);
+        check("valid short header parses", parsed.has_value());
+        check("short header kind is reported",
+              parsed.has_value() && parsed->kind == ParsedServerDatagram::Kind::short_header);
+    }
+
+    check("long header missing fixed bit is rejected",
+          !parse_server_datagram_for_routing(
+               std::vector<std::byte>{std::byte{0x80}, std::byte{0x00}, std::byte{0x00},
+                                      std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
+                                      std::byte{0x00}})
+               .has_value());
+    check("fixed-bit long headers shorter than the minimum prefix are rejected",
+          !parse_server_datagram_for_routing(
+               std::vector<std::byte>{std::byte{0xc0}, std::byte{0x00}, std::byte{0x00},
+                                      std::byte{0x00}, std::byte{0x01}, std::byte{0x00}})
+               .has_value());
+    check("version negotiation packets are ignored",
+          !parse_server_datagram_for_routing(
+               make_long_header(LongHeaderSpec{
+                   .first_byte = 0xc0u,
+                   .version = kVersionNegotiationVersion,
+                   .destination_connection_id = destination_connection_id,
+                   .source_connection_id = source_connection_id,
+               }))
+               .has_value());
+    check("destination connection id length overflow is rejected",
+          !parse_server_datagram_for_routing(
+               std::vector<std::byte>{std::byte{0xc0}, std::byte{0x00}, std::byte{0x00},
+                                      std::byte{0x00}, std::byte{0x01}, std::byte{0x08},
+                                      std::byte{0x01}})
+               .has_value());
+    check("source connection id length overflow is rejected",
+          !parse_server_datagram_for_routing(
+               std::vector<std::byte>{std::byte{0xc0}, std::byte{0x00}, std::byte{0x00},
+                                      std::byte{0x00}, std::byte{0x01}, std::byte{0x01},
+                                      std::byte{0x01}, std::byte{0x08}, std::byte{0x02}})
+               .has_value());
+
+    {
+        constexpr std::uint32_t kUnsupportedVersion = 0xfaceb00cu;
+        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
+            .first_byte = 0xc0u,
+            .version = kUnsupportedVersion,
+            .destination_connection_id = destination_connection_id,
+            .source_connection_id = source_connection_id,
+        }));
+        check("unsupported versions parse as probes", parsed.has_value());
+        check("unsupported versions are classified as unsupported long headers",
+              parsed.has_value() &&
+                  parsed->kind == ParsedServerDatagram::Kind::unsupported_version_long_header);
+    }
+
+    {
+        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
+            .first_byte = 0xc0u,
+            .version = kQuicVersion1,
+            .destination_connection_id = destination_connection_id,
+            .source_connection_id = source_connection_id,
+        }));
+        check("initial headers with truncated token varints are rejected", !parsed.has_value());
+    }
+
+    {
+        const auto oversized_token_length = encode_varint(2).value();
+        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
+            .first_byte = 0xc0u,
+            .version = kQuicVersion1,
+            .destination_connection_id = destination_connection_id,
+            .source_connection_id = source_connection_id,
+            .tail = oversized_token_length,
+        }));
+        check("initial headers with oversized tokens are rejected", !parsed.has_value());
+    }
+
+    {
+        const auto zero_token_length = encode_varint(0).value();
+        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
+            .first_byte = 0xe0u,
+            .version = kQuicVersion1,
+            .destination_connection_id = destination_connection_id,
+            .source_connection_id = source_connection_id,
+            .tail = zero_token_length,
+        }));
+        check("supported non-initial long headers parse", parsed.has_value());
+        check("supported non-initial long headers keep empty retry tokens",
+              parsed.has_value() && parsed->token.empty() &&
+                  parsed->kind == ParsedServerDatagram::Kind::supported_long_header);
+    }
+
+    {
+        auto token = encode_varint(1).value();
+        token.push_back(std::byte{0xaa});
+        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
+            .first_byte = 0xc0u,
+            .version = kQuicVersion1,
+            .destination_connection_id = destination_connection_id,
+            .source_connection_id = source_connection_id,
+            .tail = token,
+        }));
+        check("supported initial long headers parse", parsed.has_value());
+        check("supported initial long headers preserve retry tokens",
+              parsed.has_value() && parsed->kind == ParsedServerDatagram::Kind::supported_initial &&
+                  parsed->token == std::vector<std::byte>{std::byte{0xaa}});
+    }
+
+    {
+        const auto zero_token_length = encode_varint(0).value();
+        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
+            .first_byte = 0xd0u,
+            .version = kQuicVersion2,
+            .destination_connection_id = destination_connection_id,
+            .source_connection_id = source_connection_id,
+            .tail = zero_token_length,
+        }));
+        check("v2 initial long headers parse", parsed.has_value());
+        check("v2 initial long headers use the v2 initial type mapping",
+              parsed.has_value() && parsed->kind == ParsedServerDatagram::Kind::supported_initial);
+    }
+
+    return ok;
+}
+
+bool runtime_retry_and_probe_coverage_for_tests() {
+    bool ok = true;
+    const auto check = [&](std::string_view label, bool condition) {
+        if (!condition) {
+            std::cerr << "runtime_retry_and_probe_coverage_for_tests failed: " << label << '\n';
+            ok = false;
+        }
+        return condition;
+    };
+
+    sockaddr_storage peer{};
+    auto &peer_ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+    peer_ipv4.sin_family = AF_INET;
+    peer_ipv4.sin_port = htons(4443);
+    peer_ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    const auto destination_connection_id = make_runtime_connection_id(std::byte{0x51}, 1);
+    const auto source_connection_id = make_runtime_connection_id(std::byte{0x61}, 2);
+    const ParsedServerDatagram supported_initial{
+        .kind = ParsedServerDatagram::Kind::supported_initial,
+        .version = kQuicVersion1,
+        .destination_connection_id = destination_connection_id,
+        .source_connection_id = source_connection_id,
+        .token = {},
+    };
+
+    const auto retry_token = make_runtime_retry_token(0x0102030405060708ull);
+    check("retry token encodes the runtime prefix",
+          retry_token.size() == 16 && retry_token[0] == std::byte{0x72} &&
+              retry_token[1] == std::byte{0x74} && retry_token[2] == std::byte{0x72} &&
+              retry_token[3] == std::byte{0x79});
+
+    PendingRetryToken pending_retry{
+        .original_destination_connection_id = destination_connection_id,
+        .retry_source_connection_id = make_runtime_connection_id(std::byte{0x71}, 3),
+        .original_version = kQuicVersion1,
+        .peer = peer,
+        .peer_len = sizeof(sockaddr_in),
+    };
+    check("retry peer matching accepts the original peer",
+          peer_matches_pending_retry(pending_retry, peer, sizeof(sockaddr_in)));
+
+    sockaddr_storage other_peer = peer;
+    auto &other_ipv4 = *reinterpret_cast<sockaddr_in *>(&other_peer);
+    other_ipv4.sin_port = htons(4444);
+    check("retry peer matching rejects mismatched peers",
+          !peer_matches_pending_retry(pending_retry, other_peer, sizeof(sockaddr_in)));
+
+    {
+        RetryTokenStore retry_tokens;
+        check("missing retry token lookup returns nullopt",
+              !lookup_retry_context(supported_initial, peer, sizeof(sockaddr_in), retry_tokens)
+                   .has_value());
+    }
+
+    {
+        ParsedServerDatagram parsed = supported_initial;
+        parsed.token = retry_token;
+        parsed.destination_connection_id = pending_retry.retry_source_connection_id;
+        RetryTokenStore retry_tokens{
+            {connection_id_key(retry_token), pending_retry},
+        };
+        check("retry lookup rejects peer mismatches",
+              !lookup_retry_context(parsed, other_peer, sizeof(sockaddr_in), retry_tokens)
+                   .has_value());
+        check("retry lookup keeps stored tokens on mismatch",
+              retry_tokens.contains(connection_id_key(retry_token)));
+    }
+
+    {
+        ParsedServerDatagram parsed = supported_initial;
+        parsed.token = retry_token;
+        parsed.destination_connection_id = make_runtime_connection_id(std::byte{0x72}, 4);
+        RetryTokenStore retry_tokens{
+            {connection_id_key(retry_token), pending_retry},
+        };
+        check("retry lookup rejects destination connection id mismatches",
+              !lookup_retry_context(parsed, peer, sizeof(sockaddr_in), retry_tokens).has_value());
+    }
+
+    {
+        ParsedServerDatagram parsed = supported_initial;
+        parsed.token = retry_token;
+        parsed.destination_connection_id = pending_retry.retry_source_connection_id;
+        parsed.version = kQuicVersion2;
+        RetryTokenStore retry_tokens{
+            {connection_id_key(retry_token), pending_retry},
+        };
+        check("retry lookup rejects version mismatches",
+              !lookup_retry_context(parsed, peer, sizeof(sockaddr_in), retry_tokens).has_value());
+    }
+
+    {
+        ParsedServerDatagram parsed = supported_initial;
+        parsed.token = retry_token;
+        parsed.destination_connection_id = pending_retry.retry_source_connection_id;
+        RetryTokenStore retry_tokens{
+            {connection_id_key(retry_token), pending_retry},
+        };
+        const auto context = lookup_retry_context(parsed, peer, sizeof(sockaddr_in), retry_tokens);
+        check("retry lookup accepts matching retry contexts", context.has_value());
+        check("successful retry lookup erases consumed tokens", retry_tokens.empty());
+    }
+
+    {
+        ParsedServerDatagram missing_source = supported_initial;
+        missing_source.source_connection_id.reset();
+        RetryTokenStore retry_tokens;
+        check("retry send rejects missing source connection ids",
+              !send_retry_for_initial(/*fd=*/17, missing_source, peer, sizeof(sockaddr_in),
+                                      retry_tokens, /*connection_index=*/1));
+    }
+
+    {
+        g_recorded_sendto_for_tests = {};
+        RetryTokenStore retry_tokens;
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendto_fn = record_sendto_for_tests,
+            },
+        };
+        check("retry send emits a retry datagram",
+              send_retry_for_initial(/*fd=*/21, supported_initial, peer, sizeof(sockaddr_in),
+                                     retry_tokens,
+                                     /*connection_index=*/5));
+        check("retry send records exactly one sendto call", g_recorded_sendto_for_tests.calls == 1);
+        check("retry send stores one pending retry token", retry_tokens.size() == 1);
+    }
+
+    {
+        RetryTokenStore retry_tokens;
+        std::uint64_t next_connection_index = 9;
+        check("retry helper returns nullopt when retry is disabled",
+              !maybe_send_retry_for_supported_initial(
+                   /*retry_enabled=*/false, /*socket_fd=*/17, supported_initial, peer,
+                   sizeof(sockaddr_in), retry_tokens, next_connection_index)
+                   .has_value());
+        ParsedServerDatagram tokenized = supported_initial;
+        tokenized.token = retry_token;
+        check("retry helper returns nullopt when the client already presented a token",
+              !maybe_send_retry_for_supported_initial(
+                   /*retry_enabled=*/true, /*socket_fd=*/17, tokenized, peer, sizeof(sockaddr_in),
+                   retry_tokens, next_connection_index)
+                   .has_value());
+    }
+
+    {
+        g_recorded_sendto_for_tests = {};
+        RetryTokenStore retry_tokens;
+        std::uint64_t next_connection_index = 12;
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendto_fn = record_sendto_for_tests,
+            },
+        };
+        const auto retry_result = maybe_send_retry_for_supported_initial(
+            /*retry_enabled=*/true, /*socket_fd=*/22, supported_initial, peer, sizeof(sockaddr_in),
+            retry_tokens, next_connection_index);
+        check("retry helper returns an immediate result for tokenless initials",
+              retry_result.has_value() && retry_result.value());
+        check("retry helper increments the next connection index", next_connection_index == 13);
+    }
+
+    {
+        std::optional<PendingRetryToken> retry_context;
+        RetryTokenStore retry_tokens;
+        check("populate retry context succeeds when retry is disabled",
+              populate_retry_context_if_required(/*retry_enabled=*/false, supported_initial, peer,
+                                                 sizeof(sockaddr_in), retry_tokens, retry_context));
+        check("populate retry context leaves retry context empty when disabled",
+              !retry_context.has_value());
+    }
+
+    {
+        std::optional<PendingRetryToken> retry_context;
+        RetryTokenStore retry_tokens{
+            {connection_id_key(retry_token), pending_retry},
+        };
+        ParsedServerDatagram parsed = supported_initial;
+        parsed.token = retry_token;
+        parsed.destination_connection_id = pending_retry.retry_source_connection_id;
+        check("populate retry context returns the matched context",
+              populate_retry_context_if_required(/*retry_enabled=*/true, parsed, peer,
+                                                 sizeof(sockaddr_in), retry_tokens, retry_context));
+        check("populate retry context fills the optional context", retry_context.has_value());
+    }
+
+    {
+        std::optional<PendingRetryToken> retry_context;
+        RetryTokenStore retry_tokens;
+        ParsedServerDatagram parsed = supported_initial;
+        parsed.token = retry_token;
+        parsed.destination_connection_id = pending_retry.retry_source_connection_id;
+        check("populate retry context rejects invalid retry tokens",
+              !populate_retry_context_if_required(/*retry_enabled=*/true, parsed, peer,
+                                                  sizeof(sockaddr_in), retry_tokens,
+                                                  retry_context));
+    }
+
+    {
+        g_recorded_sendto_for_tests = {};
+        RetryTokenStore retry_tokens;
+        std::uint64_t next_connection_index = 40;
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendto_fn = record_sendto_for_tests,
+            },
+        };
+        const auto preparation = prepare_supported_initial_retry_handling(
+            /*retry_enabled=*/true, /*socket_fd=*/33, supported_initial, peer, sizeof(sockaddr_in),
+            retry_tokens, next_connection_index);
+        check("retry preparation returns an immediate result when it emits a retry",
+              preparation.immediate_result.has_value() && preparation.immediate_result.value());
+    }
+
+    {
+        RetryTokenStore retry_tokens{
+            {connection_id_key(retry_token), pending_retry},
+        };
+        std::uint64_t next_connection_index = 41;
+        ParsedServerDatagram parsed = supported_initial;
+        parsed.token = retry_token;
+        parsed.destination_connection_id = pending_retry.retry_source_connection_id;
+        const auto preparation = prepare_supported_initial_retry_handling(
+            /*retry_enabled=*/true, /*socket_fd=*/34, parsed, peer, sizeof(sockaddr_in),
+            retry_tokens, next_connection_index);
+        check("retry preparation returns a retry context when the token matches",
+              !preparation.immediate_result.has_value() && preparation.retry_context.has_value());
+    }
+
+    {
+        RetryTokenStore retry_tokens;
+        std::uint64_t next_connection_index = 42;
+        ParsedServerDatagram parsed = supported_initial;
+        parsed.token = retry_token;
+        parsed.destination_connection_id = pending_retry.retry_source_connection_id;
+        const auto preparation = prepare_supported_initial_retry_handling(
+            /*retry_enabled=*/true, /*socket_fd=*/35, parsed, peer, sizeof(sockaddr_in),
+            retry_tokens, next_connection_index);
+        check("retry preparation turns invalid retry tokens into immediate no-op results",
+              preparation.immediate_result.has_value() && preparation.immediate_result.value());
+    }
+
+    check("version negotiation probes under the minimum size are ignored",
+          send_version_negotiation_for_probe(
+              /*fd=*/36,
+              std::vector<std::byte>(kMinimumClientInitialDatagramBytes - 1, std::byte{0x00}),
+              supported_initial, peer, sizeof(sockaddr_in)));
+
+    {
+        ParsedServerDatagram missing_source = supported_initial;
+        missing_source.source_connection_id.reset();
+        check("version negotiation send rejects missing source connection ids",
+              !send_version_negotiation_for_probe(
+                  /*fd=*/37,
+                  std::vector<std::byte>(kMinimumClientInitialDatagramBytes, std::byte{0x00}),
+                  missing_source, peer, sizeof(sockaddr_in)));
+    }
+
+    {
+        g_recorded_sendto_for_tests = {};
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendto_fn = record_sendto_for_tests,
+            },
+        };
+        check("version negotiation sends a probe response for oversized unsupported initials",
+              send_version_negotiation_for_probe(
+                  /*fd=*/38,
+                  std::vector<std::byte>(kMinimumClientInitialDatagramBytes, std::byte{0x00}),
+                  supported_initial, peer, sizeof(sockaddr_in)));
+        check("version negotiation send records a datagram",
+              g_recorded_sendto_for_tests.calls == 1);
+    }
+
+    return ok;
+}
+
+bool runtime_routing_and_driver_coverage_for_tests() {
+    struct ScopedEnvVar {
+        std::string name;
+        std::optional<std::string> previous;
+
+        ScopedEnvVar(std::string variable, std::optional<std::string> value)
+            : name(std::move(variable)) {
+            if (const char *existing = std::getenv(name.c_str()); existing != nullptr) {
+                previous = std::string(existing);
+            }
+            if (value.has_value()) {
+                ::setenv(name.c_str(), value->c_str(), 1);
+            } else {
+                ::unsetenv(name.c_str());
+            }
+        }
+
+        ~ScopedEnvVar() {
+            if (previous.has_value()) {
+                ::setenv(name.c_str(), previous->c_str(), 1);
+            } else {
+                ::unsetenv(name.c_str());
+            }
+        }
+    };
+
+    class FailingSendBackendForTests final : public QuicIoBackend {
+      public:
+        std::vector<QuicIoTxDatagram> sent_datagrams;
+
+        std::optional<QuicRouteHandle> ensure_route(const QuicIoRemote &) override {
+            return std::nullopt;
+        }
+
+        std::optional<QuicIoEvent> wait(std::optional<QuicCoreTimePoint>) override {
+            return std::nullopt;
+        }
+
+        bool send(const QuicIoTxDatagram &datagram) override {
+            sent_datagrams.push_back(datagram);
+            return false;
+        }
+    };
+
+    bool ok = true;
+    const auto check = [&](std::string_view label, bool condition) {
+        if (!condition) {
+            std::cerr << "runtime_routing_and_driver_coverage_for_tests failed: " << label << '\n';
+            ok = false;
+        }
+        return condition;
+    };
+    const auto make_loopback_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+
+    {
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 11,
+                    .family = AF_INET,
+                },
+            .secondary =
+                ClientSocketDescriptor{
+                    .fd = 12,
+                    .family = AF_INET6,
+                },
+        };
+        check("active_client_socket_fds includes secondary sockets when present",
+              active_client_socket_fds(sockets) == std::array<int, 2>{11, 12});
+        check("active_client_socket_count includes secondary sockets when present",
+              active_client_socket_count(sockets) == 2u);
+    }
+
+    const auto make_server_session =
+        [&](std::span<const std::byte> local_connection_id,
+            std::span<const std::byte> initial_destination_connection_id,
+            std::optional<QuicCoreTimePoint> next_wakeup, bool has_pending_work) {
+            return std::make_unique<ServerSession>(ServerSession{
+                .core = make_failing_server_core_for_tests(),
+                .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                    .document_root = std::filesystem::path("."),
+                }),
+                .state =
+                    EndpointDriveState{
+                        .next_wakeup = next_wakeup,
+                        .endpoint_has_pending_work = has_pending_work,
+                    },
+                .socket_fd = 71,
+                .peer = make_loopback_peer(7443),
+                .peer_len = sizeof(sockaddr_in),
+                .local_connection_id_key = connection_id_key(local_connection_id),
+                .initial_destination_connection_id_key =
+                    connection_id_key(initial_destination_connection_id),
+            });
+        };
+
+    {
+        EndpointDriveState state;
+        RuntimeWaitStep missing_input_step{
+            .socket_fd = 41,
+            .source = make_loopback_peer(9443),
+            .source_len = sizeof(sockaddr_in),
+            .has_source = true,
+        };
+        check("assign_runtime_path_for_inbound_step ignores steps without inputs",
+              !assign_runtime_path_for_inbound_step(state, missing_input_step).has_value());
+
+        RuntimeWaitStep timer_step = missing_input_step;
+        timer_step.input = QuicCoreTimerExpired{};
+        check("assign_runtime_path_for_inbound_step ignores timer inputs",
+              !assign_runtime_path_for_inbound_step(state, timer_step).has_value());
+
+        RuntimeWaitStep inbound_step{
+            .input =
+                QuicCoreInboundDatagram{
+                    .bytes =
+                        {
+                            std::byte{0xaa},
+                            std::byte{0xbb},
+                        },
+                },
+            .input_time = now(),
+            .socket_fd = 41,
+            .source = make_loopback_peer(9443),
+            .source_len = sizeof(sockaddr_in),
+            .has_source = true,
+        };
+        const auto path_id = assign_runtime_path_for_inbound_step(state, inbound_step);
+        const auto *inbound = inbound_step.input.has_value()
+                                  ? std::get_if<QuicCoreInboundDatagram>(&*inbound_step.input)
+                                  : nullptr;
+        check("assign_runtime_path_for_inbound_step assigns stable path and route handles",
+              path_id.has_value() && path_id.value() == 1 && inbound != nullptr &&
+                  inbound->route_handle.has_value() && inbound->route_handle.value() == 1 &&
+                  state.path_routes.contains(1) && state.route_routes.contains(1));
+
+        const auto translated = make_inbound_datagram_from_io_event(QuicIoRxDatagram{
+            .route_handle = 7,
+            .bytes =
+                {
+                    std::byte{0x10},
+                    std::byte{0x20},
+                },
+            .ecn = QuicEcnCodepoint::ect1,
+        });
+        check("make_inbound_datagram_from_io_event preserves route handles and ecn",
+              translated.route_handle == 7 && translated.bytes.size() == 2 &&
+                  translated.ecn == QuicEcnCodepoint::ect1);
+    }
+
+    {
+        QuicCoreResult result;
+        result.effects.emplace_back(QuicCoreSendDatagram{
+            .bytes =
+                {
+                    std::byte{0x31},
+                },
+            .ecn = QuicEcnCodepoint::ect0,
+        });
+        check("handle_core_effects rejects missing fallback routes",
+              !handle_core_effects(/*fallback_socket_fd=*/-1, result, nullptr, 0, {}, "client"));
+        check("handle_core_effects rejects missing peers even with valid fallback sockets",
+              !handle_core_effects(/*fallback_socket_fd=*/17, result, nullptr, 0, {}, "client"));
+    }
+
+    {
+        QuicCoreResult result;
+        result.effects.emplace_back(QuicCoreSendDatagram{
+            .bytes =
+                {
+                    std::byte{0x32},
+                },
+            .ecn = QuicEcnCodepoint::ect1,
+        });
+        const auto peer = make_loopback_peer(9555);
+        const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendto_fn = [](int, const void *, size_t, int, const sockaddr *,
+                                socklen_t) -> ssize_t {
+                    errno = EIO;
+                    return -1;
+                },
+            },
+        };
+        check("handle_core_effects propagates sendto failures",
+              !handle_core_effects(/*fallback_socket_fd=*/17, result, &peer, sizeof(sockaddr_in),
+                                   {}, "client"));
+    }
+
+    {
+        const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+        check("handle_core_effects traces route-handle sends when a routed send succeeds",
+              runtime_server_send_effect_uses_route_handle_for_tests());
+    }
+
+    {
+        QuicCoreResult result;
+        result.effects.emplace_back(QuicCoreSendDatagram{
+            .bytes =
+                {
+                    std::byte{0x33},
+                },
+            .ecn = QuicEcnCodepoint::ect1,
+        });
+        ScriptedIoBackendForTests backend;
+        check("handle_core_effects_with_backend rejects missing fallback route handles",
+              !handle_core_effects_with_backend(std::nullopt, backend, result, "client"));
+    }
+
+    {
+        QuicCoreResult result;
+        result.effects.emplace_back(QuicCoreSendDatagram{
+            .bytes =
+                {
+                    std::byte{0x34},
+                },
+            .ecn = QuicEcnCodepoint::ce,
+        });
+        const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+        FailingSendBackendForTests backend;
+        check("handle_core_effects_with_backend propagates backend send failures",
+              !handle_core_effects_with_backend(9, backend, result, "client"));
+        check("handle_core_effects_with_backend passes the fallback route handle to the "
+              "backend",
+              backend.sent_datagrams.size() == 1 &&
+                  backend.sent_datagrams.front().route_handle == 9 &&
+                  backend.sent_datagrams.front().ecn == QuicEcnCodepoint::ce);
+    }
+
+    QuicCoreResult preferred_address_result;
+    preferred_address_result.effects.emplace_back(QuicCoreStateEvent{
+        .connection = 1,
+        .change = QuicCoreStateChange::handshake_ready,
+    });
+    preferred_address_result.effects.emplace_back(QuicCoreStateEvent{
+        .connection = 1,
+        .change = QuicCoreStateChange::handshake_confirmed,
+    });
+    preferred_address_result.effects.emplace_back(
+        make_ipv4_preferred_address_effect_for_tests(9777));
+
+    {
+        const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 21,
+                    .family = AF_INET,
+                },
+        };
+        check("observe_client_runtime_policy_effects tracks preferred-address routes without "
+              "opening sockets",
+              observe_client_runtime_policy_effects(preferred_address_result, state, policy,
+                                                    sockets, "client"));
+        check("observe_client_runtime_policy_effects records handshake and routing state",
+              policy.handshake_ready_seen && policy.handshake_confirmed_seen &&
+                  policy.preferred_address_route_handle.has_value() &&
+                  state.path_routes.size() == 1 && state.route_routes.size() == 1);
+    }
+
+    {
+        const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        ClientIoContext io_context;
+        check("observe_client_runtime_policy_effects_with_backend rejects missing backends",
+              !observe_client_runtime_policy_effects_with_backend(preferred_address_result, state,
+                                                                  policy, io_context, "client"));
+        check("missing backend still records handshake state before failing",
+              policy.handshake_ready_seen && policy.handshake_confirmed_seen);
+    }
+
+    {
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        ClientIoContext io_context;
+        auto backend = std::make_unique<ScriptedIoBackendForTests>();
+        backend->ensure_route_results.push_back(std::nullopt);
+        io_context.backend = std::move(backend);
+        check("observe_client_runtime_policy_effects_with_backend rejects "
+              "preferred-address route "
+              "failures",
+              !observe_client_runtime_policy_effects_with_backend(preferred_address_result, state,
+                                                                  policy, io_context, "client"));
+    }
+
+    {
+        const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        ClientIoContext io_context;
+        auto backend = std::make_unique<ScriptedIoBackendForTests>();
+        auto *backend_ptr = backend.get();
+        backend->ensure_route_results.push_back(77);
+        io_context.backend = std::move(backend);
+        check("observe_client_runtime_policy_effects_with_backend records successful "
+              "preferred-address routes",
+              observe_client_runtime_policy_effects_with_backend(preferred_address_result, state,
+                                                                 policy, io_context, "client"));
+        check("preferred-address route creation stores the chosen route handle",
+              io_context.preferred_route_handle == std::optional<QuicRouteHandle>(77) &&
+                  policy.preferred_address_route_handle == std::optional<QuicRouteHandle>(77) &&
+                  backend_ptr->ensure_route_calls.size() == 1 &&
+                  peer_port_for_remote_for_tests(backend_ptr->ensure_route_calls.front()) == 9777);
+    }
+
+    {
+        const auto direct_connection_id = make_runtime_connection_id(std::byte{0x91}, 1);
+        const auto routed_connection_id = make_runtime_connection_id(std::byte{0x92}, 2);
+        const auto initial_destination_connection_id =
+            make_runtime_connection_id(std::byte{0x93}, 3);
+        const auto session_key = connection_id_key(direct_connection_id);
+
+        ServerSessionMap sessions;
+        sessions.emplace(session_key, make_server_session(direct_connection_id,
+                                                          initial_destination_connection_id,
+                                                          std::nullopt, false));
+        ServerConnectionIdRouteMap connection_id_routes{
+            {connection_id_key(routed_connection_id), session_key},
+        };
+        std::unordered_map<std::string, std::string> initial_destination_routes{
+            {connection_id_key(initial_destination_connection_id), session_key},
+        };
+
+        const ParsedServerDatagram direct_parsed{
+            .kind = ParsedServerDatagram::Kind::short_header,
+            .destination_connection_id = direct_connection_id,
+        };
+        const ParsedServerDatagram routed_parsed{
+            .kind = ParsedServerDatagram::Kind::short_header,
+            .destination_connection_id = routed_connection_id,
+        };
+        const ParsedServerDatagram initial_parsed{
+            .kind = ParsedServerDatagram::Kind::supported_initial,
+            .version = kQuicVersion1,
+            .destination_connection_id = initial_destination_connection_id,
+        };
+        const ParsedServerDatagram supported_long_header_parsed{
+            .kind = ParsedServerDatagram::Kind::supported_long_header,
+            .version = kQuicVersion1,
+            .destination_connection_id = initial_destination_connection_id,
+        };
+        const ParsedServerDatagram missing_initial_route{
+            .kind = ParsedServerDatagram::Kind::supported_initial,
+            .version = kQuicVersion1,
+            .destination_connection_id = make_runtime_connection_id(std::byte{0x94}, 4),
+        };
+        const ParsedServerDatagram short_header_without_route{
+            .kind = ParsedServerDatagram::Kind::short_header,
+            .destination_connection_id = make_runtime_connection_id(std::byte{0x95}, 5),
+        };
+
+        check("find_server_session_for_datagram matches direct destination connection ids",
+              find_server_session_for_datagram(sessions, connection_id_routes,
+                                               initial_destination_routes,
+                                               direct_parsed) != sessions.end());
+        check("find_server_session_for_datagram matches routed destination connection ids",
+              find_server_session_for_datagram(sessions, connection_id_routes,
+                                               initial_destination_routes,
+                                               routed_parsed) != sessions.end());
+        check("find_server_session_for_datagram falls back to initial destination routes for "
+              "initials",
+              find_server_session_for_datagram(sessions, connection_id_routes,
+                                               initial_destination_routes,
+                                               initial_parsed) != sessions.end());
+        check("find_server_session_for_datagram falls back to initial destination routes "
+              "for long "
+              "headers",
+              find_server_session_for_datagram(sessions, connection_id_routes,
+                                               initial_destination_routes,
+                                               supported_long_header_parsed) != sessions.end());
+        check("find_server_session_for_datagram returns end when initial routes miss",
+              find_server_session_for_datagram(sessions, connection_id_routes,
+                                               initial_destination_routes,
+                                               missing_initial_route) == sessions.end());
+        check("find_server_session_for_datagram returns end for unrouted short headers",
+              find_server_session_for_datagram(sessions, connection_id_routes,
+                                               initial_destination_routes,
+                                               short_header_without_route) == sessions.end());
+        check("datagram_routes_via_initial_destination only accepts supported long-header "
+              "client "
+              "opens",
+              datagram_routes_via_initial_destination(initial_parsed) &&
+                  datagram_routes_via_initial_destination(supported_long_header_parsed) &&
+                  !datagram_routes_via_initial_destination(short_header_without_route));
+    }
+
+    {
+        const auto runtime_server_core = make_runtime_server_core_config(
+            Http09RuntimeConfig{
+                .mode = Http09RuntimeMode::server,
+            },
+            TlsIdentity{
+                .certificate_pem = "cert",
+                .private_key_pem = "key",
+            },
+            19);
+        check("make_runtime_server_core_config assigns runtime source connection ids",
+              runtime_server_core.source_connection_id ==
+                  make_runtime_connection_id(std::byte{0x53}, 19));
+
+        const auto wakeup_a = now() + std::chrono::milliseconds(20);
+        const auto wakeup_b = now() + std::chrono::milliseconds(10);
+        ServerSessionMap sessions;
+        sessions.emplace(connection_id_key(make_runtime_connection_id(std::byte{0xa1}, 1)),
+                         make_server_session(make_runtime_connection_id(std::byte{0xa1}, 1),
+                                             make_runtime_connection_id(std::byte{0xb1}, 1),
+                                             wakeup_a, false));
+        sessions.emplace(connection_id_key(make_runtime_connection_id(std::byte{0xa2}, 2)),
+                         make_server_session(make_runtime_connection_id(std::byte{0xa2}, 2),
+                                             make_runtime_connection_id(std::byte{0xb2}, 2),
+                                             wakeup_b, false));
+        sessions.emplace(connection_id_key(make_runtime_connection_id(std::byte{0xa3}, 3)),
+                         make_server_session(make_runtime_connection_id(std::byte{0xa3}, 3),
+                                             make_runtime_connection_id(std::byte{0xb3}, 3),
+                                             std::nullopt, false));
+        check("earliest_server_session_wakeup picks the minimum wakeup",
+              earliest_server_session_wakeup(sessions) ==
+                  std::optional<QuicCoreTimePoint>(wakeup_b));
+    }
+
+    {
+        g_recorded_sendto_for_tests = {};
+        const auto peer = make_loopback_peer(9666);
+        const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendto_fn = record_sendto_for_tests,
+            },
+        };
+        QuicCore core = make_local_error_client_core_for_tests();
+        ScriptedEndpointForTests endpoint;
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
+        });
+        QuicCoreResult initial_result;
+        initial_result.effects.emplace_back(QuicCoreSendDatagram{
+            .bytes =
+                {
+                    std::byte{0x41},
+                },
+        });
+        EndpointDriveState state;
+        bool observed_send_effects = false;
+        check("drive_endpoint_until_blocked records send effects before terminal success",
+              drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, 33, &peer,
+                                           sizeof(sockaddr_in), initial_result, state, "client",
+                                           nullptr, nullptr, nullptr, &observed_send_effects));
+        check("drive_endpoint_until_blocked marks terminal success and observed sends",
+              state.terminal_success && observed_send_effects &&
+                  g_recorded_sendto_for_tests.calls == 1);
+    }
+
+    {
+        QuicCore core = make_local_error_client_core_for_tests();
+        ScriptedEndpointForTests endpoint;
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        Http09RuntimeConfig config{
+            .mode = Http09RuntimeMode::client,
+        };
+        ScriptedIoBackendForTests backend;
+        check("drive_endpoint_until_blocked_with_backend rejects missing client io context "
+              "when "
+              "policy observation is requested",
+              !drive_endpoint_until_blocked_with_backend(make_endpoint_driver(endpoint), core, 5,
+                                                         backend, QuicCoreResult{}, state, "client",
+                                                         &config, &policy, nullptr));
+        check("missing client io context marks terminal failure", state.terminal_failure);
+    }
+
+    {
+        QuicCore core = make_local_error_client_core_for_tests();
+        ScriptedEndpointForTests endpoint;
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        Http09RuntimeConfig config{
+            .mode = Http09RuntimeMode::client,
+        };
+        ScriptedIoBackendForTests backend;
+        ClientIoContext io_context;
+        check("drive_endpoint_until_blocked_with_backend propagates preferred-address "
+              "observation "
+              "failures from client io state",
+              !drive_endpoint_until_blocked_with_backend(make_endpoint_driver(endpoint), core, 5,
+                                                         backend, preferred_address_result, state,
+                                                         "client", &config, &policy, &io_context));
+        check("preferred-address observation failures mark terminal failure",
+              state.terminal_failure);
+    }
+
+    {
+        QuicCore core = make_local_error_client_core_for_tests();
+        ScriptedEndpointForTests endpoint;
+        EndpointDriveState state;
+        ScriptedIoBackendForTests backend;
+        QuicCoreResult local_error_result;
+        local_error_result.local_error = QuicCoreLocalError{
+            .connection = std::nullopt,
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        };
+        check("drive_endpoint_until_blocked_with_backend treats unhandled local errors as "
+              "terminal "
+              "failures",
+              !drive_endpoint_until_blocked_with_backend(make_endpoint_driver(endpoint), core, 6,
+                                                         backend, local_error_result, state,
+                                                         "client"));
+        check("unhandled local errors mark terminal failure", state.terminal_failure);
+    }
+
+    {
+        QuicCore core = make_local_error_client_core_for_tests();
+        ScriptedEndpointForTests endpoint;
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .handled_local_error = true,
+        });
+        EndpointDriveState state;
+        bool observed_send_effects = true;
+        ScriptedIoBackendForTests backend;
+        QuicCoreResult local_error_result;
+        local_error_result.local_error = QuicCoreLocalError{
+            .connection = std::nullopt,
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        };
+        check("drive_endpoint_until_blocked_with_backend keeps handled local errors "
+              "non-terminal",
+              drive_endpoint_until_blocked_with_backend(
+                  make_endpoint_driver(endpoint), core, 6, backend, local_error_result, state,
+                  "client", nullptr, nullptr, nullptr, &observed_send_effects));
+        check("handled local errors do not record send effects or terminal failures",
+              !state.terminal_failure && !observed_send_effects);
+    }
+
+    {
+        const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+        QuicCore core = make_local_error_client_core_for_tests();
+        ScriptedEndpointForTests endpoint;
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
+        });
+        EndpointDriveState state;
+        bool observed_send_effects = false;
+        ScriptedIoBackendForTests backend;
+        QuicCoreResult initial_result;
+        initial_result.effects.emplace_back(QuicCoreSendDatagram{
+            .bytes =
+                {
+                    std::byte{0x42},
+                },
+            .ecn = QuicEcnCodepoint::ect0,
+        });
+        check("drive_endpoint_until_blocked_with_backend records sends before terminal "
+              "success",
+              drive_endpoint_until_blocked_with_backend(
+                  make_endpoint_driver(endpoint), core, 7, backend, initial_result, state, "client",
+                  nullptr, nullptr, nullptr, &observed_send_effects));
+        check("backend drive path marks terminal success and records the sent datagram",
+              state.terminal_success && observed_send_effects &&
+                  backend.sent_datagrams.size() == 1 &&
+                  backend.sent_datagrams.front().route_handle == 7);
+    }
+
+    {
+        QuicCore core = make_local_error_client_core_for_tests();
+        ScriptedEndpointForTests endpoint;
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        ClientIoContext io_context;
+        check("run_http09_client_connection_backend_loop rejects missing backend bootstrap "
+              "state",
+              run_http09_client_connection_backend_loop(
+                  Http09RuntimeConfig{
+                      .mode = Http09RuntimeMode::client,
+                  },
+                  make_endpoint_driver(endpoint), core, io_context, state, policy,
+                  QuicCoreResult{}) == 1);
+    }
+
+    {
+        QuicCore core = make_local_error_client_core_for_tests();
+        ScriptedEndpointForTests endpoint;
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        ClientIoContext io_context;
+        io_context.backend = std::make_unique<ScriptedIoBackendForTests>();
+        check("run_http09_client_connection_backend_loop rejects missing primary route "
+              "handles even "
+              "when a backend exists",
+              run_http09_client_connection_backend_loop(
+                  Http09RuntimeConfig{
+                      .mode = Http09RuntimeMode::client,
+                  },
+                  make_endpoint_driver(endpoint), core, io_context, state, policy,
+                  QuicCoreResult{}) == 1);
+    }
+
+    {
+        QuicCore core = make_local_error_client_core_for_tests();
+        ScriptedEndpointForTests endpoint;
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 61,
+                    .family = AF_INET,
+                },
+        };
+        ScriptedClientLoopIoForTests io_script;
+        QuicCoreResult start_result;
+        start_result.local_error = QuicCoreLocalError{
+            .connection = std::nullopt,
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        };
+        check("run_http09_client_connection_loop exits when the initial drive fails",
+              run_http09_client_connection_loop(
+                  Http09RuntimeConfig{
+                      .mode = Http09RuntimeMode::client,
+                  },
+                  make_endpoint_driver(endpoint), core, sockets, 5, make_loopback_peer(9888),
+                  sizeof(sockaddr_in), state, policy,
+                  make_scripted_client_loop_io_for_tests(io_script), start_result) == 1);
+    }
+
+    {
+        const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+        QuicCore core = make_local_error_client_core_for_tests();
+        ScriptedEndpointForTests endpoint;
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_failure = true,
+        });
+        EndpointDriveState state;
+        ClientRuntimePolicyState policy;
+        ClientSocketSet sockets{
+            .primary =
+                ClientSocketDescriptor{
+                    .fd = 62,
+                    .family = AF_INET,
+                },
+        };
+        ScriptedClientLoopIoForTests io_script;
+        check("run_http09_client_connection_loop traces pending endpoint polls before "
+              "terminal "
+              "failures",
+              run_http09_client_connection_loop(
+                  Http09RuntimeConfig{
+                      .mode = Http09RuntimeMode::client,
+                  },
+                  make_endpoint_driver(endpoint), core, sockets, 5, make_loopback_peer(9999),
+                  sizeof(sockaddr_in), state, policy,
+                  make_scripted_client_loop_io_for_tests(io_script), QuicCoreResult{}) == 1);
+        check("pending endpoint poll failures mark terminal failure", state.terminal_failure);
+    }
+
+    {
+        bool processed_any = true;
+        std::vector<std::string> erased_keys;
+        ServerSessionMap sessions;
+        sessions.emplace(connection_id_key(make_runtime_connection_id(std::byte{0xc1}, 1)),
+                         make_server_session(make_runtime_connection_id(std::byte{0xc1}, 1),
+                                             make_runtime_connection_id(std::byte{0xd1}, 1),
+                                             now() + std::chrono::milliseconds(50), false));
+        sessions.emplace(connection_id_key(make_runtime_connection_id(std::byte{0xc3}, 3)),
+                         make_server_session(make_runtime_connection_id(std::byte{0xc3}, 3),
+                                             make_runtime_connection_id(std::byte{0xd3}, 3),
+                                             std::nullopt, false));
+        ServerConnectionIdRouteMap connection_id_routes;
+        process_expired_server_sessions(
+            sessions, now(), connection_id_routes,
+            [&](const std::string &local_connection_id_key) {
+                erased_keys.push_back(local_connection_id_key);
+            },
+            processed_any);
+        check("process_expired_server_sessions skips sessions whose wakeup is still in the "
+              "future",
+              !processed_any && erased_keys.empty());
+    }
+
+    {
+        std::vector<std::string> erased_keys;
+        ServerSessionMap sessions;
+        sessions.emplace(connection_id_key(make_runtime_connection_id(std::byte{0xc2}, 2)),
+                         make_server_session(make_runtime_connection_id(std::byte{0xc2}, 2),
+                                             make_runtime_connection_id(std::byte{0xd2}, 2),
+                                             std::nullopt, false));
+        ServerConnectionIdRouteMap connection_id_routes;
+        check("pump_server_pending_endpoint_work skips sessions without pending endpoint "
+              "work",
+              !pump_server_pending_endpoint_work(sessions, connection_id_routes,
+                                                 [&](const std::string &local_connection_id_key) {
+                                                     erased_keys.push_back(local_connection_id_key);
+                                                 }));
+        check("has_pending_server_endpoint_work reports false when no session is pending",
+              !has_pending_server_endpoint_work(sessions));
+        sessions.begin()->second->state.endpoint_has_pending_work = true;
+        check("has_pending_server_endpoint_work reports true when a session is pending",
+              has_pending_server_endpoint_work(sessions));
+    }
+
+    {
+        ServerConnectionEndpointMap endpoints;
+        endpoints.emplace(7, ServerConnectionEndpointState{
+                                 .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                     .document_root = std::filesystem::path("."),
+                                 }),
+                                 .has_pending_work = true,
+                             });
+        QuicCoreResult closed_result;
+        closed_result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+            .connection = 7,
+            .event = QuicCoreConnectionLifecycle::closed,
+        });
+        erase_closed_server_connection_endpoints(endpoints, closed_result);
+        check("erase_closed_server_connection_endpoints removes closed endpoints",
+              endpoints.empty());
+    }
+
+    {
+        check("to_connection_command_input preserves supported stream commands",
+              to_connection_command_input(QuicCoreSendStreamData{
+                                              .stream_id = 3,
+                                              .bytes =
+                                                  {
+                                                      std::byte{0x51},
+                                                  },
+                                          })
+                  .has_value());
+        check("to_connection_command_input rejects unsupported endpoint-level inputs",
+              !to_connection_command_input(QuicCoreStart{}).has_value());
+    }
+
+    return ok;
+}
+
+bool runtime_wait_and_receive_coverage_for_tests() {
+    struct ScopedEnvVar {
+        std::string name;
+        std::optional<std::string> previous;
+
+        ScopedEnvVar(std::string variable, std::optional<std::string> value)
+            : name(std::move(variable)) {
+            if (const char *existing = std::getenv(name.c_str()); existing != nullptr) {
+                previous = std::string(existing);
+            }
+            if (value.has_value()) {
+                ::setenv(name.c_str(), value->c_str(), 1);
+            } else {
+                ::unsetenv(name.c_str());
+            }
+        }
+
+        ~ScopedEnvVar() {
+            if (previous.has_value()) {
+                ::setenv(name.c_str(), previous->c_str(), 1);
+            } else {
+                ::unsetenv(name.c_str());
+            }
+        }
+    };
+
+    bool ok = true;
+    const auto check = [&](std::string_view label, bool condition) {
+        if (!condition) {
+            std::cerr << "runtime_wait_and_receive_coverage_for_tests failed: " << label << '\n';
+            ok = false;
+        }
+        return condition;
+    };
+    const auto make_loopback_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+
+    {
+        g_recorded_recvmsg_for_tests = {};
+        g_recorded_recvmsg_for_tests.ecn = QuicEcnCodepoint::ect0;
+        g_recorded_recvmsg_for_tests.bytes = {
+            std::byte{0x10},
+            std::byte{0x20},
+            std::byte{0x30},
+        };
+        g_recorded_recvmsg_for_tests.peer = make_loopback_peer(6123);
+        g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in);
+
+        const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .recvmsg_fn = &record_recvmsg_for_tests,
+            },
+        };
+
+        const auto received = receive_datagram(/*socket_fd=*/47, "client", /*flags=*/0);
+        const auto wrapped = receive_runtime_client_datagram(
+            /*context=*/nullptr, /*socket_fd=*/48, MSG_DONTWAIT, "client");
+
+        const auto *received_inbound =
+            received.step.input.has_value()
+                ? std::get_if<QuicCoreInboundDatagram>(&*received.step.input)
+                : nullptr;
+        const auto *wrapped_inbound =
+            wrapped.step.input.has_value()
+                ? std::get_if<QuicCoreInboundDatagram>(&*wrapped.step.input)
+                : nullptr;
+
+        check("receive_datagram returns inbound bytes with trace enabled",
+              received.status == ReceiveDatagramStatus::ok && received.step.has_source &&
+                  received.step.source_len == sizeof(sockaddr_in) && received_inbound != nullptr &&
+                  received_inbound->bytes == g_recorded_recvmsg_for_tests.bytes &&
+                  received_inbound->ecn == QuicEcnCodepoint::ect0);
+        check("receive_runtime_client_datagram forwards to receive_datagram",
+              wrapped.status == ReceiveDatagramStatus::ok && wrapped.step.has_source &&
+                  wrapped.step.source_len == sizeof(sockaddr_in) && wrapped_inbound != nullptr &&
+                  wrapped_inbound->bytes == g_recorded_recvmsg_for_tests.bytes);
+    }
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .poll_fn = [](pollfd *, nfds_t, int) -> int { return 0; },
+            },
+        };
+        const auto step = wait_for_socket_or_deadline(
+            RuntimeWaitConfig{
+                .socket_fds = {51, -1},
+                .socket_fd_count = 1,
+                .idle_timeout_ms = 250,
+                .role_name = "client",
+            },
+            now() + std::chrono::milliseconds(250));
+        check("wait turns future wakeups into timer inputs",
+              step.has_value() && step->input.has_value() &&
+                  std::holds_alternative<QuicCoreTimerExpired>(*step->input) &&
+                  !step->idle_timeout && step->socket_fd == 51);
+    }
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .poll_fn = [](pollfd *, nfds_t, int) -> int {
+                    errno = ECANCELED;
+                    return -1;
+                },
+            },
+        };
+        check("wait returns nullopt when poll is canceled", !wait_for_socket_or_deadline(
+                                                                 RuntimeWaitConfig{
+                                                                     .socket_fds = {52, -1},
+                                                                     .socket_fd_count = 1,
+                                                                     .idle_timeout_ms = 10,
+                                                                     .role_name = "client",
+                                                                 },
+                                                                 std::nullopt)
+                                                                 .has_value());
+    }
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .poll_fn = [](pollfd *, nfds_t, int) -> int {
+                    errno = EIO;
+                    return -1;
+                },
+            },
+        };
+        check("wait returns nullopt on poll errors", !wait_for_socket_or_deadline(
+                                                          RuntimeWaitConfig{
+                                                              .socket_fds = {53, -1},
+                                                              .socket_fd_count = 1,
+                                                              .idle_timeout_ms = 10,
+                                                              .role_name = "client",
+                                                          },
+                                                          std::nullopt)
+                                                          .has_value());
+    }
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .poll_fn = [](pollfd *descriptors, nfds_t count, int) -> int {
+                    if (count > 0 && descriptors != nullptr) {
+                        descriptors[0].revents = POLLOUT;
+                    }
+                    return 1;
+                },
+            },
+        };
+        check("wait rejects sockets that become unreadable", !wait_for_socket_or_deadline(
+                                                                  RuntimeWaitConfig{
+                                                                      .socket_fds = {54, -1},
+                                                                      .socket_fd_count = 1,
+                                                                      .idle_timeout_ms = 10,
+                                                                      .role_name = "client",
+                                                                  },
+                                                                  std::nullopt)
+                                                                  .has_value());
+    }
+
+    {
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .poll_fn = [](pollfd *, nfds_t, int) -> int { return 1; },
+            },
+        };
+        check("wait rejects readiness without readable sockets", !wait_for_socket_or_deadline(
+                                                                      RuntimeWaitConfig{
+                                                                          .socket_fds = {55, -1},
+                                                                          .socket_fd_count = 1,
+                                                                          .idle_timeout_ms = 10,
+                                                                          .role_name = "client",
+                                                                      },
+                                                                      std::nullopt)
+                                                                      .has_value());
+    }
+
+    {
+        g_recorded_recvmsg_for_tests = {};
+        g_recorded_recvmsg_for_tests.bytes = {
+            std::byte{0x40},
+        };
+        g_recorded_recvmsg_for_tests.peer = make_loopback_peer(7443);
+        g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in);
+
+        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .poll_fn = [](pollfd *, nfds_t, int) -> int { return 0; },
+                .recvmsg_fn = &record_recvmsg_for_tests,
+            },
+        };
+
+        const ClientLoopIo io = make_runtime_client_loop_io();
+        const auto current = io.current_time();
+        const auto received = io.receive_datagram(/*socket_fd=*/56, /*flags=*/0, "client");
+        const auto step = io.wait_for_socket_or_deadline(
+            RuntimeWaitConfig{
+                .socket_fds = {56, -1},
+                .socket_fd_count = 1,
+                .idle_timeout_ms = 25,
+                .role_name = "client",
+            },
+            current + std::chrono::milliseconds(25));
+        const auto *inbound = received.step.input.has_value()
+                                  ? std::get_if<QuicCoreInboundDatagram>(&*received.step.input)
+                                  : nullptr;
+
+        check("client loop io wrappers call through to runtime helpers",
+              current.time_since_epoch().count() > 0 &&
+                  received.status == ReceiveDatagramStatus::ok && inbound != nullptr &&
+                  inbound->bytes == g_recorded_recvmsg_for_tests.bytes && step.has_value() &&
+                  step->input.has_value() &&
+                  std::holds_alternative<QuicCoreTimerExpired>(*step->input));
+    }
 
     return ok;
 }
@@ -7489,8 +9391,15 @@ ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests c
         .process_datagram = [&](const RuntimeWaitStep &) { return script.process_datagram_result; },
     };
 
+    const bool include_preferred_socket =
+        case_id == ServerLoopCaseForTests::blocking_wait_failure_with_preferred_socket;
     return ServerLoopResultForTests{
-        .exit_code = run_http09_server_loop(ServerSocketSet{.primary_fd = -1}, io, driver),
+        .exit_code = run_http09_server_loop(
+            ServerSocketSet{
+                .primary_fd = -1,
+                .preferred_fd = include_preferred_socket ? std::optional<int>{-2} : std::nullopt,
+            },
+            io, driver),
         .current_time_calls = current_time_calls,
         .receive_calls = receive_calls,
         .wait_calls = wait_calls,
@@ -7537,17 +9446,6 @@ run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests
                 next_wakeup_calls += 1;
                 return script.next_wakeup_results[index];
             },
-        .process_expired_timer =
-            [&](QuicCoreTimePoint) {
-                if (script.process_expired_timer_results.empty()) {
-                    process_expired_calls += 1;
-                    return false;
-                }
-                const auto index = std::min(process_expired_calls,
-                                            script.process_expired_timer_results.size() - 1);
-                process_expired_calls += 1;
-                return static_cast<bool>(script.process_expired_timer_results[index]);
-            },
         .pump_endpoint_work =
             [&](bool &made_progress) {
                 endpoint_has_pending_work = pump_calls < script.pending_work_after_pump.size()
@@ -7560,6 +9458,7 @@ run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests
                 return true;
             },
         .has_pending_endpoint_work = [&] { return endpoint_has_pending_work; },
+        .initial_buffered_event = [&] { return script.initial_buffered_event; },
         .wait =
             [&](const std::optional<QuicCoreTimePoint> &next_wakeup) {
                 wait_calls += 1;
@@ -8026,6 +9925,1616 @@ bool runtime_logging_ready_for_tests() {
 
 bool runtime_openssl_available_for_tests() {
     return runtime_has_openssl();
+}
+
+bool runtime_server_loop_and_trace_coverage_for_tests() {
+    bool ok = true;
+    const auto check = [&](std::string_view, bool condition) {
+        ok &= condition;
+        return condition;
+    };
+    const auto make_loopback_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+    const auto make_identity = [] {
+        return TlsIdentity{
+            .certificate_pem = read_text_file("tests/fixtures/quic-server-cert.pem"),
+            .private_key_pem = read_text_file("tests/fixtures/quic-server-key.pem"),
+        };
+    };
+    struct BackendLoopScriptForTests {
+        std::vector<QuicCoreTimePoint> current_times;
+        std::vector<std::optional<QuicCoreTimePoint>> next_wakeup_results;
+        std::vector<std::optional<QuicIoEvent>> wait_results;
+        std::vector<bool> pump_return_results;
+        std::vector<bool> pending_work_after_pump;
+        std::vector<bool> pump_made_progress;
+        std::vector<bool> process_wait_timer_results;
+        bool process_datagram_result = true;
+    };
+
+    const auto peer = make_loopback_peer(4443);
+    const ParsedServerDatagram supported_initial{
+        .kind = ParsedServerDatagram::Kind::supported_initial,
+        .version = kQuicVersion1,
+        .destination_connection_id = make_runtime_connection_id(std::byte{0x51}, 1),
+        .source_connection_id = make_runtime_connection_id(std::byte{0x61}, 2),
+        .token = {},
+    };
+
+    ::setenv("COQUIC_RUNTIME_TRACE", "1", 1);
+
+    {
+        g_recorded_sendto_for_tests = {};
+        RetryTokenStore retry_tokens;
+        std::uint64_t next_connection_index = 9;
+        const ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .sendto_fn = record_sendto_for_tests,
+            },
+        };
+        const auto retry_result = maybe_send_retry_for_supported_initial(
+            /*retry_enabled=*/true, /*socket_fd=*/17, supported_initial, peer, sizeof(sockaddr_in),
+            retry_tokens, next_connection_index);
+        check("retry helper traces and sends tokenless initials",
+              retry_result.has_value() & retry_result.value_or(false) &
+                  g_recorded_sendto_for_tests.calls == 1 & next_connection_index == 10);
+    }
+
+    {
+        std::optional<PendingRetryToken> retry_context;
+        RetryTokenStore retry_tokens;
+        ParsedServerDatagram invalid_retry = supported_initial;
+        invalid_retry.token = make_runtime_retry_token(0x0102030405060708ull);
+        invalid_retry.destination_connection_id = make_runtime_connection_id(std::byte{0x72}, 4);
+        check("invalid retry tokens hit the traced rejection path",
+              !populate_retry_context_if_required(/*retry_enabled=*/true, invalid_retry, peer,
+                                                  sizeof(sockaddr_in), retry_tokens,
+                                                  retry_context) &
+                  !retry_context.has_value());
+    }
+
+    {
+        RetryTokenStore retry_tokens;
+        ParsedServerDatagram invalid_retry_version = supported_initial;
+        invalid_retry_version.version = kVersionNegotiationVersion;
+        check("retry send covers retry integrity-tag failures",
+              !send_retry_for_initial(/*fd=*/18, invalid_retry_version, peer, sizeof(sockaddr_in),
+                                      retry_tokens,
+                                      /*connection_index=*/1));
+    }
+
+    {
+        const auto run_traced_input = [&](QuicCoreInput input) {
+            QuicCore core = make_local_error_client_core_for_tests();
+            const std::array<QuicCoreInput, 1> inputs = {
+                std::move(input),
+            };
+            static_cast<void>(advance_core_with_inputs(core, inputs, now()));
+        };
+        run_traced_input(QuicCoreStart{});
+        run_traced_input(QuicCoreInboundDatagram{
+            .bytes = bytes_from_string_for_runtime_tests("trace"),
+        });
+        run_traced_input(QuicCoreResetStream{.stream_id = 1, .application_error_code = 7});
+        run_traced_input(QuicCoreStopSending{.stream_id = 2, .application_error_code = 8});
+        run_traced_input(
+            QuicCoreCloseConnection{.application_error_code = 12, .reason_phrase = "trace"});
+        run_traced_input(QuicCoreSendSharedStreamData{
+            .stream_id = 3,
+            .bytes = quic::SharedBytes{std::byte{0x04}},
+            .fin = true,
+        });
+        run_traced_input(QuicCoreRequestKeyUpdate{});
+    }
+
+    {
+        check("connection command translation covers remaining supported commands",
+              to_connection_command_input(QuicCoreSendStreamData{
+                                              .stream_id = 3,
+                                              .bytes = bytes_from_string_for_runtime_tests("body"),
+                                              .fin = true,
+                                          })
+                      .has_value() &
+                  to_connection_command_input(QuicCoreResetStream{
+                                                  .stream_id = 4,
+                                                  .application_error_code = 9,
+                                              })
+                      .has_value() &
+                  to_connection_command_input(QuicCoreStopSending{
+                                                  .stream_id = 5,
+                                                  .application_error_code = 10,
+                                              })
+                      .has_value() &
+                  to_connection_command_input(QuicCoreRequestKeyUpdate{}).has_value() &
+                  !to_connection_command_input(QuicCoreSendSharedStreamData{
+                                                   .stream_id = 6,
+                                                   .bytes = quic::SharedBytes{std::byte{0x01}},
+                                                   .fin = true,
+                                               })
+                       .has_value());
+    }
+
+    {
+        QuicCoreResult result;
+        result.local_error = QuicCoreLocalError{
+            .connection = 1,
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        };
+        result.effects.emplace_back(QuicCoreReceiveStreamData{
+            .connection = 2,
+            .stream_id = 7,
+            .bytes = bytes_from_string_for_runtime_tests("rx"),
+            .fin = true,
+        });
+        result.effects.emplace_back(QuicCorePeerResetStream{
+            .connection = 3,
+            .stream_id = 8,
+            .application_error_code = 11,
+            .final_size = 12,
+        });
+        result.effects.emplace_back(QuicCorePeerStopSending{
+            .connection = 4,
+            .stream_id = 9,
+            .application_error_code = 13,
+        });
+        result.effects.emplace_back(QuicCoreStateEvent{
+            .connection = 5,
+            .change = QuicCoreStateChange::handshake_ready,
+        });
+        result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+            .connection = 6,
+            .event = QuicCoreConnectionLifecycle::accepted,
+        });
+        auto preferred_address = make_ipv4_preferred_address_effect_for_tests(9555);
+        preferred_address.connection = 7;
+        result.effects.emplace_back(preferred_address);
+        result.effects.emplace_back(QuicCoreResumptionStateAvailable{
+            .connection = 8,
+            .state =
+                QuicResumptionState{
+                    .serialized = {std::byte{0xaa}},
+                },
+        });
+        result.effects.emplace_back(QuicCoreZeroRttStatusEvent{
+            .connection = 9,
+            .status = QuicZeroRttStatus::accepted,
+        });
+        const auto handles = result_connection_handles(result);
+        const auto contains = [&](QuicConnectionHandle handle) {
+            return std::find(handles.begin(), handles.end(), handle) != handles.end();
+        };
+        const auto sliced = slice_result_for_connection(result, 4);
+        QuicCoreResult transport_error_result;
+        transport_error_result.local_error = QuicCoreLocalError{
+            .connection = std::nullopt,
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        };
+        transport_error_result.effects.emplace_back(QuicCoreStateEvent{
+            .connection = 11,
+            .change = QuicCoreStateChange::handshake_ready,
+        });
+        const auto transport_handles = result_connection_handles(transport_error_result);
+        check(
+            "result connection helpers cover the remaining effect variants",
+            contains(1) & contains(2) & contains(3) & contains(4) & contains(5) & contains(6) &
+                contains(7) & contains(8) & contains(9) & sliced.effects.size() == 1 &
+                std::holds_alternative<QuicCorePeerStopSending>(sliced.effects.at(0)) &
+                !result_has_connection_lifecycle(result, 4, QuicCoreConnectionLifecycle::accepted));
+        check("result connection helpers ignore transport-wide local errors without connections",
+              transport_handles == std::vector<QuicConnectionHandle>{11});
+    }
+
+    {
+        ServerConnectionEndpointMap endpoints;
+        endpoints.emplace(17, ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = std::filesystem::path("."),
+                                  }),
+                              });
+        QuicCoreResult accept_result;
+        accept_result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+            .connection = 17,
+            .event = QuicCoreConnectionLifecycle::accepted,
+        });
+        ensure_server_connection_endpoints_for_accepts(endpoints, accept_result,
+                                                       std::filesystem::path("."));
+        check("accept handling keeps pre-existing endpoint entries stable", endpoints.size() == 1);
+    }
+
+    {
+        QuicCore core = make_failing_server_core_for_tests();
+        EndpointDriveState transport_state;
+        ServerConnectionEndpointMap endpoints;
+        QuicCoreResult transport_error_result;
+        transport_error_result.local_error = QuicCoreLocalError{
+            .connection = std::nullopt,
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        };
+        check("server endpoint processing rejects transport-wide local errors",
+              !process_server_endpoint_core_result(
+                  core, transport_state, endpoints, std::filesystem::path("."),
+                  transport_error_result,
+                  /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)));
+
+        QuicCoreResult send_failure_result;
+        send_failure_result.effects.emplace_back(QuicCoreSendDatagram{
+            .bytes = {std::byte{0x01}},
+        });
+        check("server endpoint processing rejects missing fallback routes",
+              !process_server_endpoint_core_result(core, transport_state, endpoints,
+                                                   std::filesystem::path("."), send_failure_result,
+                                                   /*fallback_socket_fd=*/-1,
+                                                   /*fallback_peer=*/nullptr,
+                                                   /*fallback_peer_len=*/0));
+
+        QuicCoreResult missing_endpoint_result;
+        missing_endpoint_result.effects.emplace_back(QuicCoreStateEvent{
+            .connection = 19,
+            .change = QuicCoreStateChange::handshake_ready,
+        });
+        check("server endpoint processing tolerates missing connection endpoints",
+              process_server_endpoint_core_result(
+                  core, transport_state, endpoints, std::filesystem::path("."),
+                  missing_endpoint_result,
+                  /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)));
+    }
+
+    {
+        const auto run_server_loop_script = [&](ScriptedServerLoopCaseForTests script,
+                                                bool include_preferred_socket,
+                                                std::vector<bool> has_failed_results) {
+            std::size_t current_time_calls = 0;
+            std::size_t receive_calls = 0;
+            std::size_t wait_calls = 0;
+            std::size_t process_expired_calls = 0;
+            std::size_t process_datagram_calls = 0;
+            std::size_t pump_calls = 0;
+            std::size_t has_failed_calls = 0;
+            bool endpoint_has_pending_work = false;
+
+            const auto io = ServerLoopIo{
+                .current_time =
+                    [&] {
+                        current_time_calls += 1;
+                        return now();
+                    },
+                .receive_datagram =
+                    [&](int, int, std::string_view) {
+                        const auto index =
+                            std::min(receive_calls, script.receive_results.size() - 1);
+                        receive_calls += 1;
+                        return script.receive_results.at(index);
+                    },
+                .wait_for_socket_or_deadline = [&](const RuntimeWaitConfig &,
+                                                   const std::optional<QuicCoreTimePoint> &)
+                    -> std::optional<RuntimeWaitStep> {
+                    const auto index = std::min(wait_calls, script.wait_steps.size() - 1);
+                    wait_calls += 1;
+                    return script.wait_steps.at(index);
+                },
+            };
+            const auto driver = ServerLoopDriver{
+                .earliest_wakeup = [] { return std::optional<QuicCoreTimePoint>{}; },
+                .process_expired_timers =
+                    [&](QuicCoreTimePoint, bool &processed_any) {
+                        const auto index = std::min(process_expired_calls,
+                                                    script.processed_timers_results.size() - 1);
+                        process_expired_calls += 1;
+                        processed_any = script.processed_timers_results.at(index);
+                    },
+                .pump_endpoint_work =
+                    [&] {
+                        const auto work_index =
+                            std::min(pump_calls, script.pending_work_after_pump.size() - 1);
+                        endpoint_has_pending_work = script.pending_work_after_pump.at(work_index);
+                        const auto progress_index =
+                            std::min(pump_calls, script.pump_made_progress.size() - 1);
+                        const bool made_progress = script.pump_made_progress.at(progress_index);
+                        pump_calls += 1;
+                        return made_progress;
+                    },
+                .has_pending_endpoint_work = [&] { return endpoint_has_pending_work; },
+                .process_datagram =
+                    [&](const RuntimeWaitStep &) {
+                        process_datagram_calls += 1;
+                        return script.process_datagram_result;
+                    },
+                .has_failed = [&]() -> bool {
+                    const auto index = std::min(has_failed_calls, has_failed_results.size() - 1);
+                    has_failed_calls += 1;
+                    return static_cast<bool>(has_failed_results.at(index));
+                },
+            };
+            return ServerLoopResultForTests{
+                .exit_code = run_http09_server_loop(
+                    ServerSocketSet{
+                        .primary_fd = -1,
+                        .preferred_fd =
+                            include_preferred_socket ? std::optional<int>{-2} : std::nullopt,
+                    },
+                    io, driver),
+                .current_time_calls = current_time_calls,
+                .receive_calls = receive_calls,
+                .wait_calls = wait_calls,
+                .process_expired_calls = process_expired_calls,
+                .process_datagram_calls = process_datagram_calls,
+                .pump_calls = pump_calls,
+            };
+        };
+
+        const auto top_level_failed =
+            run_server_loop_script({}, /*include_preferred_socket=*/false, {true});
+        check("server loop exits immediately when the driver has already failed",
+              top_level_failed.exit_code == 1 & top_level_failed.receive_calls == 0 &
+                  top_level_failed.wait_calls == 0);
+
+        ScriptedServerLoopCaseForTests inner_timer_failure_case;
+        inner_timer_failure_case.processed_timers_results = {false};
+        const auto inner_timer_failed = run_server_loop_script(
+            inner_timer_failure_case, /*include_preferred_socket=*/false, {false, true});
+        check("server loop exits when timer processing marks the driver failed",
+              inner_timer_failed.exit_code == 1 & inner_timer_failed.process_expired_calls == 1 &
+                  inner_timer_failed.receive_calls == 0);
+
+        ScriptedServerLoopCaseForTests preferred_socket_case;
+        preferred_socket_case.receive_results = {
+            make_input_receive_for_tests(QuicCoreInboundDatagram{
+                .bytes = {std::byte{0x22}},
+            }),
+            make_error_receive_for_tests(),
+        };
+        preferred_socket_case.processed_timers_results = {false, false};
+        const auto preferred_socket_result = run_server_loop_script(
+            preferred_socket_case, /*include_preferred_socket=*/true, {false});
+        check("server loop covers preferred-socket short-circuiting after a ready datagram",
+              preferred_socket_result.exit_code == 1 &
+                  preferred_socket_result.process_datagram_calls == 1 &
+                  preferred_socket_result.receive_calls == 2);
+
+        ScriptedServerLoopCaseForTests inner_pump_failure_case;
+        inner_pump_failure_case.receive_results = {
+            make_would_block_receive_for_tests(),
+        };
+        inner_pump_failure_case.processed_timers_results = {false};
+        inner_pump_failure_case.pending_work_after_pump = {false};
+        inner_pump_failure_case.pump_made_progress = {false};
+        const auto inner_pump_failed = run_server_loop_script(
+            inner_pump_failure_case, /*include_preferred_socket=*/false, {false, false, true});
+        check("server loop exits when pumping pending work marks the driver failed",
+              inner_pump_failed.exit_code == 1 & inner_pump_failed.pump_calls == 1 &
+                  inner_pump_failed.wait_calls == 0);
+
+        ScriptedServerLoopCaseForTests outer_failure_case;
+        outer_failure_case.receive_results = {
+            make_would_block_receive_for_tests(),
+        };
+        outer_failure_case.processed_timers_results = {false, false};
+        outer_failure_case.pending_work_after_pump = {false, false};
+        outer_failure_case.pump_made_progress = {false, false};
+        const auto outer_timer_failed = run_server_loop_script(
+            outer_failure_case, /*include_preferred_socket=*/false, {false, false, false, true});
+        check("server loop exits when the outer timer pass marks the driver failed",
+              outer_timer_failed.exit_code == 1 & outer_timer_failed.process_expired_calls == 2 &
+                  outer_timer_failed.pump_calls == 1);
+        const auto outer_pump_failed =
+            run_server_loop_script(outer_failure_case, /*include_preferred_socket=*/false,
+                                   {false, false, false, false, true});
+        check("server loop exits when the outer pump marks the driver failed",
+              outer_pump_failed.exit_code == 1 & outer_pump_failed.process_expired_calls == 2 &
+                  outer_pump_failed.pump_calls == 2);
+
+        ScriptedServerLoopCaseForTests idle_timeout_case;
+        idle_timeout_case.receive_results = {
+            make_would_block_receive_for_tests(),
+            make_error_receive_for_tests(),
+        };
+        idle_timeout_case.wait_steps = {
+            make_idle_timeout_wait_step_for_tests(),
+        };
+        idle_timeout_case.processed_timers_results = {false, false, false};
+        idle_timeout_case.pending_work_after_pump = {false};
+        idle_timeout_case.pump_made_progress = {false};
+        const auto idle_timeout_result =
+            run_server_loop_script(idle_timeout_case, /*include_preferred_socket=*/false, {false});
+        check("server loop continues after idle timeout steps",
+              idle_timeout_result.exit_code == 1 & idle_timeout_result.wait_calls == 1 &
+                  idle_timeout_result.receive_calls == 2);
+
+        ScriptedServerLoopCaseForTests wait_datagram_failure_case;
+        wait_datagram_failure_case.receive_results = {
+            make_would_block_receive_for_tests(),
+        };
+        wait_datagram_failure_case.wait_steps = {
+            make_input_wait_step_for_tests(QuicCoreInboundDatagram{
+                .bytes = {std::byte{0x33}},
+            }),
+        };
+        wait_datagram_failure_case.processed_timers_results = {false, false};
+        wait_datagram_failure_case.pending_work_after_pump = {false};
+        wait_datagram_failure_case.pump_made_progress = {false};
+        wait_datagram_failure_case.process_datagram_result = false;
+        const auto wait_datagram_failure = run_server_loop_script(
+            wait_datagram_failure_case, /*include_preferred_socket=*/false, {false});
+        check("server loop propagates failures from datagrams returned by blocking waits",
+              wait_datagram_failure.exit_code == 1 & wait_datagram_failure.wait_calls == 1 &
+                  wait_datagram_failure.process_datagram_calls == 1);
+    }
+
+    {
+        const auto run_backend_loop_script = [&](BackendLoopScriptForTests script) {
+            std::size_t current_time_calls = 0;
+            std::size_t next_wakeup_calls = 0;
+            std::size_t wait_calls = 0;
+            std::size_t process_wait_timer_calls = 0;
+            std::size_t process_datagram_calls = 0;
+            std::size_t pump_calls = 0;
+            bool endpoint_has_pending_work = false;
+            QuicCoreTimePoint last_current_time = script.current_times.front();
+
+            const auto driver = ServerBackendLoopDriver{
+                .current_time =
+                    [&] {
+                        const auto index =
+                            std::min(current_time_calls, script.current_times.size() - 1);
+                        last_current_time = script.current_times.at(index);
+                        current_time_calls += 1;
+                        return last_current_time;
+                    },
+                .next_wakeup =
+                    [&] {
+                        const auto index =
+                            std::min(next_wakeup_calls, script.next_wakeup_results.size() - 1);
+                        next_wakeup_calls += 1;
+                        return script.next_wakeup_results.at(index);
+                    },
+                .pump_endpoint_work =
+                    [&](bool &made_progress) {
+                        const auto work_index =
+                            std::min(pump_calls, script.pending_work_after_pump.size() - 1);
+                        endpoint_has_pending_work = script.pending_work_after_pump.at(work_index);
+                        const auto progress_index =
+                            std::min(pump_calls, script.pump_made_progress.size() - 1);
+                        made_progress = script.pump_made_progress.at(progress_index);
+                        const auto result_index =
+                            std::min(pump_calls, script.pump_return_results.size() - 1);
+                        const bool result = script.pump_return_results.at(result_index);
+                        pump_calls += 1;
+                        return result;
+                    },
+                .has_pending_endpoint_work = [&] { return endpoint_has_pending_work; },
+                .wait =
+                    [&](const std::optional<QuicCoreTimePoint> &) {
+                        const auto index = std::min(wait_calls, script.wait_results.size() - 1);
+                        wait_calls += 1;
+                        return script.wait_results.at(index);
+                    },
+                .process_wait_timer = [&](QuicCoreTimePoint) -> bool {
+                    const auto index = std::min(process_wait_timer_calls,
+                                                script.process_wait_timer_results.size() - 1);
+                    process_wait_timer_calls += 1;
+                    return static_cast<bool>(script.process_wait_timer_results.at(index));
+                },
+                .process_datagram =
+                    [&](const QuicIoRxDatagram &, QuicCoreTimePoint) {
+                        process_datagram_calls += 1;
+                        return script.process_datagram_result;
+                    },
+            };
+            return ServerLoopResultForTests{
+                .exit_code = run_server_backend_loop_with_driver(driver),
+                .current_time_calls = current_time_calls,
+                .wait_calls = wait_calls,
+                .process_expired_calls = process_wait_timer_calls,
+                .process_datagram_calls = process_datagram_calls,
+                .pump_calls = pump_calls,
+            };
+        };
+
+        const auto base_time = now();
+        const auto wait_failure = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time},
+            .next_wakeup_results = {base_time},
+            .wait_results = {std::nullopt},
+        });
+        check("backend loop covers top-due wait failures and null event tracing",
+              wait_failure.exit_code == 1 & wait_failure.wait_calls == 1);
+
+        const auto top_due_missing_datagram = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time},
+            .next_wakeup_results = {base_time},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::rx_datagram,
+                        .now = base_time,
+                    },
+                },
+        });
+        check("backend loop covers top-due datagrams that arrive without payloads",
+              top_due_missing_datagram.exit_code == 1 &
+                  top_due_missing_datagram.process_datagram_calls == 0 &
+                  top_due_missing_datagram.wait_calls == 1);
+
+        const auto top_due_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time},
+            .next_wakeup_results = {base_time},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::timer_expired,
+                        .now = base_time,
+                    },
+                },
+            .process_wait_timer_results = {false},
+        });
+        check("backend loop covers due timer events that fail while tracing",
+              top_due_timer_failure.exit_code == 1 &
+                  top_due_timer_failure.process_expired_calls == 1);
+
+        const auto top_due_timer_success = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time},
+            .next_wakeup_results = {base_time, std::nullopt},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::timer_expired,
+                        .now = base_time,
+                    },
+                    std::nullopt,
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {false},
+            .pump_made_progress = {false},
+            .process_wait_timer_results = {true},
+        });
+        check("backend loop covers successful top-due timer handling",
+              top_due_timer_success.exit_code == 1 &
+                  top_due_timer_success.process_expired_calls == 1 &
+                  top_due_timer_success.wait_calls == 2);
+
+        const auto buffered_shutdown = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time},
+            .next_wakeup_results = {base_time},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::shutdown,
+                        .now = base_time,
+                    },
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {false},
+            .pump_made_progress = {false},
+        });
+        check("backend loop buffers top-due shutdown events before consuming them",
+              buffered_shutdown.exit_code == 1 & buffered_shutdown.wait_calls == 1 &
+                  buffered_shutdown.pump_calls == 1);
+
+        const auto buffered_idle_timeout = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time, base_time},
+            .next_wakeup_results = {base_time, std::nullopt},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::idle_timeout,
+                        .now = base_time,
+                    },
+                    std::nullopt,
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {false},
+            .pump_made_progress = {false},
+        });
+        check("backend loop buffers top-due idle timeouts before consuming them",
+              buffered_idle_timeout.exit_code == 1 & buffered_idle_timeout.wait_calls == 2 &
+                  buffered_idle_timeout.pump_calls == 2);
+
+        const auto pump_failure = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time},
+            .next_wakeup_results = {std::nullopt},
+            .pump_return_results = {false},
+            .pending_work_after_pump = {false},
+            .pump_made_progress = {false},
+        });
+        check("backend loop exits after pending-work pump failures",
+              pump_failure.exit_code == 1 & pump_failure.pump_calls == 1);
+
+        const auto ready_probe_wait_failure = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time},
+            .next_wakeup_results =
+                {
+                    base_time + std::chrono::milliseconds(5),
+                    base_time + std::chrono::milliseconds(5),
+                },
+            .wait_results = {std::nullopt},
+            .pump_return_results = {true},
+            .pending_work_after_pump = {true},
+            .pump_made_progress = {true},
+        });
+        check("backend loop covers ready-probe wait failures",
+              ready_probe_wait_failure.exit_code == 1 & ready_probe_wait_failure.wait_calls == 1 &
+                  ready_probe_wait_failure.pump_calls == 1);
+
+        const auto ready_probe_missing_datagram = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time},
+            .next_wakeup_results =
+                {
+                    base_time + std::chrono::milliseconds(5),
+                    base_time + std::chrono::milliseconds(5),
+                },
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::rx_datagram,
+                        .now = base_time,
+                    },
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {true},
+            .pump_made_progress = {true},
+        });
+        check("backend loop covers ready-probe datagrams that arrive without payloads",
+              ready_probe_missing_datagram.exit_code == 1 &
+                  ready_probe_missing_datagram.process_datagram_calls == 0 &
+                  ready_probe_missing_datagram.wait_calls == 1);
+
+        const auto ready_probe_idle_timeout = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time, base_time},
+            .next_wakeup_results =
+                {
+                    base_time + std::chrono::milliseconds(5),
+                    base_time + std::chrono::milliseconds(5),
+                    std::nullopt,
+                },
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::idle_timeout,
+                        .now = base_time,
+                    },
+                    std::nullopt,
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {true},
+            .pump_made_progress = {true},
+        });
+        check("backend loop covers ready-probe idle timeouts",
+              ready_probe_idle_timeout.exit_code == 1 & ready_probe_idle_timeout.wait_calls == 2 &
+                  ready_probe_idle_timeout.pump_calls == 1);
+
+        const auto ready_probe_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time, base_time},
+            .next_wakeup_results = {base_time, base_time},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::timer_expired,
+                        .now = base_time,
+                    },
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {true},
+            .pump_made_progress = {true},
+            .process_wait_timer_results = {false},
+        });
+        check("backend loop covers ready-probe timer failures when wakeups are already due",
+              ready_probe_timer_failure.exit_code == 1 &
+                  ready_probe_timer_failure.process_expired_calls == 1 &
+                  ready_probe_timer_failure.wait_calls == 1);
+
+        const auto ready_probe_timer_not_due = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time, base_time},
+            .next_wakeup_results =
+                {
+                    base_time + std::chrono::milliseconds(5),
+                    base_time + std::chrono::milliseconds(5),
+                    std::nullopt,
+                },
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::timer_expired,
+                        .now = base_time,
+                    },
+                    std::nullopt,
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {true},
+            .pump_made_progress = {true},
+        });
+        check("backend loop ignores ready-probe timer events when wakeups are still in the future",
+              ready_probe_timer_not_due.exit_code == 1 &
+                  ready_probe_timer_not_due.process_expired_calls == 0 &
+                  ready_probe_timer_not_due.wait_calls == 2);
+
+        const auto ready_probe_shutdown = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time},
+            .next_wakeup_results =
+                {
+                    base_time + std::chrono::milliseconds(5),
+                    base_time + std::chrono::milliseconds(5),
+                },
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::shutdown,
+                        .now = base_time,
+                    },
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {true},
+            .pump_made_progress = {true},
+        });
+        check("backend loop covers ready-probe shutdown handling",
+              ready_probe_shutdown.exit_code == 1 & ready_probe_shutdown.wait_calls == 1);
+
+        const auto main_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time, base_time},
+            .next_wakeup_results = {std::nullopt},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::timer_expired,
+                        .now = base_time,
+                    },
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {false},
+            .pump_made_progress = {false},
+            .process_wait_timer_results = {false},
+        });
+        check("backend loop covers main-wait timer failures",
+              main_timer_failure.exit_code == 1 & main_timer_failure.process_expired_calls == 1 &
+                  main_timer_failure.wait_calls == 1);
+
+        const auto main_datagram_failure = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time, base_time},
+            .next_wakeup_results = {std::nullopt},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::rx_datagram,
+                        .now = base_time,
+                        .datagram =
+                            QuicIoRxDatagram{
+                                .route_handle = QuicRouteHandle{17},
+                                .bytes = {std::byte{0x44}},
+                            },
+                    },
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {false},
+            .pump_made_progress = {false},
+            .process_datagram_result = false,
+        });
+        check("backend loop covers main-wait datagram failures",
+              main_datagram_failure.exit_code == 1 &
+                  main_datagram_failure.process_datagram_calls == 1 &
+                  main_datagram_failure.wait_calls == 1);
+    }
+
+    {
+        ClientIoContext io_context;
+        io_context.primary_route_handle = 7;
+        io_context.backend = std::make_unique<ScriptedIoBackendForTests>();
+        QuicCore core = make_local_error_client_core_for_tests();
+        EndpointDriveState state;
+        state.next_wakeup = now() - std::chrono::milliseconds(1);
+        ClientRuntimePolicyState policy;
+        ScriptedEndpointForTests endpoint;
+        check("client backend loop covers expired-timer failures before waiting",
+              run_http09_client_connection_backend_loop(
+                  Http09RuntimeConfig{
+                      .mode = Http09RuntimeMode::client,
+                  },
+                  make_endpoint_driver(endpoint), core, io_context, state, policy,
+                  QuicCoreResult{}) == 1);
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("small.txt", "hello");
+        EndpointDriveState transport_state;
+        ServerConnectionEndpointMap endpoints;
+        ScriptedIoBackendForTests backend;
+        QuicCore core(make_runtime_server_endpoint_config(
+            Http09RuntimeConfig{
+                .mode = Http09RuntimeMode::server,
+                .document_root = document_root.path(),
+            },
+            make_identity()));
+        backend.wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::timer_expired,
+            .now = now(),
+        });
+        check("server backend runtime loop executes timer-expired callbacks on live cores",
+              run_http09_server_backend_loop(
+                  Http09RuntimeConfig{
+                      .mode = Http09RuntimeMode::server,
+                      .document_root = document_root.path(),
+                  },
+                  core, transport_state, endpoints, backend) == 1);
+    }
+
+    ::unsetenv("COQUIC_RUNTIME_TRACE");
+    return ok;
+}
+
+bool runtime_server_endpoint_driver_coverage_for_tests() {
+    bool ok = true;
+    const auto check = [&](std::string_view, bool condition) {
+        ok &= condition;
+        return condition;
+    };
+    const auto make_loopback_peer = [](std::uint16_t port) {
+        sockaddr_storage peer{};
+        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4.sin_family = AF_INET;
+        ipv4.sin_port = htons(port);
+        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return peer;
+    };
+    const auto make_identity = [] {
+        return TlsIdentity{
+            .certificate_pem = read_text_file("tests/fixtures/quic-server-cert.pem"),
+            .private_key_pem = read_text_file("tests/fixtures/quic-server-key.pem"),
+        };
+    };
+    const auto accepted_connection_or_default =
+        [&](std::string_view label, const std::optional<QuicConnectionHandle> &accepted) {
+            check(label, accepted.has_value());
+            return accepted.value_or(QuicConnectionHandle{});
+        };
+    class FailingSendBackendForTests final : public QuicIoBackend {
+      public:
+        std::optional<QuicRouteHandle> ensure_route(const QuicIoRemote &) override {
+            return QuicRouteHandle{17};
+        }
+
+        std::optional<QuicIoEvent> wait(std::optional<QuicCoreTimePoint>) override {
+            return std::nullopt;
+        }
+
+        bool send(const QuicIoTxDatagram &) override {
+            return false;
+        }
+    };
+
+    {
+        FailingSendBackendForTests backend;
+        check("failing send backend helpers return fixed route null waits and failed sends",
+              backend.ensure_route(io::QuicIoRemote{
+                                       .family = AF_INET,
+                                   })
+                      .has_value() &
+                  !backend.wait(std::nullopt).has_value() &
+                  !backend.send(io::QuicIoTxDatagram{
+                      .route_handle = 17,
+                      .bytes = {},
+                  }));
+    }
+
+    check("to_connection_command_input rejects inbound datagrams",
+          !to_connection_command_input(QuicCoreInboundDatagram{
+                                           .bytes =
+                                               {
+                                                   std::byte{0x01},
+                                               },
+                                       })
+               .has_value());
+    check("to_connection_command_input rejects shared stream payloads",
+          !to_connection_command_input(QuicCoreSendSharedStreamData{
+                                           .stream_id = 3,
+                                           .bytes =
+                                               quic::SharedBytes{
+                                                   std::byte{0x02},
+                                               },
+                                           .fin = true,
+                                       })
+               .has_value());
+    check("to_connection_command_input rejects timer inputs",
+          !to_connection_command_input(QuicCoreTimerExpired{}).has_value());
+    check("to_connection_command_input preserves close commands",
+          to_connection_command_input(QuicCoreCloseConnection{
+                                          .application_error_code = 9,
+                                          .reason_phrase = "bye",
+                                      })
+              .has_value());
+    check("to_connection_command_input preserves migration requests",
+          to_connection_command_input(QuicCoreRequestConnectionMigration{
+                                          .route_handle = 77,
+                                          .reason = QuicMigrationRequestReason::preferred_address,
+                                      })
+              .has_value());
+
+    {
+        QuicCore core = make_failing_server_core_for_tests();
+        const std::array<QuicCoreInput, 1> unsupported_inputs = {
+            QuicCoreInboundDatagram{
+                .bytes =
+                    {
+                        std::byte{0x41},
+                    },
+            },
+        };
+        const auto result =
+            advance_endpoint_connection_inputs(core, /*connection=*/41, unsupported_inputs, now());
+        const auto local_error = result.local_error.value_or(QuicCoreLocalError{
+            .connection = std::nullopt,
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        });
+        check("advance_endpoint_connection_inputs reports unsupported endpoint-level inputs",
+              result.local_error.has_value() &
+                  (local_error.connection == QuicConnectionHandle{41}) &
+                  (local_error.code == QuicCoreLocalErrorCode::unsupported_operation));
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("small.txt", "hello");
+        const Http09RuntimeConfig server_config{
+            .mode = Http09RuntimeMode::server,
+            .document_root = document_root.path(),
+        };
+        QuicCore core(make_runtime_server_endpoint_config(server_config, make_identity()));
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        QuicCoreTimePoint step_now = now();
+        constexpr QuicRouteHandle kRouteHandle = 17;
+        const auto accepted =
+            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
+        const auto connection = accepted_connection_or_default(
+            "live server handshake yields an accepted connection", accepted);
+
+        const std::array<QuicCoreInput, 1> close_inputs = {
+            QuicCoreCloseConnection{},
+        };
+        const auto close_result =
+            advance_endpoint_connection_inputs(core, connection, close_inputs, now());
+        check("advance_endpoint_connection_inputs stops after connection close effects",
+              result_has_connection_lifecycle(close_result, connection,
+                                              QuicCoreConnectionLifecycle::closed));
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("small.txt", "hello");
+        const Http09RuntimeConfig server_config{
+            .mode = Http09RuntimeMode::server,
+            .document_root = document_root.path(),
+        };
+        QuicCore core(make_runtime_server_endpoint_config(server_config, make_identity()));
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        EndpointDriveState transport_state;
+        constexpr QuicRouteHandle kRouteHandle = 17;
+        const auto peer = make_loopback_peer(7443);
+        transport_state.route_routes.emplace(kRouteHandle, RuntimeSendRoute{
+                                                               .socket_fd = 77,
+                                                               .peer = peer,
+                                                               .peer_len = sizeof(sockaddr_in),
+                                                           });
+        QuicCoreTimePoint step_now = now();
+        const auto accepted =
+            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
+        const auto connection = accepted_connection_or_default(
+            "direct server-result fixture handshake succeeds", accepted);
+
+        {
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                              });
+            QuicCoreResult state_only_result;
+            state_only_result.effects.emplace_back(QuicCoreStateEvent{
+                .connection = connection,
+                .change = QuicCoreStateChange::handshake_ready,
+            });
+            bool observed_send_effects = true;
+            check("process_server_endpoint_core_result ignores non-stream effects",
+                  process_server_endpoint_core_result(core, transport_state, endpoints,
+                                                      document_root.path(), state_only_result,
+                                                      /*fallback_socket_fd=*/77, &peer,
+                                                      sizeof(sockaddr_in), &observed_send_effects) &
+                      endpoints.contains(connection) & !observed_send_effects);
+        }
+
+        {
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                                  .has_pending_work = true,
+                              });
+            QuicCoreResult local_error_result;
+            local_error_result.local_error = QuicCoreLocalError{
+                .connection = connection,
+                .code = QuicCoreLocalErrorCode::unsupported_operation,
+                .stream_id = std::nullopt,
+            };
+            check(
+                "process_server_endpoint_core_result erases endpoints for connection-local errors",
+                process_server_endpoint_core_result(
+                    core, transport_state, endpoints, document_root.path(), local_error_result,
+                    /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)) &
+                    !endpoints.contains(connection));
+        }
+
+        {
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                                  .has_pending_work = true,
+                              });
+            QuicCoreResult closed_result;
+            closed_result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+                .connection = connection,
+                .event = QuicCoreConnectionLifecycle::closed,
+            });
+            check("process_server_endpoint_core_result drops closed endpoints",
+                  process_server_endpoint_core_result(
+                      core, transport_state, endpoints, document_root.path(), closed_result,
+                      /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)) &
+                      !endpoints.contains(connection));
+        }
+
+        {
+            g_recorded_sendto_for_tests = {};
+            g_recorded_sendmsg_for_tests = {};
+            const ScopedHttp09RuntimeOpsOverride runtime_ops{
+                Http09RuntimeOpsOverride{
+                    .sendto_fn = record_sendto_for_tests,
+                    .sendmsg_fn = record_sendmsg_for_tests,
+                },
+            };
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                              });
+            QuicCoreResult request_result;
+            request_result.effects.emplace_back(QuicCoreReceiveStreamData{
+                .connection = connection,
+                .stream_id = 0,
+                .bytes = bytes_from_string_for_runtime_tests("GET /small.txt\r\n"),
+                .fin = true,
+            });
+            bool observed_send_effects = false;
+            check("process_server_endpoint_core_result advances endpoint-generated stream sends",
+                  process_server_endpoint_core_result(core, transport_state, endpoints,
+                                                      document_root.path(), request_result,
+                                                      /*fallback_socket_fd=*/77, &peer,
+                                                      sizeof(sockaddr_in), &observed_send_effects) &
+                      observed_send_effects &
+                      (g_recorded_sendto_for_tests.calls > 0 |
+                       g_recorded_sendmsg_for_tests.calls > 0));
+        }
+
+        {
+            g_recorded_sendmsg_for_tests = {};
+            const ScopedHttp09RuntimeOpsOverride runtime_ops{
+                Http09RuntimeOpsOverride{
+                    .sendmsg_fn = record_sendmsg_for_tests,
+                },
+            };
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                              });
+            QuicCoreResult invalid_request_result;
+            invalid_request_result.effects.emplace_back(QuicCoreReceiveStreamData{
+                .connection = connection,
+                .stream_id = 0,
+                .bytes = {},
+                .fin = true,
+            });
+            check("process_server_endpoint_core_result closes failed endpoints",
+                  process_server_endpoint_core_result(core, transport_state, endpoints,
+                                                      document_root.path(), invalid_request_result,
+                                                      /*fallback_socket_fd=*/77, &peer,
+                                                      sizeof(sockaddr_in)) &
+                      !endpoints.contains(connection));
+        }
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("small.txt", "hello");
+        const Http09RuntimeConfig server_config{
+            .mode = Http09RuntimeMode::server,
+            .document_root = document_root.path(),
+        };
+        QuicCore core(make_runtime_server_endpoint_config(server_config, make_identity()));
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        constexpr QuicRouteHandle kRouteHandle = 17;
+        ScriptedIoBackendForTests backend;
+        EndpointDriveState transport_state;
+        QuicCoreTimePoint step_now = now();
+        const auto accepted =
+            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
+        const auto connection = accepted_connection_or_default(
+            "backend server-result fixture handshake succeeds", accepted);
+
+        {
+            ServerConnectionEndpointMap endpoints;
+            QuicCoreResult local_error_result;
+            local_error_result.local_error = QuicCoreLocalError{
+                .connection = std::nullopt,
+                .code = QuicCoreLocalErrorCode::unsupported_operation,
+                .stream_id = std::nullopt,
+            };
+            check("process_server_endpoint_core_result_with_backend rejects transport-wide local "
+                  "errors",
+                  !process_server_endpoint_core_result_with_backend(
+                      core, transport_state, endpoints, document_root.path(), local_error_result,
+                      kRouteHandle, backend));
+        }
+
+        {
+            ServerConnectionEndpointMap endpoints;
+            QuicCoreResult missing_endpoint_result;
+            missing_endpoint_result.effects.emplace_back(QuicCoreStateEvent{
+                .connection = connection,
+                .change = QuicCoreStateChange::handshake_ready,
+            });
+            check("process_server_endpoint_core_result_with_backend tolerates missing endpoints",
+                  process_server_endpoint_core_result_with_backend(
+                      core, transport_state, endpoints, document_root.path(),
+                      missing_endpoint_result, kRouteHandle, backend));
+        }
+
+        {
+            backend.sent_datagrams.clear();
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                              });
+            QuicCoreResult request_result;
+            request_result.effects.emplace_back(QuicCoreReceiveStreamData{
+                .connection = connection,
+                .stream_id = 0,
+                .bytes = bytes_from_string_for_runtime_tests("GET /small.txt\r\n"),
+                .fin = true,
+            });
+            check("process_server_endpoint_core_result_with_backend routes generated sends through "
+                  "the backend",
+                  process_server_endpoint_core_result_with_backend(
+                      core, transport_state, endpoints, document_root.path(), request_result,
+                      kRouteHandle, backend) &
+                      !backend.sent_datagrams.empty());
+        }
+
+        {
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                              });
+            QuicCoreResult invalid_request_result;
+            invalid_request_result.effects.emplace_back(QuicCoreReceiveStreamData{
+                .connection = connection,
+                .stream_id = 0,
+                .bytes = {},
+                .fin = true,
+            });
+            check("process_server_endpoint_core_result_with_backend closes failed endpoints",
+                  process_server_endpoint_core_result_with_backend(
+                      core, transport_state, endpoints, document_root.path(),
+                      invalid_request_result, kRouteHandle, backend) &
+                      !endpoints.contains(connection));
+        }
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("large.bin",
+                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+        const Http09RuntimeConfig server_config{
+            .mode = Http09RuntimeMode::server,
+            .document_root = document_root.path(),
+        };
+        QuicCore core(make_runtime_server_endpoint_config(server_config, make_identity()));
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        EndpointDriveState transport_state;
+        constexpr QuicRouteHandle kRouteHandle = 17;
+        const auto peer = make_loopback_peer(7555);
+        transport_state.route_routes.emplace(kRouteHandle, RuntimeSendRoute{
+                                                               .socket_fd = 79,
+                                                               .peer = peer,
+                                                               .peer_len = sizeof(sockaddr_in),
+                                                           });
+        QuicCoreTimePoint step_now = now();
+        const auto accepted =
+            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
+        const auto connection = accepted_connection_or_default(
+            "server-endpoint pump fixture handshake succeeds", accepted);
+
+        {
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                                  .has_pending_work = true,
+                              });
+            bool made_progress = true;
+            check("pump_shared_server_endpoint_work clears stale pending flags without work",
+                  pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                   document_root.path(), made_progress) &
+                      !made_progress & endpoints.contains(connection) &
+                      !endpoints.at(connection).has_pending_work);
+        }
+
+        {
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                                  .has_pending_work = false,
+                              });
+            bool made_progress = true;
+            check("pump_shared_server_endpoint_work ignores endpoints without pending work",
+                  pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                   document_root.path(), made_progress) &
+                      !made_progress & endpoints.contains(connection));
+        }
+
+        {
+            g_recorded_sendto_for_tests = {};
+            g_recorded_sendmsg_for_tests = {};
+            const ScopedHttp09RuntimeOpsOverride runtime_ops{
+                Http09RuntimeOpsOverride{
+                    .sendto_fn = record_sendto_for_tests,
+                    .sendmsg_fn = record_sendmsg_for_tests,
+                },
+            };
+            QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
+                .document_root = document_root.path(),
+            });
+            const auto initial_update = endpoint.on_core_result(
+                single_receive_result_for_runtime_tests(0, "GET /large.bin\r\n", true), now());
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection, ServerConnectionEndpointState{
+                                              .endpoint = std::move(endpoint),
+                                              .has_pending_work = initial_update.has_pending_work,
+                                          });
+            bool made_progress = false;
+            check("pump_shared_server_endpoint_work advances queued response chunks",
+                  pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                   document_root.path(), made_progress) &
+                      made_progress &
+                      (g_recorded_sendto_for_tests.calls > 0 |
+                       g_recorded_sendmsg_for_tests.calls > 0));
+        }
+
+        {
+            g_recorded_sendmsg_for_tests = {};
+            const ScopedHttp09RuntimeOpsOverride runtime_ops{
+                Http09RuntimeOpsOverride{
+                    .sendmsg_fn = record_sendmsg_for_tests,
+                },
+            };
+            QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
+                .document_root = document_root.path(),
+            });
+            static_cast<void>(endpoint.on_core_result(
+                single_receive_result_for_runtime_tests(0, "", true), now()));
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection, ServerConnectionEndpointState{
+                                              .endpoint = std::move(endpoint),
+                                              .has_pending_work = true,
+                                          });
+            bool made_progress = false;
+            check("pump_shared_server_endpoint_work closes endpoints whose polls fail",
+                  pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                   document_root.path(), made_progress) &
+                      !endpoints.contains(connection));
+        }
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("large.bin",
+                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+        const Http09RuntimeConfig server_config{
+            .mode = Http09RuntimeMode::server,
+            .document_root = document_root.path(),
+        };
+        QuicCore core(make_runtime_server_endpoint_config(server_config, make_identity()));
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        ScriptedIoBackendForTests backend;
+        EndpointDriveState transport_state;
+        constexpr QuicRouteHandle kRouteHandle = 17;
+        QuicCoreTimePoint step_now = now();
+        const auto accepted =
+            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
+        const auto connection =
+            accepted_connection_or_default("backend pump fixture handshake succeeds", accepted);
+
+        {
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                                  .has_pending_work = true,
+                              });
+            bool made_progress = true;
+            check("pump_shared_server_endpoint_work_with_backend clears stale pending flags "
+                  "without work",
+                  pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
+                                                                document_root.path(), backend,
+                                                                made_progress) &
+                      !made_progress & endpoints.contains(connection) &
+                      !endpoints.at(connection).has_pending_work);
+        }
+
+        {
+            backend.sent_datagrams.clear();
+            QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
+                .document_root = document_root.path(),
+            });
+            const auto initial_update = endpoint.on_core_result(
+                single_receive_result_for_runtime_tests(0, "GET /large.bin\r\n", true), now());
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection, ServerConnectionEndpointState{
+                                              .endpoint = std::move(endpoint),
+                                              .has_pending_work = initial_update.has_pending_work,
+                                          });
+            bool made_progress = false;
+            check("pump_shared_server_endpoint_work_with_backend advances queued response chunks",
+                  pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
+                                                                document_root.path(), backend,
+                                                                made_progress) &
+                      made_progress & !backend.sent_datagrams.empty());
+        }
+
+        {
+            QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
+                .document_root = document_root.path(),
+            });
+            static_cast<void>(endpoint.on_core_result(
+                single_receive_result_for_runtime_tests(0, "", true), now()));
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection, ServerConnectionEndpointState{
+                                              .endpoint = std::move(endpoint),
+                                              .has_pending_work = true,
+                                          });
+            bool made_progress = false;
+            check("pump_shared_server_endpoint_work_with_backend closes endpoints whose polls fail",
+                  pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
+                                                                document_root.path(), backend,
+                                                                made_progress) &
+                      !endpoints.contains(connection));
+        }
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("large.bin",
+                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+        const Http09RuntimeConfig server_config{
+            .mode = Http09RuntimeMode::server,
+            .document_root = document_root.path(),
+        };
+        QuicCore core(make_runtime_server_endpoint_config(server_config, make_identity()));
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        QuicCoreTimePoint step_now = now();
+        constexpr QuicRouteHandle kRouteHandle = 17;
+        const auto accepted =
+            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
+        const auto connection = accepted_connection_or_default(
+            "server-endpoint route-failure fixture handshake succeeds", accepted);
+        QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
+            .document_root = document_root.path(),
+        });
+        const auto initial_update = endpoint.on_core_result(
+            single_receive_result_for_runtime_tests(0, "GET /large.bin\r\n", true), now());
+        ServerConnectionEndpointMap endpoints;
+        endpoints.emplace(connection, ServerConnectionEndpointState{
+                                          .endpoint = std::move(endpoint),
+                                          .has_pending_work = initial_update.has_pending_work,
+                                      });
+        EndpointDriveState transport_state;
+        bool made_progress = false;
+        check("pump_shared_server_endpoint_work fails when pending connection inputs cannot be "
+              "routed",
+              !pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                document_root.path(), made_progress));
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("large.bin",
+                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+        const Http09RuntimeConfig server_config{
+            .mode = Http09RuntimeMode::server,
+            .document_root = document_root.path(),
+        };
+        QuicCore core(make_runtime_server_endpoint_config(server_config, make_identity()));
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        QuicCoreTimePoint step_now = now();
+        constexpr QuicRouteHandle kRouteHandle = 17;
+        const auto accepted =
+            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
+        const auto connection = accepted_connection_or_default(
+            "server-endpoint close-route-failure fixture handshake succeeds", accepted);
+        QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
+            .document_root = document_root.path(),
+        });
+        static_cast<void>(
+            endpoint.on_core_result(single_receive_result_for_runtime_tests(0, "", true), now()));
+        ServerConnectionEndpointMap endpoints;
+        endpoints.emplace(connection, ServerConnectionEndpointState{
+                                          .endpoint = std::move(endpoint),
+                                          .has_pending_work = true,
+                                      });
+        EndpointDriveState transport_state;
+        bool made_progress = false;
+        check("pump_shared_server_endpoint_work fails when close effects cannot be routed after "
+              "poll failure",
+              !pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                document_root.path(), made_progress));
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("large.bin",
+                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+        const Http09RuntimeConfig server_config{
+            .mode = Http09RuntimeMode::server,
+            .document_root = document_root.path(),
+        };
+        QuicCore core(make_runtime_server_endpoint_config(server_config, make_identity()));
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        QuicCoreTimePoint step_now = now();
+        constexpr QuicRouteHandle kRouteHandle = 17;
+        const auto accepted =
+            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
+        const auto connection = accepted_connection_or_default(
+            "backend send-failure fixture handshake succeeds", accepted);
+        FailingSendBackendForTests failing_backend;
+        QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
+            .document_root = document_root.path(),
+        });
+        const auto initial_update = endpoint.on_core_result(
+            single_receive_result_for_runtime_tests(0, "GET /large.bin\r\n", true), now());
+        ServerConnectionEndpointMap endpoints;
+        endpoints.emplace(connection, ServerConnectionEndpointState{
+                                          .endpoint = std::move(endpoint),
+                                          .has_pending_work = initial_update.has_pending_work,
+                                      });
+        EndpointDriveState transport_state;
+        bool made_progress = false;
+        check("pump_shared_server_endpoint_work_with_backend fails when the backend rejects queued "
+              "response sends",
+              !pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
+                                                             document_root.path(), failing_backend,
+                                                             made_progress));
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("large.bin",
+                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+        const Http09RuntimeConfig server_config{
+            .mode = Http09RuntimeMode::server,
+            .document_root = document_root.path(),
+        };
+        QuicCore core(make_runtime_server_endpoint_config(server_config, make_identity()));
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        QuicCoreTimePoint step_now = now();
+        constexpr QuicRouteHandle kRouteHandle = 17;
+        const auto accepted =
+            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
+        const auto connection = accepted_connection_or_default(
+            "backend close-send-failure fixture handshake succeeds", accepted);
+        FailingSendBackendForTests failing_backend;
+        QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
+            .document_root = document_root.path(),
+        });
+        static_cast<void>(
+            endpoint.on_core_result(single_receive_result_for_runtime_tests(0, "", true), now()));
+        ServerConnectionEndpointMap endpoints;
+        endpoints.emplace(connection, ServerConnectionEndpointState{
+                                          .endpoint = std::move(endpoint),
+                                          .has_pending_work = true,
+                                      });
+        EndpointDriveState transport_state;
+        bool made_progress = false;
+        check("pump_shared_server_endpoint_work_with_backend fails when the backend rejects close "
+              "sends after poll failure",
+              !pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
+                                                             document_root.path(), failing_backend,
+                                                             made_progress));
+    }
+
+    {
+        g_recorded_recvmsg_for_tests = {};
+        g_recorded_recvmsg_for_tests.bytes = {
+            std::byte{0x51},
+        };
+        g_recorded_recvmsg_for_tests.peer = make_loopback_peer(7666);
+        g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in);
+        const ScopedHttp09RuntimeOpsOverride runtime_ops{
+            Http09RuntimeOpsOverride{
+                .poll_fn = [](pollfd *, nfds_t, int) -> int { return 0; },
+                .recvmsg_fn = &record_recvmsg_for_tests,
+            },
+        };
+        const auto io = make_runtime_server_loop_io();
+        const auto current = io.current_time();
+        const auto receive = io.receive_datagram(/*socket_fd=*/91, /*flags=*/0, "server");
+        const auto wait = io.wait_for_socket_or_deadline(
+            RuntimeWaitConfig{
+                .socket_fds = {91, -1},
+                .socket_fd_count = 1,
+                .idle_timeout_ms = 25,
+                .role_name = "server",
+            },
+            current + std::chrono::milliseconds(25));
+        const auto receive_input =
+            receive.step.input.value_or(QuicCoreInput{QuicCoreInboundDatagram{}});
+        const auto &inbound = std::get<QuicCoreInboundDatagram>(receive_input);
+        const auto wait_step = wait.value_or(RuntimeWaitStep{});
+        const auto wait_input = wait_step.input.value_or(QuicCoreInput{QuicCoreInboundDatagram{}});
+        check("make_runtime_server_loop_io forwards to runtime wait and receive helpers",
+              (current.time_since_epoch().count() > 0) &
+                  (receive.status == ReceiveDatagramStatus::ok) &
+                  (inbound.bytes == g_recorded_recvmsg_for_tests.bytes) & wait.has_value() &
+                  wait_step.input.has_value() &
+                  std::holds_alternative<QuicCoreTimerExpired>(wait_input));
+    }
+
+    return ok;
 }
 
 } // namespace coquic::http09::test

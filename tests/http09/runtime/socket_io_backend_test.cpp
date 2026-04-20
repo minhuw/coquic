@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <deque>
+#include <memory>
+
 #include "src/io/io_backend_test_hooks.h"
+#include "src/io/shared_udp_backend_core.h"
 #include "src/io/socket_io_backend.h"
 #include "tests/support/core/connection_test_fixtures.h"
 
@@ -15,6 +19,47 @@ struct MultiSocketBackendTestTrace {
 };
 
 thread_local MultiSocketBackendTestTrace g_multi_socket_backend_test_trace;
+
+class ScriptedIoEngine final : public coquic::io::QuicIoEngine {
+  public:
+    bool register_result = true;
+    bool send_result = true;
+    std::vector<int> registered_sockets;
+    std::size_t last_wait_socket_count = 0;
+    std::deque<std::optional<coquic::io::QuicIoEngineEvent>> scripted_wait_results;
+
+    bool register_socket(int socket_fd) override {
+        registered_sockets.push_back(socket_fd);
+        return register_result;
+    }
+
+    bool send(int, const sockaddr_storage &, socklen_t, std::span<const std::byte>,
+              std::string_view, coquic::quic::QuicEcnCodepoint) override {
+        return send_result;
+    }
+
+    std::optional<coquic::io::QuicIoEngineEvent>
+    wait(std::span<const int> socket_fds, int, std::optional<coquic::quic::QuicCoreTimePoint>,
+         std::string_view) override {
+        last_wait_socket_count = socket_fds.size();
+        if (scripted_wait_results.empty()) {
+            return std::nullopt;
+        }
+
+        auto result = scripted_wait_results.front();
+        scripted_wait_results.pop_front();
+        return result;
+    }
+};
+
+sockaddr_storage make_ipv4_loopback_peer(std::uint16_t port) {
+    sockaddr_storage peer{};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(port);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    return peer;
+}
 
 int record_socket_family_and_open(int family, int type, int protocol) {
     g_multi_socket_backend_test_trace.opened_families.push_back(family);
@@ -253,6 +298,163 @@ TEST(SocketIoBackendTest, WaitReturnsSecondRouteDatagramForHooks) {
     EXPECT_TRUE(coquic::io::test::socket_io_backend_wait_returns_second_route_datagram_for_tests());
 }
 
+TEST(SocketIoBackendTest, SharedUdpBackendCoreOpenListenerFailsWhenEngineRejectsSocket) {
+    using namespace coquic::io;
+
+    auto engine = std::make_unique<ScriptedIoEngine>();
+    auto *engine_ptr = engine.get();
+    engine_ptr->register_result = false;
+    SharedUdpBackendCore backend(
+        QuicUdpBackendConfig{
+            .role_name = "server",
+        },
+        std::move(engine));
+
+    EXPECT_FALSE(backend.open_listener("127.0.0.1", 0));
+    ASSERT_EQ(engine_ptr->registered_sockets.size(), 1u);
+    EXPECT_GE(engine_ptr->registered_sockets.front(), 0);
+}
+
+TEST(SocketIoBackendTest, SharedUdpBackendCoreEnsureRouteRejectsUnknownFamily) {
+    using namespace coquic::io;
+
+    auto engine = std::make_unique<ScriptedIoEngine>();
+    SharedUdpBackendCore backend(
+        QuicUdpBackendConfig{
+            .role_name = "client",
+        },
+        std::move(engine));
+
+    auto peer = make_ipv4_loopback_peer(4433);
+    peer.ss_family = AF_UNIX;
+    const auto route = backend.ensure_route(QuicIoRemote{
+        .peer = peer,
+        .peer_len = sizeof(sockaddr_storage),
+        .family = AF_UNSPEC,
+    });
+
+    EXPECT_FALSE(route.has_value());
+}
+
+TEST(SocketIoBackendTest, SharedUdpBackendCoreEnsureRouteRejectsOversizedPeerStorage) {
+    using namespace coquic::io;
+
+    auto engine = std::make_unique<ScriptedIoEngine>();
+    SharedUdpBackendCore backend(
+        QuicUdpBackendConfig{
+            .role_name = "client",
+        },
+        std::move(engine));
+
+    const auto route = backend.ensure_route(QuicIoRemote{
+        .peer = make_ipv4_loopback_peer(4433),
+        .peer_len = static_cast<socklen_t>(sizeof(sockaddr_storage) + 1),
+        .family = AF_INET,
+    });
+
+    EXPECT_FALSE(route.has_value());
+}
+
+TEST(SocketIoBackendTest, SharedUdpBackendCoreEnsureRouteFailsWhenEngineRejectsNewSocket) {
+    using namespace coquic::io;
+
+    auto engine = std::make_unique<ScriptedIoEngine>();
+    auto *engine_ptr = engine.get();
+    engine_ptr->register_result = false;
+    SharedUdpBackendCore backend(
+        QuicUdpBackendConfig{
+            .role_name = "client",
+        },
+        std::move(engine));
+
+    const auto route = backend.ensure_route(QuicIoRemote{
+        .peer = make_ipv4_loopback_peer(4433),
+        .peer_len = sizeof(sockaddr_in),
+        .family = AF_INET,
+    });
+
+    EXPECT_FALSE(route.has_value());
+    ASSERT_EQ(engine_ptr->registered_sockets.size(), 1u);
+    EXPECT_GE(engine_ptr->registered_sockets.front(), 0);
+}
+
+TEST(SocketIoBackendTest, SharedUdpBackendCoreWaitIgnoresReceiveEventWithoutCompletionPayload) {
+    using namespace coquic::io;
+
+    auto engine = std::make_unique<ScriptedIoEngine>();
+    auto *engine_ptr = engine.get();
+    engine_ptr->scripted_wait_results.push_back(QuicIoEngineEvent{
+        .kind = QuicIoEngineEvent::Kind::rx_datagram,
+        .now = coquic::quic::test::test_time(7),
+    });
+    SharedUdpBackendCore backend(
+        QuicUdpBackendConfig{
+            .role_name = "server",
+            .idle_timeout_ms = 5,
+        },
+        std::move(engine));
+
+    ASSERT_TRUE(backend.open_listener("127.0.0.1", 0));
+    EXPECT_FALSE(backend.wait(std::nullopt).has_value());
+    EXPECT_EQ(engine_ptr->last_wait_socket_count, 1u);
+}
+
+TEST(SocketIoBackendTest, SharedUdpBackendCoreWaitTranslatesNonReceiveEvents) {
+    using namespace coquic::io;
+
+    auto engine = std::make_unique<ScriptedIoEngine>();
+    auto *engine_ptr = engine.get();
+    engine_ptr->scripted_wait_results.push_back(QuicIoEngineEvent{
+        .kind = QuicIoEngineEvent::Kind::timer_expired,
+        .now = coquic::quic::test::test_time(11),
+    });
+    engine_ptr->scripted_wait_results.push_back(QuicIoEngineEvent{
+        .kind = QuicIoEngineEvent::Kind::idle_timeout,
+        .now = coquic::quic::test::test_time(12),
+    });
+    engine_ptr->scripted_wait_results.push_back(QuicIoEngineEvent{
+        .kind = QuicIoEngineEvent::Kind::shutdown,
+        .now = coquic::quic::test::test_time(13),
+    });
+    SharedUdpBackendCore backend(
+        QuicUdpBackendConfig{
+            .role_name = "server",
+            .idle_timeout_ms = 5,
+        },
+        std::move(engine));
+
+    ASSERT_TRUE(backend.open_listener("127.0.0.1", 0));
+
+    const auto timer_event = backend.wait(std::nullopt);
+    if (!timer_event.has_value()) {
+        FAIL() << "expected timer event";
+        return;
+    }
+    const auto &resolved_timer_event = timer_event.value();
+    EXPECT_EQ(resolved_timer_event.kind, QuicIoEvent::Kind::timer_expired);
+    EXPECT_EQ(resolved_timer_event.now, coquic::quic::test::test_time(11));
+
+    const auto idle_event = backend.wait(std::nullopt);
+    if (!idle_event.has_value()) {
+        FAIL() << "expected idle event";
+        return;
+    }
+    const auto &resolved_idle_event = idle_event.value();
+    EXPECT_EQ(resolved_idle_event.kind, QuicIoEvent::Kind::idle_timeout);
+    EXPECT_EQ(resolved_idle_event.now, coquic::quic::test::test_time(12));
+
+    const auto shutdown_event = backend.wait(std::nullopt);
+    if (!shutdown_event.has_value()) {
+        FAIL() << "expected shutdown event";
+        return;
+    }
+    const auto &resolved_shutdown_event = shutdown_event.value();
+    EXPECT_EQ(resolved_shutdown_event.kind, QuicIoEvent::Kind::shutdown);
+    EXPECT_EQ(resolved_shutdown_event.now, coquic::quic::test::test_time(13));
+
+    EXPECT_EQ(engine_ptr->last_wait_socket_count, 1u);
+}
+
 TEST(SocketIoBackendTest, ConfiguresLinuxSocketsForReceivingEcnMetadata) {
     EXPECT_TRUE(
         coquic::io::test::socket_io_backend_configures_linux_ecn_socket_options_for_tests());
@@ -269,6 +471,22 @@ TEST(SocketIoBackendTest, UsesIpTosForIpv4MappedIpv6OutboundEcnMarkings) {
 
 TEST(SocketIoBackendTest, MapsRecvmsgEcnMetadataIntoEvents) {
     EXPECT_TRUE(coquic::io::test::socket_io_backend_recvmsg_maps_ecn_for_tests());
+}
+
+TEST(SocketIoBackendTest, InternalCoverageHookExercisesColdPaths) {
+    EXPECT_TRUE(coquic::io::test::
+                    socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests());
+}
+
+TEST(SocketIoBackendTest, InternalCoverageHookExercisesRemainingBranches) {
+    EXPECT_TRUE(
+        coquic::io::test::
+            socket_io_backend_internal_coverage_hook_exercises_remaining_branches_for_tests());
+}
+
+TEST(SocketIoBackendTest, PollIoEngineInternalCoverageHookExercisesRemainingBranches) {
+    EXPECT_TRUE(coquic::io::test::
+                    poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_tests());
 }
 
 } // namespace

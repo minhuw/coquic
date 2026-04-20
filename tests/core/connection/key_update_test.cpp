@@ -1163,6 +1163,67 @@ TEST(QuicCoreTest, ApplicationSendFailsWhenAckOnlyFallbackKeyUpdateCannotDeriveN
     EXPECT_TRUE(saw_faulted_failure);
 }
 
+TEST(QuicCoreTest, ApplicationSendFailsWhenFinalKeyUpdateReserializationCannotSealPacket) {
+    const auto configure_key_update_send = [](coquic::quic::QuicConnection &connection) {
+        ASSERT_TRUE(
+            connection.queue_stream_send(0, std::vector<std::byte>(32, std::byte{0x53}), false)
+                .has_value());
+        connection.local_key_update_requested_ = true;
+        connection.current_write_phase_first_packet_number_ = 0;
+        connection.application_space_.recovery.largest_acked_packet_number_ = 0;
+    };
+
+    auto control = make_connected_server_connection();
+    configure_key_update_send(control);
+    const auto original_write_key_phase = control.application_write_key_phase_;
+
+    const auto control_datagram = control.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(control_datagram.empty());
+    EXPECT_FALSE(control.has_failed());
+    EXPECT_TRUE(control.local_key_update_initiated_);
+    EXPECT_EQ(control.application_write_key_phase_, !original_write_key_phase);
+
+    bool saw_faulted_failure = false;
+    constexpr std::array fault_points = {
+        coquic::quic::test::PacketCryptoFaultPoint::seal_context_new,
+        coquic::quic::test::PacketCryptoFaultPoint::seal_length_guard,
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update,
+        coquic::quic::test::PacketCryptoFaultPoint::seal_final,
+    };
+    for (const auto fault_point : fault_points) {
+        for (std::size_t occurrence = 1; occurrence <= 24; ++occurrence) {
+            auto failure = make_connected_server_connection();
+            configure_key_update_send(failure);
+            const auto failure_original_write_key_phase = failure.application_write_key_phase_;
+            {
+                const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(fault_point,
+                                                                                occurrence);
+                const auto faulted_datagram =
+                    failure.drain_outbound_datagram(coquic::quic::test::test_time(1));
+                if (!failure.has_failed()) {
+                    continue;
+                }
+                if (!failure.local_key_update_initiated_) {
+                    continue;
+                }
+                if (failure.application_write_key_phase_ == failure_original_write_key_phase) {
+                    continue;
+                }
+
+                saw_faulted_failure = true;
+                EXPECT_TRUE(faulted_datagram.empty()) << "occurrence=" << occurrence;
+                break;
+            }
+        }
+        if (saw_faulted_failure) {
+            break;
+        }
+    }
+
+    EXPECT_TRUE(saw_faulted_failure);
+}
+
 TEST(QuicCoreTest,
      ApplicationSendAckOnlyFallbackRestoresCurrentPathValidationFramesOnKeyUpdateFailure) {
     auto connection = make_connected_server_connection();

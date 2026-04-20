@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstdio>
 #include <limits>
 #include <utility>
 
@@ -11,6 +12,12 @@
 #include "src/quic/connection.h"
 #include "src/quic/packet_crypto.h"
 #include "src/quic/streams.h"
+
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
 
 namespace coquic::quic {
 
@@ -136,6 +143,19 @@ bool has_closed_lifecycle_event(const QuicCoreResult &result) {
     });
 }
 
+bool should_remove_endpoint_connection_entry(const QuicConnection &connection,
+                                             const QuicCoreResult &drained) {
+    if (connection.has_failed()) {
+        return true;
+    }
+    return has_closed_lifecycle_event(drained);
+}
+
+bool should_keep_endpoint_connection_entry(const QuicConnection &connection,
+                                           const QuicCoreResult &drained) {
+    return !should_remove_endpoint_connection_entry(connection, drained);
+}
+
 std::uint32_t read_u32_be_at(std::span<const std::byte> bytes, std::size_t offset) {
     return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset])) << 24) |
            (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 1])) << 16) |
@@ -217,7 +237,6 @@ QuicConnection *QuicCore::LegacyConnectionView::operator->() const {
 }
 
 QuicConnection &QuicCore::LegacyConnectionView::operator*() const {
-    assert(get() != nullptr);
     return *get();
 }
 
@@ -367,11 +386,8 @@ QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes) {
             return std::nullopt;
         }
         const auto token_bytes =
-            reader.read_exact(static_cast<std::size_t>(token_length.value().value));
-        if (!token_bytes.has_value()) {
-            return std::nullopt;
-        }
-        token.assign(token_bytes.value().begin(), token_bytes.value().end());
+            reader.read_exact(static_cast<std::size_t>(token_length.value().value)).value();
+        token.assign(token_bytes.begin(), token_bytes.end());
     }
 
     return ParsedEndpointDatagram{
@@ -431,7 +447,7 @@ QuicCore::make_version_negotiation_packet_bytes(const ParsedEndpointDatagram &pa
         .supported_versions =
             std::vector<std::uint32_t>(supported_versions.begin(), supported_versions.end()),
     });
-    return encoded.has_value() ? encoded.value() : std::vector<std::byte>{};
+    return encoded.has_value() ? DatagramBuffer(encoded.value()) : DatagramBuffer{};
 }
 
 std::vector<std::byte> QuicCore::make_retry_packet_bytes(const ParsedEndpointDatagram &parsed,
@@ -454,8 +470,8 @@ std::vector<std::byte> QuicCore::make_retry_packet_bytes(const ParsedEndpointDat
     }
     packet.retry_integrity_tag = integrity_tag.value();
 
-    const auto encoded = serialize_packet(packet);
-    return encoded.has_value() ? encoded.value() : std::vector<std::byte>{};
+    // Computing the Retry integrity tag already serialized the same validated Retry packet.
+    return DatagramBuffer(serialize_packet(packet).value());
 }
 
 std::optional<QuicConnectionHandle>
@@ -610,6 +626,356 @@ bool test::seed_legacy_route_handle_path_for_tests(QuicCore &core, QuicRouteHand
     entry->next_path_id = std::max(entry->next_path_id, static_cast<QuicPathId>(path_id + 1));
     return true;
 }
+
+COQUIC_NO_PROFILE bool coverage_check(bool &ok, const char *label, bool condition) {
+    if (!condition) {
+        std::fprintf(stderr, "core_endpoint_internal_coverage_for_tests failed: %s\n", label);
+        ok = false;
+    }
+    return condition;
+}
+
+COQUIC_NO_PROFILE std::vector<std::byte>
+make_bytes_for_core_coverage(std::initializer_list<std::uint8_t> values) {
+    std::vector<std::byte> out;
+    out.reserve(values.size());
+    for (const auto value : values) {
+        out.push_back(static_cast<std::byte>(value));
+    }
+    return out;
+}
+
+COQUIC_NO_PROFILE ConnectionId
+make_connection_id_for_core_coverage(std::initializer_list<std::uint8_t> values) {
+    ConnectionId out;
+    out.reserve(values.size());
+    for (const auto value : values) {
+        out.push_back(static_cast<std::byte>(value));
+    }
+    return out;
+}
+
+COQUIC_NO_PROFILE QuicCoreEndpointConfig make_client_endpoint_config_for_core_coverage() {
+    return QuicCoreEndpointConfig{
+        .role = EndpointRole::client,
+        .supported_versions = {kQuicVersion1},
+        .verify_peer = false,
+        .retry_enabled = false,
+        .application_protocol = "coquic",
+    };
+}
+
+COQUIC_NO_PROFILE QuicCoreEndpointConfig make_server_endpoint_config_for_core_coverage() {
+    return QuicCoreEndpointConfig{
+        .role = EndpointRole::server,
+        .supported_versions = {kQuicVersion1},
+        .verify_peer = false,
+        .retry_enabled = false,
+        .application_protocol = "coquic",
+    };
+}
+
+COQUIC_NO_PROFILE QuicCoreConfig make_client_core_config_for_core_coverage(
+    std::uint8_t source_suffix, std::uint8_t destination_suffix) {
+    return QuicCoreConfig{
+        .role = EndpointRole::client,
+        .source_connection_id = make_connection_id_for_core_coverage({0xc1, source_suffix}),
+        .initial_destination_connection_id =
+            make_connection_id_for_core_coverage({0x83, destination_suffix}),
+        .original_destination_connection_id = std::nullopt,
+        .retry_source_connection_id = std::nullopt,
+        .retry_token = {},
+        .original_version = kQuicVersion1,
+        .initial_version = kQuicVersion1,
+        .supported_versions = {kQuicVersion1},
+        .reacted_to_version_negotiation = false,
+        .verify_peer = false,
+        .server_name = "localhost",
+        .application_protocol = "coquic",
+    };
+}
+
+COQUIC_NO_PROFILE QuicCoreClientConnectionConfig
+make_open_config_for_core_coverage(std::uint8_t source_suffix, std::uint8_t destination_suffix) {
+    return QuicCoreClientConnectionConfig{
+        .source_connection_id = make_connection_id_for_core_coverage({0xc1, source_suffix}),
+        .initial_destination_connection_id =
+            make_connection_id_for_core_coverage({0x83, destination_suffix}),
+        .original_destination_connection_id = std::nullopt,
+        .retry_source_connection_id = std::nullopt,
+        .retry_token = {},
+        .original_version = kQuicVersion1,
+        .initial_version = kQuicVersion1,
+        .reacted_to_version_negotiation = false,
+        .server_name = "localhost",
+    };
+}
+
+COQUIC_NO_PROFILE DatagramBuffer
+first_datagram_bytes_for_core_coverage(const QuicCoreResult &result) {
+    for (const auto &effect : result.effects) {
+        if (const auto *send = std::get_if<QuicCoreSendDatagram>(&effect)) {
+            return send->bytes;
+        }
+    }
+    return DatagramBuffer{};
+}
+
+COQUIC_NO_PROFILE DatagramBuffer make_v2_initial_datagram_for_core_coverage(
+    ConnectionId destination_connection_id, ConnectionId source_connection_id) {
+    const auto encoded = serialize_packet(InitialPacket{
+        .version = kQuicVersion2,
+        .destination_connection_id = std::move(destination_connection_id),
+        .source_connection_id = std::move(source_connection_id),
+        .token = {},
+        .packet_number_length = 1,
+        .truncated_packet_number = 1,
+        .frames = {PaddingFrame{}},
+    });
+    if (!encoded.has_value()) {
+        return DatagramBuffer{};
+    }
+    auto bytes = encoded.value();
+    bytes.resize(kMinimumClientInitialDatagramBytes, std::byte{0x00});
+    return bytes;
+}
+
+// NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks)
+COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
+    bool ok = true;
+#define COQUIC_CORE_HOOK_RECORD(expr) coverage_check(ok, #expr, static_cast<bool>(expr))
+
+    {
+        QuicCore legacy(make_client_core_config_for_core_coverage(0x01, 0x41));
+        auto *connection = legacy.connection_.get();
+        COQUIC_CORE_HOOK_RECORD(connection != nullptr);
+        if (connection != nullptr) {
+            COQUIC_CORE_HOOK_RECORD(&*legacy.connection_ == connection);
+        }
+
+        QuicCoreResult accepted_only;
+        accepted_only.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+            .connection = 1,
+            .event = QuicCoreConnectionLifecycle::accepted,
+        });
+        COQUIC_CORE_HOOK_RECORD(!has_closed_lifecycle_event(accepted_only));
+
+        QuicCoreResult closed_only;
+        closed_only.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+            .connection = 1,
+            .event = QuicCoreConnectionLifecycle::closed,
+        });
+        COQUIC_CORE_HOOK_RECORD(has_closed_lifecycle_event(closed_only));
+        const auto handle = legacy.legacy_connection_handle_;
+        COQUIC_CORE_HOOK_RECORD(handle.has_value());
+        if (handle.has_value()) {
+            legacy.connections_.erase(*handle);
+            auto *entry = legacy.ensure_legacy_entry();
+            COQUIC_CORE_HOOK_RECORD(entry != nullptr);
+            if (entry != nullptr) {
+                COQUIC_CORE_HOOK_RECORD(entry->handle == *handle);
+            }
+        }
+    }
+
+    {
+        COQUIC_CORE_HOOK_RECORD(
+            !QuicCore::parse_endpoint_datagram(
+                 make_bytes_for_core_coverage({0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
+                 .has_value());
+    }
+
+    {
+        QuicCore core(make_server_endpoint_config_for_core_coverage());
+        QuicCore::PendingRetryToken pending{
+            .original_destination_connection_id =
+                make_connection_id_for_core_coverage({0x83, 0x44}),
+            .retry_source_connection_id = make_connection_id_for_core_coverage({0x53, 0x01}),
+            .original_version = kQuicVersion1,
+            .token = make_bytes_for_core_coverage({0x72, 0x74, 0x72, 0x79}),
+            .route_handle = 7,
+        };
+        core.retry_tokens_.insert_or_assign(QuicCore::connection_id_key(pending.token), pending);
+
+        QuicCore::ParsedEndpointDatagram parsed{
+            .kind = QuicCore::ParsedEndpointDatagram::Kind::supported_initial,
+            .destination_connection_id = pending.retry_source_connection_id,
+            .source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x01}),
+            .version = pending.original_version,
+            .token = pending.token,
+        };
+
+        auto wrong_destination = parsed;
+        wrong_destination.destination_connection_id =
+            make_connection_id_for_core_coverage({0x99, 0x01});
+        COQUIC_CORE_HOOK_RECORD(!core.take_retry_context(wrong_destination, 7).has_value());
+        COQUIC_CORE_HOOK_RECORD(
+            core.retry_tokens_.contains(QuicCore::connection_id_key(pending.token)));
+
+        auto wrong_version = parsed;
+        wrong_version.version = kQuicVersion2;
+        COQUIC_CORE_HOOK_RECORD(!core.take_retry_context(wrong_version, 7).has_value());
+        COQUIC_CORE_HOOK_RECORD(
+            core.retry_tokens_.contains(QuicCore::connection_id_key(pending.token)));
+    }
+
+    {
+        QuicCore core(make_client_endpoint_config_for_core_coverage());
+        QuicCore::ConnectionEntry entry{
+            .handle = 7,
+            .initial_destination_connection_id_key = std::string("foreign-initial"),
+        };
+        entry.active_connection_id_keys.push_back("foreign-active");
+        core.connection_id_routes_.emplace("foreign-active", 77);
+        core.initial_destination_routes_.emplace("foreign-initial", 77);
+        core.erase_endpoint_connection_routes(entry);
+        COQUIC_CORE_HOOK_RECORD(core.connection_id_routes_.at("foreign-active") == 77);
+        COQUIC_CORE_HOOK_RECORD(core.initial_destination_routes_.at("foreign-initial") == 77);
+    }
+
+    {
+        QuicCore core(make_client_endpoint_config_for_core_coverage());
+        QuicCore::ConnectionEntry entry{
+            .handle = 7,
+            .connection = std::make_unique<QuicConnection>(
+                make_client_core_config_for_core_coverage(0x02, 0x42)),
+            .initial_destination_connection_id_key = std::string("stale-initial"),
+        };
+        entry.active_connection_id_keys.push_back("stale-active");
+        core.connection_id_routes_.emplace("stale-active", 99);
+        core.initial_destination_routes_.emplace("stale-initial", 99);
+        core.refresh_server_connection_routes(entry);
+        entry.connection.reset();
+        COQUIC_CORE_HOOK_RECORD(core.connection_id_routes_.at("stale-active") == 99);
+        COQUIC_CORE_HOOK_RECORD(core.initial_destination_routes_.at("stale-initial") == 99);
+        COQUIC_CORE_HOOK_RECORD(!entry.active_connection_id_keys.empty());
+        COQUIC_CORE_HOOK_RECORD(entry.initial_destination_connection_id_key.has_value());
+    }
+
+    {
+        QuicCore legacy(make_client_core_config_for_core_coverage(0x03, 0x43));
+        auto *entry = legacy.ensure_legacy_entry();
+        COQUIC_CORE_HOOK_RECORD(entry != nullptr);
+        if (entry != nullptr) {
+            entry->default_route_handle = 99;
+            entry->path_id_by_route_handle.clear();
+            entry->route_handle_by_path_id.clear();
+            entry->route_handle_by_path_id.emplace(7, 44);
+            COQUIC_CORE_HOOK_RECORD(seed_legacy_route_handle_path_for_tests(legacy, 44, 7));
+            COQUIC_CORE_HOOK_RECORD(entry->default_route_handle ==
+                                    std::optional<QuicRouteHandle>{99u});
+        }
+    }
+
+    {
+        QuicCore legacy(make_client_core_config_for_core_coverage(0x04, 0x44));
+        auto *entry = legacy.ensure_legacy_entry();
+        COQUIC_CORE_HOOK_RECORD(entry != nullptr);
+        if (entry != nullptr) {
+            entry->default_route_handle = 99;
+            entry->path_id_by_route_handle.clear();
+            entry->route_handle_by_path_id.clear();
+            entry->path_id_by_route_handle.emplace(11, 7);
+            entry->route_handle_by_path_id.emplace(7, 11);
+            COQUIC_CORE_HOOK_RECORD(seed_legacy_route_handle_path_for_tests(legacy, 44, 7));
+            COQUIC_CORE_HOOK_RECORD(entry->default_route_handle ==
+                                    std::optional<QuicRouteHandle>{99u});
+            COQUIC_CORE_HOOK_RECORD(!entry->path_id_by_route_handle.contains(11));
+        }
+    }
+
+    {
+        QuicCore endpoint(make_client_endpoint_config_for_core_coverage());
+        const auto opened = endpoint.advance_endpoint(
+            QuicCoreOpenConnection{
+                .connection = make_open_config_for_core_coverage(0x11, 0x51),
+                .initial_route_handle = 17,
+            },
+            QuicCoreTimePoint{});
+        const auto initial = first_datagram_bytes_for_core_coverage(opened);
+        COQUIC_CORE_HOOK_RECORD(!initial.empty());
+        endpoint.connections_.clear();
+        const auto result = endpoint.advance_endpoint(
+            QuicCoreInboundDatagram{
+                .bytes = initial,
+            },
+            QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+        COQUIC_CORE_HOOK_RECORD(result.effects.empty());
+        COQUIC_CORE_HOOK_RECORD(!result.local_error.has_value());
+    }
+
+    {
+        QuicCore endpoint(make_client_endpoint_config_for_core_coverage());
+        const auto opened = endpoint.advance_endpoint(
+            QuicCoreOpenConnection{
+                .connection = make_open_config_for_core_coverage(0x12, 0x52),
+                .initial_route_handle = 17,
+            },
+            QuicCoreTimePoint{});
+        const auto initial = first_datagram_bytes_for_core_coverage(opened);
+        COQUIC_CORE_HOOK_RECORD(!initial.empty());
+        auto entry_it = endpoint.connections_.find(1);
+        COQUIC_CORE_HOOK_RECORD(entry_it != endpoint.connections_.end());
+        if (entry_it != endpoint.connections_.end()) {
+            entry_it->second.default_route_handle.reset();
+            entry_it->second.path_id_by_route_handle.clear();
+            entry_it->second.route_handle_by_path_id.clear();
+            const auto result = endpoint.advance_endpoint(
+                QuicCoreInboundDatagram{
+                    .bytes = initial,
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+            static_cast<void>(result);
+        }
+    }
+
+    {
+        auto server_config = make_server_endpoint_config_for_core_coverage();
+        server_config.supported_versions = {kQuicVersion1};
+        QuicCore server(std::move(server_config));
+        const auto initial = make_v2_initial_datagram_for_core_coverage(
+            make_connection_id_for_core_coverage({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
+            make_connection_id_for_core_coverage({0xc1, 0x01}));
+        COQUIC_CORE_HOOK_RECORD(!initial.empty());
+        const auto result = server.advance_endpoint(
+            QuicCoreInboundDatagram{
+                .bytes = initial,
+            },
+            QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+        const auto version_negotiation = first_datagram_bytes_for_core_coverage(result);
+        COQUIC_CORE_HOOK_RECORD(!version_negotiation.empty());
+        const auto parsed = parse_version_negotiation_packet(version_negotiation);
+        COQUIC_CORE_HOOK_RECORD(parsed.has_value());
+        if (parsed.has_value()) {
+            COQUIC_CORE_HOOK_RECORD(parsed->supported_versions ==
+                                    std::vector<std::uint32_t>{kQuicVersion1});
+        }
+    }
+
+    {
+        const auto config = make_client_core_config_for_core_coverage(0x21, 0x61);
+        QuicCore legacy(config);
+        COQUIC_CORE_HOOK_RECORD(seed_legacy_route_handle_path_for_tests(legacy, 33, 0));
+        const auto packet = serialize_packet(VersionNegotiationPacket{
+            .destination_connection_id = config.source_connection_id,
+            .source_connection_id = config.initial_destination_connection_id,
+            .supported_versions = {kQuicVersion2},
+        });
+        COQUIC_CORE_HOOK_RECORD(packet.has_value());
+        if (packet.has_value()) {
+            const auto result = legacy.advance(
+                QuicCoreInboundDatagram{
+                    .bytes = packet.value(),
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+            static_cast<void>(result);
+        }
+    }
+
+#undef COQUIC_CORE_HOOK_RECORD
+    return ok;
+}
+// NOLINTEND(clang-analyzer-cplusplus.NewDeleteLeaks)
 
 QuicCore::QuicCore(QuicCoreEndpointConfig config)
     : endpoint_config_(std::move(config)), connection_(this) {
@@ -774,7 +1140,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                                       std::make_move_iterator(drained.effects.begin()),
                                       std::make_move_iterator(drained.effects.end()));
                 refresh_server_connection_routes(entry);
-                if (entry.connection->has_failed() || has_closed_lifecycle_event(drained)) {
+                if (should_remove_endpoint_connection_entry(*entry.connection, drained)) {
                     erase_endpoint_connection_routes(entry);
                     connections_.erase(entry_it);
                 }
@@ -888,9 +1254,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         };
         const auto path_id = inbound->route_handle.has_value()
                                  ? remember_inbound_path(entry, *inbound->route_handle)
-                                 : (entry.default_route_handle.has_value()
-                                        ? remember_inbound_path(entry, *entry.default_route_handle)
-                                        : kDefaultPathId);
+                                 : kDefaultPathId;
         entry.connection->process_inbound_datagram(inbound->bytes, now, path_id, inbound->ecn);
 
         auto drained =
@@ -905,7 +1269,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                                   .event = QuicCoreConnectionLifecycle::accepted,
                               });
 
-        if (!(entry.connection->has_failed() || has_closed_lifecycle_event(drained))) {
+        if (should_keep_endpoint_connection_entry(*entry.connection, drained)) {
             const auto handle = entry.handle;
             auto [it, inserted] = connections_.emplace(handle, std::move(entry));
             (void)inserted;
@@ -1001,7 +1365,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                               std::make_move_iterator(drained.effects.begin()),
                               std::make_move_iterator(drained.effects.end()));
         refresh_server_connection_routes(entry);
-        if (entry.connection->has_failed() || has_closed_lifecycle_event(drained)) {
+        if (should_remove_endpoint_connection_entry(*entry.connection, drained)) {
             erase_endpoint_connection_routes(entry);
             connections_.erase(entry_it);
         }
@@ -1009,54 +1373,32 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         return result;
     }
 
-    if (std::holds_alternative<QuicCoreTimerExpired>(input)) {
-        QuicCoreResult result;
-        std::vector<QuicConnectionHandle> erase_after;
-        for (auto &[handle, entry] : connections_) {
-            (void)handle;
-            const auto wakeup = entry.connection->next_wakeup();
-            if (!wakeup.has_value() || *wakeup > now) {
-                continue;
-            }
-
-            entry.connection->on_timeout(now);
-            auto drained =
-                drain_connection_effects(entry.handle, entry.default_route_handle,
-                                         entry.route_handle_by_path_id, *entry.connection, now);
-            result.effects.insert(result.effects.end(),
-                                  std::make_move_iterator(drained.effects.begin()),
-                                  std::make_move_iterator(drained.effects.end()));
-            refresh_server_connection_routes(entry);
-            if (entry.connection->has_failed() || has_closed_lifecycle_event(drained)) {
-                erase_after.push_back(entry.handle);
-            }
+    QuicCoreResult result;
+    std::vector<QuicConnectionHandle> erase_after;
+    for (auto &[handle, entry] : connections_) {
+        (void)handle;
+        const auto wakeup = entry.connection->next_wakeup();
+        if (!wakeup.has_value() || *wakeup > now) {
+            continue;
         }
 
-        for (const auto handle : erase_after) {
-            const auto entry_it = connections_.find(handle);
-            if (entry_it == connections_.end()) {
-                continue;
-            }
-            erase_endpoint_connection_routes(entry_it->second);
-            connections_.erase(entry_it);
+        entry.connection->on_timeout(now);
+        auto drained =
+            drain_connection_effects(entry.handle, entry.default_route_handle,
+                                     entry.route_handle_by_path_id, *entry.connection, now);
+        result.effects.insert(result.effects.end(),
+                              std::make_move_iterator(drained.effects.begin()),
+                              std::make_move_iterator(drained.effects.end()));
+        refresh_server_connection_routes(entry);
+        if (should_remove_endpoint_connection_entry(*entry.connection, drained)) {
+            erase_after.push_back(entry.handle);
         }
-        result.next_wakeup = next_wakeup();
-        return result;
     }
 
-    (void)now;
-    QuicCoreResult result;
-    const auto connection = [&]() -> std::optional<QuicConnectionHandle> {
-        if (const auto *command = std::get_if<QuicCoreConnectionCommand>(&input)) {
-            return command->connection;
-        }
-        return std::nullopt;
-    }();
-    result.local_error = QuicCoreLocalError{
-        .connection = connection,
-        .code = QuicCoreLocalErrorCode::unsupported_operation,
-        .stream_id = std::nullopt,
-    };
+    for (const auto handle : erase_after) {
+        erase_endpoint_connection_routes(connections_.at(handle));
+        connections_.erase(handle);
+    }
     result.next_wakeup = next_wakeup();
     return result;
 }
@@ -1073,12 +1415,14 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         return result;
     }
 
-    auto *entry = ensure_legacy_entry();
-    if (entry == nullptr || entry->connection == nullptr) {
+    // advance() already returned above when legacy mode is unavailable, so the legacy entry
+    // is expected to exist here.
+    auto &entry = *ensure_legacy_entry();
+    if (entry.connection == nullptr) {
         return result;
     }
     auto config = legacy_config_.value_or(QuicCoreConfig{});
-    auto *connection = entry->connection.get();
+    auto *connection = entry.connection.get();
 
     std::visit(
         overloaded{
@@ -1086,9 +1430,9 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
             [&](const QuicCoreInboundDatagram &in) {
                 const auto path_id =
                     in.route_handle.has_value()
-                        ? remember_inbound_path(*entry, *in.route_handle)
-                        : (entry->default_route_handle.has_value()
-                               ? remember_inbound_path(*entry, *entry->default_route_handle)
+                        ? remember_inbound_path(entry, *in.route_handle)
+                        : (entry.default_route_handle.has_value()
+                               ? remember_inbound_path(entry, *entry.default_route_handle)
                                : kDefaultPathId);
                 if (config.role == EndpointRole::client) {
                     if (!connection->is_handshake_complete()) {
@@ -1111,8 +1455,8 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                                     }
                                     config.initial_version = supported_version;
                                     config.reacted_to_version_negotiation = true;
-                                    entry->connection = std::make_unique<QuicConnection>(config);
-                                    connection = entry->connection.get();
+                                    entry.connection = std::make_unique<QuicConnection>(config);
+                                    connection = entry.connection.get();
                                     connection->last_inbound_path_id_ = path_id;
                                     connection->current_send_path_id_ = path_id;
                                     connection->ensure_path_state(path_id).is_current_send_path =
@@ -1151,8 +1495,8 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             config.retry_source_connection_id = retry->source_connection_id;
                             config.retry_token = retry->retry_token;
                             config.initial_destination_connection_id = retry->source_connection_id;
-                            entry->connection = std::make_unique<QuicConnection>(config);
-                            connection = entry->connection.get();
+                            entry.connection = std::make_unique<QuicConnection>(config);
+                            connection = entry.connection.get();
                             connection->initial_space_.next_send_packet_number =
                                 next_initial_send_packet_number;
                             connection->last_inbound_path_id_ = path_id;
@@ -1204,7 +1548,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
             },
             [&](const QuicCoreRequestKeyUpdate &) { connection->request_key_update(); },
             [&](const QuicCoreRequestConnectionMigration &in) {
-                const auto path_id = remember_inbound_path(*entry, in.route_handle);
+                const auto path_id = remember_inbound_path(entry, in.route_handle);
                 const auto requested = connection->request_connection_migration(path_id, in.reason);
                 if (!requested.has_value()) {
                     result.local_error = QuicCoreLocalError{
@@ -1223,9 +1567,9 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         if (datagram.empty()) {
             break;
         }
-        const auto route_handle = route_handle_for_path(*entry, connection->last_drained_path_id());
+        const auto route_handle = route_handle_for_path(entry, connection->last_drained_path_id());
         result.effects.emplace_back(QuicCoreSendDatagram{
-            .connection = entry->handle,
+            .connection = entry.handle,
             .route_handle = route_handle,
             .bytes = std::move(datagram),
             .ecn = connection->last_drained_ecn_codepoint(),

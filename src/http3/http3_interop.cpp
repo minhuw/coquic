@@ -172,9 +172,9 @@ int run_http3_interop(const Http3InteropConfig &config) {
             .host = config.host,
             .port = config.port,
             .document_root = config.document_root,
+            .enable_bootstrap = false,
             .certificate_chain_path = config.certificate_chain_path,
             .private_key_path = config.private_key_path,
-            .enable_bootstrap = false,
         });
     }
 

@@ -14,7 +14,7 @@ namespace {
 
 constexpr std::string_view kNoStoreValue = "no-store";
 
-void append_json_escaped(std::string &out, std::string_view value) {
+void append_json_escaped_impl(std::string &out, std::string_view value) {
     static constexpr char kHexDigits[] = "0123456789abcdef";
     out.push_back('"');
     for (const unsigned char ch : value) {
@@ -54,9 +54,9 @@ void append_json_escaped(std::string &out, std::string_view value) {
     out.push_back('"');
 }
 
-std::vector<std::byte> inspect_json_body(const Http3Request &request) {
+std::vector<std::byte> inspect_json_body_impl(const Http3Request &request) {
     std::string json = "{\"method\":";
-    append_json_escaped(json, request.head.method);
+    append_json_escaped_impl(json, request.head.method);
     json += ",\"content_length\":";
     if (request.head.content_length.has_value()) {
         json += std::to_string(*request.head.content_length);
@@ -71,9 +71,9 @@ std::vector<std::byte> inspect_json_body(const Http3Request &request) {
             json.push_back(',');
         }
         json += "{\"name\":";
-        append_json_escaped(json, request.trailers[index].name);
+        append_json_escaped_impl(json, request.trailers[index].name);
         json += ",\"value\":";
-        append_json_escaped(json, request.trailers[index].value);
+        append_json_escaped_impl(json, request.trailers[index].value);
         json.push_back('}');
     }
     json += "]}";
@@ -143,6 +143,14 @@ std::vector<std::byte> upload_summary_json(std::size_t received_bytes) {
 
 } // namespace
 
+void append_json_escaped(std::string &out, std::string_view value) {
+    append_json_escaped_impl(out, value);
+}
+
+std::vector<std::byte> inspect_json_body(const Http3Request &request) {
+    return inspect_json_body_impl(request);
+}
+
 std::optional<Http3Response> try_demo_route_response(const Http3Request &request,
                                                      const Http3DemoRouteLimits &limits) {
     if (request.head.path == "/_coquic/echo") {
@@ -180,7 +188,7 @@ std::optional<Http3Response> try_demo_route_response(const Http3Request &request
             };
         }
 
-        auto body = inspect_json_body(request);
+        auto body = inspect_json_body_impl(request);
         return Http3Response{
             .head =
                 {

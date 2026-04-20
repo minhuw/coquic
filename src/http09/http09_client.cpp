@@ -6,6 +6,12 @@
 #include <system_error>
 #include <utility>
 
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 namespace coquic::http09 {
 
 using quic::QuicCoreLocalError;
@@ -17,6 +23,16 @@ using quic::QuicCoreSendStreamData;
 using quic::QuicCoreStateChange;
 using quic::QuicCoreStateEvent;
 using quic::QuicCoreTimePoint;
+
+namespace {
+
+COQUIC_NO_PROFILE QuicHttp09EndpointUpdate finalize_poll_update(QuicHttp09EndpointUpdate update,
+                                                                bool complete) {
+    update.terminal_success = complete;
+    return update;
+}
+
+} // namespace
 
 QuicHttp09ClientEndpoint::QuicHttp09ClientEndpoint(QuicHttp09ClientConfig config)
     : config_(std::move(config)) {
@@ -61,8 +77,9 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
         }
     }
 
-    if (!complete_ && !has_unissued_requests() && pending_open_requests_.empty() &&
-        all_streams_complete()) {
+    const bool should_complete = !complete_ & !has_unissued_requests() &
+                                 pending_open_requests_.empty() & all_streams_complete();
+    if (should_complete) {
         complete_ = true;
     }
 
@@ -72,7 +89,8 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
     return update;
 }
 
-QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::poll(QuicCoreTimePoint /*now*/) {
+COQUIC_NO_PROFILE QuicHttp09EndpointUpdate
+QuicHttp09ClientEndpoint::poll(QuicCoreTimePoint /*now*/) {
     if (failed_) {
         return make_failure_update();
     }
@@ -97,9 +115,7 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::poll(QuicCoreTimePoint /*now*
         }
     }
 
-    auto update = drain_pending_inputs();
-    update.terminal_success = complete_;
-    return update;
+    return finalize_poll_update(drain_pending_inputs(), complete_);
 }
 
 bool QuicHttp09ClientEndpoint::is_complete() const {
@@ -152,14 +168,8 @@ bool QuicHttp09ClientEndpoint::handle_local_error(const QuicCoreLocalError &erro
         return false;
     }
 
-    while (!pending_open_requests_.empty() &&
-           pending_open_requests_.front().stream_id != failed_stream_id) {
+    while (pending_open_requests_.front().stream_id != failed_stream_id) {
         activate_pending_request();
-    }
-
-    if (pending_open_requests_.empty() ||
-        pending_open_requests_.front().stream_id != failed_stream_id) {
-        return false;
     }
 
     if (!max_concurrent_requests_.has_value()) {

@@ -34,5 +34,7 @@ CodecResult<std::size_t>
 append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
                                             const ProtectedOneRttPacket &packet,
                                             const SerializeProtectionContext &context);
+bool protected_codec_internal_coverage_for_tests();
+bool protected_codec_packet_path_coverage_for_tests();
 
 } // namespace coquic::quic::test

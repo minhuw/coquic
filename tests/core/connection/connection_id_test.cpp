@@ -409,6 +409,38 @@ TEST(QuicCoreTest, RetireConnectionIdFrameQueuesReplacementConnectionId) {
     EXPECT_GE(connection.pending_new_connection_id_frames_.size(), 1u);
 }
 
+TEST(QuicCoreTest, ReceivedApplicationRetireConnectionIdFrameSucceedsForActiveSequence) {
+    auto connection = make_connected_server_connection();
+    connection.issue_spare_connection_ids();
+
+    const auto processed = connection.process_inbound_received_application(
+        std::array<coquic::quic::ReceivedFrame, 1>{coquic::quic::RetireConnectionIdFrame{
+            .sequence_number = 1,
+        }},
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/0);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(connection.local_connection_ids_.contains(1));
+    EXPECT_TRUE(connection.local_connection_ids_.at(1).retired);
+}
+
+TEST(QuicCoreTest,
+     ReceivedApplicationRetireConnectionIdFrameAllowsFollowingFramesAfterSuccessfulRetire) {
+    auto connection = make_connected_server_connection();
+    connection.issue_spare_connection_ids();
+
+    const auto processed = connection.process_inbound_received_application(
+        std::array<coquic::quic::ReceivedFrame, 2>{
+            coquic::quic::RetireConnectionIdFrame{.sequence_number = 1},
+            coquic::quic::PingFrame{},
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/0);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(connection.local_connection_ids_.contains(1));
+    EXPECT_TRUE(connection.local_connection_ids_.at(1).retired);
+}
+
 TEST(QuicCoreTest, RetireConnectionIdProcessingCoversUnknownRetiredAndReplacementPaths) {
     {
         auto connection = make_connected_server_connection();

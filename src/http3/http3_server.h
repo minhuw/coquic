@@ -10,6 +10,8 @@
 
 namespace coquic::http3 {
 
+struct Http3ServerEndpointTestAccess;
+
 struct Http3ServerConfig {
     Http3SettingsSnapshot local_settings;
     std::function<std::optional<Http3Response>(const Http3RequestHead &)> request_head_handler;
@@ -44,6 +46,8 @@ class Http3ServerEndpoint {
     bool has_failed() const;
 
   private:
+    friend struct Http3ServerEndpointTestAccess;
+
     struct PendingRequest {
         std::optional<Http3RequestHead> head;
         std::vector<std::byte> body;

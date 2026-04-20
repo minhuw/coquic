@@ -277,7 +277,8 @@ class QuicCore;
 namespace test {
 bool seed_legacy_route_handle_path_for_tests(QuicCore &core, QuicRouteHandle route_handle,
                                              QuicPathId path_id);
-}
+bool core_endpoint_internal_coverage_for_tests();
+} // namespace test
 
 class QuicCore {
   public:
@@ -355,6 +356,7 @@ class QuicCore {
     friend bool test::seed_legacy_route_handle_path_for_tests(QuicCore &core,
                                                               QuicRouteHandle route_handle,
                                                               QuicPathId path_id);
+    friend bool test::core_endpoint_internal_coverage_for_tests();
     void set_legacy_connection(std::unique_ptr<QuicConnection> connection);
     static std::string connection_id_key(std::span<const std::byte> connection_id);
     static std::optional<ParsedEndpointDatagram>

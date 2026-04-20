@@ -4,9 +4,44 @@
 
 #include <gtest/gtest.h>
 
+#define private public
 #include "src/quic/buffer.h"
+#undef private
 
 namespace {
+
+bool buffer_internal_coverage_for_tests();
+
+bool buffer_internal_coverage_for_tests() {
+    const std::array<std::byte, 3> source{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+    };
+    coquic::quic::DatagramBuffer datagram{std::span<const std::byte>(source)};
+    if (datagram.to_vector() != std::vector<std::byte>(source.begin(), source.end())) {
+        return false;
+    }
+
+    datagram.truncate(1);
+    datagram.push_back(std::byte{0xdd});
+    if (datagram.to_vector() != std::vector<std::byte>{std::byte{0xaa}, std::byte{0xdd}}) {
+        return false;
+    }
+
+    coquic::quic::BufferWriter null_writer(nullptr);
+    null_writer.write_byte(std::byte{0xee});
+    if (null_writer.bytes() != std::vector<std::byte>{std::byte{0xee}}) {
+        return false;
+    }
+
+    std::array<std::byte, 2> storage{};
+    coquic::quic::SpanBufferWriter writer{std::span<std::byte>(storage)};
+    writer.offset_ = 3;
+    const auto error = writer.write_varint(1);
+    return error.has_value() && error->code == coquic::quic::CodecErrorCode::truncated_input &&
+           error->offset == 3;
+}
 
 TEST(QuicBufferTest, SpanBufferWriterWritesBytesAndVarintsIntoFixedSpan) {
     std::array<std::byte, 8> storage{};
@@ -257,6 +292,10 @@ TEST(QuicBufferTest, DatagramBufferComparesEqualToStandardByteVector) {
 
     EXPECT_EQ(buffer, expected);
     EXPECT_EQ(expected, buffer);
+}
+
+TEST(QuicBufferTest, InternalCoverageHelperExercisesSpanOffsetAndDatagramUtilityPaths) {
+    EXPECT_TRUE(buffer_internal_coverage_for_tests());
 }
 
 } // namespace

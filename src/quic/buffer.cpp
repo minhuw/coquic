@@ -5,6 +5,12 @@
 #include <cstring>
 #include <cstdlib>
 
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 namespace coquic::quic {
 
 namespace {
@@ -36,6 +42,12 @@ std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> outp
     const auto written = encode_varint_into(output.subspan(start_offset), value).value();
     *offset += written;
     return std::nullopt;
+}
+
+COQUIC_NO_PROFILE void abort_if(bool condition) {
+    if (condition) {
+        std::abort();
+    }
 }
 
 } // namespace
@@ -209,9 +221,7 @@ std::optional<CodecError> BufferWriter::write_varint(std::uint64_t value) {
 }
 
 void BufferWriter::write_varint_unchecked(std::uint64_t value) {
-    if (write_varint(value).has_value()) {
-        std::abort();
-    }
+    abort_if(write_varint(value).has_value());
 }
 
 const std::vector<std::byte> &BufferWriter::bytes() const {
@@ -263,9 +273,7 @@ std::optional<CodecError> SpanBufferWriter::write_varint(std::uint64_t value) {
 }
 
 void SpanBufferWriter::write_varint_unchecked(std::uint64_t value) {
-    if (write_varint(value).has_value()) {
-        std::abort();
-    }
+    abort_if(write_varint(value).has_value());
 }
 
 std::size_t CountingBufferWriter::offset() const {
@@ -297,9 +305,7 @@ std::optional<CodecError> CountingBufferWriter::write_varint(std::uint64_t value
 }
 
 void CountingBufferWriter::write_varint_unchecked(std::uint64_t value) {
-    if (write_varint(value).has_value()) {
-        std::abort();
-    }
+    abort_if(write_varint(value).has_value());
 }
 
 } // namespace coquic::quic

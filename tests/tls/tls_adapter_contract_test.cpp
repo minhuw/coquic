@@ -1221,6 +1221,28 @@ TEST(QuicTlsAdapterContractTest, RuntimeStatusUpdateReturnsWhenSslIsMissing) {
     EXPECT_EQ(adapter.early_data_accepted(), std::nullopt);
 }
 
+TEST(QuicTlsAdapterContractTest, EarlyDataStatusUpdateReturnsWhenSslIsMissing) {
+    TlsAdapter adapter(make_client_config());
+    TlsAdapterTestPeer::reset_ssl(adapter);
+
+    const std::function<void(TlsAdapter &)> update_early_data_status =
+        TlsAdapterTestPeer::update_early_data_status;
+    update_early_data_status(adapter);
+
+    EXPECT_EQ(adapter.early_data_accepted(), std::nullopt);
+}
+
+TEST(QuicTlsAdapterContractTest, ResumedResumptionStateUpdateReturnsWhenSslIsMissing) {
+    TlsAdapter adapter(make_client_config());
+    TlsAdapterTestPeer::reset_ssl(adapter);
+
+    const std::function<void(TlsAdapter &)> update_resumed_resumption_state =
+        TlsAdapterTestPeer::update_resumed_resumption_state;
+    update_resumed_resumption_state(adapter);
+
+    EXPECT_FALSE(adapter.resumed_resumption_state().has_value());
+}
+
 TEST(QuicTlsAdapterContractTest,
      RuntimeStatusUpdateWithSslAndNoSelectedAlpnKeepsSelectedProtocolEmpty) {
     TlsAdapter adapter(make_client_config());
@@ -1284,6 +1306,10 @@ TEST(QuicTlsAdapterContractTest, MoveConstructionRetainsUsableAdapter) {
 
     EXPECT_FALSE(moved.handshake_complete());
     EXPECT_TRUE(moved.start().has_value());
+}
+
+TEST(QuicTlsAdapterContractTest, InternalCoverageHookExercisesDriveHandshakeAndNullSslPaths) {
+    EXPECT_TRUE(TlsAdapterTestPeer::internal_coverage_for_tests());
 }
 
 } // namespace

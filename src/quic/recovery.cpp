@@ -756,18 +756,17 @@ void PacketSpaceRecovery::on_packet_sent(const SentPacketRecord &packet) {
 }
 
 void PacketSpaceRecovery::on_packet_declared_lost(std::uint64_t packet_number) {
-    auto *packet = find_packet(packet_number);
-    if (packet == nullptr) {
+    auto *slot = slot_for_packet_number(packet_number);
+    if (slot == nullptr) {
         return;
     }
 
-    packet->in_flight = false;
-    packet->declared_lost = true;
-    packet->bytes_in_flight = 0;
-
-    if (const auto handle = handle_for_packet_number(packet_number); handle.has_value()) {
-        slots_[handle->slot_index].state = LedgerSlotState::declared_lost;
-    }
+    auto &packet = slot->packet;
+    erase_from_tracked_sets(packet);
+    packet.in_flight = false;
+    packet.declared_lost = true;
+    packet.bytes_in_flight = 0;
+    slot->state = LedgerSlotState::declared_lost;
     ++compatibility_version_;
 }
 

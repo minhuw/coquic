@@ -14,6 +14,7 @@ namespace coquic::http3 {
 
 struct Http3ConnectionPeerUniStreamAccess;
 struct Http3ConnectionPeerRequestStreamAccess;
+struct Http3ConnectionTestAccess;
 
 struct Http3ConnectionConfig {
     Http3ConnectionRole role = Http3ConnectionRole::client;
@@ -54,6 +55,7 @@ class Http3Connection {
   private:
     friend struct Http3ConnectionPeerUniStreamAccess;
     friend struct Http3ConnectionPeerRequestStreamAccess;
+    friend struct Http3ConnectionTestAccess;
 
     enum class PeerUniStreamKind : std::uint8_t {
         control,
@@ -82,7 +84,6 @@ class Http3Connection {
         bool fin_received = false;
         bool initial_headers_received = false;
         bool trailing_headers_received = false;
-        bool terminal = false;
         std::optional<RequestFieldSectionKind> blocked_field_section;
         std::optional<std::uint64_t> expected_content_length;
         std::uint64_t body_bytes_received = 0;

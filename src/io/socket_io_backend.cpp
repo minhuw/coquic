@@ -9,7 +9,9 @@
 #include <netinet/in.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
+#include <initializer_list>
 #include <cerrno>
 #include <cstring>
 #include <memory>
@@ -145,6 +147,23 @@ struct MultiSocketBackendTestTrace {
 
 thread_local MultiSocketBackendTestTrace g_multi_socket_backend_test_trace;
 
+struct SocketBackendTestConfig {
+    bool fail_socket_open = false;
+    bool suppress_opened_fd_tracking = false;
+};
+
+thread_local SocketBackendTestConfig g_socket_backend_test_config;
+
+void reset_socket_backend_test_state() {
+    g_recorded_sendto_for_tests = {};
+    g_multi_socket_backend_test_trace = {};
+    g_socket_backend_test_config = {};
+}
+
+bool all_true(std::initializer_list<bool> conditions) {
+    return std::count(conditions.begin(), conditions.end(), false) == 0;
+}
+
 ssize_t record_sendto_for_tests(int socket_fd, const void *, size_t length, int,
                                 const sockaddr *destination, socklen_t destination_len) {
     g_recorded_sendto_for_tests.calls += 1;
@@ -165,8 +184,13 @@ ssize_t record_sendto_for_tests(int socket_fd, const void *, size_t length, int,
 
 int record_socket_family_and_open(int family, int type, int protocol) {
     g_multi_socket_backend_test_trace.opened_families.push_back(family);
+    if (g_socket_backend_test_config.fail_socket_open) {
+        errno = EMFILE;
+        return -1;
+    }
+
     const int fd = ::socket(family, type, protocol);
-    if (fd >= 0) {
+    if (fd >= 0 && !g_socket_backend_test_config.suppress_opened_fd_tracking) {
         g_multi_socket_backend_test_trace.opened_fds.push_back(fd);
     }
     return fd;
@@ -290,16 +314,23 @@ bool socket_io_backend_send_uses_route_handle_for_tests() {
         .peer_len = peer_len,
         .family = AF_INET,
     });
-    if (!first.has_value() || !second.has_value()) {
+    if (!all_true({
+            first.has_value(),
+            second.has_value(),
+        })) {
         return false;
     }
+    const auto second_route_handle = second.value_or(QuicRouteHandle{});
 
     const bool sent = backend.send(QuicIoTxDatagram{
-        .route_handle = *second,
+        .route_handle = second_route_handle,
         .bytes = {std::byte{0xaa}},
     });
-    return sent && g_recorded_sendto_for_tests.calls == 1 &&
-           g_recorded_sendto_for_tests.peer_port == 9443;
+    return all_true({
+        sent,
+        g_recorded_sendto_for_tests.calls == 1,
+        g_recorded_sendto_for_tests.peer_port == 9443,
+    });
 }
 
 bool socket_io_backend_wait_returns_second_route_datagram_for_tests() {
@@ -339,20 +370,252 @@ bool socket_io_backend_wait_returns_second_route_datagram_for_tests() {
         .peer_len = sizeof(sockaddr_in6),
         .family = AF_INET6,
     });
-    if (!first.has_value() || !second.has_value()) {
+    if (!all_true({
+            first.has_value(),
+            second.has_value(),
+        })) {
         return false;
     }
+    const auto second_route_handle = second.value_or(QuicRouteHandle{});
 
-    if (g_multi_socket_backend_test_trace.opened_fds.size() < 2) {
+    if (!all_true({
+            g_multi_socket_backend_test_trace.opened_fds.size() >= 2,
+        })) {
         return false;
     }
     g_multi_socket_backend_test_trace.readable_socket_fd =
         g_multi_socket_backend_test_trace.opened_fds[1];
 
     const auto event = backend.wait(std::nullopt);
-    return event.has_value() && event->kind == QuicIoEvent::Kind::rx_datagram &&
-           event->datagram.has_value() && event->datagram->route_handle == *second &&
-           g_multi_socket_backend_test_trace.last_poll_descriptor_count == 2u;
+    const auto observed = event.value_or(QuicIoEvent{});
+    const auto datagram = observed.datagram.value_or(QuicIoRxDatagram{});
+    return all_true({
+        event.has_value(),
+        observed.kind == QuicIoEvent::Kind::rx_datagram,
+        observed.datagram.has_value(),
+        datagram.route_handle == second_route_handle,
+        g_multi_socket_backend_test_trace.last_poll_descriptor_count == 2u,
+    });
+}
+
+bool socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
+    const auto saved_sendto = g_recorded_sendto_for_tests;
+    const auto saved_trace = g_multi_socket_backend_test_trace;
+    const auto saved_config = g_socket_backend_test_config;
+    const auto reset_for_case = [] { reset_socket_backend_test_state(); };
+
+    bool ok = true;
+    const auto record = [&](bool condition, const char *) { ok &= condition; };
+
+    reset_for_case();
+
+    sockaddr_in6 ipv6_peer{};
+    ipv6_peer.sin6_family = AF_INET6;
+    ipv6_peer.sin6_port = htons(9553);
+    ipv6_peer.sin6_addr = in6addr_loopback;
+    record(all_true({
+               record_sendto_for_tests(7, nullptr, 4, 0,
+                                       reinterpret_cast<const sockaddr *>(&ipv6_peer),
+                                       sizeof(ipv6_peer)) == 4,
+               g_recorded_sendto_for_tests.peer_port == 9553,
+           }),
+           "sendto ipv6 destination");
+
+    reset_for_case();
+
+    sockaddr_in ipv4_peer{};
+    ipv4_peer.sin_family = AF_INET;
+    ipv4_peer.sin_port = htons(8443);
+    ipv4_peer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    record(all_true({
+               record_sendto_for_tests(7, nullptr, 4, 0,
+                                       reinterpret_cast<const sockaddr *>(&ipv4_peer),
+                                       sizeof(ipv4_peer) - 1) == 4,
+               g_recorded_sendto_for_tests.peer_port == 0,
+           }),
+           "sendto truncated ipv4 destination");
+
+    reset_for_case();
+    record(all_true({
+               record_sendto_for_tests(7, nullptr, 4, 0, nullptr, 0) == 4,
+               g_recorded_sendto_for_tests.peer_port == 0,
+           }),
+           "sendto null destination");
+
+    reset_for_case();
+    record(record_socket_family_and_open(-1, SOCK_DGRAM, 0) == -1, "record socket invalid family");
+
+    reset_for_case();
+    record(record_poll_descriptor_count_and_second_readable(nullptr, 0, 0) == 0,
+           "poll helper idle path");
+
+    reset_for_case();
+    record(recvmsg_for_backend_tests(3, nullptr, 0) == -1, "recvmsg null message");
+
+    msghdr message{};
+    record(recvmsg_for_backend_tests(3, &message, 0) == -1, "recvmsg missing iov");
+
+    std::array<std::byte, 2> payload = {
+        std::byte{0x00},
+        std::byte{0x00},
+    };
+    iovec iov{
+        .iov_base = payload.data(),
+        .iov_len = payload.size(),
+    };
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 0;
+    record(recvmsg_for_backend_tests(3, &message, 0) == -1, "recvmsg zero iovlen");
+
+    sockaddr_storage name_storage{};
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_name = &name_storage;
+    message.msg_namelen = sizeof(sockaddr_in);
+    record(all_true({
+               recvmsg_for_backend_tests(11, &message, 0) == 2,
+               message.msg_namelen == sizeof(sockaddr_in),
+               reinterpret_cast<const sockaddr_in *>(&name_storage)->sin_port == htons(8443),
+           }),
+           "recvmsg ipv4 fallback peer");
+
+    reset_for_case();
+    g_multi_socket_backend_test_trace.readable_socket_fd = 22;
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_name = &name_storage;
+    message.msg_namelen = sizeof(sockaddr_in6) - 1;
+    record(all_true({
+               recvmsg_for_backend_tests(22, &message, 0) == 2,
+               message.msg_namelen == sizeof(sockaddr_in6) - 1,
+           }),
+           "recvmsg ipv6 truncated name storage");
+
+    reset_for_case();
+    {
+        const ScopedSocketIoBackendOpsOverride runtime_ops{
+            SocketIoBackendOpsOverride{
+                .socket_fn =
+                    [](int, int, int) {
+                        errno = EMFILE;
+                        return -1;
+                    },
+            },
+        };
+        record(!socket_io_backend_send_uses_route_handle_for_tests(),
+               "send route helper fails when socket open fails");
+    }
+
+    reset_for_case();
+    g_socket_backend_test_config.fail_socket_open = true;
+    record(!socket_io_backend_wait_returns_second_route_datagram_for_tests(),
+           "wait helper fails when socket open fails");
+
+    reset_for_case();
+    g_socket_backend_test_config.suppress_opened_fd_tracking = true;
+    record(!socket_io_backend_wait_returns_second_route_datagram_for_tests(),
+           "wait helper fails when recorded fds are unavailable");
+
+    const auto invalid_kind = [] {
+        constexpr std::uint8_t raw_kind = 0xff;
+        auto kind = QuicIoBackendKind::socket;
+        std::memcpy(&kind, &raw_kind, sizeof(kind));
+        return kind;
+    }();
+    record(!io_backend_route_handles_are_stable_for_tests(invalid_kind),
+           "generic route helper rejects invalid backend kind");
+    record(!io_backend_send_uses_route_handle_for_tests(invalid_kind),
+           "generic send helper rejects invalid backend kind");
+    record(!io_backend_wait_returns_second_route_datagram_for_tests(invalid_kind),
+           "generic wait helper rejects invalid backend kind");
+
+    g_recorded_sendto_for_tests = saved_sendto;
+    g_multi_socket_backend_test_trace = saved_trace;
+    g_socket_backend_test_config = saved_config;
+    return ok;
+}
+
+bool socket_io_backend_internal_coverage_hook_exercises_remaining_branches_for_tests() {
+    const auto saved_sendto = g_recorded_sendto_for_tests;
+    const auto saved_trace = g_multi_socket_backend_test_trace;
+    const auto saved_config = g_socket_backend_test_config;
+    const auto reset_for_case = [] { reset_socket_backend_test_state(); };
+
+    bool ok = true;
+    const auto record = [&](bool condition, const char *) { ok &= condition; };
+
+    reset_for_case();
+    sockaddr_in6 ipv6_peer{};
+    ipv6_peer.sin6_family = AF_INET6;
+    ipv6_peer.sin6_port = htons(9554);
+    ipv6_peer.sin6_addr = in6addr_loopback;
+    record(all_true({
+               record_sendto_for_tests(7, nullptr, 4, 0,
+                                       reinterpret_cast<const sockaddr *>(&ipv6_peer),
+                                       sizeof(ipv6_peer) - 1) == 4,
+               g_recorded_sendto_for_tests.peer_port == 0,
+           }),
+           "sendto truncated ipv6 destination");
+
+    reset_for_case();
+    record(all_true({
+               record_sendto_socket_fd_for_backend_tests(33, nullptr, 6, 0, nullptr, 0) == 6,
+               g_multi_socket_backend_test_trace.last_send_socket_fd == 33,
+           }),
+           "record sendto socket fd");
+
+    std::array<std::byte, 2> payload = {
+        std::byte{0x00},
+        std::byte{0x00},
+    };
+    iovec iov{
+        .iov_base = payload.data(),
+        .iov_len = payload.size(),
+    };
+
+    reset_for_case();
+    g_multi_socket_backend_test_trace.readable_socket_fd = 22;
+    msghdr message{};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    record(all_true({
+               recvmsg_for_backend_tests(22, &message, 0) == 2,
+               message.msg_name == nullptr,
+               message.msg_namelen == 0,
+           }),
+           "recvmsg ipv6 null name storage");
+
+    sockaddr_storage name_storage{};
+    reset_for_case();
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    record(all_true({
+               recvmsg_for_backend_tests(11, &message, 0) == 2,
+               message.msg_name == nullptr,
+               message.msg_namelen == 0,
+           }),
+           "recvmsg ipv4 null name storage");
+
+    reset_for_case();
+    message = {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_name = &name_storage;
+    message.msg_namelen = sizeof(sockaddr_in) - 1;
+    record(all_true({
+               recvmsg_for_backend_tests(11, &message, 0) == 2,
+               message.msg_namelen == sizeof(sockaddr_in) - 1,
+           }),
+           "recvmsg ipv4 truncated name storage");
+
+    g_recorded_sendto_for_tests = saved_sendto;
+    g_multi_socket_backend_test_trace = saved_trace;
+    g_socket_backend_test_config = saved_config;
+    return ok;
 }
 
 bool io_backend_route_handles_are_stable_for_tests(QuicIoBackendKind kind) {

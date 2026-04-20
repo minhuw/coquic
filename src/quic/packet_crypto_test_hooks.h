@@ -13,6 +13,7 @@ enum class PacketCryptoFaultPoint : std::uint8_t {
     hkdf_expand_setup,
     seal_length_guard,
     seal_context_new,
+    seal_context_reset,
     seal_init,
     seal_aad_update,
     seal_payload_update,
@@ -21,11 +22,13 @@ enum class PacketCryptoFaultPoint : std::uint8_t {
     seal_get_tag,
     open_length_guard,
     open_context_new,
+    open_context_reset,
     open_init,
     open_aad_update,
     open_payload_update,
     open_set_tag,
     header_protection_context_new,
+    header_protection_context_reset,
     header_protection_chacha_init,
     header_protection_chacha_final,
     header_protection_chacha_bad_length,
@@ -47,6 +50,7 @@ struct PacketCryptoRuntimeCacheStats {
 
 PacketCryptoRuntimeCacheStats packet_crypto_runtime_cache_stats_for_tests();
 void reset_packet_crypto_runtime_caches_for_tests();
+bool packet_crypto_cached_header_protection_mismatch_branch_coverage_for_tests();
 
 class ScopedPacketCryptoFaultInjector {
   public:

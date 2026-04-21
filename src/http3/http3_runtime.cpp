@@ -1101,10 +1101,12 @@ class Http3ServerRuntime {
                 force_server_handle_result_failure_after_calls_for_test())) {
             return false;
         }
+        std::optional<quic::QuicConnectionHandle> local_error_connection;
         if (result.local_error.has_value()) {
             if (!result.local_error->connection.has_value()) {
                 return false;
             }
+            local_error_connection = result.local_error->connection;
         }
 
         std::unordered_set<quic::QuicConnectionHandle> closed_connections;
@@ -1149,8 +1151,8 @@ class Http3ServerRuntime {
             }
         }
 
-        if (result.local_error.has_value()) {
-            endpoints_.erase(*result.local_error->connection);
+        if (local_error_connection.has_value()) {
+            endpoints_.erase(local_error_connection.value());
         }
         for (const auto connection : closed_connections) {
             endpoints_.erase(connection);
@@ -3039,8 +3041,11 @@ bool runtime_server_local_error_without_connection_coverage_for_test() {
     const auto now = quic::QuicCoreClock::now();
     const auto server_config = make_runtime_server_config_for_test(std::filesystem::current_path());
     auto backend = std::make_unique<RuntimeTestBackend>();
-    Http3ServerRuntime runtime(server_config, *make_http3_server_endpoint_config(server_config),
-                               std::move(backend));
+    const auto endpoint = make_http3_server_endpoint_config(server_config);
+    if (!endpoint.has_value()) {
+        return false;
+    }
+    Http3ServerRuntime runtime(server_config, endpoint.value(), std::move(backend));
 
     quic::QuicCoreResult local_error_without_connection;
     local_error_without_connection.local_error = quic::QuicCoreLocalError{

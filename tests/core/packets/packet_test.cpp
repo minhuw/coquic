@@ -833,6 +833,10 @@ TEST(QuicPacketTest, RejectsOutboundAckFrameInZeroRttPacket) {
     const auto header = history.build_outbound_ack_header(/*ack_delay_exponent=*/3,
                                                           coquic::quic::test::test_time(2));
     ASSERT_TRUE(header.has_value());
+    if (!header.has_value()) {
+        return;
+    }
+    const auto &ack_header = header.value();
 
     const auto encoded = coquic::quic::serialize_packet(coquic::quic::ZeroRttPacket{
         .version = 1,
@@ -844,7 +848,7 @@ TEST(QuicPacketTest, RejectsOutboundAckFrameInZeroRttPacket) {
             {
                 coquic::quic::Frame{coquic::quic::OutboundAckFrame{
                     .history = &history,
-                    .header = *header,
+                    .header = ack_header,
                 }},
             },
     });

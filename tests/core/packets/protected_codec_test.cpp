@@ -3230,16 +3230,21 @@ TEST(QuicProtectedCodecTest, OutboundAckFrameSerializesLikeMaterializedAckFrame)
     const auto materialized =
         history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(3));
     ASSERT_TRUE(materialized.has_value());
+    if (!header.has_value() || !materialized.has_value()) {
+        return;
+    }
+    const auto &ack_header = header.value();
+    const auto &ack_frame = materialized.value();
 
     auto outbound_packet = make_minimal_one_rtt_packet();
     outbound_packet.frames = {
         coquic::quic::Frame{coquic::quic::OutboundAckFrame{
             .history = &history,
-            .header = *header,
+            .header = ack_header,
         }},
     };
     auto materialized_packet = make_minimal_one_rtt_packet();
-    materialized_packet.frames = {coquic::quic::Frame{*materialized}};
+    materialized_packet.frames = {coquic::quic::Frame{ack_frame}};
 
     const auto context =
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);

@@ -187,6 +187,17 @@ TEST(QuicBufferTest, BufferWriterWritesVarintsAndTracksOffset) {
     EXPECT_EQ(writer.bytes()[2], std::byte{0x3f});
 }
 
+TEST(QuicBufferTest, BufferWriterAppendsIntoExternalStorage) {
+    std::vector<std::byte> bytes{std::byte{0xaa}};
+    coquic::quic::BufferWriter writer(&bytes);
+
+    writer.write_byte(std::byte{0xbb});
+    writer.write_varint_unchecked(63);
+
+    EXPECT_EQ(writer.offset(), 3u);
+    EXPECT_EQ(bytes, (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}, std::byte{0x3f}}));
+}
+
 TEST(QuicBufferTest, BufferWriterWriteVarintRejectsInvalidInput) {
     coquic::quic::BufferWriter writer;
 

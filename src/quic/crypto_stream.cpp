@@ -231,10 +231,8 @@ void ReliableSendBuffer::split_at(std::uint64_t offset) {
         .end = it->second.end,
     };
     it->second.end = it->second.begin + split_index;
-    const auto [tail_it, tail_inserted] = segments_.emplace(offset, std::move(tail));
-    if (tail_inserted) {
-        note_segment_inserted(tail_it->second);
-    }
+    const auto tail_it = segments_.emplace(offset, std::move(tail)).first;
+    note_segment_inserted(tail_it->second);
 }
 
 void ReliableSendBuffer::merge_adjacent_segments() {

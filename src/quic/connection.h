@@ -527,7 +527,7 @@ class QuicConnection {
     CodecResult<bool> process_inbound_ack_cursor(
         PacketSpaceState &packet_space, AckRangeCursor cursor, std::uint64_t largest_acknowledged,
         std::chrono::milliseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
-        std::string ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
+        const std::string &ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
         bool suppress_pto_reset);
     void track_sent_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet);
     std::optional<SentPacketRecord> retire_acked_packet(PacketSpaceState &packet_space,

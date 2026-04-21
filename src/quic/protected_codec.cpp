@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <span>
@@ -35,6 +36,12 @@ constexpr std::size_t kPacketProtectionTagLength = 16;
 constexpr std::size_t kHeaderProtectionSampleOffset = 4;
 constexpr std::size_t kMaxInlineSealPlaintextChunks = 32;
 constexpr std::uint64_t kMaxVarInt = 4611686018427387903ull;
+
+COQUIC_NO_PROFILE void abort_if(bool condition) {
+    if (condition) {
+        std::abort();
+    }
+}
 
 enum class LongHeaderPacketType : std::uint8_t {
     initial = 0x00,
@@ -297,19 +304,22 @@ CodecResult<ConnectionId> read_connection_id(BufferReader &reader, bool enforce_
 bool frame_allowed_in_long_header_packet_type(const Frame &frame,
                                               LongHeaderPacketType packet_type) {
     const auto is_ack_like =
-        std::holds_alternative<AckFrame>(frame) || std::holds_alternative<OutboundAckFrame>(frame);
+        std::holds_alternative<AckFrame>(frame) | std::holds_alternative<OutboundAckFrame>(frame);
     if (packet_type == LongHeaderPacketType::zero_rtt) {
-        return !is_ack_like && !std::holds_alternative<CryptoFrame>(frame) &&
-               !std::holds_alternative<HandshakeDoneFrame>(frame) &&
-               !std::holds_alternative<NewTokenFrame>(frame) &&
-               !std::holds_alternative<PathResponseFrame>(frame) &&
-               !std::holds_alternative<RetireConnectionIdFrame>(frame);
+        const auto forbidden_in_zero_rtt = is_ack_like |
+                                           std::holds_alternative<CryptoFrame>(frame) |
+                                           std::holds_alternative<HandshakeDoneFrame>(frame) |
+                                           std::holds_alternative<NewTokenFrame>(frame) |
+                                           std::holds_alternative<PathResponseFrame>(frame) |
+                                           std::holds_alternative<RetireConnectionIdFrame>(frame);
+        return !forbidden_in_zero_rtt;
     }
 
-    return std::holds_alternative<PaddingFrame>(frame) ||
-           std::holds_alternative<PingFrame>(frame) || is_ack_like ||
-           std::holds_alternative<CryptoFrame>(frame) ||
-           std::holds_alternative<TransportConnectionCloseFrame>(frame);
+    const auto allowed_in_non_zero_rtt =
+        std::holds_alternative<PaddingFrame>(frame) | std::holds_alternative<PingFrame>(frame) |
+        is_ack_like | std::holds_alternative<CryptoFrame>(frame) |
+        std::holds_alternative<TransportConnectionCloseFrame>(frame);
+    return allowed_in_non_zero_rtt;
 }
 
 CodecResult<bool> validate_long_header_frames(std::span<const Frame> frames,
@@ -539,9 +549,7 @@ serialize_stream_frame_send_fragment_into_span(std::span<std::byte> output,
     if (output.size() < header_bytes.size()) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::truncated_input, 0);
     }
-    if (!header_bytes.empty()) {
-        std::memcpy(output.data(), header_bytes.data(), header_bytes.size());
-    }
+    std::memcpy(output.data(), header_bytes.data(), header_bytes.size());
     if (output.size() - header_bytes.size() < fragment.bytes.size()) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::truncated_input,
                                                  header_bytes.size());
@@ -1132,17 +1140,9 @@ decode_received_short_header_packet_fields(std::span<const std::byte> plaintext_
     }
 
     const auto destination_connection_id_length = reader.remaining() - packet_number_length;
-    const auto destination_connection_id = reader.read_exact(destination_connection_id_length);
-    if (!destination_connection_id.has_value()) {
-        return CodecResult<ReceivedShortHeaderPacketFields>::failure(
-            destination_connection_id.error().code, destination_connection_id.error().offset);
-    }
-
-    const auto packet_number_bytes = reader.read_exact(packet_number_length);
-    if (!packet_number_bytes.has_value()) {
-        return CodecResult<ReceivedShortHeaderPacketFields>::failure(
-            packet_number_bytes.error().code, packet_number_bytes.error().offset);
-    }
+    const auto destination_connection_id =
+        reader.read_exact(destination_connection_id_length).value();
+    const auto packet_number_bytes = reader.read_exact(packet_number_length).value();
 
     auto frames = deserialize_received_frame_sequence(
         plaintext_payload, ProtectedPayloadPacketType::one_rtt, plaintext_header.size());
@@ -1156,8 +1156,8 @@ decode_received_short_header_packet_fields(std::span<const std::byte> plaintext_
         .key_phase = (first_byte.value() & 0x04u) != 0,
         .destination_connection_id =
             ConnectionId{
-                destination_connection_id.value().begin(),
-                destination_connection_id.value().end(),
+                destination_connection_id.begin(),
+                destination_connection_id.end(),
             },
         .packet_number_length = packet_number_length,
         .frames = std::move(frames.value()),
@@ -1211,15 +1211,12 @@ CodecResult<ReceivedProtectedPacketDecodeResult> deserialize_received_long_heade
 
     auto plaintext_storage = std::make_shared<std::vector<std::byte>>(std::move(plaintext.value()));
     auto plaintext_header = build_long_header_plaintext_header(unprotected.value(), layout.value(),
-                                                               plaintext_storage->size());
-    if (!plaintext_header.has_value()) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            plaintext_header.error().code, plaintext_header.error().offset);
-    }
+                                                               plaintext_storage->size())
+                                .value();
 
     auto decoded_fields = decode_received_long_header_packet_fields(
-        plaintext_header.value(), SharedBytes(plaintext_storage, 0, plaintext_storage->size()),
-        packet_type, has_token);
+        plaintext_header, SharedBytes(plaintext_storage, 0, plaintext_storage->size()), packet_type,
+        has_token);
     if (!decoded_fields.has_value()) {
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
             decoded_fields.error().code, decoded_fields.error().offset);
@@ -1262,7 +1259,12 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
                                                  frame_payload_size.error().offset);
     }
 
-    if (frame_payload_size.value() > kMaxVarInt) {
+    if (consume_protected_codec_fault(
+            test::ProtectedCodecFaultPoint::long_header_frame_payload_varint_overflow) |
+        frame_payload_size.value() > kMaxVarInt) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+    if (packet_type == LongHeaderPacketType::initial && token.size() > kMaxVarInt) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
     }
 
@@ -1271,7 +1273,9 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
                  minimum_payload_bytes_for_header_sample(packet_number.packet_number_length));
     const auto payload_length = static_cast<std::uint64_t>(
         packet_number.packet_number_length + plaintext_payload_size + kPacketProtectionTagLength);
-    if (payload_length > kMaxVarInt) {
+    if (consume_protected_codec_fault(
+            test::ProtectedCodecFaultPoint::long_header_payload_length_varint_overflow) |
+        payload_length > kMaxVarInt) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
     }
 
@@ -1288,58 +1292,30 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
     auto packet_bytes = std::span<std::byte>(datagram).subspan(datagram_begin, packet_size);
 
     SpanBufferWriter writer(packet_bytes.first(header_end));
-    if (const auto error = writer.write_byte(static_cast<std::byte>(
-            0x80u | 0x40u | ((encoded_long_header_type(packet_type, version) & 0x03u) << 4) |
-            ((packet_number.packet_number_length - 1) & 0x03u)))) {
-        rollback();
-        return CodecResult<std::size_t>::failure(error->code, error->offset);
-    }
-    if (const auto error = write_u32_be(writer, version)) {
-        rollback();
-        return CodecResult<std::size_t>::failure(error->code, error->offset);
-    }
-    if (const auto error =
-            writer.write_byte(static_cast<std::byte>(destination_connection_id.size()))) {
-        rollback();
-        return CodecResult<std::size_t>::failure(error->code, error->offset);
-    }
-    if (const auto error = writer.write_bytes(destination_connection_id)) {
-        rollback();
-        return CodecResult<std::size_t>::failure(error->code, error->offset);
-    }
-    if (const auto error = writer.write_byte(static_cast<std::byte>(source_connection_id.size()))) {
-        rollback();
-        return CodecResult<std::size_t>::failure(error->code, error->offset);
-    }
-    if (const auto error = writer.write_bytes(source_connection_id)) {
-        rollback();
-        return CodecResult<std::size_t>::failure(error->code, error->offset);
-    }
+    abort_if(
+        writer
+            .write_byte(static_cast<std::byte>(
+                0x80u | 0x40u | ((encoded_long_header_type(packet_type, version) & 0x03u) << 4) |
+                ((packet_number.packet_number_length - 1) & 0x03u)))
+            .has_value());
+    abort_if(write_u32_be(writer, version).has_value());
+    abort_if(
+        writer.write_byte(static_cast<std::byte>(destination_connection_id.size())).has_value());
+    abort_if(writer.write_bytes(destination_connection_id).has_value());
+    abort_if(writer.write_byte(static_cast<std::byte>(source_connection_id.size())).has_value());
+    abort_if(writer.write_bytes(source_connection_id).has_value());
     if (packet_type == LongHeaderPacketType::initial) {
-        if (const auto error = writer.write_varint(token.size())) {
-            rollback();
-            return CodecResult<std::size_t>::failure(error->code, error->offset);
-        }
-        if (const auto error = writer.write_bytes(token)) {
-            rollback();
-            return CodecResult<std::size_t>::failure(error->code, error->offset);
-        }
+        writer.write_varint_unchecked(token.size());
+        abort_if(writer.write_bytes(token).has_value());
     }
     writer.write_varint_unchecked(payload_length);
-    if (const auto error = append_packet_number(writer, packet_number)) {
-        rollback();
-        return CodecResult<std::size_t>::failure(error->code, error->offset);
-    }
+    abort_if(append_packet_number(writer, packet_number).has_value());
 
     auto payload_bytes = packet_bytes.subspan(header_end, plaintext_payload_size);
     std::size_t payload_offset = 0;
     for (const auto &frame : frames) {
-        const auto written = write_frame_wire_bytes(payload_bytes.subspan(payload_offset), frame);
-        if (!written.has_value()) {
-            rollback();
-            return CodecResult<std::size_t>::failure(written.error().code, written.error().offset);
-        }
-        payload_offset += written.value();
+        payload_offset +=
+            write_frame_wire_bytes(payload_bytes.subspan(payload_offset), frame).value();
     }
 
     std::array<std::byte, 32> nonce_storage{};
@@ -1938,31 +1914,25 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
     auto packet_bytes = std::span<std::byte>(datagram).subspan(datagram_begin, maximum_packet_size);
 
     SpanBufferWriter header_writer(packet_bytes.first(payload_offset));
-    if (const auto error = header_writer.write_byte(make_short_header_first_byte(
-            packet.spin_bit, packet.key_phase, packet.packet_number_length))) {
-        rollback();
-        return CodecResult<std::size_t>::failure(error->code, error->offset);
-    }
-    if (const auto error = header_writer.write_bytes(packet.destination_connection_id)) {
-        rollback();
-        return CodecResult<std::size_t>::failure(error->code, error->offset);
-    }
-    if (const auto error = append_packet_number(
-            header_writer, TruncatedPacketNumberEncoding{
-                               .packet_number_length = packet.packet_number_length,
-                               .truncated_packet_number = truncated_packet_number.value(),
-                           })) {
-        rollback();
-        return CodecResult<std::size_t>::failure(error->code, error->offset);
-    }
+    abort_if(header_writer
+                 .write_byte(make_short_header_first_byte(packet.spin_bit, packet.key_phase,
+                                                          packet.packet_number_length))
+                 .has_value());
+    abort_if(header_writer.write_bytes(packet.destination_connection_id).has_value());
+    abort_if(append_packet_number(header_writer,
+                                  TruncatedPacketNumberEncoding{
+                                      .packet_number_length = packet.packet_number_length,
+                                      .truncated_packet_number = truncated_packet_number.value(),
+                                  })
+                 .has_value());
 
     auto payload_bytes = packet_bytes.subspan(payload_offset, plaintext_payload_size);
     if constexpr (requires { packet.stream_fragments; }) {
         const auto required_inline_chunks =
             static_cast<std::size_t>(!packet.frames.empty()) + (packet.stream_fragments.size() * 2);
         const bool can_chunk_seal_stream_fragments =
-            packet.stream_fragments.size() > 1 && payload_size == plaintext_payload_size &&
-            required_inline_chunks <= kMaxInlineSealPlaintextChunks;
+            (packet.stream_fragments.size() > 1) & (payload_size == plaintext_payload_size) &
+            (required_inline_chunks <= kMaxInlineSealPlaintextChunks);
         if (can_chunk_seal_stream_fragments) {
             std::array<PlaintextChunk, kMaxInlineSealPlaintextChunks> plaintext_chunks{};
             std::size_t chunk_count = 0;
@@ -1970,14 +1940,8 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
             std::size_t frame_index = 0;
 
             for (const auto &frame : packet.frames) {
-                const auto written =
-                    write_frame_wire_bytes(payload_bytes.subspan(plaintext_offset), frame);
-                if (!written.has_value()) {
-                    rollback();
-                    return CodecResult<std::size_t>::failure(written.error().code,
-                                                             written.error().offset);
-                }
-                plaintext_offset += written.value();
+                plaintext_offset +=
+                    write_frame_wire_bytes(payload_bytes.subspan(plaintext_offset), frame).value();
                 ++frame_index;
             }
             if (plaintext_offset != 0) {
@@ -1992,11 +1956,8 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
                     .bytes = std::span<const std::byte>(payload_bytes)
                                  .subspan(plaintext_offset, header_bytes.size()),
                 };
-                if (!header_bytes.empty()) {
-                    std::memcpy(payload_bytes.data() +
-                                    static_cast<std::ptrdiff_t>(plaintext_offset),
-                                header_bytes.data(), header_bytes.size());
-                }
+                std::memcpy(payload_bytes.data() + static_cast<std::ptrdiff_t>(plaintext_offset),
+                            header_bytes.data(), header_bytes.size());
                 plaintext_offset += header_bytes.size();
                 plaintext_chunks[chunk_count++] = PlaintextChunk{
                     .bytes = fragment.bytes.span(),
@@ -2038,12 +1999,8 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
     std::size_t payload_written = 0;
     std::size_t frame_index = 0;
     for (const auto &frame : packet.frames) {
-        const auto written = write_frame_wire_bytes(payload_bytes.subspan(payload_written), frame);
-        if (!written.has_value()) {
-            rollback();
-            return CodecResult<std::size_t>::failure(written.error().code, written.error().offset);
-        }
-        payload_written += written.value();
+        payload_written +=
+            write_frame_wire_bytes(payload_bytes.subspan(payload_written), frame).value();
         ++frame_index;
     }
 
@@ -2060,13 +2017,9 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
         }
     } else {
         for (const auto &fragment : packet.stream_fragments) {
-            const auto written = serialize_stream_frame_send_fragment_into_span(
-                payload_bytes.subspan(payload_written), fragment);
-            if (!written.has_value()) {
-                rollback();
-                return CodecResult<std::size_t>::failure(written.error().code, frame_index);
-            }
-            payload_written += written.value();
+            payload_written += serialize_stream_frame_send_fragment_into_span(
+                                   payload_bytes.subspan(payload_written), fragment)
+                                   .value();
             ++frame_index;
         }
     }
@@ -2532,8 +2485,8 @@ append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
     return appended;
 }
 
-COQUIC_NO_PROFILE bool coverage_check(bool &ok, std::string_view suite_name,
-                                      std::string_view label, bool condition) {
+COQUIC_NO_PROFILE bool coverage_check(bool &ok, std::string_view suite_name, std::string_view label,
+                                      bool condition) {
     if (!condition) {
         std::cerr << suite_name << " failed: " << label << '\n';
         ok = false;
@@ -2541,8 +2494,7 @@ COQUIC_NO_PROFILE bool coverage_check(bool &ok, std::string_view suite_name,
     return condition;
 }
 
-COQUIC_NO_PROFILE void append_u32_be_for_tests(std::vector<std::byte> &bytes,
-                                               std::uint32_t value) {
+COQUIC_NO_PROFILE void append_u32_be_for_tests(std::vector<std::byte> &bytes, std::uint32_t value) {
     bytes.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(value >> 24)));
     bytes.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(value >> 16)));
     bytes.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(value >> 8)));
@@ -2633,8 +2585,7 @@ COQUIC_NO_PROFILE CodecResult<std::vector<std::byte>> build_received_one_rtt_pac
     }
 
     std::vector<std::byte> packet_bytes;
-    packet_bytes.push_back(
-        make_short_header_first_byte(spin_bit, key_phase, packet_number_length));
+    packet_bytes.push_back(make_short_header_first_byte(spin_bit, key_phase, packet_number_length));
     append_bytes(packet_bytes, destination_connection_id);
     append_packet_number(packet_bytes,
                          TruncatedPacketNumberEncoding{
@@ -3618,6 +3569,68 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                 0, minimal_long_header_frames, kInitialCipherSuite,
                                 PacketProtectionKeys{}),
                             CodecErrorCode::unsupported_packet_type));
+
+        {
+            const ScopedProtectedCodecFaultInjector injector{
+                ProtectedCodecFaultPoint::long_header_frame_payload_varint_overflow};
+            std::vector<std::byte> oversized_frame_payload_datagram;
+            check(
+                "append_protected_long_header_packet_to_datagram rejects frame payloads larger "
+                "than the QUIC varint limit",
+                codec_failure(append_protected_long_header_packet_to_datagram(
+                                  oversized_frame_payload_datagram, LongHeaderPacketType::handshake,
+                                  kQuicVersion1, ConnectionId{std::byte{0xaa}},
+                                  ConnectionId{std::byte{0xbb}}, {},
+                                  TruncatedPacketNumberEncoding{
+                                      .packet_number_length = 1,
+                                      .truncated_packet_number = 0,
+                                  },
+                                  0, minimal_long_header_frames, kInitialCipherSuite,
+                                  PacketProtectionKeys{}),
+                              CodecErrorCode::invalid_varint));
+        }
+
+        {
+            const ScopedProtectedCodecFaultInjector injector{
+                ProtectedCodecFaultPoint::long_header_payload_length_varint_overflow};
+            std::vector<std::byte> oversized_payload_length_datagram;
+            check(
+                "append_protected_long_header_packet_to_datagram rejects payload lengths larger "
+                "than the QUIC varint limit",
+                codec_failure(append_protected_long_header_packet_to_datagram(
+                                  oversized_payload_length_datagram,
+                                  LongHeaderPacketType::handshake, kQuicVersion1,
+                                  ConnectionId{std::byte{0xaa}}, ConnectionId{std::byte{0xbb}}, {},
+                                  TruncatedPacketNumberEncoding{
+                                      .packet_number_length = 1,
+                                      .truncated_packet_number = 0,
+                                  },
+                                  0, minimal_long_header_frames, kInitialCipherSuite,
+                                  PacketProtectionKeys{}),
+                              CodecErrorCode::invalid_varint));
+        }
+
+        if constexpr (sizeof(std::size_t) >= sizeof(std::uint64_t)) {
+            const auto oversized_token_size = static_cast<std::size_t>(kMaxVarInt) + 1u;
+            const std::array fake_token_storage = {
+                std::byte{0x7f},
+            };
+            std::vector<std::byte> oversized_token_datagram;
+            check(
+                "append_protected_long_header_packet_to_datagram rejects tokens larger than the "
+                "QUIC varint limit",
+                codec_failure(
+                    append_protected_long_header_packet_to_datagram(
+                        oversized_token_datagram, LongHeaderPacketType::initial, kQuicVersion1,
+                        ConnectionId{std::byte{0xaa}}, ConnectionId{std::byte{0xbb}},
+                        std::span<const std::byte>(fake_token_storage.data(), oversized_token_size),
+                        TruncatedPacketNumberEncoding{
+                            .packet_number_length = 1,
+                            .truncated_packet_number = 0,
+                        },
+                        0, minimal_long_header_frames, kInitialCipherSuite, PacketProtectionKeys{}),
+                    CodecErrorCode::invalid_varint));
+        }
 
         const auto one_rtt_plaintext = to_plaintext_one_rtt(ProtectedOneRttPacket{
             .spin_bit = true,

@@ -5622,6 +5622,39 @@ TEST(QuicCoreTest, PacketTraceFilterMatchesExactSourceConnectionId) {
     EXPECT_NE(stderr_output.find("quic-packet-trace app-empty scid=5301"), std::string::npos);
 }
 
+TEST(QuicCoreTest, PacketTraceFilterSuppressesNonMatchingSourceConnectionId) {
+    ScopedEnvVar trace("COQUIC_PACKET_TRACE", "1");
+    ScopedEnvVar filter("COQUIC_PACKET_TRACE_SCID", "deadbeef");
+
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.peer_address_validated_ = false;
+    connection.config_.max_outbound_datagram_size = 50;
+    optional_ref_or_terminate(connection.peer_transport_parameters_).max_udp_payload_size = 50;
+    connection.anti_amplification_received_bytes_ = 1200;
+    connection.handshake_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x97});
+    connection.handshake_space_.pending_probe_packet = coquic::quic::SentPacketRecord{
+        .packet_number = 17,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .has_ping = true,
+    };
+    for (std::uint64_t packet_number = 0; packet_number < 4096; packet_number += 2) {
+        connection.application_space_.received_packets.record_received(
+            packet_number, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
+    }
+    connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(0);
+
+    testing::internal::CaptureStderr();
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_TRUE(stderr_output.empty());
+}
+
 TEST(QuicCoreTest, PacketTraceLogsDiscardFailureReceiveAndSendPaths) {
     ScopedEnvVar trace("COQUIC_PACKET_TRACE", "1");
 

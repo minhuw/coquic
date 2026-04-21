@@ -76,6 +76,16 @@ void drive_quic_handshake(QuicCore &client, QuicCore &server) {
     ASSERT_TRUE(server.is_handshake_complete());
 }
 
+struct ScopedForcedFileOpenFailurePath {
+    explicit ScopedForcedFileOpenFailurePath(const std::filesystem::path &path) {
+        coquic::http09::test::server_set_forced_file_open_failure_path_for_tests(path);
+    }
+
+    ~ScopedForcedFileOpenFailurePath() {
+        coquic::http09::test::server_clear_forced_file_open_failure_path_for_tests();
+    }
+};
+
 QuicCoreResult single_receive_result(std::uint64_t stream_id, std::string_view text, bool fin) {
     QuicCoreResult result;
     result.effects.push_back(QuicCoreEffect{
@@ -633,7 +643,7 @@ TEST(QuicHttp09ServerTest, DirectoryRequestCausesStreamLocalResetWithoutEndpoint
 TEST(QuicHttp09ServerTest, UnreadableFileCausesStreamLocalResetWithoutEndpointFailure) {
     coquic::quic::test::ScopedTempDir document_root;
     document_root.write_file("secret.txt", "top-secret");
-    std::filesystem::permissions(document_root.path() / "secret.txt", std::filesystem::perms::none);
+    ScopedForcedFileOpenFailurePath forced_failure(document_root.path() / "secret.txt");
 
     QuicCore client(coquic::quic::test::make_client_core_config());
     QuicCore server(coquic::quic::test::make_server_core_config());
@@ -659,6 +669,39 @@ TEST(QuicHttp09ServerTest, UnreadableFileCausesStreamLocalResetWithoutEndpointFa
         std::holds_alternative<coquic::quic::QuicCoreResetStream>(endpoint_update.core_inputs[0]));
     EXPECT_TRUE(
         std::holds_alternative<coquic::quic::QuicCoreStopSending>(endpoint_update.core_inputs[1]));
+    EXPECT_FALSE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ServerTest, ForcedOpenFailurePathIgnoresUnrelatedRequests) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello");
+    document_root.write_file("other.txt", "other");
+    ScopedForcedFileOpenFailurePath forced_failure(document_root.path() / "other.txt");
+
+    QuicCore client(coquic::quic::test::make_client_core_config());
+    QuicCore server(coquic::quic::test::make_server_core_config());
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    drive_quic_handshake(client, server);
+
+    const auto request_result = client.advance(
+        QuicCoreSendStreamData{
+            .stream_id = 0,
+            .bytes = coquic::quic::test::bytes_from_string("GET /hello.txt\r\n"),
+            .fin = true,
+        },
+        coquic::quic::test::test_time(1));
+    const auto request_on_server = coquic::quic::test::relay_send_datagrams_to_peer(
+        request_result, server, coquic::quic::test::test_time(1));
+    const auto endpoint_update =
+        endpoint.on_core_result(request_on_server, coquic::quic::test::test_time(2));
+
+    ASSERT_EQ(endpoint_update.core_inputs.size(), 1u);
+    const auto *send =
+        std::get_if<coquic::quic::QuicCoreSendStreamData>(&endpoint_update.core_inputs.front());
+    ASSERT_NE(send, nullptr);
+    EXPECT_FALSE(send->bytes.empty());
     EXPECT_FALSE(endpoint.has_failed());
 }
 

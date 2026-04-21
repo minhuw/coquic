@@ -15,7 +15,9 @@ namespace coquic::http09 {
 
 namespace test {
 struct QuicHttp09ServerEndpointTestPeer;
-}
+void server_set_forced_file_open_failure_path_for_tests(const std::filesystem::path &path);
+void server_clear_forced_file_open_failure_path_for_tests();
+} // namespace test
 
 struct QuicHttp09ServerConfig {
     std::filesystem::path document_root;

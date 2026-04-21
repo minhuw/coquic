@@ -6763,6 +6763,70 @@ TEST(QuicCoreTest, ReceivedAckFrameProcessingMatchesOwnedAckFrameProcessing) {
               tracked_packet_count(received_connection.application_space_));
 }
 
+TEST(QuicCoreTest, ReceivedAckFrameProcessingCoversTraceFormattingAndInvalidCursorPaths) {
+    auto connection = make_connected_client_connection();
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 2,
+                                     .sent_time = coquic::quic::test::test_time(399),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                 });
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 5,
+                                     .sent_time = coquic::quic::test::test_time(400),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                 });
+
+    const coquic::quic::AckFrame ack{
+        .largest_acknowledged = 5,
+        .ack_delay = 4,
+        .first_ack_range = 0,
+        .additional_ranges =
+            {
+                coquic::quic::AckRange{
+                    .gap = 1,
+                    .range_length = 0,
+                },
+            },
+    };
+    const auto encoded = coquic::quic::serialize_frame(coquic::quic::Frame{ack});
+    ASSERT_TRUE(encoded.has_value());
+    auto storage = std::make_shared<std::vector<std::byte>>(encoded.value());
+    const auto decoded = coquic::quic::deserialize_received_frame(
+        coquic::quic::SharedBytes(storage, 0, storage->size()));
+    ASSERT_TRUE(decoded.has_value());
+    const auto *received_ack = std::get_if<coquic::quic::ReceivedAckFrame>(&decoded.value().frame);
+    ASSERT_NE(received_ack, nullptr);
+
+    const ScopedEnvVar trace("COQUIC_PACKET_TRACE", "1");
+    testing::internal::CaptureStderr();
+    const auto traced_processed = connection.process_inbound_ack(
+        connection.application_space_, *received_ack, coquic::quic::test::test_time(401),
+        /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25, /*suppress_pto_reset=*/false);
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+
+    ASSERT_TRUE(traced_processed.has_value());
+    EXPECT_NE(stderr_output.find("quic-packet-trace ack scid="), std::string::npos);
+    EXPECT_NE(stderr_output.find("ranges=[5-5,2-2]"), std::string::npos);
+
+    const auto invalid_processed =
+        connection.process_inbound_ack(connection.application_space_,
+                                       coquic::quic::ReceivedAckFrame{
+                                           .largest_acknowledged = 1,
+                                           .first_ack_range = 2,
+                                       },
+                                       coquic::quic::test::test_time(402), /*ack_delay_exponent=*/3,
+                                       /*max_ack_delay_ms=*/25, /*suppress_pto_reset=*/false);
+
+    ASSERT_TRUE(invalid_processed.has_value());
+    EXPECT_TRUE(invalid_processed.value());
+}
+
 TEST(QuicCoreTest, AckTriggeredLossUsesLossDetectionTimeForRecoveryBoundary) {
     auto connection = make_connected_client_connection();
     auto &rtt = connection.application_space_.recovery.rtt_state();

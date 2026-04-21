@@ -512,9 +512,11 @@ CodecResult<AckFrame> decode_ack_frame(BufferReader &reader, bool has_ecn_counts
     frame.ack_delay = header.value().ack_delay;
     frame.first_ack_range = header.value().first_ack_range;
 
-    if (header.value().additional_range_count >
-        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        return CodecResult<AckFrame>::failure(CodecErrorCode::invalid_varint, reader.offset());
+    if constexpr (sizeof(std::size_t) < sizeof(std::uint64_t)) {
+        if (header.value().additional_range_count >
+            static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            return CodecResult<AckFrame>::failure(CodecErrorCode::invalid_varint, reader.offset());
+        }
     }
     frame.additional_ranges.reserve(
         static_cast<std::size_t>(header.value().additional_range_count));
@@ -1263,14 +1265,11 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
         return std::nullopt;
     }
 
-    if (std::holds_alternative<HandshakeDoneFrame>(frame)) {
-        if (const auto error = append_byte(writer, std::byte{0x1e})) {
-            return error;
-        }
-        return std::nullopt;
+    static_cast<void>(std::get<HandshakeDoneFrame>(frame));
+    if (const auto error = append_byte(writer, std::byte{0x1e})) {
+        return error;
     }
-
-    return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
+    return std::nullopt;
 }
 
 template <typename T>
@@ -1314,11 +1313,8 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
     }
 
     std::vector<std::byte> bytes(size.value());
-    const auto written = write_frame_wire_bytes(bytes, frame);
-    if (!written.has_value()) {
-        return CodecResult<std::vector<std::byte>>::failure(written.error().code,
-                                                            written.error().offset);
-    }
+    const auto written = write_frame_wire_bytes(bytes, frame).value();
+    static_cast<void>(written);
     return CodecResult<std::vector<std::byte>>::success(std::move(bytes));
 }
 
@@ -1347,13 +1343,10 @@ CodecResult<std::size_t> append_serialized_frame(std::vector<std::byte> &bytes,
 
     bytes.resize(begin + size.value());
     const auto written =
-        write_frame_wire_bytes(std::span<std::byte>(bytes).subspan(begin, size.value()), frame);
-    if (!written.has_value()) {
-        bytes.resize(begin);
-        return CodecResult<std::size_t>::failure(written.error().code, written.error().offset);
-    }
+        write_frame_wire_bytes(std::span<std::byte>(bytes).subspan(begin, size.value()), frame)
+            .value();
 
-    return CodecResult<std::size_t>::success(written.value());
+    return CodecResult<std::size_t>::success(written);
 }
 
 CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> bytes) {
@@ -1903,6 +1896,21 @@ std::uint64_t frame_to_received_variant_coverage_mask_for_tests() {
         mark(1ull << 4, (transport_close.error_code == 8) & (transport_close.frame_type == 9) &
                             (transport_close.reason.bytes == SharedBytes{std::byte{0xcc}}));
     }
+    {
+        const auto received =
+            to_received_frame(Frame{AckFrame{.largest_acknowledged = 11, .first_ack_range = 3}});
+        const auto &ack = std::get<ReceivedAckFrame>(received);
+        mark(1ull << 5, (ack.largest_acknowledged == 11) & (ack.first_ack_range == 3) &
+                            (ack.additional_range_count == 0) & ack.additional_range_bytes.empty());
+    }
+    {
+        const auto received = to_received_frame(Frame{OutboundAckFrame{
+            .header = OutboundAckHeader{.largest_acknowledged = 13, .first_ack_range = 2},
+        }});
+        const auto &ack = std::get<ReceivedAckFrame>(received);
+        mark(1ull << 6, (ack.largest_acknowledged == 13) & (ack.first_ack_range == 2) &
+                            (ack.additional_range_count == 0) & ack.additional_range_bytes.empty());
+    }
 
     return mask;
 }
@@ -2353,6 +2361,37 @@ bool frame_writer_branch_coverage_for_tests() {
                                       },
                               }}),
                               CodecErrorCode::invalid_varint, 0);
+    {
+        CountingBufferWriter writer;
+        Frame frame = OutboundAckFrame{
+            .header =
+                OutboundAckHeader{
+                    .largest_acknowledged = 3,
+                    .first_ack_range = 1,
+                },
+        };
+        ok &= !serialize_frame_into_writer(writer, frame).has_value();
+        ok &= writer.offset() > 0;
+    }
+    {
+        CountingBufferWriter writer;
+        Frame frame = OutboundAckFrame{
+            .header =
+                OutboundAckHeader{
+                    .largest_acknowledged = 1ull << 62,
+                    .first_ack_range = 0,
+                },
+        };
+        const auto error = serialize_frame_into_writer(writer, frame);
+        const auto error_code = error
+                                    .value_or(CodecError{
+                                        .code = CodecErrorCode::truncated_input,
+                                        .offset = 0,
+                                    })
+                                    .code;
+        ok &= error.has_value();
+        ok &= error_code == CodecErrorCode::invalid_varint;
+    }
     ok &= round_trip(Frame{ResetStreamFrame{
         .stream_id = 3,
         .application_protocol_error_code = 4,

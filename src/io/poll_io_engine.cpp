@@ -911,23 +911,87 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
 
 bool socket_io_backend_poll_engine_primes_descriptor_cache_for_tests() {
     PollIoEngine engine;
-    if (!engine.descriptor_scratch_.empty() || engine.descriptor_scratch_.capacity() != 0 ||
-        engine.registered_socket_count_ != 0) {
-        return false;
-    }
+    const auto descriptor_cache_matches = [&](std::size_t expected_count,
+                                              std::size_t minimum_capacity, bool expect_empty) {
+        return (engine.registered_socket_count_ == expected_count) &
+               (engine.descriptor_scratch_.empty() == expect_empty) &
+               (engine.descriptor_scratch_.capacity() >= minimum_capacity);
+    };
 
-    if (!engine.register_socket(41) || engine.registered_socket_count_ != 1 ||
-        !engine.descriptor_scratch_.empty() || engine.descriptor_scratch_.capacity() < 1) {
-        return false;
-    }
+    bool initial_state_ok = engine.descriptor_scratch_.capacity() == 0;
+    initial_state_ok &= descriptor_cache_matches(0, 0, true);
+
+    bool first_registration_ok = engine.register_socket(41);
+    first_registration_ok &= descriptor_cache_matches(1, 1, true);
     const auto first_capacity = engine.descriptor_scratch_.capacity();
 
-    if (!engine.register_socket(42) || engine.registered_socket_count_ != 2 ||
-        !engine.descriptor_scratch_.empty() || engine.descriptor_scratch_.capacity() < 2) {
-        return false;
-    }
+    bool second_registration_ok = engine.register_socket(42);
+    second_registration_ok &= descriptor_cache_matches(2, 2, true);
+    second_registration_ok &= engine.descriptor_scratch_.capacity() >= first_capacity;
 
-    return engine.descriptor_scratch_.capacity() >= first_capacity;
+    bool ok = initial_state_ok;
+    ok &= first_registration_ok;
+    ok &= second_registration_ok;
+    return ok;
+}
+
+bool poll_io_engine_descriptor_cache_guard_branches_for_tests() {
+    PollIoEngine engine;
+    bool ok = true;
+    struct DescriptorCacheExpectation {
+        std::size_t expected_count;
+        std::size_t minimum_capacity;
+        bool expect_empty;
+    };
+    const auto descriptor_cache_matches = [&](DescriptorCacheExpectation expected) {
+        if (engine.registered_socket_count_ != expected.expected_count) {
+            return false;
+        }
+        if (engine.descriptor_scratch_.empty() != expected.expect_empty) {
+            return false;
+        }
+        return engine.descriptor_scratch_.capacity() >= expected.minimum_capacity;
+    };
+
+    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+        .expected_count = 1,
+        .minimum_capacity = 0,
+        .expect_empty = true,
+    });
+
+    engine.descriptor_scratch_.push_back(pollfd{});
+    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+        .expected_count = 0,
+        .minimum_capacity = 0,
+        .expect_empty = true,
+    });
+
+    engine.descriptor_scratch_.clear();
+    engine.descriptor_scratch_.shrink_to_fit();
+    ok &= engine.register_socket(41);
+
+    engine.registered_socket_count_ = 0;
+    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+        .expected_count = 1,
+        .minimum_capacity = 1,
+        .expect_empty = true,
+    });
+
+    engine.registered_socket_count_ = 1;
+    engine.descriptor_scratch_.push_back(pollfd{});
+    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+        .expected_count = 1,
+        .minimum_capacity = 1,
+        .expect_empty = true,
+    });
+
+    engine.descriptor_scratch_.clear();
+    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+        .expected_count = 1,
+        .minimum_capacity = engine.descriptor_scratch_.capacity() + 1,
+        .expect_empty = true,
+    });
+    return ok;
 }
 
 } // namespace test

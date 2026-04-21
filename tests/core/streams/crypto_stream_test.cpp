@@ -114,6 +114,124 @@ TEST(QuicCryptoStreamTest, SendBufferSegmentStateCountsTrackTransitions) {
         0u);
 }
 
+TEST(QuicCryptoStreamTest, TransitionSegmentStateNoOpKeepsStateCountsStable) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("ab"));
+
+    const auto before_unsent = buffer.segment_state_counts_[send_buffer_state_index(
+        ReliableSendBuffer::SegmentState::unsent)];
+    const auto before_sent =
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)];
+    const auto before_lost =
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)];
+
+    auto it = buffer.segments_.begin();
+    ASSERT_NE(it, buffer.segments_.end());
+    buffer.transition_segment_state(it->second, ReliableSendBuffer::SegmentState::unsent);
+
+    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::unsent);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              before_unsent);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        before_sent);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)],
+        before_lost);
+}
+
+TEST(QuicCryptoStreamTest, AppendCollisionSkipsDuplicateInsertionAccounting) {
+    ReliableSendBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("ab"));
+    auto [it, inserted] =
+        buffer.segments_.emplace(0, ReliableSendBuffer::Segment{
+                                        .state = ReliableSendBuffer::SegmentState::unsent,
+                                        .storage = storage,
+                                        .begin = 0,
+                                        .end = 1,
+                                    });
+    ASSERT_TRUE(inserted);
+    buffer.note_segment_inserted(it->second);
+    buffer.next_append_offset_ = 0;
+
+    const auto before_unsent = buffer.segment_state_counts_[send_buffer_state_index(
+        ReliableSendBuffer::SegmentState::unsent)];
+    buffer.append(SharedBytes(storage, 1, 2));
+
+    EXPECT_EQ(buffer.segments_.size(), 1u);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              before_unsent);
+    EXPECT_EQ(buffer.next_append_offset_, 1u);
+}
+
+TEST(QuicCryptoStreamTest, TakeRangesSplitCollisionSkipsDuplicateTailInsertion) {
+    ReliableSendBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcd"));
+    auto [head_it, head_inserted] =
+        buffer.segments_.emplace(0, ReliableSendBuffer::Segment{
+                                        .state = ReliableSendBuffer::SegmentState::unsent,
+                                        .storage = storage,
+                                        .begin = 0,
+                                        .end = 4,
+                                    });
+    ASSERT_TRUE(head_inserted);
+    buffer.note_segment_inserted(head_it->second);
+    auto [tail_it, tail_inserted] =
+        buffer.segments_.emplace(2, ReliableSendBuffer::Segment{
+                                        .state = ReliableSendBuffer::SegmentState::unsent,
+                                        .storage = storage,
+                                        .begin = 2,
+                                        .end = 4,
+                                    });
+    ASSERT_TRUE(tail_inserted);
+    buffer.note_segment_inserted(tail_it->second);
+
+    const auto ranges = buffer.take_ranges(2);
+
+    ASSERT_EQ(ranges.size(), 1u);
+    EXPECT_EQ(buffer.segments_.size(), 2u);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              1u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        1u);
+}
+
+TEST(QuicCryptoStreamTest, SplitAtAddsTailSegmentAndAccountsForItsState) {
+    ReliableSendBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcd"));
+    auto [head_it, head_inserted] =
+        buffer.segments_.emplace(0, ReliableSendBuffer::Segment{
+                                        .state = ReliableSendBuffer::SegmentState::sent,
+                                        .storage = storage,
+                                        .begin = 0,
+                                        .end = 4,
+                                    });
+    ASSERT_TRUE(head_inserted);
+    buffer.note_segment_inserted(head_it->second);
+
+    buffer.split_at(2);
+
+    EXPECT_EQ(buffer.segments_.size(), 2u);
+    EXPECT_EQ(buffer.segments_.begin()->second.end, 2u);
+    const auto tail_it = std::next(buffer.segments_.begin());
+    EXPECT_EQ(tail_it->first, 2u);
+    EXPECT_EQ(tail_it->second.begin, 2u);
+    EXPECT_EQ(tail_it->second.end, 4u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        2u);
+}
+
 bool crypto_stream_internal_coverage_for_tests();
 
 bool crypto_stream_internal_coverage_for_tests() {

@@ -543,12 +543,16 @@ bool socket_io_backend_duplicate_route_lookup_reuses_cached_route_entry_for_test
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
     internal::SocketIoRouteState state;
     const auto peer = make_loopback_peer(4444);
+    const auto cached_route_matches = [&](std::uint64_t route_handle, int socket_fd,
+                                          socklen_t expected_peer_len) {
+        const auto &route = state.routes_by_handle.at(route_handle);
+        return (route_handle != 0) & (state.routes_by_handle.size() == 1) &
+               (state.route_handles_by_peer_tuple.size() == 1) & (route.socket_fd == socket_fd) &
+               (route.peer_len == expected_peer_len);
+    };
 
     const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
-    if (handle == 0 || state.routes_by_handle.size() != 1 ||
-        state.route_handles_by_peer_tuple.size() != 1) {
-        return false;
-    }
+    const bool inserted_route = cached_route_matches(handle, 4, peer_len);
 
     auto &cached_route = state.routes_by_handle.at(handle);
     cached_route.socket_fd = -1;
@@ -556,10 +560,147 @@ bool socket_io_backend_duplicate_route_lookup_reuses_cached_route_entry_for_test
     std::memset(&cached_route.peer, 0x5a, sizeof(cached_route.peer));
 
     const auto duplicate = internal::remember_route_handle(state, peer, peer_len, 4);
-    return duplicate == handle && state.routes_by_handle.size() == 1 &&
-           state.route_handles_by_peer_tuple.size() == 1 &&
-           state.routes_by_handle.at(handle).socket_fd == -1 &&
-           state.routes_by_handle.at(handle).peer_len == 0;
+    bool ok = inserted_route;
+    ok &= duplicate == handle;
+    ok &= cached_route_matches(handle, -1, 0);
+    return ok;
+}
+
+bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
+    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+    const auto peer = make_loopback_peer(4444);
+    bool ok = true;
+    struct CachedRouteExpectation {
+        std::uint64_t route_handle;
+        int socket_fd;
+        socklen_t peer_len;
+    };
+    const auto cached_route_matches = [&](const internal::SocketIoRouteState &state,
+                                          CachedRouteExpectation expected) {
+        const auto route_it = state.routes_by_handle.find(expected.route_handle);
+        if (expected.route_handle == 0) {
+            return false;
+        }
+        if (state.routes_by_handle.size() != 1) {
+            return false;
+        }
+        if (state.route_handles_by_peer_tuple.size() != 1) {
+            return false;
+        }
+        if (route_it == state.routes_by_handle.end()) {
+            return false;
+        }
+        if (route_it->second.socket_fd != expected.socket_fd) {
+            return false;
+        }
+        return route_it->second.peer_len == expected.peer_len;
+    };
+
+    {
+        internal::SocketIoRouteState state;
+        ok &= !cached_route_matches(state, CachedRouteExpectation{
+                                               .route_handle = 1,
+                                               .socket_fd = 4,
+                                               .peer_len = peer_len,
+                                           });
+    }
+
+    {
+        internal::SocketIoRouteState state;
+        const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
+        ok &= cached_route_matches(state, CachedRouteExpectation{
+                                              .route_handle = handle,
+                                              .socket_fd = 4,
+                                              .peer_len = peer_len,
+                                          });
+        ok &= !cached_route_matches(state, CachedRouteExpectation{
+                                               .route_handle = handle + 1,
+                                               .socket_fd = 4,
+                                               .peer_len = peer_len,
+                                           });
+        ok &= !cached_route_matches(state, CachedRouteExpectation{
+                                               .route_handle = 0,
+                                               .socket_fd = 4,
+                                               .peer_len = peer_len,
+                                           });
+
+        state.route_handles_by_peer_tuple.clear();
+        ok &= !cached_route_matches(state, CachedRouteExpectation{
+                                               .route_handle = handle,
+                                               .socket_fd = 4,
+                                               .peer_len = peer_len,
+                                           });
+    }
+
+    {
+        internal::SocketIoRouteState state;
+        const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
+        ok &= cached_route_matches(state, CachedRouteExpectation{
+                                              .route_handle = handle,
+                                              .socket_fd = 4,
+                                              .peer_len = peer_len,
+                                          });
+
+        state.routes_by_handle.at(handle).socket_fd = -1;
+        ok &= !cached_route_matches(state, CachedRouteExpectation{
+                                               .route_handle = handle,
+                                               .socket_fd = 4,
+                                               .peer_len = peer_len,
+                                           });
+    }
+
+    {
+        internal::SocketIoRouteState state;
+        const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
+        ok &= cached_route_matches(state, CachedRouteExpectation{
+                                              .route_handle = handle,
+                                              .socket_fd = 4,
+                                              .peer_len = peer_len,
+                                          });
+
+        state.routes_by_handle.at(handle).peer_len = 0;
+        ok &= !cached_route_matches(state, CachedRouteExpectation{
+                                               .route_handle = handle,
+                                               .socket_fd = 4,
+                                               .peer_len = peer_len,
+                                           });
+    }
+
+    {
+        internal::SocketIoRouteState state;
+        const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
+        ok &= cached_route_matches(state, CachedRouteExpectation{
+                                              .route_handle = handle,
+                                              .socket_fd = 4,
+                                              .peer_len = peer_len,
+                                          });
+
+        state.routes_by_handle.erase(handle);
+        ok &= !cached_route_matches(state, CachedRouteExpectation{
+                                               .route_handle = handle,
+                                               .socket_fd = 4,
+                                               .peer_len = peer_len,
+                                           });
+    }
+
+    {
+        internal::SocketIoRouteState state;
+        const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
+        ok &= cached_route_matches(state, CachedRouteExpectation{
+                                              .route_handle = handle,
+                                              .socket_fd = 4,
+                                              .peer_len = peer_len,
+                                          });
+
+        state.routes_by_handle.emplace(99, internal::SocketIoRoute{});
+        ok &= !cached_route_matches(state, CachedRouteExpectation{
+                                               .route_handle = handle,
+                                               .socket_fd = 4,
+                                               .peer_len = peer_len,
+                                           });
+    }
+
+    return ok;
 }
 
 } // namespace test

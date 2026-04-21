@@ -13,6 +13,8 @@ enum class ProtectedCodecFaultPoint : std::uint8_t {
     remove_long_header_packet_length_mismatch,
     remove_short_header_packet_length_mismatch,
     deserialize_plaintext_packet,
+    long_header_frame_payload_varint_overflow,
+    long_header_payload_length_varint_overflow,
 };
 
 class ScopedProtectedCodecFaultInjector {

@@ -40,19 +40,16 @@ std::size_t packet_threshold_loss_scan_end(std::uint64_t largest_acked, std::siz
 }
 
 void note_received_ecn(AckEcnCounts &counts, QuicEcnCodepoint ecn) {
-    switch (ecn) {
-    case QuicEcnCodepoint::ect0:
+    if (ecn == QuicEcnCodepoint::ect0) {
         ++counts.ect0;
-        break;
-    case QuicEcnCodepoint::ect1:
+        return;
+    }
+    if (ecn == QuicEcnCodepoint::ect1) {
         ++counts.ect1;
-        break;
-    case QuicEcnCodepoint::ce:
+        return;
+    }
+    if (ecn == QuicEcnCodepoint::ce) {
         ++counts.ecn_ce;
-        break;
-    case QuicEcnCodepoint::unavailable:
-    case QuicEcnCodepoint::not_ect:
-        break;
     }
 }
 
@@ -542,7 +539,13 @@ PacketSpaceRecovery::outstanding_slot_for_packet_number(std::uint64_t packet_num
 const PacketSpaceRecovery::SentPacketLedgerSlot *
 PacketSpaceRecovery::slot_for_tracked_packet(const DeadlineTrackedPacket &packet) const {
     const auto *slot = slot_for_packet_number(packet.packet_number);
-    if (slot == nullptr || slot->acknowledged || slot->packet.sent_time != packet.sent_time) {
+    if (slot == nullptr) {
+        return nullptr;
+    }
+    if (slot->acknowledged) {
+        return nullptr;
+    }
+    if (slot->packet.sent_time != packet.sent_time) {
         return nullptr;
     }
 
@@ -552,15 +555,34 @@ PacketSpaceRecovery::slot_for_tracked_packet(const DeadlineTrackedPacket &packet
 bool PacketSpaceRecovery::is_valid_in_flight_ack_eliciting_tracked_packet(
     const DeadlineTrackedPacket &packet) const {
     const auto *slot = slot_for_tracked_packet(packet);
-    return slot != nullptr && slot->state == LedgerSlotState::sent && slot->packet.ack_eliciting &&
-           slot->packet.in_flight && !slot->packet.declared_lost;
+    if (slot == nullptr) {
+        return false;
+    }
+    if (slot->state != LedgerSlotState::sent) {
+        return false;
+    }
+    if (!slot->packet.ack_eliciting) {
+        return false;
+    }
+    if (!slot->packet.in_flight) {
+        return false;
+    }
+    return !slot->packet.declared_lost;
 }
 
 bool PacketSpaceRecovery::is_valid_eligible_loss_tracked_packet(
     const DeadlineTrackedPacket &packet) const {
     const auto *slot = slot_for_tracked_packet(packet);
-    return slot != nullptr && slot->state == LedgerSlotState::sent && slot->packet.in_flight &&
-           !slot->packet.declared_lost;
+    if (slot == nullptr) {
+        return false;
+    }
+    if (slot->state != LedgerSlotState::sent) {
+        return false;
+    }
+    if (!slot->packet.in_flight) {
+        return false;
+    }
+    return !slot->packet.declared_lost;
 }
 
 void PacketSpaceRecovery::prune_stale_in_flight_ack_eliciting_packets() const {
@@ -911,19 +933,9 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
         }
 
         eligible_loss_packets_.erase(eligible_loss_packets_.begin());
-        const auto slot_index = static_cast<std::size_t>(tracked.packet_number);
-        if (slot_index >= slots_.size()) {
-            continue;
-        }
-
-        const auto &slot = slots_[slot_index];
-        if (slot.state != LedgerSlotState::sent || slot.acknowledged || !slot.packet.in_flight ||
-            slot.packet.packet_number != tracked.packet_number ||
-            slot.packet.sent_time != tracked.sent_time) {
-            continue;
-        }
-
-        time_threshold_loss_slots.push_back(slot_index);
+        // `prune_stale_eligible_loss_packets()` guarantees the remaining front entry still
+        // resolves to a live sent in-flight slot with matching packet metadata.
+        time_threshold_loss_slots.push_back(static_cast<std::size_t>(tracked.packet_number));
     }
 
     if (time_threshold_loss_slots.size() > 1) {
@@ -931,10 +943,6 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
     }
     for (const auto slot_index : time_threshold_loss_slots) {
         auto &slot = slots_[slot_index];
-        if (slot.state != LedgerSlotState::sent || slot.acknowledged || !slot.packet.in_flight) {
-            continue;
-        }
-
         // Keep the live packet metadata unchanged until connection-level loss handling consumes it.
         slot.state = LedgerSlotState::declared_lost;
         state.result.lost_packets.push_back(packet_handle(slot, slot_index));

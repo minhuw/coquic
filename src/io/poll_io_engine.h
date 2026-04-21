@@ -11,6 +11,7 @@ namespace coquic::io {
 
 namespace test {
 bool socket_io_backend_poll_engine_primes_descriptor_cache_for_tests();
+bool poll_io_engine_descriptor_cache_guard_branches_for_tests();
 } // namespace test
 
 class PollIoEngine final : public QuicIoEngine {
@@ -31,6 +32,7 @@ class PollIoEngine final : public QuicIoEngine {
     std::size_t registered_socket_count_ = 0;
 
     friend bool test::socket_io_backend_poll_engine_primes_descriptor_cache_for_tests();
+    friend bool test::poll_io_engine_descriptor_cache_guard_branches_for_tests();
 };
 
 } // namespace coquic::io

@@ -4,7 +4,9 @@
 
 #include <gtest/gtest.h>
 
+#define private public
 #include "src/quic/congestion.h"
+#undef private
 #include "tests/support/quic_test_utils.h"
 
 namespace {
@@ -27,6 +29,25 @@ SentPacketRecord make_sent_packet(std::uint64_t packet_number, bool ack_elicitin
 TEST(QuicCongestionTest, UsesRfcInitialWindow) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     EXPECT_EQ(controller.congestion_window(), 12000u);
+}
+
+TEST(QuicCongestionTest, InRecoveryReflectsRecoveryStartBoundary) {
+    NewRenoCongestionController controller(/*max_datagram_size=*/1200);
+    const auto boundary = coquic::quic::test::test_time(5);
+    const auto older_packet =
+        make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(4));
+    const auto newer_packet =
+        make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(6));
+
+    EXPECT_FALSE(controller.in_recovery(older_packet));
+    EXPECT_FALSE(controller.in_recovery(newer_packet));
+
+    controller.on_loss_event(boundary, older_packet.sent_time);
+
+    EXPECT_TRUE(controller.in_recovery(older_packet));
+    EXPECT_FALSE(controller.in_recovery(newer_packet));
 }
 
 TEST(QuicCongestionTest, SlowStartGrowthMatchesAcknowledgedBytes) {

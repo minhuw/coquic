@@ -2793,6 +2793,28 @@ TEST(QuicCoreTest, ClosingPeerInitiatedUnidirectionalStreamRefreshesStreamLimit)
               coquic::quic::StreamLimitType::unidirectional);
 }
 
+TEST(QuicCoreTest, ClosingPeerInitiatedBidirectionalStreamRefreshesStreamLimit) {
+    auto connection = make_connected_server_connection();
+    auto &stream =
+        connection.streams_
+            .emplace(0, coquic::quic::make_implicit_stream_state(0, connection.config_.role))
+            .first->second;
+
+    stream.peer_fin_delivered = true;
+    stream.send_fin_state = coquic::quic::StreamSendFinState::acknowledged;
+
+    connection.maybe_refresh_peer_stream_limit(stream);
+
+    EXPECT_TRUE(stream.peer_stream_limit_released);
+    EXPECT_EQ(connection.local_stream_limit_state_.max_streams_bidi_state,
+              coquic::quic::StreamControlFrameState::pending);
+    ASSERT_TRUE(connection.local_stream_limit_state_.pending_max_streams_bidi_frame.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(
+                  connection.local_stream_limit_state_.pending_max_streams_bidi_frame)
+                  .stream_type,
+              coquic::quic::StreamLimitType::bidirectional);
+}
+
 TEST(QuicCoreTest, NonTerminalPeerStreamDoesNotRefreshStreamLimit) {
     auto connection = make_connected_server_connection();
     auto &stream =

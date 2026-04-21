@@ -489,4 +489,13 @@ TEST(SocketIoBackendTest, PollIoEngineInternalCoverageHookExercisesRemainingBran
                     poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_tests());
 }
 
+TEST(SocketIoBackendTest, PollIoEngineDescriptorCacheGuardBranchesAreCovered) {
+    EXPECT_TRUE(coquic::io::test::poll_io_engine_descriptor_cache_guard_branches_for_tests());
+}
+
+TEST(SocketIoBackendTest, DuplicateRouteLookupGuardBranchesAreCovered) {
+    EXPECT_TRUE(
+        coquic::io::test::socket_io_backend_duplicate_route_lookup_guard_branches_for_tests());
+}
+
 } // namespace

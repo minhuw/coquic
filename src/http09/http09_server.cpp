@@ -33,6 +33,20 @@ constexpr std::size_t kResponseChunkSize = static_cast<std::size_t>(32) * 1024U;
 constexpr std::size_t kMaxBufferedRequestBytes = static_cast<std::size_t>(8) * 1024U;
 constexpr std::uint64_t kHttp09FileReadErrorCode = 1;
 
+std::optional<std::filesystem::path> &forced_file_open_failure_path_for_tests() {
+    static auto *path = new std::optional<std::filesystem::path>();
+    return *path;
+}
+
+std::ifstream open_response_file(const std::filesystem::path &path) {
+    const auto &forced_open_failure_path = forced_file_open_failure_path_for_tests();
+    if (forced_open_failure_path.has_value() &&
+        forced_open_failure_path.value() == path.lexically_normal()) {
+        return std::ifstream{};
+    }
+    return std::ifstream(path, std::ios::binary);
+}
+
 std::optional<std::size_t> find_request_line_terminator(std::span<const std::byte> bytes) {
     for (std::size_t index = 0; index < bytes.size(); ++index) {
         if (bytes[index] == std::byte{'\n'}) {
@@ -244,7 +258,7 @@ bool QuicHttp09ServerEndpoint::process_receive_stream_data(
     }
 
     PendingResponse response{
-        .file = std::ifstream(resolved_path_value, std::ios::binary),
+        .file = open_response_file(resolved_path_value),
     };
     if (!response.file.is_open()) {
         queue_stream_local_file_error(received.stream_id, pending_core_inputs_);
@@ -266,5 +280,17 @@ void QuicHttp09ServerEndpoint::clear_state() {
     closed_streams_.clear();
     pending_core_inputs_.clear();
 }
+
+namespace test {
+
+void server_set_forced_file_open_failure_path_for_tests(const std::filesystem::path &path) {
+    forced_file_open_failure_path_for_tests() = path.lexically_normal();
+}
+
+void server_clear_forced_file_open_failure_path_for_tests() {
+    forced_file_open_failure_path_for_tests().reset();
+}
+
+} // namespace test
 
 } // namespace coquic::http09

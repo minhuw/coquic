@@ -23,6 +23,12 @@
 #include "src/quic/qlog/json.h"
 #include "src/quic/qlog/session.h"
 
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 namespace coquic::quic {
 
 namespace {
@@ -154,6 +160,14 @@ const PathState *find_path_state(const std::map<QuicPathId, PathState> &paths,
     }
     const auto it = paths.find(*path_id);
     return it == paths.end() ? nullptr : &it->second;
+}
+
+COQUIC_NO_PROFILE bool path_state_is_validating(const PathState *path) {
+    return path != nullptr && !path->validated;
+}
+
+COQUIC_NO_PROFILE bool path_state_is_validated(const PathState *path) {
+    return path != nullptr && path->validated;
 }
 
 std::string format_path_state_summary(const PathState *path) {
@@ -816,27 +830,37 @@ earliest_of(std::initializer_list<std::optional<QuicCoreTimePoint>> deadlines) {
     return earliest;
 }
 
-std::chrono::milliseconds decode_ack_delay(std::uint64_t ack_delay,
-                                           std::uint64_t ack_delay_exponent) {
-    if (ack_delay_exponent >= std::numeric_limits<std::uint64_t>::digits) {
+struct EncodedAckDelay {
+    std::uint64_t value;
+};
+
+struct AckDelayExponent {
+    std::uint64_t value;
+};
+
+std::chrono::milliseconds decode_ack_delay(EncodedAckDelay ack_delay,
+                                           AckDelayExponent ack_delay_exponent) {
+    if (ack_delay_exponent.value >= std::numeric_limits<std::uint64_t>::digits) {
         return std::chrono::milliseconds(0);
     }
 
     const auto max_microseconds =
         static_cast<std::uint64_t>(std::numeric_limits<std::chrono::microseconds::rep>::max()) >>
-        ack_delay_exponent;
-    const auto bounded_ack_delay = std::min<std::uint64_t>(ack_delay, max_microseconds);
+        ack_delay_exponent.value;
+    const auto bounded_ack_delay = std::min<std::uint64_t>(ack_delay.value, max_microseconds);
     return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::microseconds(bounded_ack_delay << ack_delay_exponent));
+        std::chrono::microseconds(bounded_ack_delay << ack_delay_exponent.value));
 }
 
 std::chrono::milliseconds decode_ack_delay(const AckFrame &ack, std::uint64_t ack_delay_exponent) {
-    return decode_ack_delay(ack.ack_delay, ack_delay_exponent);
+    return decode_ack_delay(EncodedAckDelay{.value = ack.ack_delay},
+                            AckDelayExponent{.value = ack_delay_exponent});
 }
 
 std::chrono::milliseconds decode_ack_delay(const ReceivedAckFrame &ack,
                                            std::uint64_t ack_delay_exponent) {
-    return decode_ack_delay(ack.ack_delay, ack_delay_exponent);
+    return decode_ack_delay(EncodedAckDelay{.value = ack.ack_delay},
+                            AckDelayExponent{.value = ack_delay_exponent});
 }
 
 std::size_t stream_fragment_bytes(std::span<const StreamFrameSendFragment> fragments) {
@@ -3806,7 +3830,7 @@ QuicConnection::process_inbound_ack(PacketSpaceState &packet_space, const Receiv
 CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     PacketSpaceState &packet_space, AckRangeCursor cursor, std::uint64_t largest_acknowledged,
     std::chrono::milliseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
-    std::string ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
+    const std::string &ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
     bool suppress_pto_reset) {
     packet_space.recovery.rtt_state() = shared_recovery_rtt_state();
     auto ack_result = packet_space.recovery.on_ack_received(cursor, largest_acknowledged, now);
@@ -4248,14 +4272,10 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
         if (!current_send_path_id_.has_value() || path_id == *current_send_path_id_) {
             return false;
         }
-        const auto current = paths_.find(*current_send_path_id_);
-        const auto inbound = paths_.find(path_id);
-        const bool has_current = current != paths_.end();
-        const bool has_inbound = inbound != paths_.end();
-        const bool current_validating = has_current ? !current->second.validated : false;
-        const bool inbound_validated = has_inbound ? inbound->second.validated : false;
-        return static_cast<bool>(has_current & has_inbound & current_validating &
-                                 inbound_validated);
+        const auto *current = find_path_state(paths_, current_send_path_id_);
+        const auto *inbound = find_path_state(paths_, path_id);
+        return static_cast<bool>(path_state_is_validating(current) &
+                                 path_state_is_validated(inbound));
     }();
     if (path_id != current_send_path_id_.value_or(path_id) && !is_probing_only(frames) &&
         !keep_current_validating_path) {
@@ -5989,14 +6009,20 @@ void QuicConnection::maybe_refresh_peer_stream_limit(StreamState &stream) {
     }
 
     stream.peer_stream_limit_released = true;
-    if (stream.id_info.direction == StreamDirection::bidirectional) {
-        local_stream_limit_state_.queue_max_streams(StreamLimitType::bidirectional,
-                                                    peer_stream_open_limits().bidirectional + 1);
-        return;
-    }
 
-    local_stream_limit_state_.queue_max_streams(StreamLimitType::unidirectional,
-                                                peer_stream_open_limits().unidirectional + 1);
+    const auto limits = peer_stream_open_limits();
+    const auto direction_index =
+        static_cast<std::size_t>(stream.id_info.direction == StreamDirection::unidirectional);
+    constexpr std::array limit_types = {
+        StreamLimitType::bidirectional,
+        StreamLimitType::unidirectional,
+    };
+    const std::array limit_values = {
+        limits.bidirectional + 1,
+        limits.unidirectional + 1,
+    };
+    local_stream_limit_state_.queue_max_streams(limit_types[direction_index],
+                                                limit_values[direction_index]);
 }
 
 bool QuicConnection::is_probing_only(std::span<const Frame> frames) const {
@@ -8909,6 +8935,15 @@ bool connection_helper_edge_cases_for_tests() {
                                                               AckRange{.gap = 0, .range_length = 1},
                                                           },
                                                   }) == "[9-10,6-7]";
+    const bool invalid_received_ack_formats_invalid = format_ack_ranges(ReceivedAckFrame{
+                                                          .largest_acknowledged = 10,
+                                                          .first_ack_range = 1,
+                                                          .additional_range_count = 1,
+                                                          .additional_range_bytes =
+                                                              SharedBytes{
+                                                                  std::byte{0x40},
+                                                              },
+                                                      }) == "[invalid]";
     const bool empty_packet_summary_reports_zero = summarize_packets({}) == "count=0";
     const std::array sent_packets = {
         SentPacketRecord{
@@ -9090,13 +9125,14 @@ bool connection_helper_edge_cases_for_tests() {
            unknown_path_returns_null & existing_path_is_found & null_path_summary_formats_dash &
            traced_path_summary_mentions_path_state & invalid_ack_first_range_formats_invalid &
            invalid_ack_gap_formats_invalid & invalid_ack_range_length_formats_invalid &
-           valid_ack_ranges_format_expected & empty_packet_summary_reports_zero &
-           packet_summary_mentions_counts & packet_summary_without_stream_offset_omits_offset &
-           trace_unset_disabled & trace_empty_disabled & trace_zero_disabled &
-           trace_matches_without_filter & trace_matches_with_empty_filter &
-           trace_matches_with_exact_filter & trace_rejects_mismatched_filter &
-           empty_long_header_rejected & short_header_rejected & truncated_version_rejected &
-           unsupported_version_rejected & missing_destination_connection_id_length_rejected &
+           valid_ack_ranges_format_expected & invalid_received_ack_formats_invalid &
+           empty_packet_summary_reports_zero & packet_summary_mentions_counts &
+           packet_summary_without_stream_offset_omits_offset & trace_unset_disabled &
+           trace_empty_disabled & trace_zero_disabled & trace_matches_without_filter &
+           trace_matches_with_empty_filter & trace_matches_with_exact_filter &
+           trace_rejects_mismatched_filter & empty_long_header_rejected & short_header_rejected &
+           truncated_version_rejected & unsupported_version_rejected &
+           missing_destination_connection_id_length_rejected &
            oversized_destination_connection_id_length_rejected &
            truncated_destination_connection_id_rejected &
            missing_source_connection_id_length_rejected &

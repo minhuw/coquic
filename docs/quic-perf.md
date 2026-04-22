@@ -25,26 +25,22 @@ nix develop -c zig build
   --json-out rr.json
 ```
 
-## Build And Load The Perf Image
-
-```bash
-nix build .#perf-image-quictls-musl
-docker load -i "$(nix path-info .#perf-image-quictls-musl)"
-```
-
-## Run The Host-Network Matrix
+## Run The Direct Host Matrix
 
 ```bash
 bash bench/run-host-matrix.sh --preset smoke
 ```
 
-The harness uses `--network host` and `--cpuset-cpus` to keep Docker overhead low, adds `seccomp=unconfined` plus `IPC_LOCK`/`memlock` overrides so the containerized `io_uring` backend can initialize, mounts the repo fixture certificates into the server container, and writes per-run text and JSON files plus `.bench-results/manifest.json`.
+The harness builds one optimized `coquic-perf` binary through Nix, launches the
+server and client directly on the host with `taskset -c`, writes per-run text
+and JSON files plus `.bench-results/manifest.json`, and records
+`.bench-results/environment.txt` with runner details that help interpret noisy
+GitHub-hosted measurements.
 
 Useful environment overrides:
 
 - `PERF_RESULTS_ROOT` to choose a different output directory
+- `PERF_BINARY_ATTR` to choose a different Nix build attr for `coquic-perf`
+- `PERF_BUILD_TARGET` to override the summary label written into `manifest.json`
 - `PERF_SERVER_CPUS` and `PERF_CLIENT_CPUS` to pin different cores
 - `PERF_PORT` to move the benchmark listener port
-- `PERF_IMAGE_ATTR` and `PERF_IMAGE_TAG` to swap in a different image build
-
-If the runtime probe detects unsupported UDP `recvmsg` via `io_uring` on the local kernel, the backend falls back to the poll engine so benchmark runs still complete.

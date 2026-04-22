@@ -11,35 +11,55 @@ ignore_file="${repo_root}/.gitignore"
   exit 1
 }
 
-grep -F -- '--network host' "${script}" >/dev/null || {
-  echo 'missing host networking in harness script' >&2
+grep -F -- 'PERF_BINARY_ATTR' "${script}" >/dev/null || {
+  echo 'missing binary attr override in harness script' >&2
   exit 1
 }
 
-grep -F -- '--cpuset-cpus' "${script}" >/dev/null || {
-  echo 'missing CPU pinning in harness script' >&2
+grep -F -- 'coquic-perf-quictls-musl' "${script}" >/dev/null || {
+  echo 'missing direct perf binary default in harness script' >&2
   exit 1
 }
 
-grep -F -- '--security-opt seccomp=unconfined' "${script}" >/dev/null || {
-  echo 'missing seccomp override in harness script' >&2
+grep -F -- 'taskset -c "${server_cpus}"' "${script}" >/dev/null || {
+  echo 'missing server CPU pinning in harness script' >&2
   exit 1
 }
 
-grep -F -- '--cap-add IPC_LOCK' "${script}" >/dev/null || {
-  echo 'missing IPC_LOCK capability in harness script' >&2
+grep -F -- 'taskset -c "${client_cpus}"' "${script}" >/dev/null || {
+  echo 'missing client CPU pinning in harness script' >&2
   exit 1
 }
 
-grep -F -- '--ulimit memlock=-1:-1' "${script}" >/dev/null || {
-  echo 'missing memlock ulimit in harness script' >&2
+grep -F -- 'tests/fixtures/quic-server-cert.pem' "${script}" >/dev/null || {
+  echo 'missing server certificate path in harness script' >&2
   exit 1
 }
 
-grep -F -- '.bench-results/manifest.json' "${script}" >/dev/null || {
-  echo 'missing aggregate manifest write in harness script' >&2
+grep -F -- 'tests/fixtures/quic-server-key.pem' "${script}" >/dev/null || {
+  echo 'missing server key path in harness script' >&2
   exit 1
 }
+
+grep -F -- 'environment.txt' "${script}" >/dev/null || {
+  echo 'missing environment snapshot in harness script' >&2
+  exit 1
+}
+
+if grep -F -- 'docker ' "${script}" >/dev/null; then
+  echo 'unexpected docker usage in direct harness script' >&2
+  exit 1
+fi
+
+if grep -F -- '--network host' "${script}" >/dev/null; then
+  echo 'unexpected host-network docker flag in direct harness script' >&2
+  exit 1
+fi
+
+if grep -F -- '--cap-add IPC_LOCK' "${script}" >/dev/null; then
+  echo 'unexpected container capability override in direct harness script' >&2
+  exit 1
+fi
 
 grep -F -- 'usage: bash bench/run-host-matrix.sh [--preset smoke|ci]' "${script}" >/dev/null || {
   echo 'missing ci preset in harness usage' >&2
@@ -82,18 +102,8 @@ if grep -F -- '"io_uring ' "${script}" >/dev/null; then
   exit 1
 fi
 
-grep -F -- 'perf-image-stream-quictls-musl' "${script}" >/dev/null || {
-  echo 'missing streamed perf image default in harness script' >&2
-  exit 1
-}
-
-grep -F -- 'docker load < <("${image_path}")' "${script}" >/dev/null || {
-  echo 'missing streamed docker load path in harness script' >&2
-  exit 1
-}
-
-grep -F -- 'perf-image-stream-quictls-musl' "${flake}" >/dev/null || {
-  echo 'missing streamed perf image package export in flake.nix' >&2
+grep -F -- 'coquic-perf-quictls-musl' "${flake}" >/dev/null || {
+  echo 'missing direct perf package export in flake.nix' >&2
   exit 1
 }
 

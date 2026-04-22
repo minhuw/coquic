@@ -5,13 +5,15 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 default_manifest_path="${repo_root}/.bench-results/manifest.json"
 results_root="${PERF_RESULTS_ROOT:-$(dirname "${default_manifest_path}")}"
 manifest_path="${results_root}/manifest.json"
-image_attr="${PERF_IMAGE_ATTR:-perf-image-stream-quictls-musl}"
-image_tag="${PERF_IMAGE_TAG:-coquic-perf:quictls-musl}"
-server_name="${PERF_SERVER_NAME:-coquic-perf-server}"
+environment_path="${results_root}/environment.txt"
+binary_attr="${PERF_BINARY_ATTR:-coquic-perf-quictls-musl}"
+build_target="${PERF_BUILD_TARGET:-${binary_attr}}"
 server_cpus="${PERF_SERVER_CPUS:-2}"
 client_cpus="${PERF_CLIENT_CPUS:-3}"
 port="${PERF_PORT:-9443}"
 preset="smoke"
+perf_bin=''
+server_pid=''
 
 usage() {
   cat <<'USAGE'
@@ -19,10 +21,10 @@ usage: bash bench/run-host-matrix.sh [--preset smoke|ci]
 
 environment overrides:
   PERF_RESULTS_ROOT  result directory (default: .bench-results)
-  PERF_IMAGE_ATTR    nix package attr to build/load (default: perf-image-stream-quictls-musl)
-  PERF_IMAGE_TAG     docker tag to run (default: coquic-perf:quictls-musl)
-  PERF_SERVER_CPUS   CPU set for server container (default: 2)
-  PERF_CLIENT_CPUS   CPU set for client container (default: 3)
+  PERF_BINARY_ATTR   nix package attr to build (default: coquic-perf-quictls-musl)
+  PERF_BUILD_TARGET  manifest label for summary output (default: PERF_BINARY_ATTR)
+  PERF_SERVER_CPUS   CPU set for server process (default: 2)
+  PERF_CLIENT_CPUS   CPU set for client process (default: 3)
   PERF_PORT          UDP port for server/client (default: 9443)
 USAGE
 }
@@ -71,40 +73,71 @@ case "${preset}" in
 esac
 
 mkdir -p "${results_root}"
-rm -f "${results_root}"/*.json "${results_root}"/*.txt
+rm -f "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log "${environment_path}"
+
+stop_server() {
+  if [ -n "${server_pid}" ]; then
+    kill "${server_pid}" >/dev/null 2>&1 || true
+    wait "${server_pid}" >/dev/null 2>&1 || true
+    server_pid=''
+  fi
+}
 
 cleanup() {
-  docker rm -f "${server_name}" >/dev/null 2>&1 || true
+  stop_server
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
-image_path="$(nix build --print-out-paths ".#${image_attr}")"
-if [ -x "${image_path}" ]; then
-  docker load < <("${image_path}") >/dev/null
+command -v taskset >/dev/null || {
+  echo 'taskset is required for bench/run-host-matrix.sh' >&2
+  exit 1
+}
+
+if binary_path="$(nix build --print-out-paths ".#${binary_attr}" 2>/dev/null)"; then
+  perf_bin="${binary_path}/bin/coquic-perf"
 else
-  docker load -i "${image_path}" >/dev/null
+  system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+  perf_bin="$(nix eval --raw ".#apps.${system}.${binary_attr}.program")"
+  if [ ! -x "${perf_bin}" ]; then
+    package_attr="${binary_attr/-perf/}"
+    binary_path="$(nix build --print-out-paths ".#${package_attr}")"
+    perf_bin="${binary_path}/bin/coquic-perf"
+  fi
 fi
+[ -x "${perf_bin}" ] || {
+  echo "missing perf binary: ${perf_bin}" >&2
+  exit 1
+}
+
+{
+  echo "build_target=${build_target}"
+  echo "binary_attr=${binary_attr}"
+  echo "server_cpus=${server_cpus}"
+  echo "client_cpus=${client_cpus}"
+  echo "port=${port}"
+  echo
+  uname -a
+  echo
+  lscpu
+  echo
+  nproc
+} > "${environment_path}"
 
 for run in "${runs[@]}"; do
   read -r backend mode direction request_bytes response_bytes limit streams connections inflight warmup duration <<<"${run}"
   run_name="${preset}-${backend}-${mode}-s${streams}-c${connections}-q${inflight}"
   json_path="${results_root}/${run_name}.json"
   txt_path="${results_root}/${run_name}.txt"
+  server_log_path="${results_root}/${run_name}.server.log"
 
-  docker rm -f "${server_name}" >/dev/null 2>&1 || true
-  docker run -d --rm --name "${server_name}" \
-    --network host \
-    --cpuset-cpus "${server_cpus}" \
-    --security-opt seccomp=unconfined \
-    --cap-add IPC_LOCK \
-    --ulimit memlock=-1:-1 \
-    -v "${repo_root}/tests/fixtures:/certs:ro" \
-    "${image_tag}" server \
-      --host 127.0.0.1 \
-      --port "${port}" \
-      --certificate-chain /certs/quic-server-cert.pem \
-      --private-key /certs/quic-server-key.pem \
-      --io-backend "${backend}" >/dev/null
+  stop_server
+  taskset -c "${server_cpus}" "${perf_bin}" server \
+    --host 127.0.0.1 \
+    --port "${port}" \
+    --certificate-chain "${repo_root}/tests/fixtures/quic-server-cert.pem" \
+    --private-key "${repo_root}/tests/fixtures/quic-server-key.pem" \
+    --io-backend "${backend}" >"${server_log_path}" 2>&1 &
+  server_pid="$!"
 
   sleep 1
 
@@ -121,7 +154,7 @@ for run in "${runs[@]}"; do
     --requests-in-flight "${inflight}"
     --warmup "${warmup}"
     --duration "${duration}"
-    --json-out "/results/${run_name}.json"
+    --json-out "${json_path}"
   )
 
   if [ "${mode}" = 'bulk' ]; then
@@ -133,23 +166,16 @@ for run in "${runs[@]}"; do
     client_args+=(--requests "${limit}")
   fi
 
-  docker run --rm \
-    --network host \
-    --cpuset-cpus "${client_cpus}" \
-    --security-opt seccomp=unconfined \
-    --cap-add IPC_LOCK \
-    --ulimit memlock=-1:-1 \
-    -v "${results_root}:/results" \
-    "${image_tag}" "${client_args[@]}" | tee "${txt_path}"
+  taskset -c "${client_cpus}" "${perf_bin}" "${client_args[@]}" | tee "${txt_path}"
 
-  docker rm -f "${server_name}" >/dev/null 2>&1 || true
+  stop_server
   [ -f "${json_path}" ] || {
     echo "missing JSON result: ${json_path}" >&2
     exit 1
   }
 done
 
-python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${image_attr}" "${image_tag}"
+python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${build_target}"
 import json
 import pathlib
 import sys
@@ -157,8 +183,7 @@ import sys
 root = pathlib.Path(sys.argv[1])
 manifest_path = pathlib.Path(sys.argv[2])
 preset = sys.argv[3]
-image_attr = sys.argv[4]
-image_tag = sys.argv[5]
+build_target = sys.argv[4]
 
 runs = []
 for path in sorted(root.glob('*.json')):
@@ -173,8 +198,7 @@ for path in sorted(root.glob('*.json')):
 
 manifest = {
     'preset': preset,
-    'image_attr': image_attr,
-    'image_tag': image_tag,
+    'build_target': build_target,
     'results_root': str(root),
     'runs': runs,
 }

@@ -9,9 +9,10 @@ invalid_json_manifest="$(mktemp)"
 invalid_runs_manifest="$(mktemp)"
 invalid_metric_manifest="$(mktemp)"
 failure_manifest="$(mktemp)"
+legacy_manifest="$(mktemp)"
 output="$(mktemp)"
 stderr_output="$(mktemp)"
-trap 'rm -f "${output}" "${stderr_output}" "${empty_manifest}" "${invalid_json_manifest}" "${invalid_runs_manifest}" "${invalid_metric_manifest}" "${failure_manifest}"' EXIT
+trap 'rm -f "${output}" "${stderr_output}" "${empty_manifest}" "${invalid_json_manifest}" "${invalid_runs_manifest}" "${invalid_metric_manifest}" "${failure_manifest}" "${legacy_manifest}"' EXIT
 
 python3 "${script}"   --manifest "${manifest}"   --event-name pull_request   --commit 0123456789abcdef0123456789abcdef01234567   > "${output}"
 
@@ -109,8 +110,20 @@ grep -F -- '- `socket/crr`: client wait failed' "${output}" >/dev/null || {
 }
 
 printf '%s
+' '{' '  "preset": "smoke",' '  "image_tag": "coquic-perf:quictls-musl",' '  "runs": []' '}' > "${legacy_manifest}"
+python3 "${script}" --manifest "${legacy_manifest}" --event-name pull_request --commit 0123456789abcdef0123456789abcdef01234567 > "${output}"
+grep -F 'Target: `coquic-perf:quictls-musl`' "${output}" >/dev/null || {
+  echo 'missing legacy image-tag fallback target line' >&2
+  exit 1
+}
+
+printf '%s
 ' '{' '  "preset": "smoke",' '  "build_target": "coquic-perf-quictls-musl",' '  "runs": []' '}' > "${empty_manifest}"
 python3 "${script}" --manifest "${empty_manifest}" --event-name pull_request --commit 0123456789abcdef0123456789abcdef01234567 > "${output}"
+grep -F 'Target: `coquic-perf-quictls-musl`' "${output}" >/dev/null || {
+  echo 'missing empty-manifest target line' >&2
+  exit 1
+}
 grep -F 'No benchmark runs were recorded.' "${output}" >/dev/null || {
   echo 'missing empty-run message' >&2
   exit 1

@@ -1,7 +1,6 @@
 {
   "preset": "smoke",
-  "image_attr": "perf-image-quictls-musl",
-  "image_tag": "coquic-perf:quictls-musl",
+  "build_target": "coquic-perf-quictls-musl",
   "results_root": "/tmp/.bench-results",
   "runs": [
     {

@@ -75,12 +75,16 @@ def main() -> int:
         if not isinstance(runs, list):
             raise ValueError("manifest field `runs` must be a list")
 
+        target = manifest.get("build_target")
+        if target is None:
+            target = manifest.get("image_tag", "unknown")
+
         print("## Advisory QUIC Perf")
         print()
         print(f"Event: `{args.event_name}`")
         print(f"Commit: `{args.commit}`")
         print(f"Preset: `{manifest.get('preset', 'unknown')}`")
-        print(f"Image: `{manifest.get('image_tag', 'unknown')}`")
+        print(f"Target: `{target}`")
         print()
         print("Benchmark data from GitHub-hosted runners is advisory and may vary between runs.")
         print()

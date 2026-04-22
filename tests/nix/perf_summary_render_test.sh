@@ -35,10 +35,15 @@ grep -F 'Preset: `smoke`' "${output}" >/dev/null || {
   exit 1
 }
 
-grep -F 'Image: `coquic-perf:quictls-musl`' "${output}" >/dev/null || {
-  echo 'missing image line' >&2
+grep -F 'Target: `coquic-perf-quictls-musl`' "${output}" >/dev/null || {
+  echo 'missing target line' >&2
   exit 1
 }
+
+if grep -F 'Image:' "${output}" >/dev/null; then
+  echo 'unexpected image line in direct-host summary' >&2
+  exit 1
+fi
 
 grep -F '| socket | bulk | ok | 42 | 1.234 | 0.000 | 0 | 0 | smoke-socket-bulk-s1-c1-q1.json |' "${output}" >/dev/null || {
   echo 'missing bulk row' >&2
@@ -69,7 +74,7 @@ printf '%s
 ' \
 '{' \
 '  "preset": "smoke",' \
-'  "image_tag": "coquic-perf:quictls-musl",' \
+'  "build_target": "coquic-perf-quictls-musl",' \
 '  "runs": [' \
 '    {' \
 '      "status": "failed",' \
@@ -104,7 +109,7 @@ grep -F -- '- `socket/crr`: client wait failed' "${output}" >/dev/null || {
 }
 
 printf '%s
-' '{' '  "preset": "smoke",' '  "image_tag": "coquic-perf:quictls-musl",' '  "runs": []' '}' > "${empty_manifest}"
+' '{' '  "preset": "smoke",' '  "build_target": "coquic-perf-quictls-musl",' '  "runs": []' '}' > "${empty_manifest}"
 python3 "${script}" --manifest "${empty_manifest}" --event-name pull_request --commit 0123456789abcdef0123456789abcdef01234567 > "${output}"
 grep -F 'No benchmark runs were recorded.' "${output}" >/dev/null || {
   echo 'missing empty-run message' >&2

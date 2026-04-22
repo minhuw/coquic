@@ -14,6 +14,8 @@ port="${PERF_PORT:-9443}"
 preset="smoke"
 perf_bin=''
 server_pid=''
+server_shutdown_poll_attempts=20
+server_shutdown_poll_interval_seconds=0.1
 
 usage() {
   cat <<'USAGE'
@@ -75,12 +77,37 @@ esac
 mkdir -p "${results_root}"
 rm -f "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log "${environment_path}"
 
+wait_for_server_shutdown() {
+  local attempts_remaining="${server_shutdown_poll_attempts}"
+
+  while kill -0 "${server_pid}" >/dev/null 2>&1; do
+    [ "${attempts_remaining}" -gt 0 ] || return 1
+    sleep "${server_shutdown_poll_interval_seconds}"
+    attempts_remaining=$((attempts_remaining - 1))
+  done
+
+  return 0
+}
+
 stop_server() {
-  if [ -n "${server_pid}" ]; then
-    kill "${server_pid}" >/dev/null 2>&1 || true
+  if [ -z "${server_pid}" ]; then
+    return
+  fi
+
+  if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
     wait "${server_pid}" >/dev/null 2>&1 || true
     server_pid=''
+    return
   fi
+
+  kill "${server_pid}" >/dev/null 2>&1 || true
+  if ! wait_for_server_shutdown; then
+    kill -KILL "${server_pid}" >/dev/null 2>&1 || true
+    wait_for_server_shutdown || true
+  fi
+
+  wait "${server_pid}" >/dev/null 2>&1 || true
+  server_pid=''
 }
 
 cleanup() {

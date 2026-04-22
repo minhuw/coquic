@@ -96,6 +96,16 @@ grep -F -- 'environment.txt' "${script}" >/dev/null || {
   exit 1
 }
 
+grep -F -- 'wait_for_server_shutdown() {' "${script}" >/dev/null || {
+  echo 'missing bounded server shutdown helper in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'kill -KILL "${server_pid}"' "${script}" >/dev/null || {
+  echo 'missing KILL escalation in harness script' >&2
+  exit 1
+}
+
 if grep -F -- 'docker ' "${script}" >/dev/null; then
   echo 'unexpected docker usage in direct harness script' >&2
   exit 1
@@ -191,7 +201,20 @@ shift
 case "${mode}" in
   server)
     echo "fake server started"
-    trap 'exit 0' TERM INT
+    case "${FAKE_SERVER_BEHAVIOR:-exit-on-term}" in
+      exit-on-term)
+        trap 'printf "server-signal\tTERM\n" >>"${log_path}"; exit 0' TERM
+        trap 'printf "server-signal\tINT\n" >>"${log_path}"; exit 0' INT
+        ;;
+      ignore-term)
+        trap 'printf "server-signal\tTERM\n" >>"${log_path}"' TERM
+        trap 'printf "server-signal\tINT\n" >>"${log_path}"; exit 0' INT
+        ;;
+      *)
+        echo "unexpected fake server behavior: ${FAKE_SERVER_BEHAVIOR}" >&2
+        exit 1
+        ;;
+    esac
     while :; do
       sleep 1
     done
@@ -315,6 +338,28 @@ grep -F -- $'taskset\t-c 2 '"${fake_store}/bin/coquic-perf"' server' "${log_path
 
 grep -F -- $'taskset\t-c 3 '"${fake_store}/bin/coquic-perf"' client' "${log_path}" >/dev/null || {
   echo 'behavioral harness test missing client command shape' >&2
+  exit 1
+}
+
+term_ignoring_log_path="${tmp_dir}/term-ignoring.log"
+term_ignoring_results_root="${tmp_dir}/term-ignoring-results"
+mkdir -p "${term_ignoring_results_root}"
+
+timeout 20s env \
+  PATH="${fake_bin_dir}:$PATH" \
+  FAKE_PERF_LOG="${term_ignoring_log_path}" \
+  FAKE_PERF_STORE="${fake_store}" \
+  FAKE_SERVER_BEHAVIOR=ignore-term \
+  PERF_RESULTS_ROOT="${term_ignoring_results_root}" \
+  bash "${script}" --preset smoke >/dev/null
+
+grep -F -- $'server-signal	TERM' "${term_ignoring_log_path}" >/dev/null || {
+  echo 'term-ignoring server did not observe TERM before shutdown escalation' >&2
+  exit 1
+}
+
+[ -f "${term_ignoring_results_root}/manifest.json" ] || {
+  echo 'term-ignoring server run did not complete cleanly after shutdown escalation' >&2
   exit 1
 }
 

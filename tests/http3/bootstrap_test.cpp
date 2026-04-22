@@ -255,8 +255,9 @@ struct SimpleHttpsResponse {
     std::string body;
 };
 
-std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uint16_t port,
-                                                 std::string_view request_text) {
+std::optional<SimpleHttpsResponse> https_request_impl(std::string_view host, std::uint16_t port,
+                                                      std::string_view request_text,
+                                                      bool close_write_after_send) {
     SSL_library_init();
     SSL_load_error_strings();
 
@@ -295,6 +296,12 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
 
     if (SSL_write(ssl.get(), request_text.data(), static_cast<int>(request_text.size())) <= 0) {
         return std::nullopt;
+    }
+    if (close_write_after_send) {
+        // Best-effort close-notify so malformed requests do not rely on extra
+        // client writes. Some peers can race this path with teardown, so a
+        // shutdown error here is not itself a test failure.
+        (void)SSL_shutdown(ssl.get());
     }
 
     std::string response_text;
@@ -345,6 +352,17 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
 
     response.body = response_text.substr(header_end + 4);
     return response;
+}
+
+std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uint16_t port,
+                                                 std::string_view request_text) {
+    return https_request_impl(host, port, request_text, false);
+}
+
+std::optional<SimpleHttpsResponse>
+https_request_and_close_write_side(std::string_view host, std::uint16_t port,
+                                   std::string_view request_text) {
+    return https_request_impl(host, port, request_text, true);
 }
 
 std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uint16_t port,
@@ -852,7 +870,8 @@ TEST(QuicHttp3BootstrapTest, HttpsOversizedRequestWithoutTerminatorReturnsBadReq
     std::string oversized_request = "GET / HTTP/1.1\r\nHost: example\r\nX-Fill: ";
     oversized_request.append(static_cast<std::string::size_type>(17u * 1024u), 'a');
 
-    const auto response = https_request("127.0.0.1", bootstrap_port, oversized_request);
+    const auto response =
+        https_request_and_close_write_side("127.0.0.1", bootstrap_port, oversized_request);
     ASSERT_TRUE(response.has_value());
     if (!response.has_value()) {
         return;

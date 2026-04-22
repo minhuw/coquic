@@ -474,6 +474,24 @@ bool write_all_ssl(SSL *ssl, std::string_view bytes) {
     return true;
 }
 
+enum class HttpRequestReadProgress : std::uint8_t {
+    incomplete,
+    complete,
+    invalid,
+};
+
+HttpRequestReadProgress append_http_request_bytes(std::string &request_text,
+                                                  std::string_view bytes) {
+    request_text.append(bytes);
+    if (request_text.find("\r\n\r\n") != std::string::npos) {
+        return HttpRequestReadProgress::complete;
+    }
+    if (request_text.size() >= kBootstrapRequestLimitBytes) {
+        return HttpRequestReadProgress::invalid;
+    }
+    return HttpRequestReadProgress::incomplete;
+}
+
 std::optional<std::string> read_http_request(SSL *ssl) {
     std::string request_text;
     std::array<char, 4096> buffer{};
@@ -482,9 +500,13 @@ std::optional<std::string> read_http_request(SSL *ssl) {
         if (read <= 0) {
             return std::nullopt;
         }
-        request_text.append(buffer.data(), static_cast<std::size_t>(read));
-        if (request_text.find("\r\n\r\n") != std::string::npos) {
+        const auto progress = append_http_request_bytes(
+            request_text, std::string_view(buffer.data(), static_cast<std::size_t>(read)));
+        if (progress == HttpRequestReadProgress::complete) {
             return request_text;
+        }
+        if (progress == HttpRequestReadProgress::invalid) {
+            return std::nullopt;
         }
     }
     return std::nullopt;
@@ -777,6 +799,26 @@ bool bootstrap_scoped_fd_self_move_assignment_for_test() {
 
 bool bootstrap_parse_request_for_test(std::string_view request_text) {
     return parse_bootstrap_request(request_text).has_value();
+}
+
+bool bootstrap_rejects_oversized_request_without_terminator_for_test(
+    std::string_view request_text) {
+    std::string buffered_request;
+    std::size_t offset = 0;
+    constexpr std::size_t kChunkSize = 4096;
+    while (offset < request_text.size()) {
+        const auto chunk_size = std::min(kChunkSize, request_text.size() - offset);
+        const auto progress =
+            append_http_request_bytes(buffered_request, request_text.substr(offset, chunk_size));
+        if (progress == HttpRequestReadProgress::complete) {
+            return false;
+        }
+        if (progress == HttpRequestReadProgress::invalid) {
+            return true;
+        }
+        offset += chunk_size;
+    }
+    return false;
 }
 
 bool bootstrap_accept_errno_is_transient_for_test(int accept_errno) {

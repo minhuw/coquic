@@ -32,6 +32,7 @@ bool bootstrap_scoped_fd_move_constructor_for_test();
 bool bootstrap_scoped_fd_move_assignment_for_test();
 bool bootstrap_scoped_fd_self_move_assignment_for_test();
 bool bootstrap_parse_request_for_test(std::string_view request_text);
+bool bootstrap_rejects_oversized_request_without_terminator_for_test(std::string_view request_text);
 bool bootstrap_accept_errno_is_transient_for_test(int accept_errno);
 bool bootstrap_path_has_prefix_for_test(const std::filesystem::path &path,
                                         const std::filesystem::path &prefix);
@@ -837,26 +838,12 @@ TEST(QuicHttp3BootstrapTest, HttpsMalformedRequestsReturnBadRequest) {
     EXPECT_EQ(bad_version.value().status_code, 400);
 }
 
-TEST(QuicHttp3BootstrapTest, HttpsOversizedRequestWithoutTerminatorReturnsBadRequest) {
-    coquic::quic::test::ScopedTempDir document_root;
-    document_root.write_file("index.html", "<h1>hello</h1>");
-
-    const auto bootstrap_port = allocate_tcp_loopback_port();
-    ASSERT_NE(bootstrap_port, 0);
-
-    const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
-    ScopedBootstrapProcess server(config);
-    ASSERT_TRUE(server.started_successfully());
-
+TEST(QuicHttp3BootstrapTest, TestHookRejectsOversizedRequestWithoutTerminator) {
     std::string oversized_request = "GET / HTTP/1.1\r\nHost: example\r\nX-Fill: ";
     oversized_request.append(static_cast<std::string::size_type>(17u * 1024u), 'a');
 
-    const auto response = https_request("127.0.0.1", bootstrap_port, oversized_request);
-    ASSERT_TRUE(response.has_value());
-    if (!response.has_value()) {
-        return;
-    }
-    EXPECT_EQ(response.value().status_code, 400);
+    EXPECT_TRUE(coquic::http3::bootstrap_rejects_oversized_request_without_terminator_for_test(
+        oversized_request));
 }
 
 TEST(QuicHttp3BootstrapTest, ScopedBootstrapProcessReportsImmediateStartupFailure) {

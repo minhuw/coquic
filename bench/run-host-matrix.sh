@@ -86,7 +86,25 @@ stop_server() {
 cleanup() {
   stop_server
 }
-trap cleanup EXIT INT TERM
+
+handle_signal() {
+  signal_name="$1"
+  cleanup
+  case "${signal_name}" in
+    INT)
+      exit 130
+      ;;
+    TERM)
+      exit 143
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
+}
+trap cleanup EXIT
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
 
 command -v taskset >/dev/null || {
   echo 'taskset is required for bench/run-host-matrix.sh' >&2

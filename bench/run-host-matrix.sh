@@ -6,8 +6,8 @@ default_manifest_path="${repo_root}/.bench-results/manifest.json"
 results_root="${PERF_RESULTS_ROOT:-$(dirname "${default_manifest_path}")}"
 manifest_path="${results_root}/manifest.json"
 environment_path="${results_root}/environment.txt"
-binary_attr="${PERF_BINARY_ATTR:-coquic-perf-quictls-musl}"
-build_target="${PERF_BUILD_TARGET:-${binary_attr}}"
+binary_attr="${PERF_BINARY_ATTR:-coquic-quictls-musl}"
+build_target="${PERF_BUILD_TARGET:-coquic-perf-quictls-musl}"
 server_cpus="${PERF_SERVER_CPUS:-2}"
 client_cpus="${PERF_CLIENT_CPUS:-3}"
 port="${PERF_PORT:-9443}"
@@ -21,8 +21,8 @@ usage: bash bench/run-host-matrix.sh [--preset smoke|ci]
 
 environment overrides:
   PERF_RESULTS_ROOT  result directory (default: .bench-results)
-  PERF_BINARY_ATTR   nix package attr to build (default: coquic-perf-quictls-musl)
-  PERF_BUILD_TARGET  manifest label for summary output (default: PERF_BINARY_ATTR)
+  PERF_BINARY_ATTR   nix package attr to build (default: coquic-quictls-musl)
+  PERF_BUILD_TARGET  manifest label for summary output (default: coquic-perf-quictls-musl)
   PERF_SERVER_CPUS   CPU set for server process (default: 2)
   PERF_CLIENT_CPUS   CPU set for client process (default: 3)
   PERF_PORT          UDP port for server/client (default: 9443)
@@ -93,17 +93,8 @@ command -v taskset >/dev/null || {
   exit 1
 }
 
-if binary_path="$(nix build --print-out-paths ".#${binary_attr}" 2>/dev/null)"; then
-  perf_bin="${binary_path}/bin/coquic-perf"
-else
-  system="$(nix eval --impure --raw --expr builtins.currentSystem)"
-  perf_bin="$(nix eval --raw ".#apps.${system}.${binary_attr}.program")"
-  if [ ! -x "${perf_bin}" ]; then
-    package_attr="${binary_attr/-perf/}"
-    binary_path="$(nix build --print-out-paths ".#${package_attr}")"
-    perf_bin="${binary_path}/bin/coquic-perf"
-  fi
-fi
+binary_path="$(nix build --print-out-paths ".#${binary_attr}")"
+perf_bin="${binary_path}/bin/coquic-perf"
 [ -x "${perf_bin}" ] || {
   echo "missing perf binary: ${perf_bin}" >&2
   exit 1

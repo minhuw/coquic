@@ -11,15 +11,40 @@ ignore_file="${repo_root}/.gitignore"
   exit 1
 }
 
-grep -F -- 'PERF_BINARY_ATTR' "${script}" >/dev/null || {
-  echo 'missing binary attr override in harness script' >&2
+grep -F -- 'binary_attr="${PERF_BINARY_ATTR:-coquic-quictls-musl}"' "${script}" >/dev/null || {
+  echo 'missing real package attr default in harness script' >&2
   exit 1
 }
 
-grep -F -- 'coquic-perf-quictls-musl' "${script}" >/dev/null || {
-  echo 'missing direct perf binary default in harness script' >&2
+grep -F -- 'build_target="${PERF_BUILD_TARGET:-coquic-perf-quictls-musl}"' "${script}" >/dev/null || {
+  echo 'missing perf build label default in harness script' >&2
   exit 1
 }
+
+grep -F -- 'nix build --print-out-paths ".#${binary_attr}"' "${script}" >/dev/null || {
+  echo 'missing direct nix build in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'perf_bin="${binary_path}/bin/coquic-perf"' "${script}" >/dev/null || {
+  echo 'missing direct perf binary resolution in harness script' >&2
+  exit 1
+}
+
+if grep -F -- 'apps.${system}.${binary_attr}.program' "${script}" >/dev/null; then
+  echo 'unexpected app fallback in harness script' >&2
+  exit 1
+fi
+
+if grep -F -- 'builtins.currentSystem' "${script}" >/dev/null; then
+  echo 'unexpected system eval fallback in harness script' >&2
+  exit 1
+fi
+
+if grep -F -- 'package_attr=' "${script}" >/dev/null; then
+  echo 'unexpected package attr rewrite fallback in harness script' >&2
+  exit 1
+fi
 
 grep -F -- 'taskset -c "${server_cpus}"' "${script}" >/dev/null || {
   echo 'missing server CPU pinning in harness script' >&2
@@ -61,6 +86,21 @@ if grep -F -- '--cap-add IPC_LOCK' "${script}" >/dev/null; then
   exit 1
 fi
 
+package_path="$(nix build --no-link --print-out-paths .#coquic-quictls-musl)"
+[ -x "${package_path}/bin/coquic-perf" ] || {
+  echo 'real direct-build package is missing bin/coquic-perf' >&2
+  exit 1
+}
+
+if nix build --no-link .#coquic-perf-quictls-musl >/dev/null 2>&1; then
+  echo 'unexpected perf app label is buildable as a package attr' >&2
+  exit 1
+fi
+
+grep -F -- 'coquic-quictls-musl' "${flake}" >/dev/null || {
+  echo 'missing direct perf package export in flake.nix' >&2
+  exit 1
+}
 grep -F -- 'usage: bash bench/run-host-matrix.sh [--preset smoke|ci]' "${script}" >/dev/null || {
   echo 'missing ci preset in harness usage' >&2
   exit 1

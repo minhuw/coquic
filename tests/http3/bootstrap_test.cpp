@@ -111,14 +111,15 @@ make_bootstrap_config(const std::filesystem::path &document_root, std::uint16_t 
 }
 
 int run_bootstrap_server_guarded(const coquic::http3::Http3BootstrapConfig &config,
-                                 const std::atomic<bool> *stop_requested) noexcept;
+                                 const std::atomic<bool> *stop_requested,
+                                 std::atomic<bool> *listener_ready) noexcept;
 
 class ScopedBootstrapProcess {
   public:
     explicit ScopedBootstrapProcess(const coquic::http3::Http3BootstrapConfig &config)
         : host_(config.host), port_(config.port), config_(config),
           thread_(&ScopedBootstrapProcess::run_server_thread, this) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        wait_for_startup(std::chrono::seconds{5});
     }
 
     ~ScopedBootstrapProcess() {
@@ -167,11 +168,43 @@ class ScopedBootstrapProcess {
         return thread_.joinable() && ::pthread_kill(thread_.native_handle(), signal_number) == 0;
     }
 
+    bool started_successfully() const {
+        return started_successfully_;
+    }
+
   private:
     static void run_server_thread(ScopedBootstrapProcess *self) noexcept {
-        const int status = run_bootstrap_server_guarded(self->config_, &self->stop_requested_);
+        const int status = run_bootstrap_server_guarded(self->config_, &self->stop_requested_,
+                                                        &self->listener_ready_);
         self->exit_status_.store(status);
         self->completed_.store(true);
+    }
+
+    void wait_for_startup(std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!listener_ready_.load(std::memory_order_acquire) && !completed_.load()) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+
+        started_successfully_ = listener_ready_.load(std::memory_order_acquire);
+        if (started_successfully_) {
+            return;
+        }
+
+        if (!completed_.load()) {
+            stop_requested_.store(true);
+            wake();
+            if (thread_.joinable()) {
+                thread_.join();
+            }
+            completed_.store(true);
+        } else if (thread_.joinable()) {
+            thread_.join();
+        }
+        cached_status_ = exit_status_.load();
     }
 
     void wake() const {
@@ -199,15 +232,18 @@ class ScopedBootstrapProcess {
     coquic::http3::Http3BootstrapConfig config_;
     std::atomic<bool> stop_requested_ = false;
     std::atomic<bool> completed_ = false;
+    std::atomic<bool> listener_ready_ = false;
     std::atomic<int> exit_status_ = 0;
     std::thread thread_;
     std::optional<int> cached_status_;
+    bool started_successfully_ = false;
 };
 
 int run_bootstrap_server_guarded(const coquic::http3::Http3BootstrapConfig &config,
-                                 const std::atomic<bool> *stop_requested) noexcept {
+                                 const std::atomic<bool> *stop_requested,
+                                 std::atomic<bool> *listener_ready) noexcept {
     try {
-        return coquic::http3::run_http3_bootstrap_server(config, stop_requested);
+        return coquic::http3::run_http3_bootstrap_server(config, stop_requested, listener_ready);
     } catch (...) {
         return 1;
     }
@@ -811,6 +847,7 @@ TEST(QuicHttp3BootstrapTest, HttpsOversizedRequestWithoutTerminatorReturnsBadReq
 
     const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
     ScopedBootstrapProcess server(config);
+    ASSERT_TRUE(server.started_successfully());
 
     std::string oversized_request = "GET / HTTP/1.1\r\nHost: example\r\nX-Fill: ";
     oversized_request.append(static_cast<std::string::size_type>(17u * 1024u), 'a');
@@ -821,6 +858,37 @@ TEST(QuicHttp3BootstrapTest, HttpsOversizedRequestWithoutTerminatorReturnsBadReq
         return;
     }
     EXPECT_EQ(response.value().status_code, 400);
+}
+
+TEST(QuicHttp3BootstrapTest, ScopedBootstrapProcessReportsImmediateStartupFailure) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("index.html", "<h1>hello</h1>");
+
+    const auto bootstrap_port = allocate_tcp_loopback_port();
+    ASSERT_NE(bootstrap_port, 0);
+
+    const int occupied_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(occupied_fd, 0);
+    ScopedFd occupied_socket(occupied_fd);
+
+    const int reuse = 1;
+    ASSERT_EQ(::setsockopt(occupied_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)), 0);
+
+    sockaddr_in occupied_address{};
+    occupied_address.sin_family = AF_INET;
+    occupied_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    occupied_address.sin_port = htons(bootstrap_port);
+    ASSERT_EQ(::bind(occupied_fd, reinterpret_cast<const sockaddr *>(&occupied_address),
+                     sizeof(occupied_address)),
+              0);
+    ASSERT_EQ(::listen(occupied_fd, 1), 0);
+
+    const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
+    ScopedBootstrapProcess server(config);
+    EXPECT_FALSE(server.started_successfully());
+
+    const auto exit_status = server.wait_for_exit(std::chrono::milliseconds{0});
+    EXPECT_EQ(exit_status, std::optional<int>{1});
 }
 
 TEST(QuicHttp3BootstrapTest, RawTcpClientFailsTlsAcceptAndServerKeepsServing) {
@@ -979,8 +1047,8 @@ TEST(QuicHttp3BootstrapTest, StopRequestedWakeupExitsCleanly) {
 
     std::atomic<bool> stop_requested = false;
     const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
-    auto future =
-        std::async(std::launch::async, run_bootstrap_server_guarded, config, &stop_requested);
+    auto future = std::async(std::launch::async, run_bootstrap_server_guarded, config,
+                             &stop_requested, nullptr);
 
     std::this_thread::sleep_for(std::chrono::milliseconds{100});
     stop_requested.store(true);

@@ -19,6 +19,7 @@ struct Http3BootstrapConfig {
 
 std::string make_http3_alt_svc_value(const Http3BootstrapConfig &config);
 int run_http3_bootstrap_server(const Http3BootstrapConfig &config,
-                               const std::atomic<bool> *stop_requested = nullptr);
+                               const std::atomic<bool> *stop_requested = nullptr,
+                               std::atomic<bool> *listener_ready = nullptr);
 
 } // namespace coquic::http3

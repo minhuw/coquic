@@ -624,7 +624,12 @@ std::string make_http3_alt_svc_value(const Http3BootstrapConfig &config) {
 }
 
 int run_http3_bootstrap_server(const Http3BootstrapConfig &config,
-                               const std::atomic<bool> *stop_requested) {
+                               const std::atomic<bool> *stop_requested,
+                               std::atomic<bool> *listener_ready) {
+    if (listener_ready != nullptr) {
+        listener_ready->store(false, std::memory_order_relaxed);
+    }
+
     auto ssl_context = make_ssl_context(config);
     if (ssl_context == nullptr) {
         return 1;
@@ -633,6 +638,9 @@ int run_http3_bootstrap_server(const Http3BootstrapConfig &config,
     ScopedFd listen_socket(make_listen_socket(config));
     if (listen_socket.get() < 0) {
         return 1;
+    }
+    if (listener_ready != nullptr) {
+        listener_ready->store(true, std::memory_order_release);
     }
 
     while (!is_stop_requested(stop_requested)) {

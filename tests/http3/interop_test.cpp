@@ -248,6 +248,26 @@ TEST(QuicHttp3InteropTest, RejectsClientInvocationWithoutRequests) {
     EXPECT_FALSE(empty_requests.has_value());
 }
 
+TEST(QuicHttp3InteropTest, ParsesAndRejectsCongestionControlFromEnvironment) {
+    const char *argv[] = {"coquic", "h3-interop-client"};
+    ScopedEnvVar testcase("TESTCASE", "http3");
+    ScopedEnvVar requests("REQUESTS", "https://server/a.txt");
+
+    {
+        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "bbr");
+        const auto parsed = coquic::http3::parse_http3_interop_args(2, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
+                  coquic::quic::QuicCongestionControlAlgorithm::bbr);
+    }
+
+    {
+        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "cubic");
+        EXPECT_FALSE(
+            coquic::http3::parse_http3_interop_args(2, const_cast<char **>(argv)).has_value());
+    }
+}
+
 TEST(QuicHttp3InteropTest, RejectsMissingAndUnknownInteropSubcommands) {
     const char *missing_subcommand_argv[] = {"coquic"};
     EXPECT_FALSE(

@@ -102,6 +102,44 @@ TEST(QuicPerfConfigTest, ParsesServerIoUringInvocation) {
     EXPECT_EQ(parsed.private_key_path, std::filesystem::path{"tests/fixtures/quic-server-key.pem"});
 }
 
+TEST(QuicPerfConfigTest, ParsesAndPropagatesCongestionControlSelection) {
+    const char *argv[] = {
+        "coquic-perf",
+        "client",
+        "--host",
+        "127.0.0.1",
+        "--mode",
+        "bulk",
+        "--direction",
+        "download",
+        "--total-bytes",
+        "65536",
+        "--congestion-control",
+        "bbr",
+    };
+
+    const auto config =
+        parse_perf_runtime_args(static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+
+    ASSERT_TRUE(config.has_value());
+    const auto parsed = config.value_or(QuicPerfConfig{});
+    EXPECT_EQ(parsed.congestion_control, coquic::quic::QuicCongestionControlAlgorithm::bbr);
+
+    const auto client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
+    });
+    EXPECT_EQ(client.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+
+    const auto server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
+    });
+    EXPECT_EQ(server.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+}
+
 TEST(QuicPerfConfigTest, EndpointConfigUsesPerfOutboundDatagramSize) {
     constexpr std::size_t kExpectedPerfDatagramSize = std::size_t{16} * 1024u;
 

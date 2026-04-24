@@ -529,7 +529,7 @@ class QuicConnection {
         std::chrono::milliseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
         const std::string &ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
         bool suppress_pto_reset);
-    void track_sent_packet(PacketSpaceState &packet_space, const SentPacketRecord &packet);
+    void track_sent_packet(PacketSpaceState &packet_space, SentPacketRecord packet);
     std::optional<SentPacketRecord> retire_acked_packet(PacketSpaceState &packet_space,
                                                         RecoveryPacketHandle handle);
     std::optional<SentPacketRecord> mark_lost_packet(PacketSpaceState &packet_space,
@@ -593,6 +593,7 @@ class QuicConnection {
                                                    bool fin);
     PeerStreamOpenLimits peer_stream_open_limits() const;
     bool has_pending_application_send() const;
+    bool has_pending_congestion_controlled_send() const;
     bool has_pending_fresh_application_stream_send() const;
     std::uint64_t total_queued_stream_bytes() const;
     void maybe_queue_connection_blocked_frame();
@@ -662,7 +663,7 @@ class QuicConnection {
     std::vector<RetireConnectionIdFrame> pending_retire_connection_id_frames_;
     std::optional<StoredClientResumptionState> decoded_resumption_state_;
     std::optional<std::uint64_t> last_application_send_stream_id_;
-    NewRenoCongestionController congestion_controller_;
+    QuicCongestionController congestion_controller_;
     RecoveryRttState recovery_rtt_state_;
     std::uint32_t pto_count_ = 0;
     std::uint8_t remaining_pto_probe_datagrams_ = 0;

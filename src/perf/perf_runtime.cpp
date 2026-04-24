@@ -18,7 +18,7 @@ constexpr std::uint64_t kPerfTransferConnectionReceiveWindow = 32ull * 1024ull *
 constexpr std::uint64_t kPerfTransferStreamReceiveWindow = 16ull * 1024ull * 1024ull;
 constexpr std::string_view kPerfUsageLine =
     "usage: coquic-perf [server|client] [--host HOST] [--port PORT] "
-    "[--io-backend socket|io_uring] [--mode bulk|rr|crr] "
+    "[--io-backend socket|io_uring] [--congestion-control newreno|bbr] [--mode bulk|rr|crr] "
     "[--direction upload|download] [--request-bytes N] [--response-bytes N] "
     "[--streams N] [--connections N] [--requests-in-flight N] [--requests N] "
     "[--total-bytes N] [--warmup 250ms|2s] [--duration 250ms|2s] "
@@ -164,6 +164,19 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
                 print_usage();
                 return std::nullopt;
             }
+            continue;
+        }
+        if (arg == "--congestion-control") {
+            const auto value = require_value(arg);
+            if (!value.has_value()) {
+                return std::nullopt;
+            }
+            const auto parsed = quic::parse_congestion_control_algorithm(*value);
+            if (!parsed.has_value()) {
+                print_usage();
+                return std::nullopt;
+            }
+            config.congestion_control = *parsed;
             continue;
         }
         if (arg == "--mode") {
@@ -373,6 +386,7 @@ quic::QuicCoreEndpointConfig make_perf_client_endpoint_config(const QuicPerfConf
         .application_protocol = "coquic-perf/1",
         .max_outbound_datagram_size = kPerfMaxOutboundDatagramSize,
     };
+    endpoint_config.transport.congestion_control = config.congestion_control;
     endpoint_config.transport.initial_max_data = kPerfTransferConnectionReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_local = kPerfTransferStreamReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_remote =
@@ -392,6 +406,7 @@ quic::QuicCoreEndpointConfig make_perf_server_endpoint_config(const QuicPerfConf
             },
     };
     endpoint_config.max_outbound_datagram_size = kPerfMaxOutboundDatagramSize;
+    endpoint_config.transport.congestion_control = config.congestion_control;
     endpoint_config.transport.initial_max_data = kPerfTransferConnectionReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_local = kPerfTransferStreamReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_remote =

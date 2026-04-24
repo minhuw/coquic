@@ -146,6 +146,14 @@ std::optional<Http3InteropConfig> parse_http3_interop_args(int argc, char **argv
         config.requests = parse_requests(*requests_env);
         requests_present = true;
     }
+    if (const auto congestion_control = getenv_string("COQUIC_CONGESTION_CONTROL");
+        congestion_control.has_value()) {
+        const auto parsed = quic::parse_congestion_control_algorithm(*congestion_control);
+        if (!parsed.has_value()) {
+            return std::nullopt;
+        }
+        config.congestion_control = *parsed;
+    }
 
     if (config.mode == Http3InteropMode::server) {
         if (!testcase_present || !host_present || !port_present || !document_root_present ||
@@ -175,6 +183,7 @@ int run_http3_interop(const Http3InteropConfig &config) {
             .enable_bootstrap = false,
             .certificate_chain_path = config.certificate_chain_path,
             .private_key_path = config.private_key_path,
+            .congestion_control = config.congestion_control,
         });
     }
 
@@ -202,6 +211,7 @@ int run_http3_interop(const Http3InteropConfig &config) {
             .port = config.port,
             .server_name = config.server_name,
             .verify_peer = false,
+            .congestion_control = config.congestion_control,
         },
         std::span<const Http3RuntimeTransferJob>(jobs));
 }

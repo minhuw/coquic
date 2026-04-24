@@ -298,7 +298,7 @@ TEST(QuicCoreTest, ResumedClientDoesNotCoalescePacketsWithDifferentDestinationCo
     EXPECT_FALSE(saw_mixed_destination_connection_ids);
 }
 
-TEST(QuicCoreTest, ResumedClientStillEmitsHandshakePacketWhenAppSendIsCwndBlocked) {
+TEST(QuicCoreTest, ResumedClientDefersHandshakeCryptoWhenSharedCwndIsFull) {
     auto warmup_client_config = coquic::quic::test::make_client_core_config();
     auto warmup_server_config = coquic::quic::test::make_server_core_config();
     warmup_client_config.zero_rtt.application_context = {std::byte{0x10}};
@@ -383,14 +383,10 @@ TEST(QuicCoreTest, ResumedClientStillEmitsHandshakePacketWhenAppSendIsCwndBlocke
 
     const auto second_reply =
         client.connection_->drain_outbound_datagram(coquic::quic::test::test_time(103));
-    const auto second_packet_kinds = protected_datagram_packet_kinds(second_reply);
-    ASSERT_TRUE(second_packet_kinds.has_value());
-    if (!second_packet_kinds.has_value()) {
-        return;
-    }
-    const auto &second_kinds = *second_packet_kinds;
-    ASSERT_FALSE(second_kinds.empty());
-    EXPECT_EQ(second_kinds[0], ProtectedPacketKind::handshake);
+
+    EXPECT_TRUE(second_reply.empty());
+    EXPECT_TRUE(client.connection_->handshake_space_.send_crypto.has_pending_data());
+    EXPECT_TRUE(client.connection_->handshake_space_.received_packets.has_ack_to_send());
 }
 
 TEST(QuicCoreTest, ResumedServerFirstApplicationAckCoversOriginalZeroRttPacketRange) {

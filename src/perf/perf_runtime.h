@@ -37,6 +37,8 @@ struct QuicPerfConfig {
     std::optional<std::size_t> total_bytes;
     std::chrono::milliseconds warmup{0};
     std::chrono::milliseconds duration{5000};
+    quic::QuicCongestionControlAlgorithm congestion_control =
+        quic::QuicCongestionControlAlgorithm::newreno;
 };
 
 std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv);

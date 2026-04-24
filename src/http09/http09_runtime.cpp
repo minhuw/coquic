@@ -85,7 +85,7 @@ constexpr std::string_view kProjectName = "coquic";
 constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
-    "[--io-backend socket|io_uring] "
+    "[--io-backend socket|io_uring] [--congestion-control newreno|bbr] "
     "[--testcase "
     "handshake|transfer|keyupdate|amplificationlimit|rebind-port|rebind-addr|"
     "connectionmigration|ecn|multiconnect|chacha20|retry|resumption|zerortt|v2] "
@@ -630,6 +630,7 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
     if (config.qlog_directory.has_value()) {
         core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
     }
+    core.transport.congestion_control = config.congestion_control;
     core.tls_keylog_path = config.tls_keylog_path;
     core.transport.preferred_address = runtime_preferred_address_for_server(config);
     return core;
@@ -9744,6 +9745,15 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
         config.server_name = *server_name;
         server_name_specified = true;
     }
+    if (const auto congestion_control = getenv_string("COQUIC_CONGESTION_CONTROL");
+        congestion_control.has_value()) {
+        const auto parsed = quic::parse_congestion_control_algorithm(*congestion_control);
+        if (!parsed.has_value()) {
+            std::cerr << kUsageLine << '\n';
+            return std::nullopt;
+        }
+        config.congestion_control = *parsed;
+    }
     if (env_flag_enabled("RETRY")) {
         config.retry_enabled = true;
     }
@@ -9779,10 +9789,11 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
             continue;
         }
 
-        const bool expects_value =
-            arg == "--host" || arg == "--port" || arg == "--io-backend" || arg == "--testcase" ||
-            arg == "--requests" || arg == "--document-root" || arg == "--download-root" ||
-            arg == "--certificate-chain" || arg == "--private-key" || arg == "--server-name";
+        const bool expects_value = arg == "--host" || arg == "--port" || arg == "--io-backend" ||
+                                   arg == "--congestion-control" || arg == "--testcase" ||
+                                   arg == "--requests" || arg == "--document-root" ||
+                                   arg == "--download-root" || arg == "--certificate-chain" ||
+                                   arg == "--private-key" || arg == "--server-name";
         if (!expects_value) {
             std::cerr << kUsageLine << '\n';
             return std::nullopt;
@@ -9813,6 +9824,15 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
                 return std::nullopt;
             }
             config.io_backend = *parsed;
+            continue;
+        }
+        if (arg == "--congestion-control") {
+            const auto parsed = quic::parse_congestion_control_algorithm(*value);
+            if (!parsed.has_value()) {
+                std::cerr << kUsageLine << '\n';
+                return std::nullopt;
+            }
+            config.congestion_control = *parsed;
             continue;
         }
         if (arg == "--testcase") {
@@ -9883,6 +9903,7 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
     if (config.qlog_directory.has_value()) {
         core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
     }
+    core.transport.congestion_control = config.congestion_control;
     core.tls_keylog_path = config.tls_keylog_path;
     return core;
 }

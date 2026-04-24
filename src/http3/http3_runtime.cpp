@@ -75,12 +75,14 @@ namespace {
 constexpr std::string_view kHttp3ServerUsageLine =
     "usage: h3-server [--host HOST] [--port PORT] [--bootstrap-port PORT] "
     "[--alt-svc-max-age SECONDS] [--io-backend socket|io_uring] "
+    "[--congestion-control newreno|bbr] "
     "[--certificate-chain PATH] [--private-key PATH] [--document-root PATH]";
 
 constexpr std::string_view kHttp3ClientUsageLine =
     "usage: h3-client URL [--method GET|HEAD|POST] [--header NAME:VALUE] "
     "[--data TEXT] [--body-file PATH] [--output PATH] [--server-name NAME] "
-    "[--verify-peer] [--host HOST] [--port PORT] [--io-backend socket|io_uring]";
+    "[--verify-peer] [--host HOST] [--port PORT] [--io-backend socket|io_uring] "
+    "[--congestion-control newreno|bbr]";
 
 enum class Http3CliMode : std::uint8_t { server, client };
 
@@ -3219,6 +3221,19 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             config.io_backend = *kind;
             continue;
         }
+        if (arg == "--congestion-control") {
+            const auto value = require_value(arg);
+            if (!value.has_value()) {
+                return std::nullopt;
+            }
+            const auto parsed = quic::parse_congestion_control_algorithm(*value);
+            if (!parsed.has_value()) {
+                print_usage(mode);
+                return std::nullopt;
+            }
+            config.congestion_control = *parsed;
+            continue;
+        }
         if (arg == "--document-root") {
             if (!is_server_mode) {
                 print_usage(mode);
@@ -3408,6 +3423,7 @@ quic::QuicCoreEndpointConfig make_http3_client_endpoint_config(const Http3Runtim
         .verify_peer = config.verify_peer,
         .application_protocol = std::string(kHttp3ApplicationProtocol),
     };
+    endpoint.transport.congestion_control = config.congestion_control;
     return endpoint;
 }
 
@@ -3419,7 +3435,7 @@ make_http3_server_endpoint_config(const Http3RuntimeConfig &config) {
         return std::nullopt;
     }
 
-    return quic::QuicCoreEndpointConfig{
+    auto endpoint = quic::QuicCoreEndpointConfig{
         .role = quic::EndpointRole::server,
         .verify_peer = config.verify_peer,
         .application_protocol = std::string(kHttp3ApplicationProtocol),
@@ -3429,6 +3445,8 @@ make_http3_server_endpoint_config(const Http3RuntimeConfig &config) {
                 .private_key_pem = *private_key,
             },
     };
+    endpoint.transport.congestion_control = config.congestion_control;
+    return endpoint;
 }
 
 int run_http3_client_transfers(const Http3RuntimeConfig &config,

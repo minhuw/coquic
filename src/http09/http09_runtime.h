@@ -10,6 +10,7 @@
 #include "src/io/io_backend.h"
 #include "src/http09/http09_client.h"
 #include "src/http09/http09_server.h"
+#include "src/quic/core.h"
 
 namespace coquic::http09 {
 
@@ -32,6 +33,8 @@ struct Http09RuntimeConfig {
     std::string requests_env;
     std::optional<std::filesystem::path> qlog_directory;
     std::optional<std::filesystem::path> tls_keylog_path;
+    quic::QuicCongestionControlAlgorithm congestion_control =
+        quic::QuicCongestionControlAlgorithm::newreno;
 };
 
 struct ParsedHttp09Authority {

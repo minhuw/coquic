@@ -5044,6 +5044,48 @@ TEST(QuicCoreTest, ApplicationSendRemainsBlockedBeforeBurstResumeDeadline) {
     EXPECT_TRUE(connection.drain_outbound_datagram(burst_time).empty());
 }
 
+TEST(QuicCoreTest, BbrPacingBlocksFurtherApplicationSendsUntilPacingWakeup) {
+    auto connection = make_connected_client_connection();
+    connection.congestion_controller_ = coquic::quic::QuicCongestionController(
+        coquic::quic::QuicCongestionControlAlgorithm::bbr,
+        std::max<std::size_t>(1200, connection.config_.max_outbound_datagram_size));
+    auto &bbr =
+        std::get<coquic::quic::BbrCongestionController>(connection.congestion_controller_.storage_);
+    bbr.mode_ = coquic::quic::BbrCongestionController::Mode::probe_bw_cruise;
+    bbr.max_bandwidth_bytes_per_second_ = 120000.0;
+    bbr.bandwidth_bytes_per_second_ = 120000.0;
+    bbr.pacing_rate_bytes_per_second_ = 120000.0;
+    bbr.min_rtt_ = std::chrono::milliseconds{100};
+
+    const auto payload =
+        std::vector<std::byte>(static_cast<std::size_t>(8u) * 1024u, std::byte{0x55});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    const auto send_time = coquic::quic::test::test_time(1);
+    const auto first_datagram = connection.drain_outbound_datagram(send_time);
+    ASSERT_FALSE(first_datagram.empty());
+    const auto second_datagram = connection.drain_outbound_datagram(send_time);
+    ASSERT_FALSE(second_datagram.empty());
+
+    const auto blocked_datagram = connection.drain_outbound_datagram(send_time);
+    EXPECT_TRUE(blocked_datagram.empty());
+
+    const auto pacing_deadline =
+        connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
+    ASSERT_TRUE(pacing_deadline.has_value());
+    EXPECT_EQ(connection.next_wakeup(), pacing_deadline);
+    EXPECT_TRUE(
+        connection.drain_outbound_datagram(send_time + std::chrono::milliseconds(9)).empty());
+    EXPECT_FALSE(
+        connection.drain_outbound_datagram(optional_value_or_terminate(pacing_deadline)).empty());
+}
+
 TEST(QuicCoreTest, UrgentPathResponseBypassesBurstResumeDeadline) {
     auto connection = make_connected_client_connection();
     const auto payload =

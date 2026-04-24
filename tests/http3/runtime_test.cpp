@@ -58,6 +58,13 @@ int finish_http3_server_run(int runtime_exit_code,
 
 namespace {
 
+template <typename T> const T &optional_ref_or_terminate(const std::optional<T> &value) {
+    if (!value.has_value()) {
+        std::abort();
+    }
+    return *value;
+}
+
 class ScopedEnvVar {
   public:
     ScopedEnvVar(std::string name, std::optional<std::string> value) : name_(std::move(name)) {
@@ -1440,6 +1447,37 @@ TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsMissingAndUnsupportedSubcommands)
             static_cast<int>(std::size(argv)), const_cast<char **>(argv));
         EXPECT_FALSE(config.has_value());
     }
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection) {
+    const char *argv[] = {
+        "coquic-http3", "h3-client", "https://localhost:9443/ok", "--congestion-control", "bbr",
+    };
+    const auto parsed = coquic::http3::parse_http3_runtime_args(static_cast<int>(std::size(argv)),
+                                                                const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+
+    const auto client = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::client,
+        .url = "https://localhost:9443/hello.txt",
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
+    };
+    const auto client_core = coquic::http3::make_http3_client_endpoint_config(client);
+    EXPECT_EQ(client_core.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+
+    const auto server = coquic::http3::Http3RuntimeConfig{
+        .mode = coquic::http3::Http3RuntimeMode::server,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
+    };
+    const auto server_core = coquic::http3::make_http3_server_endpoint_config(server);
+    ASSERT_TRUE(server_core.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(server_core).transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::bbr);
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeMiscInternalCoverageHookReturnsTrue) {

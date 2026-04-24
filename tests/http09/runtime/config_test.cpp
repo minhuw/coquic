@@ -707,6 +707,49 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesRetryFlagFromEnvironmentAndCli) {
     EXPECT_TRUE(runtime.retry_enabled);
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection) {
+    {
+        const char *argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "bbr");
+
+        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
+                  coquic::quic::QuicCongestionControlAlgorithm::bbr);
+    }
+
+    {
+        const char *argv[] = {"coquic", "interop-client", "--congestion-control",
+                              "bbr",    "--requests",     "https://localhost/a.txt"};
+        const auto parsed = coquic::http09::parse_http09_runtime_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
+                  coquic::quic::QuicCongestionControlAlgorithm::bbr);
+    }
+
+    const auto client_runtime = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
+        .requests_env = "https://localhost/a.txt",
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
+    };
+    const auto client_core = coquic::http09::make_http09_client_core_config(client_runtime);
+    EXPECT_EQ(client_core.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+
+    const auto server_runtime = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
+    };
+    const auto server_core = coquic::http09::make_http09_server_core_config(server_runtime);
+    EXPECT_EQ(server_core.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeTreatsRetryTestcaseAliasAsHandshakeWithRetryEnabled) {
     {
         const char *env_argv[] = {"coquic"};

@@ -31,3 +31,4 @@ Included documents:
 - `draft-ietf-quic-qlog-main-schema-13.txt` - qlog: Structured Logging for Network Protocols
 - `draft-ietf-quic-qlog-quic-events-12.txt` - QUIC event definitions for qlog
 - `draft-ietf-quic-qlog-h3-events-12.txt` - HTTP/3 qlog event definitions
+- `draft-ietf-ccwg-bbr-05.txt` - BBR Congestion Control

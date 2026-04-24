@@ -52,6 +52,12 @@ struct SentPacketRecord {
     bool force_ack = false;
     QuicPathId path_id = 0;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+    std::uint64_t delivered = 0;
+    QuicCoreTimePoint delivered_time{};
+    QuicCoreTimePoint first_sent_time{};
+    std::size_t tx_in_flight = 0;
+    std::uint64_t lost = 0;
+    bool app_limited = false;
 };
 
 struct RecoveryRttState {

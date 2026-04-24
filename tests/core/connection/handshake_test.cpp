@@ -2420,6 +2420,51 @@ TEST(QuicCoreTest, ProcessCapturedPicoquicClientInitialPacketEmitsInitialCrypto)
     EXPECT_FALSE(first_tracked_packet(connection.initial_space_).crypto_ranges.empty());
 }
 
+TEST(QuicCoreTest, InitialPacketIncreasesSharedBytesInFlight) {
+    auto datagram = captured_picoquic_client_initial_datagram();
+
+    auto config = coquic::quic::test::make_server_core_config();
+    config.application_protocol = "hq-interop";
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.process_inbound_datagram(datagram, coquic::quic::test::test_time(1));
+
+    const auto outbound = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(outbound.empty());
+    ASSERT_EQ(tracked_packet_count(connection.initial_space_), 1u);
+    EXPECT_GT(connection.congestion_controller_.bytes_in_flight(), 0u);
+}
+
+TEST(QuicCoreTest, InitialAckUpdatesSharedCongestionController) {
+    auto datagram = captured_picoquic_client_initial_datagram();
+
+    auto config = coquic::quic::test::make_server_core_config();
+    config.application_protocol = "hq-interop";
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.process_inbound_datagram(datagram, coquic::quic::test::test_time(1));
+
+    const auto outbound = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(outbound.empty());
+    ASSERT_EQ(tracked_packet_count(connection.initial_space_), 1u);
+    const auto packet_number = first_tracked_packet(connection.initial_space_).packet_number;
+    ASSERT_GT(connection.congestion_controller_.bytes_in_flight(), 0u);
+
+    const auto bytes_in_flight_before_ack = connection.congestion_controller_.bytes_in_flight();
+    const auto acked = connection.process_inbound_ack(connection.initial_space_,
+                                                      coquic::quic::AckFrame{
+                                                          .largest_acknowledged = packet_number,
+                                                          .first_ack_range = 0,
+                                                      },
+                                                      coquic::quic::test::test_time(2),
+                                                      /*ack_delay_exponent=*/0,
+                                                      /*max_ack_delay_ms=*/0,
+                                                      /*suppress_pto_reset=*/false);
+
+    ASSERT_TRUE(acked.has_value());
+    EXPECT_EQ(tracked_packet_count(connection.initial_space_), 0u);
+    EXPECT_LT(connection.congestion_controller_.bytes_in_flight(), bytes_in_flight_before_ack);
+}
+
 TEST(QuicCoreTest, ProcessCapturedPicoquicClientInitialIgnoresTrailingDatagramPadding) {
     auto datagram = captured_picoquic_client_initial_datagram();
 

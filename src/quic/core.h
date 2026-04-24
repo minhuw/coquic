@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -21,6 +22,15 @@
 #include "src/quic/version.h"
 
 namespace coquic::quic {
+
+enum class QuicCongestionControlAlgorithm : std::uint8_t {
+    newreno,
+    bbr,
+};
+
+std::string_view congestion_control_algorithm_name(QuicCongestionControlAlgorithm algorithm);
+std::optional<QuicCongestionControlAlgorithm>
+parse_congestion_control_algorithm(std::string_view value);
 
 struct QuicTransportConfig {
     std::uint64_t max_idle_timeout = 0;
@@ -36,6 +46,7 @@ struct QuicTransportConfig {
     std::uint64_t initial_max_stream_data_uni = 256 << 10;
     std::uint64_t initial_max_streams_bidi = 16;
     std::uint64_t initial_max_streams_uni = 16;
+    QuicCongestionControlAlgorithm congestion_control = QuicCongestionControlAlgorithm::newreno;
 };
 
 struct QuicQlogConfig {

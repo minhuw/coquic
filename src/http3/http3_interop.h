@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "src/quic/core.h"
+
 namespace coquic::http3 {
 
 enum class Http3InteropMode : std::uint8_t { server, client };
@@ -21,6 +23,8 @@ struct Http3InteropConfig {
     std::filesystem::path private_key_path;
     std::string server_name;
     std::vector<std::string> requests;
+    quic::QuicCongestionControlAlgorithm congestion_control =
+        quic::QuicCongestionControlAlgorithm::newreno;
 };
 
 std::optional<Http3InteropConfig> parse_http3_interop_args(int argc, char **argv);

@@ -1,7 +1,61 @@
 {
   "source": "https://quicwg.org/",
-  "fetched_at_utc": "2026-04-04T12:18:15Z",
+  "fetched_at_utc": "2026-04-24T11:55:59Z",
   "entries": [
+    {
+      "doc_id": "draft-ietf-ccwg-bbr-05",
+      "doc_kind": "internet-draft",
+      "draft_name": "draft-ietf-ccwg-bbr-05",
+      "title": "BBR Congestion Control",
+      "category": "recovery",
+      "url": "https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.txt",
+      "local_path": "docs/rfc/draft-ietf-ccwg-bbr-05.txt"
+    },
+    {
+      "doc_id": "draft-ietf-quic-ack-frequency-14",
+      "doc_kind": "internet-draft",
+      "draft_name": "draft-ietf-quic-ack-frequency-14",
+      "title": "QUIC Acknowledgment Frequency",
+      "category": "extension",
+      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.txt",
+      "local_path": "docs/rfc/draft-ietf-quic-ack-frequency-14.txt"
+    },
+    {
+      "doc_id": "draft-ietf-quic-multipath-21",
+      "doc_kind": "internet-draft",
+      "draft_name": "draft-ietf-quic-multipath-21",
+      "title": "Managing multiple paths for a QUIC connection",
+      "category": "extension",
+      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-multipath-21.txt",
+      "local_path": "docs/rfc/draft-ietf-quic-multipath-21.txt"
+    },
+    {
+      "doc_id": "draft-ietf-quic-qlog-h3-events-12",
+      "doc_kind": "internet-draft",
+      "draft_name": "draft-ietf-quic-qlog-h3-events-12",
+      "title": "HTTP/3 qlog event definitions",
+      "category": "qlog",
+      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-h3-events-12.txt",
+      "local_path": "docs/rfc/draft-ietf-quic-qlog-h3-events-12.txt"
+    },
+    {
+      "doc_id": "draft-ietf-quic-qlog-main-schema-13",
+      "doc_kind": "internet-draft",
+      "draft_name": "draft-ietf-quic-qlog-main-schema-13",
+      "title": "qlog: Structured Logging for Network Protocols",
+      "category": "qlog",
+      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-main-schema-13.txt",
+      "local_path": "docs/rfc/draft-ietf-quic-qlog-main-schema-13.txt"
+    },
+    {
+      "doc_id": "draft-ietf-quic-qlog-quic-events-12",
+      "doc_kind": "internet-draft",
+      "draft_name": "draft-ietf-quic-qlog-quic-events-12",
+      "title": "QUIC event definitions for qlog",
+      "category": "qlog",
+      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-quic-events-12.txt",
+      "local_path": "docs/rfc/draft-ietf-quic-qlog-quic-events-12.txt"
+    },
     {
       "doc_id": "rfc8985",
       "doc_kind": "rfc",
@@ -118,51 +172,6 @@
       "category": "extension",
       "url": "https://www.rfc-editor.org/rfc/rfc9369.txt",
       "local_path": "docs/rfc/rfc9369.txt"
-    },
-    {
-      "doc_id": "draft-ietf-quic-ack-frequency-14",
-      "doc_kind": "internet-draft",
-      "draft_name": "draft-ietf-quic-ack-frequency-14",
-      "title": "QUIC Acknowledgment Frequency",
-      "category": "extension",
-      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.txt",
-      "local_path": "docs/rfc/draft-ietf-quic-ack-frequency-14.txt"
-    },
-    {
-      "doc_id": "draft-ietf-quic-multipath-21",
-      "doc_kind": "internet-draft",
-      "draft_name": "draft-ietf-quic-multipath-21",
-      "title": "Managing multiple paths for a QUIC connection",
-      "category": "extension",
-      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-multipath-21.txt",
-      "local_path": "docs/rfc/draft-ietf-quic-multipath-21.txt"
-    },
-    {
-      "doc_id": "draft-ietf-quic-qlog-main-schema-13",
-      "doc_kind": "internet-draft",
-      "draft_name": "draft-ietf-quic-qlog-main-schema-13",
-      "title": "qlog: Structured Logging for Network Protocols",
-      "category": "qlog",
-      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-main-schema-13.txt",
-      "local_path": "docs/rfc/draft-ietf-quic-qlog-main-schema-13.txt"
-    },
-    {
-      "doc_id": "draft-ietf-quic-qlog-quic-events-12",
-      "doc_kind": "internet-draft",
-      "draft_name": "draft-ietf-quic-qlog-quic-events-12",
-      "title": "QUIC event definitions for qlog",
-      "category": "qlog",
-      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-quic-events-12.txt",
-      "local_path": "docs/rfc/draft-ietf-quic-qlog-quic-events-12.txt"
-    },
-    {
-      "doc_id": "draft-ietf-quic-qlog-h3-events-12",
-      "doc_kind": "internet-draft",
-      "draft_name": "draft-ietf-quic-qlog-h3-events-12",
-      "title": "HTTP/3 qlog event definitions",
-      "category": "qlog",
-      "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-h3-events-12.txt",
-      "local_path": "docs/rfc/draft-ietf-quic-qlog-h3-events-12.txt"
     }
   ]
 }

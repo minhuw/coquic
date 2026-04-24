@@ -10,6 +10,7 @@
 
 #include "src/http3/http3.h"
 #include "src/io/io_backend.h"
+#include "src/quic/core.h"
 
 namespace coquic::http3 {
 
@@ -39,6 +40,8 @@ struct Http3RuntimeConfig {
     std::optional<std::filesystem::path> output_path;
     std::string server_name;
     bool verify_peer = false;
+    quic::QuicCongestionControlAlgorithm congestion_control =
+        quic::QuicCongestionControlAlgorithm::newreno;
 };
 
 struct Http3RuntimeTransferJob {

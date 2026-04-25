@@ -3042,12 +3042,15 @@ bool runtime_additional_internal_coverage_for_test() {
 bool runtime_server_local_error_without_connection_coverage_for_test() {
     const auto now = quic::QuicCoreClock::now();
     const auto server_config = make_runtime_server_config_for_test(std::filesystem::current_path());
+    auto endpoint_config = make_http3_server_endpoint_config(server_config)
+                               .value_or(quic::QuicCoreEndpointConfig{
+                                   .role = quic::EndpointRole::server,
+                                   .verify_peer = server_config.verify_peer,
+                                   .application_protocol = std::string(kHttp3ApplicationProtocol),
+                               });
+    endpoint_config.transport.congestion_control = server_config.congestion_control;
     auto backend = std::make_unique<RuntimeTestBackend>();
-    const auto endpoint = make_http3_server_endpoint_config(server_config);
-    if (!endpoint.has_value()) {
-        return false;
-    }
-    Http3ServerRuntime runtime(server_config, endpoint.value(), std::move(backend));
+    Http3ServerRuntime runtime(server_config, std::move(endpoint_config), std::move(backend));
 
     quic::QuicCoreResult local_error_without_connection;
     local_error_without_connection.local_error = quic::QuicCoreLocalError{

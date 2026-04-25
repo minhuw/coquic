@@ -1130,6 +1130,51 @@ TEST(QuicCoreTest,
     EXPECT_TRUE(skipped_duplicate_initial);
 }
 
+TEST(QuicCoreTest,
+     CompatibleNegotiationFinalizesInitialWhenDuplicateInitialWouldExceedCongestionWindow) {
+    bool finalized_single_initial = false;
+
+    for (std::size_t crypto_size = 64; crypto_size <= 2048 && !finalized_single_initial;
+         crypto_size += 64) {
+        auto config = coquic::quic::test::make_server_core_config();
+        config.max_outbound_datagram_size = 4096;
+        coquic::quic::QuicConnection connection(std::move(config));
+        connection.started_ = true;
+        connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+        connection.original_version_ = coquic::quic::kQuicVersion1;
+        connection.current_version_ = coquic::quic::kQuicVersion2;
+        connection.client_initial_destination_connection_id_ = bytes_from_hex("8394c8f03e515708");
+        connection.peer_source_connection_id_ = bytes_from_hex("c101");
+        connection.peer_transport_parameters_validated_ = true;
+        connection.peer_address_validated_ = false;
+        connection.anti_amplification_received_bytes_ = 4096;
+        connection.initial_space_.send_crypto.append(
+            std::vector<std::byte>(crypto_size, std::byte{0x6a}));
+        connection.congestion_controller_.congestion_window_ = 1200;
+
+        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        if (datagram.empty() || connection.has_failed()) {
+            continue;
+        }
+
+        const auto packets = decode_sender_datagram(connection, datagram);
+        if (packets.size() != 1u) {
+            continue;
+        }
+        if (!std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packets.front())) {
+            continue;
+        }
+        if (connection.initial_space_.next_send_packet_number != 1u ||
+            tracked_packet_count(connection.initial_space_) != 1u) {
+            continue;
+        }
+
+        finalized_single_initial = true;
+    }
+
+    EXPECT_TRUE(finalized_single_initial);
+}
+
 TEST(QuicCoreTest, ClientProcessInboundPacketAdoptsSupportedVersionFromInitialAndHandshake) {
     coquic::quic::QuicConnection client(coquic::quic::test::make_client_core_config());
     client.started_ = true;

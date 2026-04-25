@@ -750,6 +750,26 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection
               coquic::quic::QuicCongestionControlAlgorithm::bbr);
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidCongestionControlSelection) {
+    {
+        const char *argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "cubic");
+
+        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        EXPECT_FALSE(parsed.has_value());
+    }
+
+    {
+        const char *argv[] = {"coquic", "interop-client", "--congestion-control",
+                              "cubic",  "--requests",     "https://localhost/a.txt"};
+        const auto parsed = coquic::http09::parse_http09_runtime_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        EXPECT_FALSE(parsed.has_value());
+    }
+}
+
 TEST(QuicHttp09RuntimeTest, RuntimeTreatsRetryTestcaseAliasAsHandshakeWithRetryEnabled) {
     {
         const char *env_argv[] = {"coquic"};

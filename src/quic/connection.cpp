@@ -42,6 +42,16 @@ constexpr std::uint32_t kPersistentCongestionThreshold = 3;
 constexpr std::size_t kMaximumImmediateApplicationDatagramsPerBurst = 21;
 constexpr auto kApplicationBurstResumeDelay = std::chrono::milliseconds(1);
 
+struct ConnectionDrainTestHooks {
+    bool force_missing_packet_metadata = false;
+    bool force_missing_fallback_packet_length = false;
+};
+
+ConnectionDrainTestHooks &connection_drain_test_hooks() {
+    static ConnectionDrainTestHooks hooks;
+    return hooks;
+}
+
 bool is_ect_codepoint(QuicEcnCodepoint ecn) {
     return ecn == QuicEcnCodepoint::ect0 || ecn == QuicEcnCodepoint::ect1;
 }
@@ -2381,12 +2391,11 @@ void QuicConnection::detect_lost_packets(PacketSpaceState &packet_space, QuicCor
     }
     const auto ack_eliciting_lost_packets = ack_eliciting_in_flight_losses(lost_packets);
     if (!ack_eliciting_lost_packets.empty()) {
-        const auto max_ack_delay =
-            &packet_space == &application_space_
-                ? std::chrono::milliseconds(peer_transport_parameters_.has_value()
-                                                ? peer_transport_parameters_->max_ack_delay
-                                                : TransportParameters{}.max_ack_delay)
-                : std::chrono::milliseconds::zero();
+        const auto peer_max_ack_delay_ms =
+            peer_transport_parameters_.value_or(TransportParameters{}).max_ack_delay;
+        const auto max_ack_delay = std::chrono::milliseconds{
+            peer_max_ack_delay_ms *
+            static_cast<std::uint64_t>(&packet_space == &application_space_)};
         congestion_controller_.on_loss_event(now,
                                              latest_packet_sent_time(ack_eliciting_lost_packets));
         if (establishes_persistent_congestion(ack_eliciting_lost_packets, shared_rtt_state,
@@ -6389,7 +6398,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
 
             auto sent_packet = pending.packet;
             sent_packet.bytes_in_flight =
-                (sent_packet.ack_eliciting && sent_packet.in_flight) ? *packet_length : 0;
+                *packet_length *
+                static_cast<std::size_t>(sent_packet.ack_eliciting & sent_packet.in_flight);
             track_sent_packet(*pending.packet_space, std::move(sent_packet));
         }
         pending_tracked_packets.clear();
@@ -6398,7 +6408,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
     const auto track_pending_packets_from_datagram =
         [&](const SerializedProtectedDatagram &datagram) -> bool {
         return track_pending_packets([&](const PendingTrackedPacket &pending) {
-            if (pending.packet_index >= datagram.packet_metadata.size()) {
+            if (connection_drain_test_hooks().force_missing_packet_metadata |
+                (pending.packet_index >= datagram.packet_metadata.size())) {
                 return std::optional<std::size_t>{};
             }
             return std::optional<std::size_t>{
@@ -6408,7 +6419,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
     };
     const auto preserve_pending_tracked_packets = [&]() -> bool {
         return track_pending_packets([&](const PendingTrackedPacket &pending) {
-            if (pending.fallback_packet_length == 0) {
+            if (connection_drain_test_hooks().force_missing_fallback_packet_length |
+                (pending.fallback_packet_length == 0)) {
                 return std::optional<std::size_t>{};
             }
             return std::optional<std::size_t>{pending.fallback_packet_length};
@@ -6422,7 +6434,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
             return true;
         }
         const auto pacing_deadline = congestion_controller_.next_send_time(bytes);
-        return pacing_deadline.has_value() && now < *pacing_deadline;
+        return static_cast<bool>(pacing_deadline.has_value() &
+                                 (now < pacing_deadline.value_or(now)));
     };
     const bool defer_server_compatible_negotiation_crypto =
         (config_.role == EndpointRole::server) && (original_version_ != current_version_) &&
@@ -6819,10 +6832,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                     max_outbound_datagram_size) {
                     const bool bypass_congestion_window =
                         initial_space_.pending_probe_packet.has_value();
-                    if (initial_ack_eliciting &&
-                        congestion_blocks_datagram(
-                            duplicate_candidate_datagram.value().bytes.size(),
-                            bypass_congestion_window)) {
+                    const bool duplicate_initial_congestion_blocked = congestion_blocks_datagram(
+                        duplicate_candidate_datagram.value().bytes.size(),
+                        bypass_congestion_window);
+                    if (initial_ack_eliciting & duplicate_initial_congestion_blocked) {
                         return finalize_datagram(packets);
                     }
                     packets = std::move(duplicate_candidate_packets);
@@ -9475,6 +9488,14 @@ bool connection_header_packet_space_coverage_for_tests() {
     }
 
     return ok;
+}
+
+void connection_set_force_missing_packet_metadata_for_tests(bool enabled) {
+    connection_drain_test_hooks().force_missing_packet_metadata = enabled;
+}
+
+void connection_set_force_missing_fallback_packet_length_for_tests(bool enabled) {
+    connection_drain_test_hooks().force_missing_fallback_packet_length = enabled;
 }
 
 } // namespace coquic::quic::test

@@ -17,15 +17,11 @@ std::byte prefix_mask(std::size_t length) {
 } // namespace
 
 std::size_t encoded_varint_size(std::uint64_t value) {
-    std::size_t length = 8;
-    if (value <= 63) {
-        length = 1;
-    } else if (value <= 16383) {
-        length = 2;
-    } else if (value <= 1073741823) {
-        length = 4;
-    }
-    return length;
+    constexpr std::size_t lengths[] = {1, 2, 4, 8};
+    const auto width_index = static_cast<std::size_t>(value > 63) +
+                             static_cast<std::size_t>(value > 16383) +
+                             static_cast<std::size_t>(value > 1073741823);
+    return lengths[width_index];
 }
 
 CodecResult<std::vector<std::byte>> encode_varint(std::uint64_t value) {

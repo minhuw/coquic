@@ -1480,6 +1480,30 @@ TEST(QuicHttp3RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection)
               coquic::quic::QuicCongestionControlAlgorithm::bbr);
 }
 
+TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsInvalidCongestionControlArguments) {
+    {
+        const char *argv[] = {
+            "coquic-http3",
+            "h3-client",
+            "https://localhost:9443/ok",
+            "--congestion-control",
+        };
+        const auto parsed = coquic::http3::parse_http3_runtime_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        EXPECT_FALSE(parsed.has_value());
+    }
+
+    {
+        const char *argv[] = {
+            "coquic-http3",         "h3-client", "https://localhost:9443/ok",
+            "--congestion-control", "cubic",
+        };
+        const auto parsed = coquic::http3::parse_http3_runtime_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        EXPECT_FALSE(parsed.has_value());
+    }
+}
+
 TEST(QuicHttp3RuntimeTest, RuntimeMiscInternalCoverageHookReturnsTrue) {
     EXPECT_TRUE(coquic::http3::runtime_misc_internal_coverage_for_test());
 }

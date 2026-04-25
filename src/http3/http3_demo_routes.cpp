@@ -97,7 +97,7 @@ std::optional<std::size_t> parse_bytes_query(std::string_view path) {
 
     std::optional<std::size_t> parsed_bytes;
     std::size_t param_begin = 0;
-    while (param_begin <= tail.size()) {
+    while (true) {
         const auto param_end = tail.find('&', param_begin);
         const auto param =
             tail.substr(param_begin, param_end == std::string_view::npos ? std::string_view::npos

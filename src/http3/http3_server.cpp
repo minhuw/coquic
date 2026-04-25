@@ -13,6 +13,16 @@ namespace {
 
 constexpr Http3DemoRouteLimits kDefaultDemoRouteLimits{};
 
+struct Http3ServerTestHooks {
+    bool force_abort_request_body_failure = false;
+    bool force_follow_up_poll_terminal_failure = false;
+};
+
+Http3ServerTestHooks &server_test_hooks() {
+    static Http3ServerTestHooks hooks;
+    return hooks;
+}
+
 Http3ServerEndpointUpdate make_failure_update(bool handled_local_error = false) {
     return Http3ServerEndpointUpdate{
         .terminal_failure = true,
@@ -124,13 +134,15 @@ Http3Result<bool> submit_response(Http3Connection &connection, std::uint64_t str
     auto final_head = response.head;
     const bool head_request = request_head.method == "HEAD";
     if (head_request && !final_head.content_length.has_value()) {
-        if (response.body.size() >
-            static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
-            return Http3Result<bool>::failure(Http3Error{
-                .code = Http3ErrorCode::internal_error,
-                .detail = "response body exceeds representable content-length",
-                .stream_id = stream_id,
-            });
+        if constexpr (sizeof(std::size_t) > sizeof(std::uint64_t)) {
+            if (response.body.size() >
+                static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
+                return Http3Result<bool>::failure(Http3Error{
+                    .code = Http3ErrorCode::internal_error,
+                    .detail = "response body exceeds representable content-length",
+                    .stream_id = stream_id,
+                });
+            }
         }
         final_head.content_length = static_cast<std::uint64_t>(response.body.size());
     }
@@ -212,8 +224,15 @@ bool commit_early_response(Http3Connection &connection, std::uint64_t stream_id,
 
     ignored_request_streams.insert(stream_id);
     if (!request_completed) {
-        const auto aborted = connection.abort_request_body(
-            stream_id, static_cast<std::uint64_t>(Http3ErrorCode::no_error));
+        const auto aborted =
+            server_test_hooks().force_abort_request_body_failure
+                ? Http3Result<bool>::failure(Http3Error{
+                      .code = Http3ErrorCode::general_protocol_error,
+                      .detail = "forced abort failure",
+                      .stream_id = stream_id,
+                  })
+                : connection.abort_request_body(
+                      stream_id, static_cast<std::uint64_t>(Http3ErrorCode::no_error));
         if (!aborted.has_value()) {
             return false;
         }
@@ -396,18 +415,12 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             continue;
         }
 
-        Http3Request request;
-        if (const auto &request_head = pending_it->second.head; request_head.has_value()) {
-            request = Http3Request{
-                .head = *request_head,
-                .body = pending_it->second.body,
-                .trailers = pending_it->second.trailers,
-            };
-        } else {
-            failed_ = true;
-            pending_requests_.clear();
-            return make_failure_update();
-        }
+        const auto &request_head = pending_it->second.head.value();
+        auto request = Http3Request{
+            .head = request_head,
+            .body = pending_it->second.body,
+            .trailers = pending_it->second.trailers,
+        };
         auto response = built_in_or_buffered_handler_response(config_, request);
 
         const auto submitted =
@@ -427,7 +440,9 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
     }
 
     if (dispatched_response) {
-        auto follow_up = connection_.poll(now);
+        auto follow_up = server_test_hooks().force_follow_up_poll_terminal_failure
+                             ? Http3EndpointUpdate{.terminal_failure = true}
+                             : connection_.poll(now);
         if (!merge_connection_update(update, follow_up)) {
             failed_ = true;
             pending_requests_.clear();
@@ -473,6 +488,19 @@ std::string server_inspect_json_body_for_test(const Http3Request &request) {
 
 Http3Response server_default_route_response_for_test(const Http3Request &request) {
     return default_route_response(request);
+}
+
+bool server_would_exceed_body_limit_for_test(std::size_t buffered_bytes, std::size_t incoming_bytes,
+                                             std::size_t limit) {
+    return would_exceed_body_limit(buffered_bytes, incoming_bytes, limit);
+}
+
+void server_set_force_abort_request_body_failure_for_test(bool enabled) {
+    server_test_hooks().force_abort_request_body_failure = enabled;
+}
+
+void server_set_force_follow_up_poll_terminal_failure_for_test(bool enabled) {
+    server_test_hooks().force_follow_up_poll_terminal_failure = enabled;
 }
 
 bool server_merge_connection_update_for_test(Http3ServerEndpointUpdate &out,

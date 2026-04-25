@@ -166,6 +166,10 @@ struct BootstrapTestHooks {
     std::size_t forced_poll_index = 0;
     std::vector<ForcedAcceptResult> forced_accept_results;
     std::size_t forced_accept_index = 0;
+    std::vector<std::string> forced_ssl_read_chunks;
+    std::size_t forced_ssl_read_index = 0;
+    std::vector<int> forced_ssl_write_results;
+    std::size_t forced_ssl_write_index = 0;
 };
 
 BootstrapTestHooks &bootstrap_test_hooks() {
@@ -216,6 +220,29 @@ int bootstrap_listen(int fd, int backlog) {
         return -1;
     }
     return ::listen(fd, backlog);
+}
+
+int bootstrap_ssl_read(SSL *ssl, void *buffer, int buffer_size) {
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.forced_ssl_read_index < hooks.forced_ssl_read_chunks.size()) {
+        const auto &chunk = hooks.forced_ssl_read_chunks[hooks.forced_ssl_read_index++];
+        const auto bytes =
+            std::min<std::size_t>(static_cast<std::size_t>(buffer_size), chunk.size());
+        std::copy_n(chunk.data(), bytes, static_cast<char *>(buffer));
+        return static_cast<int>(bytes);
+    }
+    if (ssl == nullptr) {
+        return 0;
+    }
+    return SSL_read(ssl, buffer, buffer_size);
+}
+
+int bootstrap_ssl_write(SSL *ssl, const void *buffer, int buffer_size) {
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.forced_ssl_write_index < hooks.forced_ssl_write_results.size()) {
+        return hooks.forced_ssl_write_results[hooks.forced_ssl_write_index++];
+    }
+    return SSL_write(ssl, buffer, buffer_size);
 }
 
 int bootstrap_poll(pollfd *fds, nfds_t count, int timeout_ms) {
@@ -465,7 +492,8 @@ bool write_all_ssl(SSL *ssl, std::string_view bytes) {
         const auto remaining = bytes.size() - written;
         const auto chunk_size = std::min<std::size_t>(
             remaining, static_cast<std::size_t>(std::numeric_limits<int>::max()));
-        const int result = SSL_write(ssl, bytes.data() + written, static_cast<int>(chunk_size));
+        const int result =
+            bootstrap_ssl_write(ssl, bytes.data() + written, static_cast<int>(chunk_size));
         if (result <= 0) {
             return false;
         }
@@ -492,24 +520,29 @@ HttpRequestReadProgress append_http_request_bytes(std::string &request_text,
     return HttpRequestReadProgress::incomplete;
 }
 
-std::optional<std::string> read_http_request(SSL *ssl) {
+template <typename ReadChunk>
+std::optional<std::string> read_http_request_with_reader(ReadChunk &&read_chunk) {
     std::string request_text;
     std::array<char, 4096> buffer{};
-    while (request_text.size() < kBootstrapRequestLimitBytes) {
-        const int read = SSL_read(ssl, buffer.data(), static_cast<int>(buffer.size()));
+    while (true) {
+        const int read = read_chunk(buffer.data(), buffer.size());
         if (read <= 0) {
             return std::nullopt;
         }
         const auto progress = append_http_request_bytes(
             request_text, std::string_view(buffer.data(), static_cast<std::size_t>(read)));
-        if (progress == HttpRequestReadProgress::complete) {
-            return request_text;
-        }
-        if (progress == HttpRequestReadProgress::invalid) {
-            return std::nullopt;
+        if (progress != HttpRequestReadProgress::incomplete) {
+            return progress == HttpRequestReadProgress::complete
+                       ? std::optional<std::string>{request_text}
+                       : std::nullopt;
         }
     }
-    return std::nullopt;
+}
+
+std::optional<std::string> read_http_request(SSL *ssl) {
+    return read_http_request_with_reader([&](char *buffer, std::size_t buffer_size) {
+        return bootstrap_ssl_read(ssl, buffer, static_cast<int>(buffer_size));
+    });
 }
 
 std::string serialize_response(const Http3BootstrapConfig &config,
@@ -801,6 +834,28 @@ bool bootstrap_parse_request_for_test(std::string_view request_text) {
     return parse_bootstrap_request(request_text).has_value();
 }
 
+std::optional<std::string>
+bootstrap_read_http_request_chunks_for_test(const std::vector<std::string> &chunks) {
+    std::size_t chunk_index = 0;
+    std::size_t chunk_offset = 0;
+    return read_http_request_with_reader([&](char *buffer, std::size_t buffer_size) -> int {
+        if (chunk_index >= chunks.size()) {
+            return 0;
+        }
+
+        const auto &chunk = chunks[chunk_index];
+        const auto remaining = chunk.size() - chunk_offset;
+        const auto bytes = std::min(buffer_size, remaining);
+        std::copy_n(chunk.data() + static_cast<std::ptrdiff_t>(chunk_offset), bytes, buffer);
+        chunk_offset += bytes;
+        if (chunk_offset == chunk.size()) {
+            ++chunk_index;
+            chunk_offset = 0;
+        }
+        return static_cast<int>(bytes);
+    });
+}
+
 bool bootstrap_rejects_oversized_request_without_terminator_for_test(
     std::string_view request_text) {
     std::string buffered_request;
@@ -982,6 +1037,26 @@ bool bootstrap_internal_coverage_for_test() {
     check(ssl_context != nullptr);
     bootstrap_test_hooks().fail_ssl_set_fd = true;
     serve_bootstrap_connection(config, ssl_context.get(), -1);
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_ssl_write_results = {2};
+    check(write_all_ssl(nullptr, "ok"));
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_ssl_write_results = {0};
+    check(!write_all_ssl(nullptr, "fail"));
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_ssl_read_chunks = {"GET / HTTP/1.1\r\n\r\n"};
+    check(read_http_request(nullptr).has_value());
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_ssl_read_chunks = {std::string(kBootstrapRequestLimitBytes, 'a')};
+    check(!read_http_request(nullptr).has_value());
+
+    reset_bootstrap_test_hooks();
+    bootstrap_test_hooks().forced_ssl_read_chunks = {"GET / HTTP/1.1\r\nHost: example.test\r\n"};
+    check(!read_http_request(nullptr).has_value());
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_listen_socket_failures = 1;

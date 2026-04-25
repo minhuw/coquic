@@ -694,7 +694,7 @@ expand_traffic_secret_cached(const TrafficSecret &secret) {
             const bool header_protection_key_matches =
                 cached_inputs.header_protection_key == secret.header_protection_key;
             const bool version_matches = cached_inputs.quic_version == secret.quic_version;
-            if (secret_matches && header_protection_key_matches && version_matches) {
+            if (secret_matches & header_protection_key_matches & version_matches) {
                 return CodecResult<std::reference_wrapper<const PacketProtectionKeys>>::success(
                     std::cref(secret.cached_packet_protection_keys.value()));
             }

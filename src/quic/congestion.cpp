@@ -97,13 +97,7 @@ std::size_t clamp_to_size_t(double value) {
 } // namespace
 
 std::string_view congestion_control_algorithm_name(QuicCongestionControlAlgorithm algorithm) {
-    switch (algorithm) {
-    case QuicCongestionControlAlgorithm::newreno:
-        return "newreno";
-    case QuicCongestionControlAlgorithm::bbr:
-        return "bbr";
-    }
-    return "newreno";
+    return algorithm == QuicCongestionControlAlgorithm::bbr ? "bbr" : "newreno";
 }
 
 std::optional<QuicCongestionControlAlgorithm>
@@ -278,7 +272,7 @@ void BbrCongestionController::on_packet_sent(SentPacketRecord &packet) {
     maybe_mark_connection_app_limited(packet.app_limited);
     packet.app_limited = is_app_limited();
     handle_restart_from_idle(packet.sent_time);
-    if (!first_sent_time_.has_value() || bytes_in_flight_ == 0) {
+    if ((!first_sent_time_.has_value()) | (bytes_in_flight_ == 0)) {
         first_sent_time_ = packet.sent_time;
         delivered_time_ = packet.sent_time;
     }
@@ -331,9 +325,7 @@ void BbrCongestionController::on_packets_acked(std::span<const SentPacketRecord>
     set_send_quantum();
     set_cwnd(rs);
 
-    if (rs.delivered > 0) {
-        idle_restart_ = false;
-    }
+    idle_restart_ &= rs.delivered == 0;
 }
 
 void BbrCongestionController::on_packets_lost(std::span<const SentPacketRecord> packets) {
@@ -375,7 +367,7 @@ void BbrCongestionController::on_loss_event(QuicCoreTimePoint loss_detection_tim
         save_state_upon_loss();
     }
 
-    if (pending_probe_bw_down_ && mode_ == Mode::probe_bw_up) {
+    if (pending_probe_bw_down_ & (mode_ == Mode::probe_bw_up)) {
         start_probe_bw_down(loss_detection_time);
     }
     pending_probe_bw_down_ = false;
@@ -404,7 +396,7 @@ void BbrCongestionController::handle_restart_from_idle(QuicCoreTimePoint now) {
     idle_restart_ = true;
     extra_acked_interval_start_ = now;
     extra_acked_delivered_ = 0;
-    if (is_in_probe_bw_state() && bandwidth_bytes_per_second_ > 0.0) {
+    if (is_in_probe_bw_state() & (bandwidth_bytes_per_second_ > 0.0)) {
         pacing_rate_bytes_per_second_ = bandwidth_bytes_per_second_ * kBbrPacingMargin;
     } else if (mode_ == Mode::probe_rtt) {
         check_probe_rtt_done(now);
@@ -445,21 +437,27 @@ BbrCongestionController::generate_rate_sample(std::span<const SentPacketRecord> 
                                    ? 0
                                    : bytes_in_flight_ - packet.bytes_in_flight;
         }
-        if (!packet.ack_eliciting || packet.bytes_in_flight == 0) {
+        if ((!packet.ack_eliciting) | (packet.bytes_in_flight == 0)) {
             continue;
         }
-        if (sample_packet == nullptr || packet.sent_time > sample_packet->sent_time ||
-            (packet.sent_time == sample_packet->sent_time &&
-             packet.packet_number > sample_packet->packet_number)) {
+        const auto sample_sent_time =
+            sample_packet != nullptr ? sample_packet->sent_time : QuicCoreTimePoint::min();
+        const auto sample_packet_number =
+            sample_packet != nullptr ? sample_packet->packet_number : 0;
+        const bool newer_sample = (sample_packet == nullptr) |
+                                  (packet.sent_time > sample_sent_time) |
+                                  ((packet.sent_time == sample_sent_time) &
+                                   (packet.packet_number > sample_packet_number));
+        if (newer_sample) {
             sample_packet = &packet;
         }
-        if (recovery_start_time_.has_value() && packet.sent_time > *recovery_start_time_) {
+        if (packet.sent_time > recovery_start_time_.value_or(packet.sent_time)) {
             rs.exit_loss_recovery = true;
         }
     }
 
     total_delivered_ += rs.newly_acked;
-    if (is_app_limited() && total_delivered_ > app_limited_until_delivered_) {
+    if (is_app_limited() & (total_delivered_ > app_limited_until_delivered_)) {
         app_limited_until_delivered_ = 0;
     }
     delivered_time_ = now;
@@ -506,9 +504,8 @@ void BbrCongestionController::start_round() {
 
 void BbrCongestionController::update_max_bw(const RateSample &rs) {
     update_round(rs.prior_delivered);
-    if (rs.delivery_rate_bytes_per_second <= 0.0 ||
-        (rs.delivery_rate_bytes_per_second < max_bandwidth_bytes_per_second_ &&
-         rs.is_app_limited)) {
+    const bool below_max_bw = rs.delivery_rate_bytes_per_second < max_bandwidth_bytes_per_second_;
+    if ((rs.delivery_rate_bytes_per_second <= 0.0) | (below_max_bw & rs.is_app_limited)) {
         return;
     }
 
@@ -556,7 +553,8 @@ void BbrCongestionController::update_latest_delivery_signals(const RateSample &r
     bw_latest_ = std::max(bw_latest_, rs.delivery_rate_bytes_per_second);
     inflight_latest_ =
         std::max(inflight_latest_, clamp_to_size_t(static_cast<double>(rs.delivered)));
-    if (loss_round_delivered_.has_value() && rs.prior_delivered >= *loss_round_delivered_) {
+    if (rs.prior_delivered >=
+        loss_round_delivered_.value_or(std::numeric_limits<std::uint64_t>::max())) {
         loss_round_delivered_ = total_delivered_;
         loss_round_start_ = true;
     }
@@ -573,16 +571,16 @@ void BbrCongestionController::update_congestion_signals(const RateSample &rs) {
     previous_round_lost_bytes_ = loss_bytes_in_round_;
     previous_round_loss_events_ = loss_events_in_round_;
 
-    if (!is_probing_bw() && loss_in_round_) {
-        if (std::isinf(bw_shortterm_)) {
-            bw_shortterm_ = max_bandwidth_bytes_per_second_;
-        }
-        if (inflight_shortterm_ == std::numeric_limits<std::size_t>::max()) {
-            inflight_shortterm_ = congestion_window_;
-        }
-        bw_shortterm_ = std::max(bw_latest_, kBbrBeta * bw_shortterm_);
+    const bool update_shortterm_model = (!is_probing_bw()) & loss_in_round_;
+    const auto shortterm_bw =
+        std::isinf(bw_shortterm_) ? max_bandwidth_bytes_per_second_ : bw_shortterm_;
+    const auto shortterm_inflight = inflight_shortterm_ == std::numeric_limits<std::size_t>::max()
+                                        ? congestion_window_
+                                        : inflight_shortterm_;
+    if (update_shortterm_model) {
+        bw_shortterm_ = std::max(bw_latest_, kBbrBeta * shortterm_bw);
         inflight_shortterm_ = std::max(
-            inflight_latest_, clamp_to_size_t(kBbrBeta * static_cast<double>(inflight_shortterm_)));
+            inflight_latest_, clamp_to_size_t(kBbrBeta * static_cast<double>(shortterm_inflight)));
     }
 
     loss_in_round_ = false;
@@ -622,8 +620,9 @@ void BbrCongestionController::update_ack_aggregation(const RateSample &rs, QuicC
         if (extra_acked_round_[i] == std::numeric_limits<std::uint64_t>::max()) {
             continue;
         }
-        if (round_count_ < extra_acked_round_[i] ||
-            round_count_ - extra_acked_round_[i] >= filter_len) {
+        const bool outside_filter_window = (round_count_ < extra_acked_round_[i]) |
+                                           (round_count_ - extra_acked_round_[i] >= filter_len);
+        if (outside_filter_window) {
             continue;
         }
         extra_acked_ = std::max(extra_acked_, extra_acked_filter_[i]);
@@ -631,7 +630,7 @@ void BbrCongestionController::update_ack_aggregation(const RateSample &rs, QuicC
 }
 
 void BbrCongestionController::check_full_bw_reached(const RateSample &rs) {
-    if (full_bw_now_ || !round_start_ || rs.is_app_limited) {
+    if (full_bw_now_ | (!round_start_) | rs.is_app_limited) {
         return;
     }
 
@@ -646,21 +645,19 @@ void BbrCongestionController::check_full_bw_reached(const RateSample &rs) {
         ++full_bandwidth_rounds_without_growth_;
     }
     full_bw_now_ = full_bandwidth_rounds_without_growth_ >= kBbrFullBandwidthRoundLimit;
-    if (full_bw_now_) {
-        full_bw_reached_ = true;
-    }
+    full_bw_reached_ |= full_bw_now_;
 }
 
 void BbrCongestionController::check_startup_done() {
     check_startup_high_loss();
-    if (mode_ == Mode::startup && full_bw_reached_) {
+    if ((mode_ == Mode::startup) & full_bw_reached_) {
         enter_drain();
     }
 }
 
 void BbrCongestionController::check_startup_high_loss() {
-    if (mode_ != Mode::startup || !loss_round_start_ || !previous_round_had_loss_ ||
-        !recovery_start_time_.has_value() || round_count_ <= recovery_round_start_) {
+    if ((mode_ != Mode::startup) | (!loss_round_start_) | (!previous_round_had_loss_) |
+        (!recovery_start_time_.has_value()) | (round_count_ <= recovery_round_start_)) {
         return;
     }
 
@@ -682,8 +679,9 @@ void BbrCongestionController::check_startup_high_loss() {
 
 void BbrCongestionController::check_drain_done(QuicCoreTimePoint now) {
     static_cast<void>(now);
-    if (mode_ == Mode::drain &&
-        (bytes_in_flight_ <= inflight(1.0) || round_count_ > drain_start_round_ + 3)) {
+    const bool drain_enough = bytes_in_flight_ <= inflight(1.0);
+    const bool drain_round_elapsed = round_count_ > drain_start_round_ + 3;
+    if ((mode_ == Mode::drain) & (drain_enough | drain_round_elapsed)) {
         enter_probe_bw(now);
     }
 }
@@ -698,42 +696,33 @@ void BbrCongestionController::update_probe_bw_cycle_phase(const RateSample &rs,
         return;
     }
 
-    switch (mode_) {
-    case Mode::probe_bw_down:
+    if (mode_ == Mode::probe_bw_down) {
         if (is_time_to_probe_bw(now)) {
             return;
         }
         if (is_time_to_cruise()) {
             start_probe_bw_cruise();
         }
-        break;
-    case Mode::probe_bw_cruise:
+    } else if (mode_ == Mode::probe_bw_cruise) {
         static_cast<void>(is_time_to_probe_bw(now));
-        break;
-    case Mode::probe_bw_refill:
+    } else if (mode_ == Mode::probe_bw_refill) {
         if (round_start_) {
             bw_probe_samples_ = true;
             start_probe_bw_up(rs, now);
         }
-        break;
-    case Mode::probe_bw_up:
+    } else {
         if (is_time_to_go_down(rs)) {
             start_probe_bw_down(now);
         }
-        break;
-    case Mode::startup:
-    case Mode::drain:
-    case Mode::probe_rtt:
-        break;
     }
 }
 
 void BbrCongestionController::adapt_long_term_model(const RateSample &rs) {
-    if (ack_phase_ == AckPhase::probe_starting && round_start_) {
+    if ((ack_phase_ == AckPhase::probe_starting) & round_start_) {
         ack_phase_ = AckPhase::probe_feedback;
     }
-    if (ack_phase_ == AckPhase::probe_stopping && round_start_) {
-        if (is_in_probe_bw_state() && !rs.is_app_limited) {
+    if ((ack_phase_ == AckPhase::probe_stopping) & round_start_) {
+        if (is_in_probe_bw_state() & (!rs.is_app_limited)) {
             advance_max_bw_filter();
         }
     }
@@ -762,7 +751,7 @@ void BbrCongestionController::raise_inflight_longterm_slope() {
 }
 
 void BbrCongestionController::probe_inflight_longterm_upward(const RateSample &rs) {
-    if (!is_cwnd_limited() || congestion_window_ < inflight_longterm_) {
+    if ((!is_cwnd_limited()) | (congestion_window_ < inflight_longterm_)) {
         return;
     }
 
@@ -778,25 +767,32 @@ void BbrCongestionController::probe_inflight_longterm_upward(const RateSample &r
 }
 
 void BbrCongestionController::update_min_rtt(const RateSample &rs, QuicCoreTimePoint now) {
-    probe_rtt_expired_ =
-        probe_rtt_min_stamp_.has_value() && now > *probe_rtt_min_stamp_ + kBbrProbeRttInterval;
-    if (rs.rtt.has_value() && (!probe_rtt_min_delay_.has_value() ||
-                               *rs.rtt < *probe_rtt_min_delay_ || probe_rtt_expired_)) {
-        probe_rtt_min_delay_ = *rs.rtt;
+    probe_rtt_expired_ = now > probe_rtt_min_stamp_.value_or(now) + kBbrProbeRttInterval;
+    const auto probe_rtt_min_delay =
+        probe_rtt_min_delay_.value_or(std::chrono::milliseconds::max());
+    const auto sample_rtt = rs.rtt.value_or(probe_rtt_min_delay);
+    const bool update_probe_rtt =
+        rs.rtt.has_value() & ((sample_rtt < probe_rtt_min_delay) | probe_rtt_expired_ |
+                              (!probe_rtt_min_delay_.has_value()));
+    if (update_probe_rtt) {
+        probe_rtt_min_delay_ = sample_rtt;
         probe_rtt_min_stamp_ = now;
     }
 
-    const auto min_rtt_expired =
-        min_rtt_stamp_.has_value() && now > *min_rtt_stamp_ + kBbrMinRttWindow;
-    if (probe_rtt_min_delay_.has_value() &&
-        (!min_rtt_.has_value() || *probe_rtt_min_delay_ < *min_rtt_ || min_rtt_expired)) {
-        min_rtt_ = *probe_rtt_min_delay_;
+    const auto min_rtt_expired = now > min_rtt_stamp_.value_or(now) + kBbrMinRttWindow;
+    const auto min_rtt = min_rtt_.value_or(std::chrono::milliseconds::max());
+    const auto sample_min_rtt = probe_rtt_min_delay_.value_or(min_rtt);
+    const bool update_min_rtt_sample =
+        probe_rtt_min_delay_.has_value() &
+        ((sample_min_rtt < min_rtt) | min_rtt_expired | (!min_rtt_.has_value()));
+    if (update_min_rtt_sample) {
+        min_rtt_ = sample_min_rtt;
         min_rtt_stamp_ = probe_rtt_min_stamp_;
     }
 }
 
 void BbrCongestionController::check_probe_rtt(const RateSample &rs, QuicCoreTimePoint now) {
-    if (mode_ != Mode::probe_rtt && probe_rtt_expired_ && !idle_restart_) {
+    if ((mode_ != Mode::probe_rtt) & probe_rtt_expired_ & (!idle_restart_)) {
         enter_probe_rtt();
         save_cwnd();
         probe_rtt_done_stamp_.reset();
@@ -813,24 +809,21 @@ void BbrCongestionController::check_probe_rtt(const RateSample &rs, QuicCoreTime
 
 void BbrCongestionController::handle_probe_rtt(QuicCoreTimePoint now) {
     mark_connection_app_limited();
-    if (!probe_rtt_done_stamp_.has_value() && bytes_in_flight_ <= probe_rtt_cwnd()) {
+    if ((!probe_rtt_done_stamp_.has_value()) & (bytes_in_flight_ <= probe_rtt_cwnd())) {
         probe_rtt_done_stamp_ = now + kBbrProbeRttDuration;
         probe_rtt_round_done_ = false;
         start_round();
         return;
     }
-    if (probe_rtt_done_stamp_.has_value()) {
-        if (round_start_) {
-            probe_rtt_round_done_ = true;
-        }
-        if (probe_rtt_round_done_) {
-            check_probe_rtt_done(now);
-        }
+    const bool probe_rtt_done_stamp_set = probe_rtt_done_stamp_.has_value();
+    probe_rtt_round_done_ |= probe_rtt_done_stamp_set & round_start_;
+    if (probe_rtt_done_stamp_set & probe_rtt_round_done_) {
+        check_probe_rtt_done(now);
     }
 }
 
 void BbrCongestionController::check_probe_rtt_done(QuicCoreTimePoint now) {
-    if (probe_rtt_done_stamp_.has_value() && now > *probe_rtt_done_stamp_) {
+    if (now > probe_rtt_done_stamp_.value_or(now) + QuicCoreClock::duration::zero()) {
         probe_rtt_min_stamp_ = now;
         restore_cwnd();
         exit_probe_rtt(now);
@@ -859,7 +852,7 @@ void BbrCongestionController::set_pacing_rate_with_gain(double gain) {
     }
 
     const auto rate = gain * bandwidth_bytes_per_second_ * kBbrPacingMargin;
-    if (full_bw_reached_ || rate > pacing_rate_bytes_per_second_) {
+    if (full_bw_reached_ | (rate > pacing_rate_bytes_per_second_)) {
         pacing_rate_bytes_per_second_ = rate;
     }
 }
@@ -894,7 +887,7 @@ void BbrCongestionController::bound_cwnd_for_probe_rtt() {
 
 void BbrCongestionController::bound_cwnd_for_model() {
     auto cap = std::numeric_limits<std::size_t>::max();
-    if (is_in_probe_bw_state() && mode_ != Mode::probe_bw_cruise) {
+    if (is_in_probe_bw_state() & (mode_ != Mode::probe_bw_cruise)) {
         cap = inflight_longterm_;
     } else if (mode_ == Mode::probe_rtt || mode_ == Mode::probe_bw_cruise) {
         cap = inflight_with_headroom();
@@ -927,10 +920,11 @@ void BbrCongestionController::note_loss(const SentPacketRecord &packet) {
 
     loss_in_round_ = true;
     loss_bytes_in_round_ = saturating_add(loss_bytes_in_round_, packet.bytes_in_flight);
-    if (!last_lost_packet_number_.has_value() ||
-        packet.packet_number != *last_lost_packet_number_ + 1) {
-        ++loss_events_in_round_;
-    }
+    const auto previous_lost_packet_number =
+        last_lost_packet_number_.value_or(packet.packet_number > 0 ? packet.packet_number - 1 : 0);
+    loss_events_in_round_ +=
+        static_cast<std::size_t>((!last_lost_packet_number_.has_value()) |
+                                 (packet.packet_number != previous_lost_packet_number + 1));
     last_lost_packet_number_ = packet.packet_number;
 }
 
@@ -1081,10 +1075,11 @@ void BbrCongestionController::handle_spurious_loss_detection(QuicCoreTimePoint n
     bw_shortterm_ = std::max(bw_shortterm_, undo_bw_shortterm_);
     inflight_shortterm_ = std::max(inflight_shortterm_, undo_inflight_shortterm_);
     inflight_longterm_ = std::max(inflight_longterm_, undo_inflight_longterm_);
-    if (mode_ != Mode::probe_rtt && undo_state_.has_value() && mode_ != *undo_state_) {
-        if (*undo_state_ == Mode::startup) {
+    const auto undo_state = undo_state_.value_or(mode_);
+    if ((mode_ != Mode::probe_rtt) & undo_state_.has_value() & (mode_ != undo_state)) {
+        if (undo_state == Mode::startup) {
             enter_startup();
-        } else if (*undo_state_ == Mode::probe_bw_up) {
+        } else if (undo_state == Mode::probe_bw_up) {
             RateSample rs;
             rs.delivery_rate_bytes_per_second = max_bandwidth_bytes_per_second_;
             start_probe_bw_up(rs, now);
@@ -1102,7 +1097,8 @@ bool BbrCongestionController::is_app_limited() const {
 }
 
 bool BbrCongestionController::is_probing_bw() const {
-    return mode_ == Mode::startup || mode_ == Mode::probe_bw_refill || mode_ == Mode::probe_bw_up;
+    return (mode_ == Mode::startup) | (mode_ == Mode::probe_bw_refill) |
+           (mode_ == Mode::probe_bw_up);
 }
 
 bool BbrCongestionController::is_cwnd_limited() const {
@@ -1111,7 +1107,7 @@ bool BbrCongestionController::is_cwnd_limited() const {
 
 bool BbrCongestionController::has_elapsed_in_phase(QuicCoreClock::duration interval,
                                                    QuicCoreTimePoint now) const {
-    return cycle_stamp_.has_value() && now > *cycle_stamp_ + interval;
+    return now > cycle_stamp_.value_or(now) + interval;
 }
 
 bool BbrCongestionController::is_reno_coexistence_probe_time() const {
@@ -1120,7 +1116,7 @@ bool BbrCongestionController::is_reno_coexistence_probe_time() const {
 }
 
 bool BbrCongestionController::is_time_to_probe_bw(QuicCoreTimePoint now) {
-    if (has_elapsed_in_phase(bw_probe_wait_, now) || is_reno_coexistence_probe_time()) {
+    if (has_elapsed_in_phase(bw_probe_wait_, now) | is_reno_coexistence_probe_time()) {
         start_probe_bw_refill();
         return true;
     }
@@ -1138,7 +1134,7 @@ bool BbrCongestionController::is_time_to_cruise() const {
 }
 
 bool BbrCongestionController::is_time_to_go_down(const RateSample &rs) {
-    if (is_cwnd_limited() && congestion_window_ >= inflight_longterm_) {
+    if (is_cwnd_limited() & (congestion_window_ >= inflight_longterm_)) {
         reset_full_bw();
         full_bandwidth_bytes_per_second_ = rs.delivery_rate_bytes_per_second;
     } else if (full_bw_now_) {
@@ -1148,8 +1144,8 @@ bool BbrCongestionController::is_time_to_go_down(const RateSample &rs) {
 }
 
 bool BbrCongestionController::is_inflight_too_high(const RateSample &rs) const {
-    return rs.tx_in_flight != 0 &&
-           static_cast<double>(rs.lost) > static_cast<double>(rs.tx_in_flight) * kBbrLossThresh;
+    return (rs.tx_in_flight != 0) &
+           (static_cast<double>(rs.lost) > static_cast<double>(rs.tx_in_flight) * kBbrLossThresh);
 }
 
 std::uint32_t BbrCongestionController::next_random() {
@@ -1172,7 +1168,7 @@ std::size_t BbrCongestionController::inflight_at_loss(const RateSample &rs,
                                                       const SentPacketRecord &packet) const {
     const auto size = packet.bytes_in_flight;
     const auto inflight_prev = rs.tx_in_flight > size ? rs.tx_in_flight - size : 0;
-    const auto lost_prev = rs.lost > size ? rs.lost - size : 0;
+    const auto lost_prev = rs.lost - std::min(rs.lost, size);
     const auto lost_prefix =
         (kBbrLossThresh * static_cast<double>(inflight_prev) - static_cast<double>(lost_prev)) /
         (1.0 - kBbrLossThresh);
@@ -1255,10 +1251,6 @@ std::size_t BbrCongestionController::pacing_budget_at(QuicCoreTimePoint now) con
     }
 
     const auto elapsed = std::chrono::duration<double>(now - *pacing_budget_timestamp_).count();
-    if (elapsed <= 0.0) {
-        return budget;
-    }
-
     const auto replenished = elapsed * rate;
     if (replenished >= static_cast<double>(cap - budget)) {
         return cap;

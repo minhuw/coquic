@@ -112,6 +112,13 @@ void enable_qlog_session_for_test(
     ASSERT_NE(connection.qlog_session_, nullptr);
 }
 
+struct ScopedConnectionDrainTestHookReset {
+    ~ScopedConnectionDrainTestHookReset() {
+        coquic::quic::test::connection_set_force_missing_packet_metadata_for_tests(false);
+        coquic::quic::test::connection_set_force_missing_fallback_packet_length_for_tests(false);
+    }
+};
+
 TEST(QuicCoreTest, PublicConfigAcceptsOpaqueResumptionStateAndZeroRttConfig) {
     auto config = coquic::quic::test::make_client_core_config();
     config.resumption_state = coquic::quic::QuicResumptionState{
@@ -3085,6 +3092,151 @@ TEST(QuicCoreTest, HandshakeTrimReserializationFailureMarksConnectionFailedAfter
 
     EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     EXPECT_TRUE(connection.has_failed());
+}
+
+TEST(QuicCoreTest, DrainOutboundDatagramFailsWhenTrackedPacketMetadataIsMissing) {
+    ScopedConnectionDrainTestHookReset reset_hooks;
+
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("hello"), false)
+            .has_value());
+    coquic::quic::test::connection_set_force_missing_packet_metadata_for_tests(true);
+
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
+    EXPECT_TRUE(connection.has_failed());
+}
+
+TEST(QuicCoreTest, DrainOutboundDatagramFailsWhenFallbackTrackedPacketLengthIsMissing) {
+    ScopedConnectionDrainTestHookReset reset_hooks;
+
+    bool saw_failure = false;
+    for (std::size_t occurrence = 1; occurrence <= 6 && !saw_failure; ++occurrence) {
+        coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+        connection.started_ = true;
+        connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+        connection.initial_space_.send_crypto.append(coquic::quic::test::bytes_from_string("init"));
+        connection.handshake_space_.send_crypto.append(coquic::quic::test::bytes_from_string("hs"));
+        connection.handshake_space_.write_secret = make_test_traffic_secret();
+        coquic::quic::test::connection_set_force_missing_fallback_packet_length_for_tests(true);
+        const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
+            coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, occurrence);
+
+        static_cast<void>(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)));
+        saw_failure =
+            connection.has_failed() && connection.initial_space_.next_send_packet_number > 0;
+    }
+
+    EXPECT_TRUE(saw_failure);
+}
+
+TEST(QuicCoreTest, InitialCongestionBlockRestoresInitialCryptoRanges) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.initial_space_.send_crypto.append(coquic::quic::test::bytes_from_string("init"));
+    connection.congestion_controller_.congestion_window_ = 1199;
+
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_TRUE(connection.initial_space_.send_crypto.has_pending_data());
+    EXPECT_EQ(connection.initial_space_.next_send_packet_number, 0u);
+}
+
+TEST(QuicCoreTest, HandshakeCongestionBlockFinalizesQueuedInitialPacket) {
+    bool finalized_initial_before_handshake = false;
+
+    for (std::size_t handshake_crypto_size = 64;
+         handshake_crypto_size <= 2048 && !finalized_initial_before_handshake;
+         handshake_crypto_size += 64) {
+        auto config = coquic::quic::test::make_client_core_config();
+        config.max_outbound_datagram_size = 4096;
+        coquic::quic::QuicConnection connection(std::move(config));
+        connection.started_ = true;
+        connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+        connection.initial_space_.send_crypto.append(coquic::quic::test::bytes_from_string("init"));
+        connection.handshake_space_.send_crypto.append(
+            std::vector<std::byte>(handshake_crypto_size, std::byte{0x5b}));
+        connection.handshake_space_.write_secret = make_test_traffic_secret();
+        connection.congestion_controller_.congestion_window_ = 1200;
+
+        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        if (datagram.empty() || connection.has_failed()) {
+            continue;
+        }
+        if (!connection.handshake_space_.send_crypto.has_pending_data() ||
+            connection.handshake_space_.next_send_packet_number != 0u) {
+            continue;
+        }
+
+        const auto packets = decode_sender_datagram(connection, datagram);
+        if (packets.size() != 1u) {
+            continue;
+        }
+        if (!std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packets.front())) {
+            continue;
+        }
+
+        finalized_initial_before_handshake = true;
+    }
+
+    EXPECT_TRUE(finalized_initial_before_handshake);
+}
+
+TEST(QuicCoreTest, HasPendingCongestionControlledSendIncludesRetireCidAndApplicationCrypto) {
+    auto connection = make_connected_client_connection();
+    EXPECT_FALSE(connection.has_pending_application_send());
+    EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+    EXPECT_TRUE(connection.pending_retire_connection_id_frames_.empty());
+    EXPECT_FALSE(connection.application_space_.send_crypto.has_pending_data());
+    EXPECT_FALSE(connection.has_pending_congestion_controlled_send());
+
+    connection.pending_retire_connection_id_frames_.push_back(
+        coquic::quic::RetireConnectionIdFrame{.sequence_number = 1});
+    EXPECT_TRUE(connection.has_pending_congestion_controlled_send());
+
+    connection.pending_retire_connection_id_frames_.clear();
+    connection.application_space_.send_crypto.append(coquic::quic::test::bytes_from_string("x"));
+    EXPECT_TRUE(connection.has_pending_congestion_controlled_send());
+}
+
+TEST(QuicCoreTest, PacketTraceLogsPacingSendBlockedWhenApplicationPacingDefersSend) {
+    ScopedEnvVar trace("COQUIC_PACKET_TRACE", "1");
+
+    auto connection = make_connected_client_connection();
+    connection.congestion_controller_ = coquic::quic::QuicCongestionController(
+        coquic::quic::QuicCongestionControlAlgorithm::bbr,
+        std::max<std::size_t>(1200, connection.config_.max_outbound_datagram_size));
+    auto &bbr =
+        std::get<coquic::quic::BbrCongestionController>(connection.congestion_controller_.storage_);
+    bbr.mode_ = coquic::quic::BbrCongestionController::Mode::probe_bw_cruise;
+    bbr.max_bandwidth_bytes_per_second_ = 120000.0;
+    bbr.bandwidth_bytes_per_second_ = 120000.0;
+    bbr.pacing_rate_bytes_per_second_ = 120000.0;
+    bbr.min_rtt_ = std::chrono::milliseconds{100};
+
+    const auto payload =
+        std::vector<std::byte>(static_cast<std::size_t>(8u) * 1024u, std::byte{0x55});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    const auto send_time = coquic::quic::test::test_time(1);
+    ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+    ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+
+    testing::internal::CaptureStderr();
+    const auto blocked_datagram = connection.drain_outbound_datagram(send_time);
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(blocked_datagram.empty());
+    EXPECT_NE(stderr_output.find("quic-packet-trace send-blocked scid="), std::string::npos);
+    EXPECT_NE(stderr_output.find("reason=pacing"), std::string::npos);
 }
 
 TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversRemainingValidationBranches) {

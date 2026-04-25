@@ -15,6 +15,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -32,6 +33,8 @@ bool bootstrap_scoped_fd_move_constructor_for_test();
 bool bootstrap_scoped_fd_move_assignment_for_test();
 bool bootstrap_scoped_fd_self_move_assignment_for_test();
 bool bootstrap_parse_request_for_test(std::string_view request_text);
+std::optional<std::string>
+bootstrap_read_http_request_chunks_for_test(const std::vector<std::string> &chunks);
 bool bootstrap_rejects_oversized_request_without_terminator_for_test(std::string_view request_text);
 bool bootstrap_accept_errno_is_transient_for_test(int accept_errno);
 bool bootstrap_path_has_prefix_for_test(const std::filesystem::path &path,
@@ -1089,6 +1092,32 @@ TEST(QuicHttp3BootstrapTest, AcceptErrnoTransientClassificationMatchesBootstrapR
     EXPECT_TRUE(coquic::http3::bootstrap_accept_errno_is_transient_for_test(EAGAIN));
     EXPECT_TRUE(coquic::http3::bootstrap_accept_errno_is_transient_for_test(EWOULDBLOCK));
     EXPECT_FALSE(coquic::http3::bootstrap_accept_errno_is_transient_for_test(EMFILE));
+}
+
+TEST(QuicHttp3BootstrapTest, TestHookReadsChunkedRequestsAndRejectsInvalidInput) {
+    const auto complete = coquic::http3::bootstrap_read_http_request_chunks_for_test(
+        std::vector<std::string>{"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n"});
+    ASSERT_TRUE(complete.has_value());
+    if (!complete.has_value()) {
+        return;
+    }
+    const auto &complete_request = *complete;
+    EXPECT_NE(complete_request.find("GET / HTTP/1.1"), std::string::npos);
+
+    std::string oversized((static_cast<std::size_t>(16) * 1024u) + 1u, 'a');
+    EXPECT_FALSE(coquic::http3::bootstrap_read_http_request_chunks_for_test(
+                     std::vector<std::string>{oversized})
+                     .has_value());
+    EXPECT_FALSE(coquic::http3::bootstrap_read_http_request_chunks_for_test(
+                     std::vector<std::string>{"GET / HTTP/1.1\r\nHost: example.test\r\n"})
+                     .has_value());
+}
+
+TEST(QuicHttp3BootstrapTest, OversizedRequestHelperReturnsFalseForCompleteAndIncompleteInputs) {
+    EXPECT_FALSE(coquic::http3::bootstrap_rejects_oversized_request_without_terminator_for_test(
+        "GET / HTTP/1.1\r\n\r\n"));
+    EXPECT_FALSE(coquic::http3::bootstrap_rejects_oversized_request_without_terminator_for_test(
+        "GET / HTTP/1.1\r\nHost: example.test\r\n"));
 }
 
 TEST(QuicHttp3BootstrapTest, TestHooksCoverAdditionalRequestParsingAndFailureBranches) {

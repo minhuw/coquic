@@ -1039,17 +1039,30 @@ TEST(QuicCoreTest, DiscardingInitialPacketSpaceResetsPtoBackoff) {
     connection.initial_space_.recovery.rtt_state().smoothed_rtt = std::chrono::milliseconds(10);
     connection.initial_space_.recovery.rtt_state().rttvar = std::chrono::milliseconds(5);
 
-    connection.track_sent_packet(connection.handshake_space_,
+    connection.track_sent_packet(connection.initial_space_,
                                  coquic::quic::SentPacketRecord{
                                      .packet_number = 0,
+                                     .sent_time = coquic::quic::test::test_time(80),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                     .has_ping = true,
+                                 });
+    connection.track_sent_packet(connection.handshake_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 1,
                                      .sent_time = coquic::quic::test::test_time(100),
                                      .ack_eliciting = true,
                                      .in_flight = true,
+                                     .bytes_in_flight = 1200,
                                      .has_ping = true,
                                  });
 
+    ASSERT_EQ(connection.congestion_controller_.bytes_in_flight(), 2400u);
+
     connection.discard_initial_packet_space();
 
+    EXPECT_EQ(connection.congestion_controller_.bytes_in_flight(), 1200u);
     EXPECT_EQ(connection.pto_count_, 0u);
     EXPECT_EQ(connection.pto_deadline(), std::optional{coquic::quic::test::test_time(130)});
 }

@@ -696,6 +696,28 @@ TEST(QuicCongestionTest, AppLimitedAckSaturatesBytesInFlightWithoutGrowingWindow
     EXPECT_EQ(controller.congestion_window(), 12000u);
 }
 
+TEST(QuicCongestionTest, DiscardedPacketsOnlyReduceNewRenoBytesInFlight) {
+    NewRenoCongestionController controller(/*max_datagram_size=*/1200);
+    controller.congestion_window_ = 18000;
+    controller.bytes_in_flight_ = 1200;
+    controller.recovery_start_time_ = coquic::quic::test::test_time(20);
+
+    const auto cwnd = controller.congestion_window();
+    const auto recovery_start_time = controller.recovery_start_time_;
+    const std::array<SentPacketRecord, 2> packets{
+        make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(10)),
+        make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true, /*in_flight=*/false,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(11)),
+    };
+
+    controller.on_packets_discarded(packets);
+
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+    EXPECT_EQ(controller.congestion_window(), cwnd);
+    EXPECT_EQ(controller.recovery_start_time_, recovery_start_time);
+}
+
 TEST(QuicCongestionTest, RecoveryAckTransitionsToCongestionAvoidance) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     controller.on_packet_sent(/*bytes_sent=*/6000, /*ack_eliciting=*/true);
@@ -918,6 +940,34 @@ TEST(QuicCongestionTest, BbrAckLossAndIdleColdBranches) {
     const auto before = app_limited.app_limited_until_delivered_;
     app_limited.maybe_mark_connection_app_limited(/*no_pending_data=*/true);
     EXPECT_EQ(app_limited.app_limited_until_delivered_, before);
+}
+
+TEST(QuicCongestionTest, DiscardedPacketsOnlyReduceBbrBytesInFlight) {
+    BbrCongestionController controller(/*max_datagram_size=*/1200);
+    controller.bytes_in_flight_ = 1200;
+    controller.congestion_window_ = 18000;
+    controller.total_delivered_ = 2400;
+    controller.total_lost_ = 3600;
+    controller.recovery_start_time_ = coquic::quic::test::test_time(20);
+
+    const auto cwnd = controller.congestion_window();
+    const auto total_delivered = controller.total_delivered_;
+    const auto total_lost = controller.total_lost_;
+    const auto recovery_start_time = controller.recovery_start_time_;
+    const std::array<SentPacketRecord, 2> packets{
+        make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(10)),
+        make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true, /*in_flight=*/false,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(11)),
+    };
+
+    controller.on_packets_discarded(packets);
+
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+    EXPECT_EQ(controller.congestion_window(), cwnd);
+    EXPECT_EQ(controller.total_delivered_, total_delivered);
+    EXPECT_EQ(controller.total_lost_, total_lost);
+    EXPECT_EQ(controller.recovery_start_time_, recovery_start_time);
 }
 
 TEST(QuicCongestionTest, BbrModelAndBudgetColdBranches) {

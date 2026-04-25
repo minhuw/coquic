@@ -180,6 +180,18 @@ void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRec
     on_packets_acked(packets, app_limited);
 }
 
+void NewRenoCongestionController::on_packets_discarded(std::span<const SentPacketRecord> packets) {
+    for (const auto &packet : packets) {
+        if (!packet.in_flight) {
+            continue;
+        }
+
+        bytes_in_flight_ = packet.bytes_in_flight > bytes_in_flight_
+                               ? 0
+                               : bytes_in_flight_ - packet.bytes_in_flight;
+    }
+}
+
 void NewRenoCongestionController::on_packets_lost(std::span<const SentPacketRecord> packets) {
     for (const auto &packet : packets) {
         if (!packet.in_flight) {
@@ -326,6 +338,18 @@ void BbrCongestionController::on_packets_acked(std::span<const SentPacketRecord>
     set_cwnd(rs);
 
     idle_restart_ &= rs.delivered == 0;
+}
+
+void BbrCongestionController::on_packets_discarded(std::span<const SentPacketRecord> packets) {
+    for (const auto &packet : packets) {
+        if (!packet.in_flight) {
+            continue;
+        }
+
+        bytes_in_flight_ = packet.bytes_in_flight > bytes_in_flight_
+                               ? 0
+                               : bytes_in_flight_ - packet.bytes_in_flight;
+    }
 }
 
 void BbrCongestionController::on_packets_lost(std::span<const SentPacketRecord> packets) {
@@ -1349,6 +1373,10 @@ void QuicCongestionController::on_packets_acked(std::span<const SentPacketRecord
             controller.on_packets_acked(packets, app_limited, now, rtt_state);
         },
         storage_);
+}
+
+void QuicCongestionController::on_packets_discarded(std::span<const SentPacketRecord> packets) {
+    std::visit([&](auto &controller) { controller.on_packets_discarded(packets); }, storage_);
 }
 
 void QuicCongestionController::on_packets_lost(std::span<const SentPacketRecord> packets) {

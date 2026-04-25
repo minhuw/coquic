@@ -1188,7 +1188,7 @@ bool establishes_persistent_congestion(std::span<const SentPacketRecord> lost_pa
     return last_loss->sent_time - first_loss->sent_time >= persistent_congestion_duration;
 }
 
-void discard_packet_space_state(PacketSpaceState &packet_space) {
+void reset_discarded_packet_space_state(PacketSpaceState &packet_space) {
     packet_space.largest_authenticated_packet_number = std::nullopt;
     packet_space.read_secret = std::nullopt;
     packet_space.write_secret = std::nullopt;
@@ -5556,6 +5556,25 @@ bool QuicConnection::packet_targets_discarded_long_header_space(
     }
 
     return false;
+}
+
+void QuicConnection::discard_packet_space_state(PacketSpaceState &packet_space) {
+    std::vector<SentPacketRecord> discarded_packets;
+    const auto handles = packet_space.recovery.tracked_packets();
+    discarded_packets.reserve(handles.size());
+    for (const auto handle : handles) {
+        const auto *packet = packet_space.recovery.packet_for_handle(handle);
+        if (packet == nullptr || !packet->in_flight || packet->bytes_in_flight == 0) {
+            continue;
+        }
+        discarded_packets.push_back(*packet);
+    }
+
+    if (!discarded_packets.empty()) {
+        congestion_controller_.on_packets_discarded(discarded_packets);
+    }
+
+    reset_discarded_packet_space_state(packet_space);
 }
 
 void QuicConnection::discard_initial_packet_space() {

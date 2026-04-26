@@ -6200,6 +6200,78 @@ TEST(QuicCoreTest, ClientHandshakeKeepalivePtoDeadlineArmsProbeWithoutInflightPa
     EXPECT_EQ(connection.remaining_pto_probe_datagrams_, 2);
 }
 
+TEST(QuicCoreTest, ClientHandshakeKeepaliveUsesHandshakeSpaceOnceHandshakeKeysExist) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.last_peer_activity_time_ = coquic::quic::test::test_time(0);
+    connection.handshake_space_.write_secret = make_test_traffic_secret();
+
+    const auto deadline = connection.pto_deadline();
+    ASSERT_TRUE(deadline.has_value());
+
+    connection.arm_pto_probe(deadline.value_or(coquic::quic::test::test_time(1000)));
+
+    EXPECT_FALSE(connection.initial_space_.pending_probe_packet.has_value());
+    ASSERT_TRUE(connection.handshake_space_.pending_probe_packet.has_value());
+    EXPECT_TRUE(
+        optional_value_or_terminate(connection.handshake_space_.pending_probe_packet).has_ping);
+
+    const auto datagram =
+        connection.drain_outbound_datagram(deadline.value_or(coquic::quic::test::test_time(1000)));
+    ASSERT_FALSE(datagram.empty());
+
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    EXPECT_NE(std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front()), nullptr);
+}
+
+TEST(QuicCoreTest, ClientHandshakeRecoveryProbeBypassesCongestionForFirstHandshakeResponse) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.handshake_space_.write_secret = make_test_traffic_secret();
+    connection.handshake_space_.send_crypto.append(coquic::quic::test::bytes_from_string("hs"));
+    connection.handshake_space_.received_packets.record_received(
+        /*packet_number=*/7, /*ack_eliciting=*/true, coquic::quic::test::test_time(1));
+    connection.handshake_space_.pending_ack_deadline = coquic::quic::test::test_time(1);
+    connection.track_sent_packet(connection.initial_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 1,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                 });
+    connection.track_sent_packet(connection.initial_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 2,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                 });
+    connection.congestion_controller_.congestion_window_ = 2400;
+    connection.congestion_controller_.bytes_in_flight_ = 2400;
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_FALSE(connection.handshake_space_.send_crypto.has_pending_data());
+    EXPECT_TRUE(connection.initial_packet_space_discarded_);
+
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front());
+    ASSERT_NE(handshake, nullptr);
+    EXPECT_NE(std::find_if(handshake->frames.begin(), handshake->frames.end(),
+                           [](const auto &frame) {
+                               return std::holds_alternative<coquic::quic::CryptoFrame>(frame);
+                           }),
+              handshake->frames.end());
+}
+
 TEST(QuicCoreTest, ClientReceiveKeepalivePtoDeadlineArmsProbeWithoutInflightPackets) {
     auto connection = make_connected_client_connection();
     connection.current_send_path_id_ = 1;

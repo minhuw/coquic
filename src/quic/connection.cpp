@@ -2448,7 +2448,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     PacketSpaceState *client_handshake_keepalive_space =
         !client_handshake_keepalive_eligible
             ? nullptr
-            : (initial_packet_space_discarded_ ? &handshake_space_ : &initial_space_);
+            : (handshake_space_.write_secret.has_value() ? &handshake_space_ : &initial_space_);
     auto client_handshake_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
     if (client_handshake_keepalive_eligible) {
         client_handshake_keepalive_deadline = compute_pto_deadline(
@@ -2776,6 +2776,31 @@ QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
         .in_flight = true,
         .has_ping = true,
     };
+}
+
+void QuicConnection::queue_client_handshake_recovery_probe() {
+    if ((config_.role != EndpointRole::client) | (status_ != HandshakeStatus::in_progress) |
+        handshake_confirmed_ | !handshake_space_.write_secret.has_value() |
+        !handshake_space_.send_crypto.has_pending_data()) {
+        return;
+    }
+
+    if (handshake_space_.pending_probe_packet.has_value() ||
+        has_in_flight_ack_eliciting_packet(handshake_space_)) {
+        return;
+    }
+
+    const bool has_other_space_in_flight = has_in_flight_ack_eliciting_packet(initial_space_) |
+                                           has_in_flight_ack_eliciting_packet(application_space_);
+    if (!has_other_space_in_flight) {
+        return;
+    }
+
+    handshake_space_.pending_probe_packet = select_pto_probe(handshake_space_);
+    if (handshake_space_.pending_probe_packet.has_value() &&
+        handshake_space_.received_packets.has_ack_to_send()) {
+        handshake_space_.pending_probe_packet->force_ack = true;
+    }
 }
 
 void QuicConnection::queue_server_handshake_recovery_probes() {
@@ -6354,6 +6379,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
         zero_rtt_space_.write_secret.has_value()) {
         discard_packet_space_state(zero_rtt_space_);
     }
+    queue_client_handshake_recovery_probe();
 
     auto packets = std::vector<ProtectedPacket>{};
     auto selected_send_path_id = current_send_path_id_;

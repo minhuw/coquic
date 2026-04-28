@@ -2712,6 +2712,143 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeDoesNotArmBeforeDeadline) {
     EXPECT_FALSE(connection.initial_space_.pending_probe_packet.has_value());
 }
 
+TEST(QuicCoreTest, ServerInitialAckOnlySendAddsSinglePingWhenNothingIsInFlight) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.source_connection_id = bytes_from_hex("5300000000000031");
+
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.original_version_ = coquic::quic::kQuicVersion1;
+    connection.current_version_ = coquic::quic::kQuicVersion1;
+    connection.client_initial_destination_connection_id_ = bytes_from_hex("8394c8f03e515708");
+    connection.peer_source_connection_id_ = bytes_from_hex("c101");
+    connection.anti_amplification_received_bytes_ = 2400;
+    connection.initial_space_.received_packets.record_received(
+        /*packet_number=*/7, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets.front());
+    ASSERT_NE(initial, nullptr);
+
+    bool saw_ack = false;
+    bool saw_ping = false;
+    for (const auto &frame : initial->frames) {
+        if (const auto *ack_frame = std::get_if<coquic::quic::AckFrame>(&frame)) {
+            saw_ack = saw_ack || ack_frame_acks_packet_number_for_tests(*ack_frame, 7);
+        }
+        saw_ping = saw_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_ack);
+    EXPECT_TRUE(saw_ping);
+    const auto tracked_after_first_initial_send = tracked_packet_count(connection.initial_space_);
+    ASSERT_NE(tracked_after_first_initial_send, 0u);
+    EXPECT_TRUE(last_tracked_packet(connection.initial_space_).has_ping);
+
+    connection.initial_space_.received_packets.record_received(
+        /*packet_number=*/9, /*ack_eliciting=*/true, coquic::quic::test::test_time(2));
+    const auto second_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(second_datagram.empty());
+    const auto second_packets = decode_sender_datagram(connection, second_datagram);
+    ASSERT_EQ(second_packets.size(), 1u);
+    const auto *second_initial =
+        std::get_if<coquic::quic::ProtectedInitialPacket>(&second_packets.front());
+    ASSERT_NE(second_initial, nullptr);
+
+    bool saw_second_ack = false;
+    bool saw_second_ping = false;
+    for (const auto &frame : second_initial->frames) {
+        if (const auto *ack_frame = std::get_if<coquic::quic::AckFrame>(&frame)) {
+            saw_second_ack =
+                saw_second_ack || ack_frame_acks_packet_number_for_tests(*ack_frame, 9);
+        }
+        saw_second_ping = saw_second_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_second_ack);
+    EXPECT_FALSE(saw_second_ping);
+    EXPECT_FALSE(last_tracked_packet(connection.initial_space_).has_ping);
+    EXPECT_FALSE(last_tracked_packet(connection.initial_space_).ack_eliciting);
+}
+
+TEST(QuicCoreTest, ServerHandshakeAckOnlySendAddsSinglePingWhenNothingIsInFlight) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.source_connection_id = bytes_from_hex("5300000000000032");
+
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.initial_packet_space_discarded_ = true;
+    connection.original_version_ = coquic::quic::kQuicVersion1;
+    connection.current_version_ = coquic::quic::kQuicVersion1;
+    connection.client_initial_destination_connection_id_ = bytes_from_hex("8394c8f03e515709");
+    connection.peer_source_connection_id_ = bytes_from_hex("c101");
+    connection.handshake_space_.write_secret = make_test_traffic_secret();
+    connection.anti_amplification_received_bytes_ = 2400;
+    connection.handshake_space_.received_packets.record_received(
+        /*packet_number=*/11, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front());
+    ASSERT_NE(handshake, nullptr);
+
+    bool saw_ack = false;
+    bool saw_ping = false;
+    for (const auto &frame : handshake->frames) {
+        if (const auto *ack_frame = std::get_if<coquic::quic::AckFrame>(&frame)) {
+            saw_ack = saw_ack || ack_frame_acks_packet_number_for_tests(*ack_frame, 11);
+        }
+        saw_ping = saw_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_ack);
+    EXPECT_TRUE(saw_ping);
+    const auto tracked_after_first_handshake_send =
+        tracked_packet_count(connection.handshake_space_);
+    ASSERT_NE(tracked_after_first_handshake_send, 0u);
+    EXPECT_TRUE(last_tracked_packet(connection.handshake_space_).has_ping);
+
+    connection.handshake_space_.received_packets.record_received(
+        /*packet_number=*/13, /*ack_eliciting=*/true, coquic::quic::test::test_time(2));
+    const auto second_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(second_datagram.empty());
+    const auto second_packets = decode_sender_datagram(connection, second_datagram);
+    ASSERT_EQ(second_packets.size(), 1u);
+    const auto *second_handshake =
+        std::get_if<coquic::quic::ProtectedHandshakePacket>(&second_packets.front());
+    ASSERT_NE(second_handshake, nullptr);
+
+    bool saw_second_ack = false;
+    bool saw_second_ping = false;
+    for (const auto &frame : second_handshake->frames) {
+        if (const auto *ack_frame = std::get_if<coquic::quic::AckFrame>(&frame)) {
+            saw_second_ack =
+                saw_second_ack || ack_frame_acks_packet_number_for_tests(*ack_frame, 13);
+        }
+        saw_second_ping = saw_second_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_second_ack);
+    EXPECT_FALSE(saw_second_ping);
+    EXPECT_FALSE(last_tracked_packet(connection.handshake_space_).has_ping);
+    EXPECT_FALSE(last_tracked_packet(connection.handshake_space_).ack_eliciting);
+}
+
 TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeDoesNotArmAfterInitialSpaceDiscarded) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.started_ = true;

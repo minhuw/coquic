@@ -6737,6 +6737,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
         initial_crypto_ranges =
             initial_space_.send_crypto.take_ranges(std::numeric_limits<std::size_t>::max());
     }
+    const auto should_add_server_handshake_keepalive_ping =
+        [&](const PacketSpaceState &packet_space) {
+            return config_.role == EndpointRole::server && !handshake_confirmed_ &&
+                   !packet_space.pending_probe_packet.has_value() &&
+                   !has_in_flight_ack_eliciting_packet(packet_space);
+        };
     const auto build_initial_frames = [&](std::span<const ByteRange> crypto_ranges) {
         std::vector<Frame> frames;
         frames.reserve(crypto_ranges.size() + (initial_ack_frame.has_value() ? 1u : 0u) +
@@ -6751,6 +6757,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
         }
         if (initial_ack_frame.has_value() && crypto_ranges.empty()) {
             frames.emplace_back(*initial_ack_frame);
+        }
+        if (initial_ack_frame.has_value() && !has_ack_eliciting_frame(frames) &&
+            should_add_server_handshake_keepalive_ping(initial_space_)) {
+            frames.emplace_back(PingFrame{});
         }
         if (!defer_server_compatible_negotiation_crypto &&
             initial_space_.pending_probe_packet.has_value() && !has_ack_eliciting_frame(frames)) {
@@ -6797,6 +6807,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
         }
         auto sent_initial_frames = build_initial_frames(sent_initial_crypto_ranges);
         const bool initial_ack_eliciting = has_ack_eliciting_frame(sent_initial_frames);
+        const bool initial_has_ping =
+            std::ranges::any_of(sent_initial_frames, [](const Frame &frame) {
+                return std::holds_alternative<PingFrame>(frame);
+            });
         if (initial_candidate_datagram.value().bytes.size() > max_outbound_datagram_size) {
             const bool blocked_first_server_initial =
                 (initial_space_.next_send_packet_number == 0) & initial_ack_eliciting;
@@ -6832,6 +6846,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 .ack_eliciting = initial_ack_eliciting,
                 .in_flight = initial_ack_eliciting,
                 .declared_lost = false,
+                .has_ping = initial_has_ping,
                 .crypto_ranges = sent_initial_crypto_ranges,
             };
             sent_packet.path_id = selected_send_path_id.value_or(0);
@@ -6936,6 +6951,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 .crypto_data = range.bytes.to_vector(),
             });
         }
+        if (handshake_ack_frame.has_value() && !has_ack_eliciting_frame(frames) &&
+            should_add_server_handshake_keepalive_ping(handshake_space_)) {
+            frames.emplace_back(PingFrame{});
+        }
         if (handshake_space_.pending_probe_packet.has_value() && !has_ack_eliciting_frame(frames)) {
             const auto active_probe_crypto_ranges =
                 override_probe_crypto_ranges
@@ -7016,6 +7035,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                                    sent_handshake_crypto_ranges.empty() &&
                                        handshake_space_.pending_probe_packet.has_value(),
                                    sent_handshake_probe_crypto_ranges);
+        const bool handshake_has_ping =
+            std::ranges::any_of(sent_handshake_frames, [](const Frame &frame) {
+                return std::holds_alternative<PingFrame>(frame);
+            });
         if (handshake_candidate_datagram.value().bytes.size() > max_outbound_datagram_size) {
             if (!packets.empty()) {
                 return finalize_datagram(packets);
@@ -7054,6 +7077,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
             .ack_eliciting = handshake_ack_eliciting,
             .in_flight = handshake_ack_eliciting,
             .declared_lost = false,
+            .has_ping = handshake_has_ping,
             .crypto_ranges = sent_handshake_crypto_ranges,
         };
         sent_packet.path_id = selected_send_path_id.value_or(0);

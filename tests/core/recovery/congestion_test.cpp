@@ -716,6 +716,13 @@ TEST(QuicCongestionTest, DiscardedPacketsOnlyReduceNewRenoBytesInFlight) {
     EXPECT_EQ(controller.bytes_in_flight(), 0u);
     EXPECT_EQ(controller.congestion_window(), cwnd);
     EXPECT_EQ(controller.recovery_start_time_, recovery_start_time);
+
+    controller.bytes_in_flight_ = 600;
+    controller.on_packets_discarded(std::array<SentPacketRecord, 1>{
+        make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(12)),
+    });
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
 }
 
 TEST(QuicCongestionTest, RecoveryAckTransitionsToCongestionAvoidance) {
@@ -968,6 +975,22 @@ TEST(QuicCongestionTest, DiscardedPacketsOnlyReduceBbrBytesInFlight) {
     EXPECT_EQ(controller.total_delivered_, total_delivered);
     EXPECT_EQ(controller.total_lost_, total_lost);
     EXPECT_EQ(controller.recovery_start_time_, recovery_start_time);
+
+    controller.bytes_in_flight_ = 600;
+    controller.on_packets_discarded(std::array<SentPacketRecord, 1>{
+        make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(12)),
+    });
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+
+    coquic::quic::QuicCongestionController wrapper(
+        coquic::quic::QuicCongestionControlAlgorithm::bbr, /*max_datagram_size=*/1200);
+    wrapper.bytes_in_flight_ = 600;
+    wrapper.on_packets_discarded(std::array<SentPacketRecord, 1>{
+        make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(13)),
+    });
+    EXPECT_EQ(wrapper.bytes_in_flight(), 0u);
 }
 
 TEST(QuicCongestionTest, BbrModelAndBudgetColdBranches) {

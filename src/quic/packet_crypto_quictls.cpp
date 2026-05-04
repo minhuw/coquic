@@ -1133,10 +1133,18 @@ bool packet_crypto_cached_header_protection_mismatch_branch_coverage_for_tests()
         .quic_version = secret.quic_version,
     };
 
+    auto missing_inputs_secret = secret;
+    missing_inputs_secret.cached_packet_protection_inputs.reset();
+    const auto missing_inputs_expanded = expand_traffic_secret_cached(missing_inputs_secret);
+    bool missing_inputs_rebuilds_cache = missing_inputs_expanded.has_value();
+    missing_inputs_rebuilds_cache &=
+        missing_inputs_secret.cached_packet_protection_inputs.has_value();
+
     const auto expanded = expand_traffic_secret_cached(secret);
     return (secret.cached_packet_protection_inputs.value().header_protection_key ==
             secret.header_protection_key) &
-           (expanded.value().get().hp_key == secret.header_protection_key.value());
+           (expanded.value().get().hp_key == secret.header_protection_key.value()) &
+           missing_inputs_rebuilds_cache;
 }
 
 ScopedPacketCryptoFaultInjector::ScopedPacketCryptoFaultInjector(PacketCryptoFaultPoint fault_point,

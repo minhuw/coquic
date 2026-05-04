@@ -1507,13 +1507,11 @@ TEST(QuicCoreTest, ApplicationPtoPrefersNewestRetransmittablePacketOverOlderCryp
 
     const auto probe = connection.select_pto_probe(connection.application_space_);
 
-    ASSERT_TRUE(probe.has_value());
-    const auto &probe_value = optional_ref_or_terminate(probe);
-    EXPECT_EQ(probe_value.packet_number, 11u);
-    ASSERT_EQ(probe_value.stream_fragments.size(), 1u);
-    EXPECT_EQ(probe_value.stream_fragments.front().stream_id, 0u);
-    EXPECT_EQ(probe_value.stream_fragments.front().bytes, payload);
-    EXPECT_TRUE(probe_value.stream_fragments.front().fin);
+    EXPECT_EQ(probe.packet_number, 11u);
+    ASSERT_EQ(probe.stream_fragments.size(), 1u);
+    EXPECT_EQ(probe.stream_fragments.front().stream_id, 0u);
+    EXPECT_EQ(probe.stream_fragments.front().bytes, payload);
+    EXPECT_TRUE(probe.stream_fragments.front().fin);
 }
 
 TEST(QuicCoreTest, ApplicationPtoDoesNotResendFullyAckedPrefixOfPartiallyOutstandingFragment) {
@@ -1570,8 +1568,7 @@ TEST(QuicCoreTest, ApplicationPtoDoesNotResendFullyAckedPrefixOfPartiallyOutstan
                     .has_value());
 
     const auto probe = connection.select_pto_probe(connection.application_space_);
-    ASSERT_TRUE(probe.has_value());
-    const auto &probe_packet = optional_ref_or_terminate(probe);
+    const auto &probe_packet = probe;
     EXPECT_TRUE(probe_packet.stream_fragments.empty());
     EXPECT_TRUE(probe_packet.has_ping);
     connection.application_space_.pending_probe_packet = probe;
@@ -2075,12 +2072,8 @@ TEST(QuicCoreTest, SelectPtoProbeSkipsPacketsThatCannotBeProbed) {
 
     const auto probe = connection.select_pto_probe(packet_space);
 
-    if (!probe.has_value()) {
-        GTEST_FAIL() << "expected PTO probe";
-        return;
-    }
-    EXPECT_EQ(probe->packet_number, 2u);
-    EXPECT_TRUE(probe->has_ping);
+    EXPECT_EQ(probe.packet_number, 2u);
+    EXPECT_TRUE(probe.has_ping);
 }
 
 TEST(QuicCoreTest, AckDeadlinePrefersEarlierLaterPacketSpaceDeadline) {
@@ -5537,6 +5530,10 @@ TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverHeaderPacketSpaceUtilities) {
     EXPECT_TRUE(coquic::quic::test::connection_header_packet_space_coverage_for_tests());
 }
 
+TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverKeyUpdateAndProbeBranches) {
+    EXPECT_TRUE(coquic::quic::test::connection_key_update_and_probe_coverage_for_tests());
+}
+
 TEST(QuicCoreTest, PacketSpacePacketMapViewSkipsStaleLiveHandles) {
     coquic::quic::PacketSpaceRecovery recovery;
     coquic::quic::PacketSpacePacketMapView view(
@@ -6717,9 +6714,8 @@ TEST(QuicCoreTest, SelectPtoProbePrefersRetransmittableCryptoOverPingFallback) {
 
     const auto probe = connection.select_pto_probe(connection.handshake_space_);
 
-    ASSERT_TRUE(probe.has_value());
-    EXPECT_EQ(optional_value_or_terminate(probe).packet_number, 2u);
-    EXPECT_EQ(optional_value_or_terminate(probe).crypto_ranges.size(), 1u);
+    EXPECT_EQ(probe.packet_number, 2u);
+    EXPECT_EQ(probe.crypto_ranges.size(), 1u);
 }
 
 TEST(QuicCoreTest, AckOnlyOneRttPacketDoesNotScheduleApplicationAckDeadline) {
@@ -7458,8 +7454,7 @@ TEST(QuicCoreTest, SelectPtoProbeFiltersControlFramesAgainstCurrentPendingState)
 
     const auto probe = connection.select_pto_probe(packet_space);
 
-    ASSERT_TRUE(probe.has_value());
-    const auto &probe_packet = optional_ref_or_terminate(probe);
+    const auto &probe_packet = probe;
     ASSERT_EQ(probe_packet.reset_stream_frames.size(), 1u);
     EXPECT_EQ(probe_packet.reset_stream_frames.front().stream_id, 0u);
     ASSERT_EQ(probe_packet.stop_sending_frames.size(), 1u);
@@ -7497,8 +7492,7 @@ TEST(QuicCoreTest, SelectPtoProbeKeepsMatchingConnectionBlockedFrames) {
 
     const auto probe = connection.select_pto_probe(packet_space);
 
-    ASSERT_TRUE(probe.has_value());
-    const auto &probe_packet = optional_ref_or_terminate(probe);
+    const auto &probe_packet = probe;
     ASSERT_TRUE(probe_packet.max_data_frame.has_value());
     const auto &max_data_frame = optional_ref_or_terminate(probe_packet.max_data_frame);
     EXPECT_EQ(max_data_frame.maximum_data, 99u);
@@ -7550,8 +7544,7 @@ TEST(QuicCoreTest, SelectPtoProbeKeepsFinOnlyFragmentThatMatchesFinalSize) {
 
     const auto probe = connection.select_pto_probe(packet_space);
 
-    ASSERT_TRUE(probe.has_value());
-    const auto &probe_packet = optional_ref_or_terminate(probe);
+    const auto &probe_packet = probe;
     ASSERT_EQ(probe_packet.stream_fragments.size(), 1u);
     EXPECT_EQ(probe_packet.stream_fragments.front().stream_id, 4u);
     EXPECT_EQ(probe_packet.stream_fragments.front().bytes,

@@ -23,6 +23,10 @@
 
 namespace coquic::quic {
 
+namespace test {
+bool connection_key_update_and_probe_coverage_for_tests();
+} // namespace test
+
 enum class HandshakeStatus : std::uint8_t {
     idle,
     in_progress,
@@ -473,6 +477,7 @@ class QuicConnection {
 
   private:
     friend class QuicCore;
+    friend bool test::connection_key_update_and_probe_coverage_for_tests();
 
     void start_client_if_needed();
     void start_client_if_needed(QuicCoreTimePoint now);
@@ -542,7 +547,7 @@ class QuicConnection {
     void detect_lost_packets(QuicCoreTimePoint now);
     void detect_lost_packets(PacketSpaceState &packet_space, QuicCoreTimePoint now);
     void arm_pto_probe(QuicCoreTimePoint now);
-    std::optional<SentPacketRecord> select_pto_probe(const PacketSpaceState &packet_space) const;
+    SentPacketRecord select_pto_probe(const PacketSpaceState &packet_space) const;
     void queue_client_handshake_recovery_probe();
     void queue_server_handshake_recovery_probes();
     const RecoveryRttState &shared_recovery_rtt_state() const;

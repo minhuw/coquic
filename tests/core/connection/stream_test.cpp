@@ -1122,13 +1122,11 @@ TEST(QuicCoreTest, SelectPtoProbePrefersOutstandingStreamDataOverNewerControlOnl
 
     const auto probe = connection.select_pto_probe(connection.application_space_);
 
-    ASSERT_TRUE(probe.has_value());
-    const auto &probe_value = optional_ref_or_terminate(probe);
-    EXPECT_EQ(probe_value.packet_number, 10u);
-    ASSERT_EQ(probe_value.stream_fragments.size(), 1u);
-    EXPECT_EQ(probe_value.stream_fragments.front().stream_id, 0u);
-    EXPECT_EQ(probe_value.stream_fragments.front().bytes, payload);
-    EXPECT_TRUE(probe_value.stream_fragments.front().fin);
+    EXPECT_EQ(probe.packet_number, 10u);
+    ASSERT_EQ(probe.stream_fragments.size(), 1u);
+    EXPECT_EQ(probe.stream_fragments.front().stream_id, 0u);
+    EXPECT_EQ(probe.stream_fragments.front().bytes, payload);
+    EXPECT_TRUE(probe.stream_fragments.front().fin);
 }
 
 TEST(QuicCoreTest, ApplicationPtoSkipsProbePacketsWhoseStreamDataWasAckedByRetransmission) {
@@ -1181,8 +1179,7 @@ TEST(QuicCoreTest, ApplicationPtoSkipsProbePacketsWhoseStreamDataWasAckedByRetra
                     .has_value());
 
     const auto probe = connection.select_pto_probe(connection.application_space_);
-    ASSERT_TRUE(probe.has_value());
-    const auto &probe_packet = optional_ref_or_terminate(probe);
+    const auto &probe_packet = probe;
     EXPECT_TRUE(probe_packet.stream_fragments.empty());
     EXPECT_TRUE(probe_packet.has_ping);
     connection.application_space_.pending_probe_packet = probe;
@@ -1939,8 +1936,7 @@ TEST(QuicCoreTest, SelectPtoProbeDropsAcknowledgedAndMismatchedMaxStreamsFrames)
 
     const auto probe = connection.select_pto_probe(packet_space);
 
-    ASSERT_TRUE(probe.has_value());
-    const auto &probe_packet = optional_ref_or_terminate(probe);
+    const auto &probe_packet = probe;
     EXPECT_TRUE(probe_packet.max_streams_frames.empty());
     EXPECT_TRUE(probe_packet.has_ping);
 }
@@ -2399,8 +2395,7 @@ TEST(QuicCoreTest, SelectPtoProbeDropsFramesWhoseStreamsNoLongerExist) {
 
     const auto probe = connection.select_pto_probe(packet_space);
 
-    ASSERT_TRUE(probe.has_value());
-    const auto &probe_packet = optional_ref_or_terminate(probe);
+    const auto &probe_packet = probe;
     EXPECT_TRUE(probe_packet.reset_stream_frames.empty());
     EXPECT_TRUE(probe_packet.stop_sending_frames.empty());
     EXPECT_TRUE(probe_packet.max_stream_data_frames.empty());

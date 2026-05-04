@@ -6,10 +6,14 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <initializer_list>
 #include <limits>
 #include <sstream>
+#include <string>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
@@ -19,14 +23,17 @@
 #include "src/quic/buffer.h"
 #include "src/quic/frame.h"
 #include "src/quic/packet_crypto.h"
+#include "src/quic/packet_crypto_test_hooks.h"
 #include "src/quic/protected_codec.h"
 #include "src/quic/qlog/json.h"
 #include "src/quic/qlog/session.h"
 
 #if defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#define COQUIC_NOINLINE __attribute__((noinline))
 #else
 #define COQUIC_NO_PROFILE
+#define COQUIC_NOINLINE
 #endif
 
 namespace coquic::quic {
@@ -2618,8 +2625,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     maybe_emit_qlog_recovery_metrics(now);
 }
 
-std::optional<SentPacketRecord>
-QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
+SentPacketRecord QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
     std::optional<SentPacketRecord> ping_fallback;
     std::optional<SentPacketRecord> best_probe;
     int best_probe_priority = -1;
@@ -2765,10 +2771,10 @@ QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
     }
 
     if (best_probe.has_value()) {
-        return best_probe;
+        return *best_probe;
     }
     if (ping_fallback.has_value()) {
-        return ping_fallback;
+        return *ping_fallback;
     }
 
     return SentPacketRecord{
@@ -2778,7 +2784,7 @@ QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
     };
 }
 
-void QuicConnection::queue_client_handshake_recovery_probe() {
+COQUIC_NOINLINE void QuicConnection::queue_client_handshake_recovery_probe() {
     if ((config_.role != EndpointRole::client) | (status_ != HandshakeStatus::in_progress) |
         handshake_confirmed_ | !handshake_space_.write_secret.has_value() |
         !handshake_space_.send_crypto.has_pending_data()) {
@@ -2796,11 +2802,11 @@ void QuicConnection::queue_client_handshake_recovery_probe() {
         return;
     }
 
-    handshake_space_.pending_probe_packet = select_pto_probe(handshake_space_);
-    if (handshake_space_.pending_probe_packet.has_value() &&
-        handshake_space_.received_packets.has_ack_to_send()) {
-        handshake_space_.pending_probe_packet->force_ack = true;
+    auto probe = select_pto_probe(handshake_space_);
+    if (handshake_space_.received_packets.has_ack_to_send()) {
+        probe.force_ack = true;
     }
+    handshake_space_.pending_probe_packet = std::move(probe);
 }
 
 void QuicConnection::queue_server_handshake_recovery_probes() {
@@ -6846,8 +6852,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 .ack_eliciting = initial_ack_eliciting,
                 .in_flight = initial_ack_eliciting,
                 .declared_lost = false,
-                .has_ping = initial_has_ping,
                 .crypto_ranges = sent_initial_crypto_ranges,
+                .has_ping = initial_has_ping,
             };
             sent_packet.path_id = selected_send_path_id.value_or(0);
             sent_packet.ecn = outbound_ecn_codepoint_for_path(selected_send_path_id);
@@ -7077,8 +7083,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
             .ack_eliciting = handshake_ack_eliciting,
             .in_flight = handshake_ack_eliciting,
             .declared_lost = false,
-            .has_ping = handshake_has_ping,
             .crypto_ranges = sent_handshake_crypto_ranges,
+            .has_ping = handshake_has_ping,
         };
         sent_packet.path_id = selected_send_path_id.value_or(0);
         sent_packet.ecn = outbound_ecn_codepoint_for_path(selected_send_path_id);
@@ -8930,6 +8936,60 @@ class ScopedEnvVarForTests {
     bool had_previous_ = false;
 };
 
+std::vector<std::byte> bytes_from_ints_for_tests(std::initializer_list<std::uint8_t> values) {
+    std::vector<std::byte> bytes;
+    bytes.reserve(values.size());
+    for (const auto value : values) {
+        bytes.push_back(static_cast<std::byte>(value));
+    }
+    return bytes;
+}
+
+TrafficSecret
+make_test_traffic_secret(CipherSuite cipher_suite = CipherSuite::tls_aes_128_gcm_sha256,
+                         std::byte fill = std::byte{0x11}) {
+    const std::size_t secret_size = cipher_suite == CipherSuite::tls_aes_256_gcm_sha384 ? 48u : 32u;
+    return TrafficSecret{
+        .cipher_suite = cipher_suite,
+        .secret = std::vector<std::byte>(secret_size, fill),
+    };
+}
+
+CipherSuite invalid_cipher_suite_for_tests() {
+    constexpr std::uint8_t raw = 0xff;
+    CipherSuite value{};
+    std::memcpy(&value, &raw, sizeof(value));
+    return value;
+}
+
+QuicCoreConfig make_client_core_config_for_connection_coverage() {
+    return QuicCoreConfig{
+        .role = EndpointRole::client,
+        .source_connection_id = {std::byte{0xc1}, std::byte{0x01}},
+        .initial_destination_connection_id =
+            {
+                std::byte{0x83},
+                std::byte{0x94},
+                std::byte{0xc8},
+                std::byte{0xf0},
+                std::byte{0x3e},
+                std::byte{0x51},
+                std::byte{0x57},
+                std::byte{0x08},
+            },
+        .verify_peer = false,
+        .server_name = "localhost",
+    };
+}
+
+bool connection_coverage_check(bool &ok, const char *label, bool condition) {
+    if (!condition) {
+        std::cerr << "connection_key_update_and_probe_coverage_for_tests failed: " << label << '\n';
+    }
+    ok &= condition;
+    return condition;
+}
+
 } // namespace
 
 bool connection_helper_edge_cases_for_tests() {
@@ -9556,6 +9616,665 @@ bool connection_header_packet_space_coverage_for_tests() {
         record(assigned.declared_lost_packets.contains(12));
     }
 
+    return ok;
+}
+
+bool connection_key_update_and_probe_coverage_for_tests() {
+    bool ok = true;
+#define COQUIC_CONNECTION_HOOK_RECORD(expr)                                                        \
+    connection_coverage_check(ok, #expr, static_cast<bool>(expr))
+
+    const auto make_connected_client_connection = [] {
+        QuicConnection connection(make_client_core_config_for_connection_coverage());
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::connected;
+        connection.handshake_confirmed_ = true;
+        connection.peer_source_connection_id_ = {std::byte{0xa1}, std::byte{0xb2}};
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+        connection.application_space_.read_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x21});
+        connection.application_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x31});
+        connection.peer_transport_parameters_ = TransportParameters{
+            .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+            .active_connection_id_limit = 2,
+            .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+            .max_ack_delay = connection.config_.transport.max_ack_delay,
+            .initial_max_data = connection.config_.transport.initial_max_data,
+            .initial_max_stream_data_bidi_local =
+                connection.config_.transport.initial_max_stream_data_bidi_local,
+            .initial_max_stream_data_bidi_remote =
+                connection.config_.transport.initial_max_stream_data_bidi_remote,
+            .initial_max_stream_data_uni = connection.config_.transport.initial_max_stream_data_uni,
+            .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
+            .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
+            .initial_source_connection_id = connection.peer_source_connection_id_,
+        };
+        connection.peer_transport_parameters_validated_ = true;
+        connection.initialize_peer_flow_control_from_transport_parameters();
+        connection.last_validated_path_id_ = 0;
+        connection.current_send_path_id_ = 0;
+        auto &path = connection.ensure_path_state(0);
+        path.validated = true;
+        path.is_current_send_path = true;
+        return connection;
+    };
+
+    const auto serialize_one_rtt_ack_datagram =
+        [](const QuicConnection &connection, const TrafficSecret &secret,
+           std::uint64_t packet_number, bool key_phase = false) {
+            const auto encoded = serialize_protected_datagram(
+                std::array<ProtectedPacket, 1>{
+                    ProtectedOneRttPacket{
+                        .key_phase = key_phase,
+                        .destination_connection_id = connection.config_.source_connection_id,
+                        .packet_number_length = 2,
+                        .packet_number = packet_number,
+                        .frames = {AckFrame{}},
+                    },
+                },
+                SerializeProtectionContext{
+                    .local_role = EndpointRole::server,
+                    .client_initial_destination_connection_id =
+                        connection.client_initial_destination_connection_id(),
+                    .one_rtt_secret = secret,
+                    .one_rtt_key_phase = key_phase,
+                });
+            if (!encoded.has_value()) {
+                return std::vector<std::byte>{};
+            }
+            return encoded.value();
+        };
+
+    const auto enable_qlog_for_connection_coverage = [](QuicConnection &connection,
+                                                        std::string_view label) {
+        static std::uint64_t next_id = 0;
+        const auto directory =
+            std::filesystem::temp_directory_path() /
+            ("coquic-connection-coverage-" + std::string(label) + "-" + std::to_string(next_id++));
+        connection.config_.qlog = QuicQlogConfig{.directory = directory};
+        connection.qlog_session_ = qlog::Session::try_open(
+            *connection.config_.qlog, connection.config_.role,
+            connection.client_initial_destination_connection_id(), QuicCoreTimePoint{});
+        return connection.qlog_session_ != nullptr;
+    };
+
+    {
+        QuicConnection connection(make_client_core_config_for_connection_coverage());
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::in_progress;
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+        connection.handshake_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x40});
+        connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x03}});
+        connection.track_sent_packet(connection.initial_space_,
+                                     SentPacketRecord{
+                                         .packet_number = 6,
+                                         .sent_time = QuicCoreTimePoint{},
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .bytes_in_flight = 1200,
+                                     });
+
+        connection.queue_client_handshake_recovery_probe();
+
+        COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.pending_probe_packet.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.handshake_space_.pending_probe_packet.has_value() &&
+            !connection.handshake_space_.pending_probe_packet->force_ack);
+    }
+
+    {
+        QuicConnection connection(make_client_core_config_for_connection_coverage());
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::in_progress;
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+        connection.handshake_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+        connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
+        connection.track_sent_packet(connection.handshake_space_,
+                                     SentPacketRecord{
+                                         .packet_number = 7,
+                                         .sent_time = QuicCoreTimePoint{},
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .bytes_in_flight = 1200,
+                                     });
+
+        connection.queue_client_handshake_recovery_probe();
+
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !connection.handshake_space_.pending_probe_packet.has_value());
+    }
+
+    {
+        QuicConnection connection(make_client_core_config_for_connection_coverage());
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::in_progress;
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+        connection.handshake_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x47});
+        connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x04}});
+        connection.handshake_space_.pending_probe_packet = SentPacketRecord{
+            .packet_number = 4,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+        };
+
+        connection.queue_client_handshake_recovery_probe();
+
+        COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.pending_probe_packet.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.handshake_space_.pending_probe_packet->packet_number == 4);
+    }
+
+    {
+        QuicConnection connection(make_client_core_config_for_connection_coverage());
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::in_progress;
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+        connection.handshake_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x42});
+        connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x02}});
+        connection.handshake_space_.received_packets.record_received(
+            /*packet_number=*/3, /*ack_eliciting=*/true, QuicCoreTimePoint{});
+        connection.track_sent_packet(connection.initial_space_,
+                                     SentPacketRecord{
+                                         .packet_number = 8,
+                                         .sent_time = QuicCoreTimePoint{},
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .bytes_in_flight = 1200,
+                                     });
+
+        connection.queue_client_handshake_recovery_probe();
+
+        COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.pending_probe_packet.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.handshake_space_.pending_probe_packet.has_value() &&
+            connection.handshake_space_.pending_probe_packet->force_ack);
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.handshake_packet_space_discarded_ = true;
+        connection.handshake_space_.read_secret.reset();
+
+        const auto datagram = serialize_protected_datagram(
+            std::array<ProtectedPacket, 1>{
+                ProtectedHandshakePacket{
+                    .version = kQuicVersion1,
+                    .destination_connection_id = connection.config_.source_connection_id,
+                    .source_connection_id = bytes_from_ints_for_tests({0x11, 0x22}),
+                    .packet_number_length = 2,
+                    .packet_number = 11,
+                    .frames = {PingFrame{}},
+                },
+            },
+            SerializeProtectionContext{
+                .local_role = EndpointRole::server,
+                .client_initial_destination_connection_id =
+                    connection.client_initial_destination_connection_id(),
+                .handshake_secret =
+                    make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x43}),
+            });
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.has_value());
+        if (datagram.has_value()) {
+            connection.process_inbound_datagram(datagram.value(), QuicCoreTimePoint{});
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.deferred_protected_packets_.empty());
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.handshake_packet_space_discarded_ = true;
+        connection.handshake_space_.read_secret.reset();
+        COQUIC_CONNECTION_HOOK_RECORD(
+            enable_qlog_for_connection_coverage(connection, "discarded-handshake"));
+
+        const auto datagram = serialize_protected_datagram(
+            std::array<ProtectedPacket, 1>{
+                ProtectedHandshakePacket{
+                    .version = kQuicVersion1,
+                    .destination_connection_id = connection.config_.source_connection_id,
+                    .source_connection_id = bytes_from_ints_for_tests({0x11, 0x23}),
+                    .packet_number_length = 2,
+                    .packet_number = 14,
+                    .frames = {PingFrame{}},
+                },
+            },
+            SerializeProtectionContext{
+                .local_role = EndpointRole::server,
+                .client_initial_destination_connection_id =
+                    connection.client_initial_destination_connection_id(),
+                .handshake_secret =
+                    make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x45}),
+            });
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.has_value());
+        if (datagram.has_value()) {
+            connection.process_inbound_datagram(datagram.value(), QuicCoreTimePoint{});
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.deferred_protected_packets_.empty());
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.handshake_space_.read_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x44});
+
+        const auto first_packet = serialize_protected_datagram(
+            std::array<ProtectedPacket, 1>{
+                ProtectedHandshakePacket{
+                    .version = kQuicVersion1,
+                    .destination_connection_id = connection.config_.source_connection_id,
+                    .source_connection_id = {std::byte{0xaa}},
+                    .packet_number_length = 2,
+                    .packet_number = 12,
+                    .frames = {AckFrame{}},
+                },
+            },
+            SerializeProtectionContext{
+                .local_role = EndpointRole::server,
+                .client_initial_destination_connection_id =
+                    connection.client_initial_destination_connection_id(),
+                .handshake_secret = connection.handshake_space_.read_secret,
+            });
+        const auto second_packet = serialize_protected_datagram(
+            std::array<ProtectedPacket, 1>{
+                ProtectedHandshakePacket{
+                    .version = kQuicVersion1,
+                    .destination_connection_id = connection.config_.source_connection_id,
+                    .source_connection_id = {std::byte{0xaa}},
+                    .packet_number_length = 2,
+                    .packet_number = 13,
+                    .frames = {CryptoFrame{
+                        .offset = 0,
+                        .crypto_data = bytes_from_ints_for_tests({0x01}),
+                    }},
+                },
+            },
+            SerializeProtectionContext{
+                .local_role = EndpointRole::server,
+                .client_initial_destination_connection_id =
+                    connection.client_initial_destination_connection_id(),
+                .handshake_secret = connection.handshake_space_.read_secret,
+            });
+        COQUIC_CONNECTION_HOOK_RECORD(first_packet.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(second_packet.has_value());
+        if (first_packet.has_value() && second_packet.has_value()) {
+            auto datagram = first_packet.value();
+            datagram.insert(datagram.end(), second_packet.value().begin(),
+                            second_packet.value().end());
+            connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.peer_source_connection_id_ ==
+                                      bytes_from_ints_for_tests({0xaa}));
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.handshake_space_.read_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x46});
+        COQUIC_CONNECTION_HOOK_RECORD(enable_qlog_for_connection_coverage(
+            connection, "processed-before-deserialize-failure"));
+
+        const auto first_packet = serialize_protected_datagram(
+            std::array<ProtectedPacket, 1>{
+                ProtectedHandshakePacket{
+                    .version = kQuicVersion1,
+                    .destination_connection_id = connection.config_.source_connection_id,
+                    .source_connection_id = {std::byte{0xab}},
+                    .packet_number_length = 2,
+                    .packet_number = 15,
+                    .frames = {AckFrame{}},
+                },
+            },
+            SerializeProtectionContext{
+                .local_role = EndpointRole::server,
+                .client_initial_destination_connection_id =
+                    connection.client_initial_destination_connection_id(),
+                .handshake_secret = connection.handshake_space_.read_secret,
+            });
+        COQUIC_CONNECTION_HOOK_RECORD(first_packet.has_value());
+        if (first_packet.has_value()) {
+            auto datagram = first_packet.value();
+            datagram.push_back(std::byte{0x40});
+            connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.peer_source_connection_id_ ==
+                                      bytes_from_ints_for_tests({0xab}));
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        const auto current_secret = connection.application_space_.read_secret;
+        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
+        if (current_secret.has_value()) {
+            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
+            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
+            if (next_read_secret.has_value()) {
+                const auto encoded = serialize_one_rtt_ack_datagram(
+                    connection, next_read_secret.value(), /*packet_number=*/21,
+                    !connection.application_read_key_phase_);
+                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
+                coquic::quic::test::reset_packet_crypto_runtime_caches_for_tests();
+                const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
+                    coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
+                    /*occurrence=*/4);
+                connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
+            }
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        COQUIC_CONNECTION_HOOK_RECORD(
+            enable_qlog_for_connection_coverage(connection, "next-context-failure"));
+        auto current_secret = connection.application_space_.read_secret;
+        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
+        if (current_secret.has_value()) {
+            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
+            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
+            if (next_read_secret.has_value()) {
+                connection.application_space_.read_secret->header_protection_key =
+                    next_read_secret.value().header_protection_key;
+                const auto current_ready =
+                    expand_traffic_secret_cached(*connection.application_space_.read_secret);
+                COQUIC_CONNECTION_HOOK_RECORD(current_ready.has_value());
+                const auto encoded = serialize_one_rtt_ack_datagram(
+                    connection, next_read_secret.value(), /*packet_number=*/23,
+                    !connection.application_read_key_phase_);
+                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
+                if (!encoded.empty()) {
+                    coquic::quic::test::reset_packet_crypto_runtime_caches_for_tests();
+                    const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
+                        coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
+                        /*occurrence=*/2);
+                    connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
+                }
+            }
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        const auto current_secret = connection.application_space_.read_secret;
+        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
+        if (current_secret.has_value()) {
+            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
+            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
+            if (next_read_secret.has_value()) {
+                const auto encoded = serialize_one_rtt_ack_datagram(
+                    connection, next_read_secret.value(), /*packet_number=*/22,
+                    !connection.application_read_key_phase_);
+                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
+                connection.application_space_.write_secret = TrafficSecret{
+                    .cipher_suite = invalid_cipher_suite_for_tests(),
+                    .secret = {std::byte{0x01}},
+                };
+                connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
+            }
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        COQUIC_CONNECTION_HOOK_RECORD(
+            enable_qlog_for_connection_coverage(connection, "next-write-secret-failure"));
+        const auto current_secret = connection.application_space_.read_secret;
+        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
+        if (current_secret.has_value()) {
+            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
+            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
+            if (next_read_secret.has_value()) {
+                const auto encoded = serialize_one_rtt_ack_datagram(
+                    connection, next_read_secret.value(), /*packet_number=*/24,
+                    !connection.application_read_key_phase_);
+                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
+                connection.application_space_.write_secret = TrafficSecret{
+                    .cipher_suite = invalid_cipher_suite_for_tests(),
+                    .secret = {std::byte{0x01}},
+                };
+                connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
+            }
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        COQUIC_CONNECTION_HOOK_RECORD(
+            enable_qlog_for_connection_coverage(connection, "next-key-phase-qlog-retry-failure"));
+        const auto current_secret = connection.application_space_.read_secret;
+        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
+        if (current_secret.has_value()) {
+            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
+            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
+            if (next_read_secret.has_value()) {
+                const auto encoded = serialize_one_rtt_ack_datagram(
+                    connection, next_read_secret.value(), /*packet_number=*/25,
+                    !connection.application_read_key_phase_);
+                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
+                if (!encoded.empty()) {
+                    auto truncated = encoded;
+                    truncated.pop_back();
+                    connection.process_inbound_datagram(truncated, QuicCoreTimePoint{});
+                }
+            }
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.application_read_key_phase_);
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        const auto current_secret = connection.application_space_.read_secret;
+        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
+        if (current_secret.has_value()) {
+            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
+            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
+            if (next_read_secret.has_value()) {
+                const auto encoded = serialize_one_rtt_ack_datagram(
+                    connection, next_read_secret.value(), /*packet_number=*/26,
+                    !connection.application_read_key_phase_);
+                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
+                connection.local_key_update_initiated_ = true;
+                connection.local_key_update_requested_ = true;
+                if (!encoded.empty()) {
+                    connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
+                }
+            }
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.application_read_key_phase_);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.local_key_update_requested_);
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        COQUIC_CONNECTION_HOOK_RECORD(
+            enable_qlog_for_connection_coverage(connection, "next-key-phase-qlog-local-initiated"));
+        const auto current_secret = connection.application_space_.read_secret;
+        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
+        if (current_secret.has_value()) {
+            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
+            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
+            if (next_read_secret.has_value()) {
+                const auto encoded = serialize_one_rtt_ack_datagram(
+                    connection, next_read_secret.value(), /*packet_number=*/27,
+                    !connection.application_read_key_phase_);
+                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
+                connection.local_key_update_initiated_ = true;
+                connection.local_key_update_requested_ = true;
+                if (!encoded.empty()) {
+                    connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
+                }
+            }
+        }
+
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.application_read_key_phase_);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.local_key_update_requested_);
+    }
+
+    {
+        QuicConnection connection(QuicCoreConfig{
+            .role = EndpointRole::server,
+            .source_connection_id = {std::byte{0x51}, std::byte{0x01}},
+            .initial_destination_connection_id = {std::byte{0x81}, std::byte{0x01}},
+            .verify_peer = false,
+            .server_name = "localhost",
+        });
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::in_progress;
+        connection.handshake_confirmed_ = false;
+        connection.peer_address_validated_ = false;
+        connection.anti_amplification_received_bytes_ = 0;
+        connection.anti_amplification_sent_bytes_ = 0;
+        connection.current_send_path_id_.reset();
+
+        const auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.initial_space_.recovery.on_packet_sent(SentPacketRecord{
+            .packet_number = 0,
+            .sent_time = QuicCoreTimePoint{},
+            .ack_eliciting = true,
+            .in_flight = true,
+            .bytes_in_flight = 1200,
+        });
+        const auto handles = connection.initial_space_.recovery.tracked_packets();
+        COQUIC_CONNECTION_HOOK_RECORD(!handles.empty());
+        if (!handles.empty()) {
+            connection.initial_space_.recovery.retire_packet(handles.front());
+            connection.initial_space_.recovery.slots_.front().state =
+                PacketSpaceRecovery::LedgerSlotState::sent;
+            connection.initial_space_.recovery.first_live_slot_ = 0;
+            connection.initial_space_.recovery.last_live_slot_ = 0;
+        }
+
+        connection.discard_initial_packet_space();
+
+        COQUIC_CONNECTION_HOOK_RECORD(connection.initial_packet_space_discarded_);
+    }
+
+    {
+        QuicConnection connection(QuicCoreConfig{
+            .role = EndpointRole::server,
+            .source_connection_id = {std::byte{0x52}, std::byte{0x01}},
+            .initial_destination_connection_id = {std::byte{0x82}, std::byte{0x01}},
+            .verify_peer = false,
+            .server_name = "localhost",
+        });
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::in_progress;
+        connection.handshake_confirmed_ = false;
+        connection.peer_transport_parameters_ = TransportParameters{
+            .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+            .active_connection_id_limit = 2,
+            .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+            .max_ack_delay = connection.config_.transport.max_ack_delay,
+            .initial_source_connection_id = ConnectionId{std::byte{0xa5}},
+        };
+        connection.peer_transport_parameters_validated_ = true;
+        connection.peer_address_validated_ = true;
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+        connection.initial_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x53});
+        connection.initial_space_.received_packets.record_received(
+            /*packet_number=*/9, /*ack_eliciting=*/true, QuicCoreTimePoint{});
+        connection.initial_space_.pending_probe_packet = SentPacketRecord{
+            .packet_number = 1,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+        };
+
+        const auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.initial_space_.recovery.slots_.resize(1);
+        auto &slot = connection.initial_space_.recovery.slots_.front();
+        slot.state = PacketSpaceRecovery::LedgerSlotState::retired;
+        slot.packet.packet_number = 99;
+        slot.packet.ack_eliciting = true;
+        slot.packet.in_flight = true;
+        slot.packet.bytes_in_flight = 1200;
+        slot.prev_live_slot = PacketSpaceRecovery::kInvalidLedgerSlotIndex;
+        slot.next_live_slot = PacketSpaceRecovery::kInvalidLedgerSlotIndex;
+        connection.initial_space_.recovery.first_live_slot_ = 0;
+        connection.initial_space_.recovery.last_live_slot_ = 0;
+
+        connection.discard_initial_packet_space();
+
+        COQUIC_CONNECTION_HOOK_RECORD(connection.initial_packet_space_discarded_);
+    }
+
+    {
+        QuicConnection connection(QuicCoreConfig{
+            .role = EndpointRole::server,
+            .source_connection_id = {std::byte{0x54}, std::byte{0x01}},
+            .initial_destination_connection_id = {std::byte{0x84}, std::byte{0x01}},
+            .verify_peer = false,
+            .server_name = "localhost",
+        });
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::connected;
+        connection.handshake_confirmed_ = true;
+        connection.peer_transport_parameters_ = TransportParameters{
+            .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+            .active_connection_id_limit = 2,
+            .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+            .max_ack_delay = connection.config_.transport.max_ack_delay,
+            .initial_source_connection_id = ConnectionId{std::byte{0xa6}},
+        };
+        connection.peer_transport_parameters_validated_ = true;
+        connection.peer_address_validated_ = true;
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+        connection.initial_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x55});
+        connection.initial_space_.received_packets.record_received(
+            /*packet_number=*/10, /*ack_eliciting=*/true, QuicCoreTimePoint{});
+
+        const auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+    }
+
+#undef COQUIC_CONNECTION_HOOK_RECORD
     return ok;
 }
 

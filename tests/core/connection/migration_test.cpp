@@ -328,6 +328,27 @@ bool connection_additional_internal_coverage_for_tests() {
 
     {
         auto connection = make_connected_client_connection();
+        connection.peer_transport_parameters_.reset();
+        connection.current_send_path_id_ = 7;
+        connection.paths_.erase(7);
+        auto &inbound_path = connection.ensure_path_state(9);
+        inbound_path.validated = true;
+        const std::array frames = {
+            coquic::quic::ReceivedFrame{coquic::quic::ReceivedAckFrame{
+                .largest_acknowledged = 0,
+                .first_ack_range = 0,
+                .additional_ranges_validated = true,
+            }},
+        };
+        const auto result = connection.process_inbound_received_application(
+            frames, coquic::quic::test::test_time(0), /*allow_preconnected_frames=*/false,
+            /*path_id=*/9);
+        ok &= result.has_value() && result.value();
+        ok &= connection.current_send_path_id_ == std::optional<coquic::quic::QuicPathId>{9};
+    }
+
+    {
+        auto connection = make_connected_client_connection();
         const auto crypto_bytes = coquic::quic::SharedBytes(bytes_from_ints({0x01, 0x02}));
         static_cast<void>(
             connection.application_space_.receive_crypto.push_shared(0, crypto_bytes));

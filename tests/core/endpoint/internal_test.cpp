@@ -515,7 +515,8 @@ TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanup
         coquic::quic::test::test_time(0)));
     auto &timer_entry = timer_core.connections_.at(1);
     *timer_entry.connection = make_connected_client_connection();
-    timer_entry.connection->send_burst_resume_deadline_ = coquic::quic::test::test_time(5);
+    timer_entry.connection->application_space_.pending_ack_deadline =
+        coquic::quic::test::test_time(5);
     timer_entry.connection->pending_terminal_state_ = QuicConnectionTerminalState::closed;
 
     const auto timeout_result =
@@ -771,7 +772,8 @@ TEST(QuicCoreEndpointInternalTest, EndpointCommandsAndTimersCoverSuccessAndClean
         coquic::quic::test::test_time(0)));
     auto &timer_entry = timer_core.connections_.at(1);
     *timer_entry.connection = make_connected_client_connection();
-    timer_entry.connection->send_burst_resume_deadline_ = coquic::quic::test::test_time(5);
+    timer_entry.connection->application_space_.pending_ack_deadline =
+        coquic::quic::test::test_time(5);
 
     const auto timer_result =
         timer_core.advance_endpoint(QuicCoreTimerExpired{}, coquic::quic::test::test_time(5));

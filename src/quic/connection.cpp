@@ -46,8 +46,6 @@ constexpr std::size_t kMaximumDeferredProtectedPackets = 32;
 constexpr std::uint8_t kDefaultInitialPacketNumberLength = 2;
 constexpr std::uint64_t kCompatibilityStreamId = 0;
 constexpr std::uint32_t kPersistentCongestionThreshold = 3;
-constexpr std::size_t kMaximumImmediateApplicationDatagramsPerBurst = 21;
-constexpr auto kApplicationBurstResumeDelay = std::chrono::milliseconds(1);
 
 struct ConnectionDrainTestHooks {
     bool force_missing_packet_metadata = false;
@@ -2017,39 +2015,6 @@ DatagramBuffer QuicConnection::drain_outbound_datagram(QuicCoreTimePoint now) {
     last_drained_path_id_.reset();
     last_drained_ecn_codepoint_ = QuicEcnCodepoint::not_ect;
 
-    const auto has_urgent_application_control_send = [&]() {
-        if (application_space_.pending_probe_packet.has_value()) {
-            return true;
-        }
-        return std::any_of(paths_.begin(), paths_.end(), [](const auto &entry) {
-            return entry.second.pending_response.has_value() || entry.second.challenge_pending;
-        });
-    };
-    const auto should_limit_stream_send_burst = [&]() {
-        return status_ == HandshakeStatus::connected &&
-               has_pending_fresh_application_stream_send() &&
-               !has_urgent_application_control_send();
-    };
-
-    if (send_burst_resume_deadline_.has_value()) {
-        if (now >= *send_burst_resume_deadline_) {
-            send_burst_resume_deadline_.reset();
-            send_burst_reference_time_.reset();
-            send_burst_datagrams_sent_ = 0;
-        } else if (should_limit_stream_send_burst()) {
-            return {};
-        }
-    }
-    if (!send_burst_reference_time_.has_value() || *send_burst_reference_time_ != now) {
-        send_burst_reference_time_ = now;
-        send_burst_datagrams_sent_ = 0;
-    }
-    if (should_limit_stream_send_burst() &&
-        send_burst_datagrams_sent_ >= kMaximumImmediateApplicationDatagramsPerBurst) {
-        send_burst_resume_deadline_ = now + kApplicationBurstResumeDelay;
-        return {};
-    }
-
     const auto synced = sync_tls_state();
     if (!synced.has_value()) {
         log_codec_failure("sync_tls_state", synced.error());
@@ -2065,26 +2030,6 @@ DatagramBuffer QuicConnection::drain_outbound_datagram(QuicCoreTimePoint now) {
     }
 
     auto datagram = flush_outbound_datagram(now);
-    if (datagram.empty()) {
-        if (!has_pending_fresh_application_stream_send()) {
-            send_burst_resume_deadline_.reset();
-            send_burst_reference_time_.reset();
-            send_burst_datagrams_sent_ = 0;
-        }
-        return {};
-    }
-
-    if (should_limit_stream_send_burst()) {
-        ++send_burst_datagrams_sent_;
-        if (send_burst_datagrams_sent_ >= kMaximumImmediateApplicationDatagramsPerBurst) {
-            send_burst_resume_deadline_ = now + kApplicationBurstResumeDelay;
-        }
-    } else {
-        send_burst_resume_deadline_.reset();
-        send_burst_reference_time_.reset();
-        send_burst_datagrams_sent_ = 0;
-    }
-
     return datagram;
 }
 
@@ -2248,7 +2193,7 @@ std::optional<QuicCoreTimePoint> QuicConnection::next_wakeup() const {
             : std::nullopt;
 
     return earliest_of({loss_deadline(), pto_deadline(), ack_deadline(),
-                        send_burst_resume_deadline_, zero_rtt_discard_deadline(), pacing_deadline});
+                        zero_rtt_discard_deadline(), pacing_deadline});
 }
 
 std::vector<ConnectionId> QuicConnection::active_local_connection_ids() const {

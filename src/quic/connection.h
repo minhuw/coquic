@@ -698,9 +698,6 @@ class QuicConnection {
     std::vector<DeferredProtectedDatagram> deferred_protected_packets_;
     std::optional<QuicCoreTimePoint> last_peer_activity_time_;
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
-    std::optional<QuicCoreTimePoint> send_burst_resume_deadline_;
-    std::optional<QuicCoreTimePoint> send_burst_reference_time_;
-    std::size_t send_burst_datagrams_sent_ = 0;
     std::optional<QuicCoreTimePoint> server_zero_rtt_discard_deadline_;
     std::optional<QuicPathId> last_validated_path_id_;
     std::optional<QuicPathId> previous_path_id_;

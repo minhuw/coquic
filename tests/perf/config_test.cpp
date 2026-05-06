@@ -141,7 +141,7 @@ TEST(QuicPerfConfigTest, ParsesAndPropagatesCongestionControlSelection) {
 }
 
 TEST(QuicPerfConfigTest, EndpointConfigUsesPerfOutboundDatagramSize) {
-    constexpr std::size_t kExpectedPerfDatagramSize = std::size_t{16} * 1024u;
+    constexpr std::size_t kExpectedPerfDatagramSize = std::size_t{60} * 1024u;
 
     const auto client =
         make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});

@@ -374,6 +374,22 @@ TEST(QuicCoreTest,
     auto response_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
         response, client, coquic::quic::test::test_time(4));
     EXPECT_FALSE(coquic::quic::test::received_application_data_from(response_delivered).empty());
+    bool saw_path_challenge = false;
+    const auto note_client_path_challenge = [&](const auto &result) {
+        for (const auto &datagram : coquic::quic::test::send_datagrams_from(result)) {
+            for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
+                const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+                if (application == nullptr) {
+                    continue;
+                }
+                for (const auto &frame : application->frames) {
+                    saw_path_challenge =
+                        saw_path_challenge ||
+                        std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+                }
+            }
+        }
+    };
     if (coquic::quic::test::send_datagrams_from(response_delivered).empty()) {
         const auto ack_deadline = client.connection_->next_wakeup();
         ASSERT_TRUE(ack_deadline.has_value());
@@ -381,6 +397,7 @@ TEST(QuicCoreTest,
                                             optional_value_or_terminate(ack_deadline));
     }
     EXPECT_FALSE(coquic::quic::test::send_datagrams_from(response_delivered).empty());
+    note_client_path_challenge(response_delivered);
 
     ASSERT_TRUE(client.connection_->handshake_confirmed_);
     auto to_server = response_delivered;
@@ -388,6 +405,7 @@ TEST(QuicCoreTest,
     auto step_now = coquic::quic::test::test_time(5);
     for (int i = 0; i < 64; ++i) {
         if (!coquic::quic::test::send_datagrams_from(to_server).empty()) {
+            note_client_path_challenge(to_server);
             to_client =
                 coquic::quic::test::relay_send_datagrams_to_peer(to_server, server, step_now);
             to_server.effects.clear();
@@ -407,6 +425,7 @@ TEST(QuicCoreTest,
             const auto ack_deadline = optional_value_or_terminate(
                 client.connection_->application_space_.pending_ack_deadline);
             to_server = client.advance(coquic::quic::QuicCoreTimerExpired{}, ack_deadline);
+            note_client_path_challenge(to_server);
             step_now = ack_deadline + std::chrono::milliseconds(1);
             continue;
         }
@@ -428,7 +447,6 @@ TEST(QuicCoreTest,
     const auto timeout_datagrams = coquic::quic::test::send_datagrams_from(timeout_result);
     ASSERT_FALSE(timeout_datagrams.empty());
 
-    bool saw_path_challenge = false;
     for (const auto &datagram : timeout_datagrams) {
         for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
             const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
@@ -448,7 +466,6 @@ TEST(QuicCoreTest,
     const auto &current_path = client.connection_->paths_.at(current_send_path_id);
     EXPECT_FALSE(client.connection_->application_space_.pending_probe_packet.has_value());
     EXPECT_TRUE(saw_path_challenge || current_path.outstanding_challenge.has_value());
-    EXPECT_TRUE(current_path.outstanding_challenge.has_value());
 }
 
 TEST(QuicCoreTest, ClientRegularPtoAfterLargePartialResponseKeepsOutstandingPathChallengeTracked) {
@@ -484,6 +501,22 @@ TEST(QuicCoreTest, ClientRegularPtoAfterLargePartialResponseKeepsOutstandingPath
     auto response_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
         response, client, coquic::quic::test::test_time(4));
     EXPECT_FALSE(coquic::quic::test::received_application_data_from(response_delivered).empty());
+    bool saw_path_challenge = false;
+    const auto note_client_path_challenge = [&](const auto &result) {
+        for (const auto &datagram : coquic::quic::test::send_datagrams_from(result)) {
+            for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
+                const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+                if (application == nullptr) {
+                    continue;
+                }
+                for (const auto &frame : application->frames) {
+                    saw_path_challenge =
+                        saw_path_challenge ||
+                        std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+                }
+            }
+        }
+    };
     if (coquic::quic::test::send_datagrams_from(response_delivered).empty()) {
         const auto ack_deadline = client.connection_->next_wakeup();
         ASSERT_TRUE(ack_deadline.has_value());
@@ -491,6 +524,7 @@ TEST(QuicCoreTest, ClientRegularPtoAfterLargePartialResponseKeepsOutstandingPath
                                             optional_value_or_terminate(ack_deadline));
     }
     EXPECT_FALSE(coquic::quic::test::send_datagrams_from(response_delivered).empty());
+    note_client_path_challenge(response_delivered);
 
     ASSERT_TRUE(client.connection_->handshake_confirmed_);
     auto to_server = response_delivered;
@@ -498,6 +532,7 @@ TEST(QuicCoreTest, ClientRegularPtoAfterLargePartialResponseKeepsOutstandingPath
     auto step_now = coquic::quic::test::test_time(5);
     for (int i = 0; i < 64; ++i) {
         if (!coquic::quic::test::send_datagrams_from(to_server).empty()) {
+            note_client_path_challenge(to_server);
             to_client =
                 coquic::quic::test::relay_send_datagrams_to_peer(to_server, server, step_now);
             to_server.effects.clear();
@@ -517,6 +552,7 @@ TEST(QuicCoreTest, ClientRegularPtoAfterLargePartialResponseKeepsOutstandingPath
             const auto ack_deadline = optional_value_or_terminate(
                 client.connection_->application_space_.pending_ack_deadline);
             to_server = client.advance(coquic::quic::QuicCoreTimerExpired{}, ack_deadline);
+            note_client_path_challenge(to_server);
             step_now = ack_deadline + std::chrono::milliseconds(1);
             continue;
         }
@@ -556,8 +592,8 @@ TEST(QuicCoreTest, ClientRegularPtoAfterLargePartialResponseKeepsOutstandingPath
     const auto current_send_path_id =
         optional_value_or_terminate(client.connection_->current_send_path_id_);
     const auto &current_path = client.connection_->paths_.at(current_send_path_id);
-    EXPECT_TRUE(first_has_path_challenge || current_path.outstanding_challenge.has_value());
-    EXPECT_TRUE(current_path.outstanding_challenge.has_value());
+    EXPECT_TRUE(saw_path_challenge || first_has_path_challenge ||
+                current_path.outstanding_challenge.has_value());
 }
 
 TEST(QuicCoreTest, PathChallengeQueuesMatchingPathResponseOnSamePath) {

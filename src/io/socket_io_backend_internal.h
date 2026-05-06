@@ -91,6 +91,7 @@ bool has_legacy_recvfrom_override();
 QuicCoreTimePoint now();
 int linux_traffic_class_for_ecn(QuicEcnCodepoint ecn);
 QuicEcnCodepoint ecn_from_linux_traffic_class(int traffic_class);
+void configure_udp_socket_buffers(LinuxSocketDescriptor socket);
 bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family);
 bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_len);
 QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message);

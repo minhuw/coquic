@@ -68,6 +68,17 @@ translate_non_receive_wait_event(const QuicIoEngineEvent &event) {
 
 namespace internal {
 
+void configure_udp_socket_buffers(LinuxSocketDescriptor socket) {
+    const int buffer_size = 4 * 1024 * 1024;
+    const auto set_buffer_option = [&](int option) {
+        static_cast<void>(socket_io_backend_ops_state().setsockopt_fn(
+            socket.fd, SOL_SOCKET, option, &buffer_size, sizeof(buffer_size)));
+    };
+
+    set_buffer_option(SO_RCVBUF);
+    set_buffer_option(SO_SNDBUF);
+}
+
 bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family) {
 #if defined(__linux__)
     const auto set_bool_socket_option = [&](int level, int name) {
@@ -109,6 +120,8 @@ int open_udp_socket(int family) {
             return -1;
         }
     }
+
+    configure_udp_socket_buffers(LinuxSocketDescriptor{.fd = fd});
 
     if (!configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = fd}, family)) {
         const int option_errno = errno;
@@ -519,7 +532,10 @@ COQUIC_NO_PROFILE bool socket_io_backend_configures_linux_ecn_socket_options_for
                                                                                  value);
                            });
     };
+    constexpr int kExpectedUdpSocketBufferBytes = 4 * 1024 * 1024;
     return opened && has_call(IPPROTO_IPV6, IPV6_V6ONLY, 0) &&
+           has_call(SOL_SOCKET, SO_RCVBUF, kExpectedUdpSocketBufferBytes) &&
+           has_call(SOL_SOCKET, SO_SNDBUF, kExpectedUdpSocketBufferBytes) &&
            has_call(IPPROTO_IP, IP_RECVTOS, 1) && has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1);
 }
 

@@ -13,7 +13,7 @@
 
 namespace coquic::perf {
 namespace {
-constexpr std::size_t kPerfMaxOutboundDatagramSize = std::size_t{16} * 1024u;
+constexpr std::size_t kPerfMaxOutboundDatagramSize = std::size_t{60} * 1024u;
 constexpr std::uint64_t kPerfTransferConnectionReceiveWindow = 32ull * 1024ull * 1024ull;
 constexpr std::uint64_t kPerfTransferStreamReceiveWindow = 16ull * 1024ull * 1024ull;
 constexpr std::string_view kPerfUsageLine =

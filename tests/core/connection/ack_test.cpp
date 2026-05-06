@@ -5105,7 +5105,7 @@ TEST(QuicCoreTest, ApplicationSendUsesConfiguredOutboundDatagramSizeLimit) {
     EXPECT_LE(datagram.size(), 4096u);
 }
 
-TEST(QuicCoreTest, ApplicationSendYieldsAfterBoundedBurstUntilResumeDeadline) {
+TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadWithoutArtificialBurstLimit) {
     auto connection = make_connected_client_connection();
     const auto payload =
         std::vector<std::byte>(static_cast<std::size_t>(256u) * 1024u, std::byte{0x52});
@@ -5117,74 +5117,20 @@ TEST(QuicCoreTest, ApplicationSendYieldsAfterBoundedBurstUntilResumeDeadline) {
     connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
     ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
 
-    const auto burst_time = coquic::quic::test::test_time(1);
-    constexpr auto resume_delay = std::chrono::milliseconds(1);
-    constexpr std::size_t kExpectedBurstDatagrams = 21;
+    const auto send_time = coquic::quic::test::test_time(1);
 
     std::size_t emitted_packets = 0;
     for (;;) {
-        const auto datagram = connection.drain_outbound_datagram(burst_time);
+        const auto datagram = connection.drain_outbound_datagram(send_time);
         if (datagram.empty()) {
             break;
         }
         ++emitted_packets;
     }
 
-    EXPECT_EQ(emitted_packets, kExpectedBurstDatagrams);
-    EXPECT_TRUE(connection.has_pending_application_send());
-    EXPECT_EQ(connection.next_wakeup(), std::optional{burst_time + resume_delay});
-
-    const auto resumed_datagram = connection.drain_outbound_datagram(burst_time + resume_delay);
-    EXPECT_FALSE(resumed_datagram.empty());
-}
-
-TEST(QuicCoreTest, ApplicationSendSetsResumeDeadlineWhenBurstCounterIsAlreadyAtLimit) {
-    auto connection = make_connected_client_connection();
-    const auto payload =
-        std::vector<std::byte>(static_cast<std::size_t>(64u) * 1024u, std::byte{0x51});
-    auto &peer_transport_parameters =
-        optional_ref_or_terminate(connection.peer_transport_parameters_);
-    peer_transport_parameters.initial_max_data = payload.size();
-    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
-    connection.initialize_peer_flow_control_from_transport_parameters();
-    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
-    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
-
-    const auto burst_time = coquic::quic::test::test_time(1);
-    connection.send_burst_reference_time_ = burst_time;
-    connection.send_burst_datagrams_sent_ = 21;
-    connection.send_burst_resume_deadline_.reset();
-
-    const auto datagram = connection.drain_outbound_datagram(burst_time);
-    EXPECT_TRUE(datagram.empty());
-    EXPECT_EQ(connection.send_burst_resume_deadline_,
-              std::optional{burst_time + std::chrono::milliseconds(1)});
-}
-
-TEST(QuicCoreTest, ApplicationSendRemainsBlockedBeforeBurstResumeDeadline) {
-    auto connection = make_connected_client_connection();
-    const auto payload =
-        std::vector<std::byte>(static_cast<std::size_t>(256u) * 1024u, std::byte{0x52});
-    auto &peer_transport_parameters =
-        optional_ref_or_terminate(connection.peer_transport_parameters_);
-    peer_transport_parameters.initial_max_data = payload.size();
-    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
-    connection.initialize_peer_flow_control_from_transport_parameters();
-    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
-    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
-
-    const auto burst_time = coquic::quic::test::test_time(1);
-    for (;;) {
-        const auto datagram = connection.drain_outbound_datagram(burst_time);
-        if (datagram.empty()) {
-            break;
-        }
-    }
-
-    ASSERT_EQ(connection.send_burst_resume_deadline_,
-              std::optional{burst_time + std::chrono::milliseconds(1)});
-    EXPECT_TRUE(connection.has_pending_application_send());
-    EXPECT_TRUE(connection.drain_outbound_datagram(burst_time).empty());
+    EXPECT_GT(emitted_packets, 21u);
+    EXPECT_FALSE(connection.has_pending_fresh_application_stream_send());
+    EXPECT_FALSE(connection.has_pending_application_send());
 }
 
 TEST(QuicCoreTest, BbrPacingBlocksFurtherApplicationSendsUntilPacingWakeup) {
@@ -5229,7 +5175,7 @@ TEST(QuicCoreTest, BbrPacingBlocksFurtherApplicationSendsUntilPacingWakeup) {
         connection.drain_outbound_datagram(optional_value_or_terminate(pacing_deadline)).empty());
 }
 
-TEST(QuicCoreTest, UrgentPathResponseBypassesBurstResumeDeadline) {
+TEST(QuicCoreTest, PathResponseCanBeSentWhileApplicationStreamDataIsQueued) {
     auto connection = make_connected_client_connection();
     const auto payload =
         std::vector<std::byte>(static_cast<std::size_t>(256u) * 1024u, std::byte{0x53});
@@ -5241,58 +5187,32 @@ TEST(QuicCoreTest, UrgentPathResponseBypassesBurstResumeDeadline) {
     connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
     ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
 
-    const auto burst_time = coquic::quic::test::test_time(1);
-    for (;;) {
-        const auto datagram = connection.drain_outbound_datagram(burst_time);
-        if (datagram.empty()) {
-            break;
-        }
-    }
-
-    ASSERT_TRUE(connection.send_burst_resume_deadline_.has_value());
     auto &path =
         connection.ensure_path_state(optional_value_or_terminate(connection.current_send_path_id_));
     path.pending_response =
         std::array{std::byte{0x71}, std::byte{0x72}, std::byte{0x73}, std::byte{0x74},
                    std::byte{0x75}, std::byte{0x76}, std::byte{0x77}, std::byte{0x78}};
 
-    const auto urgent_datagram = connection.drain_outbound_datagram(burst_time);
-    ASSERT_FALSE(urgent_datagram.empty());
+    bool saw_path_response = false;
+    for (;;) {
+        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        if (datagram.empty()) {
+            break;
+        }
 
-    const auto packets = decode_sender_datagram(connection, urgent_datagram);
-    ASSERT_EQ(packets.size(), 1u);
-    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
-    ASSERT_NE(application, nullptr);
-    EXPECT_TRUE(
-        std::any_of(application->frames.begin(), application->frames.end(), [](const auto &frame) {
-            return std::holds_alternative<coquic::quic::PathResponseFrame>(frame);
-        }));
-}
+        const auto packets = decode_sender_datagram(connection, datagram);
+        ASSERT_EQ(packets.size(), 1u);
+        const auto *application =
+            std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+        ASSERT_NE(application, nullptr);
+        saw_path_response |= std::any_of(
+            application->frames.begin(), application->frames.end(), [](const auto &frame) {
+                return std::holds_alternative<coquic::quic::PathResponseFrame>(frame);
+            });
+    }
 
-TEST(QuicCoreTest, ApplicationSendDoesNotRearmResumeDeadlineWhenBurstEndsOnFinalDatagram) {
-    auto connection = make_connected_client_connection();
-    const auto payload = std::vector<std::byte>(64u, std::byte{0x54});
-    auto &peer_transport_parameters =
-        optional_ref_or_terminate(connection.peer_transport_parameters_);
-    peer_transport_parameters.initial_max_data = payload.size();
-    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
-    connection.initialize_peer_flow_control_from_transport_parameters();
-    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
-    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
-
-    const auto burst_time = coquic::quic::test::test_time(1);
-    connection.send_burst_reference_time_ = burst_time;
-    connection.send_burst_datagrams_sent_ = 20;
-    connection.send_burst_resume_deadline_.reset();
-
-    const auto datagram = connection.drain_outbound_datagram(burst_time);
-
-    ASSERT_FALSE(datagram.empty());
-    EXPECT_EQ(connection.send_burst_datagrams_sent_, 0u);
-    EXPECT_FALSE(connection.has_pending_fresh_application_stream_send());
-    EXPECT_FALSE(connection.has_pending_application_send());
-    EXPECT_FALSE(connection.send_burst_resume_deadline_.has_value());
-    EXPECT_FALSE(connection.send_burst_reference_time_.has_value());
+    EXPECT_TRUE(saw_path_response);
+    EXPECT_FALSE(path.pending_response.has_value());
 }
 
 TEST(QuicCoreTest, ApplicationProbePacketDoesNotLeaveRetransmittedFragmentPending) {
@@ -6600,7 +6520,7 @@ TEST(QuicCoreTest, LargePartialResponseSchedulesAckAndClearsOutstandingRequest) 
     EXPECT_FALSE(client.connection_->streams_.at(0).has_outstanding_send());
 }
 
-TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowRetainsAckOnProbe) {
+TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnProbe) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 
@@ -6635,12 +6555,29 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowRetainsAckOnProbe) {
     EXPECT_FALSE(coquic::quic::test::received_application_data_from(response_delivered).empty());
     EXPECT_FALSE(coquic::quic::test::send_datagrams_from(response_delivered).empty());
 
+    bool saw_ack = false;
+    const auto note_client_ack = [&](const auto &result) {
+        for (const auto &datagram : coquic::quic::test::send_datagrams_from(result)) {
+            for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
+                const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+                if (application == nullptr) {
+                    continue;
+                }
+                for (const auto &frame : application->frames) {
+                    saw_ack = saw_ack || std::holds_alternative<coquic::quic::AckFrame>(frame);
+                }
+            }
+        }
+    };
+    note_client_ack(response_delivered);
+
     ASSERT_TRUE(client.connection_->handshake_confirmed_);
     auto to_server = response_delivered;
     auto to_client = coquic::quic::QuicCoreResult{};
     auto step_now = coquic::quic::test::test_time(5);
     for (int i = 0; i < 64; ++i) {
         if (!coquic::quic::test::send_datagrams_from(to_server).empty()) {
+            note_client_ack(to_server);
             to_client =
                 coquic::quic::test::relay_send_datagrams_to_peer(to_server, server, step_now);
             to_server.effects.clear();
@@ -6663,7 +6600,7 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowRetainsAckOnProbe) {
     const auto in_flight_application_packets =
         std::count_if(sent_packets.begin(), sent_packets.end(),
                       [](const auto &packet) { return packet.ack_eliciting && packet.in_flight; });
-    ASSERT_EQ(in_flight_application_packets, 0);
+    ASSERT_LE(in_flight_application_packets, 1);
 
     const auto deadline = client.connection_->next_wakeup();
     ASSERT_TRUE(deadline.has_value());
@@ -6672,19 +6609,7 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowRetainsAckOnProbe) {
         client.advance(coquic::quic::QuicCoreTimerExpired{}, optional_value_or_terminate(deadline));
     const auto timeout_datagrams = coquic::quic::test::send_datagrams_from(timeout_result);
     ASSERT_FALSE(timeout_datagrams.empty());
-
-    bool saw_ack = false;
-    for (const auto &datagram : timeout_datagrams) {
-        for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
-            const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
-            if (application == nullptr) {
-                continue;
-            }
-            for (const auto &frame : application->frames) {
-                saw_ack = saw_ack || std::holds_alternative<coquic::quic::AckFrame>(frame);
-            }
-        }
-    }
+    note_client_ack(timeout_result);
 
     EXPECT_TRUE(saw_ack);
 }

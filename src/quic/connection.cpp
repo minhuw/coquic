@@ -4816,11 +4816,17 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 stream_state->receive_flow_control_consumed == *stream_state->peer_final_size &&
                 !stream_state->peer_fin_delivered;
             if (contiguous_size != 0 || fin_ready) {
-                pending_stream_receive_effects_.push_back(QuicCoreReceiveStreamData{
+                QuicCoreReceiveStreamData receive{
                     .stream_id = stream_frame->stream_id,
-                    .bytes = contiguous_bytes.value().to_vector(),
                     .fin = fin_ready,
-                });
+                };
+                if (config_.emit_shared_receive_stream_data &&
+                    contiguous_bytes.value().owned.empty()) {
+                    receive.shared_bytes = std::move(contiguous_bytes.value().shared);
+                } else {
+                    receive.bytes = contiguous_bytes.value().to_vector();
+                }
+                pending_stream_receive_effects_.push_back(std::move(receive));
                 stream_state->flow_control.delivered_bytes +=
                     static_cast<std::uint64_t>(contiguous_size);
                 connection_flow_control_.delivered_bytes +=

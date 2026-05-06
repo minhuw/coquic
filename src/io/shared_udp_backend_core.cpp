@@ -427,8 +427,8 @@ bool SharedUdpBackendCore::send(const QuicIoTxDatagram &datagram) {
     }
 
     return impl_->engine->send(route_it->second.socket_fd, route_it->second.peer,
-                               route_it->second.peer_len, datagram.bytes, impl_->config.role_name,
-                               datagram.ecn);
+                               route_it->second.peer_len, datagram.payload(),
+                               impl_->config.role_name, datagram.ecn);
 }
 
 namespace test {

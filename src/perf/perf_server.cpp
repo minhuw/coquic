@@ -77,7 +77,7 @@ int QuicPerfServer::run() {
             continue;
         }
 
-        const auto event = backend_->wait(next_wakeup);
+        auto event = backend_->wait(next_wakeup);
         if (!event.has_value()) {
             return 1;
         }
@@ -147,7 +147,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             return true;
         }
 
-        session.bytes_received += received.bytes.size();
+        session.bytes_received += received.byte_count();
         if (received.fin) {
             ++session.requests_completed;
         }
@@ -249,8 +249,9 @@ bool QuicPerfServer::handle_stream_data(Session &session,
         return true;
     }
 
-    session.control_bytes.insert(session.control_bytes.end(), received.bytes.begin(),
-                                 received.bytes.end());
+    const auto control_payload = received.payload();
+    session.control_bytes.insert(session.control_bytes.end(), control_payload.begin(),
+                                 control_payload.end());
     if (!received.fin) {
         return true;
     }

@@ -386,6 +386,7 @@ quic::QuicCoreEndpointConfig make_perf_client_endpoint_config(const QuicPerfConf
         .application_protocol = "coquic-perf/1",
         .max_outbound_datagram_size = kPerfMaxOutboundDatagramSize,
     };
+    endpoint_config.emit_shared_receive_stream_data = true;
     endpoint_config.transport.congestion_control = config.congestion_control;
     endpoint_config.transport.initial_max_data = kPerfTransferConnectionReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_local = kPerfTransferStreamReceiveWindow;
@@ -405,6 +406,7 @@ quic::QuicCoreEndpointConfig make_perf_server_endpoint_config(const QuicPerfConf
                 .private_key_pem = read_text_file(config.private_key_path),
             },
     };
+    endpoint_config.emit_shared_receive_stream_data = true;
     endpoint_config.max_outbound_datagram_size = kPerfMaxOutboundDatagramSize;
     endpoint_config.transport.congestion_control = config.congestion_control;
     endpoint_config.transport.initial_max_data = kPerfTransferConnectionReceiveWindow;

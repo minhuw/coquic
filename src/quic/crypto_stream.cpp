@@ -184,7 +184,7 @@ std::vector<ByteRange> ReliableSendBuffer::take_ranges(std::size_t max_bytes) {
 std::vector<ByteRange>
 ReliableSendBuffer::take_lost_ranges(std::size_t max_bytes,
                                      std::optional<std::uint64_t> max_offset) {
-    if (max_bytes == 0) {
+    if (max_bytes == 0 || segment_state_counts_[segment_state_index(SegmentState::lost)] == 0) {
         return {};
     }
 
@@ -197,7 +197,7 @@ ReliableSendBuffer::take_lost_ranges(std::size_t max_bytes,
 std::vector<ByteRange>
 ReliableSendBuffer::take_unsent_ranges(std::size_t max_bytes,
                                        std::optional<std::uint64_t> max_offset) {
-    if (max_bytes == 0) {
+    if (max_bytes == 0 || segment_state_counts_[segment_state_index(SegmentState::unsent)] == 0) {
         return {};
     }
 

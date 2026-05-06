@@ -75,6 +75,7 @@ struct QuicCoreConfig {
     QuicZeroRttConfig zero_rtt;
     std::optional<QuicQlogConfig> qlog;
     std::optional<std::filesystem::path> tls_keylog_path;
+    bool emit_shared_receive_stream_data = false;
 };
 
 using QuicCoreClock = std::chrono::steady_clock;
@@ -96,6 +97,7 @@ struct QuicCoreEndpointConfig {
     QuicZeroRttConfig zero_rtt;
     std::optional<QuicQlogConfig> qlog;
     std::optional<std::filesystem::path> tls_keylog_path;
+    bool emit_shared_receive_stream_data = false;
 };
 
 struct QuicCoreClientConnectionConfig {
@@ -223,7 +225,16 @@ struct QuicCoreReceiveStreamData {
     QuicConnectionHandle connection = 0;
     std::uint64_t stream_id = 0;
     std::vector<std::byte> bytes;
+    SharedBytes shared_bytes;
     bool fin = false;
+
+    std::size_t byte_count() const {
+        return shared_bytes.empty() ? bytes.size() : shared_bytes.size();
+    }
+
+    std::span<const std::byte> payload() const {
+        return shared_bytes.empty() ? std::span<const std::byte>(bytes) : shared_bytes.span();
+    }
 };
 
 struct QuicCorePeerResetStream {

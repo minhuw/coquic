@@ -77,12 +77,8 @@ QuicCoreResult drain_connection_effects(
     }
 
     while (auto received = connection.take_received_stream_data()) {
-        result.effects.emplace_back(QuicCoreReceiveStreamData{
-            .connection = handle,
-            .stream_id = received->stream_id,
-            .bytes = std::move(received->bytes),
-            .fin = received->fin,
-        });
+        received->connection = handle;
+        result.effects.emplace_back(std::move(*received));
     }
     while (const auto reset = connection.take_peer_reset_stream()) {
         result.effects.emplace_back(QuicCorePeerResetStream{
@@ -993,6 +989,7 @@ QuicCore::QuicCore(QuicCoreConfig config)
           .zero_rtt = config.zero_rtt,
           .qlog = config.qlog,
           .tls_keylog_path = config.tls_keylog_path,
+          .emit_shared_receive_stream_data = config.emit_shared_receive_stream_data,
       }),
       legacy_config_(std::move(config)), connection_(this) {
     static_cast<void>(ensure_legacy_entry());
@@ -1085,6 +1082,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .zero_rtt = open->connection.zero_rtt,
             .qlog = endpoint_config_.qlog,
             .tls_keylog_path = endpoint_config_.tls_keylog_path,
+            .emit_shared_receive_stream_data = endpoint_config_.emit_shared_receive_stream_data,
         };
 
         const auto handle = next_connection_handle_++;
@@ -1237,6 +1235,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .zero_rtt = endpoint_config_.zero_rtt,
             .qlog = endpoint_config_.qlog,
             .tls_keylog_path = endpoint_config_.tls_keylog_path,
+            .emit_shared_receive_stream_data = endpoint_config_.emit_shared_receive_stream_data,
         };
         if (retry_context.has_value()) {
             config.initial_destination_connection_id = retry_context->retry_source_connection_id;
@@ -1575,8 +1574,9 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
             .ecn = connection->last_drained_ecn_codepoint(),
         });
     }
-    while (const auto received = connection->take_received_stream_data()) {
-        result.effects.emplace_back(*received);
+    while (auto received = connection->take_received_stream_data()) {
+        received->connection = entry.handle;
+        result.effects.emplace_back(std::move(*received));
     }
     while (const auto reset = connection->take_peer_reset_stream()) {
         result.effects.emplace_back(*reset);

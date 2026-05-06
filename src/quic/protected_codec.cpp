@@ -85,9 +85,14 @@ struct RemovedLongHeaderProtection {
 };
 
 struct RemovedShortHeaderProtection {
-    std::vector<std::byte> packet_bytes;
+    std::array<std::byte, 260> plaintext_header{};
+    std::size_t plaintext_header_size = 0;
     std::uint8_t packet_number_length = 0;
     std::uint32_t truncated_packet_number = 0;
+
+    std::span<const std::byte> plaintext_header_span() const {
+        return std::span<const std::byte>(plaintext_header.data(), plaintext_header_size);
+    }
 };
 
 struct StreamFrameHeaderFields {
@@ -907,43 +912,49 @@ remove_short_header_protection(std::span<const std::byte> bytes, std::size_t pac
         return CodecResult<RemovedShortHeaderProtection>::failure(
             CodecErrorCode::header_protection_sample_too_short, 0);
 
-    std::vector<std::byte> packet_bytes(bytes.begin(), bytes.end());
     const auto mask = make_header_protection_mask(
         cipher_suite,
         HeaderProtectionMaskInput{
             .hp_key = keys.hp_key,
-            .sample = std::span<const std::byte>(packet_bytes)
-                          .subspan(packet_number_offset + kHeaderProtectionSampleOffset),
+            .sample = bytes.subspan(packet_number_offset + kHeaderProtectionSampleOffset),
         });
     if (!mask.has_value())
         return CodecResult<RemovedShortHeaderProtection>::failure(mask.error().code,
                                                                   mask.error().offset);
 
-    packet_bytes[0] ^=
-        static_cast<std::byte>(std::to_integer<std::uint8_t>(mask.value()[0]) & 0x1fu);
+    const auto first_byte =
+        bytes[0] ^ static_cast<std::byte>(std::to_integer<std::uint8_t>(mask.value()[0]) & 0x1fu);
     const auto packet_number_length =
-        static_cast<std::uint8_t>((std::to_integer<std::uint8_t>(packet_bytes[0]) & 0x03u) + 1u);
+        static_cast<std::uint8_t>((std::to_integer<std::uint8_t>(first_byte) & 0x03u) + 1u);
     const auto packet_number_length_mismatch =
         consume_protected_codec_fault(
             test::ProtectedCodecFaultPoint::remove_short_header_packet_length_mismatch) |
-        (packet_number_offset + packet_number_length > packet_bytes.size());
+        (packet_number_offset + packet_number_length > bytes.size());
     if (packet_number_length_mismatch)
         return CodecResult<RemovedShortHeaderProtection>::failure(
             CodecErrorCode::packet_length_mismatch, packet_number_offset);
 
-    for (std::size_t index = 0; index < packet_number_length; ++index) {
-        packet_bytes[packet_number_offset + index] ^= mask.value()[index + 1];
+    const auto header_end = packet_number_offset + packet_number_length;
+    RemovedShortHeaderProtection removed{
+        .plaintext_header_size = header_end,
+        .packet_number_length = packet_number_length,
+    };
+    if (header_end > removed.plaintext_header.size()) {
+        return CodecResult<RemovedShortHeaderProtection>::failure(
+            CodecErrorCode::malformed_short_header_context, packet_number_offset);
     }
 
-    const auto truncated_packet_number =
-        read_packet_number(std::span<const std::byte>(packet_bytes).subspan(packet_number_offset),
-                           packet_number_length);
+    std::copy_n(bytes.begin(), header_end, removed.plaintext_header.begin());
+    removed.plaintext_header[0] = first_byte;
+    for (std::size_t index = 0; index < packet_number_length; ++index) {
+        removed.plaintext_header[packet_number_offset + index] ^= mask.value()[index + 1];
+    }
 
-    return CodecResult<RemovedShortHeaderProtection>::success(RemovedShortHeaderProtection{
-        .packet_bytes = std::move(packet_bytes),
-        .packet_number_length = packet_number_length,
-        .truncated_packet_number = truncated_packet_number,
-    });
+    const auto truncated_packet_number = read_packet_number(
+        removed.plaintext_header_span().subspan(packet_number_offset), packet_number_length);
+    removed.truncated_packet_number = truncated_packet_number;
+
+    return CodecResult<RemovedShortHeaderProtection>::success(removed);
 }
 
 LongHeaderLayout locate_long_header_or_assert(std::span<const std::byte> bytes,
@@ -1931,7 +1942,7 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
         const auto required_inline_chunks =
             static_cast<std::size_t>(!packet.frames.empty()) + (packet.stream_fragments.size() * 2);
         const bool can_chunk_seal_stream_fragments =
-            (packet.stream_fragments.size() > 1) & (payload_size == plaintext_payload_size) &
+            !packet.stream_fragments.empty() && (payload_size == plaintext_payload_size) &&
             (required_inline_chunks <= kMaxInlineSealPlaintextChunks);
         if (can_chunk_seal_stream_fragments) {
             std::array<PlaintextChunk, kMaxInlineSealPlaintextChunks> plaintext_chunks{};
@@ -2087,38 +2098,35 @@ deserialize_protected_one_rtt_packet(std::span<const std::byte> bytes,
         return CodecResult<ProtectedPacketDecodeResult>::failure(unprotected.error().code,
                                                                  unprotected.error().offset);
 
-    const auto key_phase =
-        (std::to_integer<std::uint8_t>(unprotected.value().packet_bytes[0]) & 0x04u) != 0;
+    const auto &unprotected_value = unprotected.value();
+    const auto plaintext_header = unprotected_value.plaintext_header_span();
+    const auto key_phase = (std::to_integer<std::uint8_t>(plaintext_header[0]) & 0x04u) != 0;
     if (key_phase != context.one_rtt_key_phase)
         return CodecResult<ProtectedPacketDecodeResult>::failure(
             CodecErrorCode::invalid_packet_protection_state, 0);
 
     const auto packet_number = recover_packet_number(
         context.largest_authenticated_application_packet_number,
-        unprotected.value().truncated_packet_number, unprotected.value().packet_number_length);
+        unprotected_value.truncated_packet_number, unprotected_value.packet_number_length);
     if (!packet_number.has_value())
         return CodecResult<ProtectedPacketDecodeResult>::failure(packet_number.error().code,
                                                                  packet_number.error().offset);
 
-    const auto header_end = packet_number_offset + unprotected.value().packet_number_length;
+    const auto header_end = packet_number_offset + unprotected_value.packet_number_length;
     const auto nonce = make_packet_protection_nonce_or_assert(keys_ref.iv, packet_number.value());
 
     auto plaintext = open_payload(OpenPayloadInput{
         .cipher_suite = cipher_suite,
         .key = keys_ref.key,
         .nonce = nonce,
-        .associated_data =
-            std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
-        .ciphertext =
-            std::span<const std::byte>(unprotected.value().packet_bytes).subspan(header_end),
+        .associated_data = plaintext_header,
+        .ciphertext = bytes.subspan(header_end),
     });
     if (!plaintext.has_value())
         return CodecResult<ProtectedPacketDecodeResult>::failure(plaintext.error().code,
                                                                  plaintext.error().offset);
 
-    auto plaintext_image = std::vector<std::byte>(unprotected.value().packet_bytes.begin(),
-                                                  unprotected.value().packet_bytes.begin() +
-                                                      static_cast<std::ptrdiff_t>(header_end));
+    auto plaintext_image = std::vector<std::byte>(plaintext_header.begin(), plaintext_header.end());
     plaintext_image.insert(plaintext_image.end(), plaintext.value().begin(),
                            plaintext.value().end());
 
@@ -2176,8 +2184,9 @@ deserialize_received_protected_one_rtt_packet(std::span<const std::byte> bytes,
             unprotected.error().code, unprotected.error().offset);
     }
 
-    const auto key_phase =
-        (std::to_integer<std::uint8_t>(unprotected.value().packet_bytes[0]) & 0x04u) != 0;
+    const auto &unprotected_value = unprotected.value();
+    const auto plaintext_header = unprotected_value.plaintext_header_span();
+    const auto key_phase = (std::to_integer<std::uint8_t>(plaintext_header[0]) & 0x04u) != 0;
     if (key_phase != context.one_rtt_key_phase) {
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
             CodecErrorCode::invalid_packet_protection_state, 0);
@@ -2185,22 +2194,20 @@ deserialize_received_protected_one_rtt_packet(std::span<const std::byte> bytes,
 
     const auto packet_number = recover_packet_number(
         context.largest_authenticated_application_packet_number,
-        unprotected.value().truncated_packet_number, unprotected.value().packet_number_length);
+        unprotected_value.truncated_packet_number, unprotected_value.packet_number_length);
     if (!packet_number.has_value()) {
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
             packet_number.error().code, packet_number.error().offset);
     }
 
-    const auto header_end = packet_number_offset + unprotected.value().packet_number_length;
+    const auto header_end = packet_number_offset + unprotected_value.packet_number_length;
     const auto nonce = make_packet_protection_nonce_or_assert(keys_ref.iv, packet_number.value());
     auto plaintext = open_payload(OpenPayloadInput{
         .cipher_suite = cipher_suite,
         .key = keys_ref.key,
         .nonce = nonce,
-        .associated_data =
-            std::span<const std::byte>(unprotected.value().packet_bytes).first(header_end),
-        .ciphertext =
-            std::span<const std::byte>(unprotected.value().packet_bytes).subspan(header_end),
+        .associated_data = plaintext_header,
+        .ciphertext = bytes.subspan(header_end),
     });
     if (!plaintext.has_value()) {
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(plaintext.error().code,
@@ -2208,9 +2215,6 @@ deserialize_received_protected_one_rtt_packet(std::span<const std::byte> bytes,
     }
 
     auto plaintext_storage = std::make_shared<std::vector<std::byte>>(std::move(plaintext.value()));
-    std::vector<std::byte> plaintext_header(unprotected.value().packet_bytes.begin(),
-                                            unprotected.value().packet_bytes.begin() +
-                                                static_cast<std::ptrdiff_t>(header_end));
     auto decoded_fields = decode_received_short_header_packet_fields(
         plaintext_header, SharedBytes(plaintext_storage, 0, plaintext_storage->size()));
     if (!decoded_fields.has_value()) {

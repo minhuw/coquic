@@ -1,15 +1,17 @@
 #include "src/perf/perf_loop.h"
 
+#include <utility>
+
 namespace coquic::perf {
 
 std::vector<quic::QuicCoreEndpointInput>
-make_endpoint_inputs_from_io_event(const io::QuicIoEvent &event) {
+make_endpoint_inputs_from_io_event(io::QuicIoEvent &event) {
     std::vector<quic::QuicCoreEndpointInput> inputs;
     switch (event.kind) {
     case io::QuicIoEvent::Kind::rx_datagram:
         if (event.datagram.has_value()) {
             inputs.push_back(quic::QuicCoreInboundDatagram{
-                .bytes = event.datagram->bytes,
+                .bytes = std::move(event.datagram->bytes),
                 .route_handle = event.datagram->route_handle,
                 .ecn = event.datagram->ecn,
             });
@@ -33,7 +35,7 @@ bool flush_send_effects(io::QuicIoBackend &backend, const quic::QuicCoreResult &
             }
             if (!backend.send(io::QuicIoTxDatagram{
                     .route_handle = *send->route_handle,
-                    .bytes = send->bytes,
+                    .bytes_view = send->bytes.span(),
                     .ecn = send->ecn,
                 })) {
                 return false;

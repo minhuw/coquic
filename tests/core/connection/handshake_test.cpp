@@ -3041,7 +3041,7 @@ TEST(QuicCoreTest, FlushOutboundDatagramReusesAcceptedApplicationCandidateSerial
             .has_value());
 
     const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 3);
     const auto datagram = connection.flush_outbound_datagram(coquic::quic::test::test_time(5));
 
     EXPECT_FALSE(datagram.empty());

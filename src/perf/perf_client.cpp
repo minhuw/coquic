@@ -312,7 +312,7 @@ int QuicPerfClient::run() {
         if (!maybe_open_crr_connections(current)) {
             return fail("open crr connection failed");
         }
-        const auto event = backend_->wait(next_wakeup);
+        auto event = backend_->wait(next_wakeup);
         if (!event.has_value()) {
             return fail("client wait failed");
         }
@@ -337,7 +337,7 @@ int QuicPerfClient::run() {
             advance_benchmark_phase(event->now);
             const auto inbound_result = core_.advance_endpoint(
                 quic::QuicCoreInboundDatagram{
-                    .bytes = event->datagram->bytes,
+                    .bytes = std::move(event->datagram->bytes),
                     .route_handle = event->datagram->route_handle,
                     .ecn = event->datagram->ecn,
                 },
@@ -463,8 +463,9 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
                                         const quic::QuicCoreReceiveStreamData &received,
                                         quic::QuicCoreTimePoint now) {
     if (received.stream_id == kQuicPerfControlStreamId) {
-        connection.control_bytes.insert(connection.control_bytes.end(), received.bytes.begin(),
-                                        received.bytes.end());
+        const auto control_payload = received.payload();
+        connection.control_bytes.insert(connection.control_bytes.end(), control_payload.begin(),
+                                        control_payload.end());
         while (true) {
             const auto decoded = take_control_message(connection.control_bytes);
             if (!decoded.has_value()) {
@@ -500,7 +501,7 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
         }
     }
 
-    connection.bytes_received += received.bytes.size();
+    connection.bytes_received += received.byte_count();
 
     if (timed_bulk_download_mode()) {
         const auto stream_it = connection.active_bulk_streams.find(received.stream_id);
@@ -508,7 +509,7 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
             now >= measure_started_at_ && now < measure_deadline_;
         if (stream_it != connection.active_bulk_streams.end() && stream_it->second &&
             within_measurement_window) {
-            summary_.bytes_received += received.bytes.size();
+            summary_.bytes_received += received.byte_count();
         }
 
         if (!received.fin) {
@@ -538,9 +539,9 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
             return true;
         }
 
-        request_it->second.received_bytes += received.bytes.size();
+        request_it->second.received_bytes += received.byte_count();
         if (request_it->second.counts_toward_measurement) {
-            summary_.bytes_received += received.bytes.size();
+            summary_.bytes_received += received.byte_count();
         }
         if (!received.fin) {
             return true;
@@ -581,7 +582,7 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
         return true;
     }
 
-    summary_.bytes_received += received.bytes.size();
+    summary_.bytes_received += received.byte_count();
 
     return true;
 }

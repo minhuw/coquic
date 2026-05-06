@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -40,8 +41,13 @@ struct QuicIoRxDatagram {
 
 struct QuicIoTxDatagram {
     QuicRouteHandle route_handle = 0;
+    std::span<const std::byte> bytes_view;
     quic::DatagramBuffer bytes;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+
+    std::span<const std::byte> payload() const {
+        return bytes_view.empty() ? bytes.span() : bytes_view;
+    }
 };
 
 struct QuicIoEvent {

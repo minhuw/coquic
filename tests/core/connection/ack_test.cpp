@@ -4063,7 +4063,7 @@ TEST(QuicCoreTest, DrainOutboundDatagramReusesAcceptedApplicationCandidateSerial
         connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("data"), false)
             .has_value());
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 4);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 

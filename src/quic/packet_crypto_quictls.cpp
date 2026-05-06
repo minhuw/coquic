@@ -597,7 +597,8 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *cipher,
 
     const auto ciphertext_without_tag = ciphertext.first(ciphertext.size() - aead_tag_length);
     const auto tag = ciphertext.last(aead_tag_length);
-    std::vector<std::byte> mutable_tag(tag.begin(), tag.end());
+    std::array<std::byte, aead_tag_length> mutable_tag{};
+    std::copy(tag.begin(), tag.end(), mutable_tag.begin());
 
     auto &cache = open_context_cache();
     auto *context = prepare_open_cipher_context(cache, cipher, key, nonce);
@@ -632,7 +633,7 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *cipher,
     const auto set_tag_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::open_set_tag) |
         (EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_AEAD_SET_TAG, static_cast<int>(mutable_tag.size()),
-                             openssl_data(std::span{mutable_tag})) <= 0);
+                             openssl_data(std::span<std::byte>{mutable_tag})) <= 0);
     if (set_tag_failed) {
         reset_cipher_context(cache, PacketCryptoFaultPoint::open_context_reset);
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);

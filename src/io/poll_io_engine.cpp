@@ -134,7 +134,7 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
 }
 
 ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name, int flags) {
-    std::vector<std::byte> inbound(kMaxDatagramBytes);
+    std::array<std::byte, kMaxDatagramBytes> inbound;
     sockaddr_storage source{};
     socklen_t source_len = sizeof(source);
     QuicEcnCodepoint inbound_ecn = QuicEcnCodepoint::unavailable;
@@ -173,17 +173,17 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
             };
         }
 
-        std::cerr << "io-" << role_name << " failed: recvmsg error: " << std::strerror(errno)
+        std::cerr << "io-" << role_name << " failed: receive error: " << std::strerror(errno)
                   << '\n';
         return ReceiveDatagramResult{
             .status = ReceiveDatagramStatus::error,
         };
     }
 
-    inbound.resize(static_cast<std::size_t>(bytes_read));
+    const auto received_size = static_cast<std::size_t>(bytes_read);
     return ReceiveDatagramResult{
         .status = ReceiveDatagramStatus::ok,
-        .bytes = std::move(inbound),
+        .bytes = std::vector<std::byte>(inbound.data(), inbound.data() + received_size),
         .ecn = inbound_ecn,
         .source = source,
         .source_len = source_len,

@@ -36,13 +36,13 @@ grep -F 'Preset: `smoke`' "${output}" >/dev/null || {
   exit 1
 }
 
-grep -F 'Target: `coquic-perf-quictls-musl`' "${output}" >/dev/null || {
+grep -F 'Target: `coquic-perf:quictls-musl`' "${output}" >/dev/null || {
   echo 'missing target line' >&2
   exit 1
 }
 
 if grep -F 'Image:' "${output}" >/dev/null; then
-  echo 'unexpected image line in direct-host summary' >&2
+  echo 'unexpected legacy image line in perf summary' >&2
   exit 1
 fi
 
@@ -75,7 +75,7 @@ printf '%s
 ' \
 '{' \
 '  "preset": "smoke",' \
-'  "build_target": "coquic-perf-quictls-musl",' \
+'  "image_tag": "coquic-perf:quictls-musl",' \
 '  "runs": [' \
 '    {' \
 '      "status": "failed",' \
@@ -113,7 +113,7 @@ printf '%s
 ' '{' '  "preset": "smoke",' '  "image_tag": "coquic-perf:quictls-musl",' '  "runs": []' '}' > "${legacy_manifest}"
 python3 "${script}" --manifest "${legacy_manifest}" --event-name pull_request --commit 0123456789abcdef0123456789abcdef01234567 > "${output}"
 grep -F 'Target: `coquic-perf:quictls-musl`' "${output}" >/dev/null || {
-  echo 'missing legacy image-tag fallback target line' >&2
+  echo 'missing image-tag target line' >&2
   exit 1
 }
 

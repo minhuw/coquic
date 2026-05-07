@@ -4,30 +4,33 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 default_manifest_path="${repo_root}/.bench-results/manifest.json"
 results_root="${PERF_RESULTS_ROOT:-$(dirname "${default_manifest_path}")}"
+mkdir -p "${results_root}"
+results_root="$(cd "${results_root}" && pwd)"
 manifest_path="${results_root}/manifest.json"
 environment_path="${results_root}/environment.txt"
-binary_attr="${PERF_BINARY_ATTR:-coquic-quictls-musl}"
-build_target="${PERF_BUILD_TARGET:-coquic-perf-quictls-musl}"
+image_attr="${PERF_IMAGE_ATTR:-perf-image-quictls-musl}"
+image_tag="${PERF_IMAGE_TAG:-coquic-perf:quictls-musl}"
 server_cpus="${PERF_SERVER_CPUS:-2}"
 client_cpus="${PERF_CLIENT_CPUS:-3}"
 port="${PERF_PORT:-9443}"
+run_timeout_seconds="${PERF_RUN_TIMEOUT_SECONDS:-120}"
 preset="smoke"
-perf_bin=''
-server_pid=''
-server_shutdown_poll_attempts=20
-server_shutdown_poll_interval_seconds=0.1
+network_name=''
+server_name=''
+client_name=''
 
 usage() {
   cat <<'USAGE'
 usage: bash bench/run-host-matrix.sh [--preset smoke|ci]
 
 environment overrides:
-  PERF_RESULTS_ROOT  result directory (default: .bench-results)
-  PERF_BINARY_ATTR   nix package attr to build (default: coquic-quictls-musl)
-  PERF_BUILD_TARGET  manifest label for summary output (default: coquic-perf-quictls-musl)
-  PERF_SERVER_CPUS   CPU set for server process (default: 2)
-  PERF_CLIENT_CPUS   CPU set for client process (default: 3)
-  PERF_PORT          UDP port for server/client (default: 9443)
+  PERF_RESULTS_ROOT          result directory (default: .bench-results)
+  PERF_IMAGE_ATTR            nix image attr to build (default: perf-image-quictls-musl)
+  PERF_IMAGE_TAG             Docker image tag to run (default: coquic-perf:quictls-musl)
+  PERF_SERVER_CPUS           Docker cpuset for server container (default: 2)
+  PERF_CLIENT_CPUS           Docker cpuset for client container (default: 3)
+  PERF_PORT                  UDP port for server/client (default: 9443)
+  PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
 USAGE
 }
 
@@ -56,7 +59,7 @@ done
 case "${preset}" in
   smoke)
     runs=(
-      "socket bulk download 65536 0 0 1 1 1 0ms 5s"
+      "socket bulk download 0 65536 65536 1 1 1 0ms 5s"
       "socket rr stay 32 48 32 1 1 4 0ms 5s"
       "socket crr stay 24 24 8 1 2 1 0ms 5s"
     )
@@ -74,44 +77,23 @@ case "${preset}" in
     ;;
 esac
 
-mkdir -p "${results_root}"
-rm -f "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log "${environment_path}"
+rm -f "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
+  "${environment_path}"
 
-wait_for_server_shutdown() {
-  local attempts_remaining="${server_shutdown_poll_attempts}"
-
-  while kill -0 "${server_pid}" >/dev/null 2>&1; do
-    [ "${attempts_remaining}" -gt 0 ] || return 1
-    sleep "${server_shutdown_poll_interval_seconds}"
-    attempts_remaining=$((attempts_remaining - 1))
-  done
-
-  return 0
-}
-
-stop_server() {
-  if [ -z "${server_pid}" ]; then
-    return
+cleanup_containers() {
+  if [ -n "${client_name}" ]; then
+    docker rm -f "${client_name}" >/dev/null 2>&1 || true
   fi
-
-  if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
-    wait "${server_pid}" >/dev/null 2>&1 || true
-    server_pid=''
-    return
+  if [ -n "${server_name}" ]; then
+    docker rm -f "${server_name}" >/dev/null 2>&1 || true
   fi
-
-  kill "${server_pid}" >/dev/null 2>&1 || true
-  if ! wait_for_server_shutdown; then
-    kill -KILL "${server_pid}" >/dev/null 2>&1 || true
-    wait_for_server_shutdown || true
-  fi
-
-  wait "${server_pid}" >/dev/null 2>&1 || true
-  server_pid=''
 }
 
 cleanup() {
-  stop_server
+  cleanup_containers
+  if [ -n "${network_name}" ]; then
+    docker network rm "${network_name}" >/dev/null 2>&1 || true
+  fi
 }
 
 handle_signal() {
@@ -133,24 +115,40 @@ trap cleanup EXIT
 trap 'handle_signal INT' INT
 trap 'handle_signal TERM' TERM
 
-command -v taskset >/dev/null || {
-  echo 'taskset is required for bench/run-host-matrix.sh' >&2
+command -v docker >/dev/null || {
+  echo 'docker is required for bench/run-host-matrix.sh' >&2
   exit 1
 }
 
-binary_path="$(nix build --print-out-paths ".#${binary_attr}")"
-perf_bin="${binary_path}/bin/coquic-perf"
-[ -x "${perf_bin}" ] || {
-  echo "missing perf binary: ${perf_bin}" >&2
+command -v nix >/dev/null || {
+  echo 'nix is required for bench/run-host-matrix.sh' >&2
   exit 1
 }
+
+image_path="$(nix build --print-out-paths ".#${image_attr}")"
+docker load -i "${image_path}" >/dev/null
+docker image inspect "${image_tag}" >/dev/null
+
+network_name="coquic-perf-${preset}-$$"
+docker network create "${network_name}" >/dev/null
 
 {
-  echo "build_target=${build_target}"
-  echo "binary_attr=${binary_attr}"
+  echo "topology=docker-bridge-two-containers"
+  echo "image_attr=${image_attr}"
+  echo "image_tag=${image_tag}"
+  echo "network=${network_name}"
   echo "server_cpus=${server_cpus}"
   echo "client_cpus=${client_cpus}"
   echo "port=${port}"
+  echo "run_timeout_seconds=${run_timeout_seconds}"
+  echo
+  docker version
+  echo
+  docker info
+  echo
+  docker image inspect "${image_tag}"
+  echo
+  docker network inspect "${network_name}"
   echo
   uname -a
   echo
@@ -165,21 +163,29 @@ for run in "${runs[@]}"; do
   json_path="${results_root}/${run_name}.json"
   txt_path="${results_root}/${run_name}.txt"
   server_log_path="${results_root}/${run_name}.server.log"
+  server_cid_path="${results_root}/${run_name}.server.cid"
+  client_name="coquic-perf-client-${preset}-${mode}-$$"
+  server_name="coquic-perf-server-${preset}-${mode}-$$"
 
-  stop_server
-  taskset -c "${server_cpus}" "${perf_bin}" server \
-    --host 127.0.0.1 \
+  cleanup_containers
+
+  docker run -d --rm \
+    --name "${server_name}" \
+    --network "${network_name}" \
+    --cpuset-cpus "${server_cpus}" \
+    -v "${repo_root}/tests/fixtures:/certs:ro" \
+    "${image_tag}" server \
+    --host 0.0.0.0 \
     --port "${port}" \
-    --certificate-chain "${repo_root}/tests/fixtures/quic-server-cert.pem" \
-    --private-key "${repo_root}/tests/fixtures/quic-server-key.pem" \
-    --io-backend "${backend}" >"${server_log_path}" 2>&1 &
-  server_pid="$!"
+    --certificate-chain /certs/quic-server-cert.pem \
+    --private-key /certs/quic-server-key.pem \
+    --io-backend "${backend}" > "${server_cid_path}"
 
   sleep 1
 
   client_args=(
     client
-    --host 127.0.0.1
+    --host "${server_name}"
     --port "${port}"
     --mode "${mode}"
     --io-backend "${backend}"
@@ -190,7 +196,7 @@ for run in "${runs[@]}"; do
     --requests-in-flight "${inflight}"
     --warmup "${warmup}"
     --duration "${duration}"
-    --json-out "${json_path}"
+    --json-out /results/result.json
   )
 
   if [ "${mode}" = 'bulk' ]; then
@@ -202,16 +208,33 @@ for run in "${runs[@]}"; do
     client_args+=(--requests "${limit}")
   fi
 
-  taskset -c "${client_cpus}" "${perf_bin}" "${client_args[@]}" | tee "${txt_path}"
+  set +e
+  timeout "${run_timeout_seconds}s" docker run --rm \
+    --name "${client_name}" \
+    --network "${network_name}" \
+    --cpuset-cpus "${client_cpus}" \
+    -v "${results_root}:/results" \
+    "${image_tag}" "${client_args[@]}" | tee "${txt_path}"
+  client_status=${PIPESTATUS[0]}
+  set -e
 
-  stop_server
-  [ -f "${json_path}" ] || {
-    echo "missing JSON result: ${json_path}" >&2
+  docker logs "${server_name}" > "${server_log_path}" 2>&1 || true
+  docker rm -f "${server_name}" >/dev/null 2>&1 || true
+  docker rm -f "${client_name}" >/dev/null 2>&1 || true
+
+  if [ "${client_status}" -ne 0 ]; then
+    echo "client container failed for ${run_name} with status ${client_status}" >&2
+    exit "${client_status}"
+  fi
+
+  if [ ! -f "${results_root}/result.json" ]; then
+    echo "missing JSON result for ${run_name}: ${results_root}/result.json" >&2
     exit 1
-  }
+  fi
+  mv "${results_root}/result.json" "${json_path}"
 done
 
-python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${build_target}"
+python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${image_attr}" "${image_tag}"
 import json
 import pathlib
 import sys
@@ -219,7 +242,8 @@ import sys
 root = pathlib.Path(sys.argv[1])
 manifest_path = pathlib.Path(sys.argv[2])
 preset = sys.argv[3]
-build_target = sys.argv[4]
+image_attr = sys.argv[4]
+image_tag = sys.argv[5]
 
 runs = []
 for path in sorted(root.glob('*.json')):
@@ -234,7 +258,9 @@ for path in sorted(root.glob('*.json')):
 
 manifest = {
     'preset': preset,
-    'build_target': build_target,
+    'topology': 'docker-bridge-two-containers',
+    'image_attr': image_attr,
+    'image_tag': image_tag,
     'results_root': str(root),
     'runs': runs,
 }

@@ -1,6 +1,8 @@
 {
   "preset": "smoke",
-  "build_target": "coquic-perf-quictls-musl",
+  "topology": "docker-bridge-two-containers",
+  "image_attr": "perf-image-quictls-musl",
+  "image_tag": "coquic-perf:quictls-musl",
   "results_root": "/tmp/.bench-results",
   "runs": [
     {

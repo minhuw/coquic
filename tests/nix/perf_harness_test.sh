@@ -11,23 +11,33 @@ ignore_file="${repo_root}/.gitignore"
   exit 1
 }
 
-grep -F -- 'binary_attr="${PERF_BINARY_ATTR:-coquic-quictls-musl}"' "${script}" >/dev/null || {
-  echo 'missing real package attr default in harness script' >&2
+grep -F -- 'image_attr="${PERF_IMAGE_ATTR:-perf-image-quictls-musl}"' "${script}" >/dev/null || {
+  echo 'missing perf image attr default in harness script' >&2
   exit 1
 }
 
-grep -F -- 'build_target="${PERF_BUILD_TARGET:-coquic-perf-quictls-musl}"' "${script}" >/dev/null || {
-  echo 'missing perf build label default in harness script' >&2
+grep -F -- 'image_tag="${PERF_IMAGE_TAG:-coquic-perf:quictls-musl}"' "${script}" >/dev/null || {
+  echo 'missing perf image tag default in harness script' >&2
   exit 1
 }
 
-grep -F -- 'nix build --print-out-paths ".#${binary_attr}"' "${script}" >/dev/null || {
-  echo 'missing direct nix build in harness script' >&2
+grep -F -- 'nix build --print-out-paths ".#${image_attr}"' "${script}" >/dev/null || {
+  echo 'missing nix image build in harness script' >&2
   exit 1
 }
 
-grep -F -- 'perf_bin="${binary_path}/bin/coquic-perf"' "${script}" >/dev/null || {
-  echo 'missing direct perf binary resolution in harness script' >&2
+grep -F -- 'docker load -i "${image_path}"' "${script}" >/dev/null || {
+  echo 'missing docker image load in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'docker network create "${network_name}"' "${script}" >/dev/null || {
+  echo 'missing Docker bridge network creation in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'topology=docker-bridge-two-containers' "${script}" >/dev/null || {
+  echo 'missing Docker bridge topology marker in harness script' >&2
   exit 1
 }
 
@@ -81,13 +91,33 @@ if grep -F -- 'package_attr=' "${script}" >/dev/null; then
   exit 1
 fi
 
-grep -F -- 'tests/fixtures/quic-server-cert.pem' "${script}" >/dev/null || {
-  echo 'missing server certificate path in harness script' >&2
+if grep -F -- '--network host' "${script}" >/dev/null; then
+  echo 'unexpected host-network Docker flag in bridge harness script' >&2
+  exit 1
+fi
+
+if grep -F -- '--cap-add IPC_LOCK' "${script}" >/dev/null; then
+  echo 'unexpected container capability override in bridge harness script' >&2
+  exit 1
+fi
+
+if grep -F -- 'perf_bin=' "${script}" >/dev/null; then
+  echo 'unexpected direct perf binary resolution in Docker harness script' >&2
+  exit 1
+fi
+
+grep -F -- 'tests/fixtures:/certs:ro' "${script}" >/dev/null || {
+  echo 'missing mounted test certificate directory in harness script' >&2
   exit 1
 }
 
-grep -F -- 'tests/fixtures/quic-server-key.pem' "${script}" >/dev/null || {
-  echo 'missing server key path in harness script' >&2
+grep -F -- '--certificate-chain /certs/quic-server-cert.pem' "${script}" >/dev/null || {
+  echo 'missing mounted server certificate path in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--private-key /certs/quic-server-key.pem' "${script}" >/dev/null || {
+  echo 'missing mounted server key path in harness script' >&2
   exit 1
 }
 
@@ -96,30 +126,25 @@ grep -F -- 'environment.txt' "${script}" >/dev/null || {
   exit 1
 }
 
-grep -F -- 'wait_for_server_shutdown() {' "${script}" >/dev/null || {
-  echo 'missing bounded server shutdown helper in harness script' >&2
+grep -F -- 'docker rm -f "${server_name}"' "${script}" >/dev/null || {
+  echo 'missing server container cleanup in harness script' >&2
   exit 1
 }
 
-grep -F -- 'kill -KILL "${server_pid}"' "${script}" >/dev/null || {
-  echo 'missing KILL escalation in harness script' >&2
+grep -F -- 'docker rm -f "${client_name}"' "${script}" >/dev/null || {
+  echo 'missing client container cleanup in harness script' >&2
   exit 1
 }
 
-if grep -F -- 'docker ' "${script}" >/dev/null; then
-  echo 'unexpected docker usage in direct harness script' >&2
+grep -F -- 'docker network rm "${network_name}"' "${script}" >/dev/null || {
+  echo 'missing Docker network cleanup in harness script' >&2
   exit 1
-fi
+}
 
-if grep -F -- '--network host' "${script}" >/dev/null; then
-  echo 'unexpected host-network docker flag in direct harness script' >&2
+grep -F -- 'timeout "${run_timeout_seconds}s" docker run --rm' "${script}" >/dev/null || {
+  echo 'missing bounded client container run in harness script' >&2
   exit 1
-fi
-
-if grep -F -- '--cap-add IPC_LOCK' "${script}" >/dev/null; then
-  echo 'unexpected container capability override in direct harness script' >&2
-  exit 1
-fi
+}
 
 grep -F -- 'usage: bash bench/run-host-matrix.sh [--preset smoke|ci]' "${script}" >/dev/null || {
   echo 'missing ci preset in harness usage' >&2
@@ -132,7 +157,7 @@ grep -F -- 'ci)' "${script}" >/dev/null || {
 }
 
 smoke_runs=(
-  '"socket bulk download 65536 0 0 1 1 1 0ms 5s"'
+  '"socket bulk download 0 65536 65536 1 1 1 0ms 5s"'
   '"socket rr stay 32 48 32 1 1 4 0ms 5s"'
   '"socket crr stay 24 24 8 1 2 1 0ms 5s"'
 )
@@ -162,8 +187,8 @@ if grep -F -- '"io_uring ' "${script}" >/dev/null; then
   exit 1
 fi
 
-grep -F -- 'coquic-quictls-musl' "${flake}" >/dev/null || {
-  echo 'missing direct perf package export in flake.nix' >&2
+grep -F -- 'perf-image-quictls-musl' "${flake}" >/dev/null || {
+  echo 'missing perf image package export in flake.nix' >&2
   exit 1
 }
 
@@ -172,118 +197,161 @@ grep -F -- '.bench-results/' "${ignore_file}" >/dev/null || {
   exit 1
 }
 
-package_path="$(nix build --no-link --print-out-paths .#coquic-quictls-musl)"
-[ -x "${package_path}/bin/coquic-perf" ] || {
-  echo 'real direct-build package is missing bin/coquic-perf' >&2
+image_path="$(nix build --no-link --print-out-paths .#perf-image-quictls-musl)"
+[ -f "${image_path}" ] || {
+  echo 'real perf image package did not produce a tarball path' >&2
   exit 1
 }
-
-if nix build --no-link .#coquic-perf-quictls-musl >/dev/null 2>&1; then
-  echo 'unexpected perf app label is buildable as a package attr' >&2
-  exit 1
-fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 fake_bin_dir="${tmp_dir}/fake-bin"
-fake_store="${tmp_dir}/fake-store"
+fake_image="${tmp_dir}/fake-image.tar"
 results_root="${tmp_dir}/results"
 log_path="${tmp_dir}/invocations.log"
-mkdir -p "${fake_bin_dir}" "${fake_store}/bin" "${results_root}"
-
-cat > "${fake_store}/bin/coquic-perf" <<'FAKE_PERF'
-#!/usr/bin/env bash
-set -euo pipefail
-log_path="${FAKE_PERF_LOG:?}"
-printf 'coquic-perf\t%s\n' "$*" >>"${log_path}"
-mode="$1"
-shift
-case "${mode}" in
-  server)
-    echo "fake server started"
-    case "${FAKE_SERVER_BEHAVIOR:-exit-on-term}" in
-      exit-on-term)
-        trap 'printf "server-signal\tTERM\n" >>"${log_path}"; exit 0' TERM
-        trap 'printf "server-signal\tINT\n" >>"${log_path}"; exit 0' INT
-        ;;
-      ignore-term)
-        trap 'printf "server-signal\tTERM\n" >>"${log_path}"' TERM
-        trap 'printf "server-signal\tINT\n" >>"${log_path}"; exit 0' INT
-        ;;
-      *)
-        echo "unexpected fake server behavior: ${FAKE_SERVER_BEHAVIOR}" >&2
-        exit 1
-        ;;
-    esac
-    while :; do
-      sleep 1
-    done
-    ;;
-  client)
-    json_out=''
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        --json-out)
-          json_out="$2"
-          shift 2
-          ;;
-        *)
-          shift
-          ;;
-      esac
-    done
-    [ -n "${json_out}" ] || {
-      echo 'missing --json-out in fake client' >&2
-      exit 1
-    }
-    printf '{"status":"ok","mode":"fake"}\n' >"${json_out}"
-    echo 'status=ok mode=fake direction=download throughput_mib/s=1.000 throughput_gbit/s=0.008 requests/s=10.000'
-    ;;
-  *)
-    echo "unexpected fake mode: ${mode}" >&2
-    exit 1
-    ;;
-esac
-FAKE_PERF
-chmod +x "${fake_store}/bin/coquic-perf"
+mkdir -p "${fake_bin_dir}" "${results_root}"
+touch "${fake_image}"
 
 cat > "${fake_bin_dir}/nix" <<'FAKE_NIX'
 #!/usr/bin/env bash
 set -euo pipefail
 log_path="${FAKE_PERF_LOG:?}"
 printf 'nix\t%s\n' "$*" >>"${log_path}"
-if [ "$1" = 'build' ] && [ "$2" = '--print-out-paths' ] && [ "$3" = '.#coquic-quictls-musl' ]; then
-  printf '%s\n' "${FAKE_PERF_STORE:?}"
+if [ "$1" = 'build' ] && [ "$2" = '--print-out-paths' ] && [ "$3" = '.#perf-image-quictls-musl' ]; then
+  printf '%s\n' "${FAKE_PERF_IMAGE:?}"
   exit 0
 fi
-if [ "$1" = 'build' ] && [ "$2" = '--no-link' ] && [ "$3" = '--print-out-paths' ] && [ "$4" = '.#coquic-quictls-musl' ]; then
-  printf '%s\n' "${FAKE_PERF_STORE:?}"
+if [ "$1" = 'build' ] && [ "$2" = '--no-link' ] && [ "$3" = '--print-out-paths' ] && [ "$4" = '.#perf-image-quictls-musl' ]; then
+  printf '%s\n' "${FAKE_PERF_IMAGE:?}"
   exit 0
-fi
-if [ "$1" = 'build' ] && [ "$2" = '--no-link' ] && [ "$3" = '.#coquic-perf-quictls-musl' ]; then
-  exit 1
 fi
 exec /usr/bin/env nix "$@"
 FAKE_NIX
 chmod +x "${fake_bin_dir}/nix"
 
-cat > "${fake_bin_dir}/taskset" <<'FAKE_TASKSET'
+cat > "${fake_bin_dir}/docker" <<'FAKE_DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
 log_path="${FAKE_PERF_LOG:?}"
-printf 'taskset\t%s\n' "$*" >>"${log_path}"
-[ "$1" = '-c' ] || {
-  echo 'expected -c for fake taskset' >&2
-  exit 1
-}
-shift 2
+printf 'docker\t%s\n' "$*" >>"${log_path}"
+case "$1" in
+  load)
+    [ "$2" = '-i' ] || {
+      echo 'expected docker load -i' >&2
+      exit 1
+    }
+    ;;
+  image)
+    [ "$2" = 'inspect' ] || {
+      echo 'unexpected docker image command' >&2
+      exit 1
+    }
+    ;;
+  network)
+    case "$2" in
+      create)
+        printf '%s\n' "${3:-fake-network}"
+        ;;
+      inspect)
+        printf '[{"Name":"%s"}]\n' "${3:-fake-network}"
+        ;;
+      rm)
+        ;;
+      *)
+        echo "unexpected docker network command: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  version)
+    echo 'fake docker version'
+    ;;
+  info)
+    echo 'fake docker info'
+    ;;
+  run)
+    shift
+    detached=0
+    name=''
+    args=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -d)
+          detached=1
+          shift
+          ;;
+        --rm)
+          shift
+          ;;
+        --name)
+          name="$2"
+          shift 2
+          ;;
+        --network|--cpuset-cpus|-v)
+          shift 2
+          ;;
+        --network=*)
+          shift
+          ;;
+        *)
+          args+=("$1")
+          shift
+          ;;
+      esac
+    done
+    if [ "${detached}" -eq 1 ]; then
+      printf 'fake-server-container-id\n'
+      exit 0
+    fi
+    role_index=1
+    if [ "${args[0]:-}" = 'coquic-perf:quictls-musl' ]; then
+      role_index=1
+    fi
+    role="${args[${role_index}]:-}"
+    [ "${role}" = 'client' ] || {
+      echo "expected client role in docker run, got args=${args[*]}" >&2
+      exit 1
+    }
+    json_out=''
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      if [ "${args[$i]}" = '--json-out' ]; then
+        json_out="${args[$((i + 1))]}"
+      fi
+    done
+    [ "${json_out}" = '/results/result.json' ] || {
+      echo "unexpected json out: ${json_out}" >&2
+      exit 1
+    }
+    printf '{"status":"ok","mode":"fake"}\n' >"${FAKE_RESULTS_ROOT}/result.json"
+    echo 'status=ok mode=fake direction=download throughput_mib/s=1.000 throughput_gbit/s=0.008 requests/s=10.000'
+    ;;
+  logs)
+    echo 'fake server log'
+    ;;
+  rm)
+    ;;
+  *)
+    echo "unexpected docker command: $1" >&2
+    exit 1
+    ;;
+esac
+FAKE_DOCKER
+chmod +x "${fake_bin_dir}/docker"
+
+cat > "${fake_bin_dir}/timeout" <<'FAKE_TIMEOUT'
+#!/usr/bin/env bash
+set -euo pipefail
+log_path="${FAKE_PERF_LOG:?}"
+printf 'timeout\t%s\n' "$*" >>"${log_path}"
+shift
 exec "$@"
-FAKE_TASKSET
-chmod +x "${fake_bin_dir}/taskset"
+FAKE_TIMEOUT
+chmod +x "${fake_bin_dir}/timeout"
 
 PATH="${fake_bin_dir}:$PATH" \
 FAKE_PERF_LOG="${log_path}" \
-FAKE_PERF_STORE="${fake_store}" \
+FAKE_PERF_IMAGE="${fake_image}" \
+FAKE_RESULTS_ROOT="${results_root}" \
 PERF_RESULTS_ROOT="${results_root}" \
 bash "${script}" --preset smoke >/dev/null
 
@@ -316,51 +384,68 @@ for run_name in \
   }
 done
 
-grep -F -- $'nix\tbuild --print-out-paths .#coquic-quictls-musl' "${log_path}" >/dev/null || {
-  echo 'behavioral harness test did not use direct nix build path' >&2
+grep -F -- $'nix\tbuild --print-out-paths .#perf-image-quictls-musl' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use image nix build path' >&2
   exit 1
 }
 
-grep -F -- $'taskset\t-c 2 ' "${log_path}" >/dev/null || {
-  echo 'behavioral harness test missing server taskset invocation' >&2
+grep -F -- $'docker\tload -i '"${fake_image}" "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not load Docker image' >&2
   exit 1
 }
 
-grep -F -- $'taskset\t-c 3 ' "${log_path}" >/dev/null || {
-  echo 'behavioral harness test missing client taskset invocation' >&2
+grep -F -- $'docker\tnetwork create coquic-perf-smoke-' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not create Docker bridge network' >&2
   exit 1
 }
 
-grep -F -- $'taskset\t-c 2 '"${fake_store}/bin/coquic-perf"' server' "${log_path}" >/dev/null || {
-  echo 'behavioral harness test missing server command shape' >&2
+grep -F -- '--network coquic-perf-smoke-' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test missing bridge network on docker run' >&2
   exit 1
 }
 
-grep -F -- $'taskset\t-c 3 '"${fake_store}/bin/coquic-perf"' client' "${log_path}" >/dev/null || {
-  echo 'behavioral harness test missing client command shape' >&2
+grep -F -- '--cpuset-cpus 2' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test missing server cpuset' >&2
   exit 1
 }
 
-term_ignoring_log_path="${tmp_dir}/term-ignoring.log"
-term_ignoring_results_root="${tmp_dir}/term-ignoring-results"
-mkdir -p "${term_ignoring_results_root}"
-
-timeout 20s env \
-  PATH="${fake_bin_dir}:$PATH" \
-  FAKE_PERF_LOG="${term_ignoring_log_path}" \
-  FAKE_PERF_STORE="${fake_store}" \
-  FAKE_SERVER_BEHAVIOR=ignore-term \
-  PERF_RESULTS_ROOT="${term_ignoring_results_root}" \
-  bash "${script}" --preset smoke >/dev/null
-
-grep -F -- $'server-signal	TERM' "${term_ignoring_log_path}" >/dev/null || {
-  echo 'term-ignoring server did not observe TERM before shutdown escalation' >&2
+grep -F -- '--cpuset-cpus 3' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test missing client cpuset' >&2
   exit 1
 }
 
-[ -f "${term_ignoring_results_root}/manifest.json" ] || {
-  echo 'term-ignoring server run did not complete cleanly after shutdown escalation' >&2
+grep -F -- 'tests/fixtures:/certs:ro' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test missing cert mount' >&2
   exit 1
 }
+
+grep -F -- '--certificate-chain /certs/quic-server-cert.pem' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test missing server cert argument' >&2
+  exit 1
+}
+
+grep -F -- '--private-key /certs/quic-server-key.pem' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test missing server key argument' >&2
+  exit 1
+}
+
+if grep -F -- '--network host' "${log_path}" >/dev/null; then
+  echo 'behavioral harness test unexpectedly used host networking' >&2
+  exit 1
+fi
+
+python3 - "${results_root}/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if manifest.get("topology") != "docker-bridge-two-containers":
+    raise SystemExit("manifest missing Docker bridge topology")
+if manifest.get("image_tag") != "coquic-perf:quictls-musl":
+    raise SystemExit("manifest missing perf image tag")
+if manifest.get("image_attr") != "perf-image-quictls-musl":
+    raise SystemExit("manifest missing perf image attr")
+PY
 
 echo 'perf harness contract looks correct'

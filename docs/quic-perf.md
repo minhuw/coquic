@@ -25,22 +25,24 @@ nix develop -c zig build
   --json-out rr.json
 ```
 
-## Run The Direct Host Matrix
+## Run The Container Matrix
 
 ```bash
 bash bench/run-host-matrix.sh --preset smoke
 ```
 
-The harness builds one optimized `coquic-perf` binary through Nix, launches the
-server and client directly on the host with `taskset -c`, writes per-run text
-and JSON files plus `.bench-results/manifest.json`, and records
-`.bench-results/environment.txt` with runner details that help interpret noisy
-GitHub-hosted measurements.
+The harness builds and loads the Nix `coquic-perf` image, launches separate
+server and client containers on a Docker bridge network with `--cpuset-cpus`,
+writes per-run text and JSON files plus `.bench-results/manifest.json`, and
+records `.bench-results/environment.txt` with runner and Docker details that
+help interpret noisy GitHub-hosted measurements. The bridge network avoids
+host-loopback-only behavior such as oversized loopback MTU.
 
 Useful environment overrides:
 
 - `PERF_RESULTS_ROOT` to choose a different output directory
-- `PERF_BINARY_ATTR` to choose a different Nix build attr for `coquic-perf`
-- `PERF_BUILD_TARGET` to override the summary label written into `manifest.json`
-- `PERF_SERVER_CPUS` and `PERF_CLIENT_CPUS` to pin different cores
+- `PERF_IMAGE_ATTR` to choose a different Nix image attr for `coquic-perf`
+- `PERF_IMAGE_TAG` to choose the loaded Docker image tag
+- `PERF_SERVER_CPUS` and `PERF_CLIENT_CPUS` to pin different container CPU sets
 - `PERF_PORT` to move the benchmark listener port
+- `PERF_RUN_TIMEOUT_SECONDS` to adjust the per-client container timeout

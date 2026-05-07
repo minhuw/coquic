@@ -512,6 +512,11 @@ CodecResult<AckFrame> decode_ack_frame(BufferReader &reader, bool has_ecn_counts
     frame.ack_delay = header.value().ack_delay;
     frame.first_ack_range = header.value().first_ack_range;
 
+    const auto max_decodable_additional_ranges = static_cast<std::uint64_t>(reader.remaining() / 2);
+    if (header.value().additional_range_count > max_decodable_additional_ranges) {
+        return CodecResult<AckFrame>::failure(CodecErrorCode::truncated_input, reader.offset());
+    }
+
     if constexpr (sizeof(std::size_t) < sizeof(std::uint64_t)) {
         if (header.value().additional_range_count >
             static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
@@ -557,6 +562,12 @@ CodecResult<ReceivedAckFrame> decode_received_ack_frame(BufferReader &reader, bo
     frame.additional_range_count = header.value().additional_range_count;
 
     const auto additional_range_begin = reader.offset();
+    const auto max_decodable_additional_ranges = static_cast<std::uint64_t>(reader.remaining() / 2);
+    if (header.value().additional_range_count > max_decodable_additional_ranges) {
+        return CodecResult<ReceivedAckFrame>::failure(CodecErrorCode::truncated_input,
+                                                      additional_range_begin);
+    }
+
     const auto decoded_ranges = decode_ack_additional_ranges_bytes(
         bytes.span().subspan(additional_range_begin), header.value().additional_range_count,
         header.value().first_range_smallest, [](std::uint64_t, std::uint64_t) {});

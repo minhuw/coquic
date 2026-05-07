@@ -1421,6 +1421,24 @@ TEST(QuicFrameTest, RejectsMalformedAckFrames) {
                         CodecErrorCode::truncated_input);
 }
 
+TEST(QuicFrameTest, RejectsAckRangeCountThatExceedsRemainingBytes) {
+    const std::array<std::byte, 12> bytes{
+        std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{0xff},
+        std::byte{0xff}, std::byte{0xff}, std::byte{0xff}, std::byte{0xff},
+        std::byte{0xff}, std::byte{0xff}, std::byte{0xff}, std::byte{0x00},
+    };
+
+    const auto decoded = coquic::quic::deserialize_frame(bytes);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::truncated_input);
+
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes.begin(), bytes.end());
+    const auto received =
+        coquic::quic::deserialize_received_frame(SharedBytes(storage, 0, storage->size()));
+    ASSERT_FALSE(received.has_value());
+    EXPECT_EQ(received.error().code, CodecErrorCode::truncated_input);
+}
+
 TEST(QuicFrameTest, RejectsInvalidAckFrameSerializationInputs) {
     expect_serialize_error(
         AckFrame{

@@ -135,6 +135,26 @@ TEST(QuicCoreEndpointInternalTest, LegacyViewAndLegacyEntryHelpersHandleNullAndM
     EXPECT_FALSE(legacy_core.connection_ != nullptr);
 }
 
+TEST(QuicCoreEndpointInternalTest, ReceiveStreamDataPayloadPrefersSharedBytes) {
+    QuicCoreReceiveStreamData owned{
+        .bytes = bytes_from_ints({0x01, 0x02}),
+    };
+    EXPECT_EQ(owned.byte_count(), 2u);
+    EXPECT_EQ(std::vector<std::byte>(owned.payload().begin(), owned.payload().end()),
+              bytes_from_ints({0x01, 0x02}));
+
+    const auto storage =
+        std::make_shared<std::vector<std::byte>>(bytes_from_ints({0xaa, 0xbb, 0xcc}));
+    QuicCoreReceiveStreamData shared{
+        .bytes = bytes_from_ints({0x01}),
+        .shared_bytes = SharedBytes(storage, 1, 3),
+    };
+    EXPECT_EQ(shared.byte_count(), 2u);
+    EXPECT_EQ(shared.payload().data(), storage->data() + 1);
+    EXPECT_EQ(std::vector<std::byte>(shared.payload().begin(), shared.payload().end()),
+              bytes_from_ints({0xbb, 0xcc}));
+}
+
 TEST(QuicCoreEndpointInternalTest, ParseEndpointDatagramRejectsMalformedInputs) {
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(std::span<const std::byte>{}).has_value());
 

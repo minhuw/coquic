@@ -1141,11 +1141,23 @@ bool packet_crypto_cached_header_protection_mismatch_branch_coverage_for_tests()
     missing_inputs_rebuilds_cache &=
         missing_inputs_secret.cached_packet_protection_inputs.has_value();
 
+    auto mismatched_inputs_secret = secret;
+    const auto stale_hp_key = mismatched_inputs_secret.cached_packet_protection_keys->hp_key;
+    const auto mismatched_inputs_expanded = expand_traffic_secret_cached(mismatched_inputs_secret);
+    bool mismatched_inputs_refreshes_cache = mismatched_inputs_expanded.has_value();
+    mismatched_inputs_refreshes_cache &=
+        mismatched_inputs_secret.cached_packet_protection_inputs.has_value();
+    mismatched_inputs_refreshes_cache &=
+        mismatched_inputs_secret.cached_packet_protection_inputs->header_protection_key ==
+        mismatched_inputs_secret.header_protection_key;
+    mismatched_inputs_refreshes_cache &=
+        mismatched_inputs_expanded.value().get().hp_key != stale_hp_key;
+
     const auto expanded = expand_traffic_secret_cached(secret);
     return (secret.cached_packet_protection_inputs.value().header_protection_key ==
             secret.header_protection_key) &
            (expanded.value().get().hp_key == secret.header_protection_key.value()) &
-           missing_inputs_rebuilds_cache;
+           missing_inputs_rebuilds_cache & mismatched_inputs_refreshes_cache;
 }
 
 ScopedPacketCryptoFaultInjector::ScopedPacketCryptoFaultInjector(PacketCryptoFaultPoint fault_point,

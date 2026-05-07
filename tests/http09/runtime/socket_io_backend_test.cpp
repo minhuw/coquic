@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <deque>
 #include <memory>
 
@@ -159,6 +160,26 @@ TEST(SocketIoBackendTest, PublicShellTypesCompileAndConstruct) {
         .route_handle = 7,
         .bytes = {std::byte{0x02}},
     }));
+}
+
+TEST(SocketIoBackendTest, TxDatagramPayloadPrefersExplicitViewOverOwnedBytes) {
+    using namespace coquic::io;
+
+    const std::array view_bytes = {
+        std::byte{0x01},
+        std::byte{0x02},
+    };
+    QuicIoTxDatagram datagram{
+        .bytes_view = view_bytes,
+        .bytes = {std::byte{0x03}},
+    };
+
+    EXPECT_EQ(datagram.payload().data(), view_bytes.data());
+    EXPECT_EQ(datagram.payload().size(), view_bytes.size());
+
+    datagram.bytes_view = {};
+    EXPECT_EQ(datagram.payload().data(), datagram.bytes.span().data());
+    EXPECT_EQ(datagram.payload().size(), datagram.bytes.size());
 }
 
 TEST(SocketIoBackendTest, RouteHandlesStayStablePerPeerTuple) {

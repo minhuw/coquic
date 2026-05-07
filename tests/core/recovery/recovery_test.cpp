@@ -59,6 +59,10 @@ struct PacketSpaceRecoveryTestPeer {
         return recovery.outstanding_slot_for_packet_number(packet_number) != nullptr;
     }
 
+    static bool slot_exists(const PacketSpaceRecovery &recovery, std::uint64_t packet_number) {
+        return recovery.slot_for_packet_number(packet_number) != nullptr;
+    }
+
     static std::size_t slot_count(const PacketSpaceRecovery &recovery) {
         return recovery.slots_.size();
     }
@@ -2128,6 +2132,7 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
               nullptr);
 
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(recovery, 1, 9);
+    EXPECT_FALSE(coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_exists(recovery, 1));
     EXPECT_FALSE(recovery.handle_for_packet_number(1).has_value());
     EXPECT_EQ(recovery.find_packet(1), nullptr);
 }

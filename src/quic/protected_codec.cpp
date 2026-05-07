@@ -939,7 +939,11 @@ remove_short_header_protection(std::span<const std::byte> bytes, std::size_t pac
         .plaintext_header_size = header_end,
         .packet_number_length = packet_number_length,
     };
-    if (header_end > removed.plaintext_header.size()) {
+    const auto plaintext_header_overflow =
+        consume_protected_codec_fault(
+            test::ProtectedCodecFaultPoint::remove_short_header_plaintext_header_overflow) |
+        (header_end > removed.plaintext_header.size());
+    if (plaintext_header_overflow) {
         return CodecResult<RemovedShortHeaderProtection>::failure(
             CodecErrorCode::malformed_short_header_context, packet_number_offset);
     }
@@ -1942,7 +1946,7 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
         const auto required_inline_chunks =
             static_cast<std::size_t>(!packet.frames.empty()) + (packet.stream_fragments.size() * 2);
         const bool can_chunk_seal_stream_fragments =
-            (packet.stream_fragments.size() > 1) && (payload_size == plaintext_payload_size) &&
+            (packet.stream_fragments.size() > 1) &&
             (required_inline_chunks <= kMaxInlineSealPlaintextChunks);
         if (can_chunk_seal_stream_fragments) {
             std::array<PlaintextChunk, kMaxInlineSealPlaintextChunks> plaintext_chunks{};

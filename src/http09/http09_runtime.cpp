@@ -10485,6 +10485,31 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                   top_due_missing_datagram.process_datagram_calls == 0 &
                   top_due_missing_datagram.wait_calls == 1);
 
+        const auto top_due_successful_datagram = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time},
+            .next_wakeup_results = {base_time, std::nullopt},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::rx_datagram,
+                        .now = base_time,
+                        .datagram =
+                            QuicIoRxDatagram{
+                                .route_handle = QuicRouteHandle{17},
+                                .bytes = {std::byte{0x34}},
+                            },
+                    },
+                    std::nullopt,
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {false},
+            .pump_made_progress = {false},
+        });
+        check("backend loop covers successful top-due datagrams",
+              top_due_successful_datagram.exit_code == 1 &
+                  top_due_successful_datagram.process_datagram_calls == 1 &
+                  top_due_successful_datagram.wait_calls == 2);
+
         const auto top_due_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
             .next_wakeup_results = {base_time},

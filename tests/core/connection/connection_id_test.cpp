@@ -391,6 +391,8 @@ TEST(QuicCoreTest, OutboundDestinationConnectionIdUsesActivePeerInventoryEntry) 
 
     EXPECT_EQ(connection.outbound_destination_connection_id(),
               bytes_from_ints({0x33, 0x44, 0x55, 0x66}));
+    EXPECT_EQ(connection.outbound_destination_connection_id(99),
+              bytes_from_ints({0x33, 0x44, 0x55, 0x66}));
 }
 
 TEST(QuicCoreTest, RetireConnectionIdFrameQueuesReplacementConnectionId) {

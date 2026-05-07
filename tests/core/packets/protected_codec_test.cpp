@@ -857,6 +857,58 @@ TEST(QuicProtectedCodecTest, FragmentViewPathUsesChunkedPayloadSealUpdates) {
     EXPECT_EQ(datagram, prefix);
 }
 
+TEST(QuicProtectedCodecTest, FragmentViewPathFallsBackWhenHeaderSamplePaddingIsNeeded) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames.clear();
+    packet.packet_number_length = 1;
+    auto shared_payload = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
+        std::byte{0xaa},
+        std::byte{0xbb},
+    });
+    const std::vector<coquic::quic::StreamFrameSendFragment> fragments = {
+        coquic::quic::StreamFrameSendFragment{
+            .stream_id = 4,
+            .offset = 0,
+            .bytes = coquic::quic::SharedBytes(shared_payload, 0, 1),
+            .fin = false,
+        },
+        coquic::quic::StreamFrameSendFragment{
+            .stream_id = 4,
+            .offset = 1,
+            .bytes = coquic::quic::SharedBytes(shared_payload, 1, 2),
+            .fin = true,
+        },
+    };
+
+    const auto context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    const auto packet_view = coquic::quic::ProtectedOneRttPacketFragmentView{
+        .spin_bit = packet.spin_bit,
+        .key_phase = packet.key_phase,
+        .destination_connection_id = packet.destination_connection_id,
+        .packet_number_length = packet.packet_number_length,
+        .packet_number = packet.packet_number,
+        .frames = packet.frames,
+        .stream_fragments = fragments,
+    };
+    std::vector<std::byte> datagram;
+
+    const auto appended =
+        coquic::quic::append_protected_one_rtt_packet_to_datagram(datagram, packet_view, context);
+
+    ASSERT_TRUE(appended.has_value());
+    EXPECT_EQ(datagram.size(), appended.value());
+
+    auto deserialize_context = make_one_rtt_deserialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16,
+        /*key_phase=*/false, packet.destination_connection_id.size());
+    deserialize_context.largest_authenticated_application_packet_number = packet.packet_number - 1;
+    const auto decoded =
+        coquic::quic::deserialize_protected_datagram(datagram, deserialize_context);
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+}
+
 TEST(QuicProtectedCodecTest, ChunkedFragmentViewPathRollsBackDatagramOnHeaderProtectionFault) {
     auto packet = make_minimal_one_rtt_packet();
     packet.frames.clear();
@@ -3155,6 +3207,23 @@ TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenHeaderProtectionRevealsTooLo
         make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
+}
+
+TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenShortHeaderPlaintextHeaderOverflows) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+        coquic::quic::test::ProtectedCodecFaultPoint::
+            remove_short_header_plaintext_header_overflow};
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded.value(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::malformed_short_header_context);
 }
 
 TEST(QuicProtectedCodecTest, PropagatesInitialPlaintextDecodeFaultFromProtectedCodecSeam) {

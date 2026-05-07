@@ -306,6 +306,90 @@ TEST(
     EXPECT_TRUE(connection.deferred_protected_packets_.empty());
 }
 
+TEST(QuicCoreTest, ReceivedApplicationStreamDataCanBeEmittedAsSharedBytes) {
+    auto connection = make_connected_server_connection();
+    connection.config_.emit_shared_receive_stream_data = true;
+
+    const auto storage =
+        std::make_shared<std::vector<std::byte>>(coquic::quic::test::bytes_from_string("xxshared"));
+    const std::array frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 0,
+            .stream_data = coquic::quic::SharedBytes(storage, 2, storage->size()),
+        }},
+    };
+
+    const auto processed = connection.process_inbound_received_application(
+        frames, coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false,
+        /*path_id=*/0);
+    ASSERT_TRUE(processed.has_value());
+
+    const auto received = connection.take_received_stream_data();
+    ASSERT_TRUE(received.has_value());
+    const auto received_value = optional_value_or_terminate(received);
+    EXPECT_TRUE(received_value.bytes.empty());
+    EXPECT_EQ(received_value.shared_bytes.storage(), storage);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_value.payload()), "shared");
+    EXPECT_EQ(received_value.byte_count(), 6u);
+    EXPECT_TRUE(received_value.fin);
+}
+
+TEST(QuicCoreTest, SharedReceiveModeFallsBackToOwnedBytesForCoalescedSegments) {
+    auto connection = make_connected_server_connection();
+    connection.config_.emit_shared_receive_stream_data = true;
+
+    const auto late_storage =
+        std::make_shared<std::vector<std::byte>>(coquic::quic::test::bytes_from_string("two"));
+    const std::array late_frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 3,
+            .stream_data = coquic::quic::SharedBytes(late_storage, 0, late_storage->size()),
+        }},
+    };
+    ASSERT_TRUE(connection
+                    .process_inbound_received_application(late_frames,
+                                                          coquic::quic::test::test_time(1),
+                                                          /*allow_preconnected_frames=*/false,
+                                                          /*path_id=*/0)
+                    .has_value());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+
+    const auto early_storage =
+        std::make_shared<std::vector<std::byte>>(coquic::quic::test::bytes_from_string("one"));
+    const std::array early_frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = false,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 0,
+            .stream_data = coquic::quic::SharedBytes(early_storage, 0, early_storage->size()),
+        }},
+    };
+    ASSERT_TRUE(connection
+                    .process_inbound_received_application(early_frames,
+                                                          coquic::quic::test::test_time(2),
+                                                          /*allow_preconnected_frames=*/false,
+                                                          /*path_id=*/0)
+                    .has_value());
+
+    const auto received = connection.take_received_stream_data();
+    ASSERT_TRUE(received.has_value());
+    const auto received_value = optional_value_or_terminate(received);
+    EXPECT_TRUE(received_value.shared_bytes.empty());
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_value.bytes), "onetwo");
+    EXPECT_EQ(received_value.byte_count(), 6u);
+    EXPECT_TRUE(received_value.fin);
+}
+
 TEST(QuicCoreTest, SendStreamLocalErrorsCoverInvalidIdAndClosedSendSide) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     client.connection_->stream_open_limits_.peer_max_bidirectional = 1;

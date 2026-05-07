@@ -576,6 +576,31 @@ TEST(QuicFrameTest, NextAckRangeStopsWhenEncodedOrOwnedRangesAreMalformed) {
 }
 
 TEST(QuicFrameTest, DeserializeReceivedAckRejectsMalformedAdditionalRangesAndTruncatedEcnCounts) {
+    const auto truncated_normal_gap = coquic::quic::deserialize_frame(std::array<std::byte, 7>{
+        std::byte{0x02},
+        std::byte{0x05},
+        std::byte{0x00},
+        std::byte{0x01},
+        std::byte{0x00},
+        std::byte{0x80},
+        std::byte{0x00},
+    });
+    ASSERT_FALSE(truncated_normal_gap.has_value());
+    EXPECT_EQ(truncated_normal_gap.error().code, CodecErrorCode::truncated_input);
+
+    const auto truncated_normal_range_length =
+        coquic::quic::deserialize_frame(std::array<std::byte, 7>{
+            std::byte{0x02},
+            std::byte{0x05},
+            std::byte{0x00},
+            std::byte{0x01},
+            std::byte{0x00},
+            std::byte{0x00},
+            std::byte{0x40},
+        });
+    ASSERT_FALSE(truncated_normal_range_length.has_value());
+    EXPECT_EQ(truncated_normal_range_length.error().code, CodecErrorCode::truncated_input);
+
     auto truncated_gap_storage =
         std::make_shared<std::vector<std::byte>>(std::initializer_list<std::byte>{
             std::byte{0x02},
@@ -583,7 +608,8 @@ TEST(QuicFrameTest, DeserializeReceivedAckRejectsMalformedAdditionalRangesAndTru
             std::byte{0x00},
             std::byte{0x01},
             std::byte{0x00},
-            std::byte{0x40},
+            std::byte{0x80},
+            std::byte{0x00},
         });
     const auto truncated_gap = coquic::quic::deserialize_received_frame(
         SharedBytes(truncated_gap_storage, 0, truncated_gap_storage->size()));

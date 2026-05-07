@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <set>
 #include <type_traits>
 
 #include "src/quic/connection_test_hooks.h"
@@ -409,6 +410,39 @@ TEST(QuicCoreTest, RetireConnectionIdFrameQueuesReplacementConnectionId) {
 
     ASSERT_TRUE(processed.has_value());
     EXPECT_GE(connection.pending_new_connection_id_frames_.size(), 1u);
+}
+
+TEST(QuicCoreTest, IssuedConnectionIdsAreUniqueAcrossAdjacentServerConnectionIds) {
+    std::set<coquic::quic::ConnectionId> issued_connection_ids;
+
+    for (std::uint64_t base_sequence = 1; base_sequence <= 64; ++base_sequence) {
+        auto connection = make_connected_server_connection();
+        connection.config_.source_connection_id = {
+            std::byte{0x53}, std::byte{0x00},
+            std::byte{0x00}, std::byte{0x00},
+            std::byte{0x00}, std::byte{0x00},
+            std::byte{0x00}, static_cast<std::byte>(base_sequence),
+        };
+        connection.local_connection_ids_.clear();
+        connection.local_connection_ids_.emplace(
+            0, coquic::quic::LocalConnectionIdRecord{
+                   .sequence_number = 0,
+                   .connection_id = connection.config_.source_connection_id,
+                   .retired = false,
+               });
+        connection.pending_new_connection_id_frames_.clear();
+        connection.next_local_connection_id_sequence_ = 1;
+        optional_ref_or_terminate(connection.peer_transport_parameters_)
+            .active_connection_id_limit = 4;
+
+        connection.issue_spare_connection_ids();
+
+        for (const auto &frame : connection.pending_new_connection_id_frames_) {
+            EXPECT_TRUE(issued_connection_ids.insert(frame.connection_id).second)
+                << "duplicate issued CID sequence=" << frame.sequence_number
+                << " base_sequence=" << base_sequence;
+        }
+    }
 }
 
 TEST(QuicCoreTest, ReceivedApplicationRetireConnectionIdFrameSucceedsForActiveSequence) {

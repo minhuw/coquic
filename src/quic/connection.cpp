@@ -87,6 +87,20 @@ std::string format_connection_id_hex(std::span<const std::byte> connection_id) {
     return hex.str();
 }
 
+std::uint64_t mix_connection_id_word(std::uint64_t value) {
+    value ^= value >> 30u;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27u;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31u;
+    return value;
+}
+
+void absorb_connection_id_seed_byte(std::uint64_t &state, std::uint8_t byte) {
+    state ^= byte;
+    state *= 0x100000001b3ULL;
+}
+
 ConnectionId make_issued_connection_id(std::span<const std::byte> base_connection_id,
                                        std::uint64_t sequence_number) {
     ConnectionId connection_id(base_connection_id.begin(), base_connection_id.end());
@@ -94,11 +108,26 @@ ConnectionId make_issued_connection_id(std::span<const std::byte> base_connectio
         return connection_id;
     }
 
+    std::uint64_t state = 0xcbf29ce484222325ULL;
+    for (const auto byte : base_connection_id) {
+        absorb_connection_id_seed_byte(state, std::to_integer<std::uint8_t>(byte));
+    }
+    absorb_connection_id_seed_byte(state, 0xffu);
+    for (std::size_t i = 0; i < sizeof(sequence_number); ++i) {
+        const auto shift = static_cast<unsigned>(i * 8u);
+        absorb_connection_id_seed_byte(
+            state, static_cast<std::uint8_t>((sequence_number >> shift) & 0xffu));
+    }
+    absorb_connection_id_seed_byte(state, static_cast<std::uint8_t>(base_connection_id.size()));
+
+    std::uint64_t word = 0;
     for (std::size_t i = 0; i < connection_id.size(); ++i) {
-        const auto sequence_shift = static_cast<unsigned>((i % sizeof(sequence_number)) * 8u);
-        auto mixed = static_cast<std::uint8_t>((sequence_number >> sequence_shift) & 0xffu);
-        mixed ^= static_cast<std::uint8_t>(0x5au + static_cast<unsigned>(i * 17u));
-        connection_id[connection_id.size() - 1u - i] ^= std::byte{mixed};
+        if ((i % sizeof(word)) == 0) {
+            state = mix_connection_id_word(state + 0x9e3779b97f4a7c15ULL + i);
+            word = state;
+        }
+        const auto shift = static_cast<unsigned>((i % sizeof(word)) * 8u);
+        connection_id[i] = static_cast<std::byte>((word >> shift) & 0xffu);
     }
 
     return connection_id;

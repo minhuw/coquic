@@ -498,6 +498,26 @@ if [[ ${page_verified} -ne 1 ]]; then
   fail_with_rollback "deployment verification failed: page markers did not converge after retries"
 fi
 
+wasm_mime_verified=0
+for attempt in $(seq 1 "${verification_attempts}"); do
+  # verification retry loop: wasm MIME
+  wasm_headers=""
+  if wasm_headers="$(timeout 20s "${curl_http3_bin}" --http3-only -I "${url}coquic-wasm-quic.wasm" 2>/dev/null)"; then
+    normalized_wasm_headers="$(printf '%s' "${wasm_headers}" | tr -d '\r')"
+    if grep -Fq 'HTTP/1.1 200 OK' <<<"${normalized_wasm_headers}" &&
+       grep -Eiq '^content-type:[[:space:]]*application/wasm[[:space:]]*$' <<<"${normalized_wasm_headers}"; then
+      wasm_mime_verified=1
+      break
+    fi
+  fi
+  if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
+    sleep "${attempt}"
+  fi
+done
+if [[ ${wasm_mime_verified} -ne 1 ]]; then
+  fail_with_rollback "deployment verification failed: wasm MIME type did not converge after retries"
+fi
+
 rollback_armed=0
 deploy_succeeded=1
 echo "remote demo deploy verified"

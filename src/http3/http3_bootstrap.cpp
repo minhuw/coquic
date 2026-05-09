@@ -377,6 +377,9 @@ std::string content_type_for_path(const std::filesystem::path &path) {
     if (extension == ".js" || extension == ".mjs") {
         return "text/javascript; charset=utf-8";
     }
+    if (extension == ".wasm") {
+        return "application/wasm";
+    }
     if (extension == ".svg") {
         return "image/svg+xml";
     }

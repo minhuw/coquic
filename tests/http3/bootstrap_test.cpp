@@ -989,6 +989,9 @@ TEST(QuicHttp3BootstrapTest, TestHooksCoverBootstrapPathReadAndContentTypeColdBr
     EXPECT_EQ(coquic::http3::bootstrap_content_type_for_path_for_test(document_root.path() /
                                                                       "legacy.htm"),
               "text/html; charset=utf-8");
+    EXPECT_EQ(coquic::http3::bootstrap_content_type_for_path_for_test(document_root.path() /
+                                                                      "module.wasm"),
+              "application/wasm");
 }
 
 TEST(QuicHttp3BootstrapTest, InvalidCertificateChainReturnsFailure) {

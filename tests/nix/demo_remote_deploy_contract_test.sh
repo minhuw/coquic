@@ -190,6 +190,10 @@ if "nix build --no-link --print-out-paths .#curl-http3" not in deploy_script:
     raise SystemExit("deploy script missing up-front curl-http3 realization")
 if 'timeout 20s "${curl_http3_bin}"' not in deploy_script:
     raise SystemExit("deploy script missing bounded probe timeout wrapper")
+if "verification retry loop: wasm MIME" not in deploy_script:
+    raise SystemExit("deploy script missing wasm MIME verification loop")
+if 'coquic-wasm-quic.wasm' not in deploy_script:
+    raise SystemExit("deploy script missing wasm asset verification path")
 if "same-release gate: stop active service before in-place mutation" not in deploy_script:
     raise SystemExit("deploy script missing same-release stop gate marker")
 if "same-release gate: ensure service is inactive before mutating files" not in deploy_script:
@@ -401,6 +405,14 @@ HEADERS
 PAGE
       exit 0
     fi
+
+    if [[ "$*" == *"--http3-only -I https://coquic.minhuw.dev/coquic-wasm-quic.wasm"* ]]; then
+      cat <<'HEADERS'
+HTTP/3 200
+content-type: application/wasm
+HEADERS
+      exit 0
+    fi
     ;;
   fail_after_install)
     if [[ "$*" == *"-I https://coquic.minhuw.dev/"* ]]; then
@@ -514,7 +526,8 @@ EOF
   if [[ "${expected_status}" == "success" ]]; then
     for curl_expected in \
       "${curl_expected_name} --http3-only -sS -o /dev/null -w %{http_version} https://coquic.minhuw.dev/" \
-      "${curl_expected_name} --http3-only -sS https://coquic.minhuw.dev/"; do
+      "${curl_expected_name} --http3-only -sS https://coquic.minhuw.dev/" \
+      "${curl_expected_name} --http3-only -I https://coquic.minhuw.dev/coquic-wasm-quic.wasm"; do
       if ! grep -Fq "${curl_expected}" "${curl_log}"; then
         echo "${case_name} should invoke verification probe command: ${curl_expected}" >&2
         cat "${curl_log}" >&2

@@ -504,7 +504,7 @@ for attempt in $(seq 1 "${verification_attempts}"); do
   wasm_headers=""
   if wasm_headers="$(timeout 20s "${curl_http3_bin}" --http3-only -I "${url}coquic-wasm-quic.wasm" 2>/dev/null)"; then
     normalized_wasm_headers="$(printf '%s' "${wasm_headers}" | tr -d '\r')"
-    if grep -Fq 'HTTP/1.1 200 OK' <<<"${normalized_wasm_headers}" &&
+    if grep -Eq '^HTTP/[0-9](\.[0-9])?[[:space:]]+200([[:space:]]|$)' <<<"${normalized_wasm_headers}" &&
        grep -Eiq '^content-type:[[:space:]]*application/wasm[[:space:]]*$' <<<"${normalized_wasm_headers}"; then
       wasm_mime_verified=1
       break

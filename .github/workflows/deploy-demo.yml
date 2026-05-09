@@ -16,6 +16,8 @@ on:
       - flake.nix
       - flake.lock
       - docker/h3-server/Dockerfile
+      - scripts/build-boringssl-wasm.sh
+      - scripts/wasm-quic-smoke.mjs
       - .github/workflows/deploy-demo.yml
   workflow_dispatch:
 
@@ -37,8 +39,14 @@ jobs:
       - name: Build h3-server
         run: nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false
 
+      - name: Build wasm BoringSSL
+        run: nix develop -c bash scripts/build-boringssl-wasm.sh
+
       - name: Build wasm QUIC demo
-        run: nix develop -c zig build wasm-quic -Doptimize=ReleaseSmall
+        run: nix develop -c zig build wasm-quic -Doptimize=ReleaseSmall --summary all
+
+      - name: Smoke wasm QUIC demo
+        run: node scripts/wasm-quic-smoke.mjs zig-out/share/wasm-quic/coquic-wasm-quic.wasm
 
       - name: Package wasm demo site
         run: demo/deploy/package-demo.sh "${RUNNER_TEMP}/demo-site" "$(pwd)/zig-out/share/wasm-quic"

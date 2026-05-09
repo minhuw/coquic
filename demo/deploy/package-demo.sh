@@ -2,12 +2,13 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-source_dir="$(realpath -m -- "${repo_root}/demo/site")"
 requested_output_dir="${1:-${repo_root}/zig-out/demo-site}"
+requested_source_dir="${2:-${repo_root}/demo/site}"
+source_dir="$(realpath -m -- "${requested_source_dir}")"
 output_dir="$(realpath -m -- "${requested_output_dir}")"
 
 if [[ ! -d "${source_dir}" ]]; then
-  echo "missing demo/site source directory: ${source_dir}" >&2
+  echo "missing demo site source directory: ${source_dir}" >&2
   exit 1
 fi
 

@@ -228,7 +228,11 @@ struct ProtectedCodecFaultState {
 };
 
 ProtectedCodecFaultState &protected_codec_fault_state() {
+#if defined(__wasi__) && defined(OPENSSL_NO_THREADS_CORRUPT_MEMORY_AND_LEAK_SECRETS_IF_THREADED)
+    static ProtectedCodecFaultState state;
+#else
     static thread_local ProtectedCodecFaultState state;
+#endif
     return state;
 }
 

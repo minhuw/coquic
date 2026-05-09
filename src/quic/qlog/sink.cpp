@@ -9,6 +9,10 @@ QlogFileSeqSink::QlogFileSeqSink(std::filesystem::path path) : path_(std::move(p
 }
 
 bool QlogFileSeqSink::open() {
+#if defined(COQUIC_WASM_NO_FILESYSTEM)
+    healthy_ = false;
+    return false;
+#else
     std::error_code error;
     std::filesystem::create_directories(path_.parent_path(), error);
     if (error) {
@@ -19,6 +23,7 @@ bool QlogFileSeqSink::open() {
     output_.open(path_, std::ios::binary | std::ios::out | std::ios::trunc);
     healthy_ = output_.is_open();
     return healthy_;
+#endif
 }
 
 bool QlogFileSeqSink::write_record(std::string_view record) {

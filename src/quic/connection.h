@@ -483,15 +483,18 @@ class QuicConnection {
     std::optional<QuicCoreResumptionStateAvailable> take_resumption_state_available();
     std::optional<QuicCoreZeroRttStatusEvent> take_zero_rtt_status_event();
     std::optional<QuicConnectionTerminalState> take_terminal_state();
+    std::optional<QuicCorePacketInspection> take_packet_inspection();
     std::optional<QuicPathId> last_drained_path_id() const;
     QuicEcnCodepoint last_drained_ecn_codepoint() const;
     bool last_drained_is_pmtu_probe() const;
+    std::uint64_t last_drained_packet_inspection_datagram_id() const;
     bool has_sendable_datagram(QuicCoreTimePoint now) const;
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     std::vector<ConnectionId> active_local_connection_ids() const;
     bool is_handshake_complete() const;
     bool has_processed_peer_packet() const;
     bool has_failed() const;
+    QuicCoreConnectionDiagnostics diagnostics(QuicConnectionHandle handle) const;
 
   private:
     struct PendingTrackedPacketScratch {
@@ -595,6 +598,8 @@ class QuicConnection {
     CodecResult<bool> sync_tls_state();
     bool can_skip_outbound_tls_sync() const;
     void replay_deferred_protected_packets(QuicCoreTimePoint now);
+    std::size_t queue_outbound_packet_inspections(const SerializedProtectedDatagram &datagram,
+                                                  std::uint64_t datagram_id);
     CodecResult<bool> validate_peer_transport_parameters_if_ready();
     void update_handshake_status();
     void confirm_handshake();
@@ -714,6 +719,7 @@ class QuicConnection {
     std::optional<QuicCoreResumptionStateAvailable> pending_resumption_state_effect_;
     std::optional<QuicCoreZeroRttStatusEvent> pending_zero_rtt_status_event_;
     std::optional<QuicConnectionTerminalState> pending_terminal_state_;
+    std::deque<QuicCorePacketInspection> pending_packet_inspections_;
     std::vector<NewConnectionIdFrame> pending_new_connection_id_frames_;
     std::vector<RetireConnectionIdFrame> pending_retire_connection_id_frames_;
     std::optional<StoredClientResumptionState> decoded_resumption_state_;
@@ -753,6 +759,8 @@ class QuicConnection {
     std::optional<QuicPathId> last_drained_path_id_;
     QuicEcnCodepoint last_drained_ecn_codepoint_ = QuicEcnCodepoint::not_ect;
     bool last_drained_is_pmtu_probe_ = false;
+    std::uint64_t next_packet_inspection_datagram_id_ = 1;
+    std::uint64_t last_drained_packet_inspection_datagram_id_ = 0;
     QuicPathId last_inbound_path_id_ = 0;
     std::vector<PendingTrackedPacketScratch> pending_tracked_packet_scratch_;
     std::vector<StreamFrameSendFragment> application_stream_fragment_scratch_;

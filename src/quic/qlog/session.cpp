@@ -31,6 +31,13 @@ Session::Session(QuicCoreTimePoint start_time, std::unique_ptr<QlogFileSeqSink> 
 std::unique_ptr<Session> Session::try_open(const QuicQlogConfig &config, EndpointRole role,
                                            const ConnectionId &odcid,
                                            QuicCoreTimePoint start_time) {
+#if defined(COQUIC_WASM_NO_FILESYSTEM)
+    static_cast<void>(config);
+    static_cast<void>(role);
+    static_cast<void>(odcid);
+    static_cast<void>(start_time);
+    return nullptr;
+#else
     const auto suffix = role == EndpointRole::client ? "client" : "server";
     const auto odcid_hex = format_connection_id_hex(odcid);
     auto sink =
@@ -39,6 +46,7 @@ std::unique_ptr<Session> Session::try_open(const QuicQlogConfig &config, Endpoin
         return nullptr;
     }
     return try_open_with_sink_for_test(std::move(sink), role, odcid, start_time);
+#endif
 }
 
 std::unique_ptr<Session> Session::try_open_with_sink_for_test(std::unique_ptr<QlogFileSeqSink> sink,

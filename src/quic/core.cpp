@@ -82,6 +82,8 @@ QuicCoreResult drain_connection_effects(
             .bytes = std::move(datagram),
             .ecn = connection.last_drained_ecn_codepoint(),
             .is_pmtu_probe = connection.last_drained_is_pmtu_probe(),
+            .packet_inspection_datagram_id =
+                connection.last_drained_packet_inspection_datagram_id(),
         });
     }
     if (emitted == kMaxDatagramsPerDrain && connection.has_sendable_datagram(now)) {
@@ -131,6 +133,10 @@ QuicCoreResult drain_connection_effects(
             .connection = handle,
             .status = status->status,
         });
+    }
+    while (auto inspection = connection.take_packet_inspection()) {
+        inspection->connection = handle;
+        result.effects.emplace_back(std::move(*inspection));
     }
     if (const auto terminal = connection.take_terminal_state()) {
         if (*terminal == QuicConnectionTerminalState::closed) {
@@ -1019,6 +1025,7 @@ QuicCore::QuicCore(QuicCoreConfig config)
           .qlog = config.qlog,
           .tls_keylog_path = config.tls_keylog_path,
           .emit_shared_receive_stream_data = config.emit_shared_receive_stream_data,
+          .enable_packet_inspection = config.enable_packet_inspection,
       }),
       legacy_config_(std::move(config)), connection_(this) {
     static_cast<void>(ensure_legacy_entry());
@@ -1106,6 +1113,18 @@ std::size_t QuicCore::connection_count() const {
     return connections_.size();
 }
 
+std::vector<QuicCoreConnectionDiagnostics> QuicCore::connection_diagnostics() const {
+    std::vector<QuicCoreConnectionDiagnostics> out;
+    out.reserve(connections_.size());
+    for (const auto &[handle, entry] : connections_) {
+        if (entry.connection == nullptr) {
+            continue;
+        }
+        out.push_back(entry.connection->diagnostics(handle));
+    }
+    return out;
+}
+
 bool QuicCore::has_send_continuation_pending() const {
     return std::any_of(connections_.begin(), connections_.end(), [](const auto &entry) {
         return entry.second.connection != nullptr &&
@@ -1151,6 +1170,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .qlog = endpoint_config_.qlog,
             .tls_keylog_path = endpoint_config_.tls_keylog_path,
             .emit_shared_receive_stream_data = endpoint_config_.emit_shared_receive_stream_data,
+            .enable_packet_inspection = endpoint_config_.enable_packet_inspection,
         };
 
         const auto handle = next_connection_handle_++;
@@ -1298,6 +1318,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .qlog = endpoint_config_.qlog,
             .tls_keylog_path = endpoint_config_.tls_keylog_path,
             .emit_shared_receive_stream_data = endpoint_config_.emit_shared_receive_stream_data,
+            .enable_packet_inspection = endpoint_config_.enable_packet_inspection,
         };
         if (retry_context.has_value()) {
             config.initial_destination_connection_id = retry_context->retry_source_connection_id;
@@ -1684,6 +1705,8 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
             .bytes = std::move(datagram),
             .ecn = connection->last_drained_ecn_codepoint(),
             .is_pmtu_probe = connection->last_drained_is_pmtu_probe(),
+            .packet_inspection_datagram_id =
+                connection->last_drained_packet_inspection_datagram_id(),
         });
     }
     if (emitted == kMaxDatagramsPerDrain && connection->has_sendable_datagram(now)) {
@@ -1713,6 +1736,10 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     }
     while (const auto status = connection->take_zero_rtt_status_event()) {
         result.effects.emplace_back(*status);
+    }
+    while (auto inspection = connection->take_packet_inspection()) {
+        inspection->connection = entry.handle;
+        result.effects.emplace_back(std::move(*inspection));
     }
     legacy_config_ = std::move(config);
     return finalize_legacy_result(std::move(result), now);

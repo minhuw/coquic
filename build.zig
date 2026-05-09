@@ -182,6 +182,98 @@ fn addProjectLibrary(
     return lib;
 }
 
+fn wasmQuicSourceFiles() []const []const u8 {
+    return &.{
+        "src/quic/buffer.cpp",
+        "src/quic/congestion.cpp",
+        "src/quic/connection.cpp",
+        "src/quic/core.cpp",
+        "src/quic/crypto_stream.cpp",
+        "src/quic/frame.cpp",
+        "src/quic/packet.cpp",
+        "src/quic/packet_crypto_boringssl.cpp",
+        "src/quic/packet_number.cpp",
+        "src/quic/plaintext_codec.cpp",
+        "src/quic/protected_codec.cpp",
+        "src/quic/qlog/json.cpp",
+        "src/quic/qlog/session.cpp",
+        "src/quic/qlog/sink.cpp",
+        "src/quic/recovery.cpp",
+        "src/quic/streams.cpp",
+        "src/quic/tls_adapter_boringssl.cpp",
+        "src/quic/transport_parameters.cpp",
+        "src/quic/varint.cpp",
+        "src/wasm/quic_wasm_api.cpp",
+    };
+}
+
+fn wasmQuicExportNames() []const []const u8 {
+    return &.{
+        "coquic_wasm_version",
+        "coquic_wasm_alloc",
+        "coquic_wasm_free",
+        "coquic_wasm_endpoint_create",
+        "coquic_wasm_endpoint_destroy",
+        "coquic_wasm_endpoint_open_connection",
+        "coquic_wasm_endpoint_input_datagram",
+        "coquic_wasm_endpoint_send_stream",
+        "coquic_wasm_endpoint_timer_expired",
+        "coquic_wasm_endpoint_next_wakeup_ms",
+        "coquic_wasm_endpoint_next_datagram_header",
+        "coquic_wasm_endpoint_pop_datagram",
+        "coquic_wasm_endpoint_next_event_header",
+        "coquic_wasm_endpoint_pop_event",
+        "coquic_wasm_endpoint_next_packet_inspection_header",
+        "coquic_wasm_endpoint_pop_packet_inspection",
+        "coquic_wasm_endpoint_connection_count",
+        "coquic_wasm_endpoint_diagnostics",
+        "coquic_wasm_inspect_initial_packet",
+    };
+}
+
+fn addWasmQuic(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+    cpp_flags: []const []const u8,
+    boringssl_include_dir: []const u8,
+    boringssl_lib_dir: []const u8,
+) *std.Build.Step.Compile {
+    const wasm_cpp_flags = withExtraFlags(b, cpp_flags, &.{
+        "-fno-exceptions",
+        "-fno-rtti",
+        "-DCOQUIC_WASM_NO_FILESYSTEM",
+        "-DOPENSSL_NO_THREADS_CORRUPT_MEMORY_AND_LEAK_SECRETS_IF_THREADED",
+    });
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+    });
+    const wasm = b.addExecutable(.{
+        .name = "coquic-wasm-quic",
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+    wasm.entry = .disabled;
+    wasm.wasi_exec_model = .reactor;
+    wasm.export_memory = true;
+    wasm.root_module.export_symbol_names = wasmQuicExportNames();
+    wasm.addIncludePath(b.path("."));
+    wasm.addIncludePath(.{ .cwd_relative = boringssl_include_dir });
+    wasm.addCSourceFiles(.{
+        .root = b.path("."),
+        .files = wasmQuicSourceFiles(),
+        .flags = wasm_cpp_flags,
+    });
+    wasm.addObjectFile(.{
+        .cwd_relative = b.pathJoin(&.{ boringssl_lib_dir, "libssl.a" }),
+    });
+    wasm.addObjectFile(.{
+        .cwd_relative = b.pathJoin(&.{ boringssl_lib_dir, "libcrypto.a" }),
+    });
+    wasm.linkLibCpp();
+    return wasm;
+}
+
 fn linkTlsBackend(
     b: *std.Build,
     compile: *std.Build.Step.Compile,
@@ -282,6 +374,14 @@ pub fn build(b: *std.Build) void {
     const fmt_include_dir = requireEnv(b, "FMT_INCLUDE_DIR");
     const liburing_include_dir = requireEnv(b, "LIBURING_INCLUDE_DIR");
     const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");
+    const wasm_boringssl_include_dir =
+        b.option([]const u8, "wasm_boringssl_include_dir", "BoringSSL wasm include directory") orelse
+        b.graph.env_map.get("WASM_BORINGSSL_INCLUDE_DIR") orelse
+        ".zig-cache/boringssl-wasm/src/include";
+    const wasm_boringssl_lib_dir =
+        b.option([]const u8, "wasm_boringssl_lib_dir", "BoringSSL wasm library directory") orelse
+        b.graph.env_map.get("WASM_BORINGSSL_LIB_DIR") orelse
+        ".zig-cache/boringssl-wasm/build";
     const smoke_test_files = &.{
         "tests/smoke/smoke_test.cpp",
     };
@@ -360,6 +460,24 @@ pub fn build(b: *std.Build) void {
         "tests/perf/rr_test.cpp",
         "tests/perf/crr_test.cpp",
     };
+
+    const wasm_quic =
+        addWasmQuic(b, optimize, cpp_flags, wasm_boringssl_include_dir, wasm_boringssl_lib_dir);
+    const install_wasm_quic = b.addInstallArtifact(wasm_quic, .{
+        .dest_dir = .{ .override = .prefix },
+        .dest_sub_path = "share/wasm-quic/coquic-wasm-quic.wasm",
+    });
+    const install_wasm_quic_demo = b.addInstallDirectory(.{
+        .source_dir = b.path("demo/wasm-quic"),
+        .install_dir = .prefix,
+        .install_subdir = "share/wasm-quic",
+    });
+    const wasm_quic_step = b.step(
+        "wasm-quic",
+        "Build the no-I/O QUIC WebAssembly module and browser demo assets",
+    );
+    wasm_quic_step.dependOn(&install_wasm_quic.step);
+    wasm_quic_step.dependOn(&install_wasm_quic_demo.step);
 
     const exe = b.addExecutable(.{
         .name = "coquic",
@@ -666,7 +784,7 @@ pub fn build(b: *std.Build) void {
     linkLiburing(tls_coverage_tests);
     tls_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
     tls_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
-    const coverage_cmd = b.addSystemCommand(&.{ "bash" });
+    const coverage_cmd = b.addSystemCommand(&.{"bash"});
     coverage_cmd.addFileArg(b.path("scripts/run-coverage.sh"));
     coverage_cmd.addArtifactArg(smoke_coverage_tests);
     coverage_cmd.addArtifactArg(core_coverage_tests);

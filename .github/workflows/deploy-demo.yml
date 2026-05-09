@@ -37,8 +37,11 @@ jobs:
       - name: Build h3-server
         run: nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false
 
-      - name: Package demo site
-        run: demo/deploy/package-demo.sh "${RUNNER_TEMP}/demo-site"
+      - name: Build wasm QUIC demo
+        run: nix develop -c zig build wasm-quic -Doptimize=ReleaseSmall
+
+      - name: Package wasm demo site
+        run: demo/deploy/package-demo.sh "${RUNNER_TEMP}/demo-site" "$(pwd)/zig-out/share/wasm-quic"
 
       - name: Configure SSH
         env:

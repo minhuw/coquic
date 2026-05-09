@@ -7,13 +7,16 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#if !(defined(__wasi__) && defined(OPENSSL_NO_THREADS_CORRUPT_MEMORY_AND_LEAK_SECRETS_IF_THREADED))
+#include <mutex>
+#endif
 
 #include <openssl/bio.h>
 #include <openssl/crypto.h>
@@ -51,6 +54,12 @@ using SslSessionPtr = std::unique_ptr<SSL_SESSION, decltype(&SSL_SESSION_free)>;
 #define COQUIC_NO_PROFILE
 #endif
 
+#if defined(__wasi__) && defined(OPENSSL_NO_THREADS_CORRUPT_MEMORY_AND_LEAK_SECRETS_IF_THREADED)
+#define COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM 1
+#else
+#define COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM 0
+#endif
+
 constexpr std::uint16_t tls_aes_128_gcm_sha256_id = 0x1301;
 constexpr std::uint16_t tls_aes_256_gcm_sha384_id = 0x1302;
 constexpr std::uint16_t tls_chacha20_poly1305_sha256_id = 0x1303;
@@ -61,7 +70,11 @@ struct TlsAdapterFaultState {
 };
 
 TlsAdapterFaultState &tls_adapter_fault_state() {
+#if COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM
+    static TlsAdapterFaultState state;
+#else
     static thread_local TlsAdapterFaultState state;
+#endif
     return state;
 }
 
@@ -776,6 +789,10 @@ class TlsAdapter::Impl {
     }
 
     void append_tls_keylog_line(std::string_view line) {
+#if COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM
+        static_cast<void>(line);
+        return;
+#else
         if (!config_.tls_keylog_path.has_value()) {
             return;
         }
@@ -794,6 +811,7 @@ class TlsAdapter::Impl {
 
         output.write(line.data(), static_cast<std::streamsize>(line.size()));
         output.put('\n');
+#endif
     }
 
     CodecResult<bool> drive_handshake() {
@@ -995,7 +1013,9 @@ class TlsAdapter::Impl {
     std::optional<std::vector<std::byte>> peer_transport_parameters_;
     std::vector<std::vector<std::byte>> peer_offered_application_protocols_;
     std::optional<std::vector<std::byte>> selected_application_protocol_;
+#if !COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM
     std::mutex tls_keylog_mutex_;
+#endif
     bool early_data_attempted_ = false;
     std::optional<bool> early_data_accepted_;
     std::optional<CodecError> sticky_error_;

@@ -484,8 +484,8 @@ for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: page-markers
   page=""
   if page="$(timeout 20s "${curl_http3_bin}" --http3-only -sS "${url}" 2>/dev/null)"; then
-    # verification marker: coquic-demo-v1
-    if grep -Fq "coquic-demo-v1" <<<"${page}"; then
+    # verification marker: coquic-wasm-demo-v1
+    if grep -Fq "coquic-wasm-demo-v1" <<<"${page}"; then
       page_verified=1
       break
     fi

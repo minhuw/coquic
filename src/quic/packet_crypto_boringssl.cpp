@@ -14,6 +14,12 @@ namespace {
 using namespace coquic::quic;
 using namespace coquic::quic::detail;
 
+#if defined(__wasi__) && defined(OPENSSL_NO_THREADS_CORRUPT_MEMORY_AND_LEAK_SECRETS_IF_THREADED)
+#define COQUIC_PACKET_CRYPTO_SINGLE_THREADED_WASM 1
+#else
+#define COQUIC_PACKET_CRYPTO_SINGLE_THREADED_WASM 0
+#endif
+
 bool fits_openssl_int(std::size_t size) {
     return size <= static_cast<std::size_t>(std::numeric_limits<int>::max());
 }
@@ -72,22 +78,38 @@ struct ReusableAeadContext {
 };
 
 ReusableCipherContext &seal_cipher_context_cache() {
+#if COQUIC_PACKET_CRYPTO_SINGLE_THREADED_WASM
+    static ReusableCipherContext cache;
+#else
     static thread_local ReusableCipherContext cache;
+#endif
     return cache;
 }
 
 ReusableAeadContext &seal_aead_context_cache() {
+#if COQUIC_PACKET_CRYPTO_SINGLE_THREADED_WASM
+    static ReusableAeadContext cache;
+#else
     static thread_local ReusableAeadContext cache;
+#endif
     return cache;
 }
 
 ReusableAeadContext &open_aead_context_cache() {
+#if COQUIC_PACKET_CRYPTO_SINGLE_THREADED_WASM
+    static ReusableAeadContext cache;
+#else
     static thread_local ReusableAeadContext cache;
+#endif
     return cache;
 }
 
 ReusableCipherContext &header_protection_context_cache() {
+#if COQUIC_PACKET_CRYPTO_SINGLE_THREADED_WASM
+    static ReusableCipherContext cache;
+#else
     static thread_local ReusableCipherContext cache;
+#endif
     return cache;
 }
 
@@ -462,6 +484,14 @@ struct OpenAeadRequest {
     std::span<const std::byte> ciphertext;
 };
 
+struct OpenAeadIntoRequest {
+    std::span<const std::byte> key;
+    std::span<const std::byte> nonce;
+    std::span<const std::byte> associated_data;
+    std::span<const std::byte> ciphertext;
+    std::span<std::byte> plaintext;
+};
+
 struct SealCipherChunksRequest {
     std::span<const std::byte> key;
     std::span<const std::byte> nonce;
@@ -739,6 +769,54 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_AEAD *aead,
 
     plaintext.resize(output_length);
     return CodecResult<std::vector<std::byte>>::success(std::move(plaintext));
+}
+
+CodecResult<std::size_t> open_aead_into(const EVP_AEAD *aead, const OpenAeadIntoRequest &request) {
+    if (request.ciphertext.size() < aead_tag_length) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::packet_decryption_failed, 0);
+    }
+
+    const auto plaintext_size = request.ciphertext.size() - aead_tag_length;
+    const auto invalid_lengths =
+        consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard) |
+        (request.plaintext.size() < plaintext_size);
+    if (invalid_lengths) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
+                                                 0);
+    }
+    if (consume_packet_crypto_fault(PacketCryptoFaultPoint::open_init)) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
+                                                 0);
+    }
+
+    auto *context = acquire_aead_context(open_aead_context_cache(), aead, request.key,
+                                         PacketCryptoFaultPoint::open_context_new);
+    if (context == nullptr) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
+                                                 0);
+    }
+
+    if (!request.associated_data.empty() &&
+        consume_packet_crypto_fault(PacketCryptoFaultPoint::open_aad_update)) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
+                                                 0);
+    }
+    if (consume_packet_crypto_fault(PacketCryptoFaultPoint::open_payload_update) ||
+        consume_packet_crypto_fault(PacketCryptoFaultPoint::open_set_tag)) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
+                                                 0);
+    }
+
+    std::size_t output_length = 0;
+    if (EVP_AEAD_CTX_open(context, openssl_data(request.plaintext), &output_length,
+                          request.plaintext.size(), openssl_data(request.nonce),
+                          request.nonce.size(), openssl_data(request.ciphertext),
+                          request.ciphertext.size(), openssl_data(request.associated_data),
+                          request.associated_data.size()) != 1) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::packet_decryption_failed, 0);
+    }
+
+    return CodecResult<std::size_t>::success(output_length);
 }
 
 const EVP_CIPHER *packet_cipher_for_suite(CipherSuite cipher_suite) {
@@ -1071,6 +1149,35 @@ CodecResult<std::vector<std::byte>> open_payload(const OpenPayloadInput &input) 
                                .associated_data = input.associated_data,
                                .ciphertext = input.ciphertext,
                            });
+}
+
+CodecResult<std::size_t> open_payload_into(const OpenPayloadIntoInput &input) {
+    const auto parameters = cipher_suite_parameters(input.cipher_suite);
+    if (!parameters.has_value()) {
+        return CodecResult<std::size_t>::failure(parameters.error().code, 0);
+    }
+    if (input.key.size() != parameters.value().key_length ||
+        input.nonce.size() != parameters.value().iv_length ||
+        input.ciphertext.size() < aead_tag_length ||
+        input.plaintext.size() < input.ciphertext.size() - aead_tag_length) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
+                                                 0);
+    }
+
+    static constexpr std::array<const EVP_AEAD *(*)(), 3> kAeadCiphers{
+        &EVP_aead_aes_128_gcm,
+        &EVP_aead_aes_256_gcm,
+        &EVP_aead_chacha20_poly1305,
+    };
+    const auto aead = kAeadCiphers[static_cast<std::size_t>(input.cipher_suite)]();
+
+    return open_aead_into(aead, OpenAeadIntoRequest{
+                                    .key = input.key,
+                                    .nonce = input.nonce,
+                                    .associated_data = input.associated_data,
+                                    .ciphertext = input.ciphertext,
+                                    .plaintext = input.plaintext,
+                                });
 }
 
 CodecResult<std::size_t> make_header_protection_mask_into(CipherSuite cipher_suite,

@@ -53,6 +53,23 @@ void note_received_ecn(AckEcnCounts &counts, QuicEcnCodepoint ecn) {
     }
 }
 
+[[noreturn]] void fail_bad_optional_access() {
+#if defined(__EXCEPTIONS)
+    throw std::bad_optional_access();
+#else
+    __builtin_trap();
+#endif
+}
+
+[[noreturn]] void fail_out_of_range(const char *message) {
+#if defined(__EXCEPTIONS)
+    throw std::out_of_range(message);
+#else
+    static_cast<void>(message);
+    __builtin_trap();
+#endif
+}
+
 } // namespace
 
 bool DeadlineTrackedPacketLess::operator()(const DeadlineTrackedPacket &lhs,
@@ -391,14 +408,14 @@ bool RecoveryPacketHandleOptional::has_value() const {
 
 RecoveryPacketMetadata RecoveryPacketHandleOptional::value() const {
     if (!metadata_.has_value()) {
-        throw std::bad_optional_access();
+        fail_bad_optional_access();
     }
     return *metadata_;
 }
 
 const RecoveryPacketMetadata *RecoveryPacketHandleOptional::operator->() const {
     if (!metadata_.has_value()) {
-        throw std::bad_optional_access();
+        fail_bad_optional_access();
     }
     return &*metadata_;
 }
@@ -410,12 +427,12 @@ bool PacketSpaceRecovery::SentPacketsView::contains(std::uint64_t packet_number)
 const SentPacketRecord &
 PacketSpaceRecovery::SentPacketsView::at(std::uint64_t packet_number) const {
     if (owner == nullptr) {
-        throw std::out_of_range("packet recovery view is detached");
+        fail_out_of_range("packet recovery view is detached");
     }
 
     const auto *slot = owner->outstanding_slot_for_packet_number(packet_number);
     if (slot == nullptr) {
-        throw std::out_of_range("packet number is not tracked");
+        fail_out_of_range("packet number is not tracked");
     }
     return slot->packet;
 }

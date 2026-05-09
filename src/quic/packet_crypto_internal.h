@@ -88,7 +88,11 @@ struct PacketCryptoFaultState {
 };
 
 inline PacketCryptoFaultState &packet_crypto_fault_state() {
+#if defined(__wasi__) && defined(OPENSSL_NO_THREADS_CORRUPT_MEMORY_AND_LEAK_SECRETS_IF_THREADED)
+    static PacketCryptoFaultState state;
+#else
     static thread_local PacketCryptoFaultState state;
+#endif
     return state;
 }
 

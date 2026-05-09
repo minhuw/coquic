@@ -80,6 +80,7 @@ struct QuicCoreConfig {
     std::optional<QuicQlogConfig> qlog;
     std::optional<std::filesystem::path> tls_keylog_path;
     bool emit_shared_receive_stream_data = false;
+    bool enable_packet_inspection = false;
 };
 
 using QuicCoreClock = std::chrono::steady_clock;
@@ -87,6 +88,129 @@ using QuicCoreTimePoint = QuicCoreClock::time_point;
 using QuicPathId = std::uint64_t;
 using QuicConnectionHandle = std::uint64_t;
 using QuicRouteHandle = std::uint64_t;
+
+struct QuicCorePacketSpaceDiagnostics {
+    std::uint64_t next_send_packet_number = 0;
+    std::optional<std::uint64_t> largest_authenticated_packet_number;
+    bool read_secret_available = false;
+    bool write_secret_available = false;
+    bool pending_crypto = false;
+    std::size_t outstanding_packets = 0;
+    std::size_t declared_lost_packets = 0;
+    bool pending_probe = false;
+    std::optional<QuicCoreTimePoint> pending_ack_deadline;
+    bool force_ack = false;
+};
+
+struct QuicCoreRecoveryDiagnostics {
+    QuicCongestionControlAlgorithm algorithm = QuicCongestionControlAlgorithm::newreno;
+    std::uint64_t congestion_window = 0;
+    std::uint64_t bytes_in_flight = 0;
+    std::uint32_t pto_count = 0;
+    std::optional<std::uint64_t> latest_rtt_ms;
+    std::optional<std::uint64_t> min_rtt_ms;
+    std::uint64_t smoothed_rtt_ms = 0;
+    std::uint64_t rttvar_ms = 0;
+};
+
+struct QuicCoreFlowControlDiagnostics {
+    std::uint64_t peer_max_data = 0;
+    std::uint64_t highest_sent = 0;
+    std::uint64_t advertised_max_data = 0;
+    std::uint64_t delivered_bytes = 0;
+    std::uint64_t received_committed = 0;
+};
+
+struct QuicCoreStreamLimitDiagnostics {
+    std::uint64_t peer_max_bidirectional = 0;
+    std::uint64_t peer_max_unidirectional = 0;
+    std::uint64_t advertised_max_bidirectional = 0;
+    std::uint64_t advertised_max_unidirectional = 0;
+};
+
+struct QuicCoreStreamDiagnostics {
+    std::uint64_t stream_id = 0;
+    std::uint8_t initiator = 0;
+    std::uint8_t direction = 0;
+    bool local_can_send = false;
+    bool local_can_receive = false;
+    bool send_closed = false;
+    bool receive_closed = false;
+    bool peer_send_closed = false;
+    bool peer_fin_delivered = false;
+    bool peer_reset_received = false;
+    std::uint8_t send_fin_state = 0;
+    std::uint8_t reset_state = 0;
+    std::uint8_t stop_sending_state = 0;
+    bool pending_send = false;
+    bool outstanding_send = false;
+    std::uint64_t sendable_bytes = 0;
+    std::uint64_t send_flow_control_limit = 0;
+    std::uint64_t receive_flow_control_limit = 0;
+    std::uint64_t highest_received_offset = 0;
+    std::uint64_t receive_flow_control_consumed = 0;
+};
+
+struct QuicCoreConnectionDiagnostics {
+    QuicConnectionHandle handle = 0;
+    std::uint8_t handshake_status = 0;
+    bool started = false;
+    bool processed_peer_packet = false;
+    bool handshake_ready_emitted = false;
+    bool handshake_confirmed = false;
+    bool handshake_confirmed_emitted = false;
+    bool failed_emitted = false;
+    bool peer_transport_parameters_validated = false;
+    bool peer_address_validated = false;
+    std::uint32_t current_version = 0;
+    std::uint64_t anti_amplification_received_bytes = 0;
+    std::uint64_t anti_amplification_sent_bytes = 0;
+    std::size_t active_paths = 0;
+    std::optional<QuicPathId> current_send_path_id;
+    std::size_t active_streams = 0;
+    std::size_t retired_streams = 0;
+    QuicCorePacketSpaceDiagnostics initial_space;
+    QuicCorePacketSpaceDiagnostics handshake_space;
+    QuicCorePacketSpaceDiagnostics zero_rtt_space;
+    QuicCorePacketSpaceDiagnostics application_space;
+    QuicCoreRecoveryDiagnostics recovery;
+    QuicCoreFlowControlDiagnostics flow_control;
+    QuicCoreStreamLimitDiagnostics stream_limits;
+    std::vector<QuicCoreStreamDiagnostics> streams;
+};
+
+enum class QuicCorePacketInspectionDirection : std::uint8_t {
+    outbound,
+    inbound,
+};
+
+enum class QuicCorePacketInspectionPacketType : std::uint8_t {
+    initial,
+    zero_rtt,
+    handshake,
+    one_rtt,
+};
+
+struct QuicCorePacketInspection {
+    QuicConnectionHandle connection = 0;
+    QuicCorePacketInspectionDirection direction = QuicCorePacketInspectionDirection::outbound;
+    QuicCorePacketInspectionPacketType packet_type = QuicCorePacketInspectionPacketType::initial;
+    std::uint64_t datagram_id = 0;
+    std::size_t datagram_length = 0;
+    std::size_t datagram_offset = 0;
+    std::size_t packet_length = 0;
+    std::uint32_t version = 0;
+    ConnectionId destination_connection_id;
+    ConnectionId source_connection_id;
+    std::vector<std::byte> token;
+    bool spin_bit = false;
+    bool key_phase = false;
+    std::uint8_t packet_number_length = 0;
+    std::uint64_t packet_number = 0;
+    std::vector<std::byte> encrypted_packet;
+    std::vector<std::byte> plaintext_payload;
+    std::vector<ReceivedFrame> frames;
+};
 
 struct QuicCoreEndpointConfig {
     EndpointRole role = EndpointRole::client;
@@ -102,6 +226,7 @@ struct QuicCoreEndpointConfig {
     std::optional<QuicQlogConfig> qlog;
     std::optional<std::filesystem::path> tls_keylog_path;
     bool emit_shared_receive_stream_data = false;
+    bool enable_packet_inspection = false;
 };
 
 struct QuicCoreClientConnectionConfig {
@@ -230,6 +355,7 @@ struct QuicCoreSendDatagram {
     DatagramBuffer bytes;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
     bool is_pmtu_probe = false;
+    std::uint64_t packet_inspection_datagram_id = 0;
 };
 
 struct QuicCoreReceiveStreamData {
@@ -296,7 +422,7 @@ using QuicCoreEffect =
     std::variant<QuicCoreSendDatagram, QuicCoreReceiveStreamData, QuicCorePeerResetStream,
                  QuicCorePeerStopSending, QuicCoreStateEvent, QuicCoreConnectionLifecycleEvent,
                  QuicCorePeerPreferredAddressAvailable, QuicCoreResumptionStateAvailable,
-                 QuicCoreZeroRttStatusEvent>;
+                 QuicCoreZeroRttStatusEvent, QuicCorePacketInspection>;
 
 struct QuicCoreResult {
     std::vector<QuicCoreEffect> effects;
@@ -329,6 +455,7 @@ class QuicCore {
     QuicCoreResult advance(QuicCoreInput input, QuicCoreTimePoint now);
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     std::size_t connection_count() const;
+    std::vector<QuicCoreConnectionDiagnostics> connection_diagnostics() const;
     bool has_send_continuation_pending() const;
     std::vector<ConnectionId> active_local_connection_ids() const;
     bool is_handshake_complete() const;

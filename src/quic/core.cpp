@@ -67,6 +67,9 @@ QuicCoreResult drain_connection_effects(
         if (datagram.empty()) {
             break;
         }
+        if (emitted == 0 && connection.has_sendable_datagram(now)) {
+            result.effects.reserve(kMaxDatagramsPerDrain);
+        }
 
         const auto path_id = connection.last_drained_path_id();
         const auto route_it = path_id.has_value() ? route_handle_by_path_id.find(*path_id)
@@ -1670,6 +1673,9 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         auto datagram = connection->drain_outbound_datagram(now);
         if (datagram.empty()) {
             break;
+        }
+        if (emitted == 0 && connection->has_sendable_datagram(now)) {
+            result.effects.reserve(result.effects.size() + kMaxDatagramsPerDrain);
         }
         const auto route_handle = route_handle_for_path(entry, connection->last_drained_path_id());
         result.effects.emplace_back(QuicCoreSendDatagram{

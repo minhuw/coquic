@@ -189,6 +189,7 @@ struct StreamState {
     StreamStateResult<bool> note_peer_reset(const ResetStreamFrame &frame);
     StreamStateResult<bool> note_peer_stop_sending(std::uint64_t application_error_code);
     std::uint64_t sendable_bytes() const;
+    std::uint64_t next_send_offset_for_budget(bool prefer_fresh_data) const;
     bool should_send_stream_data_blocked() const;
     bool has_pending_send() const;
     bool has_outstanding_send() const;

@@ -494,6 +494,13 @@ class QuicConnection {
     bool has_failed() const;
 
   private:
+    struct PendingTrackedPacketScratch {
+        PacketSpaceState *packet_space = nullptr;
+        SentPacketRecord packet;
+        std::size_t packet_index = 0;
+        std::size_t fallback_packet_length = 0;
+    };
+
     friend class QuicCore;
     friend bool test::connection_key_update_and_probe_coverage_for_tests();
     friend bool test::connection_pmtud_coverage_for_tests();
@@ -586,6 +593,7 @@ class QuicConnection {
     void install_available_secrets();
     void collect_pending_tls_bytes();
     CodecResult<bool> sync_tls_state();
+    bool can_skip_outbound_tls_sync() const;
     void replay_deferred_protected_packets(QuicCoreTimePoint now);
     CodecResult<bool> validate_peer_transport_parameters_if_ready();
     void update_handshake_status();
@@ -746,6 +754,9 @@ class QuicConnection {
     QuicEcnCodepoint last_drained_ecn_codepoint_ = QuicEcnCodepoint::not_ect;
     bool last_drained_is_pmtu_probe_ = false;
     QuicPathId last_inbound_path_id_ = 0;
+    std::vector<PendingTrackedPacketScratch> pending_tracked_packet_scratch_;
+    std::vector<StreamFrameSendFragment> application_stream_fragment_scratch_;
+    std::vector<std::map<std::uint64_t, StreamState>::iterator> active_stream_iterator_scratch_;
 };
 
 } // namespace coquic::quic

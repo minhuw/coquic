@@ -666,7 +666,7 @@ CodecResult<ReceivedCryptoFrame> decode_received_crypto_frame(BufferReader &read
                                                          offset.error().offset);
     }
 
-    const auto crypto_data = read_length_prefixed_shared_bytes(reader, bytes);
+    auto crypto_data = read_length_prefixed_shared_bytes(reader, bytes);
     if (!crypto_data.has_value()) {
         return CodecResult<ReceivedCryptoFrame>::failure(crypto_data.error().code,
                                                          crypto_data.error().offset);
@@ -678,7 +678,7 @@ CodecResult<ReceivedCryptoFrame> decode_received_crypto_frame(BufferReader &read
     }
 
     frame.offset = offset.value();
-    frame.crypto_data = crypto_data.value();
+    frame.crypto_data = std::move(crypto_data.value());
     return CodecResult<ReceivedCryptoFrame>::success(std::move(frame));
 }
 
@@ -764,12 +764,12 @@ CodecResult<ReceivedStreamFrame> decode_received_stream_frame(BufferReader &read
     }
 
     if (frame.has_length) {
-        const auto stream_data = read_length_prefixed_shared_bytes(reader, bytes);
+        auto stream_data = read_length_prefixed_shared_bytes(reader, bytes);
         if (!stream_data.has_value()) {
             return CodecResult<ReceivedStreamFrame>::failure(stream_data.error().code,
                                                              stream_data.error().offset);
         }
-        frame.stream_data = stream_data.value();
+        frame.stream_data = std::move(stream_data.value());
     } else {
         const auto data_offset = reader.offset();
         const auto remaining = reader.remaining();
@@ -1642,34 +1642,34 @@ CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(const SharedBy
     }
 
     if (frame_type >= 0x08 && frame_type <= 0x0f) {
-        const auto frame = decode_received_stream_frame(reader, frame_type, bytes);
+        auto frame = decode_received_stream_frame(reader, frame_type, bytes);
         if (!frame.has_value()) {
             return received_decode_failure(frame.error().code, frame.error().offset);
         }
         return CodecResult<ReceivedFrameDecodeResult>::success(ReceivedFrameDecodeResult{
-            .frame = frame.value(),
+            .frame = std::move(frame.value()),
             .bytes_consumed = reader.offset(),
         });
     }
 
     if (frame_type == 0x06) {
-        const auto frame = decode_received_crypto_frame(reader, bytes);
+        auto frame = decode_received_crypto_frame(reader, bytes);
         if (!frame.has_value()) {
             return received_decode_failure(frame.error().code, frame.error().offset);
         }
         return CodecResult<ReceivedFrameDecodeResult>::success(ReceivedFrameDecodeResult{
-            .frame = frame.value(),
+            .frame = std::move(frame.value()),
             .bytes_consumed = reader.offset(),
         });
     }
 
     if (frame_type == 0x02 || frame_type == 0x03) {
-        const auto frame = decode_received_ack_frame(reader, frame_type == 0x03, bytes);
+        auto frame = decode_received_ack_frame(reader, frame_type == 0x03, bytes);
         if (!frame.has_value()) {
             return received_decode_failure(frame.error().code, frame.error().offset);
         }
         return CodecResult<ReceivedFrameDecodeResult>::success(ReceivedFrameDecodeResult{
-            .frame = frame.value(),
+            .frame = std::move(frame.value()),
             .bytes_consumed = reader.offset(),
         });
     }

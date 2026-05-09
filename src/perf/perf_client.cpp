@@ -426,8 +426,8 @@ int QuicPerfClient::run() {
             }
             continue;
         case io::QuicIoEvent::Kind::path_mtu_update:
-            for (auto input : make_endpoint_inputs_from_io_event(*event)) {
-                if (!handle_result(core_.advance_endpoint(std::move(input), event->now),
+            if (auto input = make_endpoint_input_from_io_event(*event); input.has_value()) {
+                if (!handle_result(core_.advance_endpoint(std::move(*input), event->now),
                                    quic::QuicCoreClock::now())) {
                     return fail("client path MTU update failed");
                 }

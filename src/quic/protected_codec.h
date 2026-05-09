@@ -172,6 +172,8 @@ struct DeserializeProtectionContext {
     std::optional<TrafficSecret> handshake_secret;
     std::optional<TrafficSecret> zero_rtt_secret;
     std::optional<TrafficSecret> one_rtt_secret;
+    const TrafficSecret *one_rtt_secret_ref = nullptr;
+    bool one_rtt_secret_cache_primed = false;
     bool one_rtt_key_phase = false;
     std::optional<std::uint64_t> largest_authenticated_initial_packet_number;
     std::optional<std::uint64_t> largest_authenticated_handshake_packet_number;

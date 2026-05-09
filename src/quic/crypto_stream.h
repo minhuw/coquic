@@ -82,6 +82,8 @@ class ReliableSendBuffer {
     bool has_outstanding_data() const;
     bool has_outstanding_range(std::uint64_t offset, std::size_t length) const;
     bool has_lost_data() const;
+    std::optional<std::uint64_t> first_lost_offset() const;
+    std::optional<std::uint64_t> first_unsent_offset() const;
 
   private:
     enum class SegmentState : std::uint8_t {
@@ -107,6 +109,7 @@ class ReliableSendBuffer {
     std::vector<ByteRange>
     take_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
                          std::optional<std::uint64_t> max_offset = std::nullopt);
+    std::optional<std::uint64_t> first_offset_by_state(SegmentState state) const;
     template <typename Callback>
     void consume_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
                                  std::optional<std::uint64_t> max_offset, Callback &&callback) {

@@ -109,8 +109,8 @@ int QuicPerfServer::run() {
             break;
         }
 
-        for (auto input : make_endpoint_inputs_from_io_event(*event)) {
-            if (!handle_result(core_.advance_endpoint(std::move(input), event->now), event->now)) {
+        if (auto input = make_endpoint_input_from_io_event(*event); input.has_value()) {
+            if (!handle_result(core_.advance_endpoint(std::move(*input), event->now), event->now)) {
                 return 1;
             }
         }

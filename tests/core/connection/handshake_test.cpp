@@ -5227,7 +5227,13 @@ TEST(QuicCoreTest, ProcessInboundDatagramQlogPathDefersProtectedApplicationPacke
                 .destination_connection_id = connection.config_.source_connection_id,
                 .packet_number_length = 2,
                 .packet_number = 188,
-                .frames = {coquic::quic::MaxDataFrame{.maximum_data = 1}},
+                .frames =
+                    {
+                        coquic::quic::MaxStreamDataFrame{
+                            .stream_id = 0,
+                            .maximum_stream_data = 1,
+                        },
+                    },
             },
         },
         coquic::quic::SerializeProtectionContext{

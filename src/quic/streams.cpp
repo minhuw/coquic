@@ -375,6 +375,27 @@ std::uint64_t StreamState::sendable_bytes() const {
     return std::min(remaining_credit, unsent_bytes);
 }
 
+std::uint64_t StreamState::next_send_offset_for_budget(bool prefer_fresh_data) const {
+    if (prefer_fresh_data) {
+        if (const auto unsent_offset = send_buffer.first_unsent_offset();
+            unsent_offset.has_value()) {
+            return *unsent_offset;
+        }
+        if (const auto lost_offset = send_buffer.first_lost_offset(); lost_offset.has_value()) {
+            return *lost_offset;
+        }
+        return flow_control.highest_sent;
+    }
+
+    if (const auto lost_offset = send_buffer.first_lost_offset(); lost_offset.has_value()) {
+        return *lost_offset;
+    }
+    if (const auto unsent_offset = send_buffer.first_unsent_offset(); unsent_offset.has_value()) {
+        return *unsent_offset;
+    }
+    return flow_control.highest_sent;
+}
+
 bool StreamState::should_send_stream_data_blocked() const {
     return id_info.local_can_send && reset_state == StreamControlFrameState::none &&
            send_flow_control_committed > flow_control.peer_max_stream_data;

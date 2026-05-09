@@ -207,6 +207,28 @@ ReliableSendBuffer::take_unsent_ranges(std::size_t max_bytes,
     return ranges;
 }
 
+std::optional<std::uint64_t> ReliableSendBuffer::first_offset_by_state(SegmentState state) const {
+    if (segment_state_counts_[segment_state_index(state)] == 0) {
+        return std::nullopt;
+    }
+
+    for (const auto &[offset, segment] : segments_) {
+        if (segment.state == state) {
+            return offset;
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::uint64_t> ReliableSendBuffer::first_lost_offset() const {
+    return first_offset_by_state(SegmentState::lost);
+}
+
+std::optional<std::uint64_t> ReliableSendBuffer::first_unsent_offset() const {
+    return first_offset_by_state(SegmentState::unsent);
+}
+
 void ReliableSendBuffer::split_at(std::uint64_t offset) {
     const auto candidate = segments_.upper_bound(offset);
     if (candidate == segments_.begin()) {

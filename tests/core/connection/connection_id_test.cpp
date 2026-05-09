@@ -809,7 +809,10 @@ TEST(QuicCoreTest, ProcessInboundApplicationCoversPreconnectedRetireConnectionId
     connection.application_space_.read_secret = make_test_traffic_secret();
 
     const auto gated = connection.process_inbound_application(
-        std::array<coquic::quic::Frame, 1>{coquic::quic::MaxDataFrame{.maximum_data = 1}},
+        std::array<coquic::quic::Frame, 1>{coquic::quic::MaxStreamDataFrame{
+            .stream_id = 0,
+            .maximum_stream_data = 1,
+        }},
         coquic::quic::test::test_time(1));
     ASSERT_FALSE(gated.has_value());
     EXPECT_EQ(gated.error().code, coquic::quic::CodecErrorCode::invalid_varint);

@@ -128,6 +128,13 @@ function updateRunButton() {
   }
 }
 
+function setModuleState(text, className = "") {
+  const node = el("module-state");
+  if (!node) return;
+  node.className = `module-state${className ? ` ${className}` : ""}`;
+  node.textContent = text;
+}
+
 function setGlobalTimer(timeMs) {
   const node = el("global-timer");
   if (node) node.textContent = `${timeMs}ms`;
@@ -1076,8 +1083,6 @@ function downloadPcap() {
 }
 
 async function loadModule() {
-  const response = await fetch(wasmPath);
-  const bytes = await response.arrayBuffer();
   let instance;
   const imports = {
     wasi_snapshot_preview1: {
@@ -1116,11 +1121,29 @@ async function loadModule() {
       },
     },
   };
-  const result = await WebAssembly.instantiate(bytes, imports);
+
+  setModuleState("fetching wasm");
+  const response = await fetch(wasmPath);
+  if (!response.ok) {
+    throw new Error(`wasm fetch failed: HTTP ${response.status}`);
+  }
+
+  setModuleState("instantiating wasm");
+  let result;
+  if (response.headers.get("content-type")?.toLowerCase().startsWith("application/wasm")) {
+    result = await WebAssembly.instantiateStreaming(response, imports);
+  } else {
+    const bytes = await response.arrayBuffer();
+    result = await WebAssembly.instantiate(bytes, imports);
+  }
   instance = result.instance;
   wasm = instance.exports;
+  if (typeof wasm._initialize !== "function") {
+    throw new Error("wasm module is missing _initialize export");
+  }
   wasm._initialize();
   resetEndpointDiagnostics();
+  setModuleState("wasm ready", "ready");
   updateRunButton();
 }
 
@@ -1899,6 +1922,7 @@ async function runDemo({ startPaused = false } = {}) {
 }
 
 loadModule().catch((error) => {
+  setModuleState("wasm failed", "failed");
   log(0, error.message, "error");
 });
 

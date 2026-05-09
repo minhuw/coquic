@@ -499,6 +499,9 @@ std::string content_type_for_path(const std::filesystem::path &path) {
     if (extension == ".js" || extension == ".mjs") {
         return "text/javascript; charset=utf-8";
     }
+    if (extension == ".wasm") {
+        return "application/wasm";
+    }
     if (extension == ".svg") {
         return "image/svg+xml";
     }
@@ -1623,6 +1626,8 @@ bool runtime_misc_internal_coverage_for_test() {
           "resolve_runtime_path_under_root rejects raw dot path segments");
     check(content_type_for_path("page.htm") == "text/html; charset=utf-8",
           "content_type_for_path treats .htm files as HTML");
+    check(content_type_for_path("module.wasm") == "application/wasm",
+          "content_type_for_path serves wasm with the WebAssembly MIME type");
 
     const auto method_not_allowed =
         runtime_server_response(document_root.path(), Http3Request{

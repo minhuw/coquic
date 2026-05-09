@@ -277,6 +277,28 @@
         white-space: nowrap;
       }
 
+      .module-state {
+        min-height: 34px;
+        border: 1px solid rgba(145, 165, 173, 0.22);
+        border-radius: 7px;
+        display: grid;
+        place-items: center;
+        padding: 5px 8px;
+        color: var(--muted);
+        font: 700 0.72rem/1.15 var(--mono);
+        text-align: center;
+      }
+
+      .module-state.ready {
+        border-color: rgba(36, 181, 166, 0.42);
+        color: var(--client-ink);
+      }
+
+      .module-state.failed {
+        border-color: rgba(255, 120, 109, 0.52);
+        color: var(--danger);
+      }
+
       #start {
         border-color: rgba(36, 181, 166, 0.68);
         color: var(--client-ink);
@@ -1447,6 +1469,7 @@
             <span>Global Timer</span>
             <strong id="global-timer">0ms</strong>
           </div>
+          <div id="module-state" class="module-state" aria-live="polite">loading wasm</div>
           <button id="start" class="control-button" type="button" aria-label="Start protocol exchange">
             <span class="control-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">

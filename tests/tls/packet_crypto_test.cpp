@@ -1345,7 +1345,7 @@ TEST(QuicPacketCryptoTest, HeaderProtectionResetFaultReturnsFailure) {
     const auto second_mask = coquic::quic::make_header_protection_mask(
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
         coquic::quic::HeaderProtectionMaskInput{
-            .hp_key = hex_bytes("9f50449e04a0e810283a1e9933adedd2"),
+            .hp_key = hex_bytes("000102030405060708090a0b0c0d0e0f"),
             .sample = hex_bytes("00112233445566778899aabbccddeeff"),
         });
     ASSERT_FALSE(second_mask.has_value());

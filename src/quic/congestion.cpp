@@ -259,6 +259,9 @@ std::optional<QuicCoreTimePoint> BbrCongestionController::next_send_time(std::si
     if (bytes == 0 || !pacing_budget_timestamp_.has_value()) {
         return std::nullopt;
     }
+    if (mode_ == Mode::startup) {
+        return std::nullopt;
+    }
 
     const auto budget = std::min(pacing_budget_bytes_, pacing_budget_cap());
     if (bytes <= budget) {

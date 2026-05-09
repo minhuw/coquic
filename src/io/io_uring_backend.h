@@ -27,6 +27,7 @@ class IoUringBackend final : public QuicIoBackend {
     std::optional<QuicRouteHandle> ensure_route(const QuicIoRemote &remote) override;
     std::optional<QuicIoEvent> wait(std::optional<QuicCoreTimePoint> next_wakeup) override;
     bool send(const QuicIoTxDatagram &datagram) override;
+    bool send_many(std::span<const QuicIoTxDatagram> datagrams) override;
 
   private:
     IoUringBackend(QuicUdpBackendConfig config, std::unique_ptr<QuicIoEngine> engine);

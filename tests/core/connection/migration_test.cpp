@@ -1494,11 +1494,9 @@ TEST(QuicCoreTest, PacketTraceLogsAckTimeoutMigrationAndBlockedSendPaths) {
         auto connection = make_connected_client_connection();
         connection.congestion_controller_.bytes_in_flight_ =
             connection.congestion_controller_.congestion_window();
+        connection.connection_flow_control_.queue_max_data(
+            connection.connection_flow_control_.advertised_max_data + 1024);
 
-        ASSERT_TRUE(connection
-                        .queue_stream_send(
-                            0, coquic::quic::test::bytes_from_string("trace-congestion"), false)
-                        .has_value());
         EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     }
 

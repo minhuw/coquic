@@ -141,7 +141,7 @@ grep -F -- 'docker network rm "${network_name}"' "${script}" >/dev/null || {
   exit 1
 }
 
-grep -F -- 'timeout "${run_timeout_seconds}s" docker run --rm' "${script}" >/dev/null || {
+grep -F -- 'timeout --kill-after=5s "${run_timeout_seconds}s" docker run --rm' "${script}" >/dev/null || {
   echo 'missing bounded client container run in harness script' >&2
   exit 1
 }
@@ -170,9 +170,9 @@ for run in "${smoke_runs[@]}"; do
 done
 
 ci_runs=(
-  '"socket bulk download 0 1048576 none 4 1 1 5s 60s"'
-  '"socket rr stay 32 32 none 1 256 16 5s 45s"'
-  '"socket crr stay 32 32 none 1 512 1 5s 45s"'
+  '"socket bulk download 0 1048576 none 4 1 1 0ms 60s"'
+  '"socket rr stay 32 32 none 1 32 16 5s 45s"'
+  '"socket crr stay 32 32 none 1 64 1 5s 45s"'
 )
 
 for run in "${ci_runs[@]}"; do
@@ -343,6 +343,9 @@ cat > "${fake_bin_dir}/timeout" <<'FAKE_TIMEOUT'
 set -euo pipefail
 log_path="${FAKE_PERF_LOG:?}"
 printf 'timeout\t%s\n' "$*" >>"${log_path}"
+if [ "${1:-}" = '--kill-after=5s' ]; then
+  shift
+fi
 shift
 exec "$@"
 FAKE_TIMEOUT

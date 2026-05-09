@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -25,6 +26,7 @@ namespace coquic::quic {
 
 namespace test {
 bool connection_key_update_and_probe_coverage_for_tests();
+bool connection_pmtud_coverage_for_tests();
 } // namespace test
 
 enum class HandshakeStatus : std::uint8_t {
@@ -416,6 +418,18 @@ struct PathEcnState {
     std::uint64_t probing_packets_lost = 0;
 };
 
+struct PathMtuState {
+    bool enabled = true;
+    std::size_t base_datagram_size = 1200;
+    std::size_t validated_datagram_size = 1200;
+    std::size_t probe_ceiling = 1200;
+    std::size_t search_low = 1200;
+    std::optional<std::size_t> outstanding_probe_size;
+    std::optional<std::uint64_t> outstanding_probe_packet_number;
+    std::optional<QuicCoreTimePoint> next_probe_time;
+    std::vector<std::size_t> failed_probe_sizes;
+};
+
 struct PathState {
     QuicPathId id = 0;
     bool validated = false;
@@ -430,6 +444,7 @@ struct PathState {
     std::uint64_t peer_connection_id_sequence = 0;
     std::optional<ConnectionId> destination_connection_id_override;
     PathEcnState ecn;
+    PathMtuState mtu;
 };
 
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
@@ -455,6 +470,7 @@ class QuicConnection {
     StreamStateResult<bool> queue_stop_sending(LocalStopSendingCommand command);
     CodecResult<bool> request_connection_migration(QuicPathId path_id,
                                                    QuicMigrationRequestReason reason);
+    void apply_path_mtu_update(QuicPathId path_id, std::size_t max_udp_payload_size);
     StreamStateResult<bool> queue_application_close(LocalApplicationCloseCommand command);
     void request_key_update();
     DatagramBuffer drain_outbound_datagram(QuicCoreTimePoint now);
@@ -469,6 +485,8 @@ class QuicConnection {
     std::optional<QuicConnectionTerminalState> take_terminal_state();
     std::optional<QuicPathId> last_drained_path_id() const;
     QuicEcnCodepoint last_drained_ecn_codepoint() const;
+    bool last_drained_is_pmtu_probe() const;
+    bool has_sendable_datagram(QuicCoreTimePoint now) const;
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     std::vector<ConnectionId> active_local_connection_ids() const;
     bool is_handshake_complete() const;
@@ -478,6 +496,7 @@ class QuicConnection {
   private:
     friend class QuicCore;
     friend bool test::connection_key_update_and_probe_coverage_for_tests();
+    friend bool test::connection_pmtud_coverage_for_tests();
 
     void start_client_if_needed();
     void start_client_if_needed(QuicCoreTimePoint now);
@@ -497,10 +516,18 @@ class QuicConnection {
     void maybe_emit_qlog_recovery_metrics(QuicCoreTimePoint now);
     void emit_qlog_packet_lost(const SentPacketRecord &packet, std::string_view trigger,
                                QuicCoreTimePoint now);
+    void process_inbound_datagram_owned(std::vector<std::byte> bytes, QuicCoreTimePoint now,
+                                        QuicPathId path_id, QuicEcnCodepoint ecn);
     void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
                                   QuicPathId path_id, QuicEcnCodepoint ecn,
                                   std::optional<std::uint32_t> inbound_datagram_id,
                                   bool replay_trigger, bool count_inbound_bytes);
+    void process_inbound_datagram(std::shared_ptr<std::vector<std::byte>> storage,
+                                  std::size_t begin, std::size_t end, QuicCoreTimePoint now,
+                                  QuicPathId path_id, QuicEcnCodepoint ecn,
+                                  std::optional<std::uint32_t> inbound_datagram_id,
+                                  bool replay_trigger, bool count_inbound_bytes,
+                                  bool allow_in_place_receive_decode);
     CodecResult<ConnectionId>
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
@@ -537,9 +564,10 @@ class QuicConnection {
     void track_sent_packet(PacketSpaceState &packet_space, SentPacketRecord packet);
     std::optional<SentPacketRecord> retire_acked_packet(PacketSpaceState &packet_space,
                                                         RecoveryPacketHandle handle);
-    std::optional<SentPacketRecord> mark_lost_packet(PacketSpaceState &packet_space,
-                                                     RecoveryPacketHandle handle,
-                                                     bool already_marked_in_recovery = false);
+    std::optional<SentPacketRecord>
+    mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketHandle handle,
+                     bool already_marked_in_recovery = false,
+                     std::optional<QuicCoreTimePoint> now = std::nullopt);
     void rebuild_recovery(PacketSpaceState &packet_space);
     std::optional<QuicCoreTimePoint> loss_deadline() const;
     std::optional<QuicCoreTimePoint> pto_deadline() const;
@@ -614,10 +642,22 @@ class QuicConnection {
     bool anti_amplification_applies(QuicPathId path_id) const;
     std::uint64_t anti_amplification_send_budget() const;
     std::uint64_t anti_amplification_send_budget(QuicPathId path_id) const;
-    std::size_t outbound_datagram_size_limit() const;
+    std::size_t outbound_datagram_size_limit(bool allow_pmtu_probe_size = true) const;
+    std::size_t outbound_datagram_size_ceiling() const;
+    std::size_t outbound_datagram_size_ceiling_for_path(std::optional<QuicPathId> path_id) const;
+    std::size_t outbound_datagram_size_limit_for_path(std::optional<QuicPathId> path_id) const;
+    std::optional<QuicCoreTimePoint> pmtud_deadline() const;
+    void initialize_path_mtu_state(PathState &path);
+    void maybe_arm_pmtu_probe(QuicCoreTimePoint now);
+    std::optional<std::size_t> next_pmtu_probe_size(PathState &path) const;
+    void note_pmtu_probe_sent(QuicPathId path_id, std::uint64_t packet_number,
+                              std::size_t datagram_size);
+    void note_pmtu_probe_acked(const SentPacketRecord &packet, QuicCoreTimePoint now);
+    void note_pmtu_probe_lost(const SentPacketRecord &packet, QuicCoreTimePoint now);
     void note_inbound_datagram_bytes(std::size_t bytes);
     void note_outbound_datagram_bytes(std::size_t bytes,
-                                      std::optional<QuicPathId> path_id = std::nullopt);
+                                      std::optional<QuicPathId> path_id = std::nullopt,
+                                      std::optional<QuicCoreTimePoint> now = std::nullopt);
     void mark_peer_address_validated();
     void disable_ecn_on_path(QuicPathId path_id);
     QuicEcnCodepoint outbound_ecn_codepoint_for_path(std::optional<QuicPathId> path_id) const;
@@ -658,10 +698,10 @@ class QuicConnection {
     ConnectionFlowControlState connection_flow_control_;
     StreamOpenLimits stream_open_limits_;
     LocalStreamLimitState local_stream_limit_state_;
-    std::vector<QuicCoreReceiveStreamData> pending_stream_receive_effects_;
-    std::vector<QuicCorePeerResetStream> pending_peer_reset_effects_;
-    std::vector<QuicCorePeerStopSending> pending_peer_stop_effects_;
-    std::vector<QuicCoreStateChange> pending_state_changes_;
+    std::deque<QuicCoreReceiveStreamData> pending_stream_receive_effects_;
+    std::deque<QuicCorePeerResetStream> pending_peer_reset_effects_;
+    std::deque<QuicCorePeerStopSending> pending_peer_stop_effects_;
+    std::deque<QuicCoreStateChange> pending_state_changes_;
     std::optional<QuicCorePeerPreferredAddressAvailable> pending_preferred_address_effect_;
     std::optional<QuicCoreResumptionStateAvailable> pending_resumption_state_effect_;
     std::optional<QuicCoreZeroRttStatusEvent> pending_zero_rtt_status_event_;
@@ -704,6 +744,7 @@ class QuicConnection {
     std::optional<QuicPathId> current_send_path_id_;
     std::optional<QuicPathId> last_drained_path_id_;
     QuicEcnCodepoint last_drained_ecn_codepoint_ = QuicEcnCodepoint::not_ect;
+    bool last_drained_is_pmtu_probe_ = false;
     QuicPathId last_inbound_path_id_ = 0;
 };
 

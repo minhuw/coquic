@@ -19,6 +19,7 @@ class SharedUdpBackendCore {
     std::optional<QuicRouteHandle> ensure_route(const QuicIoRemote &remote);
     std::optional<QuicIoEvent> wait(std::optional<QuicCoreTimePoint> next_wakeup);
     bool send(const QuicIoTxDatagram &datagram);
+    bool send_many(std::span<const QuicIoTxDatagram> datagrams);
 
   private:
     struct Impl;

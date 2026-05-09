@@ -60,6 +60,7 @@ translate_non_receive_wait_event(const QuicIoEngineEvent &event) {
             .now = event.now,
         };
     case QuicIoEngineEvent::Kind::rx_datagram:
+    case QuicIoEngineEvent::Kind::path_mtu_update:
         return std::nullopt;
     }
 }
@@ -104,6 +105,41 @@ bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family
     return true;
 }
 
+bool configure_linux_pmtud_socket_options(LinuxSocketDescriptor socket, int family) {
+#if defined(__linux__)
+    const auto set_bool_socket_option = [&](int level, int name) {
+        const int enabled = 1;
+        return socket_io_backend_ops_state().setsockopt_fn(socket.fd, level, name, &enabled,
+                                                           sizeof(enabled)) == 0;
+    };
+
+    if (family == AF_INET || family == AF_INET6) {
+        const int discover = IP_PMTUDISC_DO;
+        if (socket_io_backend_ops_state().setsockopt_fn(socket.fd, IPPROTO_IP, IP_MTU_DISCOVER,
+                                                        &discover, sizeof(discover)) != 0) {
+            return false;
+        }
+        if (!set_bool_socket_option(IPPROTO_IP, IP_RECVERR)) {
+            return false;
+        }
+    }
+    if (family == AF_INET6) {
+        const int discover = IPV6_PMTUDISC_DO;
+        if (socket_io_backend_ops_state().setsockopt_fn(socket.fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER,
+                                                        &discover, sizeof(discover)) != 0) {
+            return false;
+        }
+        if (!set_bool_socket_option(IPPROTO_IPV6, IPV6_RECVERR)) {
+            return false;
+        }
+    }
+#else
+    static_cast<void>(socket);
+    static_cast<void>(family);
+#endif
+    return true;
+}
+
 int open_udp_socket(int family) {
     const int fd = socket_io_backend_ops_state().socket_fn(family, SOCK_DGRAM, 0);
     if (fd < 0) {
@@ -124,6 +160,12 @@ int open_udp_socket(int family) {
     configure_udp_socket_buffers(LinuxSocketDescriptor{.fd = fd});
 
     if (!configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = fd}, family)) {
+        const int option_errno = errno;
+        ::close(fd);
+        errno = option_errno;
+        return -1;
+    }
+    if (!configure_linux_pmtud_socket_options(LinuxSocketDescriptor{.fd = fd}, family)) {
         const int option_errno = errno;
         ::close(fd);
         errno = option_errno;
@@ -280,6 +322,7 @@ struct SharedUdpBackendCore::Impl {
     std::vector<internal::SocketIoSocket> sockets;
     std::vector<int> socket_fds;
     internal::SocketIoRouteState route_state;
+    std::vector<QuicIoEngineTxDatagram> tx_datagram_scratch;
 };
 
 SharedUdpBackendCore::SharedUdpBackendCore(QuicUdpBackendConfig config,
@@ -401,6 +444,24 @@ SharedUdpBackendCore::wait(std::optional<QuicCoreTimePoint> next_wakeup) {
         return translated;
     }
 
+    if (event->kind == QuicIoEngineEvent::Kind::path_mtu_update) {
+        if (!event->path_mtu.has_value()) {
+            return std::nullopt;
+        }
+        auto update = *event->path_mtu;
+        const auto handle = internal::remember_route_handle(impl_->route_state, update.peer,
+                                                            update.peer_len, update.socket_fd);
+        return QuicIoEvent{
+            .kind = QuicIoEvent::Kind::path_mtu_update,
+            .now = update.now,
+            .path_mtu =
+                QuicIoPathMtuUpdate{
+                    .route_handle = handle,
+                    .max_udp_payload_size = update.max_udp_payload_size,
+                },
+        };
+    }
+
     if (!event->rx.has_value()) {
         return std::nullopt;
     }
@@ -428,7 +489,29 @@ bool SharedUdpBackendCore::send(const QuicIoTxDatagram &datagram) {
 
     return impl_->engine->send(route_it->second.socket_fd, route_it->second.peer,
                                route_it->second.peer_len, datagram.payload(),
-                               impl_->config.role_name, datagram.ecn);
+                               impl_->config.role_name, datagram.ecn, datagram.is_pmtu_probe);
+}
+
+bool SharedUdpBackendCore::send_many(std::span<const QuicIoTxDatagram> datagrams) {
+    auto &engine_datagrams = impl_->tx_datagram_scratch;
+    engine_datagrams.clear();
+    engine_datagrams.reserve(datagrams.size());
+    for (const auto &datagram : datagrams) {
+        const auto route_it = impl_->route_state.routes_by_handle.find(datagram.route_handle);
+        if (route_it == impl_->route_state.routes_by_handle.end()) {
+            return false;
+        }
+        engine_datagrams.push_back(QuicIoEngineTxDatagram{
+            .socket_fd = route_it->second.socket_fd,
+            .peer = route_it->second.peer,
+            .peer_len = route_it->second.peer_len,
+            .bytes = datagram.payload(),
+            .ecn = datagram.ecn,
+            .is_pmtu_probe = datagram.is_pmtu_probe,
+        });
+    }
+
+    return impl_->engine->send_many(engine_datagrams, impl_->config.role_name);
 }
 
 namespace test {
@@ -465,6 +548,12 @@ int socket_io_backend_open_udp_socket_for_runtime_tests(int family) {
 bool socket_io_backend_configure_linux_ecn_socket_options_for_runtime_tests(int socket_fd,
                                                                             int family) {
     return internal::configure_linux_ecn_socket_options(
+        internal::LinuxSocketDescriptor{.fd = socket_fd}, family);
+}
+
+bool socket_io_backend_configure_linux_pmtud_socket_options_for_runtime_tests(int socket_fd,
+                                                                              int family) {
+    return internal::configure_linux_pmtud_socket_options(
         internal::LinuxSocketDescriptor{.fd = socket_fd}, family);
 }
 
@@ -536,7 +625,15 @@ COQUIC_NO_PROFILE bool socket_io_backend_configures_linux_ecn_socket_options_for
     return opened && has_call(IPPROTO_IPV6, IPV6_V6ONLY, 0) &&
            has_call(SOL_SOCKET, SO_RCVBUF, kExpectedUdpSocketBufferBytes) &&
            has_call(SOL_SOCKET, SO_SNDBUF, kExpectedUdpSocketBufferBytes) &&
-           has_call(IPPROTO_IP, IP_RECVTOS, 1) && has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1);
+           has_call(IPPROTO_IP, IP_RECVTOS, 1) && has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1) &&
+#if defined(__linux__)
+           has_call(IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO) &&
+           has_call(IPPROTO_IP, IP_RECVERR, 1) &&
+           has_call(IPPROTO_IPV6, IPV6_MTU_DISCOVER, IPV6_PMTUDISC_DO) &&
+           has_call(IPPROTO_IPV6, IPV6_RECVERR, 1);
+#else
+           true;
+#endif
 }
 
 COQUIC_NO_PROFILE bool socket_io_backend_route_handles_are_stable_per_peer_tuple_for_tests() {

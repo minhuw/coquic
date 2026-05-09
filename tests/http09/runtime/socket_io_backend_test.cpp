@@ -35,7 +35,7 @@ class ScriptedIoEngine final : public coquic::io::QuicIoEngine {
     }
 
     bool send(int, const sockaddr_storage &, socklen_t, std::span<const std::byte>,
-              std::string_view, coquic::quic::QuicEcnCodepoint) override {
+              std::string_view, coquic::quic::QuicEcnCodepoint, bool) override {
         return send_result;
     }
 
@@ -479,6 +479,14 @@ TEST(SocketIoBackendTest, SharedUdpBackendCoreWaitTranslatesNonReceiveEvents) {
 TEST(SocketIoBackendTest, ConfiguresLinuxSocketsForReceivingEcnMetadata) {
     EXPECT_TRUE(
         coquic::io::test::socket_io_backend_configures_linux_ecn_socket_options_for_tests());
+}
+
+TEST(SocketIoBackendTest, PollEngineReportsLinuxPathMtuUpdates) {
+    EXPECT_TRUE(coquic::io::test::poll_io_engine_pmtud_coverage_for_tests());
+}
+
+TEST(SocketIoBackendTest, PollEngineIgnoresNonPathMtuErrqueueEvents) {
+    EXPECT_TRUE(coquic::io::test::poll_io_engine_ignores_non_pmtu_errqueue_for_tests());
 }
 
 TEST(SocketIoBackendTest, UsesSendmsgToApplyOutboundEcnMarkings) {

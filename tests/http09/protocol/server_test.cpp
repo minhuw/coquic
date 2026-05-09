@@ -320,7 +320,7 @@ TEST(QuicHttp09ServerTest, ServesResponseAfterLostShortRequestPacketIsRetransmit
     static_cast<void>(ignored_server_followup);
 
     const auto retransmission = coquic::quic::test::drive_earliest_next_wakeup(
-        client, {request.next_wakeup, client_after_partial_server_response.next_wakeup});
+        client, {client.next_wakeup(), client_after_partial_server_response.next_wakeup});
     const auto retransmission_datagrams = coquic::quic::test::send_datagrams_from(retransmission);
     ASSERT_FALSE(retransmission_datagrams.empty());
 

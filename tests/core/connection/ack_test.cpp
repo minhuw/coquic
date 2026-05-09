@@ -54,7 +54,6 @@ using coquic::quic::test_support::datagram_has_application_stream;
 using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
-using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
 using coquic::quic::test_support::first_tracked_packet;
 using coquic::quic::test_support::invalid_cipher_suite;
 using coquic::quic::test_support::last_tracked_packet;
@@ -1045,8 +1044,8 @@ TEST(QuicCoreTest, DiscardingInitialPacketSpaceResetsPtoBackoff) {
                                      .sent_time = coquic::quic::test::test_time(80),
                                      .ack_eliciting = true,
                                      .in_flight = true,
-                                     .bytes_in_flight = 1200,
                                      .has_ping = true,
+                                     .bytes_in_flight = 1200,
                                  });
     connection.track_sent_packet(connection.handshake_space_,
                                  coquic::quic::SentPacketRecord{
@@ -1054,8 +1053,8 @@ TEST(QuicCoreTest, DiscardingInitialPacketSpaceResetsPtoBackoff) {
                                      .sent_time = coquic::quic::test::test_time(100),
                                      .ack_eliciting = true,
                                      .in_flight = true,
-                                     .bytes_in_flight = 1200,
                                      .has_ping = true,
+                                     .bytes_in_flight = 1200,
                                  });
 
     ASSERT_EQ(connection.congestion_controller_.bytes_in_flight(), 2400u);
@@ -2211,8 +2210,7 @@ TEST(QuicCoreTest, DeadlineTrackingCacheRefreshesAfterTrackedPacketsAreRemoved) 
         3u);
 }
 
-TEST(QuicCoreTest,
-     ServerHandshakeConfirmationFromApplicationAckKeepsPtoForMissingApplicationTailPacket) {
+TEST(QuicCoreTest, ServerApplicationAckDoesNotConfirmHandshakeBeforeTlsCompletion) {
     auto connection = make_connected_server_connection();
     connection.handshake_confirmed_ = false;
     connection.handshake_done_state_ = coquic::quic::StreamControlFrameState::sent;
@@ -2294,7 +2292,8 @@ TEST(QuicCoreTest,
                                          /*suppress_pto_reset=*/false)
                     .has_value());
 
-    EXPECT_TRUE(connection.handshake_confirmed_);
+    EXPECT_FALSE(connection.handshake_confirmed_);
+    connection.confirm_handshake();
     ASSERT_TRUE(connection.next_wakeup().has_value());
     const auto deadline = optional_value_or_terminate(connection.next_wakeup());
 
@@ -4071,19 +4070,19 @@ TEST(QuicCoreTest, DrainOutboundDatagramReusesAcceptedApplicationCandidateSerial
     EXPECT_FALSE(connection.has_failed());
 }
 
-TEST(QuicCoreTest, ApplicationSendPathFailsWhenTrimmedFinOnlyPacketReserializationFails) {
+TEST(QuicCoreTest, ApplicationSendPathSizesFinOnlyStreamsWithoutTrimReserialization) {
     auto connection = make_connected_client_connection();
     connection.stream_open_limits_.peer_max_bidirectional = 2048;
     for (std::uint64_t stream_index = 0; stream_index < 2048; ++stream_index) {
         ASSERT_TRUE(connection.queue_stream_send(stream_index * 4, {}, true).has_value());
     }
-    coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 12);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-    EXPECT_TRUE(datagram.empty());
-    EXPECT_TRUE(connection.has_failed());
+    EXPECT_FALSE(datagram.empty());
+    EXPECT_LE(datagram.size(), 1200u);
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_TRUE(connection.has_pending_application_send());
 }
 
 TEST(QuicCoreTest, ApplicationSendFailsWhenControlFramesAloneExceedDatagramBudget) {
@@ -4178,7 +4177,7 @@ TEST(QuicCoreTest,
     connection.congestion_controller_.bytes_in_flight_ =
         connection.congestion_controller_.congestion_window();
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 3);
+        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
@@ -4188,25 +4187,21 @@ TEST(QuicCoreTest,
     EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
 }
 
-TEST(QuicCoreTest, ApplicationSendPathFailsWhenNoAckFallbackSerializationFails) {
-    const auto payload_size = find_application_send_payload_size_that_drops_ack();
-    ASSERT_TRUE(payload_size.has_value());
-    const auto payload_size_value = optional_value_or_terminate(payload_size);
-
+TEST(QuicCoreTest, ApplicationSendPathPreservesAckByTrimmingStreamData) {
     auto connection = make_connected_client_connection();
     connection.application_space_.received_packets.record_received(
         /*packet_number=*/27, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
-    ASSERT_TRUE(connection
-                    .queue_stream_send(
-                        0, std::vector<std::byte>(payload_size_value, std::byte{0x59}), false)
-                    .has_value());
-    coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 3);
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, std::vector<std::byte>(1200, std::byte{0x59}), false)
+            .has_value());
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-    EXPECT_TRUE(datagram.empty());
-    EXPECT_TRUE(connection.has_failed());
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_TRUE(datagram_has_application_ack(connection, datagram));
+    EXPECT_TRUE(datagram_has_application_stream(connection, datagram));
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
 }
 
 TEST(QuicCoreTest, ApplicationSendFallsBackToAckOnlyWhenAmplificationBudgetShrinks) {
@@ -5086,6 +5081,7 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossRepeatedCumulativeAcks
 
 TEST(QuicCoreTest, ApplicationSendUsesConfiguredOutboundDatagramSizeLimit) {
     auto connection = make_connected_client_connection();
+    connection.config_.transport.pmtud_enabled = false;
     connection.config_.max_outbound_datagram_size = 4096;
     auto &peer_transport_parameters =
         optional_ref_or_terminate(connection.peer_transport_parameters_);
@@ -5135,6 +5131,7 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadWithoutArtificialBurstLimit)
 
 TEST(QuicCoreTest, BbrPacingBlocksFurtherApplicationSendsUntilPacingWakeup) {
     auto connection = make_connected_client_connection();
+    connection.config_.transport.pmtud_enabled = false;
     connection.congestion_controller_ = coquic::quic::QuicCongestionController(
         coquic::quic::QuicCongestionControlAlgorithm::bbr,
         std::max<std::size_t>(1200, connection.config_.max_outbound_datagram_size));
@@ -5452,6 +5449,10 @@ TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverHeaderPacketSpaceUtilities) {
 
 TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverKeyUpdateAndProbeBranches) {
     EXPECT_TRUE(coquic::quic::test::connection_key_update_and_probe_coverage_for_tests());
+}
+
+TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverPmtudBranches) {
+    EXPECT_TRUE(coquic::quic::test::connection_pmtud_coverage_for_tests());
 }
 
 TEST(QuicCoreTest, PacketSpacePacketMapViewSkipsStaleLiveHandles) {
@@ -6109,7 +6110,7 @@ TEST(QuicCoreTest, ServerProcessesOneRttDataBeforeHandshakeCompletionWhenKeysAlr
         return std::nullopt;
     };
 
-    const auto handshake_datagram_index =
+    const auto has_handshake_datagram =
         find_packet_datagram_index(handshake_datagrams, [](const auto &packet) {
             return std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(packet);
         });
@@ -6117,9 +6118,8 @@ TEST(QuicCoreTest, ServerProcessesOneRttDataBeforeHandshakeCompletionWhenKeysAlr
         find_packet_datagram_index(request_datagrams, [](const auto &packet) {
             return std::holds_alternative<coquic::quic::ProtectedOneRttPacket>(packet);
         });
-    ASSERT_TRUE(handshake_datagram_index.has_value());
+    ASSERT_TRUE(has_handshake_datagram.has_value());
     ASSERT_TRUE(one_rtt_datagram_index.has_value());
-    const auto handshake_index = optional_value_or_terminate(handshake_datagram_index);
     const auto one_rtt_index = optional_value_or_terminate(one_rtt_datagram_index);
 
     ASSERT_TRUE(server.connection_->application_space_.read_secret.has_value());
@@ -6132,11 +6132,12 @@ TEST(QuicCoreTest, ServerProcessesOneRttDataBeforeHandshakeCompletionWhenKeysAlr
     EXPECT_FALSE(server.has_failed());
     EXPECT_TRUE(server.connection_->deferred_protected_packets_.empty());
 
-    const auto server_after_completion = coquic::quic::test::relay_nth_send_datagram_to_peer(
-        client_handshake, handshake_index, server, coquic::quic::test::test_time(5));
+    const auto server_after_completion = coquic::quic::test::relay_send_datagrams_to_peer(
+        client_handshake, server, coquic::quic::test::test_time(5));
     EXPECT_TRUE(
         coquic::quic::test::received_application_data_from(server_after_completion).empty());
     EXPECT_FALSE(server.has_failed());
+    EXPECT_TRUE(server.connection_->deferred_protected_packets_.empty());
 }
 
 TEST(QuicCoreTest, ProcessInboundDatagramResyncsHandshakeStateBeforeOneRttControls) {

@@ -152,6 +152,16 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesPerfOutboundDatagramSize) {
     EXPECT_EQ(server.max_outbound_datagram_size, kExpectedPerfDatagramSize);
 }
 
+TEST(QuicPerfConfigTest, EndpointConfigKeepsPmtudEnabledForContainerBenchmarks) {
+    const auto client =
+        make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
+    const auto server =
+        make_perf_server_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::server});
+
+    EXPECT_TRUE(client.transport.pmtud_enabled);
+    EXPECT_TRUE(server.transport.pmtud_enabled);
+}
+
 TEST(QuicPerfConfigTest, EndpointConfigUsesTransferSizedReceiveWindows) {
     constexpr std::uint64_t kExpectedConnectionWindow = 32ull * 1024ull * 1024ull;
     constexpr std::uint64_t kExpectedStreamWindow = 16ull * 1024ull * 1024ull;
@@ -166,4 +176,17 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesTransferSizedReceiveWindows) {
     EXPECT_EQ(server.transport.initial_max_data, kExpectedConnectionWindow);
     EXPECT_EQ(server.transport.initial_max_stream_data_bidi_remote, kExpectedStreamWindow);
 }
+
+TEST(QuicPerfConfigTest, EndpointConfigUsesPerfAckElicitingThreshold) {
+    constexpr std::uint64_t kExpectedAckElicitingThreshold = 128;
+
+    const auto client =
+        make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
+    const auto server =
+        make_perf_server_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::server});
+
+    EXPECT_EQ(client.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
+    EXPECT_EQ(server.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
+}
+
 } // namespace

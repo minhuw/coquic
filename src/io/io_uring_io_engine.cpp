@@ -255,10 +255,11 @@ bool IoUringIoEngine::register_socket(int socket_fd) {
 
 bool IoUringIoEngine::send(int socket_fd, const sockaddr_storage &peer, socklen_t peer_len,
                            std::span<const std::byte> datagram, std::string_view role_name,
-                           quic::QuicEcnCodepoint ecn) {
+                           quic::QuicEcnCodepoint ecn, bool is_pmtu_probe) {
     if (use_poll_receive_) {
         return receive_fallback_ != nullptr &&
-               receive_fallback_->send(socket_fd, peer, peer_len, datagram, role_name, ecn);
+               receive_fallback_->send(socket_fd, peer, peer_len, datagram, role_name, ecn,
+                                       is_pmtu_probe);
     }
     static_cast<void>(role_name);
     if (!initialized_ || !healthy_) {
@@ -305,6 +306,13 @@ bool IoUringIoEngine::send(int socket_fd, const sockaddr_storage &peer, socklen_
             continue;
         }
         if (completion.res < 0) {
+            if (is_pmtu_probe && completion.res == -EMSGSIZE) {
+                while (!deferred_completions.empty()) {
+                    pending_completions_.push_front(deferred_completions.back());
+                    deferred_completions.pop_back();
+                }
+                return true;
+            }
             healthy_ = false;
             return false;
         }
@@ -314,6 +322,17 @@ bool IoUringIoEngine::send(int socket_fd, const sockaddr_storage &peer, socklen_
         }
         return true;
     }
+}
+
+bool IoUringIoEngine::send_many(std::span<const QuicIoEngineTxDatagram> datagrams,
+                                std::string_view role_name) {
+    for (const auto &datagram : datagrams) {
+        if (!send(datagram.socket_fd, datagram.peer, datagram.peer_len, datagram.bytes, role_name,
+                  datagram.ecn, datagram.is_pmtu_probe)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::optional<QuicIoEngineEvent>

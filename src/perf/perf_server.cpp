@@ -1,12 +1,19 @@
 #include "src/perf/perf_server.h"
 
+#include <cstdlib>
 #include <span>
+#include <string_view>
 
 namespace coquic::perf {
 namespace {
 
 std::vector<std::byte> make_payload(std::size_t bytes) {
     return std::vector<std::byte>(bytes, std::byte{0x5a});
+}
+
+bool env_flag_enabled(const char *name) {
+    const char *value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && std::string_view(value) != "0";
 }
 
 } // namespace
@@ -69,7 +76,8 @@ int QuicPerfServer::run() {
     for (;;) {
         const auto current = quic::QuicCoreClock::now();
         const auto next_wakeup = core_.next_wakeup();
-        if (next_wakeup.has_value() && *next_wakeup <= current) {
+        if (next_wakeup.has_value() && *next_wakeup <= current &&
+            !core_.has_send_continuation_pending()) {
             if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, current),
                                current)) {
                 return 1;
@@ -84,6 +92,9 @@ int QuicPerfServer::run() {
 
         switch (event->kind) {
         case io::QuicIoEvent::Kind::idle_timeout:
+            if (should_exit_on_idle_empty()) {
+                return 0;
+            }
             continue;
         case io::QuicIoEvent::Kind::shutdown:
             return 1;
@@ -93,6 +104,7 @@ int QuicPerfServer::run() {
                 return 1;
             }
             continue;
+        case io::QuicIoEvent::Kind::path_mtu_update:
         case io::QuicIoEvent::Kind::rx_datagram:
             break;
         }
@@ -117,6 +129,7 @@ bool QuicPerfServer::handle_result(const quic::QuicCoreResult &result,
     for (const auto &effect : result.effects) {
         if (const auto *lifecycle = std::get_if<quic::QuicCoreConnectionLifecycleEvent>(&effect)) {
             if (lifecycle->event == quic::QuicCoreConnectionLifecycle::accepted) {
+                accepted_session_ = true;
                 sessions_.insert_or_assign(lifecycle->connection,
                                            Session{.connection = lifecycle->connection});
             } else if (lifecycle->event == quic::QuicCoreConnectionLifecycle::closed) {
@@ -137,6 +150,11 @@ bool QuicPerfServer::handle_result(const quic::QuicCoreResult &result,
     }
 
     return true;
+}
+
+bool QuicPerfServer::should_exit_on_idle_empty() const {
+    return accepted_session_ && sessions_.empty() &&
+           env_flag_enabled("COQUIC_PERF_SERVER_EXIT_ON_IDLE_EMPTY");
 }
 
 bool QuicPerfServer::handle_stream_data(Session &session,

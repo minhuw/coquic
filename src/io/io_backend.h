@@ -39,11 +39,17 @@ struct QuicIoRxDatagram {
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
 };
 
+struct QuicIoPathMtuUpdate {
+    QuicRouteHandle route_handle = 0;
+    std::size_t max_udp_payload_size = 0;
+};
+
 struct QuicIoTxDatagram {
     QuicRouteHandle route_handle = 0;
     std::span<const std::byte> bytes_view;
     quic::DatagramBuffer bytes;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+    bool is_pmtu_probe = false;
 
     std::span<const std::byte> payload() const {
         return bytes_view.empty() ? bytes.span() : bytes_view;
@@ -53,6 +59,7 @@ struct QuicIoTxDatagram {
 struct QuicIoEvent {
     enum class Kind : std::uint8_t {
         rx_datagram,
+        path_mtu_update,
         timer_expired,
         idle_timeout,
         shutdown,
@@ -61,6 +68,7 @@ struct QuicIoEvent {
     Kind kind = Kind::idle_timeout;
     QuicCoreTimePoint now{};
     std::optional<QuicIoRxDatagram> datagram;
+    std::optional<QuicIoPathMtuUpdate> path_mtu;
 };
 
 class QuicIoBackend {
@@ -70,6 +78,14 @@ class QuicIoBackend {
     virtual std::optional<QuicRouteHandle> ensure_route(const QuicIoRemote &remote) = 0;
     virtual std::optional<QuicIoEvent> wait(std::optional<QuicCoreTimePoint> next_wakeup) = 0;
     virtual bool send(const QuicIoTxDatagram &datagram) = 0;
+    virtual bool send_many(std::span<const QuicIoTxDatagram> datagrams) {
+        for (const auto &datagram : datagrams) {
+            if (!send(datagram)) {
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 } // namespace coquic::io

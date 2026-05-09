@@ -35,11 +35,15 @@ parse_congestion_control_algorithm(std::string_view value);
 struct QuicTransportConfig {
     std::uint64_t max_idle_timeout = 0;
     std::uint64_t max_udp_payload_size = 65527;
+    bool pmtud_enabled = true;
+    std::size_t pmtud_base_datagram_size = 1200;
+    std::size_t pmtud_max_datagram_size = 0;
     std::uint64_t active_connection_id_limit = 2;
     bool disable_active_migration = false;
     std::optional<PreferredAddress> preferred_address;
     std::uint64_t ack_delay_exponent = 3;
     std::uint64_t max_ack_delay = 25;
+    std::uint64_t ack_eliciting_threshold = 2;
     std::uint64_t initial_max_data = 1 << 20;
     std::uint64_t initial_max_stream_data_bidi_local = 256 << 10;
     std::uint64_t initial_max_stream_data_bidi_remote = 256 << 10;
@@ -156,6 +160,11 @@ struct QuicCoreInboundDatagram {
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
 };
 
+struct QuicCorePathMtuUpdate {
+    std::optional<QuicRouteHandle> route_handle;
+    std::size_t max_udp_payload_size = 0;
+};
+
 struct QuicCoreSendStreamData {
     std::uint64_t stream_id = 0;
     std::vector<std::byte> bytes;
@@ -205,20 +214,22 @@ struct QuicCoreConnectionCommand {
     QuicCoreConnectionInput input;
 };
 
-using QuicCoreEndpointInput = std::variant<QuicCoreOpenConnection, QuicCoreInboundDatagram,
-                                           QuicCoreConnectionCommand, QuicCoreTimerExpired>;
+using QuicCoreEndpointInput =
+    std::variant<QuicCoreOpenConnection, QuicCoreInboundDatagram, QuicCorePathMtuUpdate,
+                 QuicCoreConnectionCommand, QuicCoreTimerExpired>;
 
 using QuicCoreInput =
     std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
                  QuicCoreSendSharedStreamData, QuicCoreResetStream, QuicCoreStopSending,
                  QuicCoreCloseConnection, QuicCoreRequestKeyUpdate,
-                 QuicCoreRequestConnectionMigration, QuicCoreTimerExpired>;
+                 QuicCoreRequestConnectionMigration, QuicCorePathMtuUpdate, QuicCoreTimerExpired>;
 
 struct QuicCoreSendDatagram {
     QuicConnectionHandle connection = 0;
     std::optional<QuicRouteHandle> route_handle;
     DatagramBuffer bytes;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+    bool is_pmtu_probe = false;
 };
 
 struct QuicCoreReceiveStreamData {
@@ -291,6 +302,7 @@ struct QuicCoreResult {
     std::vector<QuicCoreEffect> effects;
     std::optional<QuicCoreTimePoint> next_wakeup;
     std::optional<QuicCoreLocalError> local_error;
+    bool send_continuation_pending = false;
 };
 
 class QuicConnection;
@@ -317,6 +329,7 @@ class QuicCore {
     QuicCoreResult advance(QuicCoreInput input, QuicCoreTimePoint now);
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     std::size_t connection_count() const;
+    bool has_send_continuation_pending() const;
     std::vector<ConnectionId> active_local_connection_ids() const;
     bool is_handshake_complete() const;
     bool has_failed() const;
@@ -330,6 +343,7 @@ class QuicCore {
         std::unordered_map<QuicPathId, QuicRouteHandle> route_handle_by_path_id;
         std::vector<std::string> active_connection_id_keys;
         std::optional<std::string> initial_destination_connection_id_key;
+        std::optional<QuicCoreTimePoint> send_continuation_wakeup;
         QuicPathId next_path_id = 1;
     };
 
@@ -399,6 +413,10 @@ class QuicCore {
     QuicPathId remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle);
     static std::optional<QuicRouteHandle>
     route_handle_for_path(const ConnectionEntry &entry, const std::optional<QuicPathId> &path_id);
+    static void note_send_continuation(ConnectionEntry &entry, const QuicCoreResult &result,
+                                       QuicCoreTimePoint now);
+    QuicCoreResult finalize_endpoint_result(QuicCoreResult result, QuicCoreTimePoint now);
+    QuicCoreResult finalize_legacy_result(QuicCoreResult result, QuicCoreTimePoint now);
 
     QuicCoreEndpointConfig endpoint_config_;
     std::optional<QuicCoreConfig> legacy_config_;

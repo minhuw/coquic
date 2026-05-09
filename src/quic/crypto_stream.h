@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "src/quic/frame.h"
@@ -49,6 +50,30 @@ class ReliableSendBuffer {
     std::vector<ByteRange>
     take_unsent_ranges(std::size_t max_bytes,
                        std::optional<std::uint64_t> max_offset = std::nullopt);
+    template <typename Callback>
+    void consume_lost_ranges(std::size_t &remaining_bytes, std::optional<std::uint64_t> max_offset,
+                             Callback &&callback) {
+        if (remaining_bytes == 0 ||
+            segment_state_counts_[segment_state_index(SegmentState::lost)] == 0) {
+            return;
+        }
+
+        consume_ranges_by_state(SegmentState::lost, remaining_bytes, max_offset,
+                                std::forward<Callback>(callback));
+        merge_adjacent_segments();
+    }
+    template <typename Callback>
+    void consume_unsent_ranges(std::size_t &remaining_bytes,
+                               std::optional<std::uint64_t> max_offset, Callback &&callback) {
+        if (remaining_bytes == 0 ||
+            segment_state_counts_[segment_state_index(SegmentState::unsent)] == 0) {
+            return;
+        }
+
+        consume_ranges_by_state(SegmentState::unsent, remaining_bytes, max_offset,
+                                std::forward<Callback>(callback));
+        merge_adjacent_segments();
+    }
     void acknowledge(std::uint64_t offset, std::size_t length);
     void mark_lost(std::uint64_t offset, std::size_t length);
     void mark_unsent(std::uint64_t offset, std::size_t length);
@@ -82,6 +107,60 @@ class ReliableSendBuffer {
     std::vector<ByteRange>
     take_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
                          std::optional<std::uint64_t> max_offset = std::nullopt);
+    template <typename Callback>
+    void consume_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
+                                 std::optional<std::uint64_t> max_offset, Callback &&callback) {
+        if (max_offset.has_value()) {
+            split_at(*max_offset);
+        }
+
+        const auto segment_length = [](const Segment &segment) {
+            return segment.end - segment.begin;
+        };
+
+        for (auto it = segments_.begin(); it != segments_.end() && remaining_bytes > 0; ++it) {
+            if (max_offset.has_value() && it->first >= *max_offset) {
+                break;
+            }
+            if (it->second.state != state) {
+                continue;
+            }
+
+            const auto available_bytes = segment_length(it->second);
+            const auto chunk_size = std::min(remaining_bytes, available_bytes);
+            auto range = ByteRange{
+                .offset = it->first,
+                .bytes =
+                    SharedBytes{
+                        it->second.storage,
+                        it->second.begin,
+                        it->second.begin + chunk_size,
+                    },
+            };
+            callback(std::move(range));
+
+            if (chunk_size == available_bytes) {
+                transition_segment_state(it->second, SegmentState::sent);
+                remaining_bytes -= chunk_size;
+                continue;
+            }
+
+            const auto tail_offset = it->first + static_cast<std::uint64_t>(chunk_size);
+            auto tail = Segment{
+                .state = state,
+                .storage = it->second.storage,
+                .begin = it->second.begin + chunk_size,
+                .end = it->second.end,
+            };
+            it->second.end = it->second.begin + chunk_size;
+            transition_segment_state(it->second, SegmentState::sent);
+            const auto [tail_it, tail_inserted] = segments_.emplace(tail_offset, std::move(tail));
+            if (tail_inserted) {
+                note_segment_inserted(tail_it->second);
+            }
+            remaining_bytes -= chunk_size;
+        }
+    }
     void split_at(std::uint64_t offset);
     void merge_adjacent_segments();
 

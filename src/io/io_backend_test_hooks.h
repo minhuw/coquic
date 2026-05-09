@@ -12,6 +12,9 @@
 
 #include "src/io/io_backend.h"
 
+struct mmsghdr;
+struct timespec;
+
 struct io_uring;
 struct io_uring_sqe;
 struct io_uring_cqe;
@@ -27,8 +30,10 @@ struct SocketIoBackendOpsOverride {
     int (*setsockopt_fn)(int, int, int, const void *, socklen_t) = nullptr;
     ssize_t (*sendto_fn)(int, const void *, size_t, int, const sockaddr *, socklen_t) = nullptr;
     ssize_t (*sendmsg_fn)(int, const msghdr *, int) = nullptr;
+    int (*sendmmsg_fn)(int, struct mmsghdr *, unsigned int, int) = nullptr;
     ssize_t (*recvfrom_fn)(int, void *, size_t, int, sockaddr *, socklen_t *) = nullptr;
     ssize_t (*recvmsg_fn)(int, msghdr *, int) = nullptr;
+    int (*recvmmsg_fn)(int, struct mmsghdr *, unsigned int, int, struct timespec *) = nullptr;
     int (*getaddrinfo_fn)(const char *, const char *, const addrinfo *, addrinfo **) = nullptr;
     void (*freeaddrinfo_fn)(addrinfo *) = nullptr;
     int (*gethostname_fn)(char *, size_t) = nullptr;
@@ -104,6 +109,8 @@ QuicEcnCodepoint
 socket_io_backend_ecn_from_linux_traffic_class_for_runtime_tests(int traffic_class);
 bool socket_io_backend_configure_linux_ecn_socket_options_for_runtime_tests(int socket_fd,
                                                                             int family);
+bool socket_io_backend_configure_linux_pmtud_socket_options_for_runtime_tests(int socket_fd,
+                                                                              int family);
 bool socket_io_backend_is_ipv4_mapped_ipv6_address_for_runtime_tests(const sockaddr_storage &peer,
                                                                      socklen_t peer_len);
 QuicEcnCodepoint
@@ -113,11 +120,9 @@ bool socket_io_backend_resolve_udp_address_for_runtime_tests(
     std::string_view host, std::uint16_t port, int extra_flags, int family,
     SocketIoBackendResolvedUdpAddressForTests &resolved);
 int socket_io_backend_open_udp_socket_for_runtime_tests(int family);
-bool socket_io_backend_send_datagram_for_runtime_tests(int fd, std::span<const std::byte> datagram,
-                                                       const sockaddr_storage &peer,
-                                                       socklen_t peer_len,
-                                                       std::string_view role_name,
-                                                       QuicEcnCodepoint ecn);
+bool socket_io_backend_send_datagram_for_runtime_tests(
+    int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer, socklen_t peer_len,
+    std::string_view role_name, QuicEcnCodepoint ecn, bool is_pmtu_probe = false);
 SocketIoBackendReceiveDatagramResultForTests
 socket_io_backend_receive_datagram_for_runtime_tests(int socket_fd, std::string_view role_name,
                                                      int flags);
@@ -135,6 +140,8 @@ bool socket_io_backend_recvmsg_maps_ecn_for_tests();
 bool socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests();
 bool socket_io_backend_internal_coverage_hook_exercises_remaining_branches_for_tests();
 bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_tests();
+bool poll_io_engine_pmtud_coverage_for_tests();
+bool poll_io_engine_ignores_non_pmtu_errqueue_for_tests();
 bool poll_io_engine_descriptor_cache_guard_branches_for_tests();
 bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests();
 

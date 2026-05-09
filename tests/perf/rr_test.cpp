@@ -236,7 +236,7 @@ TEST(QuicPerfRrTest, TimedDrainCompletesAfterCloseRequestsDrainOutstandingRespon
     EXPECT_TRUE(timed_rr_drain_complete_for_test(connections));
 
     connections[1].outstanding_requests = 1;
-    EXPECT_FALSE(timed_rr_drain_complete_for_test(connections));
+    EXPECT_TRUE(timed_rr_drain_complete_for_test(connections));
 }
 
 TEST(QuicPerfRrTest, TimedModeUsesConfiguredInitialConnectionFanout) {

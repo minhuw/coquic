@@ -145,8 +145,8 @@ struct PacketSpaceRecoveryTestPeer {
             return false;
         }
 
-        return recovery.in_flight_ack_eliciting_packets_.insert(recovery.tracked_packet(*packet))
-            .second;
+        recovery.latest_in_flight_ack_eliciting_packet_ = recovery.tracked_packet(*packet);
+        return true;
     }
 
     static bool insert_eligible_loss_tracked(PacketSpaceRecovery &recovery,
@@ -160,7 +160,7 @@ struct PacketSpaceRecoveryTestPeer {
     }
 
     static std::size_t in_flight_ack_eliciting_tracked_count(const PacketSpaceRecovery &recovery) {
-        return recovery.in_flight_ack_eliciting_packets_.size();
+        return recovery.latest_in_flight_ack_eliciting_packet_.has_value() ? 1u : 0u;
     }
 
     static std::size_t eligible_loss_tracked_count(const PacketSpaceRecovery &recovery) {
@@ -797,7 +797,7 @@ TEST(QuicRecoveryTest, DuplicateNonAckElicitingPacketKeepsAckPendingClear) {
               std::nullopt);
 }
 
-TEST(QuicRecoveryTest, SecondAckElicitingPacketRequestsImmediateAck) {
+TEST(QuicRecoveryTest, SecondAckElicitingPacketRequestsImmediateAckByDefault) {
     ReceivedPacketHistory history;
     history.record_received(/*packet_number=*/4, /*ack_eliciting=*/true,
                             coquic::quic::test::test_time(1));
@@ -805,6 +805,24 @@ TEST(QuicRecoveryTest, SecondAckElicitingPacketRequestsImmediateAck) {
 
     history.record_received(/*packet_number=*/5, /*ack_eliciting=*/true,
                             coquic::quic::test::test_time(2));
+    EXPECT_TRUE(history.requests_immediate_ack());
+}
+
+TEST(QuicRecoveryTest, ConfiguredAckElicitingThresholdRequestsImmediateAck) {
+    ReceivedPacketHistory history;
+    for (std::uint64_t packet_number = 4; packet_number < 19; ++packet_number) {
+        history.record_received(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)),
+            coquic::quic::QuicEcnCodepoint::unavailable,
+            /*ack_eliciting_threshold=*/16);
+        EXPECT_FALSE(history.requests_immediate_ack()) << "packet_number=" << packet_number;
+    }
+
+    history.record_received(/*packet_number=*/19, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(19),
+                            coquic::quic::QuicEcnCodepoint::unavailable,
+                            /*ack_eliciting_threshold=*/16);
     EXPECT_TRUE(history.requests_immediate_ack());
 }
 
@@ -1579,7 +1597,7 @@ TEST(QuicRecoveryTest, RecoveryTracksLatestInflightAckElicitingPacketIncremental
     EXPECT_FALSE(recovery.latest_in_flight_ack_eliciting_packet().has_value());
 }
 
-TEST(QuicRecoveryTest, LatestInflightAckElicitingPacketPrunesStaleTrackedEntries) {
+TEST(QuicRecoveryTest, LatestInflightAckElicitingPacketRefreshesStaleCache) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(5)));
@@ -1595,7 +1613,7 @@ TEST(QuicRecoveryTest, LatestInflightAckElicitingPacketPrunesStaleTrackedEntries
     EXPECT_EQ(
         coquic::quic::test::PacketSpaceRecoveryTestPeer::in_flight_ack_eliciting_tracked_count(
             recovery),
-        2u);
+        1u);
 
     const auto latest_in_flight = recovery.latest_in_flight_ack_eliciting_packet();
     ASSERT_TRUE(latest_in_flight.has_value());

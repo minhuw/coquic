@@ -2704,7 +2704,7 @@ TEST(QuicCoreTest, ConnectionTlsAndValidationHelpersCoverRemainingBranches) {
     connected_client.connection_->application_space_.write_secret = write_secret;
 }
 
-TEST(QuicCoreTest, ServerHandshakeStatusUpdateDoesNotConfirmHandshakeEarly) {
+TEST(QuicCoreTest, ServerHandshakeStatusUpdateConfirmsHandshakeOnTlsCompletion) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
     coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
@@ -2739,10 +2739,10 @@ TEST(QuicCoreTest, ServerHandshakeStatusUpdateDoesNotConfirmHandshakeEarly) {
 
     EXPECT_EQ(connection.status_, coquic::quic::HandshakeStatus::connected);
     EXPECT_EQ(connection.handshake_done_state_, coquic::quic::StreamControlFrameState::pending);
-    EXPECT_FALSE(connection.handshake_confirmed_);
-    EXPECT_TRUE(connection.handshake_space_.read_secret.has_value());
-    EXPECT_TRUE(connection.handshake_space_.write_secret.has_value());
-    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
+    EXPECT_TRUE(connection.handshake_confirmed_);
+    EXPECT_FALSE(connection.handshake_space_.read_secret.has_value());
+    EXPECT_FALSE(connection.handshake_space_.write_secret.has_value());
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
 }
 
 TEST(QuicCoreTest, ClientHandshakeMarksEstablishedPathValidated) {
@@ -3151,6 +3151,7 @@ TEST(QuicCoreTest, HandshakeCongestionBlockFinalizesQueuedInitialPacket) {
          handshake_crypto_size += 64) {
         auto config = coquic::quic::test::make_client_core_config();
         config.max_outbound_datagram_size = 4096;
+        config.transport.pmtud_enabled = false;
         coquic::quic::QuicConnection connection(std::move(config));
         connection.started_ = true;
         connection.status_ = coquic::quic::HandshakeStatus::in_progress;
@@ -3973,15 +3974,18 @@ TEST(QuicCoreTest,
     }
     EXPECT_EQ(*closing.pending_terminal_state_, coquic::quic::QuicConnectionTerminalState::closed);
 
-    auto handshake_done = make_connected_server_connection();
-    handshake_done.handshake_confirmed_ = false;
-    handshake_done.handshake_packet_space_discarded_ = false;
-    const auto handshake_done_result = handshake_done.process_inbound_received_application(
-        std::vector<coquic::quic::ReceivedFrame>{coquic::quic::HandshakeDoneFrame{}},
-        coquic::quic::test::test_time(9), /*allow_preconnected_frames=*/false, /*path_id=*/0);
-    ASSERT_TRUE(handshake_done_result.has_value());
-    EXPECT_TRUE(handshake_done.handshake_confirmed_);
-    EXPECT_TRUE(handshake_done.handshake_packet_space_discarded_);
+    auto server_handshake_done = make_connected_server_connection();
+    server_handshake_done.handshake_confirmed_ = false;
+    server_handshake_done.handshake_packet_space_discarded_ = false;
+    const auto server_handshake_done_result =
+        server_handshake_done.process_inbound_received_application(
+            std::vector<coquic::quic::ReceivedFrame>{coquic::quic::HandshakeDoneFrame{}},
+            coquic::quic::test::test_time(9), /*allow_preconnected_frames=*/false, /*path_id=*/0);
+    ASSERT_FALSE(server_handshake_done_result.has_value());
+    EXPECT_EQ(server_handshake_done_result.error().code,
+              coquic::quic::CodecErrorCode::frame_not_allowed_in_packet_type);
+    EXPECT_FALSE(server_handshake_done.handshake_confirmed_);
+    EXPECT_FALSE(server_handshake_done.handshake_packet_space_discarded_);
 
     auto invalid_retire = make_connected_client_connection();
     const auto retire_failure = invalid_retire.process_inbound_received_application(
@@ -4226,16 +4230,18 @@ TEST(QuicCoreTest, ProcessInboundReceivedCryptoCoversControlAndErrorBranches) {
     }
     EXPECT_EQ(*closing.pending_terminal_state_, coquic::quic::QuicConnectionTerminalState::closed);
 
-    auto handshake_done = make_connected_server_connection();
-    handshake_done.handshake_confirmed_ = false;
-    handshake_done.handshake_packet_space_discarded_ = false;
-    const auto handshake_done_result = handshake_done.process_inbound_received_crypto(
+    auto server_handshake_done = make_connected_server_connection();
+    server_handshake_done.handshake_confirmed_ = false;
+    server_handshake_done.handshake_packet_space_discarded_ = false;
+    const auto server_handshake_done_result = server_handshake_done.process_inbound_received_crypto(
         coquic::quic::EncryptionLevel::application,
         std::vector<coquic::quic::ReceivedFrame>{coquic::quic::HandshakeDoneFrame{}},
         coquic::quic::test::test_time(2));
-    ASSERT_TRUE(handshake_done_result.has_value());
-    EXPECT_TRUE(handshake_done.handshake_confirmed_);
-    EXPECT_TRUE(handshake_done.handshake_packet_space_discarded_);
+    ASSERT_FALSE(server_handshake_done_result.has_value());
+    EXPECT_EQ(server_handshake_done_result.error().code,
+              coquic::quic::CodecErrorCode::frame_not_allowed_in_packet_type);
+    EXPECT_FALSE(server_handshake_done.handshake_confirmed_);
+    EXPECT_FALSE(server_handshake_done.handshake_packet_space_discarded_);
 
     auto invalid_frame = make_connected_client_connection();
     const auto invalid_frame_result = invalid_frame.process_inbound_received_crypto(
@@ -4448,6 +4454,106 @@ TEST(QuicCoreTest, ProcessInboundDatagramKeepsDeferredShortHeaderPacketsBuffered
     EXPECT_FALSE(connection.has_failed());
 }
 
+TEST(QuicCoreTest, ServerProcessesAckOnlyOneRttBeforeHandshakeCompletesWhenKeysExist) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.handshake_packet_space_discarded_ = false;
+
+    const auto ack_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 7,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = 0,
+                            .first_ack_range = 0,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(ack_packet.has_value());
+
+    connection.process_inbound_datagram(ack_packet.value(), coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_FALSE(connection.handshake_confirmed_);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
+}
+
+TEST(QuicCoreTest, ServerProcessesOneRttMaxDataBeforeHandshakeCompletesWhenKeysExist) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.handshake_packet_space_discarded_ = false;
+    connection.connection_flow_control_.peer_max_data = 1024;
+    connection.connection_flow_control_.pending_data_blocked_frame =
+        coquic::quic::DataBlockedFrame{.maximum_data = 1024};
+    connection.connection_flow_control_.data_blocked_state =
+        coquic::quic::StreamControlFrameState::pending;
+
+    const auto max_data_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 8,
+                .frames =
+                    {
+                        coquic::quic::MaxDataFrame{
+                            .maximum_data = 4096,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(max_data_packet.has_value());
+
+    connection.process_inbound_datagram(max_data_packet.value(), coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_FALSE(connection.handshake_confirmed_);
+    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
+    EXPECT_EQ(connection.connection_flow_control_.peer_max_data, 4096u);
+    EXPECT_FALSE(connection.connection_flow_control_.pending_data_blocked_frame.has_value());
+    EXPECT_EQ(connection.connection_flow_control_.data_blocked_state,
+              coquic::quic::StreamControlFrameState::none);
+}
+
+TEST(QuicCoreTest, ServerProcessesReceivedOneRttMaxDataBeforeHandshakeCompletesWhenKeysExist) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.connection_flow_control_.peer_max_data = 1024;
+
+    const auto processed = connection.process_inbound_received_application(
+        std::vector<coquic::quic::ReceivedFrame>{
+            coquic::quic::MaxDataFrame{
+                .maximum_data = 4096,
+            },
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/0);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_EQ(connection.connection_flow_control_.peer_max_data, 4096u);
+    EXPECT_FALSE(connection.handshake_confirmed_);
+}
+
 TEST(QuicCoreTest, ProcessInboundDatagramDeduplicatesAndEvictsDeferredProtectedPackets) {
     const auto make_deferred_packet = [](coquic::quic::QuicConnection &connection,
                                          std::uint64_t packet_number) {
@@ -4459,8 +4565,10 @@ TEST(QuicCoreTest, ProcessInboundDatagramDeduplicatesAndEvictsDeferredProtectedP
                     .packet_number = packet_number,
                     .frames =
                         {
-                            coquic::quic::MaxDataFrame{
-                                .maximum_data = 1,
+                            coquic::quic::ResetStreamFrame{
+                                .stream_id = 0,
+                                .application_protocol_error_code = 1,
+                                .final_size = 0,
                             },
                         },
                 },
@@ -4511,12 +4619,11 @@ TEST(QuicCoreTest, ProcessInboundDatagramDeduplicatesAndEvictsDeferredProtectedP
 
         for (std::uint8_t index = 0; index < 32; ++index) {
             connection.deferred_protected_packets_.push_back(
-                bytes_from_ints({static_cast<std::uint8_t>(0x40u + index),
-                                 static_cast<std::uint8_t>(0x80u + index), index}));
+                make_deferred_packet(connection, index));
         }
 
         const auto evicted_packet = connection.deferred_protected_packets_.front();
-        const auto deferred_packet = make_deferred_packet(connection, 9);
+        const auto deferred_packet = make_deferred_packet(connection, 40);
 
         connection.process_inbound_datagram(deferred_packet, coquic::quic::test::test_time(1));
 

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -59,6 +60,8 @@ struct SentPacketRecord {
     std::size_t tx_in_flight = 0;
     std::uint64_t lost = 0;
     bool app_limited = false;
+    bool is_pmtu_probe = false;
+    std::size_t pmtu_probe_size = 0;
 };
 
 struct RecoveryRttState {
@@ -83,7 +86,8 @@ class ReceivedPacketHistory {
     bool contains(std::uint64_t packet_number) const;
     void record_received(std::uint64_t packet_number, bool ack_eliciting,
                          QuicCoreTimePoint received_time,
-                         QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
+                         QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable,
+                         std::uint64_t ack_eliciting_threshold = 2);
     bool has_ack_to_send() const;
     bool requests_immediate_ack() const;
     std::optional<OutboundAckHeader>
@@ -218,6 +222,7 @@ class PacketSpaceRecovery {
     PacketSpaceRecovery &operator=(PacketSpaceRecovery &&other) noexcept;
 
     void on_packet_sent(const SentPacketRecord &packet);
+    void on_packet_sent(SentPacketRecord &&packet);
     void on_packet_declared_lost(std::uint64_t packet_number);
     void retire_packet(RecoveryPacketHandle handle);
     void retire_packet(std::uint64_t packet_number);
@@ -241,6 +246,8 @@ class PacketSpaceRecovery {
     std::optional<std::uint64_t> largest_acked_packet_number() const;
     std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet() const;
     std::optional<DeadlineTrackedPacket> earliest_loss_packet() const;
+    std::optional<DeadlineTrackedPacket> earliest_pmtu_probe_packet() const;
+    std::vector<RecoveryPacketHandle> collect_pmtu_probe_timeouts(QuicCoreTimePoint now) const;
     void rebuild_auxiliary_indexes();
     void note_packet_metadata_updated();
     std::uint64_t compatibility_version() const;
@@ -267,8 +274,10 @@ class PacketSpaceRecovery {
     struct AckApplyState {
         AckApplyResult result;
         std::optional<std::size_t> current_live_slot;
+        std::optional<std::uint64_t> previous_largest_acked;
         std::uint64_t largest_acknowledged = 0;
         std::uint64_t effective_largest_acked = 0;
+        bool largest_acked_advanced = false;
         bool mutated = false;
     };
 
@@ -297,7 +306,8 @@ class PacketSpaceRecovery {
     const SentPacketLedgerSlot *slot_for_tracked_packet(const DeadlineTrackedPacket &packet) const;
     bool is_valid_in_flight_ack_eliciting_tracked_packet(const DeadlineTrackedPacket &packet) const;
     bool is_valid_eligible_loss_tracked_packet(const DeadlineTrackedPacket &packet) const;
-    void prune_stale_in_flight_ack_eliciting_packets() const;
+    void maybe_track_latest_in_flight_ack_eliciting_packet(const SentPacketRecord &packet) const;
+    void refresh_latest_in_flight_ack_eliciting_packet() const;
     void prune_stale_eligible_loss_packets() const;
     void erase_from_tracked_sets(const SentPacketRecord &packet);
     void maybe_track_as_loss_candidate(const SentPacketRecord &packet);
@@ -312,9 +322,8 @@ class PacketSpaceRecovery {
                                   std::uint64_t largest_acknowledged, QuicCoreTimePoint now);
     AckProcessingResult ack_processing_result_from_apply(const AckApplyResult &apply_result) const;
 
-    std::vector<SentPacketLedgerSlot> slots_;
-    mutable std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess>
-        in_flight_ack_eliciting_packets_;
+    std::deque<SentPacketLedgerSlot> slots_;
+    mutable std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet_;
     mutable std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> eligible_loss_packets_;
     std::optional<std::uint64_t> largest_acked_packet_number_;
     std::size_t first_live_slot_ = kInvalidLedgerSlotIndex;

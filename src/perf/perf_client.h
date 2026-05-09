@@ -69,11 +69,17 @@ class QuicPerfClient {
 
     bool open_initial_connection(quic::QuicCoreTimePoint now);
     void advance_benchmark_phase(quic::QuicCoreTimePoint now);
+    void maybe_start_timed_benchmark(quic::QuicCoreTimePoint now);
     void enter_measure_phase(quic::QuicCoreTimePoint now);
     void enter_drain_phase(quic::QuicCoreTimePoint now);
+    void force_close_timed_bulk_drain(quic::QuicCoreTimePoint now);
+    std::optional<quic::QuicCoreTimePoint> benchmark_next_wakeup() const;
+    std::optional<quic::QuicCoreTimePoint>
+    next_wait_wakeup(std::optional<quic::QuicCoreTimePoint> core_next_wakeup) const;
     bool timed_rr_mode() const;
     bool timed_crr_mode() const;
     bool timed_bulk_download_mode() const;
+    bool timed_mode() const;
     bool open_bulk_stream(ConnectionState &connection, quic::QuicCoreTimePoint now,
                           bool counts_toward_measurement);
     bool maybe_close_bulk_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
@@ -104,8 +110,10 @@ class QuicPerfClient {
     std::uint64_t next_connection_index_ = 0;
     BenchmarkPhase phase_ = BenchmarkPhase::warmup;
     quic::QuicCoreTimePoint run_started_at_{};
+    std::optional<quic::QuicCoreTimePoint> benchmark_started_at_;
     quic::QuicCoreTimePoint measure_started_at_{};
     quic::QuicCoreTimePoint measure_deadline_{};
+    std::optional<quic::QuicCoreTimePoint> drain_deadline_;
     QuicPerfRunSummary summary_;
 };
 

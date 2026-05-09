@@ -45,7 +45,7 @@ class StubIoEngineForTests final : public coquic::io::QuicIoEngine {
     }
 
     bool send(int, const sockaddr_storage &, socklen_t, std::span<const std::byte>,
-              std::string_view, QuicEcnCodepoint) override {
+              std::string_view, QuicEcnCodepoint, bool) override {
         ++send_calls;
         return send_result;
     }

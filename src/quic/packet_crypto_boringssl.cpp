@@ -1195,6 +1195,10 @@ void reset_packet_crypto_runtime_caches_for_tests() {
     reset_runtime_caches_for_tests_impl();
 }
 
+bool packet_crypto_fault_injector_active_for_tests() {
+    return detail::packet_crypto_fault_state().fault_point.has_value();
+}
+
 ScopedPacketCryptoFaultInjector::ScopedPacketCryptoFaultInjector(PacketCryptoFaultPoint fault_point,
                                                                  std::size_t occurrence)
     : previous_fault_point_(detail::packet_crypto_fault_state().fault_point),

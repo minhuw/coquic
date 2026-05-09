@@ -66,9 +66,9 @@ case "${preset}" in
     ;;
   ci)
     runs=(
-      "socket bulk download 0 1048576 none 4 1 1 5s 60s"
-      "socket rr stay 32 32 none 1 256 16 5s 45s"
-      "socket crr stay 32 32 none 1 512 1 5s 45s"
+      "socket bulk download 0 1048576 none 4 1 1 0ms 60s"
+      "socket rr stay 32 32 none 1 32 16 5s 45s"
+      "socket crr stay 32 32 none 1 64 1 5s 45s"
     )
     ;;
   *)
@@ -209,7 +209,7 @@ for run in "${runs[@]}"; do
   fi
 
   set +e
-  timeout "${run_timeout_seconds}s" docker run --rm \
+  timeout --kill-after=5s "${run_timeout_seconds}s" docker run --rm \
     --name "${client_name}" \
     --network "${network_name}" \
     --cpuset-cpus "${client_cpus}" \

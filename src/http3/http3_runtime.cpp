@@ -736,6 +736,15 @@ make_endpoint_inputs_from_io_event(const io::QuicIoEvent &event) {
         }
         return inputs;
     }
+    if (event.kind == io::QuicIoEvent::Kind::path_mtu_update) {
+        if (event.path_mtu.has_value()) {
+            inputs.push_back(quic::QuicCorePathMtuUpdate{
+                .route_handle = event.path_mtu->route_handle,
+                .max_udp_payload_size = event.path_mtu->max_udp_payload_size,
+            });
+        }
+        return inputs;
+    }
     if (event.kind == io::QuicIoEvent::Kind::timer_expired) {
         inputs.push_back(quic::QuicCoreTimerExpired{});
         return inputs;
@@ -756,6 +765,7 @@ bool flush_send_effects(io::QuicIoBackend &backend, const quic::QuicCoreResult &
                 .route_handle = *send->route_handle,
                 .bytes = send->bytes,
                 .ecn = send->ecn,
+                .is_pmtu_probe = send->is_pmtu_probe,
             })) {
             return false;
         }

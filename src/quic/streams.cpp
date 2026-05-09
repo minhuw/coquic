@@ -501,11 +501,18 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(std::size_
 }
 
 std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSendBudget budget) {
+    std::vector<StreamFrameSendFragment> fragments;
+    append_send_fragments(budget, fragments);
+    return fragments;
+}
+
+void StreamState::append_send_fragments(StreamSendBudget budget,
+                                        std::vector<StreamFrameSendFragment> &fragments) {
     if (reset_state != StreamControlFrameState::none) {
-        return {};
+        return;
     }
 
-    std::vector<StreamFrameSendFragment> fragments;
+    const auto initial_fragment_count = fragments.size();
     auto remaining_bytes = budget.packet_bytes;
     const auto append_fragment = [&](ByteRange range, bool consumes_flow_control) {
         const auto range_end = saturating_add(range.offset, range.bytes.size());
@@ -527,22 +534,21 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
     };
 
     const auto append_lost_ranges = [&]() {
-        for (auto &range : send_buffer.take_lost_ranges(remaining_bytes)) {
-            remaining_bytes -= range.bytes.size();
+        send_buffer.consume_lost_ranges(remaining_bytes, std::nullopt, [&](ByteRange range) {
             append_fragment(std::move(range), /*consumes_flow_control=*/false);
-        }
+        });
     };
     const auto append_new_ranges = [&]() {
         const auto capped_new_bytes =
             std::min<std::uint64_t>(budget.new_bytes, static_cast<std::uint64_t>(remaining_bytes));
-        auto new_ranges = send_buffer.take_unsent_ranges(static_cast<std::size_t>(capped_new_bytes),
-                                                         flow_control.peer_max_stream_data);
-        for (auto &range : new_ranges) {
-            const auto range_end = saturating_add(range.offset, range.bytes.size());
-            flow_control.highest_sent = std::max(flow_control.highest_sent, range_end);
-            remaining_bytes -= range.bytes.size();
-            append_fragment(std::move(range), /*consumes_flow_control=*/true);
-        }
+        auto new_remaining_bytes = static_cast<std::size_t>(capped_new_bytes);
+        send_buffer.consume_unsent_ranges(
+            new_remaining_bytes, flow_control.peer_max_stream_data, [&](ByteRange range) {
+                const auto range_end = saturating_add(range.offset, range.bytes.size());
+                flow_control.highest_sent = std::max(flow_control.highest_sent, range_end);
+                remaining_bytes -= range.bytes.size();
+                append_fragment(std::move(range), /*consumes_flow_control=*/true);
+            });
     };
 
     if (budget.prefer_fresh_data) {
@@ -558,7 +564,7 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
         fin_only_sendable = !send_buffer.has_pending_data() &&
                             *send_final_size <= flow_control.peer_max_stream_data;
     }
-    if (fragments.empty() && fin_only_sendable) {
+    if (fragments.size() == initial_fragment_count && fin_only_sendable) {
         fragments.push_back(StreamFrameSendFragment{
             .stream_id = stream_id,
             .offset = *send_final_size,
@@ -569,8 +575,6 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
         fragments.back().prime_stream_frame_header_cache();
         send_fin_state = StreamSendFinState::sent;
     }
-
-    return fragments;
 }
 
 void StreamState::acknowledge_reset_frame(const ResetStreamFrame &frame) {

@@ -48,6 +48,7 @@ using quic::test::seed_legacy_route_handle_path_for_tests;
 
 using io::QuicIoBackend;
 using io::QuicIoEvent;
+using io::QuicIoPathMtuUpdate;
 using io::QuicIoRemote;
 using io::QuicIoRxDatagram;
 using io::QuicIoTxDatagram;
@@ -638,7 +639,7 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
 
 bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer,
                    socklen_t peer_len, std::string_view role_name,
-                   QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect);
+                   QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect, bool is_pmtu_probe = false);
 
 ConnectionId make_runtime_connection_id(std::byte prefix, std::uint64_t sequence) {
     ConnectionId connection_id(kRuntimeConnectionIdLength, std::byte{0x00});
@@ -981,9 +982,10 @@ bool send_version_negotiation_for_probe(int fd, std::span<const std::byte> datag
 }
 
 bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer,
-                   socklen_t peer_len, std::string_view role_name, QuicEcnCodepoint ecn) {
+                   socklen_t peer_len, std::string_view role_name, QuicEcnCodepoint ecn,
+                   bool is_pmtu_probe) {
     return test::socket_io_backend_send_datagram_for_runtime_tests(fd, datagram, peer, peer_len,
-                                                                   role_name, ecn);
+                                                                   role_name, ecn, is_pmtu_probe);
 }
 
 struct RuntimeSendRoute {
@@ -1325,7 +1327,8 @@ bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
             stream << " bytes=" << send->bytes.size() << '\n';
         });
 
-        if (!send_datagram(socket_fd, send->bytes, *peer, peer_len, role_name, send->ecn)) {
+        if (!send_datagram(socket_fd, send->bytes, *peer, peer_len, role_name, send->ecn,
+                           send->is_pmtu_probe)) {
             return false;
         }
     }
@@ -1535,6 +1538,7 @@ bool handle_core_effects_with_backend(const std::optional<QuicRouteHandle> &fall
                 .route_handle = *route_handle,
                 .bytes = send->bytes,
                 .ecn = send->ecn,
+                .is_pmtu_probe = send->is_pmtu_probe,
             })) {
             return false;
         }
@@ -2156,6 +2160,20 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
             }
             if (state.terminal_success) {
                 ensure_terminal_success_deadline(event->now);
+            }
+            continue;
+        }
+        if (event->kind == QuicIoEvent::Kind::path_mtu_update) {
+            if (!event->path_mtu.has_value()) {
+                return 1;
+            }
+            if (!drive_result(core.advance(
+                    QuicCorePathMtuUpdate{
+                        .route_handle = event->path_mtu->route_handle,
+                        .max_udp_payload_size = event->path_mtu->max_udp_payload_size,
+                    },
+                    event->now))) {
+                return 1;
             }
             continue;
         }
@@ -3204,6 +3222,8 @@ struct ServerBackendLoopDriver {
     std::function<std::optional<QuicIoEvent>(const std::optional<QuicCoreTimePoint> &)> wait;
     std::function<bool(QuicCoreTimePoint)> process_wait_timer;
     std::function<bool(const QuicIoRxDatagram &, QuicCoreTimePoint)> process_datagram;
+    std::function<bool(const QuicIoPathMtuUpdate &, QuicCoreTimePoint)> process_path_mtu_update =
+        [](const QuicIoPathMtuUpdate &, QuicCoreTimePoint) { return true; };
 };
 
 ServerLoopIo make_runtime_server_loop_io() {
@@ -3358,6 +3378,8 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
                 stream << "null";
             } else if (event->kind == QuicIoEvent::Kind::rx_datagram) {
                 stream << "rx";
+            } else if (event->kind == QuicIoEvent::Kind::path_mtu_update) {
+                stream << "pmtu";
             } else if (event->kind == QuicIoEvent::Kind::timer_expired) {
                 stream << "timer";
             } else if (event->kind == QuicIoEvent::Kind::idle_timeout) {
@@ -3399,6 +3421,16 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
                 }
                 continue;
             }
+            if (event->kind == QuicIoEvent::Kind::path_mtu_update) {
+                if (!event->path_mtu.has_value()) {
+                    server_failed = true;
+                    continue;
+                }
+                if (!driver.process_path_mtu_update(*event->path_mtu, event->now)) {
+                    server_failed = true;
+                }
+                continue;
+            }
             if (event->kind == QuicIoEvent::Kind::timer_expired) {
                 if (!driver.process_wait_timer(event->now)) {
                     server_failed = true;
@@ -3433,6 +3465,17 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
                             continue;
                         }
                         if (!driver.process_datagram(*ready_event->datagram, ready_event->now)) {
+                            server_failed = true;
+                        }
+                        continue;
+                    }
+                    if (ready_event->kind == QuicIoEvent::Kind::path_mtu_update) {
+                        if (!ready_event->path_mtu.has_value()) {
+                            server_failed = true;
+                            continue;
+                        }
+                        if (!driver.process_path_mtu_update(*ready_event->path_mtu,
+                                                            ready_event->now)) {
                             server_failed = true;
                         }
                         continue;
@@ -3479,6 +3522,16 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
             }
             continue;
         }
+        if (event->kind == QuicIoEvent::Kind::path_mtu_update) {
+            if (!event->path_mtu.has_value()) {
+                server_failed = true;
+                continue;
+            }
+            if (!driver.process_path_mtu_update(*event->path_mtu, event->now)) {
+                server_failed = true;
+            }
+            continue;
+        }
         if (!event->datagram.has_value()) {
             server_failed = true;
             continue;
@@ -3500,6 +3553,18 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
         return process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
             datagram.route_handle, backend);
+    };
+    const auto process_path_mtu_update = [&](const QuicIoPathMtuUpdate &update,
+                                             QuicCoreTimePoint input_time) -> bool {
+        auto result = core.advance_endpoint(
+            QuicCorePathMtuUpdate{
+                .route_handle = update.route_handle,
+                .max_udp_payload_size = update.max_udp_payload_size,
+            },
+            input_time);
+        return process_server_endpoint_core_result_with_backend(
+            core, transport_state, endpoints, config.document_root, std::move(result),
+            update.route_handle, backend);
     };
 
     return run_server_backend_loop_with_driver(ServerBackendLoopDriver{
@@ -3523,6 +3588,7 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
                     core.advance_endpoint(QuicCoreTimerExpired{}, current), std::nullopt, backend);
             },
         .process_datagram = process_server_datagram,
+        .process_path_mtu_update = process_path_mtu_update,
     });
 }
 

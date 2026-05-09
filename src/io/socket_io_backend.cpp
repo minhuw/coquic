@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "src/io/socket_io_backend.h"
 
 #include "src/io/io_backend_test_hooks.h"
@@ -21,6 +25,19 @@ namespace coquic::io {
 
 namespace internal {
 
+namespace {
+
+int default_sendmmsg(int socket_fd, mmsghdr *messages, unsigned int message_count, int flags) {
+    return ::sendmmsg(socket_fd, messages, message_count, flags);
+}
+
+int default_recvmmsg(int socket_fd, mmsghdr *messages, unsigned int message_count, int flags,
+                     timespec *timeout) {
+    return ::recvmmsg(socket_fd, messages, message_count, flags, timeout);
+}
+
+} // namespace
+
 test::SocketIoBackendOpsOverride make_default_socket_io_backend_ops() {
     return test::SocketIoBackendOpsOverride{
         .socket_fn = ::socket,
@@ -29,8 +46,10 @@ test::SocketIoBackendOpsOverride make_default_socket_io_backend_ops() {
         .setsockopt_fn = ::setsockopt,
         .sendto_fn = ::sendto,
         .sendmsg_fn = ::sendmsg,
+        .sendmmsg_fn = &default_sendmmsg,
         .recvfrom_fn = ::recvfrom,
         .recvmsg_fn = ::recvmsg,
+        .recvmmsg_fn = &default_recvmmsg,
         .getaddrinfo_fn = ::getaddrinfo,
         .freeaddrinfo_fn = ::freeaddrinfo,
         .gethostname_fn = ::gethostname,
@@ -62,11 +81,17 @@ void apply_socket_io_backend_ops_override(const test::SocketIoBackendOpsOverride
     if (override_ops.sendmsg_fn != nullptr) {
         ops.sendmsg_fn = override_ops.sendmsg_fn;
     }
+    if (override_ops.sendmmsg_fn != nullptr) {
+        ops.sendmmsg_fn = override_ops.sendmmsg_fn;
+    }
     if (override_ops.recvfrom_fn != nullptr) {
         ops.recvfrom_fn = override_ops.recvfrom_fn;
     }
     if (override_ops.recvmsg_fn != nullptr) {
         ops.recvmsg_fn = override_ops.recvmsg_fn;
+    }
+    if (override_ops.recvmmsg_fn != nullptr) {
+        ops.recvmmsg_fn = override_ops.recvmmsg_fn;
     }
     if (override_ops.getaddrinfo_fn != nullptr) {
         ops.getaddrinfo_fn = override_ops.getaddrinfo_fn;
@@ -119,6 +144,10 @@ std::optional<QuicIoEvent> SocketIoBackend::wait(std::optional<QuicCoreTimePoint
 
 bool SocketIoBackend::send(const QuicIoTxDatagram &datagram) {
     return core_->send(datagram);
+}
+
+bool SocketIoBackend::send_many(std::span<const QuicIoTxDatagram> datagrams) {
+    return core_->send_many(datagrams);
 }
 
 std::unique_ptr<QuicIoBackend> make_socket_io_backend(SocketIoBackendConfig config) {

@@ -205,6 +205,8 @@ struct StreamState {
     std::optional<StopSendingFrame> take_stop_sending_frame();
     std::vector<StreamFrameSendFragment> take_send_fragments(std::size_t max_bytes);
     std::vector<StreamFrameSendFragment> take_send_fragments(StreamSendBudget budget);
+    void append_send_fragments(StreamSendBudget budget,
+                               std::vector<StreamFrameSendFragment> &fragments);
     void acknowledge_reset_frame(const ResetStreamFrame &frame);
     void mark_reset_frame_lost(const ResetStreamFrame &frame);
     void acknowledge_stop_sending_frame(const StopSendingFrame &frame);

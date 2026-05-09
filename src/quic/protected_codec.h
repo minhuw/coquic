@@ -228,6 +228,13 @@ serialize_protected_datagram(std::span<const ProtectedPacket> packets,
 CodecResult<std::vector<ProtectedPacket>>
 deserialize_protected_datagram(std::span<const std::byte> bytes,
                                const DeserializeProtectionContext &context);
+CodecResult<ReceivedProtectedPacket>
+deserialize_received_protected_packet(std::span<const std::byte> bytes,
+                                      const DeserializeProtectionContext &context);
+CodecResult<ReceivedProtectedPacket>
+deserialize_received_protected_packet(const std::shared_ptr<std::vector<std::byte>> &storage,
+                                      std::size_t begin, std::size_t end,
+                                      const DeserializeProtectionContext &context);
 CodecResult<std::vector<ReceivedProtectedPacket>>
 deserialize_received_protected_datagram(std::span<const std::byte> bytes,
                                         const DeserializeProtectionContext &context);

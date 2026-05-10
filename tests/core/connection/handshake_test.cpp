@@ -2472,6 +2472,52 @@ TEST(QuicCoreTest, InitialAckUpdatesSharedCongestionController) {
     EXPECT_LT(connection.congestion_controller_.bytes_in_flight(), bytes_in_flight_before_ack);
 }
 
+TEST(QuicCoreTest, ClientFirstHandshakeSendDiscardsInitialBeforeCongestionCheck) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.client_initial_destination_connection_id_ =
+        connection.config_.initial_destination_connection_id;
+    connection.peer_source_connection_id_ = bytes_from_ints({0x53, 0x01});
+    connection.handshake_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+    connection.handshake_space_.send_crypto.append(bytes_from_ints({0x01, 0x02, 0x03}));
+    connection.congestion_controller_.congestion_window_ = 1200;
+    connection.track_sent_packet(connection.initial_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 0,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                 });
+    connection.initial_space_.next_send_packet_number = 1;
+    connection.initial_space_.pending_probe_packet = coquic::quic::SentPacketRecord{
+        .packet_number = 0,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .has_ping = true,
+    };
+
+    ASSERT_EQ(connection.congestion_controller_.bytes_in_flight(), 1200u);
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_TRUE(connection.initial_packet_space_discarded_);
+    EXPECT_FALSE(connection.initial_space_.pending_probe_packet.has_value());
+    EXPECT_EQ(tracked_packet_count(connection.initial_space_), 0u);
+    const auto packet_kinds = protected_datagram_packet_kinds(datagram);
+    ASSERT_TRUE(packet_kinds.has_value());
+    if (!packet_kinds.has_value()) {
+        return;
+    }
+    const auto &packet_kind_values = packet_kinds.value();
+    ASSERT_EQ(packet_kind_values.size(), 1u);
+    EXPECT_EQ(packet_kind_values.front(), ProtectedPacketKind::handshake);
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
+}
+
 TEST(QuicCoreTest, ProcessCapturedPicoquicClientInitialIgnoresTrailingDatagramPadding) {
     auto datagram = captured_picoquic_client_initial_datagram();
 

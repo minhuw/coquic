@@ -7770,6 +7770,17 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
         discard_packet_space_state(zero_rtt_space_);
     }
     queue_client_handshake_recovery_probe();
+    const bool client_will_send_handshake_packet =
+        (config_.role == EndpointRole::client) & !initial_packet_space_discarded_ &
+        initial_space_.pending_probe_packet.has_value() &
+        !initial_space_.send_crypto.has_pending_data() &
+        !initial_space_.received_packets.has_ack_to_send() & !handshake_packet_space_discarded_ &
+        handshake_space_.write_secret.has_value() &
+        (handshake_space_.send_crypto.has_pending_data() ||
+         handshake_space_.pending_probe_packet.has_value());
+    if (client_will_send_handshake_packet) {
+        discard_initial_packet_space();
+    }
 
     auto packets = std::vector<ProtectedPacket>{};
     auto selected_send_path_id = current_send_path_id_;

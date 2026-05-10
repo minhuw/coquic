@@ -32,6 +32,11 @@ constexpr std::size_t kDatagramHeaderSize = 40;
 constexpr std::size_t kEventHeaderSize = 48;
 constexpr std::size_t kPacketInspectionHeaderSize = 48;
 constexpr QuicRouteHandle kDefaultRouteHandle = 1;
+constexpr std::size_t kDemoEthernetMtuBytes = 1500;
+constexpr std::size_t kDemoIpv6HeaderBytes = 40;
+constexpr std::size_t kDemoUdpHeaderBytes = 8;
+constexpr std::size_t kDemoMaxUdpPayloadSize =
+    kDemoEthernetMtuBytes - kDemoIpv6HeaderBytes - kDemoUdpHeaderBytes;
 
 enum class WasmEventType : std::uint32_t {
     state = 1,
@@ -170,10 +175,10 @@ QuicCoreEndpointConfig endpoint_config(EndpointRole role, std::optional<TlsIdent
         .verify_peer = false,
         .application_protocol = "coquic-wasm",
         .identity = std::move(identity),
-        .max_outbound_datagram_size = 1200,
+        .max_outbound_datagram_size = kDemoMaxUdpPayloadSize,
     };
     config.transport.pmtud_enabled = false;
-    config.transport.max_udp_payload_size = 1200;
+    config.transport.max_udp_payload_size = kDemoMaxUdpPayloadSize;
     config.enable_packet_inspection = true;
     return config;
 }

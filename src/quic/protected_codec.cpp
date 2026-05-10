@@ -130,27 +130,29 @@ void add_deserialize_profile_counter(std::uint64_t &counter, std::uint64_t value
     counter += value;
 }
 
+const TrafficSecret *one_rtt_secret_for_context(const DeserializeProtectionContext &context) {
+    return context.one_rtt_secret_ref != nullptr
+               ? context.one_rtt_secret_ref
+               : (context.one_rtt_secret.has_value() ? &*context.one_rtt_secret : nullptr);
+}
+
 bool one_rtt_cached_keys_available(const DeserializeProtectionContext &context) {
-    const auto *secret =
-        context.one_rtt_secret_ref != nullptr
-            ? context.one_rtt_secret_ref
-            : (context.one_rtt_secret.has_value() ? &*context.one_rtt_secret : nullptr);
+    const auto *secret = one_rtt_secret_for_context(context);
     return context.one_rtt_secret_cache_primed && secret != nullptr &&
            secret->cached_packet_protection_keys.has_value();
 }
 
 const PacketProtectionKeys &
 one_rtt_cached_keys_or_assert(const DeserializeProtectionContext &context) {
-    abort_if(!one_rtt_cached_keys_available(context));
-    const auto *secret = context.one_rtt_secret_ref != nullptr ? context.one_rtt_secret_ref
-                                                               : &*context.one_rtt_secret;
-    return secret->cached_packet_protection_keys.value();
-}
-
-const TrafficSecret *one_rtt_secret_for_context(const DeserializeProtectionContext &context) {
-    return context.one_rtt_secret_ref != nullptr
-               ? context.one_rtt_secret_ref
-               : (context.one_rtt_secret.has_value() ? &*context.one_rtt_secret : nullptr);
+    const auto *secret = one_rtt_secret_for_context(context);
+    if (!context.one_rtt_secret_cache_primed || secret == nullptr) {
+        std::abort();
+    }
+    const auto &keys = secret->cached_packet_protection_keys;
+    if (!keys.has_value()) {
+        std::abort();
+    }
+    return keys.value();
 }
 
 enum class LongHeaderPacketType : std::uint8_t {
@@ -1164,7 +1166,7 @@ try_decode_single_received_stream_frame_fast(const SharedBytes &plaintext_payloa
             return false;
         }
         const auto first = std::to_integer<std::uint8_t>(payload[offset]);
-        const auto length = static_cast<std::size_t>(1u << (first >> 6u));
+        const auto length = std::size_t{1} << (first >> 6u);
         if (payload.size() - offset < length) {
             return false;
         }

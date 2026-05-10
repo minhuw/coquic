@@ -5,18 +5,19 @@ This document covers the remote continuous deployment flow for the public
 
 ## Repo Layout
 
-- `demo/site/` is the current repo-owned demo source.
-- `demo/deploy/package-demo.sh` packages the current demo document root.
+- `demo/wasm-quic/` is the current repo-owned browser demo source.
+- `zig build wasm-quic` writes the deployable document root to
+  `zig-out/share/wasm-quic/`, including `coquic-wasm-quic.wasm`.
+- `demo/deploy/package-demo.sh` packages the built wasm demo document root.
 - `demo/deploy/deploy-remote.sh` uploads the built binary, prepared site
   directory, and TLS material to the remote host.
 - `demo/deploy/coquic-demo.service` is the systemd unit installed on the
   remote host.
 - `.github/workflows/deploy-demo.yml` is the GitHub Actions entrypoint.
 
-The current workflow packages `demo/site/`, but the deploy script already
-accepts any prepared document-root directory as its second argument. That keeps
-the remote release layout stable if the site later comes from a richer build
-step instead of a checked-in static directory.
+The current workflow builds the wasm demo first, then packages
+`zig-out/share/wasm-quic/`. The deploy script accepts any prepared document-root
+directory as its second argument, so the remote release layout stays stable.
 
 ## GitHub Actions Inputs
 
@@ -77,14 +78,17 @@ TLS material is installed at:
 - bootstrap HTTPS headers return `HTTP/1.1 200 OK`
 - `Alt-Svc` advertises HTTP/3 on the public port
 - direct `curl-http3 --http3-only` returns HTTP version `3`
-- the fetched HTML still contains the stable `coquic-demo-v1` marker
+- the fetched HTML still contains the stable `coquic-wasm-demo-v1` marker
+- the wasm module is served from `coquic-wasm-quic.wasm` with
+  `application/wasm`
 
 ## Manual Operation
 
 Local packaging:
 
 ```bash
-demo/deploy/package-demo.sh "${RUNNER_TEMP:-/tmp}/demo-site"
+nix develop -c zig build wasm-quic -Doptimize=ReleaseSmall --summary all
+demo/deploy/package-demo.sh "${RUNNER_TEMP:-/tmp}/demo-site" "$(pwd)/zig-out/share/wasm-quic"
 ```
 
 Manual CI-style deployment from a prepared workspace:

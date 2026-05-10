@@ -5,7 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
 required_paths=(
-  "demo/site/index.html"
+  "demo/wasm-quic/index.html"
+  "demo/wasm-quic/quic-demo.js"
   "demo/deploy/package-demo.sh"
   "demo/deploy/deploy-remote.sh"
   "demo/deploy/coquic-demo.service"
@@ -21,6 +22,7 @@ for path in "${required_paths[@]}"; do
 done
 
 removed_paths=(
+  "demo/site/index.html"
   "tests/nix/h3_demo_page_contract_test.sh"
   "tests/nix/h3_server_container_smoke_test.sh"
   "docs/h3-server-container.md"
@@ -40,7 +42,11 @@ import pathlib
 doc = pathlib.Path("docs/demo-deployment.md").read_text()
 
 required_doc_markers = [
-    "demo/site/",
+    "demo/wasm-quic/",
+    "zig-out/share/wasm-quic/",
+    "coquic-wasm-demo-v1",
+    "coquic-wasm-quic.wasm",
+    "application/wasm",
     "demo/deploy/package-demo.sh",
     "demo/deploy/deploy-remote.sh",
     "demo/deploy/coquic-demo.service",

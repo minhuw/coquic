@@ -31,6 +31,8 @@ expected_paths = [
     "flake.nix",
     "flake.lock",
     "docker/h3-server/Dockerfile",
+    "scripts/build-boringssl-wasm.sh",
+    "scripts/wasm-quic-smoke.mjs",
     ".github/workflows/deploy-demo.yml",
 ]
 if push.get("paths") != expected_paths:
@@ -65,7 +67,10 @@ required_step_names = [
     "Checkout",
     "Install Nix",
     "Build h3-server",
-    "Package demo site",
+    "Build wasm BoringSSL",
+    "Build wasm QUIC demo",
+    "Smoke wasm QUIC demo",
+    "Package wasm demo site",
     "Configure SSH",
     "Deploy demo",
 ]
@@ -84,6 +89,25 @@ build_step = step_by_name["Build h3-server"]
 expected_build_command = "nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false"
 if build_step.get("run") != expected_build_command:
     raise SystemExit(f"unexpected Build h3-server command: {build_step.get('run')!r}")
+
+build_boringssl_wasm_step = step_by_name["Build wasm BoringSSL"]
+if build_boringssl_wasm_step.get("run") != "nix develop -c bash scripts/build-boringssl-wasm.sh":
+    raise SystemExit(f"unexpected Build wasm BoringSSL command: {build_boringssl_wasm_step.get('run')!r}")
+
+build_wasm_step = step_by_name["Build wasm QUIC demo"]
+expected_build_wasm_command = "nix develop -c zig build wasm-quic -Doptimize=ReleaseSmall --summary all"
+if build_wasm_step.get("run") != expected_build_wasm_command:
+    raise SystemExit(f"unexpected Build wasm QUIC demo command: {build_wasm_step.get('run')!r}")
+
+smoke_wasm_step = step_by_name["Smoke wasm QUIC demo"]
+expected_smoke_wasm_command = "node scripts/wasm-quic-smoke.mjs zig-out/share/wasm-quic/coquic-wasm-quic.wasm"
+if smoke_wasm_step.get("run") != expected_smoke_wasm_command:
+    raise SystemExit(f"unexpected Smoke wasm QUIC demo command: {smoke_wasm_step.get('run')!r}")
+
+package_step = step_by_name["Package wasm demo site"]
+expected_package_command = 'demo/deploy/package-demo.sh "${RUNNER_TEMP}/demo-site" "$(pwd)/zig-out/share/wasm-quic"'
+if package_step.get("run") != expected_package_command:
+    raise SystemExit(f"unexpected Package wasm demo site command: {package_step.get('run')!r}")
 
 configure_ssh_env = step_by_name["Configure SSH"].get("env", {})
 for env_name in ["COQUIC_DEMO_REMOTE_SSH_KEY"]:
@@ -164,7 +188,7 @@ if "sudo systemctl enable coquic-demo.service" not in deploy_script:
     raise SystemExit("deploy script missing explicit enable call for active-service success path")
 if "verification retry loop" not in deploy_script:
     raise SystemExit("deploy script missing verification retry-loop marker")
-if "verification marker: coquic-demo-v1" not in deploy_script:
+if "verification marker: coquic-wasm-demo-v1" not in deploy_script:
     raise SystemExit("deploy script missing stable verification marker check")
 if "normalized_headers" not in deploy_script or "grep -Eiq '^alt-svc:" not in deploy_script:
     raise SystemExit("deploy script missing normalized case-insensitive Alt-Svc check")
@@ -386,6 +410,14 @@ printf '%s %s\n' "$(basename "$0")" "$*" >> "${COQUIC_TEST_CURL_LOG:?}"
 
 case "${COQUIC_TEST_NIX_MODE:?}" in
   success)
+    if [[ "$*" == *"--http3-only -I https://coquic.minhuw.dev/coquic-wasm-quic.wasm"* ]]; then
+      cat <<'HEADERS'
+HTTP/3 200
+content-type: application/wasm
+HEADERS
+      exit 0
+    fi
+
     if [[ "$*" == *"-I https://coquic.minhuw.dev/"* ]]; then
       cat <<'HEADERS'
 HTTP/1.1 200 OK
@@ -401,18 +433,11 @@ HEADERS
 
     if [[ "$*" == *"--http3-only -sS https://coquic.minhuw.dev/"* ]]; then
       cat <<'PAGE'
-<meta name="coquic-demo-marker" content="coquic-demo-v1">
+<meta name="coquic-demo-marker" content="coquic-wasm-demo-v1">
 PAGE
       exit 0
     fi
 
-    if [[ "$*" == *"--http3-only -I https://coquic.minhuw.dev/coquic-wasm-quic.wasm"* ]]; then
-      cat <<'HEADERS'
-HTTP/3 200
-content-type: application/wasm
-HEADERS
-      exit 0
-    fi
     ;;
   fail_after_install)
     if [[ "$*" == *"-I https://coquic.minhuw.dev/"* ]]; then

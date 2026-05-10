@@ -10,9 +10,9 @@
 !scripts/**
 !docker/
 !docker/h3-server/
-!demo/
-!demo/site/
-!demo/site/**
 !zig-out/
 !zig-out/bin/
 !zig-out/bin/h3-server
+!zig-out/share/
+!zig-out/share/wasm-quic/
+!zig-out/share/wasm-quic/**

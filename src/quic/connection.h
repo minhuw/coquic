@@ -585,6 +585,7 @@ class QuicConnection {
     void detect_lost_packets(QuicCoreTimePoint now);
     void detect_lost_packets(PacketSpaceState &packet_space, QuicCoreTimePoint now);
     void arm_pto_probe(QuicCoreTimePoint now);
+    bool packet_space_discarded(const PacketSpaceState &packet_space) const;
     SentPacketRecord select_pto_probe(const PacketSpaceState &packet_space) const;
     void queue_client_handshake_recovery_probe();
     void queue_server_handshake_recovery_probes();

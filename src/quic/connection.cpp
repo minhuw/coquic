@@ -2718,12 +2718,12 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
 
     const auto initial_ack_deadline =
         initial_space_.pending_ack_deadline.value_or(QuicCoreTimePoint::max());
-    if (now >= initial_ack_deadline) {
+    if (!initial_packet_space_discarded_ && now >= initial_ack_deadline) {
         initial_space_.force_ack_send = true;
     }
     const auto handshake_ack_deadline =
         handshake_space_.pending_ack_deadline.value_or(QuicCoreTimePoint::max());
-    if (now >= handshake_ack_deadline) {
+    if (!handshake_packet_space_discarded_ && now >= handshake_ack_deadline) {
         handshake_space_.force_ack_send = true;
     }
     const auto application_ack_deadline =
@@ -2955,14 +2955,15 @@ bool QuicConnection::has_sendable_datagram(QuicCoreTimePoint now) const {
     if (status_ == HandshakeStatus::failed || !deferred_protected_packets_.empty()) {
         return status_ != HandshakeStatus::failed;
     }
-    if (initial_space_.send_crypto.has_pending_data() ||
-        initial_space_.pending_probe_packet.has_value() ||
-        (initial_space_.received_packets.has_ack_to_send() &&
-         (initial_space_.force_ack_send ||
-          initial_space_.pending_ack_deadline.value_or(QuicCoreTimePoint::max()) <= now))) {
+    if (!initial_packet_space_discarded_ &&
+        (initial_space_.send_crypto.has_pending_data() ||
+         initial_space_.pending_probe_packet.has_value() ||
+         (initial_space_.received_packets.has_ack_to_send() &&
+          (initial_space_.force_ack_send ||
+           initial_space_.pending_ack_deadline.value_or(QuicCoreTimePoint::max()) <= now)))) {
         return true;
     }
-    if (handshake_space_.write_secret.has_value() &&
+    if (!handshake_packet_space_discarded_ && handshake_space_.write_secret.has_value() &&
         (handshake_space_.send_crypto.has_pending_data() ||
          handshake_space_.pending_probe_packet.has_value() ||
          (handshake_space_.received_packets.has_ack_to_send() &&
@@ -3020,6 +3021,9 @@ std::optional<QuicCoreTimePoint> QuicConnection::loss_deadline() const {
     const auto &shared_rtt_state = shared_recovery_rtt_state();
     const auto packet_space_loss_deadline =
         [&](const PacketSpaceState &packet_space) -> std::optional<QuicCoreTimePoint> {
+        if (packet_space_discarded(packet_space)) {
+            return std::nullopt;
+        }
         const auto tracked_packet = earliest_loss_packet(packet_space);
         if (!tracked_packet.has_value()) {
             return std::nullopt;
@@ -3070,6 +3074,9 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
     const auto packet_space_pto_deadline =
         [&](const PacketSpaceState &packet_space,
             std::chrono::milliseconds max_ack_delay) -> std::optional<QuicCoreTimePoint> {
+        if (packet_space_discarded(packet_space)) {
+            return std::nullopt;
+        }
         const auto tracked_packet = latest_in_flight_ack_eliciting_packet(packet_space);
         if (!tracked_packet.has_value()) {
             return std::nullopt;
@@ -3094,8 +3101,10 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
         const bool eligible = (config_.role == EndpointRole::client) &
                               (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
                               last_peer_activity_time_.has_value() &
-                              !has_in_flight_ack_eliciting_packet(initial_space_) &
-                              !has_in_flight_ack_eliciting_packet(handshake_space_) &
+                              (initial_packet_space_discarded_ ||
+                               !has_in_flight_ack_eliciting_packet(initial_space_)) &
+                              (handshake_packet_space_discarded_ ||
+                               !has_in_flight_ack_eliciting_packet(handshake_space_)) &
                               !has_in_flight_ack_eliciting_packet(application_space_);
         if (!eligible) {
             return std::nullopt;
@@ -3112,7 +3121,8 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
     }();
     const bool client_handshake_keepalive_space_available =
         client_handshake_keepalive_reference_time.has_value() &&
-        (!initial_packet_space_discarded_ || handshake_space_.write_secret.has_value());
+        (!initial_packet_space_discarded_ ||
+         (!handshake_packet_space_discarded_ && handshake_space_.write_secret.has_value()));
     if (!client_handshake_keepalive_space_available) {
         const auto client_receive_keepalive_reference_time =
             [this]() -> std::optional<QuicCoreTimePoint> {
@@ -3120,8 +3130,10 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
                 streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
             const bool eligible = (config_.role == EndpointRole::client) & handshake_confirmed_ &
                                   last_peer_activity_time_.has_value() & has_receive_interest &
-                                  !has_in_flight_ack_eliciting_packet(initial_space_) &
-                                  !has_in_flight_ack_eliciting_packet(handshake_space_) &
+                                  (initial_packet_space_discarded_ ||
+                                   !has_in_flight_ack_eliciting_packet(initial_space_)) &
+                                  (handshake_packet_space_discarded_ ||
+                                   !has_in_flight_ack_eliciting_packet(handshake_space_)) &
                                   !has_in_flight_ack_eliciting_packet(application_space_);
             if (!eligible) {
                 return std::nullopt;
@@ -3143,8 +3155,10 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::ack_deadline() const {
-    return earliest_of({initial_space_.pending_ack_deadline, handshake_space_.pending_ack_deadline,
-                        application_space_.pending_ack_deadline});
+    return earliest_of(
+        {initial_packet_space_discarded_ ? std::nullopt : initial_space_.pending_ack_deadline,
+         handshake_packet_space_discarded_ ? std::nullopt : handshake_space_.pending_ack_deadline,
+         application_space_.pending_ack_deadline});
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::pmtud_deadline() const {
@@ -3165,8 +3179,12 @@ std::optional<QuicCoreTimePoint> QuicConnection::pmtud_deadline() const {
 }
 
 void QuicConnection::detect_lost_packets(QuicCoreTimePoint now) {
-    detect_lost_packets(initial_space_, now);
-    detect_lost_packets(handshake_space_, now);
+    if (!initial_packet_space_discarded_) {
+        detect_lost_packets(initial_space_, now);
+    }
+    if (!handshake_packet_space_discarded_) {
+        detect_lost_packets(handshake_space_, now);
+    }
     detect_lost_packets(application_space_, now);
 }
 
@@ -3298,8 +3316,10 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         const bool eligible = (config_.role == EndpointRole::client) &
                               (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
                               last_peer_activity_time_.has_value() &
-                              !has_in_flight_ack_eliciting_packet(initial_space_) &
-                              !has_in_flight_ack_eliciting_packet(handshake_space_) &
+                              (initial_packet_space_discarded_ ||
+                               !has_in_flight_ack_eliciting_packet(initial_space_)) &
+                              (handshake_packet_space_discarded_ ||
+                               !has_in_flight_ack_eliciting_packet(handshake_space_)) &
                               !has_in_flight_ack_eliciting_packet(application_space_);
         if (!eligible) {
             return std::nullopt;
@@ -3316,11 +3336,13 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     }();
     const bool client_handshake_keepalive_eligible =
         client_handshake_keepalive_reference_time.has_value() &&
-        (!initial_packet_space_discarded_ || handshake_space_.write_secret.has_value());
+        (!initial_packet_space_discarded_ ||
+         (!handshake_packet_space_discarded_ && handshake_space_.write_secret.has_value()));
     PacketSpaceState *client_handshake_keepalive_space =
-        !client_handshake_keepalive_eligible
-            ? nullptr
-            : (handshake_space_.write_secret.has_value() ? &handshake_space_ : &initial_space_);
+        !client_handshake_keepalive_eligible ? nullptr
+        : (!handshake_packet_space_discarded_ && handshake_space_.write_secret.has_value())
+            ? &handshake_space_
+            : &initial_space_;
     auto client_handshake_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
     if (client_handshake_keepalive_eligible) {
         client_handshake_keepalive_deadline = compute_pto_deadline(
@@ -3335,8 +3357,10 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
             streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
         const bool eligible = (config_.role == EndpointRole::client) & handshake_confirmed_ &
                               last_peer_activity_time_.has_value() & has_receive_interest &
-                              !has_in_flight_ack_eliciting_packet(initial_space_) &
-                              !has_in_flight_ack_eliciting_packet(handshake_space_) &
+                              (initial_packet_space_discarded_ ||
+                               !has_in_flight_ack_eliciting_packet(initial_space_)) &
+                              (handshake_packet_space_discarded_ ||
+                               !has_in_flight_ack_eliciting_packet(handshake_space_)) &
                               !has_in_flight_ack_eliciting_packet(application_space_);
         if (!eligible) {
             return std::nullopt;
@@ -3358,6 +3382,9 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         client_receive_keepalive_deadline.has_value() && now >= *client_receive_keepalive_deadline;
     const auto consider_packet_space = [&](PacketSpaceState &packet_space,
                                            std::chrono::milliseconds max_ack_delay) {
+        if (packet_space_discarded(packet_space)) {
+            return;
+        }
         const auto tracked_packet = latest_in_flight_ack_eliciting_packet(packet_space);
         if (!tracked_packet.has_value()) {
             return;
@@ -3407,6 +3434,9 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         }
     }
     const auto arm_packet_space_probe = [&](PacketSpaceState &packet_space) {
+        if (packet_space_discarded(packet_space)) {
+            return;
+        }
         const bool allow_client_handshake_keepalive_probe =
             client_handshake_keepalive_due && &packet_space == client_handshake_keepalive_space;
         const bool allow_client_receive_keepalive_probe =
@@ -3488,6 +3518,16 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
                   << " pto_count=" << pto_count_ << '\n';
     }
     maybe_emit_qlog_recovery_metrics(now);
+}
+
+bool QuicConnection::packet_space_discarded(const PacketSpaceState &packet_space) const {
+    if (&packet_space == &initial_space_) {
+        return initial_packet_space_discarded_;
+    }
+    if (&packet_space == &handshake_space_) {
+        return handshake_packet_space_discarded_;
+    }
+    return false;
 }
 
 SentPacketRecord QuicConnection::select_pto_probe(const PacketSpaceState &packet_space) const {
@@ -3651,7 +3691,8 @@ SentPacketRecord QuicConnection::select_pto_probe(const PacketSpaceState &packet
 
 COQUIC_NOINLINE void QuicConnection::queue_client_handshake_recovery_probe() {
     if ((config_.role != EndpointRole::client) | (status_ != HandshakeStatus::in_progress) |
-        handshake_confirmed_ | !handshake_space_.write_secret.has_value() |
+        handshake_confirmed_ | handshake_packet_space_discarded_ |
+        !handshake_space_.write_secret.has_value() |
         !handshake_space_.send_crypto.has_pending_data()) {
         return;
     }
@@ -3661,8 +3702,9 @@ COQUIC_NOINLINE void QuicConnection::queue_client_handshake_recovery_probe() {
         return;
     }
 
-    const bool has_other_space_in_flight = has_in_flight_ack_eliciting_packet(initial_space_) |
-                                           has_in_flight_ack_eliciting_packet(application_space_);
+    const bool has_other_space_in_flight =
+        (!initial_packet_space_discarded_ && has_in_flight_ack_eliciting_packet(initial_space_)) |
+        has_in_flight_ack_eliciting_packet(application_space_);
     if (!has_other_space_in_flight) {
         return;
     }
@@ -3676,7 +3718,7 @@ COQUIC_NOINLINE void QuicConnection::queue_client_handshake_recovery_probe() {
 
 void QuicConnection::queue_server_handshake_recovery_probes() {
     if ((config_.role != EndpointRole::server) | (status_ != HandshakeStatus::in_progress) |
-        handshake_confirmed_) {
+        handshake_confirmed_ | handshake_packet_space_discarded_) {
         return;
     }
 
@@ -4446,6 +4488,9 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
                 }
+                if (handshake_packet_space_discarded_) {
+                    return CodecResult<bool>::success(true);
+                }
                 if (should_reset_client_handshake_peer_state(
                         protected_packet.source_connection_id)) {
                     reset_client_handshake_peer_state_for_new_source_connection_id();
@@ -4601,6 +4646,9 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 if (should_adopt_supported_client_version(config_.role, protected_packet.version,
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
+                }
+                if (handshake_packet_space_discarded_) {
+                    return CodecResult<bool>::success(true);
                 }
                 if (should_reset_client_handshake_peer_state(
                         protected_packet.source_connection_id)) {
@@ -6214,6 +6262,12 @@ void QuicConnection::install_available_secrets() {
     bool installed_client_application_keys = false;
     for (auto &available_secret : tls_->take_available_secrets()) {
         available_secret.secret.quic_version = current_version_;
+        if ((available_secret.level == EncryptionLevel::initial &&
+             initial_packet_space_discarded_) ||
+            (available_secret.level == EncryptionLevel::handshake &&
+             handshake_packet_space_discarded_)) {
+            continue;
+        }
         auto &packet_space =
             packet_space_for_level(available_secret.level, initial_space_, handshake_space_,
                                    zero_rtt_space_, application_space_);
@@ -6236,8 +6290,14 @@ void QuicConnection::collect_pending_tls_bytes() {
         return;
     }
 
-    initial_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::initial));
-    handshake_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::handshake));
+    auto initial = tls_->take_pending(EncryptionLevel::initial);
+    if (!initial_packet_space_discarded_) {
+        initial_space_.send_crypto.append(initial);
+    }
+    auto handshake = tls_->take_pending(EncryptionLevel::handshake);
+    if (!handshake_packet_space_discarded_) {
+        handshake_space_.send_crypto.append(handshake);
+    }
     zero_rtt_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::zero_rtt));
     application_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::application));
 }
@@ -7153,12 +7213,12 @@ bool QuicConnection::has_pending_application_send() const {
 }
 
 bool QuicConnection::has_pending_congestion_controlled_send() const {
-    if (initial_space_.send_crypto.has_pending_data() ||
-        initial_space_.pending_probe_packet.has_value()) {
+    if (!initial_packet_space_discarded_ && (initial_space_.send_crypto.has_pending_data() ||
+                                             initial_space_.pending_probe_packet.has_value())) {
         return true;
     }
 
-    if (handshake_space_.write_secret.has_value() &&
+    if (!handshake_packet_space_discarded_ && handshake_space_.write_secret.has_value() &&
         (handshake_space_.send_crypto.has_pending_data() ||
          handshake_space_.pending_probe_packet.has_value())) {
         return true;
@@ -7721,11 +7781,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                                                        ? client_initial_destination_connection_id()
                                                        : destination_connection_id;
     const bool duplicate_first_compatible_server_initial_crypto =
-        (config_.role == EndpointRole::server) & (original_version_ != current_version_) &
-        (initial_space_.next_send_packet_number == 0) &
+        !initial_packet_space_discarded_ & (config_.role == EndpointRole::server) &
+        (original_version_ != current_version_) & (initial_space_.next_send_packet_number == 0) &
         (handshake_space_.next_send_packet_number == 0);
-    const bool initial_probe_pending = initial_space_.pending_probe_packet.has_value();
-    const bool handshake_probe_pending = handshake_space_.pending_probe_packet.has_value();
+    const bool initial_probe_pending =
+        !initial_packet_space_discarded_ && initial_space_.pending_probe_packet.has_value();
+    const bool handshake_probe_pending =
+        !handshake_packet_space_discarded_ && handshake_space_.pending_probe_packet.has_value();
     const bool application_probe_pending = application_space_.pending_probe_packet.has_value();
     const auto pto_probe_burst_active =
         (remaining_pto_probe_datagrams_ > 0) &
@@ -8112,13 +8174,16 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
     };
 
     const auto initial_ack_frame =
-        (initial_space_.pending_probe_packet.has_value() &&
-         initial_space_.pending_probe_packet->force_ack)
-            ? initial_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now,
-                                                              /*allow_non_pending=*/true)
-            : initial_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now);
+        initial_packet_space_discarded_
+            ? std::optional<AckFrame>{}
+            : ((initial_space_.pending_probe_packet.has_value() &&
+                initial_space_.pending_probe_packet->force_ack)
+                   ? initial_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now,
+                                                                     /*allow_non_pending=*/true)
+                   : initial_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0,
+                                                                     now));
     auto initial_crypto_ranges = std::vector<ByteRange>{};
-    if (!defer_server_compatible_negotiation_crypto) {
+    if (!initial_packet_space_discarded_ && !defer_server_compatible_negotiation_crypto) {
         initial_crypto_ranges =
             initial_space_.send_crypto.take_ranges(std::numeric_limits<std::size_t>::max());
     }
@@ -8162,7 +8227,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
 
         return frames;
     };
-    auto initial_frames = build_initial_frames(initial_crypto_ranges);
+    auto initial_frames = initial_packet_space_discarded_
+                              ? std::vector<Frame>{}
+                              : build_initial_frames(initial_crypto_ranges);
     if (!initial_frames.empty()) {
         const bool duplicate_compatible_negotiation_initial_crypto =
             duplicate_first_compatible_server_initial_crypto && !initial_crypto_ranges.empty();
@@ -8310,9 +8377,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
 
     const auto max_handshake_crypto_bytes =
         std::numeric_limits<std::size_t>::max() *
-        static_cast<std::size_t>(!defer_server_compatible_negotiation_crypto);
+        static_cast<std::size_t>(!defer_server_compatible_negotiation_crypto &
+                                 !handshake_packet_space_discarded_);
     auto handshake_crypto_ranges =
-        handshake_space_.send_crypto.take_ranges(max_handshake_crypto_bytes);
+        handshake_packet_space_discarded_
+            ? std::vector<ByteRange>{}
+            : handshake_space_.send_crypto.take_ranges(max_handshake_crypto_bytes);
     const auto build_handshake_frames = [&](std::span<const ByteRange> crypto_ranges,
                                             bool override_probe_crypto_ranges = false,
                                             std::span<const ByteRange> probe_crypto_ranges = {}) {
@@ -8359,7 +8429,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
 
         return frames;
     };
-    auto handshake_frames = build_handshake_frames(handshake_crypto_ranges);
+    auto handshake_frames = handshake_packet_space_discarded_
+                                ? std::vector<Frame>{}
+                                : build_handshake_frames(handshake_crypto_ranges);
     if (!handshake_frames.empty()) {
         if (!handshake_space_.write_secret.has_value()) {
             mark_failed();
@@ -8534,17 +8606,20 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                     return entry.second.pending_response.has_value() ||
                            entry.second.challenge_pending;
                 });
-            const bool eligible =
-                (config_.role == EndpointRole::client) & handshake_confirmed_ &
-                base_ack_frame.has_value() & last_peer_activity_time_.has_value() &
-                has_receive_interest & !has_pending_application_send() &
-                !application_space_.pending_probe_packet.has_value() &
-                pending_new_connection_id_frames_.empty() &
-                pending_retire_connection_id_frames_.empty() & application_crypto_frames.empty() &
-                !has_pending_path_validation & !has_in_flight_ack_eliciting_packet(initial_space_) &
-                !has_in_flight_ack_eliciting_packet(handshake_space_) &
-                !has_in_flight_ack_eliciting_packet(application_space_) &
-                current_send_path_id_.has_value();
+            const bool eligible = (config_.role == EndpointRole::client) & handshake_confirmed_ &
+                                  base_ack_frame.has_value() &
+                                  last_peer_activity_time_.has_value() & has_receive_interest &
+                                  !has_pending_application_send() &
+                                  !application_space_.pending_probe_packet.has_value() &
+                                  pending_new_connection_id_frames_.empty() &
+                                  pending_retire_connection_id_frames_.empty() &
+                                  application_crypto_frames.empty() & !has_pending_path_validation &
+                                  (initial_packet_space_discarded_ ||
+                                   !has_in_flight_ack_eliciting_packet(initial_space_)) &
+                                  (handshake_packet_space_discarded_ ||
+                                   !has_in_flight_ack_eliciting_packet(handshake_space_)) &
+                                  !has_in_flight_ack_eliciting_packet(application_space_) &
+                                  current_send_path_id_.has_value();
             if (!eligible) {
                 return;
             }
@@ -11938,6 +12013,122 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.discard_initial_packet_space();
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.initial_packet_space_discarded_);
+    }
+
+    {
+        QuicConnection connection(QuicCoreConfig{
+            .role = EndpointRole::server,
+            .source_connection_id = {std::byte{0x52}, std::byte{0x10}},
+            .initial_destination_connection_id = {std::byte{0x82}, std::byte{0x10}},
+            .verify_peer = false,
+            .server_name = "localhost",
+        });
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::connected;
+        connection.handshake_confirmed_ = true;
+        connection.peer_transport_parameters_ = TransportParameters{
+            .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+            .active_connection_id_limit = 2,
+            .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+            .max_ack_delay = connection.config_.transport.max_ack_delay,
+            .initial_source_connection_id = ConnectionId{std::byte{0xa7}},
+        };
+        connection.peer_transport_parameters_validated_ = true;
+        connection.peer_address_validated_ = true;
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+        connection.initial_packet_space_discarded_ = true;
+        connection.handshake_packet_space_discarded_ = true;
+        connection.initial_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x52});
+        connection.handshake_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x62});
+        connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
+        connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x02}});
+        connection.initial_space_.received_packets.record_received(
+            /*packet_number=*/11, /*ack_eliciting=*/true, QuicCoreTimePoint{});
+        connection.handshake_space_.received_packets.record_received(
+            /*packet_number=*/12, /*ack_eliciting=*/true, QuicCoreTimePoint{});
+        connection.initial_space_.pending_probe_packet = SentPacketRecord{
+            .packet_number = 2,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+        };
+        connection.handshake_space_.pending_probe_packet = SentPacketRecord{
+            .packet_number = 3,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+        };
+
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_sendable_datagram(QuicCoreTimePoint{}));
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_pending_congestion_controlled_send());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.loss_deadline().has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.pto_deadline().has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.ack_deadline().has_value());
+
+        const auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        QuicConnection connection(QuicCoreConfig{
+            .role = EndpointRole::server,
+            .source_connection_id = {std::byte{0x52}, std::byte{0x11}},
+            .initial_destination_connection_id = {std::byte{0x82}, std::byte{0x11}},
+            .verify_peer = false,
+            .server_name = "localhost",
+        });
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::connected;
+        connection.handshake_confirmed_ = true;
+        connection.peer_transport_parameters_ = TransportParameters{
+            .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+            .active_connection_id_limit = 2,
+            .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+            .max_ack_delay = connection.config_.transport.max_ack_delay,
+            .initial_source_connection_id = ConnectionId{std::byte{0xa8}},
+        };
+        connection.peer_transport_parameters_validated_ = true;
+        connection.peer_address_validated_ = true;
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+        connection.initial_packet_space_discarded_ = true;
+        connection.handshake_packet_space_discarded_ = true;
+        connection.initial_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x54});
+        connection.handshake_space_.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x64});
+        connection.track_sent_packet(connection.initial_space_,
+                                     SentPacketRecord{
+                                         .packet_number = 30,
+                                         .sent_time = QuicCoreTimePoint{},
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .bytes_in_flight = 1200,
+                                     });
+        connection.track_sent_packet(connection.handshake_space_,
+                                     SentPacketRecord{
+                                         .packet_number = 31,
+                                         .sent_time = QuicCoreTimePoint{},
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .bytes_in_flight = 1200,
+                                     });
+
+        connection.arm_pto_probe(QuicCoreTimePoint{} + std::chrono::seconds(30));
+        connection.detect_lost_packets(QuicCoreTimePoint{} + std::chrono::seconds(30));
+
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.initial_space_.pending_probe_packet.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !connection.handshake_space_.pending_probe_packet.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.initial_space_.recovery.tracked_packet_count() ==
+                                      1);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.recovery.tracked_packet_count() ==
+                                      1);
     }
 
     {

@@ -1028,8 +1028,10 @@ coquic_wasm_endpoint_open_connection(std::uint32_t endpoint_id, std::uint64_t no
     }
 
     QuicCoreClientConnectionConfig connection{
-        .source_connection_id = connection_id_from_input(source_cid, source_cid_len,
-                                                         {std::byte{0xc1}, std::byte{0x01}}),
+        .source_connection_id = connection_id_from_input(
+            source_cid, source_cid_len,
+            {std::byte{0xc1}, std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+             std::byte{0x00}, std::byte{0x00}, std::byte{0x01}}),
         .initial_destination_connection_id = connection_id_from_input(
             initial_dcid, initial_dcid_len,
             {std::byte{0x83}, std::byte{0x94}, std::byte{0xc8}, std::byte{0xf0}, std::byte{0x3e},

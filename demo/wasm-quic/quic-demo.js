@@ -142,6 +142,14 @@ function setGlobalTimer(timeMs) {
   if (node) node.textContent = `${timeMs}ms`;
 }
 
+function wasmI64ToNumber(value, label) {
+  const number = typeof value === "bigint" ? Number(value) : Number(value);
+  if (!Number.isSafeInteger(number)) {
+    throw new Error(`${label} is outside JavaScript's safe integer range`);
+  }
+  return number;
+}
+
 function pingPongPayload(sender, sequence) {
   const prefix = `${sender} ping-pong ${sequence} `;
   const fill = "flow-control-window ";
@@ -1740,8 +1748,14 @@ async function acceptNextPacket(runState) {
 }
 
 function readWakeups(runState) {
-  const cw = wasm.coquic_wasm_endpoint_next_wakeup_ms(runState.clientEndpoint);
-  const sw = wasm.coquic_wasm_endpoint_next_wakeup_ms(runState.serverEndpoint);
+  const cw = wasmI64ToNumber(
+    wasm.coquic_wasm_endpoint_next_wakeup_ms(runState.clientEndpoint),
+    "client wakeup",
+  );
+  const sw = wasmI64ToNumber(
+    wasm.coquic_wasm_endpoint_next_wakeup_ms(runState.serverEndpoint),
+    "server wakeup",
+  );
   el("client-wakeup").textContent = cw >= 0 ? `${cw}ms` : "none";
   el("server-wakeup").textContent = sw >= 0 ? `${sw}ms` : "none";
   return { client: cw, server: sw };
@@ -1911,7 +1925,8 @@ async function runDemo({ startPaused = false } = {}) {
       }
 
       const handshakeReady =
-        runState.clientState !== "idle" && runState.serverState === "handshake_confirmed";
+        runState.clientState === "handshake_confirmed" &&
+        runState.serverState === "handshake_confirmed";
       if (handshakeReady && runState.pingPongSequence === 0) {
         if (!(await runAutomaticStep(runState, () => {
           queuePingPongMessage(runState, protocolNow, "client", 0n);

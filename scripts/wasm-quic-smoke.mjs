@@ -93,6 +93,7 @@ const flowControlFrameTypes = new Set([
   "DATA_BLOCKED",
   "STREAM_DATA_BLOCKED",
 ]);
+const pingPongPayloadBytes = 360;
 
 const certPem = `-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUfGLiwBSFPX9DqQSNXv+f3CUruwswDQYJKoZIhvcNAQEL
@@ -215,6 +216,14 @@ function debugLog(text) {
   if (debug) {
     console.error(text);
   }
+}
+
+function wasmI64ToNumber(value, label) {
+  const number = typeof value === "bigint" ? Number(value) : Number(value);
+  if (!Number.isSafeInteger(number)) {
+    throw new Error(`${label} is outside JavaScript's safe integer range`);
+  }
+  return number;
 }
 
 function readHeader(size, callback) {
@@ -393,6 +402,11 @@ function relay(from, to, routeHandle, now) {
       0,
     );
     for (const inspection of inspections) {
+      debugLog(
+        `inspection endpoint=${from} datagram=${datagram.inspectionDatagramId} frames=${(inspection.frames ?? [])
+          .map((frame) => frame.type)
+          .join(",")}`,
+      );
       for (const frame of inspection.frames ?? []) {
         if (flowControlFrameTypes.has(frame.type)) {
           state.flowControlFrames.add(frame.type);
@@ -423,8 +437,67 @@ function pump(client, server, state, now) {
 }
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 const certBytes = encoder.encode(certPem);
 const keyBytes = encoder.encode(keyPem);
+
+function pingPongPayload(sender, sequence) {
+  const prefix = `${sender} ping-pong ${sequence} `;
+  const fill = "flow-control-window ";
+  let text = prefix;
+  while (encoder.encode(text).length < pingPongPayloadBytes) {
+    text += fill;
+  }
+  return encoder.encode(text).slice(0, pingPongPayloadBytes);
+}
+
+function sendStream(endpoint, now, connection, streamId, payload, label) {
+  withBytes(payload, (pointer, length) => {
+    checked(
+      label,
+      coquic_wasm_endpoint_send_stream(endpoint, now, connection, streamId, pointer, length, 0),
+    );
+  });
+}
+
+function receivedBytes(state, endpoint) {
+  return state.received
+    .filter((event) => event.endpoint === endpoint)
+    .reduce((sum, event) => sum + event.payloadLength, 0);
+}
+
+function receivedText(state, endpoint) {
+  return state.received
+    .filter((event) => event.endpoint === endpoint)
+    .map((event) => event.text)
+    .join("");
+}
+
+function fireDueTimers(client, server, now) {
+  const clientWake = wasmI64ToNumber(coquic_wasm_endpoint_next_wakeup_ms(client), "client wakeup");
+  const serverWake = wasmI64ToNumber(coquic_wasm_endpoint_next_wakeup_ms(server), "server wakeup");
+  if (clientWake >= 0 && BigInt(clientWake) <= now) {
+    checked("client timer", coquic_wasm_endpoint_timer_expired(client, now));
+  }
+  if (serverWake >= 0 && BigInt(serverWake) <= now) {
+    checked("server timer", coquic_wasm_endpoint_timer_expired(server, now));
+  }
+}
+
+function pumpUntil(client, server, state, now, predicate, label, maxSteps = 128) {
+  for (let step = 0; step < maxSteps && !predicate(); step += 1) {
+    now += 1n;
+    const moved = pump(client, server, state, now);
+    debugLog(`${label} step=${step} moved=${moved} state=${jsonState(state)}`);
+    if (moved === 0) {
+      fireDueTimers(client, server, now);
+    }
+  }
+  if (!predicate()) {
+    throw new Error(`${label} did not complete: ${jsonState(state)}`);
+  }
+  return now;
+}
 
 const client = coquic_wasm_endpoint_create(0, 0, 0, 0, 0);
 const server = withBytes(certBytes, (certPointer, certLength) =>
@@ -469,11 +542,11 @@ try {
     throw new Error(`client diagnostics did not expose opened connection ${jsonState(openedClientDiagnostics)}`);
   }
 
-  for (let step = 0; step < 96 && !(state.clientReady && state.serverConfirmed); step += 1) {
+  for (let step = 0; step < 96 && !(state.clientConfirmed && state.serverConfirmed); step += 1) {
     now += 1n;
     const moved = pump(client, server, state, now);
-    const clientWake = coquic_wasm_endpoint_next_wakeup_ms(client);
-    const serverWake = coquic_wasm_endpoint_next_wakeup_ms(server);
+    const clientWake = wasmI64ToNumber(coquic_wasm_endpoint_next_wakeup_ms(client), "client wakeup");
+    const serverWake = wasmI64ToNumber(coquic_wasm_endpoint_next_wakeup_ms(server), "server wakeup");
     debugLog(
       `handshake step=${step} moved=${moved} clientWake=${clientWake} serverWake=${serverWake} state=${jsonState(state)}`,
     );
@@ -487,57 +560,48 @@ try {
     }
   }
 
-  if (!state.clientReady || !state.serverConfirmed) {
+  if (!state.clientConfirmed || !state.serverConfirmed) {
     throw new Error(`handshake did not confirm: ${jsonState(state)}`);
   }
   if (state.serverConnection === 0n) {
     throw new Error("server did not emit an accepted connection handle");
   }
 
-  const payload = encoder.encode("hello from wasm quic ".repeat(24));
-  withBytes(payload, (pointer, length) => {
-    checked(
-      "send stream",
-      coquic_wasm_endpoint_send_stream(
-        client,
-        now,
-        state.clientConnection,
-        0n,
-        pointer,
-        length,
-        0,
-      ),
-    );
-  });
+  const expectedByEndpoint = {
+    client: "",
+    server: "",
+  };
+  for (let sequence = 1; sequence <= 4; sequence += 1) {
+    const sender = sequence % 2 === 1 ? "client" : "server";
+    const receiver = sender === "client" ? "server" : "client";
+    const endpoint = sender === "client" ? client : server;
+    const connectionHandle =
+      sender === "client" ? state.clientConnection : state.serverConnection;
+    const payload = pingPongPayload(sender, sequence);
 
-  for (
-    let step = 0;
-    step < 96 &&
-    state.received
-      .filter((event) => event.endpoint === "server")
-      .reduce((sum, event) => sum + event.payloadLength, 0) < payload.length;
-    step += 1
-  ) {
-    now += 1n;
-    const moved = pump(client, server, state, now);
-    debugLog(`stream step=${step} moved=${moved} state=${jsonState(state)}`);
-    if (moved === 0) {
-      const clientWake = coquic_wasm_endpoint_next_wakeup_ms(client);
-      const serverWake = coquic_wasm_endpoint_next_wakeup_ms(server);
-      if (clientWake >= 0 && BigInt(clientWake) <= now) {
-        checked("client timer", coquic_wasm_endpoint_timer_expired(client, now));
-      }
-      if (serverWake >= 0 && BigInt(serverWake) <= now) {
-        checked("server timer", coquic_wasm_endpoint_timer_expired(server, now));
-      }
-    }
+    expectedByEndpoint[receiver] += decoder.decode(payload);
+    sendStream(
+      endpoint,
+      now,
+      connectionHandle,
+      0n,
+      payload,
+      `${sender} send ping-pong ${sequence}`,
+    );
+    now = pumpUntil(
+      client,
+      server,
+      state,
+      now,
+      () => receivedBytes(state, receiver) >= expectedByEndpoint[receiver].length,
+      `${sender} ping-pong ${sequence}`,
+    );
   }
 
-  const receivedText = state.received
-    .filter((event) => event.endpoint === "server")
-    .map((event) => event.text)
-    .join("");
-  if (receivedText !== new TextDecoder().decode(payload)) {
+  if (receivedText(state, "server") !== expectedByEndpoint.server) {
+    throw new Error(`unexpected server receive event ${jsonState(state.received)}`);
+  }
+  if (receivedText(state, "client") !== expectedByEndpoint.client) {
     throw new Error(`unexpected receive event ${jsonState(state.received)}`);
   }
   if (state.packetInspections === 0 || state.inspectedFrames === 0) {

@@ -287,6 +287,30 @@ TEST(QuicCoreEndpointInternalTest, RouteRefreshRememberPathAndLegacySeedingCover
     EXPECT_EQ(legacy_entry->route_handle_by_path_id.at(2), 11u);
 }
 
+TEST(QuicCoreEndpointInternalTest, ClientEndpointRoutesShortHeaderByFullLocalConnectionId) {
+    QuicCore endpoint(make_client_endpoint_config());
+    auto open_config = make_client_open_config();
+    open_config.source_connection_id =
+        bytes_from_ints({0xc1, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01});
+
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = open_config,
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0)));
+
+    ASSERT_EQ(endpoint.connection_count(), 1u);
+    auto parsed = QuicCore::parse_endpoint_datagram(
+        bytes_from_ints({0x40, 0xc1, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xff}));
+    if (!parsed.has_value()) {
+        FAIL() << "expected short-header endpoint datagram to parse";
+        return;
+    }
+    EXPECT_EQ(endpoint.find_endpoint_connection_for_datagram(parsed.value()),
+              std::optional<QuicConnectionHandle>{1u});
+}
+
 TEST(QuicCoreEndpointInternalTest, ConnectionCommandDrainsPendingEndpointEffects) {
     QuicCore endpoint(make_client_endpoint_config());
     static_cast<void>(endpoint.advance_endpoint(

@@ -37,6 +37,8 @@ constexpr std::size_t kDemoIpv6HeaderBytes = 40;
 constexpr std::size_t kDemoUdpHeaderBytes = 8;
 constexpr std::size_t kDemoMaxUdpPayloadSize =
     kDemoEthernetMtuBytes - kDemoIpv6HeaderBytes - kDemoUdpHeaderBytes;
+constexpr std::uint64_t kDemoInitialMaxData = 512;
+constexpr std::uint64_t kDemoInitialMaxStreamData = 512;
 
 enum class WasmEventType : std::uint32_t {
     state = 1,
@@ -179,6 +181,10 @@ QuicCoreEndpointConfig endpoint_config(EndpointRole role, std::optional<TlsIdent
     };
     config.transport.pmtud_enabled = false;
     config.transport.max_udp_payload_size = kDemoMaxUdpPayloadSize;
+    config.transport.initial_max_data = kDemoInitialMaxData;
+    config.transport.initial_max_stream_data_bidi_local = kDemoInitialMaxStreamData;
+    config.transport.initial_max_stream_data_bidi_remote = kDemoInitialMaxStreamData;
+    config.transport.initial_max_stream_data_uni = kDemoInitialMaxStreamData;
     config.enable_packet_inspection = true;
     return config;
 }

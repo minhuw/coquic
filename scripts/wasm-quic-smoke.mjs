@@ -87,6 +87,12 @@ const stateCodes = {
   handshakeConfirmed: 1,
   failed: 2,
 };
+const flowControlFrameTypes = new Set([
+  "MAX_DATA",
+  "MAX_STREAM_DATA",
+  "DATA_BLOCKED",
+  "STREAM_DATA_BLOCKED",
+]);
 
 const certPem = `-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUfGLiwBSFPX9DqQSNXv+f3CUruwswDQYJKoZIhvcNAQEL
@@ -359,6 +365,7 @@ function drainEvents(endpoint, label, state) {
         endpoint: label,
         streamId: event.streamId,
         fin: event.fin,
+        payloadLength: event.payload.length,
         text: new TextDecoder().decode(event.payload),
       });
     }
@@ -385,6 +392,13 @@ function relay(from, to, routeHandle, now) {
         count + (Array.isArray(inspection.frames) ? inspection.frames.length : 0),
       0,
     );
+    for (const inspection of inspections) {
+      for (const frame of inspection.frames ?? []) {
+        if (flowControlFrameTypes.has(frame.type)) {
+          state.flowControlFrames.add(frame.type);
+        }
+      }
+    }
     debugLog(
       `datagram ${from}->${to} len=${datagram.bytes.length} ecn=${datagram.ecn} route=${routeHandle}`,
     );
@@ -434,6 +448,7 @@ const state = {
   inspectedFrames: 0,
   pendingPacketInspections: new Map(),
   received: [],
+  flowControlFrames: new Set(),
 };
 
 try {
@@ -479,7 +494,7 @@ try {
     throw new Error("server did not emit an accepted connection handle");
   }
 
-  const payload = encoder.encode("hello from wasm quic");
+  const payload = encoder.encode("hello from wasm quic ".repeat(24));
   withBytes(payload, (pointer, length) => {
     checked(
       "send stream",
@@ -490,12 +505,19 @@ try {
         0n,
         pointer,
         length,
-        1,
+        0,
       ),
     );
   });
 
-  for (let step = 0; step < 64 && state.received.length === 0; step += 1) {
+  for (
+    let step = 0;
+    step < 96 &&
+    state.received
+      .filter((event) => event.endpoint === "server")
+      .reduce((sum, event) => sum + event.payloadLength, 0) < payload.length;
+    step += 1
+  ) {
     now += 1n;
     const moved = pump(client, server, state, now);
     debugLog(`stream step=${step} moved=${moved} state=${jsonState(state)}`);
@@ -511,12 +533,18 @@ try {
     }
   }
 
-  const received = state.received.find((event) => event.endpoint === "server");
-  if (received?.text !== "hello from wasm quic" || received.streamId !== 0n || !received.fin) {
+  const receivedText = state.received
+    .filter((event) => event.endpoint === "server")
+    .map((event) => event.text)
+    .join("");
+  if (receivedText !== new TextDecoder().decode(payload)) {
     throw new Error(`unexpected receive event ${jsonState(state.received)}`);
   }
   if (state.packetInspections === 0 || state.inspectedFrames === 0) {
     throw new Error(`packet inspection did not produce frame records: ${jsonState(state)}`);
+  }
+  if (!state.flowControlFrames.has("MAX_DATA") || !state.flowControlFrames.has("MAX_STREAM_DATA")) {
+    throw new Error(`flow-control frames were not inspected: ${jsonState([...state.flowControlFrames])}`);
   }
   const serverDiagnostics = endpointDiagnostics(server);
   if (serverDiagnostics.connection_count !== 1 || serverDiagnostics.connections[0]?.active_streams === undefined) {

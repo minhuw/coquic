@@ -3,6 +3,8 @@ const packetDelayMs = 1000;
 const initialDestinationConnectionId = Uint8Array.from([0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08]);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const pingPongPayloadBytes = 360;
+const maxPendingPingPong = 2;
 
 const certPem = `-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUfGLiwBSFPX9DqQSNXv+f3CUruwswDQYJKoZIhvcNAQEL
@@ -138,6 +140,16 @@ function setModuleState(text, className = "") {
 function setGlobalTimer(timeMs) {
   const node = el("global-timer");
   if (node) node.textContent = `${timeMs}ms`;
+}
+
+function pingPongPayload(sender, sequence) {
+  const prefix = `${sender} ping-pong ${sequence} `;
+  const fill = "flow-control-window ";
+  let text = prefix;
+  while (encoder.encode(text).length < pingPongPayloadBytes) {
+    text += fill;
+  }
+  return encoder.encode(text).slice(0, pingPongPayloadBytes);
 }
 
 function pauseDemo() {
@@ -738,6 +750,22 @@ function addText(parent, text) {
   parent.append(document.createTextNode(text));
 }
 
+function frameSummary(record) {
+  const frames = record.inspect?.ok && Array.isArray(record.inspect.frames)
+    ? record.inspect.frames.map((frame) => frame.type).filter(Boolean)
+    : [];
+  if (frames.length === 0) return record.inspect?.ok ? "no frames" : "protected";
+  const flowFrames = frames.filter((type) =>
+    type === "MAX_DATA" ||
+    type === "MAX_STREAM_DATA" ||
+    type === "DATA_BLOCKED" ||
+    type === "STREAM_DATA_BLOCKED"
+  );
+  const visible = flowFrames.length > 0 ? flowFrames : frames;
+  const suffix = frames.length > visible.length ? ` +${frames.length - visible.length}` : "";
+  return `${visible.join(", ")}${suffix}`;
+}
+
 function renderPacketList() {
   const list = el("packet-list");
   list.textContent = "";
@@ -746,11 +774,12 @@ function renderPacketList() {
     row.type = "button";
     row.className = `packet-row${record.id === selectedPacketId ? " selected" : ""}`;
     row.innerHTML =
-      '<strong class="mono"></strong><span></span><strong class="packet-kind"></strong><span class="packet-size"></span>';
+      '<strong class="mono"></strong><span></span><strong class="packet-kind"></strong><span class="packet-frames"></span><span class="packet-size"></span>';
     row.children[0].textContent = `#${record.id}`;
     row.children[1].textContent = `${record.now}ms`;
     row.children[2].textContent = `${record.directionLabel} ${record.kind}`;
-    row.children[3].textContent = `${record.bytes.length}B`;
+    row.children[3].textContent = frameSummary(record);
+    row.children[4].textContent = `${record.bytes.length}B`;
     row.addEventListener("click", () => selectPacket(record.id, { openModal: true }));
     list.append(row);
   }
@@ -1553,6 +1582,21 @@ function drainEndpointPacketInspections(endpoint, runState) {
   }
 }
 
+function noteReceivedPingPongChunk(label, event, runState) {
+  const key = `${label}:${event.streamId.toString()}`;
+  const total = (runState.streamReceiveBytes.get(key) ?? 0) + event.payload.length;
+  const completeMessages = Math.floor(total / pingPongPayloadBytes);
+  const remainingBytes = total % pingPongPayloadBytes;
+  runState.streamReceiveBytes.set(key, remainingBytes);
+  for (let index = 0; index < completeMessages; index += 1) {
+    if (runState.pendingPingPong.length >= maxPendingPingPong) break;
+    runState.pendingPingPong.push({
+      sender: label,
+      streamId: event.streamId,
+    });
+  }
+}
+
 function handleOneEvent(endpoint, label, runState) {
   const event = popEvent(endpoint);
   if (!event) return false;
@@ -1569,6 +1613,7 @@ function handleOneEvent(endpoint, label, runState) {
   } else if (event.type === 3) {
     const text = decoder.decode(event.payload);
     runState.receivedStreamText = text;
+    noteReceivedPingPongChunk(label, event, runState);
     log(runState.timelineMs, `${label} stream ${event.streamId}: ${text}`);
   } else if (event.type === 4) {
     log(runState.timelineMs, `${label} local error ${event.code}`, "error");
@@ -1702,6 +1747,33 @@ function readWakeups(runState) {
   return { client: cw, server: sw };
 }
 
+function queuePingPongMessage(runState, protocolNow, sender, streamId) {
+  const endpoint = sender === "client" ? runState.clientEndpoint : runState.serverEndpoint;
+  const connection =
+    sender === "client" ? runState.clientConnection : runState.serverConnection;
+  if (connection === 0n) {
+    throw new Error(`${sender} connection is not ready for stream send`);
+  }
+  runState.pingPongSequence += 1;
+  const payload = pingPongPayload(sender, runState.pingPongSequence);
+  withBytes(payload, (pointer, length) => {
+    const rc = wasm.coquic_wasm_endpoint_send_stream(
+      endpoint,
+      BigInt(protocolNow),
+      connection,
+      streamId,
+      pointer,
+      length,
+      0,
+    );
+    if (rc < 0) throw new Error(`${sender} send stream failed ${rc}`);
+  });
+  log(
+    runState.timelineMs,
+    `${sender} queued stream ${streamId} message ${runState.pingPongSequence} (${payload.length} bytes)`,
+  );
+}
+
 async function runDemo({ startPaused = false } = {}) {
   const runToken = activeRunToken;
   demoState = startPaused ? "paused" : "running";
@@ -1738,6 +1810,9 @@ async function runDemo({ startPaused = false } = {}) {
     inFlight: [],
     arrived: [],
     accepting: [],
+    pendingPingPong: [],
+    streamReceiveBytes: new Map(),
+    pingPongSequence: 0,
     runToken,
     stepIndex: 0,
     endpointStats: makeEndpointStats(),
@@ -1765,9 +1840,8 @@ async function runDemo({ startPaused = false } = {}) {
       log(runState.timelineMs, `client open connection ${runState.clientConnection}`);
     });
 
-    let streamQueued = false;
     let idleRounds = 0;
-    while (isRunActive(runToken) && idleRounds < 160) {
+    while (isRunActive(runToken)) {
       protocolNow += 1;
       let progressed = false;
       const wakeups = readWakeups(runState);
@@ -1838,30 +1912,25 @@ async function runDemo({ startPaused = false } = {}) {
 
       const handshakeReady =
         runState.clientState !== "idle" && runState.serverState === "handshake_confirmed";
-      if (handshakeReady && !streamQueued) {
+      if (handshakeReady && runState.pingPongSequence === 0) {
         if (!(await runAutomaticStep(runState, () => {
-          const payload = encoder.encode("browser shared-memory stream");
-          withBytes(payload, (pointer, length) => {
-            const rc = wasm.coquic_wasm_endpoint_send_stream(
-              client,
-              BigInt(protocolNow),
-              runState.clientConnection,
-              0n,
-              pointer,
-              length,
-              1,
-            );
-            if (rc < 0) throw new Error(`send stream failed ${rc}`);
-          });
-          streamQueued = true;
-          log(runState.timelineMs, "client queued stream data");
+          queuePingPongMessage(runState, protocolNow, "client", 0n);
         }))) {
           break;
         }
         progressed = true;
         continue;
       }
-      if (streamQueued && runState.receivedStreamText !== "") break;
+      if (runState.pendingPingPong.length > 0) {
+        const next = runState.pendingPingPong.shift();
+        if (!(await runAutomaticStep(runState, () => {
+          queuePingPongMessage(runState, protocolNow, next.sender, next.streamId);
+        }))) {
+          break;
+        }
+        progressed = true;
+        continue;
+      }
 
       const clientTimerDue = wakeups.client >= 0 && wakeups.client <= protocolNow;
       const serverTimerDue = wakeups.server >= 0 && wakeups.server <= protocolNow;

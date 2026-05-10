@@ -1035,7 +1035,7 @@
 
       .packet-row {
         display: grid;
-        grid-template-columns: 58px 78px minmax(0, 1fr) 72px;
+        grid-template-columns: 58px 78px minmax(0, 0.9fr) minmax(140px, 1.1fr) 72px;
         gap: 10px;
         align-items: center;
         width: 100%;
@@ -1090,6 +1090,11 @@
       .packet-kind {
         color: var(--soft);
         font-weight: 800;
+      }
+
+      .packet-frames {
+        color: var(--packet-ink);
+        font-family: var(--mono);
       }
 
       .packet-size {

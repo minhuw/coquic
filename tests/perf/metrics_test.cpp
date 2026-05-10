@@ -12,6 +12,7 @@ TEST(QuicPerfMetricsTest, SummarizesLatencyAndRendersJson) {
         .mode = QuicPerfMode::rr,
         .direction = QuicPerfDirection::download,
         .backend = "socket",
+        .congestion_control = "bbr",
         .remote_host = "127.0.0.1",
         .remote_port = 9443,
         .alpn = "coquic-perf/1",
@@ -43,10 +44,12 @@ TEST(QuicPerfMetricsTest, SummarizesLatencyAndRendersJson) {
     EXPECT_EQ(summary.latency.p50_us, 300u);
     EXPECT_EQ(summary.latency.p90_us, 500u);
     EXPECT_EQ(summary.latency.max_us, 500u);
+    EXPECT_NE(render_perf_summary(summary).find("cc=bbr"), std::string::npos);
     EXPECT_NE(render_perf_summary(summary).find("requests/s"), std::string::npos);
     EXPECT_NE(render_perf_json(summary).find("\"schema_version\":1"), std::string::npos);
     EXPECT_NE(render_perf_json(summary).find("\"status\":\"ok\""), std::string::npos);
     EXPECT_NE(render_perf_json(summary).find("\"mode\":\"rr\""), std::string::npos);
+    EXPECT_NE(render_perf_json(summary).find("\"congestion_control\":\"bbr\""), std::string::npos);
     EXPECT_NE(render_perf_json(summary).find("\"server_counters\":{"), std::string::npos);
     EXPECT_NE(render_perf_json(summary).find("\"requests_completed\":1000"), std::string::npos);
 }

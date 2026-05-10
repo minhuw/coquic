@@ -61,6 +61,7 @@ std::uint64_t saturating_add_u64(std::uint64_t lhs, std::size_t rhs) {
 double sample_bandwidth_bytes_per_second(const SentPacketRecord &packet,
                                          std::uint64_t delivered_bytes, QuicCoreTimePoint now,
                                          const std::optional<std::chrono::milliseconds> &min_rtt) {
+    static_cast<void>(min_rtt);
     if (delivered_bytes <= packet.delivered) {
         return 0.0;
     }
@@ -71,10 +72,6 @@ double sample_bandwidth_bytes_per_second(const SentPacketRecord &packet,
     const auto ack_elapsed =
         now > packet.delivered_time ? now - packet.delivered_time : QuicCoreClock::duration::zero();
     const auto interval = std::max(send_elapsed, ack_elapsed);
-    if (min_rtt.has_value() && interval < *min_rtt) {
-        return 0.0;
-    }
-
     const auto interval_seconds = std::chrono::duration<double>(interval).count();
     if (interval_seconds <= 0.0) {
         return 0.0;
@@ -257,6 +254,9 @@ bool BbrCongestionController::can_send_ack_eliciting(std::size_t bytes) const {
 
 std::optional<QuicCoreTimePoint> BbrCongestionController::next_send_time(std::size_t bytes) const {
     if (bytes == 0 || !pacing_budget_timestamp_.has_value()) {
+        return std::nullopt;
+    }
+    if (!can_send_ack_eliciting(bytes)) {
         return std::nullopt;
     }
     if (mode_ == Mode::startup) {
@@ -897,7 +897,7 @@ void BbrCongestionController::set_send_quantum() {
 
 void BbrCongestionController::update_max_inflight() {
     if (min_rtt_.has_value()) {
-        bdp_ = bandwidth_bytes_per_second_ * std::chrono::duration<double>(*min_rtt_).count();
+        bdp_ = bandwidth_bytes_per_second_ * std::chrono::duration<double>(model_min_rtt()).count();
     } else {
         bdp_ = static_cast<double>(initial_cwnd_);
     }
@@ -1203,12 +1203,16 @@ std::size_t BbrCongestionController::inflight_at_loss(const RateSample &rs,
     return std::max(minimum_window(), clamp_to_size_t(inflight_at_loss));
 }
 
+std::chrono::milliseconds BbrCongestionController::model_min_rtt() const {
+    return std::max(min_rtt_.value_or(kInitialRtt), kGranularity);
+}
+
 std::size_t BbrCongestionController::bdp_bytes(double gain) const {
     if (!min_rtt_.has_value()) {
         return initial_cwnd_;
     }
     return clamp_to_size_t(gain * bandwidth_bytes_per_second_ *
-                           std::chrono::duration<double>(*min_rtt_).count());
+                           std::chrono::duration<double>(model_min_rtt()).count());
 }
 
 std::size_t BbrCongestionController::quantization_budget(std::size_t inflight_cap) const {

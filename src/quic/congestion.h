@@ -169,6 +169,7 @@ class BbrCongestionController { // NOLINT(clang-analyzer-optin.performance.Paddi
     std::uint64_t packets_for_bytes(std::size_t bytes) const;
     std::size_t minimum_window() const;
     std::size_t inflight_at_loss(const RateSample &rs, const SentPacketRecord &packet) const;
+    std::chrono::milliseconds model_min_rtt() const;
     std::size_t bdp_bytes(double gain) const;
     std::size_t quantization_budget(std::size_t inflight_cap) const;
     std::size_t inflight(double gain) const;

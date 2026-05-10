@@ -11,6 +11,7 @@
 #include <netinet/in.h>
 #include <netinet/udp.h>
 #include <poll.h>
+#include <time.h>
 
 #include <algorithm>
 #include <array>
@@ -747,6 +748,33 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
     };
 }
 
+timespec timespec_from_duration(QuicCoreClock::duration duration) {
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::max(duration, QuicCoreClock::duration::zero()));
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(ns);
+    const auto nanos = ns - seconds;
+    return timespec{
+        .tv_sec = static_cast<time_t>(seconds.count()),
+        .tv_nsec = static_cast<long>(nanos.count()),
+    };
+}
+
+bool default_poll_fn_active() {
+    const auto defaults = make_default_socket_io_backend_ops();
+    return socket_io_backend_ops_state().poll_fn == defaults.poll_fn;
+}
+
+int poll_descriptors(std::span<pollfd> descriptors, int timeout_ms,
+                     std::optional<QuicCoreClock::duration> high_resolution_timeout) {
+    if (high_resolution_timeout.has_value() && default_poll_fn_active()) {
+        auto timeout = timespec_from_duration(*high_resolution_timeout);
+        return ::ppoll(descriptors.data(), descriptors.size(), &timeout, nullptr);
+    }
+
+    return socket_io_backend_ops_state().poll_fn(descriptors.data(), descriptors.size(),
+                                                 timeout_ms);
+}
+
 PathMtuUpdateResult receive_path_mtu_update(int socket_fd, std::string_view role_name) {
 #if defined(__linux__)
     std::array<std::byte, 256> inbound{};
@@ -879,12 +907,14 @@ PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
         const auto current = internal::now();
         int timeout_ms = idle_timeout_ms;
         bool timer_due = false;
+        std::optional<quic::QuicCoreClock::duration> high_resolution_timeout;
         if (next_wakeup.has_value()) {
             if (*next_wakeup <= current) {
                 timer_due = true;
                 timeout_ms = 0;
             } else {
                 const auto remaining = *next_wakeup - current;
+                high_resolution_timeout = remaining;
                 timeout_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                   remaining + std::chrono::milliseconds(1))
                                                   .count());
@@ -906,8 +936,8 @@ PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
             if (io_profile_enabled()) {
                 ++io_profile_counters().poll_calls;
             }
-            poll_result = internal::socket_io_backend_ops_state().poll_fn(
-                descriptors.data(), descriptors.size(), timeout_ms);
+            poll_result =
+                internal::poll_descriptors(descriptors, timeout_ms, high_resolution_timeout);
         } while (poll_result < 0 && errno == EINTR);
 
         if (poll_result < 0) {

@@ -59,6 +59,11 @@ grep -F 'bash bench/run-host-matrix.sh --preset ci' "${workflow}" >/dev/null || 
   exit 1
 }
 
+grep -F 'Run QUIC Perf CI Matrix (NewReno + BBR)' "${workflow}" >/dev/null || {
+  echo 'missing congestion-control matrix label' >&2
+  exit 1
+}
+
 grep -F 'python3 scripts/render-perf-summary.py' "${workflow}" >/dev/null || {
   echo 'missing perf summary renderer step' >&2
   exit 1

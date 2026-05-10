@@ -137,6 +137,8 @@ QuicPerfClient::QuicPerfClient(const QuicPerfConfig &config)
     summary_.mode = config.mode;
     summary_.direction = config.direction;
     summary_.backend = config.io_backend == io::QuicIoBackendKind::io_uring ? "io_uring" : "socket";
+    summary_.congestion_control =
+        std::string(quic::congestion_control_algorithm_name(config.congestion_control));
     summary_.remote_host = config.host;
     summary_.remote_port = config.port;
     summary_.alpn = std::string(kQuicPerfApplicationProtocol);
@@ -241,11 +243,7 @@ void QuicPerfClient::enter_measure_phase(quic::QuicCoreTimePoint now) {
     }
     if (timed_bulk_download_mode()) {
         for (auto &[_, connection] : connections_) {
-            while (connection.active_bulk_streams.size() < config_.streams) {
-                if (!open_bulk_stream(connection, now, /*counts_toward_measurement=*/true)) {
-                    break;
-                }
-            }
+            (void)maybe_start_bulk_streams(connection, now);
         }
     } else if (timed_rr_mode()) {
         for (auto &[_, connection] : connections_) {
@@ -784,7 +782,7 @@ bool QuicPerfClient::maybe_start_bulk_streams(ConnectionState &connection,
     }
 
     if (timed_bulk_download_mode()) {
-        if (phase_ != BenchmarkPhase::measure) {
+        if (phase_ == BenchmarkPhase::drain) {
             return true;
         }
         while (connection.active_bulk_streams.size() < config_.streams &&

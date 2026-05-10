@@ -36,7 +36,7 @@ jobs:
       - name: Perf Harness Contract
         run: bash tests/nix/perf_harness_test.sh
 
-      - name: Run QUIC Perf CI Matrix
+      - name: Run QUIC Perf CI Matrix (NewReno + BBR)
         run: bash bench/run-host-matrix.sh --preset ci
 
       - name: Publish Perf Summary

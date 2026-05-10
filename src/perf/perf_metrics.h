@@ -27,6 +27,7 @@ struct QuicPerfRunSummary {
     QuicPerfMode mode = QuicPerfMode::bulk;
     QuicPerfDirection direction = QuicPerfDirection::download;
     std::string backend = "socket";
+    std::string congestion_control = "newreno";
     std::string remote_host = "127.0.0.1";
     std::uint16_t remote_port = 0;
     std::string alpn = "coquic-perf/1";

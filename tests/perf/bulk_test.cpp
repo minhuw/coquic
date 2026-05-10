@@ -346,7 +346,7 @@ TEST(QuicPerfBulkTest, TimedDownloadDoesNotReportZeroByteMeasurementAsSuccess) {
         .connections = 1,
         .requests_in_flight = 1,
         .warmup = std::chrono::milliseconds{100},
-        .duration = std::chrono::milliseconds{1},
+        .duration = std::chrono::milliseconds{0},
         .json_out = json_path,
     };
 

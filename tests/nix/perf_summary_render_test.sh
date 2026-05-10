@@ -46,18 +46,43 @@ if grep -F 'Image:' "${output}" >/dev/null; then
   exit 1
 fi
 
-grep -F '| socket | bulk | ok | 42 | 1.234 | 0.000 | 0 | 0 | smoke-socket-bulk-s1-c1-q1.json |' "${output}" >/dev/null || {
-  echo 'missing bulk row' >&2
+grep -F '### NewReno' "${output}" >/dev/null || {
+  echo 'missing NewReno table heading' >&2
   exit 1
 }
 
-grep -F '| socket | rr | ok | 98 | 0.025 | 326.531 | 5565 | 21820 | smoke-socket-rr-s1-c1-q4.json |' "${output}" >/dev/null || {
-  echo 'missing rr row' >&2
+grep -F '### BBR' "${output}" >/dev/null || {
+  echo 'missing BBR table heading' >&2
   exit 1
 }
 
-grep -F '| socket | crr | ok | 64 | 0.018 | 125.000 | 7400 | 9800 | smoke-socket-crr-s1-c2-q1.json |' "${output}" >/dev/null || {
-  echo 'missing crr row' >&2
+grep -F '| socket | bulk | ok | 42 | 1.234 | 0.000 | 0 | 0 | smoke-newreno-socket-bulk-s1-c1-q1.json |' "${output}" >/dev/null || {
+  echo 'missing NewReno bulk row' >&2
+  exit 1
+}
+
+grep -F '| socket | rr | ok | 98 | 0.025 | 326.531 | 5565 | 21820 | smoke-newreno-socket-rr-s1-c1-q4.json |' "${output}" >/dev/null || {
+  echo 'missing NewReno rr row' >&2
+  exit 1
+}
+
+grep -F '| socket | crr | ok | 64 | 0.018 | 125.000 | 7400 | 9800 | smoke-newreno-socket-crr-s1-c2-q1.json |' "${output}" >/dev/null || {
+  echo 'missing NewReno crr row' >&2
+  exit 1
+}
+
+grep -F '| socket | bulk | ok | 42 | 1.234 | 0.000 | 0 | 0 | smoke-bbr-socket-bulk-s1-c1-q1.json |' "${output}" >/dev/null || {
+  echo 'missing BBR bulk row' >&2
+  exit 1
+}
+
+grep -F '| socket | rr | ok | 98 | 0.025 | 326.531 | 5565 | 21820 | smoke-bbr-socket-rr-s1-c1-q4.json |' "${output}" >/dev/null || {
+  echo 'missing BBR rr row' >&2
+  exit 1
+}
+
+grep -F '| socket | crr | ok | 64 | 0.018 | 125.000 | 7400 | 9800 | smoke-bbr-socket-crr-s1-c2-q1.json |' "${output}" >/dev/null || {
+  echo 'missing BBR crr row' >&2
   exit 1
 }
 
@@ -81,6 +106,7 @@ printf '%s
 '      "status": "failed",' \
 '      "mode": "crr",' \
 '      "backend": "socket",' \
+'      "congestion_control": "bbr",' \
 '      "elapsed_ms": 17,' \
 '      "throughput_mib_per_s": 0.0,' \
 '      "requests_per_s": 0.0,' \
@@ -104,7 +130,7 @@ grep -F '### Failures' "${output}" >/dev/null || {
   exit 1
 }
 
-grep -F -- '- `socket/crr`: client wait failed' "${output}" >/dev/null || {
+grep -F -- '- `bbr/socket/crr`: client wait failed' "${output}" >/dev/null || {
   echo 'missing failure reason section' >&2
   exit 1
 }

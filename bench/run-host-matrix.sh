@@ -14,6 +14,7 @@ server_cpus="${PERF_SERVER_CPUS:-2}"
 client_cpus="${PERF_CLIENT_CPUS:-3}"
 port="${PERF_PORT:-9443}"
 run_timeout_seconds="${PERF_RUN_TIMEOUT_SECONDS:-120}"
+congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno bbr}"
 preset="smoke"
 network_name=''
 server_name=''
@@ -31,6 +32,7 @@ environment overrides:
   PERF_CLIENT_CPUS           Docker cpuset for client container (default: 3)
   PERF_PORT                  UDP port for server/client (default: 9443)
   PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
+  PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno bbr")
 USAGE
 }
 
@@ -77,7 +79,24 @@ case "${preset}" in
     ;;
 esac
 
+read -r -a congestion_control_list <<<"${congestion_controls}"
+[ "${#congestion_control_list[@]}" -gt 0 ] || {
+  echo 'at least one congestion-control algorithm is required' >&2
+  exit 1
+}
+for congestion_control in "${congestion_control_list[@]}"; do
+  case "${congestion_control}" in
+    newreno|bbr)
+      ;;
+    *)
+      echo "unsupported congestion-control algorithm: ${congestion_control}" >&2
+      exit 1
+      ;;
+  esac
+done
+
 rm -f "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
+  "${results_root}"/*.cid \
   "${environment_path}"
 
 cleanup_containers() {
@@ -141,6 +160,7 @@ docker network create "${network_name}" >/dev/null
   echo "client_cpus=${client_cpus}"
   echo "port=${port}"
   echo "run_timeout_seconds=${run_timeout_seconds}"
+  echo "congestion_controls=${congestion_controls}"
   echo
   docker version
   echo
@@ -157,84 +177,88 @@ docker network create "${network_name}" >/dev/null
   nproc
 } > "${environment_path}"
 
-for run in "${runs[@]}"; do
-  read -r backend mode direction request_bytes response_bytes limit streams connections inflight warmup duration <<<"${run}"
-  run_name="${preset}-${backend}-${mode}-s${streams}-c${connections}-q${inflight}"
-  json_path="${results_root}/${run_name}.json"
-  txt_path="${results_root}/${run_name}.txt"
-  server_log_path="${results_root}/${run_name}.server.log"
-  server_cid_path="${results_root}/${run_name}.server.cid"
-  client_name="coquic-perf-client-${preset}-${mode}-$$"
-  server_name="coquic-perf-server-${preset}-${mode}-$$"
+for congestion_control in "${congestion_control_list[@]}"; do
+  for run in "${runs[@]}"; do
+    read -r backend mode direction request_bytes response_bytes limit streams connections inflight warmup duration <<<"${run}"
+    run_name="${preset}-${congestion_control}-${backend}-${mode}-s${streams}-c${connections}-q${inflight}"
+    json_path="${results_root}/${run_name}.json"
+    txt_path="${results_root}/${run_name}.txt"
+    server_log_path="${results_root}/${run_name}.server.log"
+    server_cid_path="${results_root}/${run_name}.server.cid"
+    client_name="coquic-perf-client-${preset}-${congestion_control}-${mode}-$$"
+    server_name="coquic-perf-server-${preset}-${congestion_control}-${mode}-$$"
 
-  cleanup_containers
+    cleanup_containers
 
-  docker run -d --rm \
-    --name "${server_name}" \
-    --network "${network_name}" \
-    --cpuset-cpus "${server_cpus}" \
-    -v "${repo_root}/tests/fixtures:/certs:ro" \
-    "${image_tag}" server \
-    --host 0.0.0.0 \
-    --port "${port}" \
-    --certificate-chain /certs/quic-server-cert.pem \
-    --private-key /certs/quic-server-key.pem \
-    --io-backend "${backend}" > "${server_cid_path}"
+    docker run -d --rm \
+      --name "${server_name}" \
+      --network "${network_name}" \
+      --cpuset-cpus "${server_cpus}" \
+      -v "${repo_root}/tests/fixtures:/certs:ro" \
+      "${image_tag}" server \
+      --host 0.0.0.0 \
+      --port "${port}" \
+      --certificate-chain /certs/quic-server-cert.pem \
+      --private-key /certs/quic-server-key.pem \
+      --io-backend "${backend}" \
+      --congestion-control "${congestion_control}" > "${server_cid_path}"
 
-  sleep 1
+    sleep 1
 
-  client_args=(
-    client
-    --host "${server_name}"
-    --port "${port}"
-    --mode "${mode}"
-    --io-backend "${backend}"
-    --request-bytes "${request_bytes}"
-    --response-bytes "${response_bytes}"
-    --streams "${streams}"
-    --connections "${connections}"
-    --requests-in-flight "${inflight}"
-    --warmup "${warmup}"
-    --duration "${duration}"
-    --json-out /results/result.json
-  )
+    client_args=(
+      client
+      --host "${server_name}"
+      --port "${port}"
+      --mode "${mode}"
+      --io-backend "${backend}"
+      --congestion-control "${congestion_control}"
+      --request-bytes "${request_bytes}"
+      --response-bytes "${response_bytes}"
+      --streams "${streams}"
+      --connections "${connections}"
+      --requests-in-flight "${inflight}"
+      --warmup "${warmup}"
+      --duration "${duration}"
+      --json-out /results/result.json
+    )
 
-  if [ "${mode}" = 'bulk' ]; then
-    client_args+=(--direction "${direction}")
-    if [ "${limit}" != 'none' ]; then
-      client_args+=(--total-bytes "${limit}")
+    if [ "${mode}" = 'bulk' ]; then
+      client_args+=(--direction "${direction}")
+      if [ "${limit}" != 'none' ]; then
+        client_args+=(--total-bytes "${limit}")
+      fi
+    elif [ "${limit}" != 'none' ]; then
+      client_args+=(--requests "${limit}")
     fi
-  elif [ "${limit}" != 'none' ]; then
-    client_args+=(--requests "${limit}")
-  fi
 
-  set +e
-  timeout --kill-after=5s "${run_timeout_seconds}s" docker run --rm \
-    --name "${client_name}" \
-    --network "${network_name}" \
-    --cpuset-cpus "${client_cpus}" \
-    -v "${results_root}:/results" \
-    "${image_tag}" "${client_args[@]}" | tee "${txt_path}"
-  client_status=${PIPESTATUS[0]}
-  set -e
+    set +e
+    timeout --kill-after=5s "${run_timeout_seconds}s" docker run --rm \
+      --name "${client_name}" \
+      --network "${network_name}" \
+      --cpuset-cpus "${client_cpus}" \
+      -v "${results_root}:/results" \
+      "${image_tag}" "${client_args[@]}" | tee "${txt_path}"
+    client_status=${PIPESTATUS[0]}
+    set -e
 
-  docker logs "${server_name}" > "${server_log_path}" 2>&1 || true
-  docker rm -f "${server_name}" >/dev/null 2>&1 || true
-  docker rm -f "${client_name}" >/dev/null 2>&1 || true
+    docker logs "${server_name}" > "${server_log_path}" 2>&1 || true
+    docker rm -f "${server_name}" >/dev/null 2>&1 || true
+    docker rm -f "${client_name}" >/dev/null 2>&1 || true
 
-  if [ "${client_status}" -ne 0 ]; then
-    echo "client container failed for ${run_name} with status ${client_status}" >&2
-    exit "${client_status}"
-  fi
+    if [ "${client_status}" -ne 0 ]; then
+      echo "client container failed for ${run_name} with status ${client_status}" >&2
+      exit "${client_status}"
+    fi
 
-  if [ ! -f "${results_root}/result.json" ]; then
-    echo "missing JSON result for ${run_name}: ${results_root}/result.json" >&2
-    exit 1
-  fi
-  mv "${results_root}/result.json" "${json_path}"
+    if [ ! -f "${results_root}/result.json" ]; then
+      echo "missing JSON result for ${run_name}: ${results_root}/result.json" >&2
+      exit 1
+    fi
+    mv "${results_root}/result.json" "${json_path}"
+  done
 done
 
-python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${image_attr}" "${image_tag}"
+python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${image_attr}" "${image_tag}" "${congestion_controls}"
 import json
 import pathlib
 import sys
@@ -244,6 +268,7 @@ manifest_path = pathlib.Path(sys.argv[2])
 preset = sys.argv[3]
 image_attr = sys.argv[4]
 image_tag = sys.argv[5]
+congestion_controls = sys.argv[6].split()
 
 runs = []
 for path in sorted(root.glob('*.json')):
@@ -261,6 +286,7 @@ manifest = {
     'topology': 'docker-bridge-two-containers',
     'image_attr': image_attr,
     'image_tag': image_tag,
+    'congestion_controls': congestion_controls,
     'results_root': str(root),
     'runs': runs,
 }

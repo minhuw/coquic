@@ -21,6 +21,11 @@ grep -F -- 'image_tag="${PERF_IMAGE_TAG:-coquic-perf:quictls-musl}"' "${script}"
   exit 1
 }
 
+grep -F -- 'congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno bbr}"' "${script}" >/dev/null || {
+  echo 'missing congestion-control default in harness script' >&2
+  exit 1
+}
+
 grep -F -- 'nix build --print-out-paths ".#${image_attr}"' "${script}" >/dev/null || {
   echo 'missing nix image build in harness script' >&2
   exit 1
@@ -126,6 +131,11 @@ grep -F -- 'environment.txt' "${script}" >/dev/null || {
   exit 1
 }
 
+grep -F -- '"${results_root}"/*.cid' "${script}" >/dev/null || {
+  echo 'missing stale server cid cleanup in harness script' >&2
+  exit 1
+}
+
 grep -F -- 'docker rm -f "${server_name}"' "${script}" >/dev/null || {
   echo 'missing server container cleanup in harness script' >&2
   exit 1
@@ -143,6 +153,16 @@ grep -F -- 'docker network rm "${network_name}"' "${script}" >/dev/null || {
 
 grep -F -- 'timeout --kill-after=5s "${run_timeout_seconds}s" docker run --rm' "${script}" >/dev/null || {
   echo 'missing bounded client container run in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--congestion-control "${congestion_control}"' "${script}" >/dev/null || {
+  echo 'missing congestion-control forwarding in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'PERF_CONGESTION_CONTROLS   space-separated algorithms to run' "${script}" >/dev/null || {
+  echo 'missing congestion-control usage text in harness script' >&2
   exit 1
 }
 
@@ -299,15 +319,33 @@ case "$1" in
           ;;
       esac
     done
-    if [ "${detached}" -eq 1 ]; then
-      printf 'fake-server-container-id\n'
-      exit 0
-    fi
     role_index=1
     if [ "${args[0]:-}" = 'coquic-perf:quictls-musl' ]; then
       role_index=1
     fi
     role="${args[${role_index}]:-}"
+    congestion_control=''
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      if [ "${args[$i]}" = '--congestion-control' ]; then
+        congestion_control="${args[$((i + 1))]}"
+      fi
+    done
+    case "${congestion_control}" in
+      newreno|bbr)
+        ;;
+      *)
+        echo "unexpected congestion-control: ${congestion_control}; args=${args[*]}" >&2
+        exit 1
+        ;;
+    esac
+    if [ "${detached}" -eq 1 ]; then
+      [ "${role}" = 'server' ] || {
+        echo "expected server role in detached docker run, got args=${args[*]}" >&2
+        exit 1
+      }
+      printf 'fake-server-container-id\n'
+      exit 0
+    fi
     [ "${role}" = 'client' ] || {
       echo "expected client role in docker run, got args=${args[*]}" >&2
       exit 1
@@ -322,7 +360,7 @@ case "$1" in
       echo "unexpected json out: ${json_out}" >&2
       exit 1
     }
-    printf '{"status":"ok","mode":"fake"}\n' >"${FAKE_RESULTS_ROOT}/result.json"
+    printf '{"status":"ok","mode":"fake","congestion_control":"%s"}\n' "${congestion_control}" >"${FAKE_RESULTS_ROOT}/result.json"
     echo 'status=ok mode=fake direction=download throughput_mib/s=1.000 throughput_gbit/s=0.008 requests/s=10.000'
     ;;
   logs)
@@ -369,9 +407,12 @@ bash "${script}" --preset smoke >/dev/null
 }
 
 for run_name in \
-  smoke-socket-bulk-s1-c1-q1 \
-  smoke-socket-rr-s1-c1-q4 \
-  smoke-socket-crr-s1-c2-q1
+  smoke-newreno-socket-bulk-s1-c1-q1 \
+  smoke-newreno-socket-rr-s1-c1-q4 \
+  smoke-newreno-socket-crr-s1-c2-q1 \
+  smoke-bbr-socket-bulk-s1-c1-q1 \
+  smoke-bbr-socket-rr-s1-c1-q4 \
+  smoke-bbr-socket-crr-s1-c2-q1
   do
   [ -f "${results_root}/${run_name}.json" ] || {
     echo "behavioral harness test missing JSON result for ${run_name}" >&2
@@ -432,6 +473,16 @@ grep -F -- '--private-key /certs/quic-server-key.pem' "${log_path}" >/dev/null |
   exit 1
 }
 
+grep -F -- '--congestion-control newreno' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test missing NewReno congestion-control argument' >&2
+  exit 1
+}
+
+grep -F -- '--congestion-control bbr' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test missing BBR congestion-control argument' >&2
+  exit 1
+}
+
 if grep -F -- '--network host' "${log_path}" >/dev/null; then
   echo 'behavioral harness test unexpectedly used host networking' >&2
   exit 1
@@ -449,6 +500,13 @@ if manifest.get("image_tag") != "coquic-perf:quictls-musl":
     raise SystemExit("manifest missing perf image tag")
 if manifest.get("image_attr") != "perf-image-quictls-musl":
     raise SystemExit("manifest missing perf image attr")
+if manifest.get("congestion_controls") != ["newreno", "bbr"]:
+    raise SystemExit("manifest missing congestion-control list")
+if len(manifest.get("runs", [])) != 6:
+    raise SystemExit("manifest missing per-algorithm smoke runs")
+seen = {run.get("congestion_control") for run in manifest.get("runs", [])}
+if seen != {"newreno", "bbr"}:
+    raise SystemExit("manifest missing per-run congestion-control values")
 PY
 
 echo 'perf harness contract looks correct'

@@ -135,6 +135,9 @@ TEST(QuicCongestionTest, BbrPacingBudgetProducesFutureSendDeadlineAfterBurst) {
     EXPECT_EQ(controller.pacing_budget_bytes_, 0u);
     EXPECT_EQ(controller.next_send_time(/*bytes=*/1200),
               std::optional{coquic::quic::test::test_time(10)});
+
+    controller.congestion_window_ = controller.bytes_in_flight_;
+    EXPECT_FALSE(controller.next_send_time(/*bytes=*/1200).has_value());
 }
 
 TEST(QuicCongestionTest, BbrPersistentCongestionClearsPacingDeadline) {
@@ -233,6 +236,48 @@ TEST(QuicCongestionTest, BbrRateSampleUsesNewestPacketNumberForEqualSendTime) {
     EXPECT_EQ(rs.prior_delivered, second_packet.delivered);
     EXPECT_EQ(rs.delivered, 2400u);
     EXPECT_EQ(rs.tx_in_flight, second_packet.tx_in_flight);
+}
+
+TEST(QuicCongestionTest, BbrSamplesBandwidthWhenAckIntervalIsBelowMinRtt) {
+    BbrCongestionController controller(/*max_datagram_size=*/1200);
+    controller.total_delivered_ = 1200;
+    controller.bytes_in_flight_ = 1200;
+    controller.min_rtt_ = std::chrono::milliseconds{10};
+
+    auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                   /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                   coquic::quic::test::test_time(2));
+    packet.delivered = 0;
+    packet.delivered_time = coquic::quic::test::test_time(0);
+    packet.first_sent_time = coquic::quic::test::test_time(1);
+    packet.tx_in_flight = 1200;
+
+    const auto rs = controller.generate_rate_sample(
+        std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
+        coquic::quic::test::test_time(3), coquic::quic::RecoveryRttState{});
+
+    EXPECT_TRUE(rs.has_newly_acked);
+    EXPECT_EQ(rs.delivered, 2400u);
+    EXPECT_DOUBLE_EQ(rs.delivery_rate_bytes_per_second, 800000.0);
+}
+
+TEST(QuicCongestionTest, BbrUsesTimerGranularityForZeroRttModel) {
+    BbrCongestionController controller(/*max_datagram_size=*/1200);
+    controller.full_bw_reached_ = true;
+    controller.mode_ = BbrCongestionController::Mode::probe_bw_cruise;
+    controller.bandwidth_bytes_per_second_ = 50'000'000.0;
+    controller.max_bandwidth_bytes_per_second_ = controller.bandwidth_bytes_per_second_;
+    controller.min_rtt_ = std::chrono::milliseconds{0};
+    controller.congestion_window_ = 84'000;
+    controller.send_quantum_ = 2'400;
+
+    controller.set_cwnd(make_rate_sample(/*delivery_rate_bytes_per_second=*/50'000'000.0,
+                                         /*newly_acked=*/2'400, /*lost=*/0, /*tx_in_flight=*/84'000,
+                                         /*prior_delivered=*/0, /*delivered=*/2'400));
+
+    EXPECT_EQ(controller.model_min_rtt(), coquic::quic::kGranularity);
+    EXPECT_GE(controller.max_inflight_, 50'000u);
+    EXPECT_GT(controller.congestion_window_, 25'000u);
 }
 
 TEST(QuicCongestionTest, BbrLateAckRestoresProbeUpStateAfterSpuriousLoss) {

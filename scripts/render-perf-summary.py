@@ -67,6 +67,32 @@ def row(record: dict) -> str:
     )
 
 
+def algorithm_display_name(algorithm: str) -> str:
+    if algorithm == "newreno":
+        return "NewReno"
+    if algorithm == "bbr":
+        return "BBR"
+    return algorithm
+
+
+def algorithm_sort_key(algorithm: str) -> tuple[int, str]:
+    order = {
+        "newreno": 0,
+        "bbr": 1,
+    }
+    return (order.get(algorithm, 100), algorithm)
+
+
+def grouped_runs(runs: list[dict]) -> list[tuple[str, list[dict]]]:
+    groups: dict[str, list[dict]] = {}
+    for record in runs:
+        if not isinstance(record, dict):
+            raise ValueError("each run must be an object")
+        algorithm = str(record.get("congestion_control", "newreno"))
+        groups.setdefault(algorithm, []).append(record)
+    return [(algorithm, groups[algorithm]) for algorithm in sorted(groups, key=algorithm_sort_key)]
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -93,20 +119,25 @@ def main() -> int:
             print("No benchmark runs were recorded.")
             return 0
 
-        print("| Backend | Mode | Status | Elapsed (ms) | Throughput MiB/s | Requests/s | P50 us | P99 us | Result |")
-        print("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |")
-        for record in runs:
-            print(row(record))
+        for algorithm, records in grouped_runs(runs):
+            print(f"### {algorithm_display_name(algorithm)}")
+            print()
+            print("| Backend | Mode | Status | Elapsed (ms) | Throughput MiB/s | Requests/s | P50 us | P99 us | Result |")
+            print("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |")
+            for record in records:
+                print(row(record))
+            print()
 
         failures = [record for record in runs if record.get("status") != "ok"]
         if failures:
             print()
             print("### Failures")
             for record in failures:
+                algorithm = str(record.get("congestion_control", "newreno"))
                 backend = record.get("backend", "-")
                 mode = record.get("mode", "-")
                 reason = str(record.get("failure_reason", "unknown failure")).replace("\n", " ")
-                print(f"- `{backend}/{mode}`: {reason}")
+                print(f"- `{algorithm}/{backend}/{mode}`: {reason}")
         return 0
     except ValueError as exc:
         return fail(str(exc))

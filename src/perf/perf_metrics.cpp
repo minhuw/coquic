@@ -127,6 +127,7 @@ QuicPerfLatencySummary summarize_latency_samples(
 std::string render_perf_summary(const QuicPerfRunSummary &summary) {
     std::ostringstream out;
     out << "status=" << summary.status << " mode=" << mode_name(summary.mode)
+        << " cc=" << summary.congestion_control
         << " direction=" << direction_name(summary.direction) << " throughput_mib/s=" << std::fixed
         << std::setprecision(3) << summary.throughput_mib_per_s
         << " throughput_gbit/s=" << std::fixed << std::setprecision(3)
@@ -142,6 +143,7 @@ std::string render_perf_json(const QuicPerfRunSummary &summary) {
          << "\"mode\":\"" << mode_name(summary.mode) << "\","
          << "\"direction\":\"" << direction_name(summary.direction) << "\","
          << "\"backend\":\"" << json_escape(summary.backend) << "\","
+         << "\"congestion_control\":\"" << json_escape(summary.congestion_control) << "\","
          << "\"remote_host\":\"" << json_escape(summary.remote_host) << "\","
          << "\"remote_port\":" << summary.remote_port << ',' << "\"alpn\":\""
          << json_escape(summary.alpn) << "\","

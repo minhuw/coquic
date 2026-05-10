@@ -6072,7 +6072,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramDropsOneRttPacketWithoutReadSecret) {
     EXPECT_EQ(connection.status_, coquic::quic::HandshakeStatus::connected);
 }
 
-TEST(QuicCoreTest, ServerProcessesOneRttDataBeforeHandshakeCompletionWhenKeysAlreadyExist) {
+TEST(QuicCoreTest, ServerDefersOneRttDataUntilHandshakeCompletionWhenKeysAlreadyExist) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
 
@@ -6126,16 +6126,16 @@ TEST(QuicCoreTest, ServerProcessesOneRttDataBeforeHandshakeCompletionWhenKeysAlr
 
     const auto server_before_completion = coquic::quic::test::relay_nth_send_datagram_to_peer(
         request, one_rtt_index, server, coquic::quic::test::test_time(4));
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(
-                  coquic::quic::test::received_application_data_from(server_before_completion)),
-              "buffer-me");
+    EXPECT_TRUE(
+        coquic::quic::test::received_application_data_from(server_before_completion).empty());
     EXPECT_FALSE(server.has_failed());
-    EXPECT_TRUE(server.connection_->deferred_protected_packets_.empty());
+    ASSERT_EQ(server.connection_->deferred_protected_packets_.size(), 1u);
 
     const auto server_after_completion = coquic::quic::test::relay_send_datagrams_to_peer(
         client_handshake, server, coquic::quic::test::test_time(5));
-    EXPECT_TRUE(
-        coquic::quic::test::received_application_data_from(server_after_completion).empty());
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(
+                  coquic::quic::test::received_application_data_from(server_after_completion)),
+              "buffer-me");
     EXPECT_FALSE(server.has_failed());
     EXPECT_TRUE(server.connection_->deferred_protected_packets_.empty());
 }

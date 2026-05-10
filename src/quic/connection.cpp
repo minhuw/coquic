@@ -897,9 +897,13 @@ bool requires_connected_application_state_for_inbound_frame(const FrameType &fra
 }
 
 bool should_defer_protected_one_rtt_packet(const ProtectedOneRttPacket &packet,
-                                           HandshakeStatus status) {
+                                           EndpointRole local_role, HandshakeStatus status) {
     if (status != HandshakeStatus::in_progress) {
         return false;
+    }
+
+    if (local_role == EndpointRole::server) {
+        return true;
     }
 
     return std::ranges::any_of(packet.frames, [](const Frame &frame) {
@@ -908,9 +912,13 @@ bool should_defer_protected_one_rtt_packet(const ProtectedOneRttPacket &packet,
 }
 
 bool should_defer_protected_one_rtt_packet(const ReceivedProtectedOneRttPacket &packet,
-                                           HandshakeStatus status) {
+                                           EndpointRole local_role, HandshakeStatus status) {
     if (status != HandshakeStatus::in_progress) {
         return false;
+    }
+
+    if (local_role == EndpointRole::server) {
+        return true;
     }
 
     return std::ranges::any_of(packet.frames, [](const ReceivedFrame &frame) {
@@ -918,15 +926,18 @@ bool should_defer_protected_one_rtt_packet(const ReceivedProtectedOneRttPacket &
     });
 }
 
-bool should_defer_protected_one_rtt_packet(const ProtectedPacket &packet, HandshakeStatus status) {
+bool should_defer_protected_one_rtt_packet(const ProtectedPacket &packet, EndpointRole local_role,
+                                           HandshakeStatus status) {
     const auto *one_rtt = std::get_if<ProtectedOneRttPacket>(&packet);
-    return one_rtt != nullptr ? should_defer_protected_one_rtt_packet(*one_rtt, status) : false;
+    return one_rtt != nullptr ? should_defer_protected_one_rtt_packet(*one_rtt, local_role, status)
+                              : false;
 }
 
 bool should_defer_protected_one_rtt_packet(const ReceivedProtectedPacket &packet,
-                                           HandshakeStatus status) {
+                                           EndpointRole local_role, HandshakeStatus status) {
     const auto *one_rtt = std::get_if<ReceivedProtectedOneRttPacket>(&packet);
-    return one_rtt != nullptr ? should_defer_protected_one_rtt_packet(*one_rtt, status) : false;
+    return one_rtt != nullptr ? should_defer_protected_one_rtt_packet(*one_rtt, local_role, status)
+                              : false;
 }
 
 std::optional<std::uint64_t>
@@ -2141,6 +2152,11 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
         };
         const bool short_header_packet =
             (std::to_integer<std::uint8_t>(packet_bytes.front()) & 0x80u) == 0;
+        if (allow_defer && short_header_packet && config_.role == EndpointRole::server &&
+            status_ == HandshakeStatus::in_progress) {
+            defer_packet(packet_bytes, packet_path_id, datagram_id, packet_ecn);
+            return true;
+        }
 
         const auto current_context =
             short_header_packet ? make_short_header_deserialize_context(
@@ -2270,8 +2286,8 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
                     ++send_profile_counters().defer_decision_calls;
                 }
                 SendProfileTimer defer_timer(send_profile_counters().defer_decision_ns);
-                defer_protected_app_packet =
-                    allow_defer & should_defer_protected_one_rtt_packet(packet, status_);
+                defer_protected_app_packet = allow_defer && should_defer_protected_one_rtt_packet(
+                                                                packet, config_.role, status_);
             }
             if (defer_protected_app_packet) {
                 defer_packet(packet_bytes, packet_path_id, datagram_id, packet_ecn);
@@ -10966,10 +10982,20 @@ bool connection_helper_edge_cases_for_tests() {
                 },
             },
     };
-    const bool protected_one_rtt_packet_deferred =
-        should_defer_protected_one_rtt_packet(connected_state_frame, HandshakeStatus::in_progress);
+    const ProtectedOneRttPacket ack_only_frame{
+        .frames =
+            {
+                AckFrame{},
+            },
+    };
+    const bool server_protected_one_rtt_packet_deferred = should_defer_protected_one_rtt_packet(
+        ack_only_frame, EndpointRole::server, HandshakeStatus::in_progress);
+    const bool client_connected_state_protected_one_rtt_packet_deferred =
+        should_defer_protected_one_rtt_packet(connected_state_frame, EndpointRole::client,
+                                              HandshakeStatus::in_progress);
     const bool connected_protected_one_rtt_packet_not_deferred =
-        !should_defer_protected_one_rtt_packet(connected_state_frame, HandshakeStatus::connected);
+        !should_defer_protected_one_rtt_packet(connected_state_frame, EndpointRole::server,
+                                               HandshakeStatus::connected);
     const bool corrupted_long_header_discarded =
         should_discard_corrupted_long_header_packet(false, CodecErrorCode::invalid_fixed_bit) &
         should_discard_corrupted_long_header_packet(false, CodecErrorCode::unsupported_packet_type);
@@ -11241,7 +11267,8 @@ bool connection_helper_edge_cases_for_tests() {
            pending_fin_without_buffer_is_sendable & pending_fin_blocked_by_credit &
            pending_data_blocks_fin & missing_pending_frames_preserve_state &
            short_header_is_bufferable & truncated_long_header_is_not_bufferable &
-           handshake_long_header_is_bufferable & protected_one_rtt_packet_deferred &
+           handshake_long_header_is_bufferable & server_protected_one_rtt_packet_deferred &
+           client_connected_state_protected_one_rtt_packet_deferred &
            connected_protected_one_rtt_packet_not_deferred & corrupted_long_header_discarded &
            short_header_not_discarded_as_corrupted_long_header & empty_connection_id_formats_empty &
            connection_id_formats_lower_hex & empty_issued_connection_id_remains_empty &

@@ -4500,7 +4500,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramKeepsDeferredShortHeaderPacketsBuffered
     EXPECT_FALSE(connection.has_failed());
 }
 
-TEST(QuicCoreTest, ServerProcessesAckOnlyOneRttBeforeHandshakeCompletesWhenKeysExist) {
+TEST(QuicCoreTest, ServerDefersAckOnlyOneRttBeforeHandshakeCompletesWhenKeysExist) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.handshake_confirmed_ = false;
@@ -4533,11 +4533,13 @@ TEST(QuicCoreTest, ServerProcessesAckOnlyOneRttBeforeHandshakeCompletesWhenKeysE
 
     EXPECT_FALSE(connection.has_failed());
     EXPECT_FALSE(connection.handshake_confirmed_);
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
     EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
-    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
+    ASSERT_EQ(connection.deferred_protected_packets_.size(), 1u);
+    EXPECT_EQ(connection.deferred_protected_packets_.front(), ack_packet.value());
 }
 
-TEST(QuicCoreTest, ServerProcessesOneRttMaxDataBeforeHandshakeCompletesWhenKeysExist) {
+TEST(QuicCoreTest, ServerDefersOneRttMaxDataBeforeHandshakeCompletesWhenKeysExist) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.handshake_confirmed_ = false;
@@ -4574,11 +4576,52 @@ TEST(QuicCoreTest, ServerProcessesOneRttMaxDataBeforeHandshakeCompletesWhenKeysE
 
     EXPECT_FALSE(connection.has_failed());
     EXPECT_FALSE(connection.handshake_confirmed_);
-    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
-    EXPECT_EQ(connection.connection_flow_control_.peer_max_data, 4096u);
-    EXPECT_FALSE(connection.connection_flow_control_.pending_data_blocked_frame.has_value());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    ASSERT_EQ(connection.deferred_protected_packets_.size(), 1u);
+    EXPECT_EQ(connection.deferred_protected_packets_.front(), max_data_packet.value());
+    EXPECT_EQ(connection.connection_flow_control_.peer_max_data, 1024u);
+    EXPECT_TRUE(connection.connection_flow_control_.pending_data_blocked_frame.has_value());
     EXPECT_EQ(connection.connection_flow_control_.data_blocked_state,
-              coquic::quic::StreamControlFrameState::none);
+              coquic::quic::StreamControlFrameState::pending);
+}
+
+TEST(QuicCoreTest, ServerDefersOneRttStreamBeforeHandshakeCompletesWhenKeysExist) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.handshake_packet_space_discarded_ = false;
+
+    const auto stream_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 9,
+                .frames =
+                    {
+                        coquic::quic::test::make_inbound_application_stream_frame(
+                            "GET /lost-finished\r\n", 0, 0, true),
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(stream_packet.has_value());
+
+    connection.process_inbound_datagram(stream_packet.value(), coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_FALSE(connection.handshake_confirmed_);
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_TRUE(connection.pending_stream_receive_effects_.empty());
+    ASSERT_EQ(connection.deferred_protected_packets_.size(), 1u);
+    EXPECT_EQ(connection.deferred_protected_packets_.front(), stream_packet.value());
 }
 
 TEST(QuicCoreTest, ServerProcessesReceivedOneRttMaxDataBeforeHandshakeCompletesWhenKeysExist) {

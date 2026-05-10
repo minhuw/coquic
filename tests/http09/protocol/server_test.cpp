@@ -177,23 +177,6 @@ TEST(QuicHttp09ServerTest, SendsResponseWhenRequestArrivesBeforeHandshakeComplet
     ASSERT_FALSE(handshake_datagrams.empty());
     ASSERT_FALSE(request_datagrams.empty());
 
-    const auto find_handshake_datagram_index =
-        [](std::span<const std::vector<std::byte>> datagrams) -> std::optional<std::size_t> {
-        for (std::size_t index = 0; index < datagrams.size(); ++index) {
-            if (datagrams[index].empty()) {
-                continue;
-            }
-            const auto first_byte = std::to_integer<std::uint8_t>(datagrams[index].front());
-            const bool long_header = (first_byte & 0x80u) != 0u;
-            const auto packet_type = static_cast<std::uint8_t>((first_byte >> 4) & 0x03u);
-            if (long_header && packet_type == 0x02u) {
-                return index;
-            }
-        }
-
-        return std::nullopt;
-    };
-
     const auto find_one_rtt_datagram_index =
         [](std::span<const std::vector<std::byte>> datagrams) -> std::optional<std::size_t> {
         for (std::size_t index = 0; index < datagrams.size(); ++index) {
@@ -209,11 +192,9 @@ TEST(QuicHttp09ServerTest, SendsResponseWhenRequestArrivesBeforeHandshakeComplet
         return std::nullopt;
     };
 
-    const auto handshake_datagram_index = find_handshake_datagram_index(handshake_datagrams);
     const auto one_rtt_datagram_index = find_one_rtt_datagram_index(request_datagrams);
-    ASSERT_TRUE(handshake_datagram_index.has_value());
     ASSERT_TRUE(one_rtt_datagram_index.has_value());
-    if (!handshake_datagram_index.has_value() || !one_rtt_datagram_index.has_value()) {
+    if (!one_rtt_datagram_index.has_value()) {
         return;
     }
 
@@ -222,9 +203,8 @@ TEST(QuicHttp09ServerTest, SendsResponseWhenRequestArrivesBeforeHandshakeComplet
     const auto response_before_completion = drive_server_endpoint_on_result(
         endpoint, server, request_on_server, coquic::quic::test::test_time(5));
 
-    const auto handshake_on_server = coquic::quic::test::relay_nth_send_datagram_to_peer(
-        client_handshake, handshake_datagram_index.value(), server,
-        coquic::quic::test::test_time(6));
+    const auto handshake_on_server = coquic::quic::test::relay_send_datagrams_to_peer(
+        client_handshake, server, coquic::quic::test::test_time(6));
     const auto response_after_completion = drive_server_endpoint_on_result(
         endpoint, server, handshake_on_server, coquic::quic::test::test_time(7));
 

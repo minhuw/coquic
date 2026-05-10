@@ -157,7 +157,7 @@ TEST(QuicCoreTest, ServerProcessesOneRttStreamBeforeHandshakeCompletesWhenApplic
 }
 
 TEST(QuicCoreTest,
-     ProcessInboundDatagramProcessesOneRttStreamBeforeHandshakeCompletesWhenApplicationKeysExist) {
+     ProcessInboundDatagramDefersOneRttStreamBeforeHandshakeCompletesWhenApplicationKeysExist) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.handshake_confirmed_ = false;
@@ -194,16 +194,11 @@ TEST(QuicCoreTest,
 
     EXPECT_FALSE(connection.has_failed());
     const auto received = connection.take_received_stream_data();
-    ASSERT_TRUE(received.has_value());
-    if (!received.has_value()) {
-        return;
-    }
-    const auto &received_stream = *received;
-    EXPECT_EQ(received_stream.stream_id, 0u);
-    EXPECT_EQ(received_stream.bytes, coquic::quic::test::bytes_from_string("late-handshake"));
-    EXPECT_TRUE(received_stream.fin);
-    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
-    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
+    EXPECT_FALSE(received.has_value());
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
+    ASSERT_EQ(connection.deferred_protected_packets_.size(), 1u);
+    EXPECT_EQ(connection.deferred_protected_packets_.front(), encoded.value());
 }
 
 TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilGapCloses) {
@@ -255,7 +250,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilG
 
 TEST(
     QuicCoreTest,
-    ProcessInboundDatagramProcessesOneRttAckAndStreamBeforeHandshakeCompletesWhenApplicationKeysExist) {
+    ProcessInboundDatagramDefersOneRttAckAndStreamBeforeHandshakeCompletesWhenApplicationKeysExist) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.handshake_confirmed_ = false;
@@ -296,16 +291,11 @@ TEST(
 
     EXPECT_FALSE(connection.has_failed());
     const auto received = connection.take_received_stream_data();
-    ASSERT_TRUE(received.has_value());
-    if (!received.has_value()) {
-        return;
-    }
-    const auto &received_stream = *received;
-    EXPECT_EQ(received_stream.stream_id, 0u);
-    EXPECT_EQ(received_stream.bytes, coquic::quic::test::bytes_from_string("late-handshake"));
-    EXPECT_TRUE(received_stream.fin);
-    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
-    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
+    EXPECT_FALSE(received.has_value());
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
+    ASSERT_EQ(connection.deferred_protected_packets_.size(), 1u);
+    EXPECT_EQ(connection.deferred_protected_packets_.front(), encoded.value());
 }
 
 TEST(QuicCoreTest, ReceivedApplicationStreamDataCanBeEmittedAsSharedBytes) {
@@ -2631,15 +2621,12 @@ TEST(QuicCoreTest,
     connection.process_inbound_datagram(datagram, coquic::quic::test::test_time(1));
 
     EXPECT_FALSE(connection.has_failed());
-    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
-    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    ASSERT_EQ(connection.deferred_protected_packets_.size(), 1u);
+    EXPECT_EQ(connection.deferred_protected_packets_.front(), third_packet.value());
 
     const auto received = connection.take_received_stream_data();
-    ASSERT_TRUE(received.has_value());
-    EXPECT_EQ(optional_value_or_terminate(received).stream_id, 0u);
-    EXPECT_EQ(optional_value_or_terminate(received).bytes,
-              coquic::quic::test::bytes_from_string("late-handshake"));
-    EXPECT_TRUE(optional_value_or_terminate(received).fin);
+    EXPECT_FALSE(received.has_value());
 }
 
 TEST(QuicCoreTest, LocalStreamLimitStateTracksUnidirectionalFramesAcrossQueueLossAndAck) {

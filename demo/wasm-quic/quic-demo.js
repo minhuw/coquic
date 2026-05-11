@@ -72,6 +72,7 @@ let modalLastFocus = null;
 let stepBudget = 0;
 let schedulerWaiters = [];
 let currentRunPromise = null;
+let protocolStepInProgress = false;
 const activePackets = new Map();
 const activeDatagrams = new Map();
 
@@ -95,6 +96,12 @@ function waitForAnimationFrame() {
 function waitUntilRunning() {
   if (!paused) return Promise.resolve();
   return new Promise((resolve) => pauseWaiters.push(resolve));
+}
+
+function releasePauseWaiters() {
+  const waiters = pauseWaiters;
+  pauseWaiters = [];
+  for (const resolve of waiters) resolve();
 }
 
 async function pauseAwareSleep(ms) {
@@ -124,8 +131,11 @@ function updateRunButton() {
     stopButton.setAttribute("aria-label", "Stop protocol exchange");
   }
   if (stepButton) {
-    stepButton.disabled = wasm === undefined || demoState === "running";
-    stepButton.setAttribute("aria-label", "Step one protocol action");
+    stepButton.disabled = wasm === undefined;
+    stepButton.setAttribute(
+      "aria-label",
+      demoState === "running" ? "Pause after current protocol action" : "Step one protocol action",
+    );
     if (stepLabel) stepLabel.textContent = "Step";
   }
 }
@@ -171,9 +181,8 @@ function resumeDemo() {
   if (demoState !== "paused") return;
   paused = false;
   demoState = "running";
-  const waiters = pauseWaiters;
-  pauseWaiters = [];
-  for (const resolve of waiters) resolve();
+  stepBudget = 0;
+  releasePauseWaiters();
   wakeScheduler();
   updateRunButton();
 }
@@ -190,16 +199,17 @@ function wakeScheduler() {
 
 async function waitForProtocolStep(runState, description) {
   while (isRunActive(runState.runToken)) {
-    if (demoState === "running") {
+    if (stepBudget > 0) {
+      stepBudget -= 1;
+      paused = false;
       runState.stepIndex += 1;
-      runState.stepMode = "running";
+      runState.stepMode = "single";
       updateRunButton();
       return true;
     }
-    if (stepBudget > 0) {
-      stepBudget -= 1;
+    if (demoState === "running") {
       runState.stepIndex += 1;
-      runState.stepMode = "single";
+      runState.stepMode = "running";
       updateRunButton();
       return true;
     }
@@ -211,9 +221,14 @@ async function waitForProtocolStep(runState, description) {
 async function runProtocolStep(runState, description, action) {
   if (!(await waitForProtocolStep(runState, description))) return false;
   if (!isRunActive(runState.runToken)) return false;
-  await action(runState.stepMode);
-  drainInternalEvents(runState);
-  updateEndpointDiagnostics(runState.clientEndpoint, runState.serverEndpoint, runState);
+  protocolStepInProgress = true;
+  try {
+    await action(runState.stepMode);
+    drainInternalEvents(runState);
+    updateEndpointDiagnostics(runState.clientEndpoint, runState.serverEndpoint, runState);
+  } finally {
+    protocolStepInProgress = false;
+  }
   return true;
 }
 
@@ -233,6 +248,7 @@ function startDemo(startPaused) {
       demoState = "idle";
       paused = false;
       stepBudget = 0;
+      protocolStepInProgress = false;
       wakeScheduler();
       updateRunButton();
       log(0, error.message, "error");
@@ -244,14 +260,31 @@ function startDemo(startPaused) {
 }
 
 function requestNextStep() {
-  if (wasm === undefined || demoState === "running") return;
-  stepBudget += 1;
+  if (wasm === undefined) return;
   if (demoState === "idle") {
+    stepBudget += 1;
     startDemo(true);
-  } else {
+    return;
+  }
+  if (demoState === "running") {
+    demoState = "paused";
+    paused = false;
+    if (!protocolStepInProgress) stepBudget += 1;
+    releasePauseWaiters();
     wakeScheduler();
     updateRunButton();
+    return;
   }
+
+  if (protocolStepInProgress && paused) {
+    paused = false;
+  } else {
+    stepBudget += 1;
+    paused = false;
+  }
+  releasePauseWaiters();
+  wakeScheduler();
+  updateRunButton();
 }
 
 function packetKind(bytes) {
@@ -1999,6 +2032,8 @@ async function runDemo({ startPaused = false } = {}) {
     if (runToken === activeRunToken) {
       demoState = "idle";
       paused = false;
+      stepBudget = 0;
+      protocolStepInProgress = false;
       setGlobalTimer(runState.timelineMs);
       updateRunButton();
     }

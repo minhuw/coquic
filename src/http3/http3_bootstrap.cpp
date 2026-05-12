@@ -21,6 +21,7 @@
 
 #include <netdb.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 namespace coquic::http3 {
@@ -28,6 +29,7 @@ namespace {
 
 constexpr int kBootstrapListenBacklog = 16;
 constexpr int kBootstrapPollTimeoutMs = 100;
+constexpr int kBootstrapConnectionTimeoutMs = 2000;
 constexpr std::size_t kBootstrapRequestLimitBytes = std::size_t{16} * 1024u;
 
 class ScopedFd {
@@ -154,6 +156,7 @@ struct BootstrapTestHooks {
     std::size_t pipe_call_count = 0;
     std::size_t remaining_listen_socket_failures = 0;
     std::size_t remaining_listen_failures = 0;
+    std::size_t remaining_socket_timeout_failures = 0;
     bool fail_ssl_ctx_new = false;
     bool fail_ssl_ctx_min_proto = false;
     bool fail_ssl_ctx_check_private_key = false;
@@ -220,6 +223,17 @@ int bootstrap_listen(int fd, int backlog) {
         return -1;
     }
     return ::listen(fd, backlog);
+}
+
+int bootstrap_setsockopt(int fd, int level, int option_name, const void *option_value,
+                         socklen_t option_length) {
+    auto &hooks = bootstrap_test_hooks();
+    if ((option_name == SO_RCVTIMEO || option_name == SO_SNDTIMEO) &&
+        consume_test_hook_count(hooks.remaining_socket_timeout_failures)) {
+        errno = ENOPROTOOPT;
+        return -1;
+    }
+    return ::setsockopt(fd, level, option_name, option_value, option_length);
 }
 
 int bootstrap_ssl_read(SSL *ssl, void *buffer, int buffer_size) {
@@ -319,6 +333,23 @@ int bootstrap_ssl_set_fd(SSL *ssl, int fd) {
         return 0;
     }
     return SSL_set_fd(ssl, fd);
+}
+
+timeval socket_timeout_from_ms(int timeout_ms) {
+    return timeval{
+        .tv_sec = timeout_ms / 1000,
+        .tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000),
+    };
+}
+
+bool set_bootstrap_socket_timeout(int fd, int option_name) {
+    const auto timeout = socket_timeout_from_ms(kBootstrapConnectionTimeoutMs);
+    return bootstrap_setsockopt(fd, SOL_SOCKET, option_name, &timeout, sizeof(timeout)) == 0;
+}
+
+bool set_bootstrap_connection_timeouts(int fd) {
+    return set_bootstrap_socket_timeout(fd, SO_RCVTIMEO) &&
+           set_bootstrap_socket_timeout(fd, SO_SNDTIMEO);
 }
 
 std::optional<std::filesystem::path>
@@ -576,6 +607,10 @@ std::string serialize_response(const Http3BootstrapConfig &config,
 
 void serve_bootstrap_connection(const Http3BootstrapConfig &config, SSL_CTX *ssl_context,
                                 int client_fd) {
+    if (!set_bootstrap_connection_timeouts(client_fd)) {
+        return;
+    }
+
     SslConnection ssl(bootstrap_ssl_new(ssl_context), &SSL_free);
     if (ssl == nullptr) {
         return;
@@ -1033,6 +1068,12 @@ bool bootstrap_internal_coverage_for_test() {
     auto ssl_context = make_ssl_context(config);
     check(ssl_context != nullptr);
     bootstrap_test_hooks().fail_ssl_new = true;
+    serve_bootstrap_connection(config, ssl_context.get(), -1);
+
+    reset_bootstrap_test_hooks();
+    ssl_context = make_ssl_context(config);
+    check(ssl_context != nullptr);
+    bootstrap_test_hooks().remaining_socket_timeout_failures = 1;
     serve_bootstrap_connection(config, ssl_context.get(), -1);
 
     reset_bootstrap_test_hooks();

@@ -8,6 +8,12 @@
 
 #include "src/quic/buffer.h"
 
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 namespace coquic::quic {
 
 namespace {
@@ -436,10 +442,10 @@ decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_rang
 }
 
 template <typename OnRange>
-CodecResult<std::size_t> decode_ack_additional_ranges_bytes(std::span<const std::byte> bytes,
-                                                            std::uint64_t additional_range_count,
-                                                            std::uint64_t previous_smallest,
-                                                            OnRange &&on_range) {
+COQUIC_NO_PROFILE CodecResult<std::size_t>
+decode_ack_additional_ranges_bytes(std::span<const std::byte> bytes,
+                                   std::uint64_t additional_range_count,
+                                   std::uint64_t previous_smallest, OnRange &&on_range) {
     std::size_t offset = 0;
     for (std::uint64_t i = 0; i < additional_range_count; ++i) {
         const auto gap = decode_varint_bytes(bytes, offset);
@@ -1284,7 +1290,8 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
 }
 
 template <typename T>
-bool matches_codec_error(const CodecResult<T> &result, CodecErrorCode code, std::size_t offset) {
+COQUIC_NO_PROFILE bool matches_codec_error(const CodecResult<T> &result, CodecErrorCode code,
+                                           std::size_t offset) {
     const auto *error = std::get_if<CodecError>(&result.storage);
     return error != nullptr && error->code == code && error->offset == offset;
 }
@@ -1866,6 +1873,30 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
 }
 
 namespace test {
+
+COQUIC_NO_PROFILE bool matches_optional_codec_error(const std::optional<CodecError> &error,
+                                                    CodecErrorCode code, std::size_t offset) {
+    return error.has_value() && error->code == code && error->offset == offset;
+}
+
+COQUIC_NO_PROFILE bool span_writer_error_matches(const Frame &frame, CodecErrorCode code,
+                                                 std::size_t offset) {
+    std::array<std::byte, 512> output{};
+    SpanBufferWriter writer(output);
+    return matches_optional_codec_error(serialize_frame_into_writer(writer, frame), code, offset);
+}
+
+COQUIC_NO_PROFILE bool span_writer_fault_matches(const Frame &frame, FrameFaultPoint point,
+                                                 std::size_t occurrence) {
+    const ScopedFrameFault fault(point, occurrence);
+    return span_writer_error_matches(frame, kFrameFaultError.code, kFrameFaultError.offset);
+}
+
+COQUIC_NO_PROFILE bool span_writer_succeeds(const Frame &frame) {
+    std::array<std::byte, 512> output{};
+    SpanBufferWriter writer(output);
+    return !serialize_frame_into_writer(writer, frame).has_value();
+}
 
 std::uint64_t frame_to_received_variant_coverage_mask_for_tests() {
     std::uint64_t mask = 0;
@@ -2508,6 +2539,209 @@ bool frame_writer_branch_coverage_for_tests() {
         .reason = ConnectionCloseReason{.bytes = {std::byte{0x15}}},
     }});
     ok &= round_trip(Frame{HandshakeDoneFrame{}});
+    return ok;
+}
+
+bool frame_span_writer_branch_coverage_for_tests() {
+    bool ok = true;
+
+    const AckFrame ack_with_range{
+        .largest_acknowledged = 10,
+        .ack_delay = 1,
+        .first_ack_range = 2,
+        .additional_ranges =
+            {
+                AckRange{
+                    .gap = 1,
+                    .range_length = 1,
+                },
+            },
+        .ecn_counts =
+            AckEcnCounts{
+                .ect0 = 1,
+                .ect1 = 2,
+                .ecn_ce = 3,
+            },
+    };
+    const OutboundAckFrame outbound_ack{
+        .header =
+            OutboundAckHeader{
+                .largest_acknowledged = 10,
+                .ack_delay = 1,
+                .first_ack_range = 2,
+                .additional_ranges =
+                    {
+                        AckRange{
+                            .gap = 1,
+                            .range_length = 1,
+                        },
+                    },
+                .ecn_counts =
+                    AckEcnCounts{
+                        .ect0 = 1,
+                        .ect1 = 2,
+                        .ecn_ce = 3,
+                    },
+            },
+    };
+    const CryptoFrame crypto_frame{
+        .offset = 1,
+        .crypto_data = {std::byte{0x11}},
+    };
+    const NewTokenFrame new_token_frame{
+        .token = {std::byte{0x22}},
+    };
+    const StreamFrame stream_with_offset{
+        .has_offset = true,
+        .stream_id = 9,
+        .offset = 4,
+        .stream_data = {std::byte{0x33}},
+    };
+    const StreamFrame stream_with_length{
+        .has_length = true,
+        .stream_id = 9,
+        .stream_data = {std::byte{0x33}},
+    };
+    const NewConnectionIdFrame new_connection_id{
+        .sequence_number = 3,
+        .retire_prior_to = 1,
+        .connection_id = {std::byte{0x44}},
+    };
+    const TransportConnectionCloseFrame transport_close{
+        .error_code = 1,
+        .frame_type = 2,
+        .reason = ConnectionCloseReason{.bytes = {std::byte{0xaa}}},
+    };
+    const ApplicationConnectionCloseFrame application_close{
+        .error_code = 1,
+        .reason = ConnectionCloseReason{.bytes = {std::byte{0xbb}}},
+    };
+
+    ok &= span_writer_error_matches(Frame{PaddingFrame{.length = 0}},
+                                    CodecErrorCode::invalid_varint, 0);
+    ok &= span_writer_fault_matches(Frame{PaddingFrame{.length = 1}}, FrameFaultPoint::append_byte,
+                                    1);
+
+    ok &= span_writer_fault_matches(Frame{ack_with_range}, FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{ack_with_range}, FrameFaultPoint::append_varint, 1);
+    ok &= span_writer_fault_matches(Frame{ack_with_range}, FrameFaultPoint::append_varint, 2);
+    ok &= span_writer_fault_matches(Frame{ack_with_range}, FrameFaultPoint::append_varint, 3);
+    ok &= span_writer_fault_matches(Frame{ack_with_range}, FrameFaultPoint::append_varint, 4);
+    ok &= span_writer_error_matches(Frame{AckFrame{
+                                        .largest_acknowledged = 1,
+                                        .first_ack_range = 0,
+                                        .additional_ranges =
+                                            {
+                                                AckRange{
+                                                    .gap = 0,
+                                                    .range_length = 0,
+                                                },
+                                            },
+                                    }},
+                                    CodecErrorCode::invalid_varint, 0);
+    ok &= span_writer_fault_matches(Frame{ack_with_range}, FrameFaultPoint::append_varint, 5);
+    ok &= span_writer_fault_matches(Frame{ack_with_range}, FrameFaultPoint::append_varint, 6);
+    ok &= span_writer_fault_matches(Frame{ack_with_range}, FrameFaultPoint::append_varint, 7);
+
+    ok &= span_writer_succeeds(Frame{outbound_ack});
+    ok &= span_writer_fault_matches(Frame{outbound_ack}, FrameFaultPoint::append_byte, 1);
+
+    ok &= span_writer_fault_matches(Frame{ResetStreamFrame{}}, FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{ResetStreamFrame{}}, FrameFaultPoint::append_varint, 1);
+    ok &= span_writer_fault_matches(Frame{ResetStreamFrame{}}, FrameFaultPoint::append_varint, 2);
+    ok &= span_writer_fault_matches(Frame{ResetStreamFrame{}}, FrameFaultPoint::append_varint, 3);
+
+    ok &= span_writer_fault_matches(Frame{StopSendingFrame{}}, FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{StopSendingFrame{}}, FrameFaultPoint::append_varint, 1);
+    ok &= span_writer_fault_matches(Frame{StopSendingFrame{}}, FrameFaultPoint::append_varint, 2);
+
+    ok &= span_writer_error_matches(Frame{CryptoFrame{
+                                        .offset = kMaxVarInt,
+                                        .crypto_data = {std::byte{0x55}},
+                                    }},
+                                    CodecErrorCode::invalid_varint, 0);
+    ok &= span_writer_fault_matches(Frame{crypto_frame}, FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{crypto_frame}, FrameFaultPoint::append_varint, 1);
+
+    ok &= span_writer_error_matches(Frame{NewTokenFrame{}}, CodecErrorCode::invalid_varint, 0);
+    ok &= span_writer_fault_matches(Frame{new_token_frame}, FrameFaultPoint::append_byte, 1);
+
+    ok &= span_writer_error_matches(Frame{StreamFrame{
+                                        .has_offset = true,
+                                        .stream_id = 11,
+                                        .offset = kMaxVarInt,
+                                        .stream_data = {std::byte{0x66}},
+                                    }},
+                                    CodecErrorCode::invalid_varint, 0);
+    ok &= span_writer_fault_matches(Frame{stream_with_offset}, FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{stream_with_offset}, FrameFaultPoint::append_varint, 1);
+    ok &= span_writer_fault_matches(Frame{stream_with_offset}, FrameFaultPoint::append_varint, 2);
+    ok &= span_writer_fault_matches(Frame{stream_with_length}, FrameFaultPoint::append_varint, 2);
+    ok &= span_writer_fault_matches(Frame{stream_with_offset}, FrameFaultPoint::append_bytes, 1);
+
+    ok &= span_writer_fault_matches(
+        Frame{MaxStreamDataFrame{.stream_id = 1, .maximum_stream_data = 2}},
+        FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(
+        Frame{MaxStreamDataFrame{.stream_id = 1, .maximum_stream_data = 2}},
+        FrameFaultPoint::append_varint, 1);
+    ok &= span_writer_fault_matches(
+        Frame{MaxStreamDataFrame{.stream_id = 1, .maximum_stream_data = 2}},
+        FrameFaultPoint::append_varint, 2);
+
+    ok &= span_writer_error_matches(Frame{MaxStreamsFrame{
+                                        .maximum_streams = kMaxStreamsLimit + 1,
+                                    }},
+                                    CodecErrorCode::invalid_varint, 0);
+    ok &= span_writer_fault_matches(Frame{MaxStreamsFrame{.maximum_streams = 1}},
+                                    FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{MaxStreamsFrame{.maximum_streams = 1}},
+                                    FrameFaultPoint::append_varint, 1);
+
+    ok &= span_writer_fault_matches(
+        Frame{StreamDataBlockedFrame{.stream_id = 1, .maximum_stream_data = 2}},
+        FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(
+        Frame{StreamDataBlockedFrame{.stream_id = 1, .maximum_stream_data = 2}},
+        FrameFaultPoint::append_varint, 1);
+    ok &= span_writer_fault_matches(
+        Frame{StreamDataBlockedFrame{.stream_id = 1, .maximum_stream_data = 2}},
+        FrameFaultPoint::append_varint, 2);
+
+    ok &= span_writer_error_matches(Frame{StreamsBlockedFrame{
+                                        .maximum_streams = kMaxStreamsLimit + 1,
+                                    }},
+                                    CodecErrorCode::invalid_varint, 0);
+    ok &= span_writer_fault_matches(Frame{StreamsBlockedFrame{.maximum_streams = 1}},
+                                    FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{StreamsBlockedFrame{.maximum_streams = 1}},
+                                    FrameFaultPoint::append_varint, 1);
+
+    ok &=
+        span_writer_error_matches(Frame{NewConnectionIdFrame{}}, CodecErrorCode::invalid_varint, 0);
+    ok &= span_writer_fault_matches(Frame{new_connection_id}, FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{new_connection_id}, FrameFaultPoint::append_varint, 1);
+    ok &= span_writer_fault_matches(Frame{new_connection_id}, FrameFaultPoint::append_varint, 2);
+    ok &= span_writer_fault_matches(Frame{new_connection_id}, FrameFaultPoint::append_byte, 2);
+    ok &= span_writer_fault_matches(Frame{new_connection_id}, FrameFaultPoint::append_bytes, 1);
+    ok &= span_writer_fault_matches(Frame{new_connection_id}, FrameFaultPoint::append_bytes, 2);
+
+    ok &= span_writer_fault_matches(Frame{PathChallengeFrame{}}, FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{PathChallengeFrame{}}, FrameFaultPoint::append_bytes, 1);
+    ok &= span_writer_fault_matches(Frame{PathResponseFrame{}}, FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{PathResponseFrame{}}, FrameFaultPoint::append_bytes, 1);
+
+    ok &= span_writer_fault_matches(Frame{transport_close}, FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{transport_close}, FrameFaultPoint::append_varint, 1);
+    ok &= span_writer_fault_matches(Frame{transport_close}, FrameFaultPoint::append_varint, 2);
+    ok &= span_writer_fault_matches(Frame{transport_close}, FrameFaultPoint::append_varint, 3);
+
+    ok &= span_writer_fault_matches(Frame{application_close}, FrameFaultPoint::append_byte, 1);
+    ok &= span_writer_fault_matches(Frame{application_close}, FrameFaultPoint::append_varint, 1);
+    ok &= span_writer_fault_matches(Frame{application_close}, FrameFaultPoint::append_varint, 2);
+
+    ok &= span_writer_fault_matches(Frame{HandshakeDoneFrame{}}, FrameFaultPoint::append_byte, 1);
+
     return ok;
 }
 

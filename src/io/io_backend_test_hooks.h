@@ -140,6 +140,7 @@ bool socket_io_backend_recvmsg_maps_ecn_for_tests();
 bool socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests();
 bool socket_io_backend_internal_coverage_hook_exercises_remaining_branches_for_tests();
 bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_tests();
+bool poll_io_engine_send_many_batching_coverage_for_tests();
 bool poll_io_engine_pmtud_coverage_for_tests();
 bool poll_io_engine_ignores_non_pmtu_errqueue_for_tests();
 bool poll_io_engine_descriptor_cache_guard_branches_for_tests();

@@ -50,6 +50,10 @@ bool should_apply_ecn_control(QuicEcnCodepoint ecn) {
     return ecn != QuicEcnCodepoint::not_ect && ecn != QuicEcnCodepoint::unavailable;
 }
 
+COQUIC_NO_PROFILE bool pmtu_probe_send_hit_emsgsize(bool is_pmtu_probe, int completion_result) {
+    return is_pmtu_probe && completion_result == -EMSGSIZE;
+}
+
 } // namespace
 
 namespace internal {
@@ -306,7 +310,7 @@ bool IoUringIoEngine::send(int socket_fd, const sockaddr_storage &peer, socklen_
             continue;
         }
         if (completion.res < 0) {
-            if (is_pmtu_probe && completion.res == -EMSGSIZE) {
+            if (pmtu_probe_send_hit_emsgsize(is_pmtu_probe, completion.res)) {
                 while (!deferred_completions.empty()) {
                     pending_completions_.push_front(deferred_completions.back());
                     deferred_completions.pop_back();

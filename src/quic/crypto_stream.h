@@ -17,6 +17,12 @@
 
 namespace coquic::quic {
 
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 struct ByteRange {
     std::uint64_t offset = 0;
     SharedBytes bytes;
@@ -51,8 +57,9 @@ class ReliableSendBuffer {
     take_unsent_ranges(std::size_t max_bytes,
                        std::optional<std::uint64_t> max_offset = std::nullopt);
     template <typename Callback>
-    void consume_lost_ranges(std::size_t &remaining_bytes, std::optional<std::uint64_t> max_offset,
-                             Callback &&callback) {
+    COQUIC_NO_PROFILE void consume_lost_ranges(std::size_t &remaining_bytes,
+                                               std::optional<std::uint64_t> max_offset,
+                                               Callback &&callback) {
         if (remaining_bytes == 0 ||
             segment_state_counts_[segment_state_index(SegmentState::lost)] == 0) {
             return;
@@ -63,8 +70,9 @@ class ReliableSendBuffer {
         merge_adjacent_segments();
     }
     template <typename Callback>
-    void consume_unsent_ranges(std::size_t &remaining_bytes,
-                               std::optional<std::uint64_t> max_offset, Callback &&callback) {
+    COQUIC_NO_PROFILE void consume_unsent_ranges(std::size_t &remaining_bytes,
+                                                 std::optional<std::uint64_t> max_offset,
+                                                 Callback &&callback) {
         if (remaining_bytes == 0 ||
             segment_state_counts_[segment_state_index(SegmentState::unsent)] == 0) {
             return;
@@ -111,8 +119,9 @@ class ReliableSendBuffer {
                          std::optional<std::uint64_t> max_offset = std::nullopt);
     std::optional<std::uint64_t> first_offset_by_state(SegmentState state) const;
     template <typename Callback>
-    void consume_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
-                                 std::optional<std::uint64_t> max_offset, Callback &&callback) {
+    COQUIC_NO_PROFILE void consume_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
+                                                   std::optional<std::uint64_t> max_offset,
+                                                   Callback &&callback) {
         if (max_offset.has_value()) {
             split_at(*max_offset);
         }

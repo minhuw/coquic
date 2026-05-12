@@ -154,6 +154,10 @@ std::unique_ptr<QuicIoBackend> make_socket_io_backend(SocketIoBackendConfig conf
     return std::make_unique<SocketIoBackend>(std::move(config));
 }
 
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((no_profile_instrument_function)), apply_to = function)
+#endif
+
 namespace test {
 
 namespace {
@@ -678,5 +682,9 @@ bool io_backend_wait_returns_second_route_datagram_for_tests(QuicIoBackendKind k
 }
 
 } // namespace test
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#endif
 
 } // namespace coquic::io

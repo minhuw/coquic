@@ -25,6 +25,7 @@
 #define private public
 #include "src/io/io_uring_io_engine.h"
 #undef private
+#include "tests/support/core/connection_test_fixtures.h"
 
 namespace {
 
@@ -75,6 +76,7 @@ thread_local std::deque<ScriptedCompletionForTests> g_send_loop_completions;
 struct SendObservationForTests {
     int opcode = -1;
     int socket_fd = -1;
+    std::uint16_t peer_port = 0;
     std::uint64_t user_data = 0;
     int cmsg_level = 0;
     int cmsg_type = 0;
@@ -194,7 +196,9 @@ sockaddr_storage make_ipv4_mapped_ipv6_peer(std::uint16_t port) {
 }
 
 void capture_send_message_for_tests(const msghdr *message) {
-    g_engine_harness.last_send = {};
+    g_engine_harness.last_send.cmsg_level = 0;
+    g_engine_harness.last_send.cmsg_type = 0;
+    g_engine_harness.last_send.traffic_class = -1;
     if (message == nullptr || message->msg_control == nullptr) {
         return;
     }
@@ -309,6 +313,7 @@ int submit_for_engine_test(io_uring *) {
     if (g_engine_harness.sqe.opcode == IORING_OP_SENDMSG) {
         const auto *message = std::bit_cast<const msghdr *>(g_engine_harness.sqe.addr);
         capture_send_message_for_tests(message);
+        g_engine_harness.last_send.peer_port = peer_port_from_msghdr(message);
         if (g_engine_harness.auto_complete_send) {
             const int bytes =
                 g_engine_harness.send_completion_res == std::numeric_limits<int>::min()
@@ -483,6 +488,62 @@ TEST(IoUringBackendTest, WaitPrefersReadyReceiveOverDueTimer) {
 
 TEST(IoUringBackendTest, SendReturnsWhenReceiveCompletionPrecedesSendCompletion) {
     EXPECT_TRUE(io_uring_send_returns_when_receive_completion_precedes_send_completion());
+}
+
+TEST(IoUringBackendTest, BackendSendManyDelegatesRouteMappedDatagramsToEngine) {
+    reset_io_uring_engine_harness();
+    const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+        io_uring_ops_for_engine_tests(),
+    };
+
+    auto backend = coquic::io::make_io_uring_backend(coquic::io::QuicUdpBackendConfig{
+        .role_name = "client",
+    });
+    ASSERT_NE(backend, nullptr);
+
+    const auto first_peer = make_ipv4_loopback_peer(17444);
+    const auto second_peer = make_ipv4_loopback_peer(17445);
+    const auto first_route = backend->ensure_route(coquic::io::QuicIoRemote{
+        .peer = first_peer,
+        .peer_len = sizeof(sockaddr_in),
+        .family = AF_INET,
+    });
+    const auto second_route = backend->ensure_route(coquic::io::QuicIoRemote{
+        .peer = second_peer,
+        .peer_len = sizeof(sockaddr_in),
+        .family = AF_INET,
+    });
+    ASSERT_TRUE(first_route.has_value());
+    ASSERT_TRUE(second_route.has_value());
+    const auto first_route_handle =
+        coquic::quic::test_support::optional_value_or_terminate(first_route);
+    const auto second_route_handle =
+        coquic::quic::test_support::optional_value_or_terminate(second_route);
+
+    constexpr std::array<std::byte, 1> kFirstPayload = {
+        std::byte{0x61},
+    };
+    constexpr std::array<std::byte, 2> kSecondPayload = {
+        std::byte{0x62},
+        std::byte{0x63},
+    };
+    const std::array datagrams{
+        coquic::io::QuicIoTxDatagram{
+            .route_handle = first_route_handle,
+            .bytes_view = kFirstPayload,
+            .ecn = QuicEcnCodepoint::not_ect,
+        },
+        coquic::io::QuicIoTxDatagram{
+            .route_handle = second_route_handle,
+            .bytes_view = kSecondPayload,
+            .ecn = QuicEcnCodepoint::ect0,
+        },
+    };
+
+    EXPECT_TRUE(backend->send_many(datagrams));
+    EXPECT_EQ(g_engine_harness.last_send.opcode, IORING_OP_SENDMSG);
+    EXPECT_EQ(g_engine_harness.last_send.peer_port, 17445);
+    EXPECT_EQ(g_engine_harness.last_send.traffic_class, 0x02);
 }
 
 TEST(IoUringBackendTest, RuntimeHooksExposeMutableIoUringOpsState) {
@@ -738,6 +799,32 @@ TEST(IoUringBackendTest, SendFailsWhenCompletionReportsError) {
         engine->send(83, peer, sizeof(sockaddr_in), kPayload, "client", QuicEcnCodepoint::not_ect));
 }
 
+TEST(IoUringBackendTest, PmtuProbeSendTreatsEmsgsizeAsDeliveredAndRestoresDeferredCompletions) {
+    reset_io_uring_engine_harness();
+    const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+        io_uring_ops_for_engine_tests(),
+    };
+
+    auto engine = coquic::io::IoUringIoEngine::create();
+    ASSERT_NE(engine, nullptr);
+
+    engine->pending_completions_.push_back({
+        .user_data = 321,
+        .res = 11,
+    });
+
+    constexpr std::array<std::byte, 1> kPayload = {
+        std::byte{0x79},
+    };
+    const auto peer = make_ipv4_loopback_peer(14444);
+    g_engine_harness.send_completion_res = -EMSGSIZE;
+    EXPECT_TRUE(engine->send(84, peer, sizeof(sockaddr_in), kPayload, "client",
+                             QuicEcnCodepoint::not_ect, /*is_pmtu_probe=*/true));
+    ASSERT_EQ(engine->pending_completions_.size(), 1U);
+    EXPECT_EQ(engine->pending_completions_.front().user_data, 321U);
+    EXPECT_EQ(engine->pending_completions_.front().res, 11);
+}
+
 TEST(IoUringBackendTest, SendRestoresDeferredPendingCompletionsAfterSuccess) {
     reset_io_uring_engine_harness();
     const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
@@ -761,6 +848,79 @@ TEST(IoUringBackendTest, SendRestoresDeferredPendingCompletionsAfterSuccess) {
     ASSERT_EQ(engine->pending_completions_.size(), 1U);
     EXPECT_EQ(engine->pending_completions_.front().user_data, 123U);
     EXPECT_EQ(engine->pending_completions_.front().res, 7);
+}
+
+TEST(IoUringBackendTest, SendManySendsEachDatagramInOrder) {
+    reset_io_uring_engine_harness();
+    const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+        io_uring_ops_for_engine_tests(),
+    };
+
+    auto engine = coquic::io::IoUringIoEngine::create();
+    ASSERT_NE(engine, nullptr);
+
+    constexpr std::array<std::byte, 1> kFirstPayload = {
+        std::byte{0x81},
+    };
+    constexpr std::array<std::byte, 2> kSecondPayload = {
+        std::byte{0x82},
+        std::byte{0x83},
+    };
+    const auto first_peer = make_ipv4_loopback_peer(14544);
+    const auto second_peer = make_ipv4_loopback_peer(14545);
+    const std::array datagrams{
+        coquic::io::QuicIoEngineTxDatagram{
+            .socket_fd = 84,
+            .peer = first_peer,
+            .peer_len = sizeof(sockaddr_in),
+            .bytes = kFirstPayload,
+            .ecn = QuicEcnCodepoint::not_ect,
+        },
+        coquic::io::QuicIoEngineTxDatagram{
+            .socket_fd = 85,
+            .peer = second_peer,
+            .peer_len = sizeof(sockaddr_in),
+            .bytes = kSecondPayload,
+            .ecn = QuicEcnCodepoint::ect0,
+        },
+    };
+
+    EXPECT_TRUE(engine->send_many(datagrams, "client"));
+    EXPECT_EQ(g_engine_harness.last_send.socket_fd, 85);
+    EXPECT_EQ(g_engine_harness.last_send.traffic_class, 0x02);
+}
+
+TEST(IoUringBackendTest, SendManyStopsAfterFirstSendFailure) {
+    reset_io_uring_engine_harness();
+    const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+        io_uring_ops_for_engine_tests(),
+    };
+
+    auto engine = coquic::io::IoUringIoEngine::create();
+    ASSERT_NE(engine, nullptr);
+
+    constexpr std::array<std::byte, 1> kPayload = {
+        std::byte{0x84},
+    };
+    const auto peer = make_ipv4_loopback_peer(14546);
+    const std::array datagrams{
+        coquic::io::QuicIoEngineTxDatagram{
+            .socket_fd = 86,
+            .peer = peer,
+            .peer_len = sizeof(sockaddr_in),
+            .bytes = kPayload,
+        },
+        coquic::io::QuicIoEngineTxDatagram{
+            .socket_fd = 87,
+            .peer = peer,
+            .peer_len = sizeof(sockaddr_in),
+            .bytes = kPayload,
+        },
+    };
+
+    g_engine_harness.submit_rc_for_send = -EIO;
+    EXPECT_FALSE(engine->send_many(datagrams, "client"));
+    EXPECT_EQ(g_engine_harness.last_send.socket_fd, 86);
 }
 
 TEST(IoUringBackendTest, DrainOneCompletionUsesPendingQueueBeforeRingWait) {
@@ -1091,6 +1251,38 @@ TEST(IoUringBackendTest, SendDelegatesFallbackFailures) {
     EXPECT_FALSE(
         engine.send(102, peer, sizeof(sockaddr_in), kPayload, "client", QuicEcnCodepoint::ect1));
     EXPECT_EQ(fallback_ptr->send_calls, 1);
+}
+
+TEST(IoUringBackendTest, SendManyDelegatesToFallbackEngineWhenAlreadyEnabled) {
+    coquic::io::IoUringIoEngine engine;
+    auto fallback = std::make_unique<StubIoEngineForTests>();
+    auto *fallback_ptr = fallback.get();
+    engine.use_poll_receive_ = true;
+    engine.receive_fallback_ = std::move(fallback);
+
+    constexpr std::array<std::byte, 1> kPayload = {
+        std::byte{0xbc},
+    };
+    const auto peer = make_ipv4_loopback_peer(18444);
+    const std::array datagrams{
+        coquic::io::QuicIoEngineTxDatagram{
+            .socket_fd = 102,
+            .peer = peer,
+            .peer_len = sizeof(sockaddr_in),
+            .bytes = kPayload,
+            .ecn = QuicEcnCodepoint::ect1,
+        },
+        coquic::io::QuicIoEngineTxDatagram{
+            .socket_fd = 103,
+            .peer = peer,
+            .peer_len = sizeof(sockaddr_in),
+            .bytes = kPayload,
+            .ecn = QuicEcnCodepoint::ce,
+        },
+    };
+
+    EXPECT_TRUE(engine.send_many(datagrams, "client"));
+    EXPECT_EQ(fallback_ptr->send_calls, 2);
 }
 
 TEST(IoUringBackendTest, WaitReturnsNulloptWhenFallbackEngineIsMissing) {

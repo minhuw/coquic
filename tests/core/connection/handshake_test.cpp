@@ -5340,6 +5340,47 @@ TEST(QuicCoreTest, ProcessInboundDatagramQlogPathDefersProtectedApplicationPacke
     EXPECT_FALSE(connection.has_failed());
 }
 
+TEST(QuicCoreTest, ProcessInboundDatagramQlogPathServerDefersShortHeaderBeforeHandshakeCompletes) {
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.handshake_packet_space_discarded_ = false;
+    enable_qlog_session_for_test(connection, qlog_dir.path());
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 195,
+                .frames =
+                    {
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = 0,
+                            .first_ack_range = 0,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    ASSERT_EQ(connection.deferred_protected_packets_.size(), 1u);
+    EXPECT_EQ(connection.deferred_protected_packets_.front(), encoded.value());
+    EXPECT_EQ(connection.deferred_protected_packets_.front().datagram_id, 0u);
+}
+
 TEST(QuicCoreTest, ProcessInboundDatagramQlogPathFailsWhenApplicationPacketProcessingFails) {
     coquic::quic::test::ScopedTempDir qlog_dir;
     auto connection = make_connected_server_connection();

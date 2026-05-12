@@ -1520,8 +1520,8 @@ TEST(QuicHttp3RuntimeTest, RuntimeLoopInternalCoverageMaskIncludesScriptedBranch
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeConnectionHandleCoverageMaskIncludesEventEffects) {
-    constexpr std::uint64_t kExpectedMask =
-        (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 3) | (1ull << 4) | (1ull << 5);
+    constexpr std::uint64_t kExpectedMask = (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 3) |
+                                            (1ull << 4) | (1ull << 5) | (1ull << 6);
     EXPECT_EQ(coquic::http3::runtime_connection_handle_effect_coverage_mask_for_test(),
               kExpectedMask);
 }

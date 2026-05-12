@@ -694,104 +694,32 @@ pub fn build(b: *std.Build) void {
         fmt_include_dir,
         liburing_include_dir,
     );
-    const smoke_coverage_tests = addTestBinary(
+    var coverage_test_file_list = std.ArrayList([]const u8).init(b.allocator);
+    coverage_test_file_list.appendSlice(smoke_test_files) catch @panic("oom");
+    coverage_test_file_list.appendSlice(core_test_files) catch @panic("oom");
+    coverage_test_file_list.appendSlice(http09_test_files) catch @panic("oom");
+    coverage_test_file_list.appendSlice(http3_test_files) catch @panic("oom");
+    coverage_test_file_list.appendSlice(qlog_test_files) catch @panic("oom");
+    coverage_test_file_list.appendSlice(tls_test_files) catch @panic("oom");
+
+    const coverage_tests = addTestBinary(
         b,
-        "coquic-coverage-tests-smoke",
+        "coquic-coverage-tests",
         target,
         optimize,
         coverage_cpp_flags,
         coverage_lib,
         gtest_root,
-        smoke_test_files,
+        coverage_test_file_list.toOwnedSlice() catch @panic("oom"),
     );
-    const core_coverage_tests = addTestBinary(
-        b,
-        "coquic-coverage-tests-core",
-        target,
-        optimize,
-        coverage_cpp_flags,
-        coverage_lib,
-        gtest_root,
-        core_test_files,
-    );
-    const http09_coverage_tests = addTestBinary(
-        b,
-        "coquic-coverage-tests-http09",
-        target,
-        optimize,
-        coverage_cpp_flags,
-        coverage_lib,
-        gtest_root,
-        http09_test_files,
-    );
-    const http3_coverage_tests = addTestBinary(
-        b,
-        "coquic-coverage-tests-http3",
-        target,
-        optimize,
-        coverage_cpp_flags,
-        coverage_lib,
-        gtest_root,
-        http3_test_files,
-    );
-    const qlog_coverage_tests = addTestBinary(
-        b,
-        "coquic-coverage-tests-qlog",
-        target,
-        optimize,
-        coverage_cpp_flags,
-        coverage_lib,
-        gtest_root,
-        qlog_test_files,
-    );
-    const tls_coverage_tests = addTestBinary(
-        b,
-        "coquic-coverage-tests-tls",
-        target,
-        optimize,
-        coverage_cpp_flags,
-        coverage_lib,
-        gtest_root,
-        tls_test_files,
-    );
-    linkTlsBackend(b, smoke_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
-    linkSpdlog(smoke_coverage_tests);
-    linkLiburing(smoke_coverage_tests);
-    smoke_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
-    smoke_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
-    linkTlsBackend(b, core_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
-    linkSpdlog(core_coverage_tests);
-    linkLiburing(core_coverage_tests);
-    core_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
-    core_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
-    linkTlsBackend(b, http09_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
-    linkSpdlog(http09_coverage_tests);
-    linkLiburing(http09_coverage_tests);
-    http09_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
-    http09_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
-    linkTlsBackend(b, http3_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
-    linkSpdlog(http3_coverage_tests);
-    linkLiburing(http3_coverage_tests);
-    http3_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
-    http3_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
-    linkTlsBackend(b, qlog_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
-    linkSpdlog(qlog_coverage_tests);
-    linkLiburing(qlog_coverage_tests);
-    qlog_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
-    qlog_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
-    linkTlsBackend(b, tls_coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
-    linkSpdlog(tls_coverage_tests);
-    linkLiburing(tls_coverage_tests);
-    tls_coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
-    tls_coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
+    linkTlsBackend(b, coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
+    linkSpdlog(coverage_tests);
+    linkLiburing(coverage_tests);
+    coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
+    coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
     const coverage_cmd = b.addSystemCommand(&.{"bash"});
     coverage_cmd.addFileArg(b.path("scripts/run-coverage.sh"));
-    coverage_cmd.addArtifactArg(smoke_coverage_tests);
-    coverage_cmd.addArtifactArg(core_coverage_tests);
-    coverage_cmd.addArtifactArg(http09_coverage_tests);
-    coverage_cmd.addArtifactArg(http3_coverage_tests);
-    coverage_cmd.addArtifactArg(qlog_coverage_tests);
-    coverage_cmd.addArtifactArg(tls_coverage_tests);
+    coverage_cmd.addArtifactArg(coverage_tests);
     const coverage_step = b.step(
         "coverage",
         "Run the test suite and export LLVM coverage reports",

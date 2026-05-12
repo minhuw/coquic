@@ -1711,6 +1711,26 @@ bool runtime_misc_internal_coverage_for_test() {
         check(inputs.size() == 1, "timer events produce exactly one core input");
         check(timer_expired_count == 1, "timer events become timer core inputs");
     }
+    {
+        const auto inputs = make_endpoint_inputs_from_io_event(io::QuicIoEvent{
+            .kind = io::QuicIoEvent::Kind::path_mtu_update,
+            .path_mtu =
+                io::QuicIoPathMtuUpdate{
+                    .route_handle = quic::QuicRouteHandle{77},
+                    .max_udp_payload_size = 1400,
+                },
+        });
+        const auto pmtu_count = std::count_if(inputs.begin(), inputs.end(), [](const auto &input) {
+            return std::holds_alternative<quic::QuicCorePathMtuUpdate>(input);
+        });
+        check(inputs.size() == 1, "path MTU events produce exactly one core input");
+        check(pmtu_count == 1, "path MTU events become path MTU core inputs");
+    }
+    check(make_endpoint_inputs_from_io_event(io::QuicIoEvent{
+                                                 .kind = io::QuicIoEvent::Kind::path_mtu_update,
+                                             })
+              .empty(),
+          "path MTU events without payloads produce no core inputs");
     check(make_endpoint_inputs_from_io_event(io::QuicIoEvent{
                                                  .kind = io::QuicIoEvent::Kind::idle_timeout,
                                              })
@@ -1962,6 +1982,13 @@ std::uint64_t runtime_connection_handle_effect_coverage_mask_for_test() {
              .application_error_code = 18,
          }},
          16, "connection_handle_of_effect handles peer stop sending effects");
+    mark(1ull << 6,
+         quic::QuicCoreEffect{quic::QuicCorePacketInspection{
+             .connection = 19,
+             .direction = quic::QuicCorePacketInspectionDirection::outbound,
+             .datagram_id = 20,
+         }},
+         19, "connection_handle_of_effect handles packet inspection effects");
 
     return mask;
 }

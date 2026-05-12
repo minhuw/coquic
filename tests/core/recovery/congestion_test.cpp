@@ -140,6 +140,14 @@ TEST(QuicCongestionTest, BbrPacingBudgetProducesFutureSendDeadlineAfterBurst) {
     EXPECT_FALSE(controller.next_send_time(/*bytes=*/1200).has_value());
 }
 
+TEST(QuicCongestionTest, BbrStartupModeDoesNotExposePacingDeadline) {
+    BbrCongestionController controller(/*max_datagram_size=*/1200);
+    controller.pacing_budget_timestamp_ = coquic::quic::test::test_time(7);
+    controller.pacing_budget_bytes_ = 1200;
+
+    EXPECT_FALSE(controller.next_send_time(/*bytes=*/1200).has_value());
+}
+
 TEST(QuicCongestionTest, BbrPersistentCongestionClearsPacingDeadline) {
     BbrCongestionController controller(/*max_datagram_size=*/1200);
     controller.mode_ = BbrCongestionController::Mode::probe_bw_cruise;
@@ -901,6 +909,7 @@ TEST(QuicCongestionTest, BbrAckLossAndIdleColdBranches) {
     pacing.pacing_budget_timestamp_ = coquic::quic::test::test_time(0);
     pacing.pacing_budget_bytes_ = 0;
     pacing.send_quantum_ = 1200;
+    pacing.mode_ = BbrCongestionController::Mode::probe_bw_cruise;
     pacing.pacing_rate_bytes_per_second_ = 0.0;
     EXPECT_FALSE(pacing.next_send_time(/*bytes=*/2400).has_value());
 

@@ -86,6 +86,9 @@ enum class ClientConnectionBackendLoopCaseForTests : std::uint8_t {
     timer_due_before_wait_then_drive_failure,
     timer_event_then_drive_failure,
     timer_event_then_terminal_success,
+    missing_path_mtu_update,
+    path_mtu_update_then_wait_failure,
+    path_mtu_update_then_drive_failure,
     rx_datagram_then_drive_failure,
     rx_datagram_then_terminal_success_after_elapsed_drain_window,
     rx_datagram_then_terminal_success_with_followup_input,
@@ -153,6 +156,7 @@ struct ServerLoopResultForTests {
     std::vector<long long> wait_request_delta_ms;
     std::size_t process_expired_calls = 0;
     std::size_t process_datagram_calls = 0;
+    std::size_t process_path_mtu_calls = 0;
     std::size_t pump_calls = 0;
     std::size_t initial_send_calls = 0;
     std::size_t send_calls = 0;

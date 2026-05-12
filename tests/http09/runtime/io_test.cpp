@@ -491,6 +491,32 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_FALSE(timer_event_then_terminal_success.terminal_failure);
     EXPECT_EQ(timer_event_then_terminal_success.wait_calls, 1U);
 
+    const auto missing_path_mtu_update =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::missing_path_mtu_update);
+    EXPECT_EQ(missing_path_mtu_update.exit_code, 1);
+    EXPECT_FALSE(missing_path_mtu_update.terminal_success);
+    EXPECT_FALSE(missing_path_mtu_update.terminal_failure);
+    EXPECT_EQ(missing_path_mtu_update.wait_calls, 1U);
+
+    const auto path_mtu_update_then_wait_failure =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
+                path_mtu_update_then_wait_failure);
+    EXPECT_EQ(path_mtu_update_then_wait_failure.exit_code, 1);
+    EXPECT_FALSE(path_mtu_update_then_wait_failure.terminal_success);
+    EXPECT_FALSE(path_mtu_update_then_wait_failure.terminal_failure);
+    EXPECT_EQ(path_mtu_update_then_wait_failure.wait_calls, 2U);
+
+    const auto path_mtu_update_then_drive_failure =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
+                path_mtu_update_then_drive_failure);
+    EXPECT_EQ(path_mtu_update_then_drive_failure.exit_code, 1);
+    EXPECT_FALSE(path_mtu_update_then_drive_failure.terminal_success);
+    EXPECT_TRUE(path_mtu_update_then_drive_failure.terminal_failure);
+    EXPECT_EQ(path_mtu_update_then_drive_failure.wait_calls, 1U);
+
     const auto rx_datagram_then_drive_failure =
         coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
             coquic::http09::test::ClientConnectionBackendLoopCaseForTests::

@@ -25,6 +25,8 @@
 namespace coquic::quic {
 
 namespace test {
+struct ConnectionCoverageTestPeer;
+bool connection_helper_edge_cases_for_tests();
 bool connection_key_update_and_probe_coverage_for_tests();
 bool connection_pmtud_coverage_for_tests();
 } // namespace test
@@ -505,6 +507,8 @@ class QuicConnection {
     };
 
     friend class QuicCore;
+    friend struct test::ConnectionCoverageTestPeer;
+    friend bool test::connection_helper_edge_cases_for_tests();
     friend bool test::connection_key_update_and_probe_coverage_for_tests();
     friend bool test::connection_pmtud_coverage_for_tests();
 

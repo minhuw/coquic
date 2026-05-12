@@ -313,6 +313,93 @@ TEST(QuicStreamsTest, RestoreSendFragmentReturnsNewDataToUnsentState) {
     EXPECT_TRUE(resent[0].consumes_flow_control);
 }
 
+TEST(QuicStreamsTest, NextSendOffsetPrefersFreshDataThenLostRangesWhenRequested) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    state.flow_control.peer_max_stream_data = 8;
+    state.send_buffer.append(bytes_from_string("abcdefgh"));
+    state.send_flow_control_committed = 8;
+
+    const auto sent = state.take_send_fragments(/*max_bytes=*/4);
+    ASSERT_EQ(sent.size(), 1u);
+    state.mark_send_fragment_lost(sent[0]);
+
+    EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/false), sent[0].offset);
+    EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/true), 4u);
+
+    const auto fresh = state.take_send_fragments(coquic::quic::StreamSendBudget{
+        .packet_bytes = 4,
+        .new_bytes = 4,
+        .prefer_fresh_data = true,
+    });
+    ASSERT_EQ(fresh.size(), 1u);
+    EXPECT_EQ(fresh[0].offset, 4u);
+
+    EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/true), sent[0].offset);
+
+    const auto lost_retry = state.take_send_fragments(coquic::quic::StreamSendBudget{
+        .packet_bytes = 4,
+        .new_bytes = 0,
+        .prefer_fresh_data = true,
+    });
+    ASSERT_EQ(lost_retry.size(), 1u);
+    EXPECT_EQ(lost_retry[0].offset, sent[0].offset);
+
+    EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/true),
+              state.flow_control.highest_sent);
+}
+
+TEST(QuicStreamsTest, NextSendOffsetFallsBackToFreshDataWhenNoLostRangesExist) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    state.flow_control.peer_max_stream_data = 3;
+    state.send_buffer.append(bytes_from_string("abc"));
+    state.send_flow_control_committed = 3;
+
+    EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/false), 0u);
+}
+
+TEST(QuicStreamsTest, RestoreRetransmittedFragmentKeepsLostStateWhenCreditWasAlreadyConsumed) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    state.flow_control.peer_max_stream_data = 3;
+    state.send_buffer.append(bytes_from_string("abc"));
+    state.send_flow_control_committed = 3;
+
+    const auto sent = state.take_send_fragments(/*max_bytes=*/3);
+    ASSERT_EQ(sent.size(), 1u);
+    ASSERT_TRUE(sent[0].consumes_flow_control);
+    state.mark_send_fragment_lost(sent[0]);
+
+    const auto retransmit = state.take_send_fragments(coquic::quic::StreamSendBudget{
+        .packet_bytes = 3,
+        .new_bytes = 0,
+        .prefer_fresh_data = false,
+    });
+    ASSERT_EQ(retransmit.size(), 1u);
+    EXPECT_FALSE(retransmit[0].consumes_flow_control);
+
+    state.restore_send_fragment(retransmit[0]);
+
+    EXPECT_TRUE(state.send_buffer.has_lost_data());
+    EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/false), 0u);
+}
+
+TEST(QuicStreamsTest, RestoreFinBearingFragmentMakesFinPendingAgain) {
+    StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    state.send_buffer.append(bytes_from_string("abc"));
+    ASSERT_TRUE(state.validate_local_send(/*fin=*/true).has_value());
+    state.send_final_size = 3;
+    state.send_fin_state = StreamSendFinState::pending;
+    state.send_flow_control_committed = 3;
+
+    const auto fragments = state.take_send_fragments(/*max_bytes=*/3);
+    ASSERT_EQ(fragments.size(), 1u);
+    ASSERT_TRUE(fragments[0].fin);
+    EXPECT_EQ(state.send_fin_state, StreamSendFinState::sent);
+
+    state.restore_send_fragment(fragments[0]);
+
+    EXPECT_EQ(state.send_fin_state, StreamSendFinState::pending);
+}
+
 TEST(QuicStreamsTest, MarkSendFragmentSentMarksPendingFinAsSent) {
     StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
     state.send_buffer.append(bytes_from_string("hello"));

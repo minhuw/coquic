@@ -80,6 +80,29 @@ void configure_udp_socket_buffers(LinuxSocketDescriptor socket) {
     set_buffer_option(SO_SNDBUF);
 }
 
+COQUIC_NO_PROFILE bool socket_family_uses_ipv4_pmtud_options(int family) {
+    return family == AF_INET || family == AF_INET6;
+}
+
+COQUIC_NO_PROFILE bool socket_family_is_ipv6(int family) {
+    return family == AF_INET6;
+}
+
+COQUIC_NO_PROFILE bool
+configure_ipv4_pmtud_socket_options_if_needed(LinuxSocketDescriptor socket, int family,
+                                              const auto &set_bool_socket_option) {
+    if (!socket_family_uses_ipv4_pmtud_options(family)) {
+        return true;
+    }
+
+    const int discover = IP_PMTUDISC_DO;
+    if (socket_io_backend_ops_state().setsockopt_fn(socket.fd, IPPROTO_IP, IP_MTU_DISCOVER,
+                                                    &discover, sizeof(discover)) != 0) {
+        return false;
+    }
+    return set_bool_socket_option(IPPROTO_IP, IP_RECVERR);
+}
+
 bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family) {
 #if defined(__linux__)
     const auto set_bool_socket_option = [&](int level, int name) {
@@ -93,7 +116,7 @@ bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family
             return false;
         }
     }
-    if (family == AF_INET6) {
+    if (socket_family_is_ipv6(family)) {
         if (!set_bool_socket_option(IPPROTO_IPV6, IPV6_RECVTCLASS)) {
             return false;
         }
@@ -113,17 +136,10 @@ bool configure_linux_pmtud_socket_options(LinuxSocketDescriptor socket, int fami
                                                            sizeof(enabled)) == 0;
     };
 
-    if (family == AF_INET || family == AF_INET6) {
-        const int discover = IP_PMTUDISC_DO;
-        if (socket_io_backend_ops_state().setsockopt_fn(socket.fd, IPPROTO_IP, IP_MTU_DISCOVER,
-                                                        &discover, sizeof(discover)) != 0) {
-            return false;
-        }
-        if (!set_bool_socket_option(IPPROTO_IP, IP_RECVERR)) {
-            return false;
-        }
+    if (!configure_ipv4_pmtud_socket_options_if_needed(socket, family, set_bool_socket_option)) {
+        return false;
     }
-    if (family == AF_INET6) {
+    if (socket_family_is_ipv6(family)) {
         const int discover = IPV6_PMTUDISC_DO;
         if (socket_io_backend_ops_state().setsockopt_fn(socket.fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER,
                                                         &discover, sizeof(discover)) != 0) {

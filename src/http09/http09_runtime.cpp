@@ -41,6 +41,12 @@
 #include <utility>
 #include <variant>
 
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 namespace coquic::http09 {
 
 using namespace quic;
@@ -3226,6 +3232,21 @@ struct ServerBackendLoopDriver {
         [](const QuicIoPathMtuUpdate &, QuicCoreTimePoint) { return true; };
 };
 
+COQUIC_NO_PROFILE bool process_path_mtu_update_event(const ServerBackendLoopDriver &driver,
+                                                     const QuicIoPathMtuUpdate &update,
+                                                     QuicCoreTimePoint now) {
+    return driver.process_path_mtu_update(update, now);
+}
+
+COQUIC_NO_PROFILE void
+process_path_mtu_update_event_or_mark_failed(const ServerBackendLoopDriver &driver,
+                                             const QuicIoPathMtuUpdate &update,
+                                             QuicCoreTimePoint now, bool &server_failed) {
+    if (!process_path_mtu_update_event(driver, update, now)) {
+        server_failed = true;
+    }
+}
+
 ServerLoopIo make_runtime_server_loop_io() {
     return ServerLoopIo{
         .current_time = [] { return now(); },
@@ -3426,9 +3447,8 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
                     server_failed = true;
                     continue;
                 }
-                if (!driver.process_path_mtu_update(*event->path_mtu, event->now)) {
-                    server_failed = true;
-                }
+                process_path_mtu_update_event_or_mark_failed(driver, *event->path_mtu, event->now,
+                                                             server_failed);
                 continue;
             }
             if (event->kind == QuicIoEvent::Kind::timer_expired) {
@@ -3474,10 +3494,8 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
                             server_failed = true;
                             continue;
                         }
-                        if (!driver.process_path_mtu_update(*ready_event->path_mtu,
-                                                            ready_event->now)) {
-                            server_failed = true;
-                        }
+                        process_path_mtu_update_event_or_mark_failed(
+                            driver, *ready_event->path_mtu, ready_event->now, server_failed);
                         continue;
                     }
                     if (ready_event->kind == QuicIoEvent::Kind::timer_expired) {
@@ -5357,6 +5375,41 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
         backend_ptr->wait_results.push_back(QuicIoEvent{
             .kind = QuicIoEvent::Kind::timer_expired,
             .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::missing_path_mtu_update:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::path_mtu_update,
+            .now = event_time,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::path_mtu_update_then_wait_failure:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::path_mtu_update,
+            .now = event_time,
+            .path_mtu =
+                QuicIoPathMtuUpdate{
+                    .route_handle = QuicRouteHandle{17},
+                    .max_udp_payload_size = 1400,
+                },
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::path_mtu_update_then_drive_failure:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_failure = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::path_mtu_update,
+            .now = event_time,
+            .path_mtu =
+                QuicIoPathMtuUpdate{
+                    .route_handle = QuicRouteHandle{17},
+                    .max_udp_payload_size = 1400,
+                },
         });
         break;
     case ClientConnectionBackendLoopCaseForTests::rx_datagram_then_drive_failure:
@@ -10043,6 +10096,7 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         std::vector<bool> pump_made_progress;
         std::vector<bool> process_wait_timer_results;
         bool process_datagram_result = true;
+        bool process_path_mtu_result = true;
     };
 
     const auto peer = make_loopback_peer(4443);
@@ -10118,6 +10172,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .fin = true,
         });
         run_traced_input(QuicCoreRequestKeyUpdate{});
+        run_traced_input(QuicCorePathMtuUpdate{
+            .route_handle = 11,
+            .max_udp_payload_size = 1400,
+        });
     }
 
     {
@@ -10193,6 +10251,11 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .connection = 9,
             .status = QuicZeroRttStatus::accepted,
         });
+        result.effects.emplace_back(QuicCorePacketInspection{
+            .connection = 10,
+            .direction = QuicCorePacketInspectionDirection::outbound,
+            .datagram_id = 1,
+        });
         const auto handles = result_connection_handles(result);
         const auto contains = [&](QuicConnectionHandle handle) {
             return std::find(handles.begin(), handles.end(), handle) != handles.end();
@@ -10212,7 +10275,8 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         check(
             "result connection helpers cover the remaining effect variants",
             contains(1) & contains(2) & contains(3) & contains(4) & contains(5) & contains(6) &
-                contains(7) & contains(8) & contains(9) & sliced.effects.size() == 1 &
+                contains(7) & contains(8) & contains(9) & contains(10) &
+                sliced.effects.size() == 1 &
                 std::holds_alternative<QuicCorePeerStopSending>(sliced.effects.at(0)) &
                 !result_has_connection_lifecycle(result, 4, QuicCoreConnectionLifecycle::accepted));
         check("result connection helpers ignore transport-wide local errors without connections",
@@ -10463,6 +10527,7 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             std::size_t wait_calls = 0;
             std::size_t process_wait_timer_calls = 0;
             std::size_t process_datagram_calls = 0;
+            std::size_t process_path_mtu_calls = 0;
             std::size_t pump_calls = 0;
             bool endpoint_has_pending_work = false;
             QuicCoreTimePoint last_current_time = script.current_times.front();
@@ -10515,6 +10580,11 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                         process_datagram_calls += 1;
                         return script.process_datagram_result;
                     },
+                .process_path_mtu_update =
+                    [&](const QuicIoPathMtuUpdate &, QuicCoreTimePoint) {
+                        process_path_mtu_calls += 1;
+                        return script.process_path_mtu_result;
+                    },
             };
             return ServerLoopResultForTests{
                 .exit_code = run_server_backend_loop_with_driver(driver),
@@ -10522,6 +10592,7 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                 .wait_calls = wait_calls,
                 .process_expired_calls = process_wait_timer_calls,
                 .process_datagram_calls = process_datagram_calls,
+                .process_path_mtu_calls = process_path_mtu_calls,
                 .pump_calls = pump_calls,
             };
         };
@@ -10575,6 +10646,44 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
               top_due_successful_datagram.exit_code == 1 &
                   top_due_successful_datagram.process_datagram_calls == 1 &
                   top_due_successful_datagram.wait_calls == 2);
+
+        const auto top_due_missing_path_mtu = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time},
+            .next_wakeup_results = {base_time},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::path_mtu_update,
+                        .now = base_time,
+                    },
+                },
+        });
+        check("backend loop covers top-due path MTU events without payloads",
+              top_due_missing_path_mtu.exit_code == 1 &
+                  top_due_missing_path_mtu.process_path_mtu_calls == 0 &
+                  top_due_missing_path_mtu.wait_calls == 1);
+
+        const auto top_due_path_mtu_failure = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time},
+            .next_wakeup_results = {base_time},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::path_mtu_update,
+                        .now = base_time,
+                        .path_mtu =
+                            QuicIoPathMtuUpdate{
+                                .route_handle = QuicRouteHandle{17},
+                                .max_udp_payload_size = 1400,
+                            },
+                    },
+                },
+            .process_path_mtu_result = false,
+        });
+        check("backend loop propagates top-due path MTU update failures",
+              top_due_path_mtu_failure.exit_code == 1 &
+                  top_due_path_mtu_failure.process_path_mtu_calls == 1 &
+                  top_due_path_mtu_failure.wait_calls == 1);
 
         const auto top_due_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -10698,6 +10807,58 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
               ready_probe_missing_datagram.exit_code == 1 &
                   ready_probe_missing_datagram.process_datagram_calls == 0 &
                   ready_probe_missing_datagram.wait_calls == 1);
+
+        const auto ready_probe_missing_path_mtu = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time},
+            .next_wakeup_results =
+                {
+                    base_time + std::chrono::milliseconds(5),
+                    base_time + std::chrono::milliseconds(5),
+                },
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::path_mtu_update,
+                        .now = base_time,
+                    },
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {true},
+            .pump_made_progress = {true},
+        });
+        check("backend loop covers ready-probe path MTU events without payloads",
+              ready_probe_missing_path_mtu.exit_code == 1 &
+                  ready_probe_missing_path_mtu.process_path_mtu_calls == 0 &
+                  ready_probe_missing_path_mtu.wait_calls == 1);
+
+        const auto ready_probe_path_mtu_failure = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time},
+            .next_wakeup_results =
+                {
+                    base_time + std::chrono::milliseconds(5),
+                    base_time + std::chrono::milliseconds(5),
+                },
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::path_mtu_update,
+                        .now = base_time,
+                        .path_mtu =
+                            QuicIoPathMtuUpdate{
+                                .route_handle = QuicRouteHandle{17},
+                                .max_udp_payload_size = 1400,
+                            },
+                    },
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {true},
+            .pump_made_progress = {true},
+            .process_path_mtu_result = false,
+        });
+        check("backend loop propagates ready-probe path MTU update failures",
+              ready_probe_path_mtu_failure.exit_code == 1 &
+                  ready_probe_path_mtu_failure.process_path_mtu_calls == 1 &
+                  ready_probe_path_mtu_failure.wait_calls == 1);
 
         const auto ready_probe_idle_timeout = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time, base_time},
@@ -10832,6 +10993,148 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
               main_datagram_failure.exit_code == 1 &
                   main_datagram_failure.process_datagram_calls == 1 &
                   main_datagram_failure.wait_calls == 1);
+
+        const auto main_missing_path_mtu = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time, base_time},
+            .next_wakeup_results = {std::nullopt},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::path_mtu_update,
+                        .now = base_time,
+                    },
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {false},
+            .pump_made_progress = {false},
+        });
+        check("backend loop covers main-wait path MTU events without payloads",
+              main_missing_path_mtu.exit_code == 1 &
+                  main_missing_path_mtu.process_path_mtu_calls == 0 &
+                  main_missing_path_mtu.wait_calls == 1);
+
+        const auto main_path_mtu_failure = run_backend_loop_script(BackendLoopScriptForTests{
+            .current_times = {base_time, base_time, base_time},
+            .next_wakeup_results = {std::nullopt},
+            .wait_results =
+                {
+                    QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::path_mtu_update,
+                        .now = base_time,
+                        .path_mtu =
+                            QuicIoPathMtuUpdate{
+                                .route_handle = QuicRouteHandle{17},
+                                .max_udp_payload_size = 1400,
+                            },
+                    },
+                },
+            .pump_return_results = {true},
+            .pending_work_after_pump = {false},
+            .pump_made_progress = {false},
+            .process_path_mtu_result = false,
+        });
+        check("backend loop propagates main-wait path MTU update failures",
+              main_path_mtu_failure.exit_code == 1 &
+                  main_path_mtu_failure.process_path_mtu_calls == 1 &
+                  main_path_mtu_failure.wait_calls == 1);
+
+        const auto default_no_pending_work = [] { return false; };
+        const auto default_accept_timer = [](QuicCoreTimePoint) { return true; };
+        const auto default_accept_datagram = [](const QuicIoRxDatagram &, QuicCoreTimePoint) {
+            return true;
+        };
+        check("backend loop shared default callbacks remain callable",
+              !default_no_pending_work() & default_accept_timer(base_time) &
+                  default_accept_datagram(QuicIoRxDatagram{}, base_time));
+
+        {
+            std::size_t wait_calls = 0;
+            const auto default_path_mtu_driver = ServerBackendLoopDriver{
+                .current_time = [base_time] { return base_time; },
+                .next_wakeup = [] { return std::optional<QuicCoreTimePoint>{}; },
+                .pump_endpoint_work =
+                    [](bool &made_progress) {
+                        made_progress = false;
+                        return true;
+                    },
+                .has_pending_endpoint_work = default_no_pending_work,
+                .wait =
+                    [&](const std::optional<QuicCoreTimePoint> &) -> std::optional<QuicIoEvent> {
+                    wait_calls += 1;
+                    if (wait_calls == 1) {
+                        return QuicIoEvent{
+                            .kind = QuicIoEvent::Kind::path_mtu_update,
+                            .now = base_time,
+                            .path_mtu =
+                                QuicIoPathMtuUpdate{
+                                    .route_handle = QuicRouteHandle{17},
+                                    .max_udp_payload_size = 1400,
+                                },
+                        };
+                    }
+                    return std::nullopt;
+                },
+                .process_wait_timer = default_accept_timer,
+                .process_datagram = default_accept_datagram,
+            };
+            check("backend loop default path MTU callback accepts updates",
+                  run_server_backend_loop_with_driver(default_path_mtu_driver) == 1 &
+                      wait_calls == 2);
+        }
+
+        {
+            std::size_t wait_calls = 0;
+            std::size_t timer_calls = 0;
+            std::size_t datagram_calls = 0;
+            const auto default_path_mtu_driver = ServerBackendLoopDriver{
+                .current_time = [base_time] { return base_time; },
+                .next_wakeup = [base_time] { return std::optional<QuicCoreTimePoint>{base_time}; },
+                .pump_endpoint_work =
+                    [](bool &made_progress) {
+                        made_progress = false;
+                        return true;
+                    },
+                .has_pending_endpoint_work = default_no_pending_work,
+                .wait =
+                    [&](const std::optional<QuicCoreTimePoint> &) -> std::optional<QuicIoEvent> {
+                    wait_calls += 1;
+                    if (wait_calls == 1) {
+                        return QuicIoEvent{
+                            .kind = QuicIoEvent::Kind::timer_expired,
+                            .now = base_time,
+                        };
+                    }
+                    if (wait_calls == 2) {
+                        return QuicIoEvent{
+                            .kind = QuicIoEvent::Kind::rx_datagram,
+                            .now = base_time,
+                            .datagram =
+                                QuicIoRxDatagram{
+                                    .route_handle = QuicRouteHandle{17},
+                                    .bytes = {std::byte{0x44}},
+                                },
+                        };
+                    }
+                    return QuicIoEvent{
+                        .kind = QuicIoEvent::Kind::shutdown,
+                        .now = base_time,
+                    };
+                },
+                .process_wait_timer =
+                    [&](QuicCoreTimePoint) {
+                        timer_calls += 1;
+                        return true;
+                    },
+                .process_datagram =
+                    [&](const QuicIoRxDatagram &, QuicCoreTimePoint) {
+                        datagram_calls += 1;
+                        return true;
+                    },
+            };
+            check("backend loop default callbacks accept timer and datagram events",
+                  run_server_backend_loop_with_driver(default_path_mtu_driver) == 1 &
+                      wait_calls == 3 & timer_calls == 1 & datagram_calls == 1);
+        }
     }
 
     {
@@ -10875,6 +11178,38 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                       .document_root = document_root.path(),
                   },
                   core, transport_state, endpoints, backend) == 1);
+    }
+
+    {
+        ScopedRuntimeTempDirForTests document_root;
+        document_root.write_file("small.txt", "hello");
+        EndpointDriveState transport_state;
+        ServerConnectionEndpointMap endpoints;
+        ScriptedIoBackendForTests backend;
+        const auto input_time = now();
+        backend.wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::path_mtu_update,
+            .now = input_time,
+            .path_mtu =
+                QuicIoPathMtuUpdate{
+                    .route_handle = QuicRouteHandle{17},
+                    .max_udp_payload_size = 1400,
+                },
+        });
+        QuicCore core(make_runtime_server_endpoint_config(
+            Http09RuntimeConfig{
+                .mode = Http09RuntimeMode::server,
+                .document_root = document_root.path(),
+            },
+            make_identity()));
+        check("server backend runtime loop applies path MTU callbacks on live cores",
+              run_http09_server_backend_loop(
+                  Http09RuntimeConfig{
+                      .mode = Http09RuntimeMode::server,
+                      .document_root = document_root.path(),
+                  },
+                  core, transport_state, endpoints, backend) == 1 &
+                  backend.wait_requests.size() == 2);
     }
 
     ::unsetenv("COQUIC_RUNTIME_TRACE");

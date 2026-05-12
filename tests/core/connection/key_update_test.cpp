@@ -1099,6 +1099,36 @@ TEST(QuicCoreTest, ApplicationProbeFailsWhenLocalKeyUpdateCannotDeriveNextReadSe
     EXPECT_TRUE(connection.has_failed());
 }
 
+TEST(QuicCoreTest, ApplicationProbeCandidateFailureFailsConnection) {
+    auto connection = make_connected_server_connection();
+    ASSERT_TRUE(connection.queue_stream_send(0, std::vector<std::byte>(32, std::byte{0x90}), false)
+                    .has_value());
+
+    coquic::quic::test::
+        connection_set_force_candidate_datagram_serialization_failure_countdown_for_tests(0);
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    coquic::quic::test::
+        connection_set_force_candidate_datagram_serialization_failure_countdown_for_tests(-1);
+
+    EXPECT_TRUE(datagram.empty());
+    EXPECT_TRUE(connection.has_failed());
+}
+
+TEST(QuicCoreTest, ApplicationSendFastAppendBaseFailureFailsConnection) {
+    auto connection = make_connected_server_connection();
+    ASSERT_TRUE(connection.queue_stream_send(0, std::vector<std::byte>(64, std::byte{0x91}), false)
+                    .has_value());
+
+    coquic::quic::test::connection_set_force_appended_fragment_base_datagram_failure_for_tests(
+        true);
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    coquic::quic::test::connection_set_force_appended_fragment_base_datagram_failure_for_tests(
+        false);
+
+    EXPECT_TRUE(datagram.empty());
+    EXPECT_TRUE(connection.has_failed());
+}
+
 TEST(QuicCoreTest, ApplicationSendFailsWhenAckOnlyFallbackKeyUpdateCannotDeriveNextWriteSecret) {
     const auto configure_ack_only_key_update_fallback =
         [](coquic::quic::QuicConnection &connection) {
@@ -1161,6 +1191,46 @@ TEST(QuicCoreTest, ApplicationSendFailsWhenAckOnlyFallbackKeyUpdateCannotDeriveN
     }
 
     EXPECT_TRUE(saw_faulted_failure);
+}
+
+TEST(QuicCoreTest, ApplicationAckTrimmingFailureFailsConnection) {
+    auto connection = make_connected_server_connection();
+    connection.config_.max_outbound_datagram_size = 1200;
+    connection.application_space_.received_packets.record_received(
+        0, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
+    connection.application_space_.received_packets.record_received(
+        2, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
+    connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(0);
+    ASSERT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+
+    coquic::quic::test::
+        connection_set_force_application_candidate_estimate_failure_countdown_for_tests(0);
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    coquic::quic::test::
+        connection_set_force_application_candidate_estimate_failure_countdown_for_tests(-1);
+
+    EXPECT_TRUE(datagram.empty());
+    EXPECT_TRUE(connection.has_failed());
+}
+
+TEST(QuicCoreTest, ApplicationAckTrimmingSearchFailureFailsConnection) {
+    auto connection = make_connected_server_connection();
+    connection.config_.max_outbound_datagram_size = 1200;
+    for (std::uint64_t packet_number = 0; packet_number < 6; packet_number += 2) {
+        connection.application_space_.received_packets.record_received(
+            packet_number, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
+    }
+    connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(0);
+    ASSERT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+
+    coquic::quic::test::
+        connection_set_force_application_candidate_estimate_failure_countdown_for_tests(1);
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    coquic::quic::test::
+        connection_set_force_application_candidate_estimate_failure_countdown_for_tests(-1);
+
+    EXPECT_TRUE(datagram.empty());
+    EXPECT_TRUE(connection.has_failed());
 }
 
 TEST(QuicCoreTest, ApplicationSendFailsWhenFinalKeyUpdateReserializationCannotSealPacket) {

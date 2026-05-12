@@ -146,6 +146,11 @@ COQUIC_NO_PROFILE bool cached_header_protection_configuration_matches(
            std::equal(cache.key.begin(), cache.key.end(), key.begin(), key.end());
 }
 
+COQUIC_NO_PROFILE bool cached_aes_header_protection_context_ready(
+    bool same_configuration, const ReusableCipherContext &cache, bool fault_injector_active) {
+    return same_configuration && cache.aes_stream_ready && !fault_injector_active;
+}
+
 EVP_CIPHER_CTX *prepare_header_protection_aes_context(ReusableCipherContext &cache,
                                                       const EVP_CIPHER *cipher,
                                                       std::span<const std::byte> key) {
@@ -165,7 +170,8 @@ EVP_CIPHER_CTX *prepare_header_protection_aes_context(ReusableCipherContext &cac
         }
         context = cache.context;
     }
-    if (same_configuration && cache.aes_stream_ready && !fault_injector_active) {
+    if (cached_aes_header_protection_context_ready(same_configuration, cache,
+                                                   fault_injector_active)) {
         return context;
     }
 
@@ -1132,14 +1138,13 @@ CodecResult<std::size_t> make_header_protection_mask_into(CipherSuite cipher_sui
     auto mask_output = mask.first(header_protection_mask_length);
 
     auto &cache = header_protection_context_cache();
-    auto *context =
-        acquire_cipher_context(cache, PacketCryptoFaultPoint::header_protection_context_new,
-                               PacketCryptoFaultPoint::header_protection_aes_context_new);
-    if (context == nullptr) {
-        return CodecResult<std::size_t>::failure(CodecErrorCode::header_protection_failed, 0);
-    }
 
     if (cipher_suite == CipherSuite::tls_chacha20_poly1305_sha256) {
+        auto *context =
+            acquire_cipher_context(cache, PacketCryptoFaultPoint::header_protection_context_new);
+        if (context == nullptr) {
+            return CodecResult<std::size_t>::failure(CodecErrorCode::header_protection_failed, 0);
+        }
         if (!reset_header_protection_context(cache)) {
             return CodecResult<std::size_t>::failure(CodecErrorCode::header_protection_failed, 0);
         }
@@ -1185,7 +1190,7 @@ CodecResult<std::size_t> make_header_protection_mask_into(CipherSuite cipher_sui
         &EVP_aes_256_ecb,
     };
     const auto cipher = kHeaderProtectionAesCiphers[static_cast<std::size_t>(cipher_suite)]();
-    context = prepare_header_protection_aes_context(cache, cipher, input.hp_key);
+    auto *context = prepare_header_protection_aes_context(cache, cipher, input.hp_key);
     if (context == nullptr) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::header_protection_failed, 0);
     }
@@ -1351,6 +1356,109 @@ bool packet_crypto_cached_header_protection_mismatch_branch_coverage_for_tests()
             secret.header_protection_key) &
            (expanded.value().get().hp_key == secret.header_protection_key.value()) &
            missing_inputs_rebuilds_cache & mismatched_inputs_refreshes_cache;
+}
+
+COQUIC_NO_PROFILE bool packet_crypto_open_into_internal_guard_coverage_for_tests() {
+    const std::array key{std::byte{0x00}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                         std::byte{0x04}, std::byte{0x05}, std::byte{0x06}, std::byte{0x07},
+                         std::byte{0x08}, std::byte{0x09}, std::byte{0x0a}, std::byte{0x0b},
+                         std::byte{0x0c}, std::byte{0x0d}, std::byte{0x0e}, std::byte{0x0f}};
+    const std::array nonce{std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13},
+                           std::byte{0x14}, std::byte{0x15}, std::byte{0x16}, std::byte{0x17},
+                           std::byte{0x18}, std::byte{0x19}, std::byte{0x1a}, std::byte{0x1b}};
+    const std::array short_tag_only_ciphertext{std::byte{0x20}};
+    std::array<std::byte, 1> output{};
+    const auto short_ciphertext =
+        open_aead_into(EVP_aes_128_gcm(), key, nonce, {}, short_tag_only_ciphertext, output);
+    const bool short_ciphertext_guard =
+        !short_ciphertext.has_value() &&
+        short_ciphertext.error().code == CodecErrorCode::packet_decryption_failed;
+
+    const std::array tag_only_ciphertext{
+        std::byte{0x20}, std::byte{0x21}, std::byte{0x22}, std::byte{0x23},
+        std::byte{0x24}, std::byte{0x25}, std::byte{0x26}, std::byte{0x27},
+        std::byte{0x28}, std::byte{0x29}, std::byte{0x2a}, std::byte{0x2b},
+        std::byte{0x2c}, std::byte{0x2d}, std::byte{0x2e}, std::byte{0x2f},
+    };
+    const ScopedPacketCryptoFaultInjector invalid_length_fault(
+        PacketCryptoFaultPoint::open_length_guard);
+    const auto invalid_lengths =
+        open_aead_into(EVP_aes_128_gcm(), key, nonce, {}, tag_only_ciphertext, output);
+    const bool invalid_length_guard =
+        !invalid_lengths.has_value() &&
+        invalid_lengths.error().code == CodecErrorCode::invalid_packet_protection_state;
+
+    const std::array chacha_key{
+        std::byte{0x00}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
+        std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08}, std::byte{0x09},
+        std::byte{0x0a}, std::byte{0x0b}, std::byte{0x0c}, std::byte{0x0d}, std::byte{0x0e},
+        std::byte{0x0f}, std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13},
+        std::byte{0x14}, std::byte{0x15}, std::byte{0x16}, std::byte{0x17}, std::byte{0x18},
+        std::byte{0x19}, std::byte{0x1a}, std::byte{0x1b}, std::byte{0x1c}, std::byte{0x1d},
+        std::byte{0x1e}, std::byte{0x1f},
+    };
+    const std::array sample{
+        std::byte{0x20}, std::byte{0x21}, std::byte{0x22}, std::byte{0x23},
+        std::byte{0x24}, std::byte{0x25}, std::byte{0x26}, std::byte{0x27},
+        std::byte{0x28}, std::byte{0x29}, std::byte{0x2a}, std::byte{0x2b},
+        std::byte{0x2c}, std::byte{0x2d}, std::byte{0x2e}, std::byte{0x2f},
+    };
+    std::array<std::byte, header_protection_mask_length> mask{};
+    bool chacha_context_guard = false;
+    {
+        const ScopedPacketCryptoFaultInjector chacha_context_fault(
+            PacketCryptoFaultPoint::header_protection_context_new);
+        const auto chacha_context_failure =
+            make_header_protection_mask_into(CipherSuite::tls_chacha20_poly1305_sha256,
+                                             HeaderProtectionMaskInput{
+                                                 .hp_key = chacha_key,
+                                                 .sample = sample,
+                                             },
+                                             mask);
+        chacha_context_guard =
+            !chacha_context_failure.has_value() &&
+            chacha_context_failure.error().code == CodecErrorCode::header_protection_failed;
+    }
+
+    bool chacha_reset_guard = false;
+    {
+        const ScopedPacketCryptoFaultInjector chacha_reset_fault(
+            PacketCryptoFaultPoint::header_protection_context_reset);
+        const auto chacha_reset_failure =
+            make_header_protection_mask_into(CipherSuite::tls_chacha20_poly1305_sha256,
+                                             HeaderProtectionMaskInput{
+                                                 .hp_key = chacha_key,
+                                                 .sample = sample,
+                                             },
+                                             mask);
+        chacha_reset_guard =
+            !chacha_reset_failure.has_value() &&
+            chacha_reset_failure.error().code == CodecErrorCode::header_protection_failed;
+    }
+
+    reset_packet_crypto_runtime_caches_for_tests();
+    const auto aes_context_prime =
+        make_header_protection_mask_into(CipherSuite::tls_aes_128_gcm_sha256,
+                                         HeaderProtectionMaskInput{
+                                             .hp_key = key,
+                                             .sample = sample,
+                                         },
+                                         mask);
+    const ScopedPacketCryptoFaultInjector aes_context_fault(
+        PacketCryptoFaultPoint::header_protection_aes_context_new);
+    const auto aes_context_failure =
+        make_header_protection_mask_into(CipherSuite::tls_aes_128_gcm_sha256,
+                                         HeaderProtectionMaskInput{
+                                             .hp_key = key,
+                                             .sample = sample,
+                                         },
+                                         mask);
+    const bool aes_context_guard =
+        aes_context_prime.has_value() && !aes_context_failure.has_value() &&
+        aes_context_failure.error().code == CodecErrorCode::header_protection_failed;
+
+    return short_ciphertext_guard & invalid_length_guard & chacha_context_guard &
+           chacha_reset_guard & aes_context_guard;
 }
 
 ScopedPacketCryptoFaultInjector::ScopedPacketCryptoFaultInjector(PacketCryptoFaultPoint fault_point,

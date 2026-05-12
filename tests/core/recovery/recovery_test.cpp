@@ -204,6 +204,10 @@ struct PacketSpaceRecoveryTestPeer {
         recovery.next_loss_candidate_slot_ = slot_index;
     }
 
+    static void set_first_live_slot(PacketSpaceRecovery &recovery, std::size_t slot_index) {
+        recovery.first_live_slot_ = slot_index;
+    }
+
     static std::size_t next_loss_candidate_slot(const PacketSpaceRecovery &recovery) {
         return recovery.next_loss_candidate_slot_;
     }
@@ -1548,6 +1552,85 @@ TEST(QuicRecoveryTest, TimeThresholdLossScansLedgerWithoutSentPacketMap) {
               (std::vector<std::uint64_t>{3}));
 }
 
+TEST(QuicRecoveryTest, PmtuProbeDeadlineHelpersSelectEarliestProbeAndCollectExpiredProbes) {
+    PacketSpaceRecovery recovery;
+    recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().min_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().smoothed_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().rttvar = std::chrono::milliseconds(5);
+
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+
+    auto later_probe = make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                        coquic::quic::test::test_time(5));
+    later_probe.is_pmtu_probe = true;
+    later_probe.pmtu_probe_size = 1400;
+    recovery.on_packet_sent(later_probe);
+
+    auto earlier_probe = make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                          coquic::quic::test::test_time(3));
+    earlier_probe.is_pmtu_probe = true;
+    earlier_probe.pmtu_probe_size = 1300;
+    recovery.on_packet_sent(earlier_probe);
+
+    const auto earliest = recovery.earliest_pmtu_probe_packet();
+    ASSERT_TRUE(earliest.has_value());
+    const auto earliest_probe = optional_value_or_terminate(earliest);
+    EXPECT_EQ(earliest_probe.packet_number, 3u);
+    EXPECT_EQ(earliest_probe.sent_time, coquic::quic::test::test_time(3));
+
+    EXPECT_TRUE(recovery.collect_pmtu_probe_timeouts(coquic::quic::test::test_time(10)).empty());
+
+    EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.collect_pmtu_probe_timeouts(
+                                                        coquic::quic::test::test_time(100))),
+              (std::vector<std::uint64_t>{2, 3}));
+}
+
+TEST(QuicRecoveryTest, PmtuProbeDeadlineHelpersSkipDeclaredLostProbeSlots) {
+    PacketSpaceRecovery recovery;
+
+    auto declared_lost_probe = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                                coquic::quic::test::test_time(1));
+    declared_lost_probe.is_pmtu_probe = true;
+    recovery.on_packet_sent(declared_lost_probe);
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_state_declared_lost(recovery, 1);
+
+    EXPECT_FALSE(recovery.earliest_pmtu_probe_packet().has_value());
+}
+
+TEST(QuicRecoveryTest, PmtuProbeDeadlineHelpersIgnoreCorruptLiveSlotHead) {
+    PacketSpaceRecovery recovery;
+    auto probe = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                  coquic::quic::test::test_time(1));
+    probe.is_pmtu_probe = true;
+    recovery.on_packet_sent(probe);
+    ASSERT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_count(recovery), 2u);
+
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_first_live_slot(recovery, 2);
+
+    EXPECT_TRUE(recovery.collect_pmtu_probe_timeouts(coquic::quic::test::test_time(100)).empty());
+    EXPECT_FALSE(recovery.earliest_pmtu_probe_packet().has_value());
+}
+
+TEST(QuicRecoveryTest, PmtuProbeDeadlineHelpersKeepExistingEarliestAgainstLaterCandidate) {
+    PacketSpaceRecovery recovery;
+
+    auto earlier_probe = make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                          coquic::quic::test::test_time(4));
+    earlier_probe.is_pmtu_probe = true;
+    recovery.on_packet_sent(earlier_probe);
+
+    auto later_probe = make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                        coquic::quic::test::test_time(8));
+    later_probe.is_pmtu_probe = true;
+    recovery.on_packet_sent(later_probe);
+
+    const auto earliest = recovery.earliest_pmtu_probe_packet();
+    ASSERT_TRUE(earliest.has_value());
+    EXPECT_EQ(optional_value_or_terminate(earliest).packet_number, 2u);
+}
+
 TEST(QuicRecoveryTest, StaleAckStillDeclaresNewTimeThresholdLosses) {
     PacketSpaceRecovery recovery;
     recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
@@ -2183,6 +2266,11 @@ TEST(QuicRecoveryTest, LossCandidateHelpersSkipDeclaredLostPacketsAndAcknowledge
 }
 
 TEST(QuicRecoveryTest, TrackNewLossCandidatesReturnsWhenNextCandidateSlotIsPastEnd) {
+    PacketSpaceRecovery empty_recovery;
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::track_new_loss_candidates(empty_recovery,
+                                                                               std::nullopt, 5);
+    EXPECT_FALSE(empty_recovery.earliest_loss_packet().has_value());
+
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(0)));
@@ -2293,6 +2381,20 @@ TEST(QuicRecoveryTest,
         coquic::quic::test::PacketSpaceRecoveryTestPeer::outstanding_slot_exists(recovery, 0));
     EXPECT_TRUE(
         coquic::quic::test::PacketSpaceRecoveryTestPeer::outstanding_slot_exists(recovery, 1));
+    EXPECT_FALSE(recovery.latest_in_flight_ack_eliciting_packet().has_value());
+}
+
+TEST(QuicRecoveryTest, RebuildAuxiliaryIndexesSkipsSentSlotsMarkedDeclaredLost) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+
+    auto &packet = coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_packet_at(recovery, 0);
+    packet.declared_lost = true;
+    packet.in_flight = true;
+
+    recovery.rebuild_auxiliary_indexes();
+
     EXPECT_FALSE(recovery.latest_in_flight_ack_eliciting_packet().has_value());
 }
 

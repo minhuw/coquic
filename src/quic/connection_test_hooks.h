@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 namespace coquic::quic::test {
 
 bool connection_helper_edge_cases_for_tests();
@@ -9,5 +11,15 @@ bool connection_key_update_and_probe_coverage_for_tests();
 bool connection_pmtud_coverage_for_tests();
 void connection_set_force_missing_packet_metadata_for_tests(bool enabled);
 void connection_set_force_missing_fallback_packet_length_for_tests(bool enabled);
+void connection_set_force_appended_fragment_base_datagram_failure_for_tests(bool enabled);
+void connection_set_force_application_candidate_estimate_failure_countdown_for_tests(int value);
+void connection_set_force_candidate_datagram_serialization_failure_countdown_for_tests(int value);
+struct ApplicationCandidateDatagramExtraBytesTestHook {
+    int countdown;
+    std::size_t bytes;
+};
+void connection_set_force_application_candidate_datagram_extra_bytes_for_tests(
+    ApplicationCandidateDatagramExtraBytesTestHook hook);
+void connection_set_force_packet_inspection_missing_plaintext_storage_for_tests(bool enabled);
 
 } // namespace coquic::quic::test

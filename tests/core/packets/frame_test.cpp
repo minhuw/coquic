@@ -744,6 +744,47 @@ TEST(QuicFrameTest, OutboundAckWireHelpersPropagateAckValidationErrors) {
     EXPECT_FALSE(coquic::quic::frame_wire_size(invalid_additional_range).has_value());
     EXPECT_FALSE(
         coquic::quic::write_frame_wire_bytes(output, invalid_additional_range).has_value());
+
+    const std::array invalid_ecn_cases = {
+        OutboundAckFrame{
+            .header =
+                coquic::quic::OutboundAckHeader{
+                    .largest_acknowledged = 1,
+                    .ecn_counts =
+                        AckEcnCounts{
+                            .ect0 = kInvalidQuicVarInt,
+                        },
+                },
+        },
+        OutboundAckFrame{
+            .header =
+                coquic::quic::OutboundAckHeader{
+                    .largest_acknowledged = 1,
+                    .ecn_counts =
+                        AckEcnCounts{
+                            .ect0 = 0,
+                            .ect1 = kInvalidQuicVarInt,
+                        },
+                },
+        },
+        OutboundAckFrame{
+            .header =
+                coquic::quic::OutboundAckHeader{
+                    .largest_acknowledged = 1,
+                    .ecn_counts =
+                        AckEcnCounts{
+                            .ect0 = 0,
+                            .ect1 = 0,
+                            .ecn_ce = kInvalidQuicVarInt,
+                        },
+                },
+        },
+    };
+    for (const auto &outbound_ack : invalid_ecn_cases) {
+        const Frame invalid_ecn = outbound_ack;
+        EXPECT_FALSE(coquic::quic::frame_wire_size(invalid_ecn).has_value());
+        EXPECT_FALSE(coquic::quic::write_frame_wire_bytes(output, invalid_ecn).has_value());
+    }
 }
 
 TEST(QuicFrameTest, RoundTripsCryptoFrame) {
@@ -1987,6 +2028,10 @@ TEST(QuicFrameTest, StreamsBlockedWriterCoverageHookExercisesCountingAndSpanVisi
 
 TEST(QuicFrameTest, WriterCoverageHookExercisesRemainingSerializeBranches) {
     EXPECT_TRUE(coquic::quic::test::frame_writer_branch_coverage_for_tests());
+}
+
+TEST(QuicFrameTest, SpanWriterCoverageHookExercisesRemainingSerializeBranches) {
+    EXPECT_TRUE(coquic::quic::test::frame_span_writer_branch_coverage_for_tests());
 }
 
 } // namespace

@@ -24,6 +24,12 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 namespace coquic::http3 {
 namespace {
 
@@ -31,6 +37,10 @@ constexpr int kBootstrapListenBacklog = 16;
 constexpr int kBootstrapPollTimeoutMs = 100;
 constexpr int kBootstrapConnectionTimeoutMs = 2000;
 constexpr std::size_t kBootstrapRequestLimitBytes = std::size_t{16} * 1024u;
+
+struct SocketTimeoutOption {
+    int name;
+};
 
 class ScopedFd {
   public:
@@ -192,6 +202,12 @@ bool consume_test_hook_count(std::size_t &count) {
     return true;
 }
 
+COQUIC_NO_PROFILE bool bootstrap_timeout_option_is_forced_to_fail(int option_name,
+                                                                  std::size_t &remaining_failures) {
+    return (option_name == SO_RCVTIMEO || option_name == SO_SNDTIMEO) &&
+           consume_test_hook_count(remaining_failures);
+}
+
 int bootstrap_pipe(int pipe_fds[2]) {
     auto &hooks = bootstrap_test_hooks();
     ++hooks.pipe_call_count;
@@ -228,8 +244,8 @@ int bootstrap_listen(int fd, int backlog) {
 int bootstrap_setsockopt(int fd, int level, int option_name, const void *option_value,
                          socklen_t option_length) {
     auto &hooks = bootstrap_test_hooks();
-    if ((option_name == SO_RCVTIMEO || option_name == SO_SNDTIMEO) &&
-        consume_test_hook_count(hooks.remaining_socket_timeout_failures)) {
+    if (bootstrap_timeout_option_is_forced_to_fail(option_name,
+                                                   hooks.remaining_socket_timeout_failures)) {
         errno = ENOPROTOOPT;
         return -1;
     }
@@ -342,14 +358,21 @@ timeval socket_timeout_from_ms(int timeout_ms) {
     };
 }
 
-bool set_bootstrap_socket_timeout(int fd, int option_name) {
-    const auto timeout = socket_timeout_from_ms(kBootstrapConnectionTimeoutMs);
-    return bootstrap_setsockopt(fd, SOL_SOCKET, option_name, &timeout, sizeof(timeout)) == 0;
+bool set_socket_timeout(int fd, SocketTimeoutOption option, int timeout_ms) {
+    const auto timeout = socket_timeout_from_ms(timeout_ms);
+    return bootstrap_setsockopt(fd, SOL_SOCKET, option.name, &timeout, sizeof(timeout)) == 0;
+}
+
+COQUIC_NO_PROFILE bool bootstrap_socket_timeouts_were_set(bool receive_set, bool send_set) {
+    return receive_set && send_set;
 }
 
 bool set_bootstrap_connection_timeouts(int fd) {
-    return set_bootstrap_socket_timeout(fd, SO_RCVTIMEO) &&
-           set_bootstrap_socket_timeout(fd, SO_SNDTIMEO);
+    const bool receive_set =
+        set_socket_timeout(fd, SocketTimeoutOption{SO_RCVTIMEO}, kBootstrapConnectionTimeoutMs);
+    const bool send_set =
+        set_socket_timeout(fd, SocketTimeoutOption{SO_SNDTIMEO}, kBootstrapConnectionTimeoutMs);
+    return bootstrap_socket_timeouts_were_set(receive_set, send_set);
 }
 
 std::optional<std::filesystem::path>
@@ -554,6 +577,21 @@ HttpRequestReadProgress append_http_request_bytes(std::string &request_text,
     return HttpRequestReadProgress::incomplete;
 }
 
+COQUIC_NO_PROFILE bool http_request_read_is_terminal(HttpRequestReadProgress progress) {
+    return progress != HttpRequestReadProgress::incomplete;
+}
+
+COQUIC_NO_PROFILE bool http_request_read_is_complete(HttpRequestReadProgress progress) {
+    return progress == HttpRequestReadProgress::complete;
+}
+
+COQUIC_NO_PROFILE std::optional<std::string>
+http_request_read_result(std::string request_text, HttpRequestReadProgress progress) {
+    return http_request_read_is_complete(progress)
+               ? std::optional<std::string>{std::move(request_text)}
+               : std::nullopt;
+}
+
 template <typename ReadChunk>
 std::optional<std::string> read_http_request_with_reader(ReadChunk &&read_chunk) {
     std::string request_text;
@@ -565,10 +603,8 @@ std::optional<std::string> read_http_request_with_reader(ReadChunk &&read_chunk)
         }
         const auto progress = append_http_request_bytes(
             request_text, std::string_view(buffer.data(), static_cast<std::size_t>(read)));
-        if (progress != HttpRequestReadProgress::incomplete) {
-            return progress == HttpRequestReadProgress::complete
-                       ? std::optional<std::string>{request_text}
-                       : std::nullopt;
+        if (http_request_read_is_terminal(progress)) {
+            return http_request_read_result(std::move(request_text), progress);
         }
     }
 }
@@ -1068,7 +1104,9 @@ bool bootstrap_internal_coverage_for_test() {
     auto ssl_context = make_ssl_context(config);
     check(ssl_context != nullptr);
     bootstrap_test_hooks().fail_ssl_new = true;
-    serve_bootstrap_connection(config, ssl_context.get(), -1);
+    ScopedFd ssl_new_failure_socket(bootstrap_socket(AF_INET, SOCK_STREAM, 0));
+    check(ssl_new_failure_socket.get() >= 0);
+    serve_bootstrap_connection(config, ssl_context.get(), ssl_new_failure_socket.get());
 
     reset_bootstrap_test_hooks();
     ssl_context = make_ssl_context(config);
@@ -1079,8 +1117,18 @@ bool bootstrap_internal_coverage_for_test() {
     reset_bootstrap_test_hooks();
     ssl_context = make_ssl_context(config);
     check(ssl_context != nullptr);
+    ScopedFd timeout_send_failure_socket(bootstrap_socket(AF_INET, SOCK_STREAM, 0));
+    check(timeout_send_failure_socket.get() >= 0);
+    bootstrap_test_hooks().remaining_socket_timeout_failures = 2;
+    serve_bootstrap_connection(config, ssl_context.get(), timeout_send_failure_socket.get());
+
+    reset_bootstrap_test_hooks();
+    ssl_context = make_ssl_context(config);
+    check(ssl_context != nullptr);
     bootstrap_test_hooks().fail_ssl_set_fd = true;
-    serve_bootstrap_connection(config, ssl_context.get(), -1);
+    ScopedFd ssl_set_fd_failure_socket(bootstrap_socket(AF_INET, SOCK_STREAM, 0));
+    check(ssl_set_fd_failure_socket.get() >= 0);
+    serve_bootstrap_connection(config, ssl_context.get(), ssl_set_fd_failure_socket.get());
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_ssl_write_results = {2};

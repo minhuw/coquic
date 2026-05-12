@@ -60,7 +60,7 @@ COQUIC_NO_PROFILE void abort_if(bool condition) {
     }
 }
 
-bool deserialize_profile_enabled() {
+COQUIC_NO_PROFILE bool deserialize_profile_enabled() {
     static const bool enabled = [] {
         const char *value = std::getenv("COQUIC_DESERIALIZE_PROFILE");
         return value != nullptr && value[0] != '\0' && std::string_view(value) != "0";
@@ -68,12 +68,12 @@ bool deserialize_profile_enabled() {
     return enabled;
 }
 
-DeserializeProfileCounters &deserialize_profile_counters() {
+COQUIC_NO_PROFILE DeserializeProfileCounters &deserialize_profile_counters() {
     static DeserializeProfileCounters counters;
     return counters;
 }
 
-void print_deserialize_profile() {
+COQUIC_NO_PROFILE void print_deserialize_profile() {
     if (!deserialize_profile_enabled()) {
         return;
     }
@@ -92,7 +92,7 @@ void print_deserialize_profile() {
               << " frame_decode_ns=" << c.frame_decode_ns << '\n';
 }
 
-void register_deserialize_profile_printer_once() {
+COQUIC_NO_PROFILE void register_deserialize_profile_printer_once() {
     static const bool registered = [] {
         std::atexit(print_deserialize_profile);
         return true;
@@ -100,7 +100,7 @@ void register_deserialize_profile_printer_once() {
     static_cast<void>(registered);
 }
 
-struct DeserializeProfileTimer {
+struct COQUIC_NO_PROFILE DeserializeProfileTimer {
     std::uint64_t *target = nullptr;
     std::chrono::steady_clock::time_point start{};
 
@@ -122,7 +122,8 @@ struct DeserializeProfileTimer {
     }
 };
 
-void add_deserialize_profile_counter(std::uint64_t &counter, std::uint64_t value) {
+COQUIC_NO_PROFILE void add_deserialize_profile_counter(std::uint64_t &counter,
+                                                       std::uint64_t value) {
     if (!deserialize_profile_enabled()) {
         return;
     }
@@ -136,13 +137,13 @@ const TrafficSecret *one_rtt_secret_for_context(const DeserializeProtectionConte
                : (context.one_rtt_secret.has_value() ? &*context.one_rtt_secret : nullptr);
 }
 
-bool one_rtt_cached_keys_available(const DeserializeProtectionContext &context) {
+COQUIC_NO_PROFILE bool one_rtt_cached_keys_available(const DeserializeProtectionContext &context) {
     const auto *secret = one_rtt_secret_for_context(context);
     return context.one_rtt_secret_cache_primed && secret != nullptr &&
            secret->cached_packet_protection_keys.has_value();
 }
 
-const PacketProtectionKeys &
+COQUIC_NO_PROFILE const PacketProtectionKeys &
 one_rtt_cached_keys_or_assert(const DeserializeProtectionContext &context) {
     const auto *secret = one_rtt_secret_for_context(context);
     if (!context.one_rtt_secret_cache_primed || secret == nullptr) {
@@ -1093,9 +1094,9 @@ PatchedLengthField patch_long_header_length_field_or_assert(std::vector<std::byt
     return patch_long_header_length_field(packet_bytes, layout, new_length_value).value();
 }
 
-std::span<const std::byte> make_packet_protection_nonce_or_assert(std::span<const std::byte> iv,
-                                                                  std::uint64_t packet_number,
-                                                                  std::span<std::byte> storage) {
+COQUIC_NO_PROFILE std::span<const std::byte>
+make_packet_protection_nonce_or_assert(std::span<const std::byte> iv, std::uint64_t packet_number,
+                                       std::span<std::byte> storage) {
     abort_if(storage.size() < iv.size());
 
     auto nonce = storage.first(iv.size());
@@ -2482,7 +2483,8 @@ deserialize_received_protected_one_rtt_packet(std::span<const std::byte> bytes,
         });
 }
 
-CodecResult<ReceivedProtectedPacketDecodeResult> deserialize_received_protected_one_rtt_packet(
+COQUIC_NO_PROFILE CodecResult<ReceivedProtectedPacketDecodeResult>
+deserialize_received_protected_one_rtt_packet(
     const std::shared_ptr<std::vector<std::byte>> &storage, std::size_t begin, std::size_t end,
     const DeserializeProtectionContext &context) {
     DeserializeProfileTimer one_rtt_timer(deserialize_profile_counters().one_rtt_in_place_ns);
@@ -2560,7 +2562,11 @@ CodecResult<ReceivedProtectedPacketDecodeResult> deserialize_received_protected_
                                                       nonce_storage);
     }();
     const auto ciphertext = bytes.subspan(header_end);
-    if (ciphertext.size() < kPacketProtectionTagLength) {
+    const auto ciphertext_too_short =
+        consume_protected_codec_fault(
+            test::ProtectedCodecFaultPoint::one_rtt_in_place_short_ciphertext) |
+        (ciphertext.size() < kPacketProtectionTagLength);
+    if (ciphertext_too_short) {
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
             CodecErrorCode::packet_decryption_failed, header_end);
     }
@@ -2581,9 +2587,14 @@ CodecResult<ReceivedProtectedPacketDecodeResult> deserialize_received_protected_
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(plaintext.error().code,
                                                                          plaintext.error().offset);
     }
-    if (plaintext.value() != plaintext_size) {
+    const auto plaintext_bytes_written =
+        consume_protected_codec_fault(
+            test::ProtectedCodecFaultPoint::one_rtt_in_place_plaintext_size_mismatch)
+            ? plaintext_size + 1u
+            : plaintext.value();
+    if (plaintext_bytes_written != plaintext_size) {
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            CodecErrorCode::packet_length_mismatch, header_end + plaintext.value());
+            CodecErrorCode::packet_length_mismatch, header_end + plaintext_bytes_written);
     }
 
     const auto plaintext_begin = begin + header_end;
@@ -2615,7 +2626,11 @@ CodecResult<ReceivedProtectedPacketDecodeResult> deserialize_received_protected_
                     .plaintext_storage = storage,
                     .frames = std::move(decoded_fields.value().frames),
                 },
-            .bytes_consumed = bytes.size(),
+            .bytes_consumed =
+                consume_protected_codec_fault(
+                    test::ProtectedCodecFaultPoint::one_rtt_in_place_bytes_consumed_mismatch)
+                    ? bytes.size() - 1u
+                    : bytes.size(),
         });
 }
 
@@ -3461,6 +3476,59 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                   decoded.has_value() && decoded.value().size() == 1 &&
                       std::holds_alternative<PingFrame>(decoded.value().front()));
         }
+
+        check("fast stream frame decoder rejects empty payloads",
+              codec_failure_offset(try_decode_single_received_stream_frame_fast(SharedBytes{}, 31),
+                                   CodecErrorCode::empty_packet_payload, 31));
+        check("fast stream frame decoder rejects non-stream frame types",
+              codec_failure_offset(
+                  try_decode_single_received_stream_frame_fast(SharedBytes{std::byte{0x01}}, 37),
+                  CodecErrorCode::unknown_frame_type, 37));
+        check("fast stream frame decoder rejects truncated stream ids",
+              codec_failure_offset(
+                  try_decode_single_received_stream_frame_fast(SharedBytes{std::byte{0x08}}, 41),
+                  CodecErrorCode::truncated_input, 42));
+        check("fast stream frame decoder rejects partially encoded multi-byte stream ids",
+              codec_failure_offset(try_decode_single_received_stream_frame_fast(
+                                       SharedBytes{std::byte{0x08}, std::byte{0x40}}, 42),
+                                   CodecErrorCode::truncated_input, 43));
+        check("fast stream frame decoder rejects truncated stream offsets",
+              codec_failure_offset(try_decode_single_received_stream_frame_fast(
+                                       SharedBytes{std::byte{0x0c}, std::byte{0x01}}, 43),
+                                   CodecErrorCode::truncated_input, 45));
+        check("fast stream frame decoder rejects truncated explicit lengths",
+              codec_failure_offset(try_decode_single_received_stream_frame_fast(
+                                       SharedBytes{std::byte{0x0a}, std::byte{0x01}}, 47),
+                                   CodecErrorCode::truncated_input, 49));
+        check("fast stream frame decoder rejects explicit lengths beyond the payload",
+              codec_failure_offset(try_decode_single_received_stream_frame_fast(
+                                       SharedBytes{std::byte{0x0a}, std::byte{0x01},
+                                                   std::byte{0x02}, std::byte{0xaa}},
+                                       53),
+                                   CodecErrorCode::truncated_input, 56));
+        check(
+            "fast stream frame decoder rejects trailing bytes after explicit-length stream data",
+            codec_failure_offset(try_decode_single_received_stream_frame_fast(
+                                     SharedBytes{std::byte{0x0a}, std::byte{0x01}, std::byte{0x01},
+                                                 std::byte{0xaa}, std::byte{0xbb}},
+                                     59),
+                                 CodecErrorCode::unknown_frame_type, 63));
+        check(
+            "fast stream frame decoder rejects overflowing stream data offsets",
+            codec_failure_offset(
+                try_decode_single_received_stream_frame_fast(
+                    SharedBytes{std::byte{0x0c}, std::byte{0x01}, std::byte{0xff}, std::byte{0xff},
+                                std::byte{0xff}, std::byte{0xff}, std::byte{0xff}, std::byte{0xff},
+                                std::byte{0xff}, std::byte{0xff}, std::byte{0xaa}},
+                    67),
+                CodecErrorCode::invalid_varint, 77));
+        const auto fast_stream = try_decode_single_received_stream_frame_fast(
+            SharedBytes{std::byte{0x0f}, std::byte{0x01}, std::byte{0x01}, std::byte{0x02},
+                        std::byte{0xaa}, std::byte{0xbb}},
+            79);
+        check("fast stream frame decoder accepts valid explicit-length stream frames",
+              fast_stream.has_value() && fast_stream.value().size() == 1 &&
+                  std::holds_alternative<ReceivedStreamFrame>(fast_stream.value().front()));
     }
 
     check("encoded_stream_frame_payload_size includes type, varints, and payload bytes",
@@ -4835,6 +4903,156 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
         check("serialize_protected_datagram builds a received one-rtt fixture",
               one_rtt_packet_bytes.has_value());
         if (one_rtt_packet_bytes.has_value()) {
+            const auto make_one_rtt_storage = [&]() {
+                return std::make_shared<std::vector<std::byte>>(one_rtt_packet_bytes.value());
+            };
+            check("shared-storage one-rtt decoder rejects null storage",
+                  codec_failure(
+                      deserialize_received_protected_packet(
+                          nullptr, 0, one_rtt_packet_bytes.value().size(), one_rtt_receive_context),
+                      CodecErrorCode::truncated_input));
+            check(
+                "shared-storage one-rtt decoder rejects null storage through direct in-place path",
+                codec_failure(
+                    deserialize_received_protected_one_rtt_packet(
+                        nullptr, 0, one_rtt_packet_bytes.value().size(), one_rtt_receive_context),
+                    CodecErrorCode::truncated_input));
+            const auto malformed_range_storage = make_one_rtt_storage();
+            check("shared-storage one-rtt decoder rejects malformed ranges",
+                  codec_failure(deserialize_received_protected_packet(
+                                    malformed_range_storage, malformed_range_storage->size(), 0,
+                                    one_rtt_receive_context),
+                                CodecErrorCode::truncated_input));
+            check("shared-storage one-rtt decoder rejects overrun ranges through direct in-place "
+                  "path",
+                  codec_failure(deserialize_received_protected_one_rtt_packet(
+                                    malformed_range_storage, 0, malformed_range_storage->size() + 1,
+                                    one_rtt_receive_context),
+                                CodecErrorCode::truncated_input));
+            check("shared-storage one-rtt decoder rejects missing one-rtt secrets",
+                  codec_failure(deserialize_received_protected_packet(
+                                    make_one_rtt_storage(), 0, one_rtt_packet_bytes.value().size(),
+                                    DeserializeProtectionContext{
+                                        .peer_role = EndpointRole::client,
+                                        .one_rtt_destination_connection_id_length =
+                                            destination_connection_id.size(),
+                                    }),
+                                CodecErrorCode::missing_crypto_context));
+            check("shared-storage one-rtt decoder rejects oversized destination connection id "
+                  "contexts",
+                  codec_failure(deserialize_received_protected_packet(
+                                    make_one_rtt_storage(), 0, one_rtt_packet_bytes.value().size(),
+                                    DeserializeProtectionContext{
+                                        .peer_role = EndpointRole::client,
+                                        .one_rtt_secret = one_rtt_secret,
+                                        .one_rtt_destination_connection_id_length =
+                                            one_rtt_packet_bytes.value().size(),
+                                    }),
+                                CodecErrorCode::malformed_short_header_context));
+            check("shared-storage one-rtt decoder propagates secret expansion failures",
+                  codec_failure(deserialize_received_protected_packet(
+                                    make_one_rtt_storage(), 0, one_rtt_packet_bytes.value().size(),
+                                    DeserializeProtectionContext{
+                                        .peer_role = EndpointRole::client,
+                                        .one_rtt_secret =
+                                            TrafficSecret{
+                                                .cipher_suite = invalid_cipher_suite(),
+                                                .secret = make_secret_bytes(32, 0x61),
+                                            },
+                                        .one_rtt_destination_connection_id_length =
+                                            destination_connection_id.size(),
+                                    }),
+                                CodecErrorCode::unsupported_cipher_suite));
+            {
+                const ScopedProtectedCodecFaultInjector injector{
+                    ProtectedCodecFaultPoint::remove_short_header_packet_length_mismatch};
+                check("shared-storage one-rtt decoder propagates header protection failures",
+                      codec_failure(
+                          deserialize_received_protected_packet(make_one_rtt_storage(), 0,
+                                                                one_rtt_packet_bytes.value().size(),
+                                                                one_rtt_receive_context),
+                          CodecErrorCode::packet_length_mismatch));
+            }
+            check("shared-storage one-rtt decoder rejects wrong key phases",
+                  codec_failure(deserialize_received_protected_packet(
+                                    make_one_rtt_storage(), 0, one_rtt_packet_bytes.value().size(),
+                                    DeserializeProtectionContext{
+                                        .peer_role = EndpointRole::client,
+                                        .one_rtt_secret = one_rtt_secret,
+                                        .one_rtt_key_phase = true,
+                                        .one_rtt_destination_connection_id_length =
+                                            destination_connection_id.size(),
+                                    }),
+                                CodecErrorCode::invalid_packet_protection_state));
+            check("shared-storage one-rtt decoder propagates packet number recovery failures",
+                  codec_failure(deserialize_received_protected_packet(
+                                    make_one_rtt_storage(), 0, one_rtt_packet_bytes.value().size(),
+                                    DeserializeProtectionContext{
+                                        .peer_role = EndpointRole::client,
+                                        .one_rtt_secret = one_rtt_secret,
+                                        .largest_authenticated_application_packet_number =
+                                            (std::uint64_t{1} << 62) - 1u,
+                                        .one_rtt_destination_connection_id_length =
+                                            destination_connection_id.size(),
+                                    }),
+                                CodecErrorCode::packet_number_recovery_failed));
+
+            {
+                auto short_ciphertext_storage = make_one_rtt_storage();
+                const ScopedProtectedCodecFaultInjector short_ciphertext_injector{
+                    ProtectedCodecFaultPoint::one_rtt_in_place_short_ciphertext};
+                check(
+                    "shared-storage one-rtt decoder rejects ciphertexts shorter than the AEAD tag",
+                    codec_failure(deserialize_received_protected_packet(
+                                      short_ciphertext_storage, 0, short_ciphertext_storage->size(),
+                                      one_rtt_receive_context),
+                                  CodecErrorCode::packet_decryption_failed));
+            }
+
+            auto wrong_one_rtt_secret = one_rtt_secret;
+            wrong_one_rtt_secret.secret.back() ^= std::byte{0xff};
+            check("shared-storage one-rtt decoder rejects packets encrypted with different "
+                  "secrets",
+                  codec_failure(deserialize_received_protected_packet(
+                                    make_one_rtt_storage(), 0, one_rtt_packet_bytes.value().size(),
+                                    DeserializeProtectionContext{
+                                        .peer_role = EndpointRole::client,
+                                        .one_rtt_secret = wrong_one_rtt_secret,
+                                        .one_rtt_destination_connection_id_length =
+                                            destination_connection_id.size(),
+                                    }),
+                                CodecErrorCode::packet_decryption_failed));
+            {
+                const ScopedProtectedCodecFaultInjector injector{
+                    ProtectedCodecFaultPoint::one_rtt_in_place_plaintext_size_mismatch};
+                check("shared-storage one-rtt decoder rejects unexpected plaintext lengths",
+                      codec_failure(
+                          deserialize_received_protected_packet(make_one_rtt_storage(), 0,
+                                                                one_rtt_packet_bytes.value().size(),
+                                                                one_rtt_receive_context),
+                          CodecErrorCode::packet_length_mismatch));
+            }
+            {
+                const ScopedProtectedCodecFaultInjector injector{
+                    ProtectedCodecFaultPoint::one_rtt_in_place_bytes_consumed_mismatch};
+                check("shared-storage one-rtt packet wrapper rejects trailing decoded bytes",
+                      codec_failure(
+                          deserialize_received_protected_packet(make_one_rtt_storage(), 0,
+                                                                one_rtt_packet_bytes.value().size(),
+                                                                one_rtt_receive_context),
+                          CodecErrorCode::packet_length_mismatch));
+            }
+            const auto shared_decoded = deserialize_received_protected_packet(
+                make_one_rtt_storage(), 0, one_rtt_packet_bytes.value().size(),
+                one_rtt_receive_context);
+            bool shared_decoded_ok = shared_decoded.has_value();
+            if (shared_decoded_ok) {
+                const auto *packet =
+                    std::get_if<ReceivedProtectedOneRttPacket>(&shared_decoded.value());
+                shared_decoded_ok = packet != nullptr && packet->plaintext_storage != nullptr;
+            }
+            check("shared-storage one-rtt decoder decodes valid packets", shared_decoded_ok);
+
             {
                 const ScopedProtectedCodecFaultInjector injector{
                     ProtectedCodecFaultPoint::remove_short_header_packet_length_mismatch};
@@ -4845,19 +5063,21 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                     CodecErrorCode::packet_length_mismatch));
             }
 
-            auto wrong_one_rtt_secret = one_rtt_secret;
-            wrong_one_rtt_secret.secret.back() ^= std::byte{0xff};
-            check("deserialize_received_protected_one_rtt_packet rejects packets encrypted with "
-                  "different secrets",
-                  codec_failure(deserialize_received_protected_one_rtt_packet(
-                                    one_rtt_packet_bytes.value(),
-                                    DeserializeProtectionContext{
-                                        .peer_role = EndpointRole::client,
-                                        .one_rtt_secret = wrong_one_rtt_secret,
-                                        .one_rtt_destination_connection_id_length =
-                                            destination_connection_id.size(),
-                                    }),
-                                CodecErrorCode::packet_decryption_failed));
+            {
+                auto wrong_one_rtt_secret_for_span = one_rtt_secret;
+                wrong_one_rtt_secret_for_span.secret.back() ^= std::byte{0xff};
+                check("deserialize_received_protected_one_rtt_packet rejects packets encrypted "
+                      "with different secrets",
+                      codec_failure(deserialize_received_protected_one_rtt_packet(
+                                        one_rtt_packet_bytes.value(),
+                                        DeserializeProtectionContext{
+                                            .peer_role = EndpointRole::client,
+                                            .one_rtt_secret = wrong_one_rtt_secret_for_span,
+                                            .one_rtt_destination_connection_id_length =
+                                                destination_connection_id.size(),
+                                        }),
+                                    CodecErrorCode::packet_decryption_failed));
+            }
         }
 
         const auto one_rtt_keys = expand_traffic_secret_cached(one_rtt_secret);
@@ -4880,6 +5100,14 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                       codec_failure(deserialize_received_protected_one_rtt_packet(
                                         empty_payload_one_rtt.value(), one_rtt_receive_context),
                                     CodecErrorCode::truncated_input));
+                check(
+                    "shared-storage one-rtt decoder propagates decrypted payload decode "
+                    "failures",
+                    codec_failure(
+                        deserialize_received_protected_packet(
+                            std::make_shared<std::vector<std::byte>>(empty_payload_one_rtt.value()),
+                            0, empty_payload_one_rtt.value().size(), one_rtt_receive_context),
+                        CodecErrorCode::truncated_input));
             }
         }
 

@@ -305,6 +305,41 @@ TEST(QuicBufferTest, DatagramBufferComparesEqualToStandardByteVector) {
     EXPECT_EQ(expected, buffer);
 }
 
+TEST(QuicBufferTest, DatagramBufferRejectsSameSizeDifferentByteVector) {
+    const std::vector<std::byte> expected{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+    };
+    const std::vector<std::byte> different{
+        std::byte{0xaa},
+        std::byte{0xbc},
+        std::byte{0xcc},
+    };
+
+    const coquic::quic::DatagramBuffer buffer(expected);
+
+    EXPECT_FALSE(buffer == different);
+    EXPECT_FALSE(different == buffer);
+}
+
+TEST(QuicBufferTest, DatagramBufferRejectsDifferentSizeByteVector) {
+    const std::vector<std::byte> expected{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+    };
+    const std::vector<std::byte> truncated{
+        std::byte{0xaa},
+        std::byte{0xbb},
+    };
+
+    const coquic::quic::DatagramBuffer buffer(expected);
+
+    EXPECT_FALSE(buffer == truncated);
+    EXPECT_FALSE(truncated == buffer);
+}
+
 TEST(QuicBufferTest, InternalCoverageHelperExercisesSpanOffsetAndDatagramUtilityPaths) {
     EXPECT_TRUE(buffer_internal_coverage_for_tests());
 }

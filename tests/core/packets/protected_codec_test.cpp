@@ -445,6 +445,144 @@ TEST(QuicProtectedCodecTest, DeserializesReceivedOneRttPacketWithAliasedStreamPa
     EXPECT_EQ(stream->stream_data.storage(), one_rtt->plaintext_storage);
 }
 
+TEST(QuicProtectedCodecTest, DeserializesReceivedOneRttPacketFromSharedStorageSubrange) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames = {
+        coquic::quic::StreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 11,
+            .offset = 7,
+            .stream_data = {std::byte{0x31}, std::byte{0x32}, std::byte{0x33}},
+        },
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{packet},
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                       /*secret_size=*/16));
+    ASSERT_TRUE(encoded.has_value());
+
+    auto storage = std::make_shared<std::vector<std::byte>>();
+    storage->push_back(std::byte{0xee});
+    const auto begin = storage->size();
+    storage->insert(storage->end(), encoded.value().begin(), encoded.value().end());
+    const auto end = storage->size();
+    storage->push_back(std::byte{0xdd});
+
+    const auto decoded = coquic::quic::deserialize_received_protected_packet(
+        storage, begin, end,
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                         /*secret_size=*/16));
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *one_rtt =
+        std::get_if<coquic::quic::ReceivedProtectedOneRttPacket>(&decoded.value());
+    ASSERT_NE(one_rtt, nullptr);
+    EXPECT_EQ(one_rtt->plaintext_storage, storage);
+    ASSERT_EQ(one_rtt->frames.size(), 1u);
+
+    const auto *stream = std::get_if<coquic::quic::ReceivedStreamFrame>(&one_rtt->frames.front());
+    ASSERT_NE(stream, nullptr);
+    EXPECT_TRUE(stream->fin);
+    EXPECT_TRUE(stream->has_offset);
+    EXPECT_TRUE(stream->has_length);
+    EXPECT_EQ(stream->stream_id, 11u);
+    EXPECT_EQ(stream->offset, std::optional<std::uint64_t>{7u});
+    EXPECT_EQ(stream->stream_data,
+              (std::vector<std::byte>{std::byte{0x31}, std::byte{0x32}, std::byte{0x33}}));
+    EXPECT_EQ(stream->stream_data.storage(), storage);
+}
+
+TEST(QuicProtectedCodecTest, ReceivedProtectedPacketSharedStorageRejectsInvalidRanges) {
+    auto storage = std::make_shared<std::vector<std::byte>>(
+        std::vector<std::byte>{std::byte{0x40}, std::byte{0x00}});
+
+    const auto null_storage =
+        coquic::quic::deserialize_received_protected_packet(nullptr, 0, 1, {});
+    ASSERT_FALSE(null_storage.has_value());
+    EXPECT_EQ(null_storage.error().code, coquic::quic::CodecErrorCode::truncated_input);
+
+    const auto empty_range = coquic::quic::deserialize_received_protected_packet(storage, 1, 1, {});
+    ASSERT_FALSE(empty_range.has_value());
+    EXPECT_EQ(empty_range.error().code, coquic::quic::CodecErrorCode::truncated_input);
+
+    const auto past_end =
+        coquic::quic::deserialize_received_protected_packet(storage, 0, storage->size() + 1, {});
+    ASSERT_FALSE(past_end.has_value());
+    EXPECT_EQ(past_end.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicProtectedCodecTest, ReceivedProtectedPacketSharedStorageDispatchesLongHeaders) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    auto storage = std::make_shared<std::vector<std::byte>>(encoded.value());
+    const auto decoded = coquic::quic::deserialize_received_protected_packet(
+        storage, 0, storage->size(), make_rfc9001_client_initial_deserialize_context());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_NE(std::get_if<coquic::quic::ReceivedProtectedInitialPacket>(&decoded.value()), nullptr);
+}
+
+TEST(QuicProtectedCodecTest, ReceivedProtectedPacketSharedStoragePropagatesOneRttErrors) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_minimal_one_rtt_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets,
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(encoded.has_value());
+
+    auto storage = std::make_shared<std::vector<std::byte>>(encoded.value());
+    const auto missing_secret = coquic::quic::deserialize_received_protected_packet(
+        storage, 0, storage->size(),
+        coquic::quic::DeserializeProtectionContext{
+            .peer_role = coquic::quic::EndpointRole::client,
+            .one_rtt_destination_connection_id_length = kOneRttDestinationConnectionIdLength,
+        });
+    ASSERT_FALSE(missing_secret.has_value());
+    EXPECT_EQ(missing_secret.error().code, coquic::quic::CodecErrorCode::missing_crypto_context);
+}
+
+TEST(QuicProtectedCodecTest, ReceivedProtectedPacketDirectWrapperRejectsEmptyInput) {
+    const auto decoded = coquic::quic::deserialize_received_protected_packet({}, {});
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::truncated_input);
+}
+
+TEST(QuicProtectedCodecTest, ReceivedProtectedPacketDirectWrapperRejectsTrailingBytes) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    auto bytes = encoded.value();
+    bytes.push_back(std::byte{0x00});
+
+    const auto decoded = coquic::quic::deserialize_received_protected_packet(
+        bytes, make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
+    EXPECT_EQ(decoded.error().offset, encoded.value().size());
+}
+
+TEST(QuicProtectedCodecTest, ReceivedProtectedPacketSharedStorageRejectsTrailingBytes) {
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    auto storage = std::make_shared<std::vector<std::byte>>(encoded.value());
+    storage->push_back(std::byte{0x00});
+
+    const auto decoded = coquic::quic::deserialize_received_protected_packet(
+        storage, 0, storage->size(), make_rfc9001_client_initial_deserialize_context());
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
+    EXPECT_EQ(decoded.error().offset, encoded.value().size());
+}
+
 TEST(QuicProtectedCodecTest, AppendsOneRttPacketIntoExistingDatagramBuffer) {
     const auto packet = make_minimal_one_rtt_packet();
     const auto context = make_one_rtt_serialize_context(

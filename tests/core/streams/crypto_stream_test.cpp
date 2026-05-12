@@ -232,6 +232,24 @@ TEST(QuicCryptoStreamTest, SplitAtAddsTailSegmentAndAccountsForItsState) {
         2u);
 }
 
+TEST(QuicCryptoStreamTest, FirstOffsetByStateReturnsEmptyWhenStateCountIsStale) {
+    ReliableSendBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcd"));
+    auto [it, inserted] =
+        buffer.segments_.emplace(0, ReliableSendBuffer::Segment{
+                                        .state = ReliableSendBuffer::SegmentState::sent,
+                                        .storage = storage,
+                                        .begin = 0,
+                                        .end = 4,
+                                    });
+    ASSERT_TRUE(inserted);
+    buffer.note_segment_inserted(it->second);
+    buffer.segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)] =
+        1;
+
+    EXPECT_FALSE(buffer.first_lost_offset().has_value());
+}
+
 bool crypto_stream_internal_coverage_for_tests();
 
 bool crypto_stream_internal_coverage_for_tests() {
@@ -629,6 +647,181 @@ TEST(QuicCryptoStreamTest, MarkLostEarlierRangeIsTakenBeforeLaterLostTail) {
     EXPECT_EQ(lost[0].bytes, bytes_from_string("bc"));
     EXPECT_EQ(lost[1].offset, 4u);
     EXPECT_EQ(lost[1].bytes, bytes_from_string("ef"));
+}
+
+TEST(QuicCryptoStreamTest, TakeRangesHonorsMaxOffsetWhenSplittingLostAndUnsentSegments) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdefgh"));
+
+    const auto sent = buffer.take_ranges(4);
+    ASSERT_EQ(sent.size(), 1u);
+    buffer.mark_lost(0, 4);
+
+    const auto lost = buffer.take_lost_ranges(/*max_bytes=*/8, /*max_offset=*/2);
+    ASSERT_EQ(lost.size(), 1u);
+    EXPECT_EQ(lost[0].offset, 0u);
+    EXPECT_EQ(lost[0].bytes, bytes_from_string("ab"));
+
+    const auto unsent = buffer.take_unsent_ranges(/*max_bytes=*/8, /*max_offset=*/6);
+    ASSERT_EQ(unsent.size(), 1u);
+    EXPECT_EQ(unsent[0].offset, 4u);
+    EXPECT_EQ(unsent[0].bytes, bytes_from_string("ef"));
+}
+
+TEST(QuicCryptoStreamTest, ConsumeRangesHonorsMaxOffsetAndStopsAtSplitBoundary) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdefgh"));
+
+    const auto sent = buffer.take_ranges(4);
+    ASSERT_EQ(sent.size(), 1u);
+    buffer.mark_lost(0, 4);
+
+    std::vector<coquic::quic::ByteRange> lost;
+    const auto remember_lost = [&](coquic::quic::ByteRange range) {
+        lost.push_back(std::move(range));
+    };
+
+    std::size_t empty_lost_budget = 0;
+    buffer.consume_lost_ranges(empty_lost_budget, std::nullopt, remember_lost);
+    EXPECT_TRUE(lost.empty());
+
+    std::size_t lost_budget = 2;
+    buffer.consume_lost_ranges(lost_budget, /*max_offset=*/3, remember_lost);
+    ASSERT_EQ(lost.size(), 1u);
+    EXPECT_EQ(lost[0].offset, 0u);
+    EXPECT_EQ(lost[0].bytes, bytes_from_string("ab"));
+    EXPECT_EQ(lost_budget, 0u);
+
+    lost.clear();
+    lost_budget = 8;
+    buffer.consume_lost_ranges(lost_budget, /*max_offset=*/3, remember_lost);
+    ASSERT_EQ(lost.size(), 1u);
+    EXPECT_EQ(lost[0].offset, 2u);
+    EXPECT_EQ(lost[0].bytes, bytes_from_string("c"));
+    EXPECT_EQ(lost_budget, 7u);
+
+    std::vector<coquic::quic::ByteRange> unsent;
+    const auto remember_unsent = [&](coquic::quic::ByteRange range) {
+        unsent.push_back(std::move(range));
+    };
+
+    std::size_t empty_unsent_budget = 0;
+    buffer.consume_unsent_ranges(empty_unsent_budget, std::nullopt, remember_unsent);
+    EXPECT_TRUE(unsent.empty());
+
+    std::size_t unsent_budget = 2;
+    buffer.consume_unsent_ranges(unsent_budget, /*max_offset=*/7, remember_unsent);
+    ASSERT_EQ(unsent.size(), 1u);
+    EXPECT_EQ(unsent[0].offset, 4u);
+    EXPECT_EQ(unsent[0].bytes, bytes_from_string("ef"));
+    EXPECT_EQ(unsent_budget, 0u);
+
+    unsent.clear();
+    unsent_budget = 8;
+    buffer.consume_unsent_ranges(unsent_budget, /*max_offset=*/7, remember_unsent);
+    ASSERT_EQ(unsent.size(), 1u);
+    EXPECT_EQ(unsent[0].offset, 6u);
+    EXPECT_EQ(unsent[0].bytes, bytes_from_string("g"));
+    EXPECT_EQ(unsent_budget, 7u);
+}
+
+TEST(QuicCryptoStreamTest, ConsumeRangesCanRunWithoutMaxOffset) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+
+    const auto sent = buffer.take_ranges(3);
+    ASSERT_EQ(sent.size(), 1u);
+    buffer.mark_lost(0, 3);
+
+    std::vector<coquic::quic::ByteRange> lost;
+    const auto remember_lost = [&](coquic::quic::ByteRange range) {
+        lost.push_back(std::move(range));
+    };
+    std::size_t empty_lost_budget = 0;
+    buffer.consume_lost_ranges(empty_lost_budget, std::nullopt, remember_lost);
+    EXPECT_TRUE(lost.empty());
+
+    std::size_t lost_budget = 8;
+    buffer.consume_lost_ranges(lost_budget, std::nullopt, remember_lost);
+    ASSERT_EQ(lost.size(), 1u);
+    EXPECT_EQ(lost[0].offset, 0u);
+    EXPECT_EQ(lost[0].bytes, bytes_from_string("abc"));
+    EXPECT_EQ(lost_budget, 5u);
+
+    std::vector<coquic::quic::ByteRange> unsent;
+    const auto remember_unsent = [&](coquic::quic::ByteRange range) {
+        unsent.push_back(std::move(range));
+    };
+    std::size_t empty_unsent_budget = 0;
+    buffer.consume_unsent_ranges(empty_unsent_budget, std::nullopt, remember_unsent);
+    EXPECT_TRUE(unsent.empty());
+
+    std::size_t unsent_budget = 8;
+    buffer.consume_unsent_ranges(unsent_budget, std::nullopt, remember_unsent);
+    ASSERT_EQ(unsent.size(), 1u);
+    EXPECT_EQ(unsent[0].offset, 3u);
+    EXPECT_EQ(unsent[0].bytes, bytes_from_string("def"));
+    EXPECT_EQ(unsent_budget, 5u);
+}
+
+TEST(QuicCryptoStreamTest, ConsumeRangesCanSplitWithoutMaxOffset) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+    ASSERT_EQ(buffer.take_unsent_ranges(6).size(), 1u);
+    buffer.mark_lost(0, 6);
+
+    std::size_t remaining = 3;
+    std::vector<coquic::quic::ByteRange> lost_ranges;
+    buffer.consume_lost_ranges(remaining, std::nullopt, [&](coquic::quic::ByteRange range) {
+        lost_ranges.push_back(std::move(range));
+    });
+
+    ASSERT_EQ(lost_ranges.size(), 1u);
+    EXPECT_EQ(lost_ranges.front().offset, 0u);
+    EXPECT_EQ(lost_ranges.front().bytes, bytes_from_string("abc"));
+    EXPECT_EQ(remaining, 0u);
+    EXPECT_TRUE(buffer.has_lost_data());
+    EXPECT_TRUE(buffer.has_outstanding_range(3, 3));
+}
+
+TEST(QuicCryptoStreamTest, ConsumeRangesCanSkipDifferentStateWithoutMaxOffset) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+    ASSERT_EQ(buffer.take_unsent_ranges(3).size(), 1u);
+    buffer.mark_lost(0, 3);
+
+    std::size_t remaining = 3;
+    std::vector<coquic::quic::ByteRange> unsent_ranges;
+    buffer.consume_unsent_ranges(remaining, std::nullopt, [&](coquic::quic::ByteRange range) {
+        unsent_ranges.push_back(std::move(range));
+    });
+
+    ASSERT_EQ(unsent_ranges.size(), 1u);
+    EXPECT_EQ(unsent_ranges.front().offset, 3u);
+    EXPECT_EQ(unsent_ranges.front().bytes, bytes_from_string("def"));
+    EXPECT_EQ(remaining, 0u);
+    EXPECT_TRUE(buffer.has_lost_data());
+}
+
+TEST(QuicCryptoStreamTest, EmptyStateSpecificRangeReadsReturnNoOffsetsOrRanges) {
+    ReliableSendBuffer empty;
+    EXPECT_TRUE(empty.take_ranges(/*max_bytes=*/0).empty());
+    EXPECT_TRUE(empty.take_lost_ranges(/*max_bytes=*/8).empty());
+    EXPECT_TRUE(empty.take_lost_ranges(/*max_bytes=*/0).empty());
+    EXPECT_TRUE(empty.take_unsent_ranges(/*max_bytes=*/8).empty());
+    EXPECT_TRUE(empty.take_unsent_ranges(/*max_bytes=*/0).empty());
+    EXPECT_FALSE(empty.first_lost_offset().has_value());
+    EXPECT_FALSE(empty.first_unsent_offset().has_value());
+
+    ReliableSendBuffer sent_only;
+    sent_only.append(bytes_from_string("ab"));
+    ASSERT_EQ(sent_only.take_ranges(2).size(), 1u);
+    EXPECT_TRUE(sent_only.take_lost_ranges(/*max_bytes=*/8).empty());
+    EXPECT_TRUE(sent_only.take_lost_ranges(/*max_bytes=*/0).empty());
+    EXPECT_TRUE(sent_only.take_unsent_ranges(/*max_bytes=*/8).empty());
+    EXPECT_TRUE(sent_only.take_unsent_ranges(/*max_bytes=*/0).empty());
+    EXPECT_FALSE(sent_only.first_lost_offset().has_value());
+    EXPECT_FALSE(sent_only.first_unsent_offset().has_value());
 }
 
 TEST(QuicCryptoStreamTest, ZeroLengthMarkUnsentAndMarkSentLeaveSentStateUnchanged) {

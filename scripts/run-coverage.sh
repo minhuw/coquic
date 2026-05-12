@@ -25,9 +25,43 @@ mkdir -p "${html_dir}"
 
 profraws=()
 index=0
+run_profiled_tests() {
+    local profile_raw="$1"
+    local test_binary="$2"
+    shift 2
+    env "$@" LLVM_PROFILE_FILE="${profile_raw}" "${test_binary}"
+}
+
 for test_binary in "$@"; do
     profile_raw="${coverage_dir}/coquic-${index}.profraw"
-    LLVM_PROFILE_FILE="${profile_raw}" "${test_binary}"
+    run_profiled_tests "${profile_raw}" "${test_binary}" \
+        -u COQUIC_DESERIALIZE_PROFILE \
+        -u COQUIC_IO_PROFILE \
+        -u COQUIC_SEND_PROFILE
+    profraws+=("${profile_raw}")
+    index=$((index + 1))
+
+    profile_raw="${coverage_dir}/coquic-${index}.profraw"
+    run_profiled_tests "${profile_raw}" "${test_binary}" \
+        COQUIC_DESERIALIZE_PROFILE= \
+        COQUIC_IO_PROFILE= \
+        COQUIC_SEND_PROFILE=
+    profraws+=("${profile_raw}")
+    index=$((index + 1))
+
+    profile_raw="${coverage_dir}/coquic-${index}.profraw"
+    run_profiled_tests "${profile_raw}" "${test_binary}" \
+        COQUIC_DESERIALIZE_PROFILE=0 \
+        COQUIC_IO_PROFILE=0 \
+        COQUIC_SEND_PROFILE=0
+    profraws+=("${profile_raw}")
+    index=$((index + 1))
+
+    profile_raw="${coverage_dir}/coquic-${index}.profraw"
+    run_profiled_tests "${profile_raw}" "${test_binary}" \
+        COQUIC_DESERIALIZE_PROFILE=1 \
+        COQUIC_IO_PROFILE=1 \
+        COQUIC_SEND_PROFILE=1
     profraws+=("${profile_raw}")
     index=$((index + 1))
 done

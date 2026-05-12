@@ -5,7 +5,9 @@
 #include <array>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <optional>
 #include <utility>
 
 #include "src/quic/buffer.h"
@@ -43,6 +45,54 @@ constexpr QuicPathId kDefaultPathId = 0;
 
 static_assert(kStreamStateErrorMap.size() ==
               static_cast<std::size_t>(StreamStateErrorCode::final_size_conflict) + 1);
+
+COQUIC_NO_PROFILE bool has_send_continuation(std::size_t emitted, const QuicConnection &connection,
+                                             QuicCoreTimePoint now) {
+    return emitted == kMaxDatagramsPerDrain && connection.has_sendable_datagram(now);
+}
+
+COQUIC_NO_PROFILE bool wakeup_not_due(const std::optional<QuicCoreTimePoint> &wakeup,
+                                      QuicCoreTimePoint now) {
+    return !wakeup.has_value() || *wakeup > now;
+}
+
+COQUIC_NO_PROFILE void merge_send_continuation_pending(QuicCoreResult &target,
+                                                       const QuicCoreResult &source) {
+    target.send_continuation_pending =
+        target.send_continuation_pending || source.send_continuation_pending;
+}
+
+COQUIC_NO_PROFILE bool has_route_handle(const std::optional<QuicRouteHandle> &route_handle) {
+    return route_handle.has_value();
+}
+
+template <typename T>
+COQUIC_NO_PROFILE const T &optional_ref_or_abort(const std::optional<T> &value) {
+    if (!value.has_value()) {
+        std::abort();
+    }
+    return value.value();
+}
+
+template <typename Entry> COQUIC_NO_PROFILE bool has_legacy_entry(Entry *entry) {
+    return entry != nullptr;
+}
+
+template <typename Entry>
+COQUIC_NO_PROFILE void
+maybe_note_legacy_send_continuation(Entry *entry, const QuicCoreResult &result,
+                                    QuicCoreTimePoint now, const auto &note) {
+    if (has_legacy_entry(entry)) {
+        note(*entry, result, now);
+    }
+}
+
+COQUIC_NO_PROFILE void clamp_result_wakeup_to_now_if_continuation_pending(QuicCoreResult &result,
+                                                                          QuicCoreTimePoint now) {
+    if (result.send_continuation_pending) {
+        result.next_wakeup = std::min(result.next_wakeup.value_or(now), now);
+    }
+}
 
 QuicCoreLocalError stream_state_error_to_local_error(const StreamStateError &error) {
     return QuicCoreLocalError{
@@ -86,7 +136,7 @@ QuicCoreResult drain_connection_effects(
                 connection.last_drained_packet_inspection_datagram_id(),
         });
     }
-    if (emitted == kMaxDatagramsPerDrain && connection.has_sendable_datagram(now)) {
+    if (has_send_continuation(emitted, connection, now)) {
         result.next_wakeup = now;
         result.send_continuation_pending = true;
     }
@@ -156,8 +206,7 @@ QuicCoreResult drain_connection_effects(
 void append_result(QuicCoreResult &target, QuicCoreResult source) {
     target.effects.insert(target.effects.end(), std::make_move_iterator(source.effects.begin()),
                           std::make_move_iterator(source.effects.end()));
-    target.send_continuation_pending =
-        target.send_continuation_pending || source.send_continuation_pending;
+    merge_send_continuation_pending(target, source);
     if (source.next_wakeup.has_value()) {
         target.next_wakeup =
             std::min(target.next_wakeup.value_or(*source.next_wakeup), *source.next_wakeup);
@@ -617,6 +666,44 @@ QuicCore::route_handle_for_path(const ConnectionEntry &entry,
     return entry.default_route_handle;
 }
 
+template <typename Entry>
+COQUIC_NO_PROFILE void store_send_continuation_wakeup(Entry &entry, bool send_continuation_pending,
+                                                      QuicCoreTimePoint now) {
+    entry.send_continuation_wakeup =
+        send_continuation_pending ? std::optional<QuicCoreTimePoint>{now} : std::nullopt;
+}
+
+template <typename Entry>
+COQUIC_NO_PROFILE std::optional<QuicCoreTimePoint> next_entry_wakeup(const Entry &entry) {
+    return entry.send_continuation_wakeup.has_value() ? entry.send_continuation_wakeup
+                                                      : entry.connection->next_wakeup();
+}
+
+template <typename Entry> COQUIC_NO_PROFILE bool should_run_connection_timeout(const Entry &entry) {
+    return !entry.send_continuation_wakeup.has_value();
+}
+
+template <typename Entry>
+COQUIC_NO_PROFILE void maybe_run_connection_timeout(Entry &entry, QuicCoreTimePoint now) {
+    if (should_run_connection_timeout(entry)) {
+        entry.connection->on_timeout(now);
+    }
+}
+
+template <typename Entry>
+COQUIC_NO_PROFILE std::optional<QuicPathId>
+path_id_for_route_handle(const Entry &entry, const std::optional<QuicRouteHandle> &route_handle) {
+    if (!has_route_handle(route_handle)) {
+        return std::nullopt;
+    }
+    const auto route_handle_value = optional_ref_or_abort(route_handle);
+    const auto path_it = entry.path_id_by_route_handle.find(route_handle_value);
+    if (path_it == entry.path_id_by_route_handle.end()) {
+        return std::nullopt;
+    }
+    return path_it->second;
+}
+
 bool test::seed_legacy_route_handle_path_for_tests(QuicCore &core, QuicRouteHandle route_handle,
                                                    QuicPathId path_id) {
     auto *entry = core.ensure_legacy_entry();
@@ -806,6 +893,64 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
             if (entry != nullptr) {
                 COQUIC_CORE_HOOK_RECORD(entry->handle == *handle);
             }
+        }
+    }
+
+    {
+        QuicCoreResult target;
+        target.local_error = QuicCoreLocalError{
+            .connection = 1,
+            .code = QuicCoreLocalErrorCode::invalid_stream_id,
+            .stream_id = 9,
+        };
+
+        QuicCoreResult source;
+        source.local_error = QuicCoreLocalError{
+            .connection = 2,
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        };
+        append_result(target, std::move(source));
+        COQUIC_CORE_HOOK_RECORD(target.local_error.has_value());
+        const auto &target_error = optional_ref_or_abort(target.local_error);
+        COQUIC_CORE_HOOK_RECORD(target_error.connection == std::optional{1u});
+
+        QuicCoreResult empty_target;
+        QuicCoreResult error_source;
+        error_source.local_error = QuicCoreLocalError{
+            .connection = 3,
+            .code = QuicCoreLocalErrorCode::receive_side_closed,
+            .stream_id = 5,
+        };
+        append_result(empty_target, std::move(error_source));
+        COQUIC_CORE_HOOK_RECORD(empty_target.local_error.has_value());
+        const auto &empty_target_error = optional_ref_or_abort(empty_target.local_error);
+        COQUIC_CORE_HOOK_RECORD(empty_target_error.connection == std::optional{3u});
+    }
+
+    {
+        QuicCore endpoint(make_client_endpoint_config_for_core_coverage());
+        QuicCoreResult continuation;
+        continuation.send_continuation_pending = true;
+        const auto finalized =
+            endpoint.finalize_endpoint_result(std::move(continuation), QuicCoreTimePoint{});
+        COQUIC_CORE_HOOK_RECORD(finalized.next_wakeup.has_value());
+        COQUIC_CORE_HOOK_RECORD(finalized.next_wakeup == std::optional{QuicCoreTimePoint{}});
+
+        QuicCore legacy(make_client_core_config_for_core_coverage(0x05, 0x45));
+        QuicCoreResult legacy_continuation;
+        legacy_continuation.send_continuation_pending = true;
+        const auto legacy_finalized = legacy.finalize_legacy_result(
+            std::move(legacy_continuation), QuicCoreTimePoint{} + std::chrono::milliseconds(2));
+        COQUIC_CORE_HOOK_RECORD(legacy_finalized.next_wakeup.has_value());
+        COQUIC_CORE_HOOK_RECORD(legacy_finalized.next_wakeup ==
+                                std::optional{QuicCoreTimePoint{} + std::chrono::milliseconds(2)});
+        auto *entry = legacy.legacy_entry();
+        COQUIC_CORE_HOOK_RECORD(entry != nullptr);
+        if (entry != nullptr) {
+            COQUIC_CORE_HOOK_RECORD(
+                entry->send_continuation_wakeup ==
+                std::optional{QuicCoreTimePoint{} + std::chrono::milliseconds(2)});
         }
     }
 
@@ -1086,26 +1231,24 @@ std::optional<QuicCoreTimePoint> QuicCore::next_wakeup() const {
 
 void QuicCore::note_send_continuation(ConnectionEntry &entry, const QuicCoreResult &result,
                                       QuicCoreTimePoint now) {
-    entry.send_continuation_wakeup =
-        result.send_continuation_pending ? std::optional<QuicCoreTimePoint>{now} : std::nullopt;
+    store_send_continuation_wakeup(entry, result.send_continuation_pending, now);
 }
 
 QuicCoreResult QuicCore::finalize_endpoint_result(QuicCoreResult result, QuicCoreTimePoint now) {
     result.next_wakeup = next_wakeup();
-    if (result.send_continuation_pending) {
-        result.next_wakeup = std::min(result.next_wakeup.value_or(now), now);
-    }
+    clamp_result_wakeup_to_now_if_continuation_pending(result, now);
     return result;
 }
 
 QuicCoreResult QuicCore::finalize_legacy_result(QuicCoreResult result, QuicCoreTimePoint now) {
-    if (auto *entry = legacy_entry(); entry != nullptr) {
-        note_send_continuation(*entry, result, now);
-    }
+    maybe_note_legacy_send_continuation(
+        legacy_entry(), result, now,
+        [&](ConnectionEntry &entry, const QuicCoreResult &legacy_result,
+            QuicCoreTimePoint wakeup_time) {
+            note_send_continuation(entry, legacy_result, wakeup_time);
+        });
     result.next_wakeup = next_wakeup();
-    if (result.send_continuation_pending) {
-        result.next_wakeup = std::min(result.next_wakeup.value_or(now), now);
-    }
+    clamp_result_wakeup_to_now_if_continuation_pending(result, now);
     return result;
 }
 
@@ -1353,9 +1496,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
 
         if (keep_entry) {
             const auto handle = entry.handle;
-            entry.send_continuation_wakeup = result.send_continuation_pending
-                                                 ? std::optional<QuicCoreTimePoint>{now}
-                                                 : std::nullopt;
+            store_send_continuation_wakeup(entry, result.send_continuation_pending, now);
             auto [it, inserted] = connections_.emplace(handle, std::move(entry));
             (void)inserted;
             refresh_server_connection_routes(it->second);
@@ -1365,22 +1506,20 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
 
     if (const auto *mtu = std::get_if<QuicCorePathMtuUpdate>(&input); mtu != nullptr) {
         QuicCoreResult result;
-        if (mtu->route_handle.has_value()) {
-            for (auto &[handle, entry] : connections_) {
-                static_cast<void>(handle);
-                const auto path_it = entry.path_id_by_route_handle.find(*mtu->route_handle);
-                if (path_it == entry.path_id_by_route_handle.end()) {
-                    continue;
-                }
-                entry.connection->apply_path_mtu_update(path_it->second, mtu->max_udp_payload_size);
-                auto drained =
-                    drain_connection_effects(entry.handle, entry.default_route_handle,
-                                             entry.route_handle_by_path_id, *entry.connection, now);
-                note_send_continuation(entry, drained, now);
-                append_result(result, std::move(drained));
-                refresh_server_connection_routes(entry);
-                break;
+        for (auto &[handle, entry] : connections_) {
+            static_cast<void>(handle);
+            const auto path_id = path_id_for_route_handle(entry, mtu->route_handle);
+            if (!path_id.has_value()) {
+                continue;
             }
+            entry.connection->apply_path_mtu_update(*path_id, mtu->max_udp_payload_size);
+            auto drained =
+                drain_connection_effects(entry.handle, entry.default_route_handle,
+                                         entry.route_handle_by_path_id, *entry.connection, now);
+            note_send_continuation(entry, drained, now);
+            append_result(result, std::move(drained));
+            refresh_server_connection_routes(entry);
+            break;
         }
         return finalize_endpoint_result(std::move(result), now);
     }
@@ -1483,16 +1622,12 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
     std::vector<QuicConnectionHandle> erase_after;
     for (auto &[handle, entry] : connections_) {
         (void)handle;
-        const auto wakeup = entry.send_continuation_wakeup.has_value()
-                                ? entry.send_continuation_wakeup
-                                : entry.connection->next_wakeup();
-        if (!wakeup.has_value() || *wakeup > now) {
+        const auto wakeup = next_entry_wakeup(entry);
+        if (wakeup_not_due(wakeup, now)) {
             continue;
         }
 
-        if (!entry.send_continuation_wakeup.has_value()) {
-            entry.connection->on_timeout(now);
-        }
+        maybe_run_connection_timeout(entry, now);
         auto drained =
             drain_connection_effects(entry.handle, entry.default_route_handle,
                                      entry.route_handle_by_path_id, *entry.connection, now);
@@ -1678,11 +1813,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                     };
                 }
             },
-            [&](const QuicCoreTimerExpired &) {
-                if (!entry.send_continuation_wakeup.has_value()) {
-                    connection->on_timeout(now);
-                }
-            },
+            [&](const QuicCoreTimerExpired &) { maybe_run_connection_timeout(entry, now); },
         },
         input);
 
@@ -1709,7 +1840,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                 connection->last_drained_packet_inspection_datagram_id(),
         });
     }
-    if (emitted == kMaxDatagramsPerDrain && connection->has_sendable_datagram(now)) {
+    if (has_send_continuation(emitted, *connection, now)) {
         result.next_wakeup = now;
         result.send_continuation_pending = true;
     }

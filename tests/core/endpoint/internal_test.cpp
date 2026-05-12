@@ -385,6 +385,262 @@ TEST(QuicCoreEndpointInternalTest, ConnectionCommandDrainsPendingEndpointEffects
     EXPECT_TRUE(saw_zero_rtt);
 }
 
+TEST(QuicCoreEndpointInternalTest, EndpointDiagnosticsSkipNullEntriesAndTrackContinuations) {
+    QuicCore endpoint(make_client_endpoint_config());
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0)));
+
+    auto &entry = endpoint.connections_.at(1);
+    *entry.connection = make_connected_client_connection();
+    endpoint.connections_.emplace(404,
+                                  QuicCore::ConnectionEntry{
+                                      .handle = 404,
+                                      .send_continuation_wakeup = coquic::quic::test::test_time(3),
+                                  });
+
+    EXPECT_FALSE(endpoint.has_send_continuation_pending());
+
+    entry.send_continuation_wakeup = coquic::quic::test::test_time(2);
+    EXPECT_TRUE(endpoint.has_send_continuation_pending());
+    const auto next_wakeup = endpoint.next_wakeup();
+    ASSERT_TRUE(next_wakeup.has_value());
+    EXPECT_EQ(optional_value_or_terminate(next_wakeup), coquic::quic::test::test_time(2));
+
+    const auto diagnostics = endpoint.connection_diagnostics();
+    ASSERT_EQ(diagnostics.size(), 1u);
+    EXPECT_EQ(diagnostics.front().handle, 1u);
+    EXPECT_TRUE(diagnostics.front().started);
+}
+
+TEST(QuicCoreEndpointInternalTest, EndpointPacketInspectionEffectsCarryConnectionHandle) {
+    auto config = make_client_endpoint_config();
+    config.enable_packet_inspection = true;
+    QuicCore endpoint(std::move(config));
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0)));
+
+    auto &entry = endpoint.connections_.at(1);
+    *entry.connection = make_connected_client_connection();
+    entry.connection->config_.enable_packet_inspection = true;
+
+    const auto result = endpoint.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                QuicCoreSendStreamData{
+                    .stream_id = 0,
+                    .bytes = bytes_from_ints({0x68, 0x69}),
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(send_effects_from(result).empty());
+    bool saw_inspection = false;
+    for (const auto &effect : result.effects) {
+        const auto *inspection = std::get_if<QuicCorePacketInspection>(&effect);
+        if (inspection == nullptr) {
+            continue;
+        }
+        saw_inspection = true;
+        EXPECT_EQ(inspection->connection, 1u);
+        EXPECT_EQ(inspection->direction, QuicCorePacketInspectionDirection::outbound);
+        EXPECT_EQ(inspection->packet_type, QuicCorePacketInspectionPacketType::one_rtt);
+        EXPECT_FALSE(inspection->encrypted_packet.empty());
+        EXPECT_FALSE(inspection->frames.empty());
+    }
+    EXPECT_TRUE(saw_inspection);
+}
+
+TEST(QuicCoreEndpointInternalTest, EndpointDrainMarksContinuationAfterBatchCap) {
+    QuicCore endpoint(make_client_endpoint_config());
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0)));
+
+    auto &entry = endpoint.connections_.at(1);
+    *entry.connection = make_connected_client_connection();
+    entry.connection->config_.max_outbound_datagram_size = 1200;
+    entry.connection->congestion_controller_.congestion_window_ = 1u << 30u;
+    entry.connection->congestion_controller_.bytes_in_flight_ = 0;
+    entry.connection->connection_flow_control_.peer_max_data = 1u << 30u;
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(entry.connection->peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = 1u << 30u;
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = 1u << 30u;
+    entry.connection->initialize_peer_flow_control_from_transport_parameters();
+
+    const auto result = endpoint.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                QuicCoreSendStreamData{
+                    .stream_id = 0,
+                    .bytes = std::vector<std::byte>(400000, std::byte{0x51}),
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(result.send_continuation_pending);
+    ASSERT_TRUE(result.next_wakeup.has_value());
+    EXPECT_EQ(optional_value_or_terminate(result.next_wakeup), coquic::quic::test::test_time(1));
+    EXPECT_EQ(send_effects_from(result).size(), 256u);
+}
+
+TEST(QuicCoreEndpointInternalTest, LegacyDrainMarksContinuationAndCarriesPacketInspection) {
+    QuicCore legacy_core(coquic::quic::test::make_client_core_config());
+    *legacy_core.connection_ = make_connected_client_connection();
+    legacy_core.connection_->config_.max_outbound_datagram_size = 1200;
+    legacy_core.connection_->congestion_controller_.congestion_window_ = 1u << 30u;
+    legacy_core.connection_->congestion_controller_.bytes_in_flight_ = 0;
+    legacy_core.connection_->connection_flow_control_.peer_max_data = 1u << 30u;
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(legacy_core.connection_->peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = 1u << 30u;
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = 1u << 30u;
+    legacy_core.connection_->initialize_peer_flow_control_from_transport_parameters();
+    legacy_core.connection_->pending_packet_inspections_.push_back(QuicCorePacketInspection{
+        .direction = QuicCorePacketInspectionDirection::outbound,
+        .packet_type = QuicCorePacketInspectionPacketType::one_rtt,
+        .datagram_id = 77,
+        .packet_number = 9,
+    });
+
+    const auto result = legacy_core.advance(
+        QuicCoreSendStreamData{
+            .stream_id = 0,
+            .bytes = std::vector<std::byte>(400000, std::byte{0x52}),
+        },
+        coquic::quic::test::test_time(2));
+
+    EXPECT_TRUE(result.send_continuation_pending);
+    ASSERT_TRUE(result.next_wakeup.has_value());
+    EXPECT_EQ(optional_value_or_terminate(result.next_wakeup), coquic::quic::test::test_time(2));
+    EXPECT_EQ(send_effects_from(result).size(), 256u);
+
+    bool saw_inspection = false;
+    for (const auto &effect : result.effects) {
+        const auto *inspection = std::get_if<QuicCorePacketInspection>(&effect);
+        if (inspection == nullptr) {
+            continue;
+        }
+        saw_inspection = true;
+        EXPECT_EQ(inspection->connection, 1u);
+        EXPECT_EQ(inspection->direction, QuicCorePacketInspectionDirection::outbound);
+        EXPECT_EQ(inspection->packet_type, QuicCorePacketInspectionPacketType::one_rtt);
+        EXPECT_EQ(inspection->datagram_id, 77u);
+        EXPECT_EQ(inspection->packet_number, 9u);
+    }
+    EXPECT_TRUE(saw_inspection);
+}
+
+TEST(QuicCoreEndpointInternalTest, EndpointPathMtuUpdateAppliesToMatchedRouteOnly) {
+    QuicCore endpoint(make_client_endpoint_config());
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0)));
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(2),
+            .initial_route_handle = 29,
+        },
+        coquic::quic::test::test_time(1)));
+
+    auto &first = endpoint.connections_.at(1);
+    auto &second = endpoint.connections_.at(2);
+    *first.connection = make_connected_client_connection();
+    *second.connection = make_connected_client_connection();
+    first.connection->config_.max_outbound_datagram_size = 4096;
+    second.connection->config_.max_outbound_datagram_size = 4096;
+    first.path_id_by_route_handle.emplace(17, 0);
+    first.route_handle_by_path_id.emplace(0, 17);
+    second.path_id_by_route_handle.emplace(29, 0);
+    second.route_handle_by_path_id.emplace(0, 29);
+
+    first.connection->paths_.at(0).mtu.validated_datagram_size = 1500;
+    first.connection->paths_.at(0).mtu.probe_ceiling = 4096;
+    first.connection->paths_.at(0).mtu.search_low = 1500;
+    first.connection->paths_.at(0).mtu.outstanding_probe_size = 1800;
+    first.connection->paths_.at(0).mtu.outstanding_probe_packet_number = 7;
+    first.connection->paths_.at(0).mtu.failed_probe_sizes = {1600, 2500};
+    second.connection->paths_.at(0).mtu.validated_datagram_size = 1500;
+    second.connection->paths_.at(0).mtu.probe_ceiling = 4096;
+
+    const auto ignored = endpoint.advance_endpoint(
+        QuicCorePathMtuUpdate{
+            .route_handle = 99,
+            .max_udp_payload_size = 1300,
+        },
+        coquic::quic::test::test_time(2));
+    EXPECT_TRUE(ignored.effects.empty());
+    EXPECT_EQ(first.connection->paths_.at(0).mtu.validated_datagram_size, 1500u);
+
+    const auto updated = endpoint.advance_endpoint(
+        QuicCorePathMtuUpdate{
+            .route_handle = 17,
+            .max_udp_payload_size = 1400,
+        },
+        coquic::quic::test::test_time(3));
+
+    EXPECT_FALSE(updated.local_error.has_value());
+    EXPECT_EQ(first.connection->paths_.at(0).mtu.probe_ceiling, 1400u);
+    EXPECT_EQ(first.connection->paths_.at(0).mtu.validated_datagram_size, 1400u);
+    EXPECT_FALSE(first.connection->paths_.at(0).mtu.outstanding_probe_size.has_value());
+    EXPECT_EQ(first.connection->paths_.at(0).mtu.failed_probe_sizes, std::vector<std::size_t>{});
+    EXPECT_EQ(second.connection->paths_.at(0).mtu.validated_datagram_size, 1500u);
+}
+
+TEST(QuicCoreEndpointInternalTest, LegacyPathMtuUpdateHonorsRouteMapping) {
+    QuicCore legacy_core(coquic::quic::test::make_client_core_config());
+    *legacy_core.connection_ = make_connected_client_connection();
+    legacy_core.connection_->config_.max_outbound_datagram_size = 4096;
+    ASSERT_TRUE(coquic::quic::test::seed_legacy_route_handle_path_for_tests(legacy_core, 17, 0));
+    auto *entry = legacy_core.ensure_legacy_entry();
+    ASSERT_NE(entry, nullptr);
+    auto &path = entry->connection->paths_.at(0);
+    path.mtu.validated_datagram_size = 1500;
+    path.mtu.probe_ceiling = 4096;
+    path.mtu.search_low = 1500;
+
+    static_cast<void>(legacy_core.advance(
+        QuicCorePathMtuUpdate{
+            .route_handle = std::nullopt,
+            .max_udp_payload_size = 1300,
+        },
+        coquic::quic::test::test_time(1)));
+    EXPECT_EQ(path.mtu.validated_datagram_size, 1500u);
+
+    static_cast<void>(legacy_core.advance(
+        QuicCorePathMtuUpdate{
+            .route_handle = 404,
+            .max_udp_payload_size = 1300,
+        },
+        coquic::quic::test::test_time(2)));
+    EXPECT_EQ(path.mtu.validated_datagram_size, 1500u);
+
+    static_cast<void>(legacy_core.advance(
+        QuicCorePathMtuUpdate{
+            .route_handle = 17,
+            .max_udp_payload_size = 1300,
+        },
+        coquic::quic::test::test_time(3)));
+    EXPECT_EQ(path.mtu.probe_ceiling, 1300u);
+    EXPECT_EQ(path.mtu.validated_datagram_size, 1300u);
+}
+
 TEST(QuicCoreEndpointInternalTest, EndpointInternalCoverageHookExercisesRemainingColdPaths) {
     EXPECT_TRUE(coquic::quic::test::core_endpoint_internal_coverage_for_tests());
 }

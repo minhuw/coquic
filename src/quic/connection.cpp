@@ -14416,6 +14416,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
     };
     const auto make_runtime_transport_parameters = [](const QuicConnection &connection) {
         return TransportParameters{
+            .original_destination_connection_id =
+                connection.config_.initial_destination_connection_id,
             .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
             .active_connection_id_limit = connection.config_.transport.active_connection_id_limit,
             .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
@@ -14429,8 +14431,6 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
             .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
             .initial_source_connection_id = connection.peer_source_connection_id_,
-            .original_destination_connection_id =
-                connection.config_.initial_destination_connection_id,
             .version_information = version_information_for_handshake(
                 connection.config_.supported_versions, connection.current_version_,
                 connection.config_.retry_source_connection_id, connection.original_version_,
@@ -14645,8 +14645,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             TlsAdapterTestPeer::set_peer_transport_parameters(*connection.tls_,
                                                               serialized_reduced.value());
             TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
-            TlsAdapterTestPeer::apply_early_data_status(*connection.tls_, SSL_EARLY_DATA_ACCEPTED,
-                                                        true);
+            TlsAdapterTestPeer::set_early_data_accepted(*connection.tls_, true);
             const auto validated = connection.validate_peer_transport_parameters_if_ready();
             COQUIC_CONNECTION_HOOK_RECORD(!validated.has_value());
             if (!validated.has_value()) {
@@ -14682,8 +14681,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             TlsAdapterTestPeer::set_peer_transport_parameters(*connection.tls_,
                                                               serialized_current.value());
             TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
-            TlsAdapterTestPeer::apply_early_data_status(*connection.tls_, SSL_EARLY_DATA_ACCEPTED,
-                                                        true);
+            TlsAdapterTestPeer::set_early_data_accepted(*connection.tls_, true);
             const auto validated = connection.validate_peer_transport_parameters_if_ready();
             COQUIC_CONNECTION_HOOK_RECORD(validated.has_value());
         }
@@ -14706,8 +14704,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             TlsAdapterTestPeer::set_peer_transport_parameters(*connection.tls_,
                                                               serialized_current.value());
             TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
-            TlsAdapterTestPeer::apply_early_data_status(*connection.tls_, SSL_EARLY_DATA_ACCEPTED,
-                                                        true);
+            TlsAdapterTestPeer::set_early_data_accepted(*connection.tls_, true);
             const auto validated = connection.validate_peer_transport_parameters_if_ready();
             COQUIC_CONNECTION_HOOK_RECORD(validated.has_value());
         }

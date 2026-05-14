@@ -1355,6 +1355,27 @@ void TlsAdapterTestPeer::clear_peer_transport_parameters(TlsAdapter &adapter) {
     adapter.impl_->peer_transport_parameters_.reset();
 }
 
+void TlsAdapterTestPeer::set_early_data_attempted(TlsAdapter &adapter, bool attempted) {
+    adapter.impl_->early_data_attempted_ = attempted;
+}
+
+void TlsAdapterTestPeer::set_early_data_accepted(TlsAdapter &adapter,
+                                                 std::optional<bool> accepted) {
+    adapter.impl_->early_data_accepted_ = accepted;
+}
+
+void TlsAdapterTestPeer::apply_early_data_status(TlsAdapter &adapter, int early_data_status,
+                                                 bool handshake_complete) {
+    static_cast<void>(handshake_complete);
+    if (early_data_status == 2) {
+        adapter.impl_->early_data_attempted_ = true;
+        adapter.impl_->early_data_accepted_ = true;
+    } else if (early_data_status == 1) {
+        adapter.impl_->early_data_attempted_ = true;
+        adapter.impl_->early_data_accepted_ = false;
+    }
+}
+
 } // namespace test
 
 } // namespace coquic::quic

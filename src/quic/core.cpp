@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if !defined(COQUIC_WASM_NO_FILESYSTEM)
 #include <fstream>
+#endif
 #include <iomanip>
 #include <limits>
 #include <optional>
@@ -1470,6 +1472,9 @@ QuicCore::make_stateless_reset_for_unknown_cid(const ParsedEndpointDatagram &par
 
 COQUIC_NO_PROFILE void QuicCore::load_consumed_address_validation_tokens() {
     consumed_address_validation_tokens_.clear();
+#if defined(COQUIC_WASM_NO_FILESYSTEM)
+    return;
+#else
     if (!endpoint_config_.address_validation_replay_store_path.has_value()) {
         return;
     }
@@ -1493,9 +1498,13 @@ COQUIC_NO_PROFILE void QuicCore::load_consumed_address_validation_tokens() {
         }
         consumed_address_validation_tokens_[*key] = token_time_from_ms(*expires_at_ms);
     }
+#endif
 }
 
 COQUIC_NO_PROFILE void QuicCore::persist_consumed_address_validation_tokens() {
+#if defined(COQUIC_WASM_NO_FILESYSTEM)
+    return;
+#else
     if (!endpoint_config_.address_validation_replay_store_path.has_value()) {
         return;
     }
@@ -1523,6 +1532,7 @@ COQUIC_NO_PROFILE void QuicCore::persist_consumed_address_validation_tokens() {
         std::filesystem::remove(path, ignored);
         std::filesystem::rename(temporary, path, ignored);
     }
+#endif
 }
 
 bool QuicCore::address_validation_token_consumed(std::span<const std::byte> token) const {

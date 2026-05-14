@@ -364,6 +364,8 @@ int QuicPerfClient::run() {
     }
     backend_ = std::move(bootstrap->backend);
     primary_route_handle_ = bootstrap->primary_route_handle;
+    primary_address_validation_identity_ =
+        std::move(bootstrap->primary_address_validation_identity);
 
     if (!open_initial_connection(start)) {
         return fail("open connection failed");
@@ -440,6 +442,8 @@ int QuicPerfClient::run() {
                 quic::QuicCoreInboundDatagram{
                     .bytes = std::move(event->datagram->bytes),
                     .route_handle = event->datagram->route_handle,
+                    .address_validation_identity =
+                        std::move(event->datagram->address_validation_identity),
                     .ecn = event->datagram->ecn,
                 },
                 event->now);
@@ -458,6 +462,7 @@ bool QuicPerfClient::open_initial_connection(quic::QuicCoreTimePoint now) {
             quic::QuicCoreOpenConnection{
                 .connection = make_client_open_config(index),
                 .initial_route_handle = primary_route_handle_,
+                .address_validation_identity = primary_address_validation_identity_,
             },
             now);
         ok = ok && handle_result(result, now);
@@ -1020,6 +1025,7 @@ bool QuicPerfClient::maybe_open_crr_connections(quic::QuicCoreTimePoint now) {
             quic::QuicCoreOpenConnection{
                 .connection = make_client_open_config(next_connection_index_++),
                 .initial_route_handle = primary_route_handle_,
+                .address_validation_identity = primary_address_validation_identity_,
             },
             now);
         ++crr_requests_opened_;

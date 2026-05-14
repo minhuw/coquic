@@ -26,7 +26,9 @@ namespace coquic::quic {
 
 namespace test {
 struct ConnectionCoverageTestPeer;
+bool core_endpoint_internal_coverage_for_tests();
 bool connection_helper_edge_cases_for_tests();
+bool connection_header_packet_space_coverage_for_tests();
 bool connection_key_update_and_probe_coverage_for_tests();
 bool connection_pmtud_coverage_for_tests();
 } // namespace test
@@ -41,6 +43,32 @@ enum class HandshakeStatus : std::uint8_t {
 enum class QuicConnectionTerminalState : std::uint8_t {
     closed,
     failed,
+};
+
+enum class QuicConnectionCloseMode : std::uint8_t {
+    none,
+    closing,
+    draining,
+};
+
+enum class QuicTransportErrorCode : std::uint64_t { // NOLINT(performance-enum-size)
+    no_error = 0x00,
+    internal_error = 0x01,
+    connection_refused = 0x02,
+    flow_control_error = 0x03,
+    stream_limit_error = 0x04,
+    stream_state_error = 0x05,
+    final_size_error = 0x06,
+    frame_encoding_error = 0x07,
+    transport_parameter_error = 0x08,
+    connection_id_limit_error = 0x09,
+    protocol_violation = 0x0a,
+    invalid_token = 0x0b,
+    application_error = 0x0c,
+    crypto_buffer_exceeded = 0x0d,
+    key_update_error = 0x0e,
+    aead_limit_reached = 0x0f,
+    no_viable_path = 0x10,
 };
 
 class PacketSpacePacketMapView {
@@ -187,6 +215,8 @@ class PacketSpacePacketMapView {
 
 struct PacketSpaceState {
     std::uint64_t next_send_packet_number = 0;
+    std::uint64_t optimistic_ack_skip_counter = 0;
+    std::deque<std::uint64_t> optimistic_ack_skipped_packet_numbers;
     std::optional<std::uint64_t> largest_authenticated_packet_number;
     std::optional<TrafficSecret> read_secret;
     std::optional<TrafficSecret> write_secret;
@@ -219,6 +249,8 @@ struct PacketSpaceState {
         }
 
         next_send_packet_number = other.next_send_packet_number;
+        optimistic_ack_skip_counter = other.optimistic_ack_skip_counter;
+        optimistic_ack_skipped_packet_numbers = other.optimistic_ack_skipped_packet_numbers;
         largest_authenticated_packet_number = other.largest_authenticated_packet_number;
         read_secret = other.read_secret;
         write_secret = other.write_secret;
@@ -240,6 +272,9 @@ struct PacketSpaceState {
         }
 
         next_send_packet_number = other.next_send_packet_number;
+        optimistic_ack_skip_counter = other.optimistic_ack_skip_counter;
+        optimistic_ack_skipped_packet_numbers =
+            std::move(other.optimistic_ack_skipped_packet_numbers);
         largest_authenticated_packet_number = other.largest_authenticated_packet_number;
         read_secret = std::move(other.read_secret);
         write_secret = std::move(other.write_secret);
@@ -309,6 +344,11 @@ struct LocalStreamLimitState {
     std::vector<MaxStreamsFrame> take_max_streams_frames();
     void acknowledge_max_streams_frame(const MaxStreamsFrame &frame);
     void mark_max_streams_frame_lost(const MaxStreamsFrame &frame);
+};
+
+struct StatelessResetTokenRecord {
+    ConnectionId connection_id;
+    std::array<std::byte, 16> stateless_reset_token{};
 };
 
 struct StoredClientResumptionState {
@@ -393,6 +433,8 @@ struct PeerConnectionIdRecord {
     std::uint64_t sequence_number = 0;
     ConnectionId connection_id;
     std::array<std::byte, 16> stateless_reset_token{};
+    bool locally_retired = false;
+    bool retire_frame_in_flight = false;
 };
 
 struct LocalConnectionIdRecord {
@@ -420,8 +462,15 @@ struct PathEcnState {
     std::uint64_t probing_packets_lost = 0;
 };
 
+struct PathSpinState {
+    bool disabled = true;
+    bool value = false;
+    std::optional<std::uint64_t> largest_peer_packet_number;
+};
+
 struct PathMtuState {
     bool enabled = true;
+    bool viable = true;
     std::size_t base_datagram_size = 1200;
     std::size_t validated_datagram_size = 1200;
     std::size_t probe_ceiling = 1200;
@@ -446,6 +495,7 @@ struct PathState {
     std::uint64_t peer_connection_id_sequence = 0;
     std::optional<ConnectionId> destination_connection_id_override;
     PathEcnState ecn;
+    PathSpinState spin;
     PathMtuState mtu;
 };
 
@@ -471,9 +521,11 @@ class QuicConnection {
     StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
     StreamStateResult<bool> queue_stop_sending(LocalStopSendingCommand command);
     CodecResult<bool> request_connection_migration(QuicPathId path_id,
-                                                   QuicMigrationRequestReason reason);
+                                                   QuicMigrationRequestReason reason,
+                                                   QuicCoreTimePoint now = QuicCoreClock::now());
     void apply_path_mtu_update(QuicPathId path_id, std::size_t max_udp_payload_size);
     StreamStateResult<bool> queue_application_close(LocalApplicationCloseCommand command);
+    void queue_new_token(std::vector<std::byte> token);
     void request_key_update();
     DatagramBuffer drain_outbound_datagram(QuicCoreTimePoint now);
     void on_timeout(QuicCoreTimePoint now);
@@ -486,6 +538,7 @@ class QuicConnection {
     std::optional<QuicCoreZeroRttStatusEvent> take_zero_rtt_status_event();
     std::optional<QuicConnectionTerminalState> take_terminal_state();
     std::optional<QuicCorePacketInspection> take_packet_inspection();
+    std::optional<std::vector<std::byte>> take_new_token();
     std::optional<QuicPathId> last_drained_path_id() const;
     QuicEcnCodepoint last_drained_ecn_codepoint() const;
     bool last_drained_is_pmtu_probe() const;
@@ -493,9 +546,14 @@ class QuicConnection {
     bool has_sendable_datagram(QuicCoreTimePoint now) const;
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     std::vector<ConnectionId> active_local_connection_ids() const;
+    std::vector<StatelessResetTokenRecord> active_local_stateless_reset_tokens() const;
+    std::vector<StatelessResetTokenRecord> peer_stateless_reset_tokens() const;
     bool is_handshake_complete() const;
     bool has_processed_peer_packet() const;
     bool has_failed() const;
+    bool close_state_active() const;
+    bool terminal_state_expired(QuicCoreTimePoint now) const;
+    void enter_stateless_reset_draining(QuicCoreTimePoint now);
     QuicCoreConnectionDiagnostics diagnostics(QuicConnectionHandle handle) const;
 
   private:
@@ -508,7 +566,9 @@ class QuicConnection {
 
     friend class QuicCore;
     friend struct test::ConnectionCoverageTestPeer;
+    friend bool test::core_endpoint_internal_coverage_for_tests();
     friend bool test::connection_helper_edge_cases_for_tests();
+    friend bool test::connection_header_packet_space_coverage_for_tests();
     friend bool test::connection_key_update_and_probe_coverage_for_tests();
     friend bool test::connection_pmtud_coverage_for_tests();
 
@@ -575,6 +635,7 @@ class QuicConnection {
         std::chrono::milliseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
         const std::string &ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
         bool suppress_pto_reset);
+    void reset_recovery_for_new_path(QuicPathId path_id);
     void track_sent_packet(PacketSpaceState &packet_space, SentPacketRecord packet);
     std::optional<SentPacketRecord> retire_acked_packet(PacketSpaceState &packet_space,
                                                         RecoveryPacketHandle handle);
@@ -586,6 +647,7 @@ class QuicConnection {
     std::optional<QuicCoreTimePoint> loss_deadline() const;
     std::optional<QuicCoreTimePoint> pto_deadline() const;
     std::optional<QuicCoreTimePoint> ack_deadline() const;
+    std::optional<QuicCoreTimePoint> idle_timeout_deadline() const;
     void detect_lost_packets(QuicCoreTimePoint now);
     void detect_lost_packets(PacketSpaceState &packet_space, QuicCoreTimePoint now);
     void arm_pto_probe(QuicCoreTimePoint now);
@@ -598,6 +660,7 @@ class QuicConnection {
     void arm_server_zero_rtt_discard_deadline(QuicCoreTimePoint now);
     void maybe_discard_server_zero_rtt_packet_space(QuicCoreTimePoint now);
     void synchronize_recovery_rtt_state();
+    std::chrono::milliseconds path_validation_timeout_period() const;
     void install_available_secrets();
     void collect_pending_tls_bytes();
     CodecResult<bool> sync_tls_state();
@@ -609,14 +672,26 @@ class QuicConnection {
     void update_handshake_status();
     void confirm_handshake();
     PathState &ensure_path_state(QuicPathId path_id);
-    void start_path_validation(QuicPathId path_id, bool initiated_locally);
+    void start_path_validation(QuicPathId path_id, bool initiated_locally,
+                               QuicCoreTimePoint now = QuicCoreClock::now());
     void queue_path_response(QuicPathId path_id, const std::array<std::byte, 8> &data);
     bool path_validation_timed_out(QuicPathId path_id, QuicCoreTimePoint now) const;
+    static bool
+    should_skip_packet_number_for_optimistic_ack_detection(const PacketSpaceState &packet_space,
+                                                           std::uint64_t packet_number);
+    std::uint64_t reserve_packet_number(PacketSpaceState &packet_space);
+    bool ack_ranges_include_unsent_packet_number(const PacketSpaceState &packet_space,
+                                                 AckRangeCursor cursor) const;
+    CodecResult<bool> reject_optimistic_ack_if_detected(PacketSpaceState &packet_space,
+                                                        AckRangeCursor cursor,
+                                                        QuicCoreTimePoint now);
     CodecResult<bool> process_new_connection_id_frame(const NewConnectionIdFrame &frame);
     CodecResult<bool> process_retire_connection_id_frame(const RetireConnectionIdFrame &frame);
+    void queue_peer_connection_id_retirement(std::uint64_t sequence_number);
     void issue_spare_connection_ids();
     std::array<std::byte, 8> next_path_challenge_data(QuicPathId path_id);
-    std::uint64_t select_peer_connection_id_sequence_for_path(QuicPathId path_id) const;
+    std::optional<std::uint64_t>
+    select_peer_connection_id_sequence_for_path(QuicPathId path_id) const;
     ConnectionId active_peer_destination_connection_id() const;
     std::optional<NewConnectionIdFrame> take_pending_new_connection_id_frame();
     bool should_reset_client_handshake_peer_state(const ConnectionId &source_connection_id) const;
@@ -655,7 +730,16 @@ class QuicConnection {
     void maybe_refresh_stream_receive_credit(StreamState &stream, bool force);
     void maybe_refresh_peer_stream_limit(StreamState &stream);
     bool is_probing_only(std::span<const Frame> frames) const;
-    void maybe_switch_to_path(QuicPathId path_id, bool initiated_locally);
+    bool can_initiate_path_validation(QuicPathId path_id) const;
+    void retire_peer_connection_id_for_inactive_path(QuicPathId old_path_id,
+                                                     QuicPathId new_path_id);
+    void maybe_switch_to_path(QuicPathId path_id, bool initiated_locally,
+                              QuicCoreTimePoint now = QuicCoreClock::now());
+    static void set_path_peer_connection_id_sequence(PathState &path,
+                                                     std::uint64_t sequence_number);
+    void update_spin_bit_on_receive(QuicPathId path_id, bool peer_spin_bit,
+                                    std::uint64_t packet_number);
+    bool outbound_spin_bit_for_path(std::optional<QuicPathId> path_id) const;
     bool anti_amplification_applies() const;
     bool anti_amplification_applies(QuicPathId path_id) const;
     std::uint64_t anti_amplification_send_budget() const;
@@ -670,12 +754,16 @@ class QuicConnection {
     std::optional<std::size_t> next_pmtu_probe_size(PathState &path) const;
     void note_pmtu_probe_sent(QuicPathId path_id, std::uint64_t packet_number,
                               std::size_t datagram_size);
+    void maybe_note_pmtu_probe_sent_for_tracking(const std::optional<std::size_t> &pmtu_probe_size,
+                                                 const SentPacketRecord &packet);
     void note_pmtu_probe_acked(const SentPacketRecord &packet, QuicCoreTimePoint now);
     void note_pmtu_probe_lost(const SentPacketRecord &packet, QuicCoreTimePoint now);
     void note_inbound_datagram_bytes(std::size_t bytes);
     void note_outbound_datagram_bytes(std::size_t bytes,
                                       std::optional<QuicPathId> path_id = std::nullopt,
                                       std::optional<QuicCoreTimePoint> now = std::nullopt);
+    void note_idle_peer_activity(QuicCoreTimePoint now);
+    void note_idle_ack_eliciting_send(QuicCoreTimePoint now);
     void mark_peer_address_validated();
     void disable_ecn_on_path(QuicPathId path_id);
     QuicEcnCodepoint outbound_ecn_codepoint_for_path(std::optional<QuicPathId> path_id) const;
@@ -683,10 +771,20 @@ class QuicConnection {
     outbound_destination_connection_id(std::optional<QuicPathId> path_id = std::nullopt) const;
     ConnectionId client_initial_destination_connection_id() const;
     DatagramBuffer flush_outbound_datagram(QuicCoreTimePoint now);
+    bool can_send_connection_close_frame() const;
+    std::optional<Frame> connection_close_frame_for_send() const;
+    void mark_connection_close_frame_sent(const Frame &frame, QuicCoreTimePoint now);
+    void enter_closing_state(QuicCoreTimePoint now, QuicConnectionTerminalState terminal_state);
+    void enter_draining_state(QuicCoreTimePoint now);
+    void queue_transport_close_for_error(QuicCoreTimePoint now, const CodecError &error,
+                                         std::uint64_t frame_type = 0);
+    void clear_connection_failure_effects();
+    void mark_silent_close();
     void mark_failed();
     void queue_state_change(QuicCoreStateChange change);
 
     QuicCoreConfig config_;
+    bool latency_spin_bit_disabled_ = true;
     std::uint32_t original_version_;
     std::uint32_t current_version_;
     HandshakeStatus status_ = HandshakeStatus::idle;
@@ -704,6 +802,7 @@ class QuicConnection {
     std::map<std::uint64_t, LocalConnectionIdRecord> local_connection_ids_;
     std::map<QuicPathId, PathState> paths_;
     std::uint64_t active_peer_connection_id_sequence_ = 0;
+    std::uint64_t largest_peer_retire_prior_to_ = 0;
     std::uint64_t active_local_connection_id_sequence_ = 0;
     std::uint64_t next_local_connection_id_sequence_ = 1;
     std::uint64_t next_path_challenge_sequence_ = 1;
@@ -727,6 +826,8 @@ class QuicConnection {
     std::deque<QuicCorePacketInspection> pending_packet_inspections_;
     std::vector<NewConnectionIdFrame> pending_new_connection_id_frames_;
     std::vector<RetireConnectionIdFrame> pending_retire_connection_id_frames_;
+    std::vector<NewTokenFrame> pending_new_token_frames_;
+    std::deque<std::vector<std::byte>> pending_received_new_tokens_;
     std::optional<StoredClientResumptionState> decoded_resumption_state_;
     std::optional<std::uint64_t> last_application_send_stream_id_;
     QuicCongestionController congestion_controller_;
@@ -753,9 +854,21 @@ class QuicConnection {
     bool processed_peer_packet_ = false;
     bool local_application_close_sent_ = false;
     std::optional<ApplicationConnectionCloseFrame> pending_application_close_;
+    std::optional<TransportConnectionCloseFrame> pending_transport_close_;
+    std::optional<QuicConnectionTerminalState> pending_connection_close_terminal_state_;
+    QuicConnectionCloseMode close_mode_ = QuicConnectionCloseMode::none;
+    std::optional<QuicCoreTimePoint> close_started_at_;
+    std::optional<QuicCoreTimePoint> close_deadline_;
+    std::optional<TransportConnectionCloseFrame> closing_transport_close_;
+    std::optional<ApplicationConnectionCloseFrame> closing_application_close_;
+    bool closing_close_packet_pending_ = false;
+    std::uint64_t closing_packets_since_last_close_ = 0;
+    std::uint64_t closing_packet_response_threshold_ = 1;
     std::unique_ptr<qlog::Session> qlog_session_;
     std::vector<DeferredProtectedDatagram> deferred_protected_packets_;
     std::optional<QuicCoreTimePoint> last_peer_activity_time_;
+    std::optional<QuicCoreTimePoint> idle_timeout_base_time_;
+    bool ack_eliciting_sent_since_idle_reset_ = false;
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
     std::optional<QuicCoreTimePoint> server_zero_rtt_discard_deadline_;
     std::optional<QuicPathId> last_validated_path_id_;

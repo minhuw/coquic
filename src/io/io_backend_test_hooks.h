@@ -99,6 +99,7 @@ struct SocketIoBackendReceiveDatagramResultForTests {
     SocketIoBackendReceiveDatagramStatusForTests status =
         SocketIoBackendReceiveDatagramStatusForTests::would_block;
     std::vector<std::byte> bytes;
+    std::vector<std::byte> address_validation_identity;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
     sockaddr_storage source{};
     socklen_t source_len = 0;
@@ -119,6 +120,9 @@ int socket_io_backend_preferred_udp_address_family_for_runtime_tests(std::string
 bool socket_io_backend_resolve_udp_address_for_runtime_tests(
     std::string_view host, std::uint16_t port, int extra_flags, int family,
     SocketIoBackendResolvedUdpAddressForTests &resolved);
+std::vector<std::byte>
+socket_io_backend_address_validation_identity_for_runtime_tests(const sockaddr_storage &peer,
+                                                                socklen_t peer_len);
 int socket_io_backend_open_udp_socket_for_runtime_tests(int family);
 bool socket_io_backend_send_datagram_for_runtime_tests(
     int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer, socklen_t peer_len,
@@ -128,6 +132,7 @@ socket_io_backend_receive_datagram_for_runtime_tests(int socket_fd, std::string_
                                                      int flags);
 
 bool socket_io_backend_route_handles_are_stable_per_peer_tuple_for_tests();
+bool socket_io_backend_address_validation_identity_branches_for_tests();
 bool socket_io_backend_duplicate_route_lookup_reuses_cached_route_entry_for_tests();
 bool socket_io_backend_send_uses_route_handle_for_tests();
 bool socket_io_backend_wait_returns_second_route_datagram_for_tests();
@@ -136,6 +141,7 @@ bool socket_io_backend_poll_engine_primes_descriptor_cache_for_tests();
 bool socket_io_backend_configures_linux_ecn_socket_options_for_tests();
 bool socket_io_backend_sendmsg_uses_outbound_ecn_for_tests();
 bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests();
+bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests();
 bool socket_io_backend_recvmsg_maps_ecn_for_tests();
 bool socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests();
 bool socket_io_backend_internal_coverage_hook_exercises_remaining_branches_for_tests();

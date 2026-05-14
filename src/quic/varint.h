@@ -35,6 +35,10 @@ enum class CodecErrorCode : std::uint8_t {
 struct CodecError {
     CodecErrorCode code;
     std::size_t offset;
+    std::uint64_t transport_error_code = 0;
+    bool has_transport_error_code = false;
+    std::uint64_t frame_type = 0;
+    bool has_frame_type = false;
 };
 
 template <typename T> struct CodecResult {
@@ -73,6 +77,12 @@ template <typename T> struct CodecResult {
                     .code = code,
                     .offset = offset,
                 },
+        };
+    }
+
+    static CodecResult failure(CodecError error) {
+        return CodecResult{
+            .storage = error,
         };
     }
 };

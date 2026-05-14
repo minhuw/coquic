@@ -59,11 +59,32 @@ lifecycle_events_from(const QuicCoreResult &result) {
     return out;
 }
 
+inline std::vector<QuicCoreStateChange> state_changes_from(const QuicCoreResult &result) {
+    std::vector<QuicCoreStateChange> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *event = std::get_if<QuicCoreStateEvent>(&effect)) {
+            out.push_back(event->change);
+        }
+    }
+
+    return out;
+}
+
 inline std::vector<QuicCoreSendDatagram> send_effects_from(const QuicCoreResult &result) {
     std::vector<QuicCoreSendDatagram> out;
     for (const auto &effect : result.effects) {
         if (const auto *send = std::get_if<QuicCoreSendDatagram>(&effect)) {
             out.push_back(*send);
+        }
+    }
+    return out;
+}
+
+inline std::vector<QuicCoreNewTokenAvailable> new_token_effects_from(const QuicCoreResult &result) {
+    std::vector<QuicCoreNewTokenAvailable> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *token = std::get_if<QuicCoreNewTokenAvailable>(&effect)) {
+            out.push_back(*token);
         }
     }
     return out;

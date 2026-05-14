@@ -57,6 +57,24 @@ using coquic::quic::test_support::tracked_packet_or_null;
 using coquic::quic::test_support::tracked_packet_or_terminate;
 using coquic::quic::test_support::tracked_packet_snapshot;
 
+void install_spare_peer_connection_id(coquic::quic::QuicConnection &connection,
+                                      std::uint64_t sequence_number = 2) {
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.peer_connection_ids_[sequence_number] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = sequence_number,
+        .connection_id =
+            bytes_from_ints({0x10, static_cast<std::uint8_t>(0x10u + sequence_number)}),
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+    if (connection.current_send_path_id_.has_value()) {
+        connection.ensure_path_state(*connection.current_send_path_id_)
+            .peer_connection_id_sequence = 0;
+    }
+}
+
 TEST(QuicCoreTest,
      ServerProcessesOneRttPathChallengeBeforeHandshakeCompletesWhenApplicationKeysExist) {
     auto connection = make_connected_server_connection();
@@ -328,6 +346,7 @@ TEST(QuicCoreTest, PathValidationFramesAreAllowedDuringHandshakeWhenApplicationK
     auto response_connection = make_connected_client_connection();
     response_connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     response_connection.handshake_confirmed_ = false;
+    install_spare_peer_connection_id(response_connection);
     response_connection.start_path_validation(7, /*initiated_locally=*/true);
     const auto outstanding_challenge =
         optional_ref_or_terminate(response_connection.paths_.at(7).outstanding_challenge);
@@ -1121,6 +1140,7 @@ TEST(QuicCoreTest, FirstServerResponseOnMigratedPathIncludesPathChallengeAlongsi
 
 TEST(QuicCoreTest, MatchingPathResponseValidatesCandidatePath) {
     auto connection = make_connected_client_connection();
+    install_spare_peer_connection_id(connection);
     connection.start_path_validation(7, /*initiated_locally=*/true);
     const auto challenge = optional_ref_or_terminate(connection.paths_.at(7).outstanding_challenge);
 
@@ -1164,8 +1184,55 @@ TEST(QuicCoreTest, MatchingPathResponseSwitchesCurrentSendPathToValidatedPath) {
     EXPECT_TRUE(connection.paths_.at(9).is_current_send_path);
 }
 
+TEST(QuicCoreTest, MatchingPathResponseResetsRecoveryForNewPath) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.congestion_controller_.bytes_in_flight_ = 4800;
+    connection.recovery_rtt_state_.latest_rtt = std::chrono::milliseconds(42);
+    connection.recovery_rtt_state_.min_rtt = std::chrono::milliseconds(30);
+    connection.recovery_rtt_state_.smoothed_rtt = std::chrono::milliseconds(36);
+    connection.pto_count_ = 2;
+    connection.remaining_pto_probe_datagrams_ = 1;
+    connection.application_space_.pending_probe_packet = coquic::quic::SentPacketRecord{
+        .packet_number = 21,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .has_ping = true,
+        .path_id = 3,
+    };
+
+    constexpr std::array<std::byte, 8> outstanding_challenge = {
+        std::byte{0x41}, std::byte{0x42}, std::byte{0x43}, std::byte{0x44},
+        std::byte{0x45}, std::byte{0x46}, std::byte{0x47}, std::byte{0x48}};
+    auto &candidate_path = connection.ensure_path_state(9);
+    candidate_path.validated = false;
+    candidate_path.outstanding_challenge = outstanding_challenge;
+
+    const auto processed = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::PathResponseFrame{
+                .data = outstanding_challenge,
+            },
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/9);
+    ASSERT_TRUE(processed.has_value());
+
+    EXPECT_EQ(connection.current_send_path_id_, 9u);
+    EXPECT_EQ(connection.congestion_controller_.bytes_in_flight(), 0u);
+    EXPECT_EQ(connection.recovery_rtt_state_.latest_rtt, std::nullopt);
+    EXPECT_EQ(connection.recovery_rtt_state_.min_rtt, std::nullopt);
+    EXPECT_EQ(connection.recovery_rtt_state_.smoothed_rtt, std::chrono::milliseconds(333));
+    EXPECT_EQ(connection.pto_count_, 0u);
+    EXPECT_EQ(connection.remaining_pto_probe_datagrams_, 0u);
+    EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
+}
+
 TEST(QuicCoreTest, RepeatedPathValidationUsesFreshChallengeData) {
     auto connection = make_connected_client_connection();
+    install_spare_peer_connection_id(connection);
 
     connection.start_path_validation(7, /*initiated_locally=*/true);
     ASSERT_TRUE(connection.paths_.contains(7));
@@ -1182,6 +1249,19 @@ TEST(QuicCoreTest, RepeatedPathValidationUsesFreshChallengeData) {
         optional_ref_or_terminate(connection.paths_.at(7).outstanding_challenge);
 
     EXPECT_NE(first_challenge, second_challenge);
+}
+
+TEST(QuicCoreTest, PathValidationStartArmsDeadline) {
+    auto connection = make_connected_client_connection();
+    install_spare_peer_connection_id(connection);
+
+    const auto now = coquic::quic::test::test_time(100);
+    connection.start_path_validation(7, /*initiated_locally=*/true, now);
+
+    ASSERT_TRUE(connection.paths_.contains(7));
+    const auto validation_deadline = connection.paths_.at(7).validation_deadline;
+    EXPECT_GT(optional_value_or_terminate(validation_deadline), now);
+    EXPECT_FALSE(connection.path_validation_timed_out(7, coquic::quic::test::test_time(99)));
 }
 
 TEST(QuicCoreTest, MatchingPathResponseValidatesChallengedPathAcrossInboundPathIds) {
@@ -1381,6 +1461,7 @@ TEST(QuicCoreTest, LiveLikePathResponseBurstKeepsMigratedServerSending) {
 
 TEST(QuicCoreTest, MismatchedPathResponseDoesNotValidatePath) {
     auto connection = make_connected_client_connection();
+    install_spare_peer_connection_id(connection);
     connection.start_path_validation(7, /*initiated_locally=*/true);
 
     ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
@@ -1396,6 +1477,7 @@ TEST(QuicCoreTest, MismatchedPathResponseDoesNotValidatePath) {
 
 TEST(QuicCoreTest, ReceivedApplicationMismatchedPathResponseDoesNotValidatePath) {
     auto connection = make_connected_client_connection();
+    install_spare_peer_connection_id(connection);
     connection.start_path_validation(7, /*initiated_locally=*/true);
 
     const auto processed = connection.process_inbound_received_application(

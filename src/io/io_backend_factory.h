@@ -5,6 +5,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 #include "src/io/io_backend.h"
 
@@ -18,6 +19,7 @@ struct QuicIoBackendBootstrapConfig {
 struct QuicClientIoBootstrap {
     std::unique_ptr<QuicIoBackend> backend;
     quic::QuicRouteHandle primary_route_handle = 0;
+    std::vector<std::byte> primary_address_validation_identity;
 };
 
 struct QuicServerIoBootstrap {

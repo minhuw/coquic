@@ -1403,6 +1403,13 @@ void QuicCongestionController::on_persistent_congestion() {
     std::visit([&](auto &controller) { controller.on_persistent_congestion(); }, storage_);
 }
 
+void QuicCongestionController::reset_for_new_path() {
+    const auto algorithm_before_reset = algorithm();
+    const auto max_datagram_size =
+        std::visit([](const auto &controller) { return controller.max_datagram_size_; }, storage_);
+    *this = QuicCongestionController(algorithm_before_reset, max_datagram_size);
+}
+
 std::size_t QuicCongestionController::congestion_window() const {
     return test_metric(/*congestion_window=*/true);
 }

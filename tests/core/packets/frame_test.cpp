@@ -1986,7 +1986,8 @@ TEST(QuicFrameTest, OutboundAckFrameWireHelpersMatchMaterializedAckFrame) {
 
 TEST(QuicFrameTest, ToReceivedVariantCoverageMaskIncludesColdAlternatives) {
     constexpr std::uint64_t kExpectedMask = (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 3) |
-                                            (1ull << 4) | (1ull << 5) | (1ull << 6);
+                                            (1ull << 4) | (1ull << 5) | (1ull << 6) | (1ull << 7) |
+                                            (1ull << 8);
     EXPECT_EQ(coquic::quic::test::frame_to_received_variant_coverage_mask_for_tests(),
               kExpectedMask);
 }

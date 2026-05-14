@@ -713,7 +713,10 @@ TEST(QuicCoreTest, ClientFailsOnNonRetryLongHeaderDatagramAfterRetryParserReject
     const auto after_initial =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = initial_datagram.value()},
                        coquic::quic::test::test_time(1));
-    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_initial).empty());
+    EXPECT_EQ(coquic::quic::test::send_datagrams_from(after_initial).size(), 1u);
+    const auto later =
+        client.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(2));
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(later).empty());
     EXPECT_TRUE(client.has_failed());
 }
 
@@ -743,7 +746,10 @@ TEST(QuicCoreTest, ClientFailsOnNonRetryLongHeaderDatagramWithTrailingBytes) {
     const auto after_initial =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = initial_datagram.value()},
                        coquic::quic::test::test_time(1));
-    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_initial).empty());
+    EXPECT_EQ(coquic::quic::test::send_datagrams_from(after_initial).size(), 1u);
+    const auto later =
+        client.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(2));
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(later).empty());
     EXPECT_TRUE(client.has_failed());
 }
 

@@ -636,6 +636,9 @@ TEST(QuicCongestionTest, BbrHelperPredicatesMathAndWrapperDispatchCoverAccessors
     EXPECT_EQ(wrapper.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::bbr);
     EXPECT_EQ(wrapper.name(), "bbr");
     EXPECT_EQ(wrapper.minimum_window(), 4800u);
+    wrapper.reset_for_new_path();
+    EXPECT_EQ(wrapper.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::bbr);
+    EXPECT_EQ(wrapper.minimum_window(), 4800u);
 
     auto &bbr = std::get<BbrCongestionController>(wrapper.storage_);
     bbr.mode_ = BbrCongestionController::Mode::probe_bw_cruise;

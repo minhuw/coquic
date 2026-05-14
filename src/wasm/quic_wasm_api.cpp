@@ -159,6 +159,17 @@ std::optional<std::string> input_string(const std::uint8_t *input, std::size_t i
     return std::string(reinterpret_cast<const char *>(input), input_len);
 }
 
+std::vector<std::byte> route_address_validation_identity(QuicRouteHandle route_handle) {
+    std::vector<std::byte> identity;
+    identity.reserve(1 + sizeof(route_handle));
+    identity.push_back(std::byte{0xff});
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        identity.push_back(
+            static_cast<std::byte>((route_handle >> static_cast<unsigned>(shift)) & 0xffu));
+    }
+    return identity;
+}
+
 ConnectionId connection_id_from_input(const std::uint8_t *input, std::size_t input_len,
                                       std::initializer_list<std::byte> fallback) {
     if (input_len == 0) {
@@ -1047,6 +1058,8 @@ coquic_wasm_endpoint_open_connection(std::uint32_t endpoint_id, std::uint64_t no
         QuicCoreOpenConnection{
             .connection = std::move(connection),
             .initial_route_handle = route_handle == 0 ? kDefaultRouteHandle : route_handle,
+            .address_validation_identity = route_address_validation_identity(
+                route_handle == 0 ? kDefaultRouteHandle : route_handle),
         },
         time_from_ms(now_ms));
     std::uint64_t created_connection = 0;
@@ -1080,6 +1093,9 @@ coquic_wasm_endpoint_input_datagram(std::uint32_t endpoint_id, std::uint64_t now
             .bytes = std::move(*bytes),
             .route_handle = route_handle == 0 ? std::optional<QuicRouteHandle>{}
                                               : std::optional<QuicRouteHandle>{route_handle},
+            .address_validation_identity = route_handle == 0
+                                               ? std::vector<std::byte>{}
+                                               : route_address_validation_identity(route_handle),
             .ecn = static_cast<QuicEcnCodepoint>(ecn),
         },
         time_from_ms(now_ms));

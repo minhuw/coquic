@@ -103,6 +103,7 @@ class QuicPerfClient {
     quic::QuicCore core_;
     std::unique_ptr<io::QuicIoBackend> backend_;
     quic::QuicRouteHandle primary_route_handle_ = 0;
+    std::vector<std::byte> primary_address_validation_identity_;
     std::unordered_map<quic::QuicConnectionHandle, ConnectionState> connections_;
     std::unordered_set<quic::QuicConnectionHandle> closing_connections_;
     std::size_t requests_started_ = 0;

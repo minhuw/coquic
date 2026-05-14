@@ -26,6 +26,7 @@
 #include <unordered_set>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace coquic::http3 {
 
@@ -734,6 +735,7 @@ make_endpoint_inputs_from_io_event(const io::QuicIoEvent &event) {
             inputs.push_back(quic::QuicCoreInboundDatagram{
                 .bytes = event.datagram->bytes,
                 .route_handle = event.datagram->route_handle,
+                .address_validation_identity = event.datagram->address_validation_identity,
                 .ecn = event.datagram->ecn,
             });
         }
@@ -1240,9 +1242,11 @@ class Http3ClientRuntime {
     Http3ClientRuntime(const Http3RuntimeConfig &config,
                        std::vector<Http3ClientTransferPlan> transfers,
                        quic::QuicRouteHandle primary_route_handle,
+                       std::vector<std::byte> primary_address_validation_identity,
                        std::unique_ptr<io::QuicIoBackend> backend)
         : transfers_(std::move(transfers)), core_(make_http3_client_endpoint_config(config)),
-          backend_(std::move(backend)), primary_route_handle_(primary_route_handle) {
+          backend_(std::move(backend)), primary_route_handle_(primary_route_handle),
+          primary_address_validation_identity_(std::move(primary_address_validation_identity)) {
     }
 
     int run() {
@@ -1269,6 +1273,7 @@ class Http3ClientRuntime {
                     quic::QuicCoreOpenConnection{
                         .connection = make_client_open_config(transfers_.front().execution),
                         .initial_route_handle = primary_route_handle_,
+                        .address_validation_identity = primary_address_validation_identity_,
                     },
                     start),
                 start)) {
@@ -1440,6 +1445,7 @@ class Http3ClientRuntime {
     Http3ClientEndpoint endpoint_;
     std::unique_ptr<io::QuicIoBackend> backend_;
     quic::QuicRouteHandle primary_route_handle_ = 0;
+    std::vector<std::byte> primary_address_validation_identity_;
     std::optional<quic::QuicConnectionHandle> connection_;
     std::unordered_map<std::uint64_t, std::filesystem::path> pending_outputs_;
     std::size_t expected_responses_ = 0;
@@ -1989,6 +1995,12 @@ std::uint64_t runtime_connection_handle_effect_coverage_mask_for_test() {
              .datagram_id = 20,
          }},
          19, "connection_handle_of_effect handles packet inspection effects");
+    mark(1ull << 7,
+         quic::QuicCoreEffect{quic::QuicCoreNewTokenAvailable{
+             .connection = 21,
+             .token = {std::byte{0x01}},
+         }},
+         21, "connection_handle_of_effect handles new-token effects");
 
     return mask;
 }
@@ -2101,7 +2113,7 @@ std::uint64_t runtime_loop_internal_coverage_mask_for_test() {
         auto backend = std::make_unique<RuntimeTestBackend>();
         auto *backend_ptr = backend.get();
         backend_ptr->wait_results = {event, std::nullopt};
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         return (runtime.run() == 1) & (backend_ptr->wait_calls == expected_wait_calls);
     };
 
@@ -2139,7 +2151,7 @@ std::uint64_t runtime_loop_internal_coverage_mask_for_test() {
          "client runtime handles rx events without payloads");
 
     auto backend = std::make_unique<RuntimeTestBackend>();
-    Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+    Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
     runtime.connection_ = 7;
     const auto ready = runtime.endpoint_.on_core_result(
         quic::QuicCoreResult{
@@ -2334,12 +2346,12 @@ bool runtime_loop_internal_coverage_for_test() {
 
         {
             auto backend = std::make_unique<RuntimeTestBackend>();
-            Http3ClientRuntime empty_runtime(config, {}, 1, std::move(backend));
+            Http3ClientRuntime empty_runtime(config, {}, 1, {}, std::move(backend));
             check(empty_runtime.run() == 1, "client runtime rejects empty transfer set");
         }
 
         auto backend = std::make_unique<RuntimeTestBackend>();
-        Http3ClientRuntime runtime(config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(config, transfers, 3, {}, std::move(backend));
 
         quic::QuicCoreResult local_error;
         local_error.local_error = quic::QuicCoreLocalError{
@@ -2728,7 +2740,7 @@ bool runtime_additional_internal_coverage_for_test() {
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         force_client_initial_submit_failure_count_for_test() = 1;
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         check(runtime.run() == 1,
               "client runtime fails when the initial request submission is forced to fail");
     }
@@ -2736,7 +2748,7 @@ bool runtime_additional_internal_coverage_for_test() {
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         force_client_handle_result_failure_after_calls_for_test() = 0;
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         check(runtime.run() == 1,
               "client runtime fails when opening the connection triggers handle_result failure");
     }
@@ -2745,7 +2757,7 @@ bool runtime_additional_internal_coverage_for_test() {
         auto backend = std::make_unique<RuntimeTestBackend>();
         backend->wait_results.push_back(std::nullopt);
         force_client_due_timer_count_for_test() = 1;
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         check(runtime.run() == 1,
               "client runtime continues after a forced due timer before backend wait failure");
     }
@@ -2754,7 +2766,7 @@ bool runtime_additional_internal_coverage_for_test() {
         auto backend = std::make_unique<RuntimeTestBackend>();
         force_client_due_timer_count_for_test() = 1;
         force_client_handle_result_failure_after_calls_for_test() = 1;
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         check(runtime.run() == 1,
               "client runtime fails when a forced due timer triggers handle_result failure");
     }
@@ -2766,7 +2778,7 @@ bool runtime_additional_internal_coverage_for_test() {
             .now = now,
         });
         force_client_handle_result_failure_after_calls_for_test() = 1;
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         check(runtime.run() == 1,
               "client runtime fails when timer events trigger handle_result failures");
     }
@@ -2774,7 +2786,7 @@ bool runtime_additional_internal_coverage_for_test() {
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         backend->send_result = false;
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         quic::QuicCoreResult send_failure;
         send_failure.effects.push_back(quic::QuicCoreEffect{
             quic::QuicCoreSendDatagram{
@@ -2789,7 +2801,7 @@ bool runtime_additional_internal_coverage_for_test() {
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         runtime.connection_ = 7;
         check(!runtime.submit_endpoint_commands(
                   {
@@ -2801,7 +2813,7 @@ bool runtime_additional_internal_coverage_for_test() {
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         runtime.connection_ = 7;
         force_client_handle_result_failure_after_calls_for_test() = 0;
         check(!runtime.submit_endpoint_commands(
@@ -2816,7 +2828,7 @@ bool runtime_additional_internal_coverage_for_test() {
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         runtime.connection_ = 7;
         static_cast<void>(runtime.endpoint_.on_core_result(
             quic::QuicCoreResult{
@@ -2866,7 +2878,7 @@ bool runtime_additional_internal_coverage_for_test() {
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         runtime.connection_ = 7;
         static_cast<void>(runtime.endpoint_.on_core_result(
             quic::QuicCoreResult{
@@ -2918,7 +2930,7 @@ bool runtime_additional_internal_coverage_for_test() {
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         runtime.connection_ = 7;
         static_cast<void>(runtime.endpoint_.on_core_result(
             quic::QuicCoreResult{
@@ -2959,7 +2971,7 @@ bool runtime_additional_internal_coverage_for_test() {
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         runtime.connection_ = 7;
         static_cast<void>(runtime.endpoint_.on_core_result(
             quic::QuicCoreResult{
@@ -2990,7 +3002,7 @@ bool runtime_additional_internal_coverage_for_test() {
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
-        Http3ClientRuntime runtime(client_config, transfers, 3, std::move(backend));
+        Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         runtime.connection_ = 7;
         runtime.expected_responses_ = 1;
         runtime.completed_responses_ = 0;
@@ -3516,6 +3528,7 @@ int run_http3_client_transfers(const Http3RuntimeConfig &config,
     }
 
     Http3ClientRuntime runtime(config, *plans, bootstrap->primary_route_handle,
+                               std::move(bootstrap->primary_address_validation_identity),
                                std::move(bootstrap->backend));
     return runtime.run();
 }

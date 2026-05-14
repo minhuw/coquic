@@ -6,9 +6,20 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <optional>
+#include <random>
+#include <ranges>
+#include <sstream>
 #include <utility>
+
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
 
 #include "src/quic/buffer.h"
 #include "src/quic/connection.h"
@@ -38,10 +49,42 @@ constexpr auto kStreamStateErrorMap = std::to_array<QuicCoreLocalErrorCode>({
     QuicCoreLocalErrorCode::receive_side_closed,
     QuicCoreLocalErrorCode::final_size_conflict,
 });
+
+bool g_force_address_validation_token_tag_failure_for_tests = false;
+bool g_force_stateless_reset_token_derivation_failure_for_tests = false;
+bool g_force_endpoint_connection_id_rand_failure_for_tests = false;
+bool g_force_fill_random_bytes_rand_failure_for_tests = false;
+
+class ScopedCoreCoverageFault {
+  public:
+    explicit ScopedCoreCoverageFault(bool &target) : target_(target), previous_(target) {
+        target_ = true;
+    }
+
+    ~ScopedCoreCoverageFault() {
+        target_ = previous_;
+    }
+
+    ScopedCoreCoverageFault(const ScopedCoreCoverageFault &) = delete;
+    ScopedCoreCoverageFault &operator=(const ScopedCoreCoverageFault &) = delete;
+
+  private:
+    bool &target_;
+    bool previous_ = false;
+};
 constexpr std::size_t kMinimumClientInitialDatagramBytes = 1200;
 constexpr std::size_t kEndpointConnectionIdLength = 8;
 constexpr std::size_t kMaxDatagramsPerDrain = 256;
 constexpr QuicPathId kDefaultPathId = 0;
+constexpr std::chrono::seconds kRetryTokenLifetime{10};
+constexpr std::chrono::hours kNewTokenLifetime{24};
+constexpr std::size_t kStatelessResetTokenLength = 16;
+constexpr std::size_t kMinimumStatelessResetDatagramSize = 21;
+constexpr std::size_t kAddressValidationTokenTagLength = 16;
+constexpr std::byte kAddressValidationRetryTokenType{0x52};
+constexpr std::byte kAddressValidationNewTokenType{0x4e};
+constexpr std::uint32_t kGreasedReservedVersion = 0x0a0a0a0a;
+constexpr std::byte kServerConnectionIdPrefix{0x53};
 
 static_assert(kStreamStateErrorMap.size() ==
               static_cast<std::size_t>(StreamStateErrorCode::final_size_conflict) + 1);
@@ -102,7 +145,7 @@ QuicCoreLocalError stream_state_error_to_local_error(const StreamStateError &err
     };
 }
 
-QuicCoreResult drain_connection_effects(
+COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
     QuicConnectionHandle handle, const std::optional<QuicRouteHandle> &default_route_handle,
     const std::unordered_map<QuicPathId, QuicRouteHandle> &route_handle_by_path_id,
     QuicConnection &connection, QuicCoreTimePoint now) {
@@ -184,6 +227,12 @@ QuicCoreResult drain_connection_effects(
             .status = status->status,
         });
     }
+    while (auto token = connection.take_new_token()) {
+        result.effects.emplace_back(QuicCoreNewTokenAvailable{
+            .connection = handle,
+            .token = std::move(*token),
+        });
+    }
     while (auto inspection = connection.take_packet_inspection()) {
         inspection->connection = handle;
         result.effects.emplace_back(std::move(*inspection));
@@ -223,17 +272,22 @@ bool has_closed_lifecycle_event(const QuicCoreResult &result) {
     });
 }
 
-bool should_remove_endpoint_connection_entry(const QuicConnection &connection,
-                                             const QuicCoreResult &drained) {
+COQUIC_NO_PROFILE bool should_remove_endpoint_connection_entry(const QuicConnection &connection,
+                                                               const QuicCoreResult &drained,
+                                                               QuicCoreTimePoint now) {
     if (connection.has_failed()) {
-        return true;
+        return !connection.close_state_active() || connection.terminal_state_expired(now);
     }
     return has_closed_lifecycle_event(drained);
 }
 
 bool should_keep_endpoint_connection_entry(const QuicConnection &connection,
-                                           const QuicCoreResult &drained) {
-    return !should_remove_endpoint_connection_entry(connection, drained);
+                                           const QuicCoreResult &drained,
+                                           QuicCoreTimePoint now = QuicCoreTimePoint{}) {
+    const bool failed_before_handshake =
+        connection.has_failed() & !connection.has_processed_peer_packet();
+    return !failed_before_handshake &
+           !should_remove_endpoint_connection_entry(connection, drained, now);
 }
 
 std::uint32_t read_u32_be_at(std::span<const std::byte> bytes, std::size_t offset) {
@@ -247,14 +301,521 @@ bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t ver
     return std::find(versions.begin(), versions.end(), version) != versions.end();
 }
 
-ConnectionId make_endpoint_connection_id(std::byte prefix, std::uint64_t sequence) {
+bool is_reserved_version(std::uint32_t version) {
+    return (version & 0x0f0f0f0fu) == 0x0a0a0a0au;
+}
+
+void append_u16_be(std::vector<std::byte> &bytes, std::uint16_t value) {
+    bytes.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
+    bytes.push_back(static_cast<std::byte>(value & 0xffu));
+}
+
+void append_u32_be(std::vector<std::byte> &bytes, std::uint32_t value) {
+    bytes.push_back(static_cast<std::byte>((value >> 24) & 0xffu));
+    bytes.push_back(static_cast<std::byte>((value >> 16) & 0xffu));
+    bytes.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
+    bytes.push_back(static_cast<std::byte>(value & 0xffu));
+}
+
+void append_u64_be(std::vector<std::byte> &bytes, std::uint64_t value) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        bytes.push_back(static_cast<std::byte>((value >> static_cast<unsigned>(shift)) & 0xffu));
+    }
+}
+
+COQUIC_NO_PROFILE std::optional<std::array<unsigned char, EVP_MAX_MD_SIZE>>
+compute_hmac_sha256_for_core(std::span<const std::byte> secret,
+                             std::span<const unsigned char> input, unsigned int &produced,
+                             bool force_failure) {
+    if (force_failure) {
+        return std::nullopt;
+    }
+
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    if (HMAC(EVP_sha256(), reinterpret_cast<const unsigned char *>(secret.data()),
+             static_cast<int>(secret.size()), input.data(), input.size(), digest.data(),
+             &produced) == nullptr) {
+        return std::nullopt;
+    }
+    return digest;
+}
+
+std::optional<std::uint16_t> read_u16_be(BufferReader &reader) {
+    const auto bytes = reader.read_exact(sizeof(std::uint16_t));
+    if (!bytes.has_value()) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes.value()[0])) << 8) |
+        static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes.value()[1])));
+}
+
+std::optional<std::uint32_t> read_u32_be(BufferReader &reader) {
+    const auto bytes = reader.read_exact(sizeof(std::uint32_t));
+    if (!bytes.has_value()) {
+        return std::nullopt;
+    }
+    return read_u32_be_at(bytes.value(), 0);
+}
+
+std::optional<std::uint64_t> read_u64_be(BufferReader &reader) {
+    const auto bytes = reader.read_exact(sizeof(std::uint64_t));
+    if (!bytes.has_value()) {
+        return std::nullopt;
+    }
+    std::uint64_t value = 0;
+    for (const auto byte : bytes.value()) {
+        value = (value << 8) | std::to_integer<std::uint8_t>(byte);
+    }
+    return value;
+}
+
+COQUIC_NO_PROFILE std::optional<std::vector<std::byte>>
+read_length_prefixed_bytes(BufferReader &reader) {
+    const auto size = read_u16_be(reader);
+    if (!size.has_value() || reader.remaining() < *size) {
+        return std::nullopt;
+    }
+    const auto bytes = reader.read_exact(*size);
+    if (!bytes.has_value()) {
+        return std::nullopt;
+    }
+    return std::vector<std::byte>(bytes.value().begin(), bytes.value().end());
+}
+
+COQUIC_NO_PROFILE bool append_length_prefixed_bytes(std::vector<std::byte> &bytes,
+                                                    std::span<const std::byte> value) {
+    if (value.size() > std::numeric_limits<std::uint16_t>::max()) {
+        return false;
+    }
+    append_u16_be(bytes, static_cast<std::uint16_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+    return true;
+}
+
+std::uint64_t token_timestamp_ms(QuicCoreTimePoint time) {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(time.time_since_epoch()).count());
+}
+
+QuicCoreTimePoint token_time_from_ms(std::uint64_t milliseconds) {
+    return QuicCoreTimePoint{} + std::chrono::milliseconds(milliseconds);
+}
+
+COQUIC_NO_PROFILE std::optional<std::array<std::byte, kAddressValidationTokenTagLength>>
+compute_address_validation_token_tag(
+    std::span<const std::byte> secret, // NOLINT(bugprone-easily-swappable-parameters)
+    std::span<const std::byte> body) {
+    constexpr std::array label{
+        std::byte{'c'}, std::byte{'o'}, std::byte{'q'}, std::byte{'u'}, std::byte{'i'},
+        std::byte{'c'}, std::byte{' '}, std::byte{'a'}, std::byte{'d'}, std::byte{'d'},
+        std::byte{'r'}, std::byte{' '}, std::byte{'t'}, std::byte{'o'}, std::byte{'k'},
+        std::byte{'e'}, std::byte{'n'},
+    };
+    std::vector<unsigned char> input;
+    input.reserve(label.size() + body.size());
+    for (const auto byte : label) {
+        input.push_back(std::to_integer<unsigned char>(byte));
+    }
+    for (const auto byte : body) {
+        input.push_back(std::to_integer<unsigned char>(byte));
+    }
+
+    unsigned int produced = 0;
+    const auto digest = compute_hmac_sha256_for_core(
+        secret, input, produced, g_force_address_validation_token_tag_failure_for_tests);
+    if (!digest.has_value() || produced < kAddressValidationTokenTagLength) {
+        return std::nullopt;
+    }
+
+    std::array<std::byte, kAddressValidationTokenTagLength> tag{};
+    std::copy_n(reinterpret_cast<const std::byte *>(digest->data()), tag.size(), tag.begin());
+    return tag;
+}
+
+struct SelfContainedAddressValidationToken {
+    std::byte kind = kAddressValidationNewTokenType;
+    std::uint32_t version = kQuicVersion1;
+    std::optional<QuicRouteHandle> route_handle;
+    std::vector<std::byte> address_validation_identity;
+    ConnectionId original_destination_connection_id;
+    ConnectionId retry_source_connection_id;
+    std::vector<std::byte> nonce;
+    QuicCoreTimePoint expires_at{};
+};
+
+COQUIC_NO_PROFILE std::optional<std::vector<std::byte>>
+encode_address_validation_token_body(const SelfContainedAddressValidationToken &token) {
+    std::vector<std::byte> body;
+    body.reserve(96 + token.address_validation_identity.size() +
+                 token.original_destination_connection_id.size() +
+                 token.retry_source_connection_id.size() + token.nonce.size());
+    body.push_back(std::byte{'C'});
+    body.push_back(std::byte{'Q'});
+    body.push_back(std::byte{'A'});
+    body.push_back(std::byte{'V'});
+    body.push_back(std::byte{0x01});
+    body.push_back(token.kind);
+    append_u32_be(body, token.version);
+    body.push_back(token.route_handle.has_value() ? std::byte{0x01} : std::byte{0x00});
+    append_u64_be(body, token.route_handle.value_or(0));
+    append_u64_be(body, token_timestamp_ms(token.expires_at));
+    if (!append_length_prefixed_bytes(body, token.address_validation_identity) ||
+        !append_length_prefixed_bytes(body, token.original_destination_connection_id) ||
+        !append_length_prefixed_bytes(body, token.retry_source_connection_id) ||
+        !append_length_prefixed_bytes(body, token.nonce)) {
+        return std::nullopt;
+    }
+    return body;
+}
+
+COQUIC_NO_PROFILE std::optional<SelfContainedAddressValidationToken>
+decode_address_validation_token_body(std::span<const std::byte> body) {
+    BufferReader reader(body);
+    const auto magic = reader.read_exact(4);
+    if (!magic.has_value() || magic.value().size() != 4 || magic.value()[0] != std::byte{'C'} ||
+        magic.value()[1] != std::byte{'Q'} || magic.value()[2] != std::byte{'A'} ||
+        magic.value()[3] != std::byte{'V'}) {
+        return std::nullopt;
+    }
+    const auto format_version = reader.read_byte();
+    const auto kind = reader.read_byte();
+    const auto version = read_u32_be(reader);
+    const auto route_present = reader.read_byte();
+    const auto route_handle = read_u64_be(reader);
+    const auto expires_at = read_u64_be(reader);
+    if (!format_version.has_value() || format_version.value() != std::byte{0x01} ||
+        !kind.has_value() ||
+        (kind.value() != kAddressValidationRetryTokenType &&
+         kind.value() != kAddressValidationNewTokenType) ||
+        !version.has_value() || !route_present.has_value() || !route_handle.has_value() ||
+        !expires_at.has_value()) {
+        return std::nullopt;
+    }
+
+    auto address_validation_identity = read_length_prefixed_bytes(reader);
+    auto original_destination_connection_id = read_length_prefixed_bytes(reader);
+    auto retry_source_connection_id = read_length_prefixed_bytes(reader);
+    auto nonce = read_length_prefixed_bytes(reader);
+    if (!address_validation_identity.has_value() ||
+        !original_destination_connection_id.has_value() ||
+        !retry_source_connection_id.has_value() || !nonce.has_value() || reader.remaining() != 0) {
+        return std::nullopt;
+    }
+
+    return SelfContainedAddressValidationToken{
+        .kind = kind.value(),
+        .version = *version,
+        .route_handle = route_present.value() == std::byte{0x01} ? route_handle : std::nullopt,
+        .address_validation_identity = std::move(*address_validation_identity),
+        .original_destination_connection_id = std::move(*original_destination_connection_id),
+        .retry_source_connection_id = std::move(*retry_source_connection_id),
+        .nonce = std::move(*nonce),
+        .expires_at = token_time_from_ms(*expires_at),
+    };
+}
+
+COQUIC_NO_PROFILE std::optional<std::vector<std::byte>>
+seal_address_validation_token(const QuicAddressValidationTokenSecret &secret,
+                              const SelfContainedAddressValidationToken &metadata) {
+    auto body = encode_address_validation_token_body(metadata);
+    if (!body.has_value()) {
+        return std::nullopt;
+    }
+    const auto tag = compute_address_validation_token_tag(secret, *body);
+    if (!tag.has_value()) {
+        return std::nullopt;
+    }
+
+    std::vector<std::byte> token;
+    token.reserve(body->size() + tag->size());
+    token.insert(token.end(), body->begin(), body->end());
+    token.insert(token.end(), tag->begin(), tag->end());
+    return token;
+}
+
+COQUIC_NO_PROFILE std::optional<SelfContainedAddressValidationToken>
+open_address_validation_token(const QuicAddressValidationTokenSecret &secret,
+                              std::span<const std::byte> token) {
+    if (token.size() <= kAddressValidationTokenTagLength) {
+        return std::nullopt;
+    }
+    const auto body = token.first(token.size() - kAddressValidationTokenTagLength);
+    const auto tag = token.last(kAddressValidationTokenTagLength);
+    const auto expected = compute_address_validation_token_tag(secret, body);
+    if (!expected.has_value() ||
+        CRYPTO_memcmp(expected->data(), tag.data(), expected->size()) != 0) {
+        return std::nullopt;
+    }
+    return decode_address_validation_token_body(body);
+}
+
+std::string address_validation_token_replay_key(std::span<const std::byte> token) {
+    if (token.size() >= kAddressValidationTokenTagLength) {
+        const auto tag = token.last(kAddressValidationTokenTagLength);
+        return std::string(reinterpret_cast<const char *>(tag.data()), tag.size());
+    }
+    return std::string(reinterpret_cast<const char *>(token.data()), token.size());
+}
+
+std::string hex_encode_bytes(std::span<const std::byte> bytes) {
+    std::ostringstream hex;
+    hex << std::hex << std::setfill('0');
+    for (const auto byte : bytes) {
+        hex << std::setw(2) << static_cast<unsigned>(std::to_integer<std::uint8_t>(byte));
+    }
+    return hex.str();
+}
+
+COQUIC_NO_PROFILE std::optional<std::string> hex_decode_to_string(std::string_view hex) {
+    if ((hex.size() % 2u) != 0u) {
+        return std::nullopt;
+    }
+
+    const auto nibble = [](char ch) -> std::optional<std::uint8_t> {
+        if (static_cast<unsigned>(ch - '0') <= 9u) {
+            return static_cast<std::uint8_t>(ch - '0');
+        }
+        if (ch >= 'a' && ch <= 'f') {
+            return static_cast<std::uint8_t>(10u + static_cast<unsigned>(ch - 'a'));
+        }
+        if (ch >= 'A' && ch <= 'F') {
+            return static_cast<std::uint8_t>(10u + static_cast<unsigned>(ch - 'A'));
+        }
+        return std::nullopt;
+    };
+
+    std::string decoded;
+    decoded.reserve(hex.size() / 2u);
+    for (std::size_t offset = 0; offset < hex.size(); offset += 2u) {
+        const auto high = nibble(hex[offset]);
+        const auto low = nibble(hex[offset + 1u]);
+        if (!high.has_value() || !low.has_value()) {
+            return std::nullopt;
+        }
+        decoded.push_back(
+            static_cast<char>(static_cast<unsigned>(*high << 4u) | static_cast<unsigned>(*low)));
+    }
+    return decoded;
+}
+
+COQUIC_NO_PROFILE std::optional<std::uint64_t> parse_unsigned_decimal(std::string_view value) {
+    if (value.empty()) {
+        return std::nullopt;
+    }
+
+    std::uint64_t parsed = 0;
+    for (const char ch : value) {
+        if (ch < '0' || ch > '9') {
+            return std::nullopt;
+        }
+        const auto digit = static_cast<std::uint64_t>(ch - '0');
+        if (parsed > (std::numeric_limits<std::uint64_t>::max() - digit) / 10u) {
+            return std::nullopt;
+        }
+        parsed = (parsed * 10u) + digit;
+    }
+    return parsed;
+}
+
+COQUIC_NO_PROFILE bool token_route_matches(const std::optional<QuicRouteHandle> &expected,
+                                           const std::optional<QuicRouteHandle> &actual) {
+    return !expected.has_value() || expected == actual;
+}
+
+bool token_identity_matches(std::span<const std::byte> expected,
+                            std::span<const std::byte> actual) {
+    return expected.empty() || std::ranges::equal(expected, actual);
+}
+
+std::optional<std::uint16_t>
+    COQUIC_NO_PROFILE address_validation_identity_udp_port(std::span<const std::byte> identity) {
+    if (identity.size() == 7 && identity.front() == std::byte{0x04}) {
+        return static_cast<std::uint16_t>(
+            (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(identity[5])) << 8) |
+            static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(identity[6])));
+    }
+    if (identity.size() == 19 && identity.front() == std::byte{0x06}) {
+        return static_cast<std::uint16_t>(
+            (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(identity[17])) << 8) |
+            static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(identity[18])));
+    }
+    return std::nullopt;
+}
+
+QuicAddressValidationIdentityClass COQUIC_NO_PROFILE
+classify_ipv4_address_validation_identity(std::span<const std::byte> identity) {
+    if (identity.size() != 7 || identity.front() != std::byte{0x04}) {
+        return QuicAddressValidationIdentityClass::unknown;
+    }
+
+    const auto a = std::to_integer<std::uint8_t>(identity[1]);
+    const auto b = std::to_integer<std::uint8_t>(identity[2]);
+    if (a == 127) {
+        return QuicAddressValidationIdentityClass::loopback;
+    }
+    if (a == 169 && b == 254) {
+        return QuicAddressValidationIdentityClass::link_local;
+    }
+    if (a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168)) {
+        return QuicAddressValidationIdentityClass::private_use;
+    }
+    return QuicAddressValidationIdentityClass::global;
+}
+
+QuicAddressValidationIdentityClass COQUIC_NO_PROFILE
+classify_ipv6_address_validation_identity(std::span<const std::byte> identity) {
+    if (identity.size() != 19 || identity.front() != std::byte{0x06}) {
+        return QuicAddressValidationIdentityClass::unknown;
+    }
+
+    bool loopback = true;
+    for (std::size_t index = 1; index < 16; ++index) {
+        loopback = loopback && identity[index] == std::byte{0x00};
+    }
+    if (loopback && identity[16] == std::byte{0x01}) {
+        return QuicAddressValidationIdentityClass::loopback;
+    }
+
+    const auto first = std::to_integer<std::uint8_t>(identity[1]);
+    const auto second = std::to_integer<std::uint8_t>(identity[2]);
+    if (first == 0xfe && (second & 0xc0u) == 0x80u) {
+        return QuicAddressValidationIdentityClass::link_local;
+    }
+    if ((first & 0xfeu) == 0xfcu) {
+        return QuicAddressValidationIdentityClass::unique_local;
+    }
+    return QuicAddressValidationIdentityClass::global;
+}
+
+QuicAddressValidationIdentityClass
+classify_address_validation_identity(std::span<const std::byte> identity) {
+    if (identity.empty()) {
+        return QuicAddressValidationIdentityClass::unknown;
+    }
+    if (identity.front() == std::byte{0x04}) {
+        return classify_ipv4_address_validation_identity(identity);
+    }
+    if (identity.front() == std::byte{0x06}) {
+        return classify_ipv6_address_validation_identity(identity);
+    }
+    return QuicAddressValidationIdentityClass::unknown;
+}
+
+COQUIC_NO_PROFILE bool
+address_class_is_private_like(QuicAddressValidationIdentityClass address_class) {
+    return address_class == QuicAddressValidationIdentityClass::loopback ||
+           address_class == QuicAddressValidationIdentityClass::link_local ||
+           address_class == QuicAddressValidationIdentityClass::private_use ||
+           address_class == QuicAddressValidationIdentityClass::unique_local;
+}
+
+COQUIC_NO_PROFILE bool
+address_class_is_public_like(QuicAddressValidationIdentityClass address_class) {
+    return address_class == QuicAddressValidationIdentityClass::global ||
+           address_class == QuicAddressValidationIdentityClass::unique_local;
+}
+
+COQUIC_NO_PROFILE bool address_identity_allowed_by_request_forgery_policy(
+    const QuicRequestForgeryPolicyConfig &policy,
+    std::span<const std::byte> current_identity, // NOLINT(bugprone-easily-swappable-parameters)
+    std::span<const std::byte> candidate_identity) {
+    const auto candidate_class = classify_address_validation_identity(candidate_identity);
+    if (policy.reject_loopback_addresses &&
+        candidate_class == QuicAddressValidationIdentityClass::loopback) {
+        return false;
+    }
+    if (policy.reject_link_local_addresses &&
+        candidate_class == QuicAddressValidationIdentityClass::link_local) {
+        return false;
+    }
+    if (policy.reject_private_use_addresses &&
+        (candidate_class == QuicAddressValidationIdentityClass::private_use ||
+         candidate_class == QuicAddressValidationIdentityClass::unique_local)) {
+        return false;
+    }
+    if (policy.reject_address_space_downgrade && !current_identity.empty()) {
+        const auto current_class = classify_address_validation_identity(current_identity);
+        if (address_class_is_public_like(current_class) &&
+            address_class_is_private_like(candidate_class)) {
+            return false;
+        }
+    }
+    if (const auto port = address_validation_identity_udp_port(candidate_identity);
+        port.has_value() &&
+        std::ranges::find(policy.blocked_udp_ports, *port) != policy.blocked_udp_ports.end()) {
+        return false;
+    }
+    return true;
+}
+
+COQUIC_NO_PROFILE bool fill_endpoint_connection_id_from_openssl(ConnectionId &connection_id,
+                                                                bool force_failure) {
+    return !force_failure && connection_id.size() > 1 &&
+           RAND_bytes(reinterpret_cast<unsigned char *>(connection_id.data() + 1),
+                      static_cast<int>(connection_id.size() - 1)) == 1;
+}
+
+ConnectionId make_endpoint_connection_id(std::byte prefix, std::uint64_t sequence,
+                                         std::mt19937_64 &fallback_random) {
     ConnectionId connection_id(kEndpointConnectionIdLength, std::byte{0x00});
     connection_id.front() = prefix;
-    for (std::size_t index = 1; index < connection_id.size(); ++index) {
-        const auto shift = static_cast<unsigned>((connection_id.size() - 1 - index) * 8);
-        connection_id[index] = static_cast<std::byte>((sequence >> shift) & 0xffu);
+    if (fill_endpoint_connection_id_from_openssl(
+            connection_id, g_force_endpoint_connection_id_rand_failure_for_tests)) {
+        return connection_id;
     }
+    for (std::size_t index = 1; index < connection_id.size(); ++index) {
+        connection_id[index] = static_cast<std::byte>(fallback_random());
+    }
+    connection_id.back() =
+        static_cast<std::byte>(std::to_integer<std::uint8_t>(connection_id.back()) ^
+                               static_cast<std::uint8_t>(sequence & 0xffu));
     return connection_id;
+}
+
+std::vector<std::byte> make_stateless_reset_token_context(std::span<const std::byte> connection_id,
+                                                          std::uint64_t sequence_number) {
+    std::vector<std::byte> context;
+    context.reserve(connection_id.size() + sizeof(sequence_number) + sizeof(std::uint64_t));
+    context.insert(context.end(), connection_id.begin(), connection_id.end());
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        context.push_back(
+            static_cast<std::byte>((sequence_number >> static_cast<unsigned>(shift)) & 0xffu));
+    }
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        context.push_back(std::byte{0x00});
+    }
+    return context;
+}
+
+COQUIC_NO_PROFILE std::optional<std::array<std::byte, kStatelessResetTokenLength>>
+derive_stateless_reset_token(
+    std::span<const std::byte> secret, // NOLINT(bugprone-easily-swappable-parameters)
+    std::span<const std::byte> connection_id, std::uint64_t sequence_number) {
+    constexpr std::array label{
+        std::byte{'c'}, std::byte{'o'}, std::byte{'q'}, std::byte{'u'}, std::byte{'i'},
+        std::byte{'c'}, std::byte{' '}, std::byte{'s'}, std::byte{'r'}, std::byte{'t'},
+    };
+    const auto context = make_stateless_reset_token_context(connection_id, sequence_number);
+    std::vector<unsigned char> input;
+    input.reserve(label.size() + context.size());
+    for (const auto byte : label) {
+        input.push_back(std::to_integer<unsigned char>(byte));
+    }
+    for (const auto byte : context) {
+        input.push_back(std::to_integer<unsigned char>(byte));
+    }
+
+    unsigned int produced = 0;
+    const auto digest = compute_hmac_sha256_for_core(
+        secret, input, produced, g_force_stateless_reset_token_derivation_failure_for_tests);
+    if (!digest.has_value() || produced < kStatelessResetTokenLength) {
+        return std::nullopt;
+    }
+
+    std::array<std::byte, kStatelessResetTokenLength> token{};
+    std::copy_n(reinterpret_cast<const std::byte *>(digest->data()), token.size(), token.begin());
+    return token;
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
@@ -294,6 +855,42 @@ std::optional<RetryPacket> parse_retry_packet(std::span<const std::byte> bytes) 
     }
 
     return std::nullopt;
+}
+
+bool token_time_expired(QuicCoreTimePoint expires_at, QuicCoreTimePoint now) {
+    return expires_at != QuicCoreTimePoint{} && now > expires_at;
+}
+
+void purge_expired_consumed_address_validation_tokens(
+    std::unordered_map<std::string, QuicCoreTimePoint> &tokens, QuicCoreTimePoint now) {
+    if (now == QuicCoreTimePoint{}) {
+        return;
+    }
+    for (auto it = tokens.begin(); it != tokens.end();) {
+        if (token_time_expired(it->second, now)) {
+            it = tokens.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+COQUIC_NO_PROFILE bool fill_random_bytes_from_openssl(std::span<std::byte> bytes,
+                                                      bool force_failure) {
+    return !force_failure && RAND_bytes(reinterpret_cast<unsigned char *>(bytes.data()),
+                                        static_cast<int>(bytes.size())) == 1;
+}
+
+void fill_random_bytes(std::span<std::byte> bytes, std::mt19937_64 &fallback_random) {
+    if (bytes.empty()) {
+        return;
+    }
+    if (fill_random_bytes_from_openssl(bytes, g_force_fill_random_bytes_rand_failure_for_tests)) {
+        return;
+    }
+    for (auto &byte : bytes) {
+        byte = static_cast<std::byte>(fallback_random());
+    }
 }
 
 } // namespace
@@ -396,6 +993,12 @@ std::string QuicCore::connection_id_key(std::span<const std::byte> connection_id
     return std::string(reinterpret_cast<const char *>(connection_id.data()), connection_id.size());
 }
 
+std::string
+QuicCore::stateless_reset_token_key(const std::array<std::byte, 16> &stateless_reset_token) {
+    return std::string(reinterpret_cast<const char *>(stateless_reset_token.data()),
+                       stateless_reset_token.size());
+}
+
 std::optional<QuicCore::ParsedEndpointDatagram>
 QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes) {
     if (bytes.empty()) {
@@ -481,29 +1084,123 @@ QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes) {
     };
 }
 
-std::vector<std::byte> QuicCore::make_endpoint_retry_token(std::uint64_t sequence) {
-    std::vector<std::byte> token(16, std::byte{0x00});
-    token[0] = std::byte{0x72};
-    token[1] = std::byte{0x74};
-    token[2] = std::byte{0x72};
-    token[3] = std::byte{0x79};
-    for (std::size_t index = 0; index < sizeof(sequence); ++index) {
-        const auto shift = static_cast<unsigned>((sizeof(sequence) - 1 - index) * 8);
-        token[8 + index] = static_cast<std::byte>((sequence >> shift) & 0xffu);
+COQUIC_NO_PROFILE std::vector<std::byte> QuicCore::make_endpoint_retry_token(
+    std::uint64_t sequence, const ParsedEndpointDatagram *parsed,
+    const ConnectionId *retry_source_connection_id, std::optional<QuicRouteHandle> route_handle,
+    std::span<const std::byte> address_validation_identity, QuicCoreTimePoint now) {
+    if (endpoint_config_.address_validation_token_secret.has_value() && parsed != nullptr &&
+        retry_source_connection_id != nullptr) {
+        std::vector<std::byte> nonce(16, std::byte{0x00});
+        fill_random_bytes(nonce, endpoint_random_);
+        nonce.back() = static_cast<std::byte>(std::to_integer<std::uint8_t>(nonce.back()) ^
+                                              static_cast<std::uint8_t>(sequence & 0xffu));
+        if (const auto token = seal_address_validation_token(
+                *endpoint_config_.address_validation_token_secret,
+                SelfContainedAddressValidationToken{
+                    .kind = kAddressValidationRetryTokenType,
+                    .version = parsed->version,
+                    .route_handle = route_handle,
+                    .address_validation_identity = std::vector<std::byte>(
+                        address_validation_identity.begin(), address_validation_identity.end()),
+                    .original_destination_connection_id = parsed->destination_connection_id,
+                    .retry_source_connection_id = *retry_source_connection_id,
+                    .nonce = std::move(nonce),
+                    .expires_at = now + kRetryTokenLifetime,
+                })) {
+            return *token;
+        }
     }
+
+    std::vector<std::byte> token(16, std::byte{0x00});
+    fill_random_bytes(token, endpoint_random_);
+    token.back() = static_cast<std::byte>(std::to_integer<std::uint8_t>(token.back()) ^
+                                          static_cast<std::uint8_t>(sequence & 0xffu));
     return token;
 }
 
-std::optional<QuicCore::PendingRetryToken>
-QuicCore::take_retry_context(const ParsedEndpointDatagram &parsed,
-                             const std::optional<QuicRouteHandle> &route_handle) {
+COQUIC_NO_PROFILE std::vector<std::byte> QuicCore::make_endpoint_new_token(
+    std::uint64_t sequence, // NOLINT(bugprone-easily-swappable-parameters)
+    std::uint32_t version, std::optional<QuicRouteHandle> route_handle,
+    std::span<const std::byte> address_validation_identity, QuicCoreTimePoint now) {
+    if (endpoint_config_.address_validation_token_secret.has_value()) {
+        std::vector<std::byte> nonce(16, std::byte{0x00});
+        fill_random_bytes(nonce, endpoint_random_);
+        nonce.back() = static_cast<std::byte>(std::to_integer<std::uint8_t>(nonce.back()) ^
+                                              static_cast<std::uint8_t>(sequence & 0xffu));
+        if (const auto token = seal_address_validation_token(
+                *endpoint_config_.address_validation_token_secret,
+                SelfContainedAddressValidationToken{
+                    .kind = kAddressValidationNewTokenType,
+                    .version = version,
+                    .route_handle = route_handle,
+                    .address_validation_identity = std::vector<std::byte>(
+                        address_validation_identity.begin(), address_validation_identity.end()),
+                    .nonce = std::move(nonce),
+                    .expires_at = now + kNewTokenLifetime,
+                })) {
+            return *token;
+        }
+    }
+
+    std::vector<std::byte> token(24, std::byte{0x00});
+    fill_random_bytes(token, endpoint_random_);
+    token.front() = static_cast<std::byte>(std::to_integer<std::uint8_t>(token.front()) ^ 0x4eu);
+    token.back() = static_cast<std::byte>(std::to_integer<std::uint8_t>(token.back()) ^
+                                          static_cast<std::uint8_t>(sequence & 0xffu));
+    return token;
+}
+
+COQUIC_NO_PROFILE std::optional<QuicCore::PendingRetryToken> QuicCore::take_retry_context(
+    const ParsedEndpointDatagram &parsed, const std::optional<QuicRouteHandle> &route_handle,
+    QuicCoreTimePoint now, std::span<const std::byte> address_validation_identity) {
+    purge_expired_consumed_address_validation_tokens(consumed_address_validation_tokens_, now);
+    persist_consumed_address_validation_tokens();
     const auto it = retry_tokens_.find(connection_id_key(parsed.token));
     if (it == retry_tokens_.end()) {
+        if (!endpoint_config_.address_validation_token_secret.has_value()) {
+            return std::nullopt;
+        }
+
+        auto metadata = open_address_validation_token(
+            *endpoint_config_.address_validation_token_secret, parsed.token);
+        if (!metadata.has_value()) {
+            return std::nullopt;
+        }
+
+        if (metadata->kind != kAddressValidationRetryTokenType ||
+            token_time_expired(metadata->expires_at, now) ||
+            address_validation_token_consumed(parsed.token) ||
+            !token_route_matches(metadata->route_handle, route_handle) ||
+            !token_identity_matches(metadata->address_validation_identity,
+                                    address_validation_identity) ||
+            parsed.destination_connection_id != metadata->retry_source_connection_id ||
+            parsed.version != metadata->version) {
+            return std::nullopt;
+        }
+
+        mark_address_validation_token_consumed(parsed.token, metadata->expires_at);
+        return PendingRetryToken{
+            .original_destination_connection_id = metadata->original_destination_connection_id,
+            .retry_source_connection_id = metadata->retry_source_connection_id,
+            .original_version = metadata->version,
+            .token = parsed.token,
+            .route_handle = metadata->route_handle,
+            .address_validation_identity = metadata->address_validation_identity,
+            .expires_at = metadata->expires_at,
+        };
+    }
+
+    if (address_validation_token_consumed(parsed.token)) {
         return std::nullopt;
     }
 
     const auto &pending = it->second;
+    if (token_time_expired(pending.expires_at, now)) {
+        retry_tokens_.erase(it);
+        return std::nullopt;
+    }
     if (pending.route_handle != route_handle ||
+        !token_identity_matches(pending.address_validation_identity, address_validation_identity) ||
         parsed.destination_connection_id != pending.retry_source_connection_id ||
         parsed.version != pending.original_version) {
         return std::nullopt;
@@ -511,21 +1208,394 @@ QuicCore::take_retry_context(const ParsedEndpointDatagram &parsed,
 
     auto retry_context = pending;
     retry_tokens_.erase(it);
+    mark_address_validation_token_consumed(parsed.token, retry_context.expires_at);
     return retry_context;
 }
 
-std::vector<std::byte>
-QuicCore::make_version_negotiation_packet_bytes(const ParsedEndpointDatagram &parsed,
-                                                std::span<const std::uint32_t> supported_versions) {
-    if (!parsed.source_connection_id.has_value()) {
+COQUIC_NO_PROFILE std::optional<QuicCore::StoredEndpointNewToken> QuicCore::take_new_token_context(
+    const ParsedEndpointDatagram &parsed, const std::optional<QuicRouteHandle> &route_handle,
+    QuicCoreTimePoint now, std::span<const std::byte> address_validation_identity) {
+    purge_expired_consumed_address_validation_tokens(consumed_address_validation_tokens_, now);
+    persist_consumed_address_validation_tokens();
+    const auto token_key = connection_id_key(parsed.token);
+    const auto it = new_tokens_.find(token_key);
+    if (it == new_tokens_.end()) {
+        if (!endpoint_config_.address_validation_token_secret.has_value()) {
+            return std::nullopt;
+        }
+
+        std::optional<SelfContainedAddressValidationToken> metadata;
+        if (auto opened = open_address_validation_token(
+                *endpoint_config_.address_validation_token_secret, parsed.token)) {
+            metadata = std::move(opened);
+        } else {
+            for (const auto &previous_secret :
+                 endpoint_config_.previous_address_validation_token_secrets) {
+                if (auto opened_previous =
+                        open_address_validation_token(previous_secret, parsed.token)) {
+                    metadata = std::move(opened_previous);
+                    break;
+                }
+            }
+        }
+
+        if (!metadata.has_value() || metadata->kind != kAddressValidationNewTokenType ||
+            token_time_expired(metadata->expires_at, now) ||
+            address_validation_token_consumed(parsed.token) ||
+            !token_route_matches(metadata->route_handle, route_handle) ||
+            !token_identity_matches(metadata->address_validation_identity,
+                                    address_validation_identity) ||
+            metadata->version != parsed.version) {
+            return std::nullopt;
+        }
+
+        mark_address_validation_token_consumed(parsed.token, metadata->expires_at);
+        return StoredEndpointNewToken{
+            .token = parsed.token,
+            .route_handle = metadata->route_handle,
+            .address_validation_identity = metadata->address_validation_identity,
+            .version = metadata->version,
+            .expires_at = metadata->expires_at,
+            .used = true,
+        };
+    }
+
+    if (address_validation_token_consumed(parsed.token)) {
+        return std::nullopt;
+    }
+
+    auto token = it->second;
+    if (token.used || token.version != parsed.version ||
+        (token.route_handle.has_value() && token.route_handle != route_handle) ||
+        !token_identity_matches(token.address_validation_identity, address_validation_identity) ||
+        token_time_expired(token.expires_at, now)) {
+        if (token_time_expired(token.expires_at, now)) {
+            new_tokens_.erase(it);
+        }
+        return std::nullopt;
+    }
+
+    token.used = true;
+    new_tokens_.erase(it);
+    mark_address_validation_token_consumed(parsed.token, token.expires_at);
+    return token;
+}
+
+COQUIC_NO_PROFILE void QuicCore::maybe_queue_server_new_token(ConnectionEntry &entry,
+                                                              QuicCoreTimePoint now) {
+    if (endpoint_config_.role != EndpointRole::server || entry.connection == nullptr ||
+        !entry.connection->is_handshake_complete() || !entry.connection->peer_address_validated_) {
+        return;
+    }
+
+    const auto route_handle = route_handle_for_path(entry, entry.connection->current_send_path_id_);
+    if (!route_handle.has_value()) {
+        return;
+    }
+
+    if (std::find(entry.new_token_issued_routes.begin(), entry.new_token_issued_routes.end(),
+                  *route_handle) != entry.new_token_issued_routes.end()) {
+        return;
+    }
+
+    const auto path_id = entry.connection->current_send_path_id_;
+    const auto identity_it = path_id.has_value()
+                                 ? entry.address_validation_identity_by_path_id.find(*path_id)
+                                 : entry.address_validation_identity_by_path_id.end();
+    const auto address_validation_identity =
+        identity_it != entry.address_validation_identity_by_path_id.end()
+            ? std::span<const std::byte>(identity_it->second)
+            : std::span<const std::byte>{};
+
+    const auto sequence = next_server_connection_id_sequence_++;
+    auto token = make_endpoint_new_token(sequence, entry.connection->current_version_, route_handle,
+                                         address_validation_identity, now);
+    if (token.empty()) {
+        return;
+    }
+
+    new_tokens_.insert_or_assign(connection_id_key(token),
+                                 StoredEndpointNewToken{
+                                     .token = token,
+                                     .route_handle = route_handle,
+                                     .address_validation_identity =
+                                         std::vector<std::byte>(address_validation_identity.begin(),
+                                                                address_validation_identity.end()),
+                                     .version = entry.connection->current_version_,
+                                     .expires_at = now + kNewTokenLifetime,
+                                     .used = false,
+                                 });
+    entry.connection->queue_new_token(std::move(token));
+    entry.new_token_issued_routes.push_back(*route_handle);
+}
+
+COQUIC_NO_PROFILE void QuicCore::drain_queued_server_new_token(ConnectionEntry &entry,
+                                                               QuicCoreResult &drained,
+                                                               QuicCoreTimePoint now) {
+    maybe_queue_server_new_token(entry, now);
+    if (!entry.connection->has_sendable_datagram(now)) {
+        return;
+    }
+    auto token_drained =
+        drain_connection_effects(entry.handle, entry.default_route_handle,
+                                 entry.route_handle_by_path_id, *entry.connection, now);
+    append_result(drained, std::move(token_drained));
+}
+
+COQUIC_NO_PROFILE void QuicCore::remember_client_new_tokens(ConnectionEntry &entry,
+                                                            const QuicCoreResult &result) {
+    if (endpoint_config_.role != EndpointRole::client || entry.connection == nullptr) {
+        return;
+    }
+
+    for (const auto &effect : result.effects) {
+        const auto *new_token = std::get_if<QuicCoreNewTokenAvailable>(&effect);
+        if (new_token == nullptr || new_token->token.empty() ||
+            new_token->connection != entry.handle) {
+            continue;
+        }
+
+        const bool already_stored =
+            std::ranges::any_of(client_new_tokens_, [&](const ClientStoredNewToken &stored) {
+                return stored.server_name == entry.connection->config_.server_name &&
+                       stored.version == entry.connection->current_version_ &&
+                       stored.token == new_token->token;
+            });
+        if (already_stored) {
+            continue;
+        }
+
+        client_new_tokens_.push_back(ClientStoredNewToken{
+            .server_name = entry.connection->config_.server_name,
+            .version = entry.connection->current_version_,
+            .token = new_token->token,
+            .used = false,
+        });
+    }
+}
+
+std::optional<std::vector<std::byte>> COQUIC_NO_PROFILE
+QuicCore::take_client_new_token_for_open(const QuicCoreClientConnectionConfig &connection) {
+    for (auto it = client_new_tokens_.rbegin(); it != client_new_tokens_.rend(); ++it) {
+        if (it->used || it->server_name != connection.server_name ||
+            it->version != connection.initial_version || it->token.empty()) {
+            continue;
+        }
+
+        it->used = true;
+        return it->token;
+    }
+    return std::nullopt;
+}
+
+std::optional<QuicConnectionHandle>
+    COQUIC_NO_PROFILE QuicCore::detect_stateless_reset(std::span<const std::byte> bytes) const {
+    if (bytes.size() < kMinimumStatelessResetDatagramSize) {
+        return std::nullopt;
+    }
+
+    std::array<std::byte, kStatelessResetTokenLength> token{};
+    std::copy_n(bytes.end() - static_cast<std::ptrdiff_t>(token.size()), token.size(),
+                token.begin());
+    for (const auto &[key, route] : peer_stateless_reset_tokens_) {
+        if (key.size() != token.size()) {
+            continue;
+        }
+        if (CRYPTO_memcmp(key.data(), token.data(), token.size()) == 0) {
+            return route.owner;
+        }
+    }
+    return std::nullopt;
+}
+
+COQUIC_NO_PROFILE std::optional<QuicCoreSendDatagram>
+QuicCore::make_stateless_reset_for_unknown_cid(const ParsedEndpointDatagram &parsed,
+                                               std::span<const std::byte> inbound_bytes,
+                                               const std::optional<QuicRouteHandle> &route_handle,
+                                               QuicCoreTimePoint now) {
+    if (parsed.kind != ParsedEndpointDatagram::Kind::short_header ||
+        inbound_bytes.size() < kMinimumStatelessResetDatagramSize) {
+        return std::nullopt;
+    }
+
+    purge_expired_local_stateless_reset_tokens(now);
+
+    const auto token_it = local_stateless_reset_tokens_by_cid_.find(
+        connection_id_key(parsed.destination_connection_id));
+    std::optional<LocalStatelessResetTokenRoute> derived_token_route;
+    if (token_it == local_stateless_reset_tokens_by_cid_.end() &&
+        endpoint_config_.stateless_reset_secret.has_value() &&
+        parsed.destination_connection_id.size() == kEndpointConnectionIdLength &&
+        parsed.destination_connection_id.front() == kServerConnectionIdPrefix) {
+        if (const auto token = derive_stateless_reset_token(
+                *endpoint_config_.stateless_reset_secret, parsed.destination_connection_id,
+                /*sequence_number=*/0)) {
+            derived_token_route = LocalStatelessResetTokenRoute{
+                .owner = 0,
+                .stateless_reset_token = *token,
+            };
+        }
+    }
+    const auto *token_route = token_it != local_stateless_reset_tokens_by_cid_.end()
+                                  ? &token_it->second
+                              : derived_token_route ? &*derived_token_route
+                                                    : nullptr;
+    if (token_route == nullptr) {
+        return std::nullopt;
+    }
+
+    std::size_t reset_size = inbound_bytes.size() <= 43
+                                 ? inbound_bytes.size() - 1u
+                                 : std::min<std::size_t>(inbound_bytes.size(), 64u);
+    reset_size = std::max(reset_size, kMinimumStatelessResetDatagramSize);
+    if (reset_size >= inbound_bytes.size() * 3u) {
+        reset_size = std::max(kMinimumStatelessResetDatagramSize, inbound_bytes.size());
+    }
+
+    DatagramBuffer bytes;
+    bytes.resize(reset_size, std::byte{0x00});
+    fill_random_bytes(bytes.span(), endpoint_random_);
+    auto reset_bytes = bytes.span();
+    reset_bytes.front() = static_cast<std::byte>(
+        0x40u | (std::to_integer<std::uint8_t>(reset_bytes.front()) & 0x3fu));
+    std::copy(token_route->stateless_reset_token.begin(), token_route->stateless_reset_token.end(),
+              bytes.end() - static_cast<std::ptrdiff_t>(kStatelessResetTokenLength));
+
+    return QuicCoreSendDatagram{
+        .connection = token_route->owner,
+        .route_handle = route_handle,
+        .bytes = std::move(bytes),
+    };
+}
+
+COQUIC_NO_PROFILE void QuicCore::load_consumed_address_validation_tokens() {
+    consumed_address_validation_tokens_.clear();
+    if (!endpoint_config_.address_validation_replay_store_path.has_value()) {
+        return;
+    }
+
+    std::ifstream input(*endpoint_config_.address_validation_replay_store_path);
+    if (!input.is_open()) {
+        return;
+    }
+
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto separator = line.find(' ');
+        if (separator == std::string::npos) {
+            continue;
+        }
+        const auto key = hex_decode_to_string(std::string_view(line).substr(0, separator));
+        const auto expires_at_ms =
+            parse_unsigned_decimal(std::string_view(line).substr(separator + 1u));
+        if (!key.has_value() || !expires_at_ms.has_value() || key->empty()) {
+            continue;
+        }
+        consumed_address_validation_tokens_[*key] = token_time_from_ms(*expires_at_ms);
+    }
+}
+
+COQUIC_NO_PROFILE void QuicCore::persist_consumed_address_validation_tokens() {
+    if (!endpoint_config_.address_validation_replay_store_path.has_value()) {
+        return;
+    }
+
+    const auto &path = *endpoint_config_.address_validation_replay_store_path;
+    std::error_code ignored;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), ignored);
+    }
+
+    const auto temporary = path.string() + ".tmp";
+    {
+        std::ofstream output(temporary, std::ios::trunc);
+        if (!output.is_open()) {
+            return;
+        }
+        for (const auto &[key, expires_at] : consumed_address_validation_tokens_) {
+            const auto key_bytes = std::as_bytes(std::span(key.data(), key.size()));
+            output << hex_encode_bytes(key_bytes) << ' ' << token_timestamp_ms(expires_at) << '\n';
+        }
+    }
+
+    std::filesystem::rename(temporary, path, ignored);
+    if (ignored) {
+        std::filesystem::remove(path, ignored);
+        std::filesystem::rename(temporary, path, ignored);
+    }
+}
+
+bool QuicCore::address_validation_token_consumed(std::span<const std::byte> token) const {
+    return consumed_address_validation_tokens_.contains(address_validation_token_replay_key(token));
+}
+
+void QuicCore::mark_address_validation_token_consumed(std::span<const std::byte> token,
+                                                      QuicCoreTimePoint expires_at) {
+    consumed_address_validation_tokens_[address_validation_token_replay_key(token)] = expires_at;
+    persist_consumed_address_validation_tokens();
+}
+
+std::span<const std::byte>
+QuicCore::current_address_validation_identity(const ConnectionEntry &entry) const {
+    if (entry.connection == nullptr || !entry.connection->current_send_path_id_.has_value()) {
         return {};
+    }
+    const auto identity_it =
+        entry.address_validation_identity_by_path_id.find(*entry.connection->current_send_path_id_);
+    if (identity_it == entry.address_validation_identity_by_path_id.end()) {
+        return {};
+    }
+    return identity_it->second;
+}
+
+COQUIC_NO_PROFILE std::vector<std::byte> QuicCore::effective_address_validation_identity_for_route(
+    const ConnectionEntry &entry, QuicRouteHandle route_handle,
+    std::span<const std::byte> proposed_identity) const {
+    if (!proposed_identity.empty()) {
+        return std::vector<std::byte>(proposed_identity.begin(), proposed_identity.end());
+    }
+
+    const auto path_it = entry.path_id_by_route_handle.find(route_handle);
+    if (path_it == entry.path_id_by_route_handle.end()) {
+        return {};
+    }
+    const auto identity_it = entry.address_validation_identity_by_path_id.find(path_it->second);
+    if (identity_it == entry.address_validation_identity_by_path_id.end()) {
+        return {};
+    }
+    return identity_it->second;
+}
+
+bool QuicCore::address_validation_identity_allowed_for_new_route(
+    const ConnectionEntry *entry, std::span<const std::byte> address_validation_identity) const {
+    if (address_validation_identity.empty()) {
+        return true;
+    }
+
+    const auto current_identity = entry != nullptr ? current_address_validation_identity(*entry)
+                                                   : std::span<const std::byte>{};
+    return address_identity_allowed_by_request_forgery_policy(
+        endpoint_config_.request_forgery_policy, current_identity, address_validation_identity);
+}
+
+std::vector<std::byte> COQUIC_NO_PROFILE QuicCore::make_version_negotiation_packet_bytes(
+    const ParsedEndpointDatagram &parsed, std::span<const std::uint32_t> supported_versions,
+    bool grease_reserved_versions) {
+    if (!parsed.source_connection_id.has_value() || supported_versions.empty()) {
+        return {};
+    }
+
+    std::vector<std::uint32_t> advertised_versions(supported_versions.begin(),
+                                                   supported_versions.end());
+    if (grease_reserved_versions &&
+        std::none_of(advertised_versions.begin(), advertised_versions.end(), is_reserved_version)) {
+        advertised_versions.push_back(kGreasedReservedVersion);
     }
 
     const auto encoded = serialize_packet(VersionNegotiationPacket{
         .destination_connection_id = *parsed.source_connection_id,
         .source_connection_id = parsed.destination_connection_id,
-        .supported_versions =
-            std::vector<std::uint32_t>(supported_versions.begin(), supported_versions.end()),
+        .supported_versions = std::move(advertised_versions),
     });
     return encoded.has_value() ? DatagramBuffer(encoded.value()) : DatagramBuffer{};
 }
@@ -574,7 +1644,7 @@ QuicCore::find_endpoint_connection_for_datagram(const ParsedEndpointDatagram &pa
     return initial_it->second;
 }
 
-void QuicCore::erase_endpoint_connection_routes(const ConnectionEntry &entry) {
+COQUIC_NO_PROFILE void QuicCore::erase_endpoint_connection_routes(const ConnectionEntry &entry) {
     for (const auto &connection_id_key_value : entry.active_connection_id_keys) {
         const auto it = connection_id_routes_.find(connection_id_key_value);
         if (it != connection_id_routes_.end() && it->second == entry.handle) {
@@ -588,9 +1658,75 @@ void QuicCore::erase_endpoint_connection_routes(const ConnectionEntry &entry) {
             initial_destination_routes_.erase(it);
         }
     }
+    for (const auto &connection_id_key_value : entry.local_stateless_reset_connection_id_keys) {
+        const auto it = local_stateless_reset_tokens_by_cid_.find(connection_id_key_value);
+        if (it != local_stateless_reset_tokens_by_cid_.end() && it->second.owner == entry.handle) {
+            local_stateless_reset_tokens_by_cid_.erase(it);
+        }
+    }
+    for (const auto &token_key : entry.peer_stateless_reset_token_keys) {
+        const auto it = peer_stateless_reset_tokens_.find(token_key);
+        if (it != peer_stateless_reset_tokens_.end() && it->second.owner == entry.handle) {
+            peer_stateless_reset_tokens_.erase(it);
+        }
+    }
 }
 
-void QuicCore::refresh_server_connection_routes(ConnectionEntry &entry) {
+COQUIC_NO_PROFILE void QuicCore::retire_endpoint_connection_routes(const ConnectionEntry &entry,
+                                                                   QuicCoreTimePoint now) {
+    for (const auto &connection_id_key_value : entry.active_connection_id_keys) {
+        const auto it = connection_id_routes_.find(connection_id_key_value);
+        if (it != connection_id_routes_.end() && it->second == entry.handle) {
+            connection_id_routes_.erase(it);
+        }
+    }
+    if (entry.initial_destination_connection_id_key.has_value()) {
+        const auto it =
+            initial_destination_routes_.find(*entry.initial_destination_connection_id_key);
+        if (it != initial_destination_routes_.end() && it->second == entry.handle) {
+            initial_destination_routes_.erase(it);
+        }
+    }
+
+    const auto reset_token_expiry =
+        endpoint_config_.retain_stateless_reset_tokens_after_connection_close
+            ? std::optional<QuicCoreTimePoint>{now +
+                                               endpoint_config_.stateless_reset_token_retention}
+            : std::nullopt;
+    for (const auto &connection_id_key_value : entry.local_stateless_reset_connection_id_keys) {
+        const auto it = local_stateless_reset_tokens_by_cid_.find(connection_id_key_value);
+        if (it == local_stateless_reset_tokens_by_cid_.end() || it->second.owner != entry.handle) {
+            continue;
+        }
+        if (reset_token_expiry.has_value()) {
+            it->second.expires_at = reset_token_expiry;
+        } else {
+            local_stateless_reset_tokens_by_cid_.erase(it);
+        }
+    }
+    for (const auto &token_key : entry.peer_stateless_reset_token_keys) {
+        const auto it = peer_stateless_reset_tokens_.find(token_key);
+        if (it != peer_stateless_reset_tokens_.end() && it->second.owner == entry.handle) {
+            peer_stateless_reset_tokens_.erase(it);
+        }
+    }
+}
+
+COQUIC_NO_PROFILE void QuicCore::purge_expired_local_stateless_reset_tokens(QuicCoreTimePoint now) {
+    if (now == QuicCoreTimePoint{}) {
+        return;
+    }
+    for (auto it = local_stateless_reset_tokens_by_cid_.begin();
+         it != local_stateless_reset_tokens_by_cid_.end();) {
+        if (it->second.expires_at.has_value() && *it->second.expires_at <= now) {
+            it = local_stateless_reset_tokens_by_cid_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+COQUIC_NO_PROFILE void QuicCore::refresh_server_connection_routes(ConnectionEntry &entry) {
     std::vector<std::string> active_connection_id_keys;
     for (const auto &connection_id : entry.connection->active_local_connection_ids()) {
         auto key = connection_id_key(connection_id);
@@ -613,6 +1749,55 @@ void QuicCore::refresh_server_connection_routes(ConnectionEntry &entry) {
     }
     entry.active_connection_id_keys = std::move(active_connection_id_keys);
 
+    std::vector<std::string> local_stateless_reset_connection_id_keys;
+    for (const auto &record : entry.connection->active_local_stateless_reset_tokens()) {
+        auto key = connection_id_key(record.connection_id);
+        if (key.empty()) {
+            continue;
+        }
+        local_stateless_reset_tokens_by_cid_[key] = LocalStatelessResetTokenRoute{
+            .owner = entry.handle,
+            .stateless_reset_token = record.stateless_reset_token,
+        };
+        local_stateless_reset_connection_id_keys.push_back(std::move(key));
+    }
+    for (const auto &existing_key : entry.local_stateless_reset_connection_id_keys) {
+        if (std::find(local_stateless_reset_connection_id_keys.begin(),
+                      local_stateless_reset_connection_id_keys.end(),
+                      existing_key) != local_stateless_reset_connection_id_keys.end()) {
+            continue;
+        }
+        const auto route_it = local_stateless_reset_tokens_by_cid_.find(existing_key);
+        if (route_it != local_stateless_reset_tokens_by_cid_.end() &&
+            route_it->second.owner == entry.handle) {
+            local_stateless_reset_tokens_by_cid_.erase(route_it);
+        }
+    }
+    entry.local_stateless_reset_connection_id_keys =
+        std::move(local_stateless_reset_connection_id_keys);
+
+    std::vector<std::string> peer_stateless_reset_token_keys;
+    for (const auto &record : entry.connection->peer_stateless_reset_tokens()) {
+        auto key = stateless_reset_token_key(record.stateless_reset_token);
+        peer_stateless_reset_tokens_[key] = PeerStatelessResetTokenRoute{
+            .owner = entry.handle,
+        };
+        peer_stateless_reset_token_keys.push_back(std::move(key));
+    }
+    for (const auto &existing_key : entry.peer_stateless_reset_token_keys) {
+        if (std::find(peer_stateless_reset_token_keys.begin(),
+                      peer_stateless_reset_token_keys.end(),
+                      existing_key) != peer_stateless_reset_token_keys.end()) {
+            continue;
+        }
+        const auto route_it = peer_stateless_reset_tokens_.find(existing_key);
+        if (route_it != peer_stateless_reset_tokens_.end() &&
+            route_it->second.owner == entry.handle) {
+            peer_stateless_reset_tokens_.erase(route_it);
+        }
+    }
+    entry.peer_stateless_reset_token_keys = std::move(peer_stateless_reset_token_keys);
+
     const auto next_initial_destination_key =
         connection_id_key(entry.connection->client_initial_destination_connection_id());
     if (entry.initial_destination_connection_id_key.has_value() &&
@@ -633,13 +1818,19 @@ void QuicCore::refresh_server_connection_routes(ConnectionEntry &entry) {
     entry.initial_destination_connection_id_key = next_initial_destination_key;
 }
 
-QuicPathId QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle) {
+COQUIC_NO_PROFILE QuicPathId
+QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle,
+                                std::span<const std::byte> address_validation_identity) {
     if (!entry.default_route_handle.has_value()) {
         entry.default_route_handle = route_handle;
     }
 
     const auto existing = entry.path_id_by_route_handle.find(route_handle);
     if (existing != entry.path_id_by_route_handle.end()) {
+        if (!address_validation_identity.empty()) {
+            entry.address_validation_identity_by_path_id[existing->second] = std::vector<std::byte>(
+                address_validation_identity.begin(), address_validation_identity.end());
+        }
         return existing->second;
     }
 
@@ -651,7 +1842,41 @@ QuicPathId QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHand
 
     entry.path_id_by_route_handle.emplace(route_handle, path_id);
     entry.route_handle_by_path_id.emplace(path_id, route_handle);
+    if (!address_validation_identity.empty()) {
+        entry.address_validation_identity_by_path_id[path_id] = std::vector<std::byte>(
+            address_validation_identity.begin(), address_validation_identity.end());
+    }
     return path_id;
+}
+
+std::optional<QuicPathId> COQUIC_NO_PROFILE QuicCore::path_id_for_inbound_route(
+    ConnectionEntry &entry, const std::optional<QuicRouteHandle> &route_handle,
+    std::span<const std::byte> address_validation_identity) {
+    if (route_handle.has_value()) {
+        const auto existing = entry.path_id_by_route_handle.find(*route_handle);
+        if (existing != entry.path_id_by_route_handle.end()) {
+            if (!address_validation_identity.empty()) {
+                entry.address_validation_identity_by_path_id[existing->second] =
+                    std::vector<std::byte>(address_validation_identity.begin(),
+                                           address_validation_identity.end());
+            }
+            return existing->second;
+        }
+        if (!endpoint_config_.allow_peer_address_change) {
+            return std::nullopt;
+        }
+        if (!address_validation_identity_allowed_for_new_route(&entry,
+                                                               address_validation_identity)) {
+            return std::nullopt;
+        }
+        return remember_inbound_path(entry, *route_handle, address_validation_identity);
+    }
+
+    if (entry.default_route_handle.has_value()) {
+        return remember_inbound_path(entry, *entry.default_route_handle,
+                                     address_validation_identity);
+    }
+    return kDefaultPathId;
 }
 
 std::optional<QuicRouteHandle>
@@ -861,7 +2086,10 @@ COQUIC_NO_PROFILE DatagramBuffer make_v2_initial_datagram_for_core_coverage(
 // NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks)
 COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
     bool ok = true;
-#define COQUIC_CORE_HOOK_RECORD(expr) coverage_check(ok, #expr, static_cast<bool>(expr))
+#define COQUIC_CORE_STRINGIFY_DETAIL(value) #value
+#define COQUIC_CORE_STRINGIFY(value) COQUIC_CORE_STRINGIFY_DETAIL(value)
+#define COQUIC_CORE_HOOK_RECORD(expr)                                                              \
+    coverage_check(ok, #expr ":" COQUIC_CORE_STRINGIFY(__LINE__), static_cast<bool>(expr))
 
     {
         QuicCore legacy(make_client_core_config_for_core_coverage(0x01, 0x41));
@@ -962,6 +2190,191 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
     }
 
     {
+        BufferReader u16_short(make_bytes_for_core_coverage({0x01}));
+        BufferReader u32_short(make_bytes_for_core_coverage({0x01, 0x02, 0x03}));
+        BufferReader u64_short(
+            make_bytes_for_core_coverage({0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}));
+        BufferReader length_short(make_bytes_for_core_coverage({0x00, 0x03, 0xaa}));
+        std::vector<std::byte> prefixed_bytes;
+        std::vector<std::byte> oversized_prefixed_bytes(
+            static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()) + 1u,
+            std::byte{0xaa});
+
+        COQUIC_CORE_HOOK_RECORD(!read_u16_be(u16_short).has_value());
+        COQUIC_CORE_HOOK_RECORD(!read_u32_be(u32_short).has_value());
+        COQUIC_CORE_HOOK_RECORD(!read_u64_be(u64_short).has_value());
+        COQUIC_CORE_HOOK_RECORD(!read_length_prefixed_bytes(length_short).has_value());
+        COQUIC_CORE_HOOK_RECORD(
+            !append_length_prefixed_bytes(prefixed_bytes, oversized_prefixed_bytes));
+    }
+
+    {
+        SelfContainedAddressValidationToken token{
+            .kind = kAddressValidationRetryTokenType,
+            .version = kQuicVersion1,
+            .route_handle = 9,
+            .address_validation_identity =
+                make_bytes_for_core_coverage({0x04, 127, 0, 0, 1, 0x01, 0xbb}),
+            .original_destination_connection_id =
+                make_connection_id_for_core_coverage({0x83, 0x01}),
+            .retry_source_connection_id = make_connection_id_for_core_coverage({0x53, 0x01}),
+            .nonce = make_bytes_for_core_coverage({0x01, 0x02, 0x03}),
+            .expires_at = QuicCoreTimePoint{} + std::chrono::seconds(30),
+        };
+        const auto encoded = encode_address_validation_token_body(token);
+        COQUIC_CORE_HOOK_RECORD(encoded.has_value());
+        if (encoded.has_value()) {
+            auto wrong_magic = *encoded;
+            wrong_magic[0] = std::byte{'X'};
+            auto wrong_format = *encoded;
+            wrong_format[4] = std::byte{0x02};
+            auto wrong_kind = *encoded;
+            wrong_kind[5] = std::byte{0xff};
+            auto truncated = *encoded;
+            truncated.resize(12);
+            auto trailing = *encoded;
+            trailing.push_back(std::byte{0xee});
+
+            COQUIC_CORE_HOOK_RECORD(!decode_address_validation_token_body({}).has_value());
+            COQUIC_CORE_HOOK_RECORD(!decode_address_validation_token_body(wrong_magic).has_value());
+            COQUIC_CORE_HOOK_RECORD(
+                !decode_address_validation_token_body(wrong_format).has_value());
+            COQUIC_CORE_HOOK_RECORD(!decode_address_validation_token_body(wrong_kind).has_value());
+            COQUIC_CORE_HOOK_RECORD(!decode_address_validation_token_body(truncated).has_value());
+            COQUIC_CORE_HOOK_RECORD(!decode_address_validation_token_body(trailing).has_value());
+        }
+
+        QuicAddressValidationTokenSecret secret{};
+        const auto sealed = seal_address_validation_token(secret, token);
+        COQUIC_CORE_HOOK_RECORD(sealed.has_value());
+        if (sealed.has_value()) {
+            auto tampered = *sealed;
+            tampered.back() =
+                static_cast<std::byte>(std::to_integer<std::uint8_t>(tampered.back()) ^ 0x01u);
+            COQUIC_CORE_HOOK_RECORD(!open_address_validation_token(secret, {}).has_value());
+            COQUIC_CORE_HOOK_RECORD(!open_address_validation_token(secret, tampered).has_value());
+            COQUIC_CORE_HOOK_RECORD(open_address_validation_token(secret, *sealed).has_value());
+        }
+    }
+
+    {
+        QuicAddressValidationTokenSecret secret{};
+        const SelfContainedAddressValidationToken token{
+            .kind = kAddressValidationRetryTokenType,
+            .version = kQuicVersion1,
+            .original_destination_connection_id =
+                make_connection_id_for_core_coverage({0x83, 0x02}),
+            .retry_source_connection_id = make_connection_id_for_core_coverage({0x53, 0x02}),
+            .nonce = make_bytes_for_core_coverage({0x04}),
+            .expires_at = QuicCoreTimePoint{} + std::chrono::seconds(30),
+        };
+        {
+            ScopedCoreCoverageFault fault(g_force_address_validation_token_tag_failure_for_tests);
+            COQUIC_CORE_HOOK_RECORD(!seal_address_validation_token(secret, token).has_value());
+        }
+        {
+            ScopedCoreCoverageFault fault(
+                g_force_stateless_reset_token_derivation_failure_for_tests);
+            COQUIC_CORE_HOOK_RECORD(
+                !derive_stateless_reset_token(secret, make_bytes_for_core_coverage({0x01}), 1)
+                     .has_value());
+        }
+        {
+            std::mt19937_64 fallback_random{7};
+            ScopedCoreCoverageFault fault(g_force_endpoint_connection_id_rand_failure_for_tests);
+            const auto connection_id =
+                make_endpoint_connection_id(kServerConnectionIdPrefix, 3, fallback_random);
+            COQUIC_CORE_HOOK_RECORD(connection_id.size() == kEndpointConnectionIdLength);
+            COQUIC_CORE_HOOK_RECORD(connection_id.front() == kServerConnectionIdPrefix);
+        }
+        {
+            std::mt19937_64 fallback_random{11};
+            std::vector<std::byte> empty;
+            std::vector<std::byte> bytes(4, std::byte{0});
+            fill_random_bytes(empty, fallback_random);
+            ScopedCoreCoverageFault fault(g_force_fill_random_bytes_rand_failure_for_tests);
+            fill_random_bytes(bytes, fallback_random);
+            COQUIC_CORE_HOOK_RECORD(empty.empty());
+            COQUIC_CORE_HOOK_RECORD(
+                std::ranges::any_of(bytes, [](std::byte byte) { return byte != std::byte{0}; }));
+        }
+    }
+
+    {
+        COQUIC_CORE_HOOK_RECORD(!hex_decode_to_string("f").has_value());
+        COQUIC_CORE_HOOK_RECORD(hex_decode_to_string("30").value_or("") == "0");
+        COQUIC_CORE_HOOK_RECORD(hex_decode_to_string("4f").value_or("") == "O");
+        COQUIC_CORE_HOOK_RECORD(hex_decode_to_string("4F").value_or("") == "O");
+        COQUIC_CORE_HOOK_RECORD(!hex_decode_to_string("0g").has_value());
+        COQUIC_CORE_HOOK_RECORD(!hex_decode_to_string("g0").has_value());
+        COQUIC_CORE_HOOK_RECORD(!hex_decode_to_string(":G").has_value());
+        COQUIC_CORE_HOOK_RECORD(!parse_unsigned_decimal("").has_value());
+        COQUIC_CORE_HOOK_RECORD(!parse_unsigned_decimal("12x").has_value());
+        COQUIC_CORE_HOOK_RECORD(!parse_unsigned_decimal("18446744073709551616").has_value());
+        COQUIC_CORE_HOOK_RECORD(parse_unsigned_decimal("18446744073709551615").has_value());
+    }
+
+    {
+        const auto ipv4_unknown = make_bytes_for_core_coverage({0x04, 127, 0});
+        const auto ipv4_loopback = make_bytes_for_core_coverage({0x04, 127, 0, 0, 1, 0x1f, 0x90});
+        const auto ipv4_link_local =
+            make_bytes_for_core_coverage({0x04, 169, 254, 1, 2, 0x1f, 0x90});
+        const auto ipv4_private = make_bytes_for_core_coverage({0x04, 10, 0, 0, 1, 0x1f, 0x90});
+        const auto ipv4_global = make_bytes_for_core_coverage({0x04, 8, 8, 8, 8, 0x1f, 0x90});
+        const auto ipv6_unknown = make_bytes_for_core_coverage({0x06, 0});
+        const auto ipv6_loopback = make_bytes_for_core_coverage(
+            {0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90});
+        const auto ipv6_link_local = make_bytes_for_core_coverage(
+            {0x06, 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90});
+        const auto ipv6_unique_local = make_bytes_for_core_coverage(
+            {0x06, 0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90});
+        const auto ipv6_global = make_bytes_for_core_coverage(
+            {0x06, 0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xbb});
+        const auto ipv6_global_blocked_port = make_bytes_for_core_coverage(
+            {0x06, 0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90});
+        QuicRequestForgeryPolicyConfig policy;
+        policy.reject_link_local_addresses = true;
+        policy.reject_private_use_addresses = true;
+        policy.reject_address_space_downgrade = true;
+        policy.blocked_udp_ports.push_back(8080);
+
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity({}) ==
+                                QuicAddressValidationIdentityClass::unknown);
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv4_unknown) ==
+                                QuicAddressValidationIdentityClass::unknown);
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv4_loopback) ==
+                                QuicAddressValidationIdentityClass::loopback);
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv4_link_local) ==
+                                QuicAddressValidationIdentityClass::link_local);
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv4_private) ==
+                                QuicAddressValidationIdentityClass::private_use);
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv4_global) ==
+                                QuicAddressValidationIdentityClass::global);
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv6_unknown) ==
+                                QuicAddressValidationIdentityClass::unknown);
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv6_loopback) ==
+                                QuicAddressValidationIdentityClass::loopback);
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv6_link_local) ==
+                                QuicAddressValidationIdentityClass::link_local);
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv6_unique_local) ==
+                                QuicAddressValidationIdentityClass::unique_local);
+        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv6_global) ==
+                                QuicAddressValidationIdentityClass::global);
+        COQUIC_CORE_HOOK_RECORD(!address_identity_allowed_by_request_forgery_policy(
+            policy, ipv4_global, ipv4_link_local));
+        COQUIC_CORE_HOOK_RECORD(
+            !address_identity_allowed_by_request_forgery_policy(policy, ipv4_global, ipv4_private));
+        COQUIC_CORE_HOOK_RECORD(!address_identity_allowed_by_request_forgery_policy(
+            policy, ipv4_global, ipv6_unique_local));
+        COQUIC_CORE_HOOK_RECORD(!address_identity_allowed_by_request_forgery_policy(
+            policy, ipv4_global, ipv4_loopback));
+        COQUIC_CORE_HOOK_RECORD(!address_identity_allowed_by_request_forgery_policy(
+            policy, ipv4_global, ipv6_global_blocked_port));
+        COQUIC_CORE_HOOK_RECORD(
+            address_identity_allowed_by_request_forgery_policy(policy, ipv4_global, ipv6_global));
+    }
+
+    {
         QuicCore core(make_server_endpoint_config_for_core_coverage());
         QuicCore::PendingRetryToken pending{
             .original_destination_connection_id =
@@ -984,13 +2397,15 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         auto wrong_destination = parsed;
         wrong_destination.destination_connection_id =
             make_connection_id_for_core_coverage({0x99, 0x01});
-        COQUIC_CORE_HOOK_RECORD(!core.take_retry_context(wrong_destination, 7).has_value());
+        COQUIC_CORE_HOOK_RECORD(
+            !core.take_retry_context(wrong_destination, 7, QuicCoreTimePoint{}).has_value());
         COQUIC_CORE_HOOK_RECORD(
             core.retry_tokens_.contains(QuicCore::connection_id_key(pending.token)));
 
         auto wrong_version = parsed;
         wrong_version.version = kQuicVersion2;
-        COQUIC_CORE_HOOK_RECORD(!core.take_retry_context(wrong_version, 7).has_value());
+        COQUIC_CORE_HOOK_RECORD(
+            !core.take_retry_context(wrong_version, 7, QuicCoreTimePoint{}).has_value());
         COQUIC_CORE_HOOK_RECORD(
             core.retry_tokens_.contains(QuicCore::connection_id_key(pending.token)));
     }
@@ -1062,6 +2477,46 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
 
     {
         QuicCore endpoint(make_client_endpoint_config_for_core_coverage());
+        QuicCore::ConnectionEntry entry{
+            .handle = 41,
+            .connection = std::make_unique<QuicConnection>(
+                make_client_core_config_for_core_coverage(0x10, 0x50)),
+        };
+        endpoint.client_new_tokens_.push_back(QuicCore::ClientStoredNewToken{
+            .server_name = "other.example",
+            .version = kQuicVersion1,
+            .token = make_bytes_for_core_coverage({0x6e, 0x01}),
+        });
+        endpoint.client_new_tokens_.push_back(QuicCore::ClientStoredNewToken{
+            .server_name = entry.connection->config_.server_name,
+            .version = kQuicVersion2,
+            .token = make_bytes_for_core_coverage({0x6e, 0x01}),
+        });
+        endpoint.client_new_tokens_.push_back(QuicCore::ClientStoredNewToken{
+            .server_name = entry.connection->config_.server_name,
+            .version = entry.connection->current_version_,
+            .token = make_bytes_for_core_coverage({0x6e, 0xff}),
+        });
+        QuicCoreResult result;
+        result.effects.emplace_back(QuicCoreNewTokenAvailable{
+            .connection = entry.handle,
+            .token = make_bytes_for_core_coverage({0x6e, 0x01}),
+        });
+        endpoint.remember_client_new_tokens(entry, result);
+        endpoint.remember_client_new_tokens(entry, result);
+        COQUIC_CORE_HOOK_RECORD(endpoint.client_new_tokens_.size() == 4);
+
+        QuicCore::ConnectionEntry empty_entry;
+        COQUIC_CORE_HOOK_RECORD(endpoint.current_address_validation_identity(empty_entry).empty());
+    }
+
+    {
+        QuicCore endpoint(make_client_endpoint_config_for_core_coverage());
+        endpoint.client_new_tokens_.push_back(QuicCore::ClientStoredNewToken{
+            .server_name = "localhost",
+            .version = kQuicVersion1,
+            .token = make_bytes_for_core_coverage({0x6e, 0x74}),
+        });
         const auto opened = endpoint.advance_endpoint(
             QuicCoreOpenConnection{
                 .connection = make_open_config_for_core_coverage(0x11, 0x51),
@@ -1070,6 +2525,7 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
             QuicCoreTimePoint{});
         const auto initial = first_datagram_bytes_for_core_coverage(opened);
         COQUIC_CORE_HOOK_RECORD(!initial.empty());
+        COQUIC_CORE_HOOK_RECORD(endpoint.client_new_tokens_.front().used);
         endpoint.connections_.clear();
         const auto result = endpoint.advance_endpoint(
             QuicCoreInboundDatagram{
@@ -1078,6 +2534,18 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
             QuicCoreTimePoint{} + std::chrono::milliseconds(1));
         COQUIC_CORE_HOOK_RECORD(result.effects.empty());
         COQUIC_CORE_HOOK_RECORD(!result.local_error.has_value());
+
+        auto explicit_retry_open = make_open_config_for_core_coverage(0x31, 0x71);
+        explicit_retry_open.retry_token =
+            make_bytes_for_core_coverage({0x72, 0x65, 0x74, 0x72, 0x79});
+        const auto explicit_retry_opened = endpoint.advance_endpoint(
+            QuicCoreOpenConnection{
+                .connection = std::move(explicit_retry_open),
+                .initial_route_handle = 18,
+            },
+            QuicCoreTimePoint{} + std::chrono::milliseconds(2));
+        COQUIC_CORE_HOOK_RECORD(
+            !first_datagram_bytes_for_core_coverage(explicit_retry_opened).empty());
     }
 
     {
@@ -1103,6 +2571,315 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
                 QuicCoreTimePoint{} + std::chrono::milliseconds(1));
             static_cast<void>(result);
         }
+    }
+
+    {
+        QuicCore endpoint(make_client_endpoint_config_for_core_coverage());
+        auto opened = endpoint.advance_endpoint(
+            QuicCoreOpenConnection{
+                .connection = make_open_config_for_core_coverage(0x13, 0x53),
+                .initial_route_handle = 18,
+            },
+            QuicCoreTimePoint{});
+        static_cast<void>(opened);
+        auto entry_it = endpoint.connections_.find(1);
+        COQUIC_CORE_HOOK_RECORD(entry_it != endpoint.connections_.end());
+        if (entry_it != endpoint.connections_.end()) {
+            std::array<std::byte, kStatelessResetTokenLength> token{std::byte{0x5a}};
+            endpoint.peer_stateless_reset_tokens_.emplace(
+                QuicCore::stateless_reset_token_key(token), QuicCore::PeerStatelessResetTokenRoute{
+                                                                .owner = 99,
+                                                            });
+            std::vector<std::byte> reset_bytes(kMinimumStatelessResetDatagramSize, std::byte{0xaa});
+            std::copy(token.begin(), token.end(),
+                      reset_bytes.end() - static_cast<std::ptrdiff_t>(token.size()));
+            const auto unknown_owner_result = endpoint.advance_endpoint(
+                QuicCoreInboundDatagram{
+                    .bytes = reset_bytes,
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+            COQUIC_CORE_HOOK_RECORD(unknown_owner_result.effects.empty());
+
+            entry_it->second.connection.reset();
+            endpoint.peer_stateless_reset_tokens_.insert_or_assign(
+                QuicCore::stateless_reset_token_key(token), QuicCore::PeerStatelessResetTokenRoute{
+                                                                .owner = 1,
+                                                            });
+            const auto null_owner_result = endpoint.advance_endpoint(
+                QuicCoreInboundDatagram{
+                    .bytes = reset_bytes,
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+            COQUIC_CORE_HOOK_RECORD(null_owner_result.effects.empty());
+            entry_it->second.connection = std::make_unique<QuicConnection>(
+                make_client_core_config_for_core_coverage(0x13, 0x53));
+
+            entry_it->second.connection->enter_draining_state(QuicCoreTimePoint{});
+            entry_it->second.connection->close_deadline_ = QuicCoreTimePoint{};
+            endpoint.peer_stateless_reset_tokens_.insert_or_assign(
+                QuicCore::stateless_reset_token_key(token), QuicCore::PeerStatelessResetTokenRoute{
+                                                                .owner = 1,
+                                                            });
+            const auto removed_result = endpoint.advance_endpoint(
+                QuicCoreInboundDatagram{
+                    .bytes = reset_bytes,
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(2));
+            static_cast<void>(removed_result);
+            COQUIC_CORE_HOOK_RECORD(!endpoint.connections_.contains(1));
+        }
+    }
+
+    {
+        auto server_config = make_server_endpoint_config_for_core_coverage();
+        server_config.retry_enabled = true;
+        server_config.address_validation_token_secret = QuicAddressValidationTokenSecret{};
+        QuicCore server(std::move(server_config));
+        auto token = server.make_endpoint_new_token(
+            /*sequence=*/11, kQuicVersion1, std::nullopt,
+            make_bytes_for_core_coverage({0x04, 8, 8, 4, 4, 0x01, 0xbb}), QuicCoreTimePoint{});
+        server.new_tokens_.insert_or_assign(
+            QuicCore::connection_id_key(token),
+            QuicCore::StoredEndpointNewToken{
+                .token = token,
+                .address_validation_identity =
+                    make_bytes_for_core_coverage({0x04, 8, 8, 4, 4, 0x01, 0xbb}),
+                .version = kQuicVersion1,
+                .expires_at = QuicCoreTimePoint{} + std::chrono::hours(1),
+            });
+        const auto initial = serialize_packet(InitialPacket{
+            .version = kQuicVersion1,
+            .destination_connection_id = make_connection_id_for_core_coverage(
+                {0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x09}),
+            .source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x18}),
+            .token = token,
+            .packet_number_length = 1,
+            .truncated_packet_number = 1,
+            .frames = {PaddingFrame{}},
+        });
+        COQUIC_CORE_HOOK_RECORD(initial.has_value());
+        if (initial.has_value()) {
+            auto bytes = initial.value();
+            bytes.resize(kMinimumClientInitialDatagramBytes, std::byte{0x00});
+            const auto result = server.advance_endpoint(
+                QuicCoreInboundDatagram{
+                    .bytes = std::move(bytes),
+                    .address_validation_identity =
+                        make_bytes_for_core_coverage({0x04, 8, 8, 4, 4, 0x01, 0xbb}),
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+            COQUIC_CORE_HOOK_RECORD(
+                !server.new_tokens_.contains(QuicCore::connection_id_key(token)));
+            static_cast<void>(result);
+        }
+    }
+
+    {
+        auto config = make_server_endpoint_config_for_core_coverage();
+        config.stateless_reset_secret = QuicStatelessResetSecret{};
+        QuicCore server(std::move(config));
+        auto unknown_cid =
+            make_endpoint_connection_id(kServerConnectionIdPrefix, 4, server.endpoint_random_);
+        DatagramBuffer bytes;
+        bytes.push_back(std::byte{0x40});
+        bytes.append(unknown_cid);
+        bytes.resize(kMinimumStatelessResetDatagramSize, std::byte{0xaa});
+        const auto result = server.advance_endpoint(
+            QuicCoreInboundDatagram{
+                .bytes = bytes.to_vector(),
+                .route_handle = 31,
+            },
+            QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+        COQUIC_CORE_HOOK_RECORD(!first_datagram_bytes_for_core_coverage(result).empty());
+    }
+
+    {
+        QuicCore endpoint(make_client_endpoint_config_for_core_coverage());
+        endpoint.endpoint_config_.allow_peer_address_change = false;
+        const auto opened = endpoint.advance_endpoint(
+            QuicCoreOpenConnection{
+                .connection = make_open_config_for_core_coverage(0x19, 0x59),
+                .initial_route_handle = 19,
+            },
+            QuicCoreTimePoint{});
+        const auto initial = first_datagram_bytes_for_core_coverage(opened);
+        COQUIC_CORE_HOOK_RECORD(!initial.empty());
+        const auto result = endpoint.advance_endpoint(
+            QuicCoreInboundDatagram{
+                .bytes = initial,
+                .route_handle = 20,
+            },
+            QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+        COQUIC_CORE_HOOK_RECORD(result.effects.empty());
+        auto entry_it = endpoint.connections_.find(1);
+        COQUIC_CORE_HOOK_RECORD(entry_it != endpoint.connections_.end());
+        if (entry_it != endpoint.connections_.end()) {
+            COQUIC_CORE_HOOK_RECORD(!entry_it->second.path_id_by_route_handle.contains(20));
+        }
+    }
+
+    {
+        auto server_config = make_server_endpoint_config_for_core_coverage();
+        server_config.address_validation_token_secret = QuicAddressValidationTokenSecret{};
+        QuicCore server(std::move(server_config));
+        auto token = server.make_endpoint_new_token(
+            /*sequence=*/7, kQuicVersion1, std::nullopt,
+            make_bytes_for_core_coverage({0x04, 8, 8, 8, 8, 0x01, 0xbb}), QuicCoreTimePoint{});
+        server.new_tokens_.insert_or_assign(
+            QuicCore::connection_id_key(token),
+            QuicCore::StoredEndpointNewToken{
+                .token = token,
+                .address_validation_identity =
+                    make_bytes_for_core_coverage({0x04, 8, 8, 8, 8, 0x01, 0xbb}),
+                .version = kQuicVersion1,
+                .expires_at = QuicCoreTimePoint{} + std::chrono::hours(1),
+            });
+        const auto initial = serialize_packet(InitialPacket{
+            .version = kQuicVersion1,
+            .destination_connection_id = make_connection_id_for_core_coverage(
+                {0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
+            .source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x14}),
+            .token = token,
+            .packet_number_length = 1,
+            .truncated_packet_number = 1,
+            .frames = {PaddingFrame{}},
+        });
+        COQUIC_CORE_HOOK_RECORD(initial.has_value());
+        if (initial.has_value()) {
+            auto bytes = initial.value();
+            bytes.resize(kMinimumClientInitialDatagramBytes, std::byte{0x00});
+            const auto result = server.advance_endpoint(
+                QuicCoreInboundDatagram{
+                    .bytes = std::move(bytes),
+                    .address_validation_identity =
+                        make_bytes_for_core_coverage({0x04, 8, 8, 8, 8, 0x01, 0xbb}),
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+            COQUIC_CORE_HOOK_RECORD(
+                !server.new_tokens_.contains(QuicCore::connection_id_key(token)));
+            COQUIC_CORE_HOOK_RECORD(
+                std::ranges::any_of(result.effects, [](const QuicCoreEffect &effect) {
+                    return std::holds_alternative<QuicCoreConnectionLifecycleEvent>(effect);
+                }));
+        }
+    }
+
+    {
+        auto server_config = make_server_endpoint_config_for_core_coverage();
+        QuicCore server(std::move(server_config));
+        const auto initial = serialize_packet(InitialPacket{
+            .version = kQuicVersion1,
+            .destination_connection_id = make_connection_id_for_core_coverage(
+                {0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
+            .source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x15}),
+            .token = {},
+            .packet_number_length = 1,
+            .truncated_packet_number = 1,
+            .frames = {PaddingFrame{}},
+        });
+        COQUIC_CORE_HOOK_RECORD(initial.has_value());
+        if (initial.has_value()) {
+            auto bytes = initial.value();
+            bytes.resize(kMinimumClientInitialDatagramBytes, std::byte{0x00});
+            const auto result = server.advance_endpoint(
+                QuicCoreInboundDatagram{
+                    .bytes = std::move(bytes),
+                    .address_validation_identity =
+                        make_bytes_for_core_coverage({0x04, 9, 9, 9, 9, 0x01, 0xbb}),
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+            COQUIC_CORE_HOOK_RECORD(
+                std::ranges::any_of(result.effects, [](const QuicCoreEffect &effect) {
+                    return std::holds_alternative<QuicCoreConnectionLifecycleEvent>(effect);
+                }));
+        }
+    }
+
+    {
+        auto server_config = make_server_endpoint_config_for_core_coverage();
+        server_config.address_validation_token_secret = QuicAddressValidationTokenSecret{};
+        QuicCore server(std::move(server_config));
+        const auto initial = serialize_packet(InitialPacket{
+            .version = kQuicVersion1,
+            .destination_connection_id = make_connection_id_for_core_coverage(
+                {0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
+            .source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x16}),
+            .token = {},
+            .packet_number_length = 1,
+            .truncated_packet_number = 1,
+            .frames = {CryptoFrame{
+                .offset = 0,
+                .crypto_data = std::vector<std::byte>(900, std::byte{0x41}),
+            }},
+        });
+        COQUIC_CORE_HOOK_RECORD(initial.has_value());
+        if (initial.has_value()) {
+            auto bytes = initial.value();
+            bytes.resize(kMinimumClientInitialDatagramBytes, std::byte{0x00});
+            const auto result = server.advance_endpoint(
+                QuicCoreInboundDatagram{
+                    .bytes = std::move(bytes),
+                    .route_handle = 56,
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+            COQUIC_CORE_HOOK_RECORD(
+                std::ranges::any_of(result.effects, [](const QuicCoreEffect &effect) {
+                    return std::holds_alternative<QuicCoreSendDatagram>(effect);
+                }));
+        }
+    }
+
+    {
+        auto server_config = make_server_endpoint_config_for_core_coverage();
+        QuicCore server(std::move(server_config));
+        QuicCore::ConnectionEntry entry{
+            .handle = 71,
+            .default_route_handle = 33,
+            .connection = std::make_unique<QuicConnection>(QuicCoreConfig{
+                .role = EndpointRole::server,
+                .source_connection_id = make_connection_id_for_core_coverage({0x53, 0x71}),
+                .initial_destination_connection_id =
+                    make_connection_id_for_core_coverage({0x83, 0x71}),
+                .verify_peer = false,
+                .server_name = "localhost",
+                .application_protocol = "coquic",
+                .address_validation_token_secret = QuicAddressValidationTokenSecret{},
+            }),
+        };
+        entry.connection->started_ = true;
+        entry.connection->status_ = HandshakeStatus::connected;
+        entry.connection->handshake_confirmed_ = true;
+        entry.connection->peer_address_validated_ = true;
+        entry.connection->initial_packet_space_discarded_ = true;
+        entry.connection->handshake_packet_space_discarded_ = true;
+        entry.connection->peer_transport_parameters_ = TransportParameters{
+            .max_udp_payload_size = entry.connection->config_.transport.max_udp_payload_size,
+            .active_connection_id_limit = 2,
+            .ack_delay_exponent = entry.connection->config_.transport.ack_delay_exponent,
+            .max_ack_delay = entry.connection->config_.transport.max_ack_delay,
+            .initial_source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x71}),
+        };
+        entry.connection->peer_transport_parameters_validated_ = true;
+        entry.connection->client_initial_destination_connection_id_ =
+            entry.connection->config_.initial_destination_connection_id;
+        entry.connection->application_space_.write_secret = TrafficSecret{
+            .cipher_suite = CipherSuite::tls_aes_128_gcm_sha256,
+            .secret = std::vector<std::byte>(32, std::byte{0x71}),
+        };
+        entry.connection->current_send_path_id_ = 0;
+        entry.connection->ensure_path_state(0).is_current_send_path = true;
+        entry.route_handle_by_path_id.emplace(0, 33);
+
+        server.maybe_queue_server_new_token(entry, QuicCoreTimePoint{});
+        COQUIC_CORE_HOOK_RECORD(entry.new_token_issued_routes == std::vector<QuicRouteHandle>{33});
+        COQUIC_CORE_HOOK_RECORD(server.new_tokens_.size() == 1);
+        COQUIC_CORE_HOOK_RECORD(entry.connection->pending_new_token_frames_.size() == 1);
+        auto drained = drain_connection_effects(entry.handle, entry.default_route_handle,
+                                                entry.route_handle_by_path_id, *entry.connection,
+                                                QuicCoreTimePoint{});
+        server.drain_queued_server_new_token(entry, drained, QuicCoreTimePoint{});
+        COQUIC_CORE_HOOK_RECORD(
+            should_keep_endpoint_connection_entry(*entry.connection, drained, QuicCoreTimePoint{}));
     }
 
     {
@@ -1148,13 +2925,90 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         }
     }
 
+    {
+        auto config = make_client_core_config_for_core_coverage(0x22, 0x62);
+        QuicCore legacy(config);
+        auto *entry = legacy.ensure_legacy_entry();
+        COQUIC_CORE_HOOK_RECORD(entry != nullptr);
+        if (entry != nullptr) {
+            entry->default_route_handle.reset();
+            entry->path_id_by_route_handle.clear();
+            entry->route_handle_by_path_id.clear();
+            const auto result = legacy.advance(
+                QuicCoreInboundDatagram{
+                    .bytes = make_bytes_for_core_coverage({0x40}),
+                    .route_handle = 42,
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+            static_cast<void>(result);
+            COQUIC_CORE_HOOK_RECORD(entry->path_id_by_route_handle.contains(42));
+        }
+    }
+
+    {
+        auto config = make_client_core_config_for_core_coverage(0x25, 0x65);
+        QuicCore legacy(config);
+        legacy.endpoint_config_.allow_peer_address_change = false;
+        auto *entry = legacy.ensure_legacy_entry();
+        COQUIC_CORE_HOOK_RECORD(entry != nullptr);
+        if (entry != nullptr) {
+            entry->path_id_by_route_handle.clear();
+            entry->route_handle_by_path_id.clear();
+            const auto result = legacy.advance(
+                QuicCoreInboundDatagram{
+                    .bytes = make_bytes_for_core_coverage({0x40}),
+                    .route_handle = 43,
+                },
+                QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+            static_cast<void>(result);
+            COQUIC_CORE_HOOK_RECORD(!entry->path_id_by_route_handle.contains(43));
+        }
+    }
+
+    {
+        auto config = make_client_core_config_for_core_coverage(0x23, 0x63);
+        QuicCore legacy(config);
+        legacy.endpoint_config_.allow_peer_address_change = false;
+        const auto result = legacy.advance(
+            QuicCoreRequestConnectionMigration{
+                .route_handle = 90,
+            },
+            QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+        COQUIC_CORE_HOOK_RECORD(result.local_error.has_value());
+    }
+
+    {
+        auto config = make_client_core_config_for_core_coverage(0x24, 0x64);
+        config.request_forgery_policy.reject_private_use_addresses = true;
+        QuicCore legacy(config);
+        legacy.endpoint_config_.request_forgery_policy.reject_private_use_addresses = true;
+        auto *entry = legacy.ensure_legacy_entry();
+        COQUIC_CORE_HOOK_RECORD(entry != nullptr);
+        if (entry != nullptr) {
+            entry->address_validation_identity_by_path_id[0] =
+                make_bytes_for_core_coverage({0x04, 8, 8, 8, 8, 0x01, 0xbb});
+        }
+        const auto result = legacy.advance(
+            QuicCoreRequestConnectionMigration{
+                .route_handle = 91,
+                .address_validation_identity =
+                    make_bytes_for_core_coverage({0x04, 10, 0, 0, 1, 0x01, 0xbb}),
+            },
+            QuicCoreTimePoint{} + std::chrono::milliseconds(1));
+        COQUIC_CORE_HOOK_RECORD(result.local_error.has_value());
+    }
+
 #undef COQUIC_CORE_HOOK_RECORD
+#undef COQUIC_CORE_STRINGIFY
+#undef COQUIC_CORE_STRINGIFY_DETAIL
     return ok;
 }
 // NOLINTEND(clang-analyzer-cplusplus.NewDeleteLeaks)
 
 QuicCore::QuicCore(QuicCoreEndpointConfig config)
-    : endpoint_config_(std::move(config)), connection_(this) {
+    : endpoint_config_(std::move(config)), endpoint_random_(std::random_device{}()),
+      connection_(this) {
+    load_consumed_address_validation_tokens();
 }
 
 QuicCore::QuicCore(QuicCoreConfig config)
@@ -1169,10 +3023,18 @@ QuicCore::QuicCore(QuicCoreConfig config)
           .zero_rtt = config.zero_rtt,
           .qlog = config.qlog,
           .tls_keylog_path = config.tls_keylog_path,
+          .stateless_reset_secret = config.stateless_reset_secret,
+          .address_validation_token_secret = config.address_validation_token_secret,
+          .previous_address_validation_token_secrets =
+              config.previous_address_validation_token_secrets,
+          .address_validation_replay_store_path = config.address_validation_replay_store_path,
+          .request_forgery_policy = config.request_forgery_policy,
           .emit_shared_receive_stream_data = config.emit_shared_receive_stream_data,
           .enable_packet_inspection = config.enable_packet_inspection,
       }),
-      legacy_config_(std::move(config)), connection_(this) {
+      legacy_config_(std::move(config)), endpoint_random_(std::random_device{}()),
+      connection_(this) {
+    load_consumed_address_validation_tokens();
     static_cast<void>(ensure_legacy_entry());
 }
 
@@ -1183,11 +3045,15 @@ QuicCore::QuicCore(QuicCore &&other) noexcept
       legacy_config_(std::move(other.legacy_config_)), connections_(std::move(other.connections_)),
       connection_id_routes_(std::move(other.connection_id_routes_)),
       initial_destination_routes_(std::move(other.initial_destination_routes_)),
-      retry_tokens_(std::move(other.retry_tokens_)),
+      retry_tokens_(std::move(other.retry_tokens_)), new_tokens_(std::move(other.new_tokens_)),
+      consumed_address_validation_tokens_(std::move(other.consumed_address_validation_tokens_)),
+      client_new_tokens_(std::move(other.client_new_tokens_)),
+      local_stateless_reset_tokens_by_cid_(std::move(other.local_stateless_reset_tokens_by_cid_)),
+      peer_stateless_reset_tokens_(std::move(other.peer_stateless_reset_tokens_)),
       legacy_connection_handle_(other.legacy_connection_handle_),
       next_connection_handle_(other.next_connection_handle_),
       next_server_connection_id_sequence_(other.next_server_connection_id_sequence_),
-      connection_(this) {
+      endpoint_random_(other.endpoint_random_), connection_(this) {
     other.connection_.owner = &other;
 }
 
@@ -1201,9 +3067,15 @@ QuicCore &QuicCore::operator=(QuicCore &&other) noexcept {
     connection_id_routes_ = std::move(other.connection_id_routes_);
     initial_destination_routes_ = std::move(other.initial_destination_routes_);
     retry_tokens_ = std::move(other.retry_tokens_);
+    new_tokens_ = std::move(other.new_tokens_);
+    consumed_address_validation_tokens_ = std::move(other.consumed_address_validation_tokens_);
+    client_new_tokens_ = std::move(other.client_new_tokens_);
+    local_stateless_reset_tokens_by_cid_ = std::move(other.local_stateless_reset_tokens_by_cid_);
+    peer_stateless_reset_tokens_ = std::move(other.peer_stateless_reset_tokens_);
     legacy_connection_handle_ = other.legacy_connection_handle_;
     next_connection_handle_ = other.next_connection_handle_;
     next_server_connection_id_sequence_ = other.next_server_connection_id_sequence_;
+    endpoint_random_ = other.endpoint_random_;
     connection_.owner = this;
     other.connection_.owner = &other;
     return *this;
@@ -1289,6 +3161,13 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             return result;
         }
 
+        auto retry_token = open->connection.retry_token;
+        if (retry_token.empty()) {
+            if (auto stored_token = take_client_new_token_for_open(open->connection)) {
+                retry_token = std::move(*stored_token);
+            }
+        }
+
         QuicCoreConfig config{
             .role = endpoint_config_.role,
             .source_connection_id = open->connection.source_connection_id,
@@ -1296,7 +3175,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .original_destination_connection_id =
                 open->connection.original_destination_connection_id,
             .retry_source_connection_id = open->connection.retry_source_connection_id,
-            .retry_token = open->connection.retry_token,
+            .retry_token = std::move(retry_token),
             .original_version = open->connection.original_version,
             .initial_version = open->connection.initial_version,
             .supported_versions = endpoint_config_.supported_versions,
@@ -1312,6 +3191,13 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .zero_rtt = open->connection.zero_rtt,
             .qlog = endpoint_config_.qlog,
             .tls_keylog_path = endpoint_config_.tls_keylog_path,
+            .stateless_reset_secret = endpoint_config_.stateless_reset_secret,
+            .address_validation_token_secret = endpoint_config_.address_validation_token_secret,
+            .previous_address_validation_token_secrets =
+                endpoint_config_.previous_address_validation_token_secrets,
+            .address_validation_replay_store_path =
+                endpoint_config_.address_validation_replay_store_path,
+            .request_forgery_policy = endpoint_config_.request_forgery_policy,
             .emit_shared_receive_stream_data = endpoint_config_.emit_shared_receive_stream_data,
             .enable_packet_inspection = endpoint_config_.enable_packet_inspection,
         };
@@ -1326,6 +3212,21 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         entry.connection = std::make_unique<QuicConnection>(std::move(config));
         entry.path_id_by_route_handle.emplace(open->initial_route_handle, 0);
         entry.route_handle_by_path_id.emplace(0, open->initial_route_handle);
+        if (!open->address_validation_identity.empty()) {
+            if (!address_validation_identity_allowed_for_new_route(
+                    nullptr, open->address_validation_identity)) {
+                connections_.erase(it);
+                QuicCoreResult denied;
+                denied.local_error = QuicCoreLocalError{
+                    .connection = handle,
+                    .code = QuicCoreLocalErrorCode::unsupported_operation,
+                    .stream_id = std::nullopt,
+                };
+                return finalize_endpoint_result(std::move(denied), now);
+            }
+            entry.address_validation_identity_by_path_id.emplace(0,
+                                                                 open->address_validation_identity);
+        }
         entry.connection->start(now);
         refresh_server_connection_routes(entry);
 
@@ -1342,8 +3243,38 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
 
     if (auto *inbound = std::get_if<QuicCoreInboundDatagram>(&input); inbound != nullptr) {
         QuicCoreResult result;
+        const auto drain_stateless_reset_owner = [&](QuicConnectionHandle owner) -> bool {
+            const auto entry_it = connections_.find(owner);
+            if (entry_it == connections_.end() || entry_it->second.connection == nullptr) {
+                return false;
+            }
+
+            entry_it->second.connection->enter_stateless_reset_draining(now);
+            auto drained = drain_connection_effects(
+                entry_it->second.handle, entry_it->second.default_route_handle,
+                entry_it->second.route_handle_by_path_id, *entry_it->second.connection, now);
+            append_result(result, std::move(drained));
+            const bool remove_entry =
+                should_remove_endpoint_connection_entry(*entry_it->second.connection, result, now);
+            refresh_server_connection_routes(entry_it->second);
+            if (remove_entry) {
+                retire_endpoint_connection_routes(entry_it->second, now);
+                connections_.erase(entry_it);
+            }
+            return true;
+        };
         const auto parsed = parse_endpoint_datagram(inbound->bytes);
         if (!parsed.has_value()) {
+            if (const auto reset_owner = detect_stateless_reset(inbound->bytes);
+                reset_owner.has_value()) {
+                static_cast<void>(drain_stateless_reset_owner(*reset_owner));
+            }
+            return finalize_endpoint_result(std::move(result), now);
+        }
+
+        if (const auto reset_owner = detect_stateless_reset(inbound->bytes);
+            reset_owner.has_value()) {
+            static_cast<void>(drain_stateless_reset_owner(*reset_owner));
             return finalize_endpoint_result(std::move(result), now);
         }
 
@@ -1352,25 +3283,26 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             auto entry_it = connections_.find(*handle);
             if (entry_it != connections_.end()) {
                 auto &entry = entry_it->second;
-                const auto path_id =
-                    inbound->route_handle.has_value()
-                        ? remember_inbound_path(entry, *inbound->route_handle)
-                        : (entry.default_route_handle.has_value()
-                               ? remember_inbound_path(entry, *entry.default_route_handle)
-                               : kDefaultPathId);
+                const auto path_id = path_id_for_inbound_route(
+                    entry, inbound->route_handle, inbound->address_validation_identity);
+                if (!path_id.has_value()) {
+                    return finalize_endpoint_result(std::move(result), now);
+                }
                 entry.connection->process_inbound_datagram_owned(std::move(inbound->bytes), now,
-                                                                 path_id, inbound->ecn);
+                                                                 *path_id, inbound->ecn);
 
                 auto drained =
                     drain_connection_effects(entry.handle, entry.default_route_handle,
                                              entry.route_handle_by_path_id, *entry.connection, now);
+                drain_queued_server_new_token(entry, drained, now);
                 const bool remove_entry =
-                    should_remove_endpoint_connection_entry(*entry.connection, drained);
+                    should_remove_endpoint_connection_entry(*entry.connection, drained, now);
+                remember_client_new_tokens(entry, drained);
                 note_send_continuation(entry, drained, now);
                 append_result(result, std::move(drained));
                 refresh_server_connection_routes(entry);
                 if (remove_entry) {
-                    erase_endpoint_connection_routes(entry);
+                    retire_endpoint_connection_routes(entry, now);
                     connections_.erase(entry_it);
                 }
                 return finalize_endpoint_result(std::move(result), now);
@@ -1394,7 +3326,9 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                     parsed->kind == ParsedEndpointDatagram::Kind::unsupported_version_long_header
                         ? supported_quic_versions()
                         : endpoint_config_.supported_versions;
-                auto bytes = make_version_negotiation_packet_bytes(*parsed, advertised_versions);
+                auto bytes = make_version_negotiation_packet_bytes(
+                    *parsed, advertised_versions,
+                    endpoint_config_.transport.grease_reserved_versions);
                 if (!bytes.empty()) {
                     result.effects.emplace_back(QuicCoreSendDatagram{
                         .connection = 0,
@@ -1407,25 +3341,47 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         }
 
         if (parsed->kind != ParsedEndpointDatagram::Kind::supported_initial) {
+            if (auto reset = make_stateless_reset_for_unknown_cid(*parsed, inbound->bytes,
+                                                                  inbound->route_handle, now)) {
+                result.effects.emplace_back(std::move(*reset));
+            }
+            return finalize_endpoint_result(std::move(result), now);
+        }
+
+        if (inbound->bytes.size() < kMinimumClientInitialDatagramBytes) {
+            return finalize_endpoint_result(std::move(result), now);
+        }
+        if (!address_validation_identity_allowed_for_new_route(
+                nullptr, inbound->address_validation_identity)) {
             return finalize_endpoint_result(std::move(result), now);
         }
 
         std::optional<PendingRetryToken> retry_context;
+        auto new_token_context = parsed->token.empty()
+                                     ? std::optional<StoredEndpointNewToken>{}
+                                     : take_new_token_context(*parsed, inbound->route_handle, now,
+                                                              inbound->address_validation_identity);
         if (endpoint_config_.retry_enabled) {
-            retry_context = take_retry_context(*parsed, inbound->route_handle);
+            retry_context = take_retry_context(*parsed, inbound->route_handle, now,
+                                               inbound->address_validation_identity);
             if (!retry_context.has_value()) {
-                if (!parsed->token.empty()) {
+                if (!parsed->token.empty() && !new_token_context.has_value()) {
                     return finalize_endpoint_result(std::move(result), now);
                 }
 
                 const auto sequence = next_server_connection_id_sequence_++;
+                auto retry_source_connection_id = make_endpoint_connection_id(
+                    kServerConnectionIdPrefix, sequence, endpoint_random_);
                 PendingRetryToken pending{
                     .original_destination_connection_id = parsed->destination_connection_id,
-                    .retry_source_connection_id =
-                        make_endpoint_connection_id(std::byte{0x53}, sequence),
+                    .retry_source_connection_id = retry_source_connection_id,
                     .original_version = parsed->version,
-                    .token = make_endpoint_retry_token(sequence),
+                    .token = make_endpoint_retry_token(
+                        sequence, &*parsed, &retry_source_connection_id, inbound->route_handle,
+                        inbound->address_validation_identity, now),
                     .route_handle = inbound->route_handle,
+                    .address_validation_identity = inbound->address_validation_identity,
+                    .expires_at = now + kRetryTokenLifetime,
                 };
                 retry_tokens_.insert_or_assign(connection_id_key(pending.token), pending);
 
@@ -1446,8 +3402,9 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .source_connection_id =
                 retry_context.has_value()
                     ? retry_context->retry_source_connection_id
-                    : make_endpoint_connection_id(std::byte{0x53},
-                                                  next_server_connection_id_sequence_++),
+                    : make_endpoint_connection_id(kServerConnectionIdPrefix,
+                                                  next_server_connection_id_sequence_++,
+                                                  endpoint_random_),
             .original_version = parsed->version,
             .initial_version = parsed->version,
             .supported_versions = endpoint_config_.supported_versions,
@@ -1460,6 +3417,13 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .zero_rtt = endpoint_config_.zero_rtt,
             .qlog = endpoint_config_.qlog,
             .tls_keylog_path = endpoint_config_.tls_keylog_path,
+            .stateless_reset_secret = endpoint_config_.stateless_reset_secret,
+            .address_validation_token_secret = endpoint_config_.address_validation_token_secret,
+            .previous_address_validation_token_secrets =
+                endpoint_config_.previous_address_validation_token_secrets,
+            .address_validation_replay_store_path =
+                endpoint_config_.address_validation_replay_store_path,
+            .request_forgery_policy = endpoint_config_.request_forgery_policy,
             .emit_shared_receive_stream_data = endpoint_config_.emit_shared_receive_stream_data,
             .enable_packet_inspection = endpoint_config_.enable_packet_inspection,
         };
@@ -1478,15 +3442,25 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             .connection = std::make_unique<QuicConnection>(std::move(config)),
         };
         const auto path_id = inbound->route_handle.has_value()
-                                 ? remember_inbound_path(entry, *inbound->route_handle)
+                                 ? remember_inbound_path(entry, *inbound->route_handle,
+                                                         inbound->address_validation_identity)
                                  : kDefaultPathId;
+        if (!inbound->route_handle.has_value() && !inbound->address_validation_identity.empty()) {
+            entry.address_validation_identity_by_path_id[path_id] =
+                inbound->address_validation_identity;
+        }
         entry.connection->process_inbound_datagram_owned(std::move(inbound->bytes), now, path_id,
                                                          inbound->ecn);
+        if (new_token_context.has_value()) {
+            entry.connection->mark_peer_address_validated();
+        }
 
         auto drained =
             drain_connection_effects(entry.handle, entry.default_route_handle,
                                      entry.route_handle_by_path_id, *entry.connection, now);
-        const bool keep_entry = should_keep_endpoint_connection_entry(*entry.connection, drained);
+        drain_queued_server_new_token(entry, drained, now);
+        const bool keep_entry =
+            should_keep_endpoint_connection_entry(*entry.connection, drained, now);
         append_result(result, std::move(drained));
         result.effects.insert(result.effects.begin(),
                               QuicCoreConnectionLifecycleEvent{
@@ -1588,9 +3562,29 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                 },
                 [&](const QuicCoreRequestKeyUpdate &) { entry.connection->request_key_update(); },
                 [&](const QuicCoreRequestConnectionMigration &in) {
-                    const auto path_id = remember_inbound_path(entry, in.route_handle);
+                    if (!endpoint_config_.allow_peer_address_change) {
+                        result.local_error = QuicCoreLocalError{
+                            .connection = entry.handle,
+                            .code = QuicCoreLocalErrorCode::unsupported_operation,
+                            .stream_id = std::nullopt,
+                        };
+                        return;
+                    }
+                    const auto effective_identity = effective_address_validation_identity_for_route(
+                        entry, in.route_handle, in.address_validation_identity);
+                    if (!address_validation_identity_allowed_for_new_route(&entry,
+                                                                           effective_identity)) {
+                        result.local_error = QuicCoreLocalError{
+                            .connection = entry.handle,
+                            .code = QuicCoreLocalErrorCode::unsupported_operation,
+                            .stream_id = std::nullopt,
+                        };
+                        return;
+                    }
+                    const auto path_id =
+                        remember_inbound_path(entry, in.route_handle, effective_identity);
                     const auto requested =
-                        entry.connection->request_connection_migration(path_id, in.reason);
+                        entry.connection->request_connection_migration(path_id, in.reason, now);
                     if (!requested.has_value()) {
                         result.local_error = QuicCoreLocalError{
                             .connection = entry.handle,
@@ -1607,12 +3601,12 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             drain_connection_effects(entry.handle, entry.default_route_handle,
                                      entry.route_handle_by_path_id, *entry.connection, now);
         const bool remove_entry =
-            should_remove_endpoint_connection_entry(*entry.connection, drained);
+            should_remove_endpoint_connection_entry(*entry.connection, drained, now);
         note_send_continuation(entry, drained, now);
         append_result(result, std::move(drained));
         refresh_server_connection_routes(entry);
         if (remove_entry) {
-            erase_endpoint_connection_routes(entry);
+            retire_endpoint_connection_routes(entry, now);
             connections_.erase(entry_it);
         }
         return finalize_endpoint_result(std::move(result), now);
@@ -1632,7 +3626,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             drain_connection_effects(entry.handle, entry.default_route_handle,
                                      entry.route_handle_by_path_id, *entry.connection, now);
         const bool remove_entry =
-            should_remove_endpoint_connection_entry(*entry.connection, drained);
+            should_remove_endpoint_connection_entry(*entry.connection, drained, now);
         note_send_continuation(entry, drained, now);
         append_result(result, std::move(drained));
         refresh_server_connection_routes(entry);
@@ -1642,7 +3636,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
     }
 
     for (const auto handle : erase_after) {
-        erase_endpoint_connection_routes(connections_.at(handle));
+        retire_endpoint_connection_routes(connections_.at(handle), now);
         connections_.erase(handle);
     }
     return finalize_endpoint_result(std::move(result), now);
@@ -1673,12 +3667,11 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         overloaded{
             [&](const QuicCoreStart &) { connection->start(now); },
             [&](const QuicCoreInboundDatagram &in) {
-                const auto path_id =
-                    in.route_handle.has_value()
-                        ? remember_inbound_path(entry, *in.route_handle)
-                        : (entry.default_route_handle.has_value()
-                               ? remember_inbound_path(entry, *entry.default_route_handle)
-                               : kDefaultPathId);
+                const auto path_id = path_id_for_inbound_route(entry, in.route_handle,
+                                                               in.address_validation_identity);
+                if (!path_id.has_value()) {
+                    return;
+                }
                 if (config.role == EndpointRole::client) {
                     if (!connection->is_handshake_complete()) {
                         const auto version_negotiation = parse_version_negotiation_packet(in.bytes);
@@ -1702,9 +3695,9 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                                     config.reacted_to_version_negotiation = true;
                                     entry.connection = std::make_unique<QuicConnection>(config);
                                     connection = entry.connection.get();
-                                    connection->last_inbound_path_id_ = path_id;
+                                    connection->last_inbound_path_id_ = *path_id;
                                     connection->current_send_path_id_ = path_id;
-                                    connection->ensure_path_state(path_id).is_current_send_path =
+                                    connection->ensure_path_state(*path_id).is_current_send_path =
                                         true;
                                     connection->start(now);
                                     return;
@@ -1744,15 +3737,15 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             connection = entry.connection.get();
                             connection->initial_space_.next_send_packet_number =
                                 next_initial_send_packet_number;
-                            connection->last_inbound_path_id_ = path_id;
+                            connection->last_inbound_path_id_ = *path_id;
                             connection->current_send_path_id_ = path_id;
-                            connection->ensure_path_state(path_id).is_current_send_path = true;
+                            connection->ensure_path_state(*path_id).is_current_send_path = true;
                             connection->start(now);
                         }
                         return;
                     }
                 }
-                connection->process_inbound_datagram(in.bytes, now, path_id, in.ecn);
+                connection->process_inbound_datagram(in.bytes, now, *path_id, in.ecn);
             },
             [&](const QuicCorePathMtuUpdate &in) {
                 if (!in.route_handle.has_value()) {
@@ -1803,8 +3796,29 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
             },
             [&](const QuicCoreRequestKeyUpdate &) { connection->request_key_update(); },
             [&](const QuicCoreRequestConnectionMigration &in) {
-                const auto path_id = remember_inbound_path(entry, in.route_handle);
-                const auto requested = connection->request_connection_migration(path_id, in.reason);
+                if (!endpoint_config_.allow_peer_address_change) {
+                    result.local_error = QuicCoreLocalError{
+                        .connection = std::nullopt,
+                        .code = QuicCoreLocalErrorCode::unsupported_operation,
+                        .stream_id = std::nullopt,
+                    };
+                    return;
+                }
+                const auto effective_identity = effective_address_validation_identity_for_route(
+                    entry, in.route_handle, in.address_validation_identity);
+                if (!address_validation_identity_allowed_for_new_route(&entry,
+                                                                       effective_identity)) {
+                    result.local_error = QuicCoreLocalError{
+                        .connection = std::nullopt,
+                        .code = QuicCoreLocalErrorCode::unsupported_operation,
+                        .stream_id = std::nullopt,
+                    };
+                    return;
+                }
+                const auto path_id =
+                    remember_inbound_path(entry, in.route_handle, effective_identity);
+                const auto requested =
+                    connection->request_connection_migration(path_id, in.reason, now);
                 if (!requested.has_value()) {
                     result.local_error = QuicCoreLocalError{
                         .connection = std::nullopt,
@@ -1868,9 +3882,23 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
     while (const auto status = connection->take_zero_rtt_status_event()) {
         result.effects.emplace_back(*status);
     }
+    while (auto token = connection->take_new_token()) {
+        result.effects.emplace_back(QuicCoreNewTokenAvailable{
+            .connection = entry.handle,
+            .token = std::move(*token),
+        });
+    }
     while (auto inspection = connection->take_packet_inspection()) {
         inspection->connection = entry.handle;
         result.effects.emplace_back(std::move(*inspection));
+    }
+    if (const auto terminal = connection->take_terminal_state()) {
+        if (*terminal == QuicConnectionTerminalState::closed) {
+            result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+                .connection = entry.handle,
+                .event = QuicCoreConnectionLifecycle::closed,
+            });
+        }
     }
     legacy_config_ = std::move(config);
     return finalize_legacy_result(std::move(result), now);

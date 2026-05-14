@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <set>
 #include <span>
 #include <vector>
 
@@ -21,6 +22,7 @@ using coquic::quic::VersionInformation;
 
 constexpr std::uint64_t original_destination_connection_id_parameter_id = 0x00;
 constexpr std::uint64_t max_idle_timeout_parameter_id = 0x01;
+constexpr std::uint64_t stateless_reset_token_parameter_id = 0x02;
 constexpr std::uint64_t max_udp_payload_size_parameter_id = 0x03;
 constexpr std::uint64_t initial_max_data_parameter_id = 0x04;
 constexpr std::uint64_t initial_max_stream_data_bidi_local_parameter_id = 0x05;
@@ -41,6 +43,7 @@ constexpr std::uint64_t minimum_active_connection_id_limit = 2;
 constexpr std::uint64_t maximum_ack_delay_exponent = 20;
 constexpr std::uint64_t maximum_max_ack_delay = (std::uint64_t{1} << 14);
 constexpr std::size_t maximum_connection_id_length = 20;
+constexpr std::size_t stateless_reset_token_length = 16;
 
 void append_parameter_header(std::vector<std::byte> &output, std::uint64_t id, std::size_t length) {
     const auto encoded_id = coquic::quic::encode_varint(id).value();
@@ -63,6 +66,16 @@ void append_connection_id_parameter(std::vector<std::byte> &output, std::uint64_
     }
 
     append_raw_parameter(output, id, *connection_id);
+}
+
+void append_stateless_reset_token_parameter(
+    std::vector<std::byte> &output,
+    const std::optional<std::array<std::byte, stateless_reset_token_length>> &token) {
+    if (!token.has_value()) {
+        return;
+    }
+
+    append_raw_parameter(output, stateless_reset_token_parameter_id, *token);
 }
 
 void append_u32_be(std::vector<std::byte> &output, std::uint32_t value) {
@@ -167,6 +180,7 @@ serialize_transport_parameters(const TransportParameters &parameters) {
 
     append_connection_id_parameter(output, original_destination_connection_id_parameter_id,
                                    parameters.original_destination_connection_id);
+    append_stateless_reset_token_parameter(output, parameters.stateless_reset_token);
 
     auto encoded_max_idle_timeout = encode_varint(parameters.max_idle_timeout);
     if (!encoded_max_idle_timeout.has_value()) {
@@ -296,6 +310,7 @@ serialize_transport_parameters(const TransportParameters &parameters) {
 CodecResult<TransportParameters>
 deserialize_transport_parameters(std::span<const std::byte> bytes) {
     TransportParameters parameters;
+    std::set<std::uint64_t> seen_parameter_ids;
     std::size_t offset = 0;
 
     while (offset < bytes.size()) {
@@ -319,10 +334,24 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
         const auto value = bytes.subspan(offset, static_cast<std::size_t>(length.value().value));
         offset += value.size();
 
+        if (!seen_parameter_ids.insert(id.value().value).second) {
+            return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                             offset);
+        }
+
         switch (id.value().value) {
         case original_destination_connection_id_parameter_id:
             parameters.original_destination_connection_id =
                 ConnectionId(value.begin(), value.end());
+            break;
+        case stateless_reset_token_parameter_id:
+            if (value.size() != stateless_reset_token_length) {
+                return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                                 offset);
+            }
+            parameters.stateless_reset_token.emplace();
+            std::copy_n(value.begin(), parameters.stateless_reset_token->size(),
+                        parameters.stateless_reset_token->begin());
             break;
         case max_idle_timeout_parameter_id: {
             const auto decoded = decode_integer_parameter(value);
@@ -510,7 +539,8 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
     if (peer_role == EndpointRole::client) {
         if (parameters.original_destination_connection_id.has_value() ||
             parameters.retry_source_connection_id.has_value() ||
-            parameters.preferred_address.has_value()) {
+            parameters.preferred_address.has_value() ||
+            parameters.stateless_reset_token.has_value()) {
             return validation_failure();
         }
 

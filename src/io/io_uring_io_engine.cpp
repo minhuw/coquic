@@ -2,6 +2,7 @@
 
 #include "src/io/io_backend_test_hooks.h"
 #include "src/io/poll_io_engine.h"
+#include "src/io/socket_io_backend_internal.h"
 
 #include <netinet/in.h>
 #include <unistd.h>
@@ -270,12 +271,13 @@ bool IoUringIoEngine::send(int socket_fd, const sockaddr_storage &peer, socklen_
         return false;
     }
 
+    send_peer_ = internal::peer_with_ipv6_flow_label(peer, peer_len, datagram);
     iovec iov{
         .iov_base = const_cast<std::byte *>(datagram.data()),
         .iov_len = datagram.size(),
     };
     msghdr message{};
-    message.msg_name = const_cast<sockaddr *>(reinterpret_cast<const sockaddr *>(&peer));
+    message.msg_name = reinterpret_cast<sockaddr *>(&send_peer_);
     message.msg_namelen = peer_len;
     message.msg_iov = &iov;
     message.msg_iovlen = 1;

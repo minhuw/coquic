@@ -36,6 +36,7 @@ struct QuicIoRemote {
 struct QuicIoRxDatagram {
     QuicRouteHandle route_handle = 0;
     std::vector<std::byte> bytes;
+    std::vector<std::byte> address_validation_identity;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
 };
 

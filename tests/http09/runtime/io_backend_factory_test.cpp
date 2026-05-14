@@ -38,6 +38,7 @@ TEST(QuicIoBackendFactoryTest, SocketClientBootstrapCreatesPrimaryRoute) {
     const auto &bootstrap_value = bootstrap.value();
     EXPECT_NE(bootstrap_value.backend, nullptr);
     EXPECT_NE(bootstrap_value.primary_route_handle, 0u);
+    EXPECT_FALSE(bootstrap_value.primary_address_validation_identity.empty());
 }
 
 TEST(QuicIoBackendFactoryTest, IoUringClientBootstrapFailsFastWhenInitializationFails) {

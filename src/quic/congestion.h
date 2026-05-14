@@ -321,6 +321,7 @@ class QuicCongestionController {
     void on_loss_event(QuicCoreTimePoint loss_detection_time,
                        QuicCoreTimePoint largest_lost_sent_time);
     void on_persistent_congestion();
+    void reset_for_new_path();
 
     std::size_t congestion_window() const;
     std::size_t bytes_in_flight() const;

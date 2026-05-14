@@ -1,11 +1,13 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -51,10 +53,33 @@ struct QuicTransportConfig {
     std::uint64_t initial_max_streams_bidi = 16;
     std::uint64_t initial_max_streams_uni = 16;
     QuicCongestionControlAlgorithm congestion_control = QuicCongestionControlAlgorithm::newreno;
+    bool enable_latency_spin_bit = false;
+    bool grease_reserved_versions = false;
+    bool enable_optimistic_ack_mitigation = false;
 };
 
 struct QuicQlogConfig {
     std::filesystem::path directory;
+};
+
+using QuicStatelessResetSecret = std::array<std::byte, 32>;
+using QuicAddressValidationTokenSecret = std::array<std::byte, 32>;
+
+enum class QuicAddressValidationIdentityClass : std::uint8_t {
+    unknown,
+    loopback,
+    link_local,
+    private_use,
+    unique_local,
+    global,
+};
+
+struct QuicRequestForgeryPolicyConfig {
+    bool reject_loopback_addresses = false;
+    bool reject_link_local_addresses = false;
+    bool reject_private_use_addresses = false;
+    bool reject_address_space_downgrade = false;
+    std::vector<std::uint16_t> blocked_udp_ports;
 };
 
 struct QuicCoreConfig {
@@ -79,6 +104,11 @@ struct QuicCoreConfig {
     QuicZeroRttConfig zero_rtt;
     std::optional<QuicQlogConfig> qlog;
     std::optional<std::filesystem::path> tls_keylog_path;
+    std::optional<QuicStatelessResetSecret> stateless_reset_secret;
+    std::optional<QuicAddressValidationTokenSecret> address_validation_token_secret;
+    std::vector<QuicAddressValidationTokenSecret> previous_address_validation_token_secrets;
+    std::optional<std::filesystem::path> address_validation_replay_store_path;
+    QuicRequestForgeryPolicyConfig request_forgery_policy;
     bool emit_shared_receive_stream_data = false;
     bool enable_packet_inspection = false;
 };
@@ -225,8 +255,16 @@ struct QuicCoreEndpointConfig {
     QuicZeroRttConfig zero_rtt;
     std::optional<QuicQlogConfig> qlog;
     std::optional<std::filesystem::path> tls_keylog_path;
+    std::optional<QuicStatelessResetSecret> stateless_reset_secret;
+    std::optional<QuicAddressValidationTokenSecret> address_validation_token_secret;
+    std::vector<QuicAddressValidationTokenSecret> previous_address_validation_token_secrets;
+    std::optional<std::filesystem::path> address_validation_replay_store_path;
+    QuicRequestForgeryPolicyConfig request_forgery_policy;
     bool emit_shared_receive_stream_data = false;
     bool enable_packet_inspection = false;
+    bool allow_peer_address_change = true;
+    bool retain_stateless_reset_tokens_after_connection_close = true;
+    std::chrono::milliseconds stateless_reset_token_retention = std::chrono::minutes(10);
 };
 
 struct QuicCoreClientConnectionConfig {
@@ -282,6 +320,7 @@ struct QuicCoreStart {};
 struct QuicCoreInboundDatagram {
     std::vector<std::byte> bytes;
     std::optional<QuicRouteHandle> route_handle;
+    std::vector<std::byte> address_validation_identity;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
 };
 
@@ -322,11 +361,13 @@ struct QuicCoreRequestKeyUpdate {};
 struct QuicCoreRequestConnectionMigration {
     QuicRouteHandle route_handle = 0;
     QuicMigrationRequestReason reason = QuicMigrationRequestReason::active;
+    std::vector<std::byte> address_validation_identity;
 };
 
 struct QuicCoreOpenConnection {
     QuicCoreClientConnectionConfig connection;
     QuicRouteHandle initial_route_handle = 0;
+    std::vector<std::byte> address_validation_identity;
 };
 
 using QuicCoreConnectionInput =
@@ -418,11 +459,16 @@ struct QuicCoreZeroRttStatusEvent {
     QuicZeroRttStatus status = QuicZeroRttStatus::not_attempted;
 };
 
+struct QuicCoreNewTokenAvailable {
+    QuicConnectionHandle connection = 0;
+    std::vector<std::byte> token;
+};
+
 using QuicCoreEffect =
     std::variant<QuicCoreSendDatagram, QuicCoreReceiveStreamData, QuicCorePeerResetStream,
                  QuicCorePeerStopSending, QuicCoreStateEvent, QuicCoreConnectionLifecycleEvent,
                  QuicCorePeerPreferredAddressAvailable, QuicCoreResumptionStateAvailable,
-                 QuicCoreZeroRttStatusEvent, QuicCorePacketInspection>;
+                 QuicCoreZeroRttStatusEvent, QuicCorePacketInspection, QuicCoreNewTokenAvailable>;
 
 struct QuicCoreResult {
     std::vector<QuicCoreEffect> effects;
@@ -469,8 +515,13 @@ class QuicCore {
         std::unordered_map<QuicRouteHandle, QuicPathId> path_id_by_route_handle;
         std::unordered_map<QuicPathId, QuicRouteHandle> route_handle_by_path_id;
         std::vector<std::string> active_connection_id_keys;
+        std::vector<std::string> local_stateless_reset_connection_id_keys;
+        std::vector<std::string> peer_stateless_reset_token_keys;
         std::optional<std::string> initial_destination_connection_id_key;
         std::optional<QuicCoreTimePoint> send_continuation_wakeup;
+        std::vector<QuicRouteHandle> new_token_issued_routes;
+        std::unordered_map<QuicPathId, std::vector<std::byte>>
+            address_validation_identity_by_path_id;
         QuicPathId next_path_id = 1;
     };
 
@@ -495,6 +546,34 @@ class QuicCore {
         std::uint32_t original_version = kQuicVersion1;
         std::vector<std::byte> token;
         std::optional<QuicRouteHandle> route_handle;
+        std::vector<std::byte> address_validation_identity;
+        QuicCoreTimePoint expires_at{};
+    };
+
+    struct StoredEndpointNewToken {
+        std::vector<std::byte> token;
+        std::optional<QuicRouteHandle> route_handle;
+        std::vector<std::byte> address_validation_identity;
+        std::uint32_t version = kQuicVersion1;
+        QuicCoreTimePoint expires_at{};
+        bool used = false;
+    };
+
+    struct ClientStoredNewToken {
+        std::string server_name;
+        std::uint32_t version = kQuicVersion1;
+        std::vector<std::byte> token;
+        bool used = false;
+    };
+
+    struct LocalStatelessResetTokenRoute {
+        QuicConnectionHandle owner = 0;
+        std::array<std::byte, 16> stateless_reset_token{};
+        std::optional<QuicCoreTimePoint> expires_at;
+    };
+
+    struct PeerStatelessResetTokenRoute {
+        QuicConnectionHandle owner = 0;
     };
 
     struct LegacyConnectionView {
@@ -522,22 +601,72 @@ class QuicCore {
     friend bool test::core_endpoint_internal_coverage_for_tests();
     void set_legacy_connection(std::unique_ptr<QuicConnection> connection);
     static std::string connection_id_key(std::span<const std::byte> connection_id);
+    static std::string
+    stateless_reset_token_key(const std::array<std::byte, 16> &stateless_reset_token);
     static std::optional<ParsedEndpointDatagram>
     parse_endpoint_datagram(std::span<const std::byte> bytes);
-    static std::vector<std::byte> make_endpoint_retry_token(std::uint64_t sequence);
+    std::vector<std::byte>
+    make_endpoint_retry_token(std::uint64_t sequence,
+                              const ParsedEndpointDatagram *parsed = nullptr,
+                              const ConnectionId *retry_source_connection_id = nullptr,
+                              std::optional<QuicRouteHandle> route_handle = std::nullopt,
+                              std::span<const std::byte> address_validation_identity = {},
+                              QuicCoreTimePoint now = QuicCoreTimePoint{});
+    std::vector<std::byte>
+    make_endpoint_new_token(std::uint64_t sequence, std::uint32_t version = kQuicVersion1,
+                            std::optional<QuicRouteHandle> route_handle = std::nullopt,
+                            std::span<const std::byte> address_validation_identity = {},
+                            QuicCoreTimePoint now = QuicCoreTimePoint{});
     std::optional<PendingRetryToken>
     take_retry_context(const ParsedEndpointDatagram &parsed,
-                       const std::optional<QuicRouteHandle> &route_handle);
+                       const std::optional<QuicRouteHandle> &route_handle, QuicCoreTimePoint now,
+                       std::span<const std::byte> address_validation_identity = {});
+    std::optional<StoredEndpointNewToken> take_new_token_context(
+        const ParsedEndpointDatagram &parsed, const std::optional<QuicRouteHandle> &route_handle,
+        QuicCoreTimePoint now, std::span<const std::byte> address_validation_identity = {});
+    void maybe_queue_server_new_token(ConnectionEntry &entry, QuicCoreTimePoint now);
+    void drain_queued_server_new_token(ConnectionEntry &entry, QuicCoreResult &drained,
+                                       QuicCoreTimePoint now);
+    void remember_client_new_tokens(ConnectionEntry &entry, const QuicCoreResult &result);
+    std::optional<std::vector<std::byte>>
+    take_client_new_token_for_open(const QuicCoreClientConnectionConfig &connection);
+    std::optional<QuicConnectionHandle>
+    detect_stateless_reset(std::span<const std::byte> bytes) const;
+    std::optional<QuicCoreSendDatagram>
+    make_stateless_reset_for_unknown_cid(const ParsedEndpointDatagram &parsed,
+                                         std::span<const std::byte> inbound_bytes,
+                                         const std::optional<QuicRouteHandle> &route_handle,
+                                         QuicCoreTimePoint now = QuicCoreTimePoint{});
+    void load_consumed_address_validation_tokens();
+    void persist_consumed_address_validation_tokens();
+    bool address_validation_token_consumed(std::span<const std::byte> token) const;
+    void mark_address_validation_token_consumed(std::span<const std::byte> token,
+                                                QuicCoreTimePoint expires_at);
+    std::span<const std::byte>
+    current_address_validation_identity(const ConnectionEntry &entry) const;
+    std::vector<std::byte> effective_address_validation_identity_for_route(
+        const ConnectionEntry &entry, QuicRouteHandle route_handle,
+        std::span<const std::byte> proposed_identity) const;
+    bool address_validation_identity_allowed_for_new_route(
+        const ConnectionEntry *entry, std::span<const std::byte> address_validation_identity) const;
     static std::vector<std::byte>
     make_version_negotiation_packet_bytes(const ParsedEndpointDatagram &parsed,
-                                          std::span<const std::uint32_t> supported_versions);
+                                          std::span<const std::uint32_t> supported_versions,
+                                          bool grease_reserved_versions = false);
     static std::vector<std::byte> make_retry_packet_bytes(const ParsedEndpointDatagram &parsed,
                                                           const PendingRetryToken &pending);
     std::optional<QuicConnectionHandle>
     find_endpoint_connection_for_datagram(const ParsedEndpointDatagram &parsed) const;
     void erase_endpoint_connection_routes(const ConnectionEntry &entry);
+    void retire_endpoint_connection_routes(const ConnectionEntry &entry, QuicCoreTimePoint now);
+    void purge_expired_local_stateless_reset_tokens(QuicCoreTimePoint now);
     void refresh_server_connection_routes(ConnectionEntry &entry);
-    QuicPathId remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle);
+    QuicPathId remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle,
+                                     std::span<const std::byte> address_validation_identity = {});
+    std::optional<QuicPathId>
+    path_id_for_inbound_route(ConnectionEntry &entry,
+                              const std::optional<QuicRouteHandle> &route_handle,
+                              std::span<const std::byte> address_validation_identity = {});
     static std::optional<QuicRouteHandle>
     route_handle_for_path(const ConnectionEntry &entry, const std::optional<QuicPathId> &path_id);
     static void note_send_continuation(ConnectionEntry &entry, const QuicCoreResult &result,
@@ -551,9 +680,16 @@ class QuicCore {
     std::unordered_map<std::string, QuicConnectionHandle> connection_id_routes_;
     std::unordered_map<std::string, QuicConnectionHandle> initial_destination_routes_;
     std::unordered_map<std::string, PendingRetryToken> retry_tokens_;
+    std::unordered_map<std::string, StoredEndpointNewToken> new_tokens_;
+    std::unordered_map<std::string, QuicCoreTimePoint> consumed_address_validation_tokens_;
+    std::vector<ClientStoredNewToken> client_new_tokens_;
+    std::unordered_map<std::string, LocalStatelessResetTokenRoute>
+        local_stateless_reset_tokens_by_cid_;
+    std::unordered_map<std::string, PeerStatelessResetTokenRoute> peer_stateless_reset_tokens_;
     std::optional<QuicConnectionHandle> legacy_connection_handle_;
     QuicConnectionHandle next_connection_handle_ = 1;
     std::uint64_t next_server_connection_id_sequence_ = 1;
+    std::mt19937_64 endpoint_random_;
     LegacyConnectionView connection_;
 };
 

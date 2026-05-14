@@ -1953,6 +1953,18 @@ std::uint64_t frame_to_received_variant_coverage_mask_for_tests() {
         mark(1ull << 6, (ack.largest_acknowledged == 13) & (ack.first_ack_range == 2) &
                             (ack.additional_range_count == 0) & ack.additional_range_bytes.empty());
     }
+    {
+        const auto received = to_received_frame(Frame{DataBlockedFrame{.maximum_data = 17}});
+        mark(1ull << 7, std::get<DataBlockedFrame>(received).maximum_data == 17);
+    }
+    {
+        const auto received = to_received_frame(Frame{StreamDataBlockedFrame{
+            .stream_id = 5,
+            .maximum_stream_data = 23,
+        }});
+        const auto &blocked = std::get<StreamDataBlockedFrame>(received);
+        mark(1ull << 8, (blocked.stream_id == 5) & (blocked.maximum_stream_data == 23));
+    }
 
     return mask;
 }

@@ -503,6 +503,9 @@ bool io_uring_backend_wait_returns_second_route_datagram_for_tests() {
         observed.datagram.has_value(),
         datagram.route_handle == second_route,
         datagram.bytes.size() == kPayload.size(),
+        datagram.address_validation_identity ==
+            socket_io_backend_address_validation_identity_for_runtime_tests(second_peer,
+                                                                            sizeof(sockaddr_in6)),
         g_io_uring_test_harness.receive_arm_count_by_fd[second_socket_fd] >= 2,
     });
 }

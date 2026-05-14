@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "src/quic/transport_parameters.h"
+#include "tests/support/core/connection_test_fixtures.h"
 
 namespace {
 
@@ -62,6 +63,15 @@ PreferredAddress sample_preferred_address() {
                                   std::byte{0x09}, std::byte{0x0a}, std::byte{0x0b},
                                   std::byte{0x0c}, std::byte{0x0d}, std::byte{0x0e},
                                   std::byte{0x0f}},
+    };
+}
+
+std::array<std::byte, 16> sample_stateless_reset_token() {
+    return {
+        std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13},
+        std::byte{0x14}, std::byte{0x15}, std::byte{0x16}, std::byte{0x17},
+        std::byte{0x18}, std::byte{0x19}, std::byte{0x1a}, std::byte{0x1b},
+        std::byte{0x1c}, std::byte{0x1d}, std::byte{0x1e}, std::byte{0x1f},
     };
 }
 
@@ -241,6 +251,26 @@ TEST(QuicTransportParametersTest, RoundTripsMaxIdleTimeout) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(encoded.value());
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(decoded.value().max_idle_timeout, 180000u);
+}
+
+TEST(QuicTransportParametersTest, RoundTripsStatelessResetToken) {
+    const auto token = sample_stateless_reset_token();
+    const TransportParameters parameters{
+        .stateless_reset_token = token,
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_source_connection_id = ConnectionId{std::byte{0xc1}},
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto decoded = coquic::quic::deserialize_transport_parameters(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+    const auto &decoded_parameters = decoded.value();
+    EXPECT_EQ(coquic::quic::test_support::optional_value_or_terminate(
+                  decoded_parameters.stateless_reset_token),
+              token);
 }
 
 TEST(QuicTransportParametersTest, RoundTripsFlowControlAndStreamCountParameters) {
@@ -483,6 +513,36 @@ TEST(QuicTransportParametersTest, IgnoresUnknownParameterIdsDuringParse) {
     EXPECT_FALSE(decoded.value().retry_source_connection_id.has_value());
 }
 
+TEST(QuicTransportParametersTest, RejectsDuplicateKnownParameterIdsDuringParse) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x03,
+        0x02,
+        0x44,
+        0xb0,
+        0x03,
+        0x02,
+        0x44,
+        0xb0,
+    }));
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsDuplicateUnknownParameterIdsDuringParse) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x20,
+        0x01,
+        0xff,
+        0x20,
+        0x01,
+        0xee,
+    }));
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicTransportParametersTest, RejectsMalformedParameterIdEncoding) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({0x40}));
 
@@ -527,6 +587,22 @@ TEST(QuicTransportParametersTest, RejectsInvalidMaxIdleTimeoutEncoding) {
 
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsStatelessResetTokenWithInvalidLengthEncoding) {
+    auto too_short = byte_vector({0x02, 0x0f});
+    too_short.insert(too_short.end(), 15, std::byte{0xaa});
+
+    const auto decoded_too_short = coquic::quic::deserialize_transport_parameters(too_short);
+    ASSERT_FALSE(decoded_too_short.has_value());
+    EXPECT_EQ(decoded_too_short.error().code, CodecErrorCode::invalid_varint);
+
+    auto too_long = byte_vector({0x02, 0x11});
+    too_long.insert(too_long.end(), 17, std::byte{0xaa});
+
+    const auto decoded_too_long = coquic::quic::deserialize_transport_parameters(too_long);
+    ASSERT_FALSE(decoded_too_long.has_value());
+    EXPECT_EQ(decoded_too_long.error().code, CodecErrorCode::invalid_varint);
 }
 
 TEST(QuicTransportParametersTest, RejectsInvalidActiveConnectionIdLimitEncoding) {
@@ -687,6 +763,21 @@ TEST(QuicTransportParametersTest, ClientRejectsPreferredAddressFromPeer) {
             .active_connection_id_limit = 2,
             .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
             .preferred_address = sample_preferred_address(),
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}}));
+
+    ASSERT_FALSE(validation.has_value());
+    EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTransportParametersTest, ClientRejectsStatelessResetTokenFromPeer) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::client,
+        TransportParameters{
+            .stateless_reset_token = sample_stateless_reset_token(),
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
         },
         make_validation_context(ConnectionId{std::byte{0xaa}}));
 

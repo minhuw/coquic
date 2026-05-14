@@ -820,6 +820,10 @@ TEST(SocketIoBackendTest, UsesIpTosForIpv4MappedIpv6OutboundEcnMarkings) {
                     socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests());
 }
 
+TEST(SocketIoBackendTest, AppliesIpv6FlowLabelOnOutboundDatagrams) {
+    EXPECT_TRUE(coquic::io::test::socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests());
+}
+
 TEST(SocketIoBackendTest, MapsRecvmsgEcnMetadataIntoEvents) {
     EXPECT_TRUE(coquic::io::test::socket_io_backend_recvmsg_maps_ecn_for_tests());
 }
@@ -827,6 +831,11 @@ TEST(SocketIoBackendTest, MapsRecvmsgEcnMetadataIntoEvents) {
 TEST(SocketIoBackendTest, InternalCoverageHookExercisesColdPaths) {
     EXPECT_TRUE(coquic::io::test::
                     socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests());
+}
+
+TEST(SocketIoBackendTest, AddressValidationIdentityCoverageHookExercisesFamilies) {
+    EXPECT_TRUE(
+        coquic::io::test::socket_io_backend_address_validation_identity_branches_for_tests());
 }
 
 TEST(SocketIoBackendTest, InternalCoverageHookExercisesRemainingBranches) {

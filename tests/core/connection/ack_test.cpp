@@ -44,6 +44,14 @@ struct PacketSpaceRecoveryTestPeer {
 
 struct ScopedConnectionDrainTestHookReset {
     ~ScopedConnectionDrainTestHookReset() {
+        coquic::quic::test::connection_set_force_quic_core_secret_rand_failure_for_tests(false);
+        coquic::quic::test::connection_set_force_prf_failure_for_tests(false);
+        coquic::quic::test::connection_set_force_issued_connection_id_rand_failure_for_tests(false);
+        coquic::quic::test::connection_set_force_stateless_reset_token_rand_failure_for_tests(
+            false);
+        coquic::quic::test::connection_set_force_path_challenge_rand_failure_for_tests(false);
+        coquic::quic::test::connection_set_force_random_one_in_sixteen_rand_failure_for_tests(
+            false);
         coquic::quic::test::connection_set_force_missing_packet_metadata_for_tests(false);
         coquic::quic::test::connection_set_force_missing_fallback_packet_length_for_tests(false);
         coquic::quic::test::connection_set_force_appended_fragment_base_datagram_failure_for_tests(
@@ -162,6 +170,67 @@ TEST(QuicCoreTest, PacketInspectionQueuesDecodedOutboundOneRttPackets) {
     EXPECT_EQ(stream.stream_data.to_vector(),
               std::vector<std::byte>(kPayload.begin(), kPayload.end()));
     EXPECT_FALSE(connection.take_packet_inspection().has_value());
+}
+
+TEST(QuicCoreTest, LatencySpinBitIsDisabledUnlessConfigured) {
+    auto connection = make_connected_client_connection();
+    auto &path = connection.ensure_path_state(0);
+    path.spin.disabled = false;
+    path.spin.value = true;
+
+    EXPECT_FALSE(connection.outbound_spin_bit_for_path(0));
+
+    connection.update_spin_bit_on_receive(0, /*peer_spin_bit=*/false, /*packet_number=*/1);
+    EXPECT_TRUE(path.spin.value);
+    EXPECT_FALSE(path.spin.largest_peer_packet_number.has_value());
+}
+
+TEST(QuicCoreTest, LatencySpinBitFollowsPeerOnPrimaryPathWhenEnabled) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.transport.enable_latency_spin_bit = true;
+    coquic::quic::QuicConnection client(std::move(client_config));
+    client.latency_spin_bit_disabled_ = false;
+    client.current_send_path_id_ = 0;
+    auto &client_path = client.ensure_path_state(0);
+    client_path.spin.disabled = false;
+
+    EXPECT_FALSE(client.outbound_spin_bit_for_path(0));
+    client.update_spin_bit_on_receive(0, /*peer_spin_bit=*/false, /*packet_number=*/1);
+    EXPECT_TRUE(client.outbound_spin_bit_for_path(0));
+    client.update_spin_bit_on_receive(0, /*peer_spin_bit=*/true, /*packet_number=*/1);
+    EXPECT_TRUE(client.outbound_spin_bit_for_path(0));
+
+    auto server_config = coquic::quic::test::make_server_core_config();
+    server_config.transport.enable_latency_spin_bit = true;
+    coquic::quic::QuicConnection server(std::move(server_config));
+    server.latency_spin_bit_disabled_ = false;
+    server.current_send_path_id_ = 0;
+    auto &server_path = server.ensure_path_state(0);
+    server_path.spin.disabled = false;
+
+    server.update_spin_bit_on_receive(0, /*peer_spin_bit=*/true, /*packet_number=*/1);
+    EXPECT_TRUE(server.outbound_spin_bit_for_path(0));
+    server.update_spin_bit_on_receive(0, /*peer_spin_bit=*/false, /*packet_number=*/2);
+    EXPECT_FALSE(server.outbound_spin_bit_for_path(0));
+}
+
+TEST(QuicCoreTest, LatencySpinBitResetsWhenPathConnectionIdChanges) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.transport.enable_latency_spin_bit = true;
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.latency_spin_bit_disabled_ = false;
+    connection.current_send_path_id_ = 0;
+    auto &path = connection.ensure_path_state(0);
+    path.spin.disabled = false;
+
+    connection.update_spin_bit_on_receive(0, /*peer_spin_bit=*/false, /*packet_number=*/1);
+    ASSERT_TRUE(connection.outbound_spin_bit_for_path(0));
+    ASSERT_TRUE(path.spin.largest_peer_packet_number.has_value());
+
+    coquic::quic::QuicConnection::set_path_peer_connection_id_sequence(path, 4);
+
+    EXPECT_FALSE(connection.outbound_spin_bit_for_path(0));
+    EXPECT_FALSE(path.spin.largest_peer_packet_number.has_value());
 }
 
 TEST(QuicCoreTest, PacketInspectionQueuesDecodedOutboundLongHeaderPackets) {
@@ -1152,6 +1221,45 @@ TEST(QuicCoreTest, AckProcessingClampsAckDelayWhenExponentIsTooLarge) {
     ASSERT_TRUE(processed.has_value());
     EXPECT_EQ(connection.application_space_.recovery.rtt_state().latest_rtt,
               std::optional{std::chrono::milliseconds(40)});
+}
+
+TEST(QuicCoreTest, OptimisticAckMitigationSkipsPacketNumbersAndRejectsAcksForThem) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.transport.enable_optimistic_ack_mitigation = true;
+    coquic::quic::QuicConnection connection(std::move(config));
+
+    std::vector<std::uint64_t> sent_packet_numbers;
+    for (std::int64_t index = 0; index < 16; ++index) {
+        const auto packet_number = connection.reserve_packet_number(connection.application_space_);
+        sent_packet_numbers.push_back(packet_number);
+        connection.track_sent_packet(connection.application_space_,
+                                     coquic::quic::SentPacketRecord{
+                                         .packet_number = packet_number,
+                                         .sent_time = coquic::quic::test::test_time(index),
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                     });
+    }
+
+    ASSERT_EQ(sent_packet_numbers.back(), 16u);
+    EXPECT_EQ(connection.application_space_.next_send_packet_number, 18u);
+    EXPECT_EQ(connection.application_space_.recovery.find_packet(8), nullptr);
+    EXPECT_EQ(connection.application_space_.recovery.find_packet(17), nullptr);
+
+    const auto processed = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 8,
+            .first_ack_range = 0,
+        },
+        coquic::quic::test::test_time(40), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+        /*suppress_pto_reset=*/false);
+
+    EXPECT_FALSE(processed.has_value());
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::closing);
+    ASSERT_TRUE(connection.pending_transport_close_.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(connection.pending_transport_close_).error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
 }
 
 TEST(QuicCoreTest, AckProcessingDisablesEcnWhenAckOmitsCountsForNewlyAckedEct0Packets) {

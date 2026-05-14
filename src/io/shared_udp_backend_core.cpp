@@ -311,6 +311,35 @@ QuicRouteHandle remember_route_handle(SocketIoRouteState &state, const sockaddr_
     return handle;
 }
 
+std::vector<std::byte> address_validation_identity_from_peer(const sockaddr_storage &peer,
+                                                             socklen_t peer_len) {
+    if (peer.ss_family == AF_INET && peer_len >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
+        const auto &ipv4 = *reinterpret_cast<const sockaddr_in *>(&peer);
+        std::vector<std::byte> identity;
+        identity.reserve(1 + sizeof(ipv4.sin_addr) + sizeof(ipv4.sin_port));
+        identity.push_back(std::byte{0x04});
+        const auto *address = reinterpret_cast<const std::byte *>(&ipv4.sin_addr);
+        identity.insert(identity.end(), address, address + sizeof(ipv4.sin_addr));
+        const auto *port = reinterpret_cast<const std::byte *>(&ipv4.sin_port);
+        identity.insert(identity.end(), port, port + sizeof(ipv4.sin_port));
+        return identity;
+    }
+
+    if (peer.ss_family == AF_INET6 && peer_len >= static_cast<socklen_t>(sizeof(sockaddr_in6))) {
+        const auto &ipv6 = *reinterpret_cast<const sockaddr_in6 *>(&peer);
+        std::vector<std::byte> identity;
+        identity.reserve(1 + sizeof(ipv6.sin6_addr) + sizeof(ipv6.sin6_port));
+        identity.push_back(std::byte{0x06});
+        const auto *address = reinterpret_cast<const std::byte *>(&ipv6.sin6_addr);
+        identity.insert(identity.end(), address, address + sizeof(ipv6.sin6_addr));
+        const auto *port = reinterpret_cast<const std::byte *>(&ipv6.sin6_port);
+        identity.insert(identity.end(), port, port + sizeof(ipv6.sin6_port));
+        return identity;
+    }
+
+    return {};
+}
+
 } // namespace internal
 
 struct SharedUdpBackendCore::Impl {
@@ -492,6 +521,8 @@ SharedUdpBackendCore::wait(std::optional<QuicCoreTimePoint> next_wakeup) {
             QuicIoRxDatagram{
                 .route_handle = handle,
                 .bytes = std::move(completion.bytes),
+                .address_validation_identity = internal::address_validation_identity_from_peer(
+                    completion.peer, completion.peer_len),
                 .ecn = completion.ecn,
             },
     };
@@ -555,6 +586,12 @@ bool socket_io_backend_resolve_udp_address_for_runtime_tests(
     resolved.address_len = backend_resolved.address_len;
     resolved.family = backend_resolved.family;
     return true;
+}
+
+std::vector<std::byte>
+socket_io_backend_address_validation_identity_for_runtime_tests(const sockaddr_storage &peer,
+                                                                socklen_t peer_len) {
+    return internal::address_validation_identity_from_peer(peer, peer_len);
 }
 
 int socket_io_backend_open_udp_socket_for_runtime_tests(int family) {
@@ -666,6 +703,40 @@ COQUIC_NO_PROFILE bool socket_io_backend_route_handles_are_stable_per_peer_tuple
     return first != 0 && first == second && first != third &&
            state.routes_by_handle.at(first).socket_fd == 4 &&
            state.routes_by_handle.at(third).socket_fd == 7;
+}
+
+bool socket_io_backend_address_validation_identity_branches_for_tests() {
+    const auto ipv4_peer = make_loopback_peer(4444);
+    const auto ipv4_identity = internal::address_validation_identity_from_peer(
+        ipv4_peer, static_cast<socklen_t>(sizeof(sockaddr_in)));
+
+    sockaddr_storage ipv6_peer{};
+    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&ipv6_peer);
+    ipv6.sin6_family = AF_INET6;
+    ipv6.sin6_port = htons(5555);
+    ipv6.sin6_addr = in6addr_loopback;
+    const auto ipv6_identity = internal::address_validation_identity_from_peer(
+        ipv6_peer, static_cast<socklen_t>(sizeof(sockaddr_in6)));
+
+    sockaddr_storage unsupported_peer{};
+    unsupported_peer.ss_family = AF_UNIX;
+    const auto unsupported_identity = internal::address_validation_identity_from_peer(
+        unsupported_peer, static_cast<socklen_t>(sizeof(sockaddr_storage)));
+
+    const auto short_ipv4_identity =
+        internal::address_validation_identity_from_peer(ipv4_peer, /*peer_len=*/1);
+    const auto short_ipv6_identity =
+        internal::address_validation_identity_from_peer(ipv6_peer, /*peer_len=*/1);
+
+    bool ok = true;
+    ok &= ipv4_identity.size() == 7;
+    ok &= ipv4_identity.front() == std::byte{0x04};
+    ok &= ipv6_identity.size() == 19;
+    ok &= ipv6_identity.front() == std::byte{0x06};
+    ok &= unsupported_identity.empty();
+    ok &= short_ipv4_identity.empty();
+    ok &= short_ipv6_identity.empty();
+    return ok;
 }
 
 bool socket_io_backend_duplicate_route_lookup_reuses_cached_route_entry_for_tests() {

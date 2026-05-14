@@ -13,6 +13,8 @@ make_endpoint_input_from_io_event(io::QuicIoEvent &event) {
             return quic::QuicCoreInboundDatagram{
                 .bytes = std::move(event.datagram->bytes),
                 .route_handle = event.datagram->route_handle,
+                .address_validation_identity =
+                    std::move(event.datagram->address_validation_identity),
                 .ecn = event.datagram->ecn,
             };
         }

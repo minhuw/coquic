@@ -39,8 +39,11 @@ struct SentPacketRecord {
     bool declared_lost = false;
     bool has_handshake_done = false;
     std::vector<ByteRange> crypto_ranges;
+    std::vector<NewTokenFrame> new_token_frames;
     std::vector<ResetStreamFrame> reset_stream_frames;
     std::vector<StopSendingFrame> stop_sending_frames;
+    std::vector<NewConnectionIdFrame> new_connection_id_frames;
+    std::vector<RetireConnectionIdFrame> retire_connection_id_frames;
     std::optional<MaxDataFrame> max_data_frame;
     std::vector<MaxStreamDataFrame> max_stream_data_frames;
     std::vector<MaxStreamsFrame> max_streams_frames;

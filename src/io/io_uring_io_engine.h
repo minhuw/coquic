@@ -66,6 +66,7 @@ class IoUringIoEngine final : public QuicIoEngine {
     std::unordered_map<int, ReceiveState> receives_;
     std::deque<Completion> pending_completions_;
     alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> send_control_{};
+    sockaddr_storage send_peer_{};
 };
 
 std::unique_ptr<QuicIoEngine> make_io_uring_io_engine();

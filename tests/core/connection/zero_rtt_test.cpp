@@ -1460,6 +1460,116 @@ TEST(QuicCoreTest, StartClientWithMalformedResumptionStateMarksZeroRttUnavailabl
               coquic::quic::QuicZeroRttStatus::unavailable);
 }
 
+TEST(QuicCoreTest, AcceptedZeroRttRejectsReducedServerTransportLimits) {
+    const auto original_destination_connection_id =
+        bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
+    const auto remembered = coquic::quic::TransportParameters{
+        .original_destination_connection_id = original_destination_connection_id,
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 8,
+        .initial_max_data = 4096,
+        .initial_max_stream_data_bidi_local = 2048,
+        .initial_max_stream_data_bidi_remote = 2048,
+        .initial_max_stream_data_uni = 1024,
+        .initial_max_streams_bidi = 4,
+        .initial_max_streams_uni = 4,
+        .initial_source_connection_id = bytes_from_ints({0x53, 0x01}),
+    };
+    const auto expect_reduction_rejected = [&](auto reduce_parameter) {
+        auto connection =
+            coquic::quic::QuicConnection(coquic::quic::test::make_client_core_config());
+        connection.start_client_if_needed();
+        ASSERT_TRUE(connection.tls_.has_value());
+        connection.peer_source_connection_id_ = bytes_from_ints({0x53, 0x01});
+        connection.decoded_resumption_state_ = coquic::quic::StoredClientResumptionState{
+            .tls_state = {},
+            .quic_version = coquic::quic::kQuicVersion1,
+            .application_protocol = connection.config_.application_protocol,
+            .peer_transport_parameters = remembered,
+            .application_context = connection.config_.zero_rtt.application_context,
+        };
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+
+        auto reduced = remembered;
+        reduce_parameter(reduced);
+        const auto serialized_reduced = coquic::quic::serialize_transport_parameters(reduced);
+        ASSERT_TRUE(serialized_reduced.has_value());
+        coquic::quic::test::TlsAdapterTestPeer::set_peer_transport_parameters(
+            *connection.tls_, serialized_reduced.value());
+        coquic::quic::test::TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
+        coquic::quic::test::TlsAdapterTestPeer::apply_early_data_status(
+            *connection.tls_, SSL_EARLY_DATA_ACCEPTED, true);
+
+        const auto validated = connection.validate_peer_transport_parameters_if_ready();
+
+        ASSERT_FALSE(validated.has_value());
+        EXPECT_EQ(validated.error().code,
+                  coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+    };
+
+    expect_reduction_rejected([](auto &parameters) { parameters.active_connection_id_limit = 7; });
+    expect_reduction_rejected([](auto &parameters) { parameters.initial_max_data = 4095; });
+    expect_reduction_rejected(
+        [](auto &parameters) { parameters.initial_max_stream_data_bidi_local = 2047; });
+    expect_reduction_rejected(
+        [](auto &parameters) { parameters.initial_max_stream_data_bidi_remote = 2047; });
+    expect_reduction_rejected(
+        [](auto &parameters) { parameters.initial_max_stream_data_uni = 1023; });
+    expect_reduction_rejected([](auto &parameters) { parameters.initial_max_streams_bidi = 3; });
+    expect_reduction_rejected([](auto &parameters) { parameters.initial_max_streams_uni = 3; });
+}
+
+TEST(QuicCoreTest, AcceptedZeroRttAllowsNonRememberedAndOptionalParameterReduction) {
+    const auto original_destination_connection_id =
+        bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
+    const auto remembered = coquic::quic::TransportParameters{
+        .original_destination_connection_id = original_destination_connection_id,
+        .max_idle_timeout = 30000,
+        .max_udp_payload_size = 1500,
+        .active_connection_id_limit = 8,
+        .ack_delay_exponent = 12,
+        .max_ack_delay = 200,
+        .initial_max_data = 4096,
+        .initial_max_stream_data_bidi_local = 2048,
+        .initial_max_stream_data_bidi_remote = 2048,
+        .initial_max_stream_data_uni = 1024,
+        .initial_max_streams_bidi = 4,
+        .initial_max_streams_uni = 4,
+        .initial_source_connection_id = bytes_from_ints({0x53, 0x01}),
+    };
+    auto current = remembered;
+    current.max_idle_timeout = 1000;
+    current.max_udp_payload_size = 1200;
+    current.ack_delay_exponent = 3;
+    current.max_ack_delay = 25;
+
+    auto connection = coquic::quic::QuicConnection(coquic::quic::test::make_client_core_config());
+    connection.start_client_if_needed();
+    ASSERT_TRUE(connection.tls_.has_value());
+    connection.peer_source_connection_id_ = bytes_from_ints({0x53, 0x01});
+    connection.decoded_resumption_state_ = coquic::quic::StoredClientResumptionState{
+        .tls_state = {},
+        .quic_version = coquic::quic::kQuicVersion1,
+        .application_protocol = connection.config_.application_protocol,
+        .peer_transport_parameters = remembered,
+        .application_context = connection.config_.zero_rtt.application_context,
+    };
+    connection.client_initial_destination_connection_id_ =
+        connection.config_.initial_destination_connection_id;
+
+    const auto serialized_current = coquic::quic::serialize_transport_parameters(current);
+    ASSERT_TRUE(serialized_current.has_value());
+    auto &tls = optional_ref_or_terminate(connection.tls_);
+    coquic::quic::test::TlsAdapterTestPeer::set_peer_transport_parameters(
+        tls, serialized_current.value());
+    coquic::quic::test::TlsAdapterTestPeer::set_early_data_attempted(tls, true);
+    coquic::quic::test::TlsAdapterTestPeer::apply_early_data_status(tls, SSL_EARLY_DATA_ACCEPTED,
+                                                                    true);
+
+    EXPECT_TRUE(connection.validate_peer_transport_parameters_if_ready().has_value());
+}
+
 TEST(QuicCoreTest, StartClientWithVersionMismatchedResumptionStateMarksZeroRttUnavailable) {
     auto warmup_client = coquic::quic::QuicCore(coquic::quic::test::make_client_core_config());
     auto warmup_server = coquic::quic::QuicCore(coquic::quic::test::make_server_core_config());

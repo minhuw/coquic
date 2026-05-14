@@ -112,6 +112,9 @@ void configure_udp_socket_buffers(LinuxSocketDescriptor socket);
 bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family);
 bool configure_linux_pmtud_socket_options(LinuxSocketDescriptor socket, int family);
 bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_len);
+bool should_apply_ipv6_flow_label(const sockaddr_storage &peer, socklen_t peer_len);
+sockaddr_storage peer_with_ipv6_flow_label(const sockaddr_storage &peer, socklen_t peer_len,
+                                           std::span<const std::byte> datagram);
 QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message);
 
 int preferred_udp_address_family(std::string_view host);
@@ -129,5 +132,7 @@ SocketIoPeerTupleKey peer_tuple_key(int socket_fd, const sockaddr_storage &peer,
                                     socklen_t peer_len);
 QuicRouteHandle remember_route_handle(SocketIoRouteState &state, const sockaddr_storage &peer,
                                       socklen_t peer_len, int socket_fd);
+std::vector<std::byte> address_validation_identity_from_peer(const sockaddr_storage &peer,
+                                                             socklen_t peer_len);
 
 } // namespace coquic::io::internal

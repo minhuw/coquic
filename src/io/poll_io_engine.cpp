@@ -140,6 +140,47 @@ bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_le
     return IN6_IS_ADDR_V4MAPPED(&ipv6->sin6_addr);
 }
 
+bool should_apply_ipv6_flow_label(const sockaddr_storage &peer, socklen_t peer_len) {
+    return peer.ss_family == AF_INET6 && peer_len >= static_cast<socklen_t>(sizeof(sockaddr_in6)) &&
+           !is_ipv4_mapped_ipv6_address(peer, peer_len);
+}
+
+COQUIC_NO_PROFILE std::uint32_t normalize_ipv6_flow_label_hash(std::uint32_t hash) {
+    return (hash & 0x000fffffu) == 0 ? 1u : (hash & 0x000fffffu);
+}
+
+std::uint32_t hash_ipv6_flow_label_input(const sockaddr_in6 &peer,
+                                         std::span<const std::byte> datagram) {
+    std::uint32_t hash = 2166136261u;
+    const auto mix = [&](std::uint8_t value) {
+        hash ^= value;
+        hash *= 16777619u;
+    };
+    for (const auto byte : peer.sin6_addr.s6_addr) {
+        mix(byte);
+    }
+    mix(static_cast<std::uint8_t>(ntohs(peer.sin6_port) >> 8));
+    mix(static_cast<std::uint8_t>(ntohs(peer.sin6_port) & 0xffu));
+    mix(static_cast<std::uint8_t>(datagram.size() >> 8));
+    mix(static_cast<std::uint8_t>(datagram.size() & 0xffu));
+    for (const auto byte : datagram.subspan(0, std::min<std::size_t>(datagram.size(), 16u))) {
+        mix(std::to_integer<std::uint8_t>(byte));
+    }
+    return normalize_ipv6_flow_label_hash(hash);
+}
+
+sockaddr_storage peer_with_ipv6_flow_label(const sockaddr_storage &peer, socklen_t peer_len,
+                                           std::span<const std::byte> datagram) {
+    sockaddr_storage out = peer;
+    if (!should_apply_ipv6_flow_label(peer, peer_len)) {
+        return out;
+    }
+
+    auto *ipv6 = reinterpret_cast<sockaddr_in6 *>(&out);
+    ipv6->sin6_flowinfo = htonl(hash_ipv6_flow_label_input(*ipv6, datagram));
+    return out;
+}
+
 QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message) {
 #if defined(__linux__)
     if ((message.msg_flags & MSG_CTRUNC) != 0) {
@@ -243,15 +284,22 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
         ++io_profile_counters().send_datagram_calls;
     }
     const auto *buffer = reinterpret_cast<const void *>(datagram.data());
-    const bool use_sendmsg = !has_legacy_sendto_override() && is_ect_codepoint(ecn) &&
-                             peer_len > 0 &&
-                             (peer.ss_family == AF_INET || peer.ss_family == AF_INET6);
+    const bool apply_ipv6_flow_label = should_apply_ipv6_flow_label(peer, peer_len);
+    const bool use_sendmsg =
+        !has_legacy_sendto_override() && peer_len > 0 &&
+        ((is_ect_codepoint(ecn) && (peer.ss_family == AF_INET || peer.ss_family == AF_INET6)) ||
+         apply_ipv6_flow_label);
+    const auto peer_with_flow = apply_ipv6_flow_label
+                                    ? peer_with_ipv6_flow_label(peer, peer_len, datagram)
+                                    : sockaddr_storage{};
+    const auto &send_peer = apply_ipv6_flow_label ? peer_with_flow : peer;
     if (!use_sendmsg) {
         if (io_profile_enabled()) {
             ++io_profile_counters().sendto_calls;
         }
         const ssize_t sent = socket_io_backend_ops_state().sendto_fn(
-            fd, buffer, datagram.size(), 0, reinterpret_cast<const sockaddr *>(&peer), peer_len);
+            fd, buffer, datagram.size(), 0, reinterpret_cast<const sockaddr *>(&send_peer),
+            peer_len);
         if (sent >= 0) {
             return true;
         }
@@ -270,22 +318,24 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
     };
     alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
     msghdr message{};
-    message.msg_name = const_cast<sockaddr *>(reinterpret_cast<const sockaddr *>(&peer));
+    message.msg_name = const_cast<sockaddr *>(reinterpret_cast<const sockaddr *>(&send_peer));
     message.msg_namelen = peer_len;
     message.msg_iov = &iov;
     message.msg_iovlen = 1;
-    message.msg_control = control.data();
-    message.msg_controllen = control.size();
+    if (is_ect_codepoint(ecn)) {
+        message.msg_control = control.data();
+        message.msg_controllen = control.size();
 
-    auto *header = reinterpret_cast<cmsghdr *>(control.data());
-    const bool use_ipv4_traffic_class =
-        peer.ss_family == AF_INET || is_ipv4_mapped_ipv6_address(peer, peer_len);
-    header->cmsg_level = use_ipv4_traffic_class ? IPPROTO_IP : IPPROTO_IPV6;
-    header->cmsg_type = use_ipv4_traffic_class ? IP_TOS : IPV6_TCLASS;
-    header->cmsg_len = CMSG_LEN(sizeof(int));
-    const int traffic_class = linux_traffic_class_for_ecn(ecn);
-    std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
-    message.msg_controllen = header->cmsg_len;
+        auto *header = reinterpret_cast<cmsghdr *>(control.data());
+        const bool use_ipv4_traffic_class =
+            peer.ss_family == AF_INET || is_ipv4_mapped_ipv6_address(peer, peer_len);
+        header->cmsg_level = use_ipv4_traffic_class ? IPPROTO_IP : IPPROTO_IPV6;
+        header->cmsg_type = use_ipv4_traffic_class ? IP_TOS : IPV6_TCLASS;
+        header->cmsg_len = CMSG_LEN(sizeof(int));
+        const int traffic_class = linux_traffic_class_for_ecn(ecn);
+        std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
+        message.msg_controllen = header->cmsg_len;
+    }
 
     if (io_profile_enabled()) {
         ++io_profile_counters().sendmsg_calls;
@@ -320,6 +370,7 @@ struct SendmmsgBatchScratch {
     std::vector<iovec> iovecs;
     std::vector<mmsghdr> messages;
     std::vector<EcnControlStorage> ecn_controls;
+    std::vector<sockaddr_storage> peers;
 };
 
 SendmmsgBatchScratch &sendmmsg_batch_scratch() {
@@ -335,6 +386,9 @@ bool &udp_gso_disabled() {
 bool sendmmsg_supports_datagram(const QuicIoEngineTxDatagram &datagram) {
     if (datagram.is_pmtu_probe || !valid_send_destination(datagram)) {
         return false;
+    }
+    if (should_apply_ipv6_flow_label(datagram.peer, datagram.peer_len)) {
+        return true;
     }
     if (is_ect_codepoint(datagram.ecn)) {
         return datagram.peer.ss_family == AF_INET || datagram.peer.ss_family == AF_INET6;
@@ -453,7 +507,9 @@ bool send_udp_gso_batch(std::span<const QuicIoEngineTxDatagram> datagrams,
     const auto segment_size = datagrams.front().bytes.size();
     auto &scratch = sendmmsg_batch_scratch();
     auto &iovecs = scratch.iovecs;
+    auto &peers = scratch.peers;
     iovecs.resize(datagrams.size());
+    peers.resize(datagrams.size());
     for (std::size_t index = 0; index < datagrams.size(); ++index) {
         const auto &datagram = datagrams[index];
         iovecs[index] = iovec{
@@ -464,8 +520,9 @@ bool send_udp_gso_batch(std::span<const QuicIoEngineTxDatagram> datagrams,
 
     UdpGsoControlStorage control{};
     msghdr message{};
-    message.msg_name =
-        const_cast<sockaddr *>(reinterpret_cast<const sockaddr *>(&datagrams.front().peer));
+    peers.front() = peer_with_ipv6_flow_label(datagrams.front().peer, datagrams.front().peer_len,
+                                              datagrams.front().bytes);
+    message.msg_name = reinterpret_cast<sockaddr *>(&peers.front());
     message.msg_namelen = datagrams.front().peer_len;
     message.msg_iov = iovecs.data();
     message.msg_iovlen = iovecs.size();
@@ -544,9 +601,11 @@ bool sendmmsg_batch(std::span<const QuicIoEngineTxDatagram> datagrams, std::stri
     auto &iovecs = scratch.iovecs;
     auto &messages = scratch.messages;
     auto &ecn_controls = scratch.ecn_controls;
+    auto &peers = scratch.peers;
 
     iovecs.resize(datagrams.size());
     messages.resize(datagrams.size());
+    peers.resize(datagrams.size());
     if (is_ect_codepoint(datagrams.front().ecn)) {
         ecn_controls.resize(datagrams.size());
     } else {
@@ -558,10 +617,10 @@ bool sendmmsg_batch(std::span<const QuicIoEngineTxDatagram> datagrams, std::stri
             .iov_base = const_cast<std::byte *>(datagram.bytes.data()),
             .iov_len = datagram.bytes.size(),
         };
+        peers[index] = peer_with_ipv6_flow_label(datagram.peer, datagram.peer_len, datagram.bytes);
         auto &message = messages[index];
         message = {};
-        message.msg_hdr.msg_name =
-            const_cast<sockaddr *>(reinterpret_cast<const sockaddr *>(&datagram.peer));
+        message.msg_hdr.msg_name = reinterpret_cast<sockaddr *>(&peers[index]);
         message.msg_hdr.msg_namelen = datagram.peer_len;
         message.msg_hdr.msg_iov = &iovecs[index];
         message.msg_hdr.msg_iovlen = 1;
@@ -1173,6 +1232,8 @@ struct RecordedSendMsgForTests {
     int level = 0;
     int type = 0;
     int traffic_class = 0;
+    int family = AF_UNSPEC;
+    std::uint32_t ipv6_flowinfo = 0;
 };
 
 thread_local RecordedSendMsgForTests g_recorded_sendmsg_for_tests;
@@ -1236,6 +1297,8 @@ struct SendManyBatchCoverageTrace {
     int ecn_type = 0;
     int traffic_class = 0;
     std::uint16_t udp_segment_size = 0;
+    int peer_family = AF_UNSPEC;
+    std::uint32_t ipv6_flowinfo = 0;
 };
 
 thread_local SendManyBatchCoverageTrace g_send_many_batch_coverage_trace;
@@ -1253,6 +1316,14 @@ std::size_t iov_total_size(const msghdr &message) {
 }
 
 void record_batch_controls_for_tests(const msghdr &message) {
+    if (message.msg_name != nullptr) {
+        const auto *peer = static_cast<const sockaddr *>(message.msg_name);
+        g_send_many_batch_coverage_trace.peer_family = peer->sa_family;
+        if (peer->sa_family == AF_INET6) {
+            const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(message.msg_name);
+            g_send_many_batch_coverage_trace.ipv6_flowinfo = ntohl(ipv6->sin6_flowinfo);
+        }
+    }
     for (auto *control = CMSG_FIRSTHDR(const_cast<msghdr *>(&message)); control != nullptr;
          control = CMSG_NXTHDR(const_cast<msghdr *>(&message), control)) {
         if ((control->cmsg_level == IPPROTO_IP && control->cmsg_type == IP_TOS) ||
@@ -1407,8 +1478,18 @@ ssize_t record_sendmsg_for_tests(int socket_fd, const msghdr *message, int) {
     g_recorded_sendmsg_for_tests.level = 0;
     g_recorded_sendmsg_for_tests.type = 0;
     g_recorded_sendmsg_for_tests.traffic_class = 0;
+    g_recorded_sendmsg_for_tests.family = AF_UNSPEC;
+    g_recorded_sendmsg_for_tests.ipv6_flowinfo = 0;
     if (message == nullptr) {
         return 0;
+    }
+    if (message->msg_name != nullptr) {
+        const auto *peer = static_cast<const sockaddr *>(message->msg_name);
+        g_recorded_sendmsg_for_tests.family = peer->sa_family;
+        if (peer->sa_family == AF_INET6) {
+            const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(message->msg_name);
+            g_recorded_sendmsg_for_tests.ipv6_flowinfo = ntohl(ipv6->sin6_flowinfo);
+        }
     }
     if (auto *control = CMSG_FIRSTHDR(const_cast<msghdr *>(message)); control != nullptr) {
         g_recorded_sendmsg_for_tests.level = control->cmsg_level;
@@ -1627,6 +1708,8 @@ socket_io_backend_receive_datagram_for_runtime_tests(int socket_fd, std::string_
         return SocketIoBackendReceiveDatagramResultForTests{
             .status = SocketIoBackendReceiveDatagramStatusForTests::ok,
             .bytes = received.bytes,
+            .address_validation_identity = internal::address_validation_identity_from_peer(
+                received.source, received.source_len),
             .ecn = received.ecn,
             .source = received.source,
             .source_len = received.source_len,
@@ -1703,6 +1786,93 @@ bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests()
         g_recorded_sendmsg_for_tests.type == IP_TOS,
         g_recorded_sendmsg_for_tests.traffic_class == 0x01,
     });
+}
+
+bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests() {
+    g_recorded_sendmsg_for_tests = {};
+    const ScopedSocketIoBackendOpsOverride runtime_ops{
+        SocketIoBackendOpsOverride{
+            .sendmsg_fn = &record_sendmsg_for_tests,
+        },
+    };
+    const std::array<std::byte, 4> datagram = {
+        std::byte{0x01},
+        std::byte{0x02},
+        std::byte{0x03},
+        std::byte{0x04},
+    };
+
+    sockaddr_storage peer{};
+    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&peer);
+    ipv6.sin6_family = AF_INET6;
+    ipv6.sin6_port = htons(4433);
+    ipv6.sin6_addr = in6addr_loopback;
+
+    sockaddr_storage ipv4_peer{};
+    ipv4_peer.ss_family = AF_INET;
+    const bool skipped_non_ipv6 = !internal::should_apply_ipv6_flow_label(
+        ipv4_peer, static_cast<socklen_t>(sizeof(sockaddr_in)));
+    const bool skipped_short_ipv6 = !internal::should_apply_ipv6_flow_label(peer, 1);
+    const bool normalized_zero_hash = internal::normalize_ipv6_flow_label_hash(0x12300000u) == 1u;
+
+    const bool sent =
+        internal::send_datagram(29, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in6)),
+                                "server", QuicEcnCodepoint::not_ect);
+    const bool single_send_applied_flow_label = all_true({
+        sent,
+        g_recorded_sendmsg_for_tests.calls == 1,
+        g_recorded_sendmsg_for_tests.socket_fd == 29,
+        g_recorded_sendmsg_for_tests.family == AF_INET6,
+        g_recorded_sendmsg_for_tests.level == 0,
+        g_recorded_sendmsg_for_tests.type == 0,
+        g_recorded_sendmsg_for_tests.ipv6_flowinfo != 0,
+        (g_recorded_sendmsg_for_tests.ipv6_flowinfo & ~0x000fffffu) == 0,
+    });
+
+    g_send_many_batch_coverage_trace = {};
+    const ScopedSocketIoBackendOpsOverride batch_ops{
+        SocketIoBackendOpsOverride{
+            .sendmsg_fn = &batch_sendmsg_for_tests,
+            .sendmmsg_fn = &batch_sendmmsg_for_tests,
+        },
+    };
+    const std::array<std::byte, 2> first_payload = {
+        std::byte{0xaa},
+        std::byte{0xbb},
+    };
+    const std::array<std::byte, 2> second_payload = {
+        std::byte{0xcc},
+        std::byte{0xdd},
+    };
+    const auto first = QuicIoEngineTxDatagram{
+        .socket_fd = 31,
+        .peer = peer,
+        .peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6)),
+        .bytes = first_payload,
+        .ecn = QuicEcnCodepoint::not_ect,
+    };
+    const auto second = QuicIoEngineTxDatagram{
+        .socket_fd = 31,
+        .peer = peer,
+        .peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6)),
+        .bytes = second_payload,
+        .ecn = QuicEcnCodepoint::not_ect,
+    };
+    std::array<QuicIoEngineTxDatagram, 2> datagrams = {first, second};
+
+    const bool batched = internal::sendmmsg_batch(datagrams, "server");
+    const bool batch_applied_flow_label = all_true({
+        batched,
+        g_send_many_batch_coverage_trace.sendmsg_calls +
+                g_send_many_batch_coverage_trace.sendmmsg_calls >
+            0,
+        g_send_many_batch_coverage_trace.peer_family == AF_INET6,
+        g_send_many_batch_coverage_trace.ipv6_flowinfo != 0,
+        (g_send_many_batch_coverage_trace.ipv6_flowinfo & ~0x000fffffu) == 0,
+    });
+
+    return skipped_non_ipv6 && skipped_short_ipv6 && normalized_zero_hash &&
+           single_send_applied_flow_label && batch_applied_flow_label;
 }
 
 bool socket_io_backend_recvmsg_maps_ecn_for_tests() {

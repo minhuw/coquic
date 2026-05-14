@@ -427,6 +427,8 @@ bool socket_io_backend_wait_returns_second_route_datagram_for_tests() {
         observed.kind == QuicIoEvent::Kind::rx_datagram,
         observed.datagram.has_value(),
         datagram.route_handle == second_route_handle,
+        datagram.address_validation_identity ==
+            internal::address_validation_identity_from_peer(second_peer, sizeof(sockaddr_in6)),
         g_multi_socket_backend_test_trace.last_poll_descriptor_count == 2u,
     });
 }

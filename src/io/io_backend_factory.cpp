@@ -3,6 +3,7 @@
 #include "src/io/io_backend_test_hooks.h"
 #include "src/io/io_uring_backend.h"
 #include "src/io/socket_io_backend.h"
+#include "src/io/socket_io_backend_internal.h"
 
 #include <array>
 #include <cerrno>
@@ -36,6 +37,8 @@ bootstrap_client_io_backend(const QuicIoBackendBootstrapConfig &config, std::str
         return QuicClientIoBootstrap{
             .backend = std::move(backend),
             .primary_route_handle = *route_handle,
+            .primary_address_validation_identity =
+                internal::address_validation_identity_from_peer(remote->peer, remote->peer_len),
         };
     }
     case QuicIoBackendKind::io_uring: {
@@ -62,6 +65,8 @@ bootstrap_client_io_backend(const QuicIoBackendBootstrapConfig &config, std::str
         return QuicClientIoBootstrap{
             .backend = std::move(backend),
             .primary_route_handle = *route_handle,
+            .primary_address_validation_identity =
+                internal::address_validation_identity_from_peer(remote->peer, remote->peer_len),
         };
     }
     }
@@ -173,7 +178,8 @@ bool client_bootstrap_is_usable_for_factory_tests(
     if (!bootstrap.has_value()) {
         return false;
     }
-    return (bootstrap->backend != nullptr) & (bootstrap->primary_route_handle != 0);
+    return (bootstrap->backend != nullptr) & (bootstrap->primary_route_handle != 0) &
+           !bootstrap->primary_address_validation_identity.empty();
 }
 
 bool server_bootstrap_is_usable_for_factory_tests(

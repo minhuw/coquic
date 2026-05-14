@@ -57,6 +57,24 @@ using coquic::quic::test_support::tracked_packet_or_null;
 using coquic::quic::test_support::tracked_packet_or_terminate;
 using coquic::quic::test_support::tracked_packet_snapshot;
 
+void install_spare_peer_connection_id(coquic::quic::QuicConnection &connection,
+                                      std::uint64_t sequence_number = 2) {
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.peer_connection_ids_[sequence_number] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = sequence_number,
+        .connection_id =
+            bytes_from_ints({0x10, static_cast<std::uint8_t>(0x10u + sequence_number)}),
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+    if (connection.current_send_path_id_.has_value()) {
+        connection.ensure_path_state(*connection.current_send_path_id_)
+            .peer_connection_id_sequence = 0;
+    }
+}
+
 bool connection_additional_internal_coverage_for_tests() {
     bool ok = true;
 
@@ -996,6 +1014,7 @@ TEST(QuicCoreTest, LocalMigrationRequestSendsPathChallengeWithoutOtherPayload) {
     connection.current_send_path_id_ = 3;
     connection.ensure_path_state(3).validated = true;
     connection.ensure_path_state(3).is_current_send_path = true;
+    install_spare_peer_connection_id(connection);
 
     const auto requested = connection.request_connection_migration(
         7, coquic::quic::QuicMigrationRequestReason::active);
@@ -1063,6 +1082,62 @@ TEST(QuicCoreTest, LocalMigrationRequestUsesSparePeerConnectionIdOnNewPath) {
     EXPECT_EQ(destination_connection_ids_value.front(), bytes_from_ints({0x10, 0x11}));
 }
 
+TEST(QuicCoreTest, LocalMigrationWithoutUnusedPeerConnectionIdIsRejected) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+
+    const auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::active);
+
+    ASSERT_FALSE(requested.has_value());
+    EXPECT_FALSE(connection.paths_.contains(7));
+    EXPECT_EQ(connection.current_send_path_id_, 3u);
+}
+
+TEST(QuicCoreTest, ValidatedLocalMigrationRetiresPreviousPathPeerConnectionId) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.peer_connection_ids_[2] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 2,
+        .connection_id = bytes_from_ints({0x10, 0x11}),
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+
+    const auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::active);
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.contains(7));
+    const auto outstanding_challenge = connection.paths_.at(7).outstanding_challenge;
+    const auto challenge = optional_value_or_terminate(outstanding_challenge);
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 7, {coquic::quic::PathResponseFrame{.data = challenge}}));
+
+    EXPECT_TRUE(connection.paths_.at(7).validated);
+    EXPECT_TRUE(connection.peer_connection_ids_.at(0).locally_retired);
+    ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
+    EXPECT_EQ(connection.pending_retire_connection_id_frames_.front().sequence_number, 0u);
+}
+
 TEST(QuicCoreTest, PeerMigrationKeepsCurrentPeerConnectionIdOnNewPath) {
     auto connection = make_connected_server_connection();
     connection.paths_.clear();
@@ -1108,6 +1183,7 @@ TEST(QuicCoreTest, LocalMigrationRequestKeepsPendingSendPathDespiteOldPathTraffi
     connection.current_send_path_id_ = 3;
     connection.ensure_path_state(3).validated = true;
     connection.ensure_path_state(3).is_current_send_path = true;
+    install_spare_peer_connection_id(connection);
 
     const auto requested = connection.request_connection_migration(
         7, coquic::quic::QuicMigrationRequestReason::active);
@@ -1268,7 +1344,8 @@ TEST(QuicCoreTest, MigrationHelpersCoverExistingPathSelectionAndAmplificationBra
         };
         connection.ensure_path_state(7).peer_connection_id_sequence = 2;
 
-        EXPECT_EQ(connection.select_peer_connection_id_sequence_for_path(7), 2u);
+        EXPECT_EQ(connection.select_peer_connection_id_sequence_for_path(7),
+                  std::optional<std::uint64_t>{2});
 
         connection.start_path_validation(7, /*initiated_locally=*/false);
 
@@ -1325,7 +1402,8 @@ TEST(QuicCoreTest, MigrationHelpersCoverAdditionalPrivateBranches) {
         };
         connection.ensure_path_state(9).peer_connection_id_sequence = 99;
 
-        EXPECT_EQ(connection.select_peer_connection_id_sequence_for_path(9), 2u);
+        EXPECT_EQ(connection.select_peer_connection_id_sequence_for_path(9),
+                  std::optional<std::uint64_t>{2});
 
         connection.paths_.clear();
         connection.start_path_validation(9, /*initiated_locally=*/false);
@@ -1381,6 +1459,7 @@ TEST(QuicCoreTest, PacketTraceLogsAckTimeoutMigrationAndBlockedSendPaths) {
         connection.current_send_path_id_ = 3;
         connection.ensure_path_state(3).validated = true;
         connection.ensure_path_state(3).is_current_send_path = true;
+        install_spare_peer_connection_id(connection);
 
         ASSERT_TRUE(
             connection

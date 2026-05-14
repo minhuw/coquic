@@ -218,10 +218,12 @@ TEST(QuicCoreTest, NewConnectionIdFrameStoresPeerInventoryAndRetiresOlderEntries
         coquic::quic::test::test_time(1));
 
     ASSERT_TRUE(processed.has_value());
-    EXPECT_FALSE(connection.peer_connection_ids_.contains(0));
+    ASSERT_TRUE(connection.peer_connection_ids_.contains(0));
+    EXPECT_TRUE(connection.peer_connection_ids_.at(0).locally_retired);
     ASSERT_TRUE(connection.peer_connection_ids_.contains(2));
     EXPECT_EQ(connection.peer_connection_ids_.at(2).connection_id,
               bytes_from_ints({0x10, 0x11, 0x12, 0x13}));
+    EXPECT_EQ(connection.active_peer_connection_id_sequence_, 2u);
 }
 
 TEST(QuicCoreTest, NewConnectionIdFrameQueuesRetireConnectionIdForRetirePriorToRange) {
@@ -257,7 +259,8 @@ TEST(QuicCoreTest, NewConnectionIdFrameQueuesRetireConnectionIdForRetirePriorToR
         coquic::quic::test::test_time(1));
 
     ASSERT_TRUE(processed.has_value());
-    EXPECT_FALSE(connection.peer_connection_ids_.contains(0));
+    ASSERT_TRUE(connection.peer_connection_ids_.contains(0));
+    EXPECT_TRUE(connection.peer_connection_ids_.at(0).locally_retired);
     ASSERT_TRUE(connection.peer_connection_ids_.contains(2));
     ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
     EXPECT_EQ(connection.pending_retire_connection_id_frames_.front().sequence_number, 0u);
@@ -265,6 +268,80 @@ TEST(QuicCoreTest, NewConnectionIdFrameQueuesRetireConnectionIdForRetirePriorToR
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
     EXPECT_TRUE(connection.pending_retire_connection_id_frames_.empty());
+    ASSERT_TRUE(connection.peer_connection_ids_.contains(0));
+    EXPECT_TRUE(connection.peer_connection_ids_.at(0).retire_frame_in_flight);
+}
+
+TEST(QuicCoreTest, RetiredPeerConnectionIdIsForgottenAfterRetireAck) {
+    auto connection = make_connected_server_connection();
+
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa}),
+    };
+    const auto processed =
+        connection.process_new_connection_id_frame(coquic::quic::NewConnectionIdFrame{
+            .sequence_number = 2,
+            .retire_prior_to = 1,
+            .connection_id = bytes_from_ints({0x10, 0x11}),
+            .stateless_reset_token = {},
+        });
+    ASSERT_TRUE(processed.has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+    ASSERT_TRUE(connection.peer_connection_ids_.contains(0));
+    ASSERT_TRUE(connection.peer_connection_ids_.at(0).retire_frame_in_flight);
+    const auto packet_number = connection.application_space_.next_send_packet_number - 1;
+
+    const auto acked = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = packet_number,
+            .first_ack_range = 0,
+        },
+        coquic::quic::test::test_time(2), connection.local_transport_parameters_.ack_delay_exponent,
+        connection.local_transport_parameters_.max_ack_delay, /*suppress_pto_reset=*/false);
+
+    ASSERT_TRUE(acked.has_value());
+    EXPECT_FALSE(connection.peer_connection_ids_.contains(0));
+    ASSERT_TRUE(connection.peer_connection_ids_.contains(2));
+}
+
+TEST(QuicCoreTest, LostRetireConnectionIdFrameKeepsPeerCidAndRequeuesRetirement) {
+    auto connection = make_connected_server_connection();
+
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa}),
+    };
+    const auto processed =
+        connection.process_new_connection_id_frame(coquic::quic::NewConnectionIdFrame{
+            .sequence_number = 2,
+            .retire_prior_to = 1,
+            .connection_id = bytes_from_ints({0x10, 0x11}),
+            .stateless_reset_token = {},
+        });
+    ASSERT_TRUE(processed.has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+    ASSERT_TRUE(connection.peer_connection_ids_.contains(0));
+    ASSERT_TRUE(connection.peer_connection_ids_.at(0).retire_frame_in_flight);
+
+    const auto handle = connection.application_space_.recovery.newest_tracked_packet();
+    ASSERT_TRUE(handle.has_value());
+    const auto tracked_handle = optional_value_or_terminate(handle);
+    const auto lost = connection.mark_lost_packet(connection.application_space_, tracked_handle,
+                                                  /*already_marked_in_recovery=*/false,
+                                                  coquic::quic::test::test_time(2));
+
+    ASSERT_TRUE(lost.has_value());
+    ASSERT_TRUE(connection.peer_connection_ids_.contains(0));
+    EXPECT_TRUE(connection.peer_connection_ids_.at(0).locally_retired);
+    EXPECT_FALSE(connection.peer_connection_ids_.at(0).retire_frame_in_flight);
+    ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
+    EXPECT_EQ(connection.pending_retire_connection_id_frames_.front().sequence_number, 0u);
 }
 
 TEST(QuicCoreTest, NewConnectionIdProcessingRejectsInvalidSequencesConflictsAndLimits) {

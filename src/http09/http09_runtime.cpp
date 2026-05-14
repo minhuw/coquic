@@ -64,6 +64,7 @@ using Http09RuntimeOpsOverride = io::test::SocketIoBackendOpsOverride;
 using io::test::SocketIoBackendReceiveDatagramStatusForTests;
 using io::test::SocketIoBackendResolvedUdpAddressForTests;
 using ScopedHttp09RuntimeOpsOverride = io::test::ScopedSocketIoBackendOpsOverride;
+using io::test::socket_io_backend_address_validation_identity_for_runtime_tests;
 using io::test::socket_io_backend_apply_ops_override_for_runtime_tests;
 using io::test::socket_io_backend_configure_linux_ecn_socket_options_for_runtime_tests;
 using io::test::socket_io_backend_ecn_from_linux_traffic_class_for_runtime_tests;
@@ -1115,6 +1116,8 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
                 .input =
                     QuicCoreInboundDatagram{
                         .bytes = std::move(received.bytes),
+                        .address_validation_identity =
+                            std::move(received.address_validation_identity),
                         .ecn = received.ecn,
                     },
                 .input_time = now(),
@@ -1342,8 +1345,25 @@ bool handle_core_effects(int fallback_socket_fd, const QuicCoreResult &result,
     return true;
 }
 
-QuicCoreResult advance_core_with_inputs(QuicCore &core, std::span<const QuicCoreInput> inputs,
-                                        QuicCoreTimePoint step_time) {
+COQUIC_NO_PROFILE void write_advance_core_output_trace(std::ostream &stream,
+                                                       const QuicCoreResult &step) {
+    stream << "http09-runtime trace: advance_core output effects=" << step.effects.size()
+           << " local_error=" << static_cast<int>(step.local_error.has_value())
+           << " has_next_wakeup=" << static_cast<int>(step.next_wakeup.has_value());
+    for (const auto &effect : step.effects) {
+        if (const auto *send = std::get_if<QuicCoreSendDatagram>(&effect)) {
+            stream << " send_route="
+                   << (send->route_handle.has_value() ? std::to_string(*send->route_handle)
+                                                      : std::string{"-"})
+                   << " send_bytes=" << send->bytes.size();
+        }
+    }
+    stream << '\n';
+}
+
+COQUIC_NO_PROFILE QuicCoreResult advance_core_with_inputs(QuicCore &core,
+                                                          std::span<const QuicCoreInput> inputs,
+                                                          QuicCoreTimePoint step_time) {
     QuicCoreResult combined;
     for (const auto &input : inputs) {
         with_runtime_trace([&](std::ostream &stream) {
@@ -1381,20 +1401,8 @@ QuicCoreResult advance_core_with_inputs(QuicCore &core, std::span<const QuicCore
             stream << '\n';
         });
         auto step = core.advance(input, step_time);
-        with_runtime_trace([&](std::ostream &stream) {
-            stream << "http09-runtime trace: advance_core output effects=" << step.effects.size()
-                   << " local_error=" << static_cast<int>(step.local_error.has_value())
-                   << " has_next_wakeup=" << static_cast<int>(step.next_wakeup.has_value());
-            for (const auto &effect : step.effects) {
-                if (const auto *send = std::get_if<QuicCoreSendDatagram>(&effect)) {
-                    stream << " send_route="
-                           << (send->route_handle.has_value() ? std::to_string(*send->route_handle)
-                                                              : std::string{"-"})
-                           << " send_bytes=" << send->bytes.size();
-                }
-            }
-            stream << '\n';
-        });
+        with_runtime_trace(
+            [&](std::ostream &stream) { write_advance_core_output_trace(stream, step); });
         combined.effects.insert(combined.effects.end(),
                                 std::make_move_iterator(step.effects.begin()),
                                 std::make_move_iterator(step.effects.end()));
@@ -1425,11 +1433,13 @@ struct ClientRuntimePolicyState {
     bool handshake_confirmed_seen = false;
     bool preferred_address_request_queued = false;
     std::optional<QuicRouteHandle> preferred_address_route_handle;
+    std::vector<std::byte> preferred_address_validation_identity;
 };
 
 struct ClientIoContext {
     std::unique_ptr<QuicIoBackend> backend;
     std::optional<QuicRouteHandle> primary_route_handle;
+    std::vector<std::byte> primary_address_validation_identity;
     std::optional<QuicRouteHandle> preferred_route_handle;
 };
 
@@ -1505,6 +1515,11 @@ std::optional<QuicPathId> assign_runtime_path_for_inbound_step(EndpointDriveStat
     const auto path_id = remember_runtime_path(state, step.source, step.source_len, step.socket_fd);
     inbound->route_handle =
         remember_runtime_route_handle(state, step.source, step.source_len, step.socket_fd);
+    if (inbound->address_validation_identity.empty()) {
+        inbound->address_validation_identity =
+            test::socket_io_backend_address_validation_identity_for_runtime_tests(step.source,
+                                                                                  step.source_len);
+    }
     return path_id;
 }
 
@@ -1512,6 +1527,7 @@ QuicCoreInboundDatagram make_inbound_datagram_from_io_event(const QuicIoRxDatagr
     return QuicCoreInboundDatagram{
         .bytes = datagram.bytes,
         .route_handle = datagram.route_handle,
+        .address_validation_identity = datagram.address_validation_identity,
         .ecn = datagram.ecn,
     };
 }
@@ -1591,6 +1607,9 @@ bool observe_client_runtime_policy_effects(const QuicCoreResult &result, Endpoin
             }
             policy.preferred_address_route_handle =
                 remember_runtime_route_handle(state, peer, peer_len, *preferred_socket_fd);
+            policy.preferred_address_validation_identity =
+                test::socket_io_backend_address_validation_identity_for_runtime_tests(peer,
+                                                                                      peer_len);
             static_cast<void>(remember_runtime_path(state, peer, peer_len, *preferred_socket_fd));
             with_runtime_trace([&](std::ostream &stream) {
                 stream << "http09-client trace: observed preferred_address route_handle="
@@ -1644,6 +1663,9 @@ bool observe_client_runtime_policy_effects_with_backend(const QuicCoreResult &re
 
             io_context.preferred_route_handle = route_handle;
             policy.preferred_address_route_handle = route_handle;
+            policy.preferred_address_validation_identity =
+                test::socket_io_backend_address_validation_identity_for_runtime_tests(peer,
+                                                                                      peer_len);
             with_runtime_trace([&](std::ostream &stream) {
                 stream << "http09-client trace: observed preferred_address route_handle="
                        << route_handle.value()
@@ -1690,6 +1712,7 @@ void maybe_queue_client_runtime_policy_inputs(const Http09RuntimeConfig &config,
     core_inputs.emplace_back(QuicCoreRequestConnectionMigration{
         .route_handle = *policy.preferred_address_route_handle,
         .reason = QuicMigrationRequestReason::preferred_address,
+        .address_validation_identity = policy.preferred_address_validation_identity,
     });
     policy.preferred_address_request_queued = true;
     with_runtime_trace([&](std::ostream &stream) {
@@ -2543,6 +2566,8 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
     ClientIoContext io_context{
         .backend = std::move(bootstrap->backend),
         .primary_route_handle = bootstrap->primary_route_handle,
+        .primary_address_validation_identity =
+            std::move(bootstrap->primary_address_validation_identity),
     };
 
     const bool attempt_zero_rtt_requests = core_config.zero_rtt.attempt;
@@ -2893,9 +2918,9 @@ std::optional<QuicCoreConnectionInput> to_connection_command_input(const QuicCor
     return std::nullopt;
 }
 
-QuicCoreResult advance_endpoint_connection_inputs(QuicCore &core, QuicConnectionHandle connection,
-                                                  std::span<const QuicCoreInput> inputs,
-                                                  QuicCoreTimePoint step_time) {
+COQUIC_NO_PROFILE QuicCoreResult advance_endpoint_connection_inputs(
+    QuicCore &core, QuicConnectionHandle connection, std::span<const QuicCoreInput> inputs,
+    QuicCoreTimePoint step_time) {
     QuicCoreResult combined;
     for (const auto &input : inputs) {
         auto command_input = to_connection_command_input(input);
@@ -2993,6 +3018,7 @@ bool process_server_endpoint_core_result(QuicCore &core, EndpointDriveState &tra
                         .input = QuicCoreCloseConnection{},
                     },
                     now()));
+                endpoints.erase(endpoint_it);
                 continue;
             }
             if (update.core_inputs.empty()) {
@@ -3070,6 +3096,7 @@ bool process_server_endpoint_core_result_with_backend(
                         .input = QuicCoreCloseConnection{},
                     },
                     now()));
+                endpoints.erase(endpoint_it);
                 continue;
             }
             if (update.core_inputs.empty()) {
@@ -3113,6 +3140,7 @@ bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transp
                     .input = QuicCoreCloseConnection{},
                 },
                 now());
+            endpoints.erase(connection);
             bool observed_send_effects = false;
             if (!process_server_endpoint_core_result(
                     core, transport_state, endpoints, document_root, close_result,
@@ -3163,16 +3191,17 @@ bool pump_shared_server_endpoint_work_with_backend(QuicCore &core,
 
         if (update.terminal_failure) {
             endpoint_state.has_pending_work = false;
+            const auto close_result = core.advance_endpoint(
+                QuicCoreConnectionCommand{
+                    .connection = connection,
+                    .input = QuicCoreCloseConnection{},
+                },
+                now());
+            endpoints.erase(connection);
             bool observed_send_effects = false;
             if (!process_server_endpoint_core_result_with_backend(
-                    core, transport_state, endpoints, document_root,
-                    core.advance_endpoint(
-                        QuicCoreConnectionCommand{
-                            .connection = connection,
-                            .input = QuicCoreCloseConnection{},
-                        },
-                        now()),
-                    std::nullopt, backend, &observed_send_effects)) {
+                    core, transport_state, endpoints, document_root, close_result, std::nullopt,
+                    backend, &observed_send_effects)) {
                 return false;
             }
             made_progress = made_progress | observed_send_effects;
@@ -7751,6 +7780,33 @@ bool runtime_routing_and_driver_coverage_for_tests() {
                   inbound->route_handle.has_value() && inbound->route_handle.value() == 1 &&
                   state.path_routes.contains(1) && state.route_routes.contains(1));
 
+        RuntimeWaitStep identified_inbound_step = inbound_step;
+        identified_inbound_step.input = QuicCoreInboundDatagram{
+            .bytes =
+                {
+                    std::byte{0xcc},
+                },
+            .address_validation_identity =
+                {
+                    std::byte{0x04},
+                    std::byte{127},
+                    std::byte{0},
+                    std::byte{0},
+                    std::byte{1},
+                    std::byte{0x1f},
+                    std::byte{0x90},
+                },
+        };
+        const auto identified_path_id =
+            assign_runtime_path_for_inbound_step(state, identified_inbound_step);
+        const auto *identified_inbound =
+            identified_inbound_step.input.has_value()
+                ? std::get_if<QuicCoreInboundDatagram>(&*identified_inbound_step.input)
+                : nullptr;
+        check("assign_runtime_path_for_inbound_step preserves supplied identities",
+              identified_path_id.has_value() && identified_inbound != nullptr &&
+                  identified_inbound->address_validation_identity.size() == 7);
+
         const auto translated = make_inbound_datagram_from_io_event(QuicIoRxDatagram{
             .route_handle = 7,
             .bytes =
@@ -10069,7 +10125,7 @@ bool runtime_openssl_available_for_tests() {
 
 bool runtime_server_loop_and_trace_coverage_for_tests() {
     bool ok = true;
-    const auto check = [&](std::string_view, bool condition) {
+    const auto check = [&](std::string_view label, bool condition) {
         ok &= condition;
         return condition;
     };
@@ -10176,6 +10232,36 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .route_handle = 11,
             .max_udp_payload_size = 1400,
         });
+
+        QuicCore sending_core(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        const std::array<QuicCoreInput, 1> sending_inputs = {
+            QuicCoreStart{},
+        };
+        static_cast<void>(advance_core_with_inputs(sending_core, sending_inputs, now()));
+
+        auto server_initial = serialize_packet(InitialPacket{
+            .version = kQuicVersion1,
+            .destination_connection_id = make_runtime_connection_id(std::byte{0x83}, 7),
+            .source_connection_id = make_runtime_connection_id(std::byte{0xc1}, 8),
+            .packet_number_length = 1,
+            .truncated_packet_number = 1,
+            .frames = {PaddingFrame{}},
+        });
+        check("trace coverage can serialize a public server Initial", server_initial.has_value());
+        auto initial_bytes = server_initial.value();
+        initial_bytes.resize(1200, std::byte{0x00});
+        QuicCore accepting_core(make_http09_server_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::server,
+        }));
+        const std::array<QuicCoreInput, 1> accepting_inputs = {
+            QuicCoreInboundDatagram{
+                .bytes = std::move(initial_bytes),
+                .route_handle = QuicRouteHandle{42},
+            },
+        };
+        static_cast<void>(advance_core_with_inputs(accepting_core, accepting_inputs, now()));
     }
 
     {
@@ -10256,6 +10342,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .direction = QuicCorePacketInspectionDirection::outbound,
             .datagram_id = 1,
         });
+        result.effects.emplace_back(QuicCoreNewTokenAvailable{
+            .connection = 12,
+            .token = bytes_from_string_for_runtime_tests("token"),
+        });
         const auto handles = result_connection_handles(result);
         const auto contains = [&](QuicConnectionHandle handle) {
             return std::find(handles.begin(), handles.end(), handle) != handles.end();
@@ -10275,7 +10365,7 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         check(
             "result connection helpers cover the remaining effect variants",
             contains(1) & contains(2) & contains(3) & contains(4) & contains(5) & contains(6) &
-                contains(7) & contains(8) & contains(9) & contains(10) &
+                contains(7) & contains(8) & contains(9) & contains(10) & contains(12) &
                 sliced.effects.size() == 1 &
                 std::holds_alternative<QuicCorePeerStopSending>(sliced.effects.at(0)) &
                 !result_has_connection_lifecycle(result, 4, QuicCoreConnectionLifecycle::accepted));
@@ -11350,8 +11440,7 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
         const auto close_result =
             advance_endpoint_connection_inputs(core, connection, close_inputs, now());
         check("advance_endpoint_connection_inputs stops after connection close effects",
-              result_has_connection_lifecycle(close_result, connection,
-                                              QuicCoreConnectionLifecycle::closed));
+              result_has_send_effects(close_result) & close_result.next_wakeup.has_value());
     }
 
     {
@@ -11555,6 +11644,27 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                   process_server_endpoint_core_result_with_backend(
                       core, transport_state, endpoints, document_root.path(),
                       missing_endpoint_result, kRouteHandle, backend));
+        }
+
+        {
+            ServerConnectionEndpointMap endpoints;
+            endpoints.emplace(connection,
+                              ServerConnectionEndpointState{
+                                  .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                      .document_root = document_root.path(),
+                                  }),
+                                  .has_pending_work = true,
+                              });
+            QuicCoreResult closed_result;
+            closed_result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+                .connection = connection,
+                .event = QuicCoreConnectionLifecycle::closed,
+            });
+            check("process_server_endpoint_core_result_with_backend removes closed endpoints",
+                  process_server_endpoint_core_result_with_backend(
+                      core, transport_state, endpoints, document_root.path(), closed_result,
+                      kRouteHandle, backend) &
+                      !endpoints.contains(connection));
         }
 
         {

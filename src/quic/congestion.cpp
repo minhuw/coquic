@@ -3,12 +3,10 @@
 namespace coquic::quic {
 
 std::string_view congestion_control_algorithm_name(QuicCongestionControlAlgorithm algorithm) {
-    switch (algorithm) {
-    case QuicCongestionControlAlgorithm::newreno:
-        return "newreno";
-    case QuicCongestionControlAlgorithm::cubic:
+    if (algorithm == QuicCongestionControlAlgorithm::cubic) {
         return "cubic";
-    case QuicCongestionControlAlgorithm::bbr:
+    }
+    if (algorithm == QuicCongestionControlAlgorithm::bbr) {
         return "bbr";
     }
     return "newreno";
@@ -32,15 +30,12 @@ QuicCongestionController::QuicCongestionController(QuicCongestionControlAlgorith
                                                    std::size_t max_datagram_size)
     : storage_(std::in_place_type<NewRenoCongestionController>, max_datagram_size),
       congestion_window_(this, true), bytes_in_flight_(this, false) {
-    switch (algorithm) {
-    case QuicCongestionControlAlgorithm::newreno:
-        break;
-    case QuicCongestionControlAlgorithm::cubic:
+    if (algorithm == QuicCongestionControlAlgorithm::cubic) {
         storage_.emplace<CubicCongestionController>(max_datagram_size);
-        break;
-    case QuicCongestionControlAlgorithm::bbr:
+        return;
+    }
+    if (algorithm == QuicCongestionControlAlgorithm::bbr) {
         storage_.emplace<BbrCongestionController>(max_datagram_size);
-        break;
     }
 }
 

@@ -238,6 +238,12 @@ struct PacketSpaceRecoveryTestPeer {
         recovery.track_new_loss_candidates(previous_largest_acked, largest_acked);
     }
 
+    static void adapt_reordering_thresholds_from_spurious_loss(PacketSpaceRecovery &recovery,
+                                                               const SentPacketRecord &packet,
+                                                               QuicCoreTimePoint now) {
+        recovery.maybe_adapt_reordering_thresholds_from_spurious_loss(packet, now);
+    }
+
     static AckProcessingResult ack_processing_result_from_apply(const PacketSpaceRecovery &recovery,
                                                                 const AckApplyResult &apply) {
         return recovery.ack_processing_result_from_apply(apply);
@@ -970,6 +976,28 @@ TEST(QuicRecoveryTest, PacketThresholdLossFrontierAdvancesAcrossAckBatches) {
         2u);
 }
 
+TEST(QuicRecoveryTest, PacketThresholdScanSkipsPacketsBelowReorderingGap) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(2)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(3)));
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(recovery, 0, 2);
+
+    const auto result =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(4));
+
+    EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{3}));
+    EXPECT_TRUE(result.lost_packets.empty());
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::next_packet_threshold_loss_slot(recovery),
+        1u);
+}
+
 TEST(QuicRecoveryTest, PacketThresholdLossMarksCauseForAdaptiveReordering) {
     PacketSpaceRecovery recovery;
     for (std::uint64_t packet_number = 0; packet_number <= 3; ++packet_number) {
@@ -1020,6 +1048,57 @@ TEST(QuicRecoveryTest, LateAckedPacketThresholdLossRaisesReorderingThreshold) {
         recovery.on_ack_received(make_ack_frame(/*largest=*/5), coquic::quic::test::test_time(13));
     EXPECT_EQ(packet_numbers_from(larger_distance.acked_packets), (std::vector<std::uint64_t>{5}));
     EXPECT_EQ(packet_numbers_from(larger_distance.lost_packets), (std::vector<std::uint64_t>{1}));
+}
+
+TEST(QuicRecoveryTest, SpuriousLossAdaptationKeepsThresholdsWhenNoNewEvidence) {
+    PacketSpaceRecovery recovery;
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_largest_acked_packet_number(recovery,
+                                                                                     std::nullopt);
+
+    auto no_packet_threshold = make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,
+                                                coquic::quic::test::test_time(4));
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::adapt_reordering_thresholds_from_spurious_loss(
+        recovery, no_packet_threshold, coquic::quic::test::test_time(4));
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::packet_reordering_threshold(recovery),
+        coquic::quic::kPacketThreshold);
+
+    auto non_reordered_packet_threshold = make_sent_packet(
+        /*packet_number=*/5, /*ack_eliciting=*/true, coquic::quic::test::test_time(5));
+    non_reordered_packet_threshold.lost_by_packet_threshold = true;
+    non_reordered_packet_threshold.packet_threshold_largest_acked = 5;
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::adapt_reordering_thresholds_from_spurious_loss(
+        recovery, non_reordered_packet_threshold, coquic::quic::test::test_time(5));
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::packet_reordering_threshold(recovery),
+        coquic::quic::kPacketThreshold);
+
+    auto same_packet_threshold = make_sent_packet(/*packet_number=*/10, /*ack_eliciting=*/true,
+                                                  coquic::quic::test::test_time(10));
+    same_packet_threshold.lost_by_packet_threshold = true;
+    same_packet_threshold.packet_threshold_largest_acked = 12;
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::adapt_reordering_thresholds_from_spurious_loss(
+        recovery, same_packet_threshold, coquic::quic::test::test_time(10));
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::packet_reordering_threshold(recovery),
+        coquic::quic::kPacketThreshold);
+
+    auto larger_packet_threshold_without_largest_ack = make_sent_packet(
+        /*packet_number=*/1, /*ack_eliciting=*/true, coquic::quic::test::test_time(1));
+    larger_packet_threshold_without_largest_ack.lost_by_packet_threshold = true;
+    larger_packet_threshold_without_largest_ack.packet_threshold_largest_acked = 5;
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::adapt_reordering_thresholds_from_spurious_loss(
+        recovery, larger_packet_threshold_without_largest_ack, coquic::quic::test::test_time(10));
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::packet_reordering_threshold(recovery), 5u);
+
+    auto time_threshold_without_delay = make_sent_packet(
+        /*packet_number=*/6, /*ack_eliciting=*/true, coquic::quic::test::test_time(20));
+    time_threshold_without_delay.lost_by_time_threshold = true;
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::adapt_reordering_thresholds_from_spurious_loss(
+        recovery, time_threshold_without_delay, coquic::quic::test::test_time(20));
+    EXPECT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::time_reordering_threshold(recovery),
+              std::chrono::milliseconds(0));
 }
 
 TEST(QuicRecoveryTest, TimeThresholdLossMarksCauseForAdaptiveReordering) {

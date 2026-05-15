@@ -2,6 +2,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -54,6 +55,13 @@ TlsAdapterConfig make_server_config() {
             },
         .local_transport_parameters = coquic::quic::test::sample_transport_parameters(),
     };
+}
+
+template <typename T> const T &optional_ref_or_terminate(const std::optional<T> &value) {
+    if (!value.has_value()) {
+        std::abort();
+    }
+    return *value;
 }
 
 CipherSuite invalid_cipher_suite() {
@@ -281,7 +289,13 @@ TEST(QuicTlsAdapterContractTest, ZeroRttSessionTicketAdvertisesQuicEarlyDataLimi
 
     const auto max_early_data = TlsAdapterTestPeer::session_max_early_data(*exported);
     ASSERT_TRUE(max_early_data.has_value());
-    EXPECT_EQ(*max_early_data, std::numeric_limits<std::uint32_t>::max());
+    EXPECT_EQ(optional_ref_or_terminate(max_early_data), std::numeric_limits<std::uint32_t>::max());
+}
+
+TEST(QuicTlsAdapterContractTest, SessionMaxEarlyDataRejectsInvalidSessionBytes) {
+    const std::vector<std::byte> invalid_session{std::byte{0x00}};
+
+    EXPECT_FALSE(TlsAdapterTestPeer::session_max_early_data(invalid_session).has_value());
 }
 
 TEST(QuicTlsAdapterContractTest, ServerHandshakeFlightGrowsWhenCertificatePemContainsChain) {

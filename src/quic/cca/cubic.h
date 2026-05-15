@@ -6,6 +6,7 @@
 #include <optional>
 #include <span>
 
+#include "src/quic/cca/common.h"
 #include "src/quic/recovery.h"
 
 namespace coquic::quic {
@@ -59,6 +60,7 @@ class CubicCongestionController {
     std::optional<QuicCoreTimePoint> epoch_start_time_;
     std::chrono::milliseconds app_limited_pause_{0};
     std::optional<QuicCoreTimePoint> app_limited_start_time_;
+    HyStartPlusPlus hystart_;
 };
 
 } // namespace coquic::quic

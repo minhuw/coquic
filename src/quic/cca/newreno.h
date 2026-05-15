@@ -5,6 +5,7 @@
 #include <optional>
 #include <span>
 
+#include "src/quic/cca/common.h"
 #include "src/quic/recovery.h"
 
 namespace coquic::quic {
@@ -44,6 +45,7 @@ class NewRenoCongestionController {
     std::size_t slow_start_threshold_ = std::numeric_limits<std::size_t>::max();
     std::size_t congestion_avoidance_credit_ = 0;
     std::optional<QuicCoreTimePoint> recovery_start_time_;
+    HyStartPlusPlus hystart_;
 };
 
 } // namespace coquic::quic

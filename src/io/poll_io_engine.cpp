@@ -1378,7 +1378,7 @@ ssize_t batch_sendmsg_for_tests(int socket_fd, const msghdr *message, int) {
     }
     if (g_send_many_batch_coverage_trace.mode ==
         SendManyBatchCoverageTrace::Mode::udp_gso_hard_error) {
-        errno = EIO;
+        errno = EACCES;
         return -1;
     }
     if (g_send_many_batch_coverage_trace.mode ==
@@ -1986,6 +1986,24 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
            }),
            "record_sendmsg handles null message");
 
+    {
+        const ScopedSocketIoBackendOpsOverride runtime_ops{
+            SocketIoBackendOpsOverride{
+                .sendmsg_fn =
+                    [](int, const msghdr *, int) {
+                        errno = ECONNREFUSED;
+                        return static_cast<ssize_t>(-1);
+                    },
+            },
+        };
+        const auto peer = loopback_peer_for_batch_tests(7443);
+        const std::array<std::byte, 1> bytes{std::byte{0x01}};
+        record(socket_io_backend_send_datagram_for_runtime_tests(
+                   /*fd=*/5, bytes, peer, static_cast<socklen_t>(sizeof(sockaddr_in)), "test",
+                   QuicEcnCodepoint::ect0, /*is_pmtu_probe=*/false),
+               "send_datagram ignores connection refused from sendmsg");
+    }
+
     reset_for_case();
     msghdr send_message{};
     record(all_true({
@@ -2057,6 +2075,24 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
                        internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1),
                }),
                "append_sendmsg_ecn_control emits IPv6 ancillary data");
+    }
+
+    {
+        const ScopedSocketIoBackendOpsOverride runtime_ops{
+            SocketIoBackendOpsOverride{
+                .sendmsg_fn =
+                    [](int, const msghdr *, int) {
+                        errno = EACCES;
+                        return static_cast<ssize_t>(-1);
+                    },
+            },
+        };
+        const auto peer = loopback_peer_for_batch_tests(7444);
+        const std::array<std::byte, 1> bytes{std::byte{0x02}};
+        record(!socket_io_backend_send_datagram_for_runtime_tests(
+                   /*fd=*/6, bytes, peer, static_cast<socklen_t>(sizeof(sockaddr_in)), "test",
+                   QuicEcnCodepoint::ect0, /*is_pmtu_probe=*/false),
+               "send_datagram reports hard sendmsg errors");
     }
 
     reset_for_case();
@@ -2731,9 +2767,9 @@ bool poll_io_engine_send_many_batching_coverage_for_tests() {
                    engine.send_many(datagrams, "client"),
                    g_send_many_batch_coverage_trace.sendmsg_calls == 1,
                    g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-                   internal::udp_gso_disabled(),
+                   !internal::udp_gso_disabled(),
                }),
-               "send_many disables GSO after EIO before sendmmsg fallback");
+               "send_many falls back to sendmmsg after hard GSO sendmsg errors");
     }
 
     {

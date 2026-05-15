@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <cmath>
 
-#include "src/quic/cca/common.h"
-
 namespace coquic::quic {
 
 namespace {
@@ -18,7 +16,8 @@ CubicCongestionController::CubicCongestionController(std::size_t max_datagram_si
     : max_datagram_size_(max_datagram_size),
       congestion_window_(congestion_initial_window(max_datagram_size)),
       cwnd_prior_segments_(smss_segments(congestion_window_)),
-      w_max_segments_(cwnd_prior_segments_), w_est_segments_(cwnd_prior_segments_) {
+      w_max_segments_(cwnd_prior_segments_), w_est_segments_(cwnd_prior_segments_),
+      hystart_(max_datagram_size) {
 }
 
 bool CubicCongestionController::can_send_ack_eliciting(std::size_t bytes) const {
@@ -40,6 +39,7 @@ void CubicCongestionController::on_packet_sent(std::size_t bytes_sent, bool ack_
 }
 
 void CubicCongestionController::on_packet_sent(SentPacketRecord &packet) {
+    hystart_.on_packet_sent(packet);
     on_packet_sent(packet.bytes_in_flight, packet.ack_eliciting);
 }
 
@@ -55,6 +55,7 @@ void CubicCongestionController::on_packets_acked(std::span<const SentPacketRecor
     static_cast<void>(app_limited);
     const auto recovery_boundary = recovery_start_time_;
     bool exit_recovery = false;
+    std::size_t slow_start_acked_bytes = 0;
 
     for (const auto &packet : packets) {
         if (packet.in_flight) {
@@ -79,15 +80,24 @@ void CubicCongestionController::on_packets_acked(std::span<const SentPacketRecor
         }
 
         if (congestion_window_ < slow_start_threshold_) {
-            congestion_window_ =
-                congestion_saturating_add(congestion_window_, packet.bytes_in_flight);
-            epoch_start_time_.reset();
-            cwnd_prior_segments_ = smss_segments(congestion_window_);
-            w_est_segments_ = cwnd_prior_segments_;
+            slow_start_acked_bytes =
+                congestion_saturating_add(slow_start_acked_bytes, packet.bytes_in_flight);
             continue;
         }
 
         grow_congestion_avoidance(packet.bytes_in_flight, now, rtt_state);
+    }
+
+    if (slow_start_acked_bytes != 0) {
+        congestion_window_ = congestion_saturating_add(
+            congestion_window_, hystart_.growth_bytes(slow_start_acked_bytes));
+        epoch_start_time_.reset();
+        cwnd_prior_segments_ = smss_segments(congestion_window_);
+        w_est_segments_ = cwnd_prior_segments_;
+        hystart_.on_slow_start_ack(packets, rtt_state);
+        if (hystart_.should_exit_slow_start()) {
+            slow_start_threshold_ = congestion_window_;
+        }
     }
 
     if (!packets.empty() && epoch_start_time_.has_value() && !app_limited_start_time_.has_value()) {
@@ -145,6 +155,7 @@ void CubicCongestionController::on_loss_event(QuicCoreTimePoint loss_detection_t
         w_max_segments_ = current_window_segments;
     }
 
+    hystart_.disable();
     recovery_start_time_ = loss_detection_time;
     cwnd_prior_segments_ = current_window_segments;
     const auto reduced_window = bytes_from_segments(current_window_segments * kCubicBeta);
@@ -154,6 +165,7 @@ void CubicCongestionController::on_loss_event(QuicCoreTimePoint loss_detection_t
 }
 
 void CubicCongestionController::on_persistent_congestion() {
+    hystart_.disable();
     congestion_window_ = minimum_window();
     slow_start_threshold_ = congestion_window_;
     w_max_segments_ = smss_segments(congestion_window_);

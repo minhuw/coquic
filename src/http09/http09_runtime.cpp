@@ -1635,6 +1635,25 @@ bool result_observes_stream_data_before_handshake_ready(const EndpointDriveState
     });
 }
 
+COQUIC_NO_PROFILE void
+note_server_early_stream_data_deferral(std::optional<QuicCoreTimePoint> &defer_output_until,
+                                       QuicCoreTimePoint input_time) {
+    defer_output_until =
+        std::max(defer_output_until.value_or(input_time),
+                 input_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs));
+}
+
+COQUIC_NO_PROFILE void
+maybe_note_server_early_stream_data_deferral(bool ok, bool observed_early_stream_data,
+                                             std::optional<QuicCoreTimePoint> &defer_output_until,
+                                             QuicCoreTimePoint input_time) {
+    if (!ok || !observed_early_stream_data) {
+        return;
+    }
+
+    note_server_early_stream_data_deferral(defer_output_until, input_time);
+}
+
 bool observe_client_runtime_policy_effects(const QuicCoreResult &result, EndpointDriveState &state,
                                            ClientRuntimePolicyState &policy,
                                            ClientSocketSet &client_sockets,
@@ -3709,11 +3728,6 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
                                    ServerConnectionEndpointMap &endpoints, QuicIoBackend &backend) {
     std::vector<QuicIoTxDatagram> deferred_output;
     std::optional<QuicCoreTimePoint> defer_output_until;
-    const auto note_early_stream_data = [&](QuicCoreTimePoint input_time) {
-        defer_output_until =
-            std::max(defer_output_until.value_or(input_time),
-                     input_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs));
-    };
     const auto flush_deferred_output = [&]() -> bool {
         if (deferred_output.empty()) {
             defer_output_until.reset();
@@ -3732,9 +3746,8 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
         const bool ok = process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
             datagram.route_handle, backend, nullptr, &deferred_output, &observed_early_stream_data);
-        if (ok && observed_early_stream_data) {
-            note_early_stream_data(input_time);
-        }
+        maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data,
+                                                     defer_output_until, input_time);
         return ok;
     };
     const auto process_path_mtu_update = [&](const QuicIoPathMtuUpdate &update,
@@ -3749,9 +3762,8 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
         const bool ok = process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
             update.route_handle, backend, nullptr, &deferred_output, &observed_early_stream_data);
-        if (ok && observed_early_stream_data) {
-            note_early_stream_data(input_time);
-        }
+        maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data,
+                                                     defer_output_until, input_time);
         return ok;
     };
 
@@ -3777,9 +3789,8 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
                     core, transport_state, endpoints, config.document_root,
                     core.advance_endpoint(QuicCoreTimerExpired{}, current), std::nullopt, backend,
                     nullptr, &deferred_output, &observed_early_stream_data);
-                if (ok && observed_early_stream_data) {
-                    note_early_stream_data(current);
-                }
+                maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data,
+                                                             defer_output_until, current);
                 return ok;
             },
         .process_datagram = process_server_datagram,
@@ -5579,6 +5590,11 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
             .kind = QuicIoEvent::Kind::timer_expired,
             .now = event_time,
         });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::timer_due_before_wait_then_wait_failure:
+        start_result.next_wakeup = event_time;
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
         break;
     case ClientConnectionBackendLoopCaseForTests::timer_due_before_wait_then_drive_failure:
         start_result.next_wakeup = event_time;
@@ -10584,6 +10600,30 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                 !result_has_connection_lifecycle(result, 4, QuicCoreConnectionLifecycle::accepted));
         check("result connection helpers ignore transport-wide local errors without connections",
               transport_handles == std::vector<QuicConnectionHandle>{11});
+    }
+
+    {
+        EndpointDriveState state;
+        QuicCoreResult duplicate_ready;
+        duplicate_ready.effects.emplace_back(QuicCoreStateEvent{
+            .connection = 13,
+            .change = QuicCoreStateChange::handshake_ready,
+        });
+        duplicate_ready.effects.emplace_back(QuicCoreStateEvent{
+            .connection = 13,
+            .change = QuicCoreStateChange::handshake_ready,
+        });
+        check("handshake-ready observation treats repeated ready events as already observed",
+              result_observes_new_handshake_ready(state, duplicate_ready) &
+                  !result_observes_new_handshake_ready(state, duplicate_ready));
+
+        std::optional<QuicCoreTimePoint> defer_output_until;
+        const auto defer_base_time = now();
+        note_server_early_stream_data_deferral(defer_output_until, defer_base_time);
+        check("server early-data deferral records a grace deadline",
+              defer_output_until ==
+                  std::optional<QuicCoreTimePoint>{
+                      defer_base_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs)});
     }
 
     {

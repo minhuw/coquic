@@ -464,6 +464,15 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_FALSE(timer_event_then_wait_failure.terminal_failure);
     EXPECT_EQ(timer_event_then_wait_failure.wait_calls, 2U);
 
+    const auto timer_due_before_wait_then_wait_failure =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
+                timer_due_before_wait_then_wait_failure);
+    EXPECT_EQ(timer_due_before_wait_then_wait_failure.exit_code, 1);
+    EXPECT_FALSE(timer_due_before_wait_then_wait_failure.terminal_success);
+    EXPECT_FALSE(timer_due_before_wait_then_wait_failure.terminal_failure);
+    EXPECT_EQ(timer_due_before_wait_then_wait_failure.wait_calls, 1U);
+
     const auto timer_due_before_wait_then_drive_failure =
         coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
             coquic::http09::test::ClientConnectionBackendLoopCaseForTests::

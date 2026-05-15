@@ -83,6 +83,7 @@ enum class ClientConnectionBackendLoopCaseForTests : std::uint8_t {
     shutdown,
     missing_rx_datagram,
     timer_event_then_wait_failure,
+    timer_due_before_wait_then_wait_failure,
     timer_due_before_wait_then_drive_failure,
     timer_event_then_drive_failure,
     timer_event_then_terminal_success,

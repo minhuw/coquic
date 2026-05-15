@@ -31,9 +31,10 @@ inline constexpr double kTimeThreshold = 9.0 / 8.0;
 inline constexpr std::chrono::milliseconds kGranularity{1};
 inline constexpr std::chrono::milliseconds kInitialRtt{333};
 
-struct SentPacketRecord {
+struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     std::uint64_t packet_number = 0;
     QuicCoreTimePoint sent_time{};
+    std::uint64_t congestion_send_sequence = 0;
     bool ack_eliciting = false;
     bool in_flight = false;
     bool declared_lost = false;

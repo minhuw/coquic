@@ -56,6 +56,11 @@ grep -F '### BBR' "${output}" >/dev/null || {
   exit 1
 }
 
+grep -F '### CUBIC' "${output}" >/dev/null || {
+  echo 'missing CUBIC table heading' >&2
+  exit 1
+}
+
 grep -F '| socket | bulk | ok | 42 | 1.234 | 0.000 | 0 | 0 | smoke-newreno-socket-bulk-s1-c1-q1.json |' "${output}" >/dev/null || {
   echo 'missing NewReno bulk row' >&2
   exit 1
@@ -68,6 +73,21 @@ grep -F '| socket | rr | ok | 98 | 0.025 | 326.531 | 5565 | 21820 | smoke-newren
 
 grep -F '| socket | crr | ok | 64 | 0.018 | 125.000 | 7400 | 9800 | smoke-newreno-socket-crr-s1-c2-q1.json |' "${output}" >/dev/null || {
   echo 'missing NewReno crr row' >&2
+  exit 1
+}
+
+grep -F '| socket | bulk | ok | 42 | 1.234 | 0.000 | 0 | 0 | smoke-cubic-socket-bulk-s1-c1-q1.json |' "${output}" >/dev/null || {
+  echo 'missing CUBIC bulk row' >&2
+  exit 1
+}
+
+grep -F '| socket | rr | ok | 98 | 0.025 | 326.531 | 5565 | 21820 | smoke-cubic-socket-rr-s1-c1-q4.json |' "${output}" >/dev/null || {
+  echo 'missing CUBIC rr row' >&2
+  exit 1
+}
+
+grep -F '| socket | crr | ok | 64 | 0.018 | 125.000 | 7400 | 9800 | smoke-cubic-socket-crr-s1-c2-q1.json |' "${output}" >/dev/null || {
+  echo 'missing CUBIC crr row' >&2
   exit 1
 }
 

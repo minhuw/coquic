@@ -115,7 +115,7 @@ TEST(QuicPerfConfigTest, ParsesAndPropagatesCongestionControlSelection) {
         "--total-bytes",
         "65536",
         "--congestion-control",
-        "bbr",
+        "cubic",
     };
 
     const auto config =
@@ -123,14 +123,14 @@ TEST(QuicPerfConfigTest, ParsesAndPropagatesCongestionControlSelection) {
 
     ASSERT_TRUE(config.has_value());
     const auto parsed = config.value_or(QuicPerfConfig{});
-    EXPECT_EQ(parsed.congestion_control, coquic::quic::QuicCongestionControlAlgorithm::bbr);
+    EXPECT_EQ(parsed.congestion_control, coquic::quic::QuicCongestionControlAlgorithm::cubic);
 
     const auto client = make_perf_client_endpoint_config(QuicPerfConfig{
         .role = QuicPerfRole::client,
-        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::cubic,
     });
     EXPECT_EQ(client.transport.congestion_control,
-              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+              coquic::quic::QuicCongestionControlAlgorithm::cubic);
 
     const auto server = make_perf_server_endpoint_config(QuicPerfConfig{
         .role = QuicPerfRole::server,

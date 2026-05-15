@@ -262,7 +262,7 @@ TEST(QuicHttp3InteropTest, ParsesAndRejectsCongestionControlFromEnvironment) {
     }
 
     {
-        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "cubic");
+        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "vegas");
         EXPECT_FALSE(
             coquic::http3::parse_http3_interop_args(2, const_cast<char **>(argv)).has_value());
     }

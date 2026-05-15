@@ -70,6 +70,8 @@ def row(record: dict) -> str:
 def algorithm_display_name(algorithm: str) -> str:
     if algorithm == "newreno":
         return "NewReno"
+    if algorithm == "cubic":
+        return "CUBIC"
     if algorithm == "bbr":
         return "BBR"
     return algorithm
@@ -78,7 +80,8 @@ def algorithm_display_name(algorithm: str) -> str:
 def algorithm_sort_key(algorithm: str) -> tuple[int, str]:
     order = {
         "newreno": 0,
-        "bbr": 1,
+        "cubic": 1,
+        "bbr": 2,
     }
     return (order.get(algorithm, 100), algorithm)
 

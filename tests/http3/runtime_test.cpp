@@ -1451,13 +1451,13 @@ TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsMissingAndUnsupportedSubcommands)
 
 TEST(QuicHttp3RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection) {
     const char *argv[] = {
-        "coquic-http3", "h3-client", "https://localhost:9443/ok", "--congestion-control", "bbr",
+        "coquic-http3", "h3-client", "https://localhost:9443/ok", "--congestion-control", "cubic",
     };
     const auto parsed = coquic::http3::parse_http3_runtime_args(static_cast<int>(std::size(argv)),
                                                                 const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
-              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+              coquic::quic::QuicCongestionControlAlgorithm::cubic);
 
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -1496,7 +1496,7 @@ TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsInvalidCongestionControlArguments
     {
         const char *argv[] = {
             "coquic-http3",         "h3-client", "https://localhost:9443/ok",
-            "--congestion-control", "cubic",
+            "--congestion-control", "vegas",
         };
         const auto parsed = coquic::http3::parse_http3_runtime_args(
             static_cast<int>(std::size(argv)), const_cast<char **>(argv));

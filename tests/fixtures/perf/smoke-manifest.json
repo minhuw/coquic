@@ -69,6 +69,57 @@
         "p50_us": 0,
         "p99_us": 0
       },
+      "result_file": "smoke-cubic-socket-bulk-s1-c1-q1.json",
+      "summary_file": "smoke-cubic-socket-bulk-s1-c1-q1.txt",
+      "congestion_control": "cubic"
+    },
+    {
+      "schema_version": 1,
+      "status": "ok",
+      "mode": "rr",
+      "direction": "download",
+      "backend": "socket",
+      "elapsed_ms": 98,
+      "throughput_mib_per_s": 0.025,
+      "requests_per_s": 326.531,
+      "latency": {
+        "p50_us": 5565,
+        "p99_us": 21820
+      },
+      "result_file": "smoke-cubic-socket-rr-s1-c1-q4.json",
+      "summary_file": "smoke-cubic-socket-rr-s1-c1-q4.txt",
+      "congestion_control": "cubic"
+    },
+    {
+      "schema_version": 1,
+      "status": "ok",
+      "mode": "crr",
+      "direction": "download",
+      "backend": "socket",
+      "elapsed_ms": 64,
+      "throughput_mib_per_s": 0.018,
+      "requests_per_s": 125.0,
+      "latency": {
+        "p50_us": 7400,
+        "p99_us": 9800
+      },
+      "result_file": "smoke-cubic-socket-crr-s1-c2-q1.json",
+      "summary_file": "smoke-cubic-socket-crr-s1-c2-q1.txt",
+      "congestion_control": "cubic"
+    },
+    {
+      "schema_version": 1,
+      "status": "ok",
+      "mode": "bulk",
+      "direction": "download",
+      "backend": "socket",
+      "elapsed_ms": 42,
+      "throughput_mib_per_s": 1.234,
+      "requests_per_s": 0.0,
+      "latency": {
+        "p50_us": 0,
+        "p99_us": 0
+      },
       "result_file": "smoke-bbr-socket-bulk-s1-c1-q1.json",
       "summary_file": "smoke-bbr-socket-bulk-s1-c1-q1.txt",
       "congestion_control": "bbr"
@@ -110,6 +161,7 @@
   ],
   "congestion_controls": [
     "newreno",
+    "cubic",
     "bbr"
   ]
 }

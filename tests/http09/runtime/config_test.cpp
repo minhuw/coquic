@@ -756,12 +756,12 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection
 
     {
         const char *argv[] = {"coquic", "interop-client", "--congestion-control",
-                              "bbr",    "--requests",     "https://localhost/a.txt"};
+                              "cubic",  "--requests",     "https://localhost/a.txt"};
         const auto parsed = coquic::http09::parse_http09_runtime_args(
             static_cast<int>(std::size(argv)), const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
-                  coquic::quic::QuicCongestionControlAlgorithm::bbr);
+                  coquic::quic::QuicCongestionControlAlgorithm::cubic);
     }
 
     const auto client_runtime = coquic::http09::Http09RuntimeConfig{
@@ -789,7 +789,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidCongestionControlSelection) {
         const char *argv[] = {"coquic"};
         ScopedEnvVar role("ROLE", "client");
         ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
-        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "cubic");
+        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "vegas");
 
         const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
         EXPECT_FALSE(parsed.has_value());
@@ -797,7 +797,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidCongestionControlSelection) {
 
     {
         const char *argv[] = {"coquic", "interop-client", "--congestion-control",
-                              "cubic",  "--requests",     "https://localhost/a.txt"};
+                              "vegas",  "--requests",     "https://localhost/a.txt"};
         const auto parsed = coquic::http09::parse_http09_runtime_args(
             static_cast<int>(std::size(argv)), const_cast<char **>(argv));
         EXPECT_FALSE(parsed.has_value());

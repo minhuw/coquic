@@ -21,7 +21,7 @@ grep -F -- 'image_tag="${PERF_IMAGE_TAG:-coquic-perf:quictls-musl}"' "${script}"
   exit 1
 }
 
-grep -F -- 'congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno bbr}"' "${script}" >/dev/null || {
+grep -F -- 'congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr}"' "${script}" >/dev/null || {
   echo 'missing congestion-control default in harness script' >&2
   exit 1
 }
@@ -331,7 +331,7 @@ case "$1" in
       fi
     done
     case "${congestion_control}" in
-      newreno|bbr)
+      newreno|cubic|bbr)
         ;;
       *)
         echo "unexpected congestion-control: ${congestion_control}; args=${args[*]}" >&2
@@ -410,6 +410,9 @@ for run_name in \
   smoke-newreno-socket-bulk-s1-c1-q1 \
   smoke-newreno-socket-rr-s1-c1-q4 \
   smoke-newreno-socket-crr-s1-c2-q1 \
+  smoke-cubic-socket-bulk-s1-c1-q1 \
+  smoke-cubic-socket-rr-s1-c1-q4 \
+  smoke-cubic-socket-crr-s1-c2-q1 \
   smoke-bbr-socket-bulk-s1-c1-q1 \
   smoke-bbr-socket-rr-s1-c1-q4 \
   smoke-bbr-socket-crr-s1-c2-q1
@@ -478,6 +481,11 @@ grep -F -- '--congestion-control newreno' "${log_path}" >/dev/null || {
   exit 1
 }
 
+grep -F -- '--congestion-control cubic' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test missing CUBIC congestion-control argument' >&2
+  exit 1
+}
+
 grep -F -- '--congestion-control bbr' "${log_path}" >/dev/null || {
   echo 'behavioral harness test missing BBR congestion-control argument' >&2
   exit 1
@@ -500,12 +508,12 @@ if manifest.get("image_tag") != "coquic-perf:quictls-musl":
     raise SystemExit("manifest missing perf image tag")
 if manifest.get("image_attr") != "perf-image-quictls-musl":
     raise SystemExit("manifest missing perf image attr")
-if manifest.get("congestion_controls") != ["newreno", "bbr"]:
+if manifest.get("congestion_controls") != ["newreno", "cubic", "bbr"]:
     raise SystemExit("manifest missing congestion-control list")
-if len(manifest.get("runs", [])) != 6:
+if len(manifest.get("runs", [])) != 9:
     raise SystemExit("manifest missing per-algorithm smoke runs")
 seen = {run.get("congestion_control") for run in manifest.get("runs", [])}
-if seen != {"newreno", "bbr"}:
+if seen != {"newreno", "cubic", "bbr"}:
     raise SystemExit("manifest missing per-run congestion-control values")
 PY
 

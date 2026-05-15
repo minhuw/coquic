@@ -27,6 +27,7 @@ namespace coquic::quic {
 
 enum class QuicCongestionControlAlgorithm : std::uint8_t {
     newreno,
+    cubic,
     bbr,
 };
 

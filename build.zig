@@ -129,6 +129,10 @@ fn addProjectLibrary(
     var files = std.ArrayList([]const u8).init(b.allocator);
     files.appendSlice(&.{
         "src/quic/buffer.cpp",
+        "src/quic/cca/bbr.cpp",
+        "src/quic/cca/common.cpp",
+        "src/quic/cca/cubic.cpp",
+        "src/quic/cca/newreno.cpp",
         "src/quic/congestion.cpp",
         "src/quic/connection.cpp",
         "src/quic/core.cpp",
@@ -185,6 +189,10 @@ fn addProjectLibrary(
 fn wasmQuicSourceFiles() []const []const u8 {
     return &.{
         "src/quic/buffer.cpp",
+        "src/quic/cca/bbr.cpp",
+        "src/quic/cca/common.cpp",
+        "src/quic/cca/cubic.cpp",
+        "src/quic/cca/newreno.cpp",
         "src/quic/congestion.cpp",
         "src/quic/connection.cpp",
         "src/quic/core.cpp",

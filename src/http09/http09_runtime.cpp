@@ -85,7 +85,7 @@ using io::test::socket_io_backend_send_datagram_for_runtime_tests;
 namespace {
 
 constexpr std::size_t kMinimumClientInitialDatagramBytes = 1200;
-constexpr std::size_t kRuntimeMaxOutboundDatagramBytes = 1472;
+constexpr std::size_t kRuntimeMaxOutboundDatagramBytes = 1452;
 constexpr std::size_t kRuntimeConnectionIdLength = 8;
 constexpr int kDefaultClientReceiveTimeoutMs = 30000;
 constexpr int kMulticonnectClientReceiveTimeoutMs = 180000;

@@ -792,6 +792,7 @@ TEST(QuicCoreTest, ApplicationSendIgnoresMissingCurrentSendPathValidationState) 
     ASSERT_TRUE(
         connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("payload"), false)
             .has_value());
+    EXPECT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(1)));
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 

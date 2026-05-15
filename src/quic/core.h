@@ -29,6 +29,7 @@ enum class QuicCongestionControlAlgorithm : std::uint8_t {
     newreno,
     cubic,
     bbr,
+    copa,
 };
 
 std::string_view congestion_control_algorithm_name(QuicCongestionControlAlgorithm algorithm);

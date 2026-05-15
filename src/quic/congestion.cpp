@@ -9,6 +9,9 @@ std::string_view congestion_control_algorithm_name(QuicCongestionControlAlgorith
     if (algorithm == QuicCongestionControlAlgorithm::bbr) {
         return "bbr";
     }
+    if (algorithm == QuicCongestionControlAlgorithm::copa) {
+        return "copa";
+    }
     return "newreno";
 }
 
@@ -23,6 +26,9 @@ parse_congestion_control_algorithm(std::string_view value) {
     if (value == "bbr") {
         return QuicCongestionControlAlgorithm::bbr;
     }
+    if (value == "copa") {
+        return QuicCongestionControlAlgorithm::copa;
+    }
     return std::nullopt;
 }
 
@@ -36,6 +42,10 @@ QuicCongestionController::QuicCongestionController(QuicCongestionControlAlgorith
     }
     if (algorithm == QuicCongestionControlAlgorithm::bbr) {
         storage_.emplace<BbrCongestionController>(max_datagram_size);
+        return;
+    }
+    if (algorithm == QuicCongestionControlAlgorithm::copa) {
+        storage_.emplace<CopaCongestionController>(max_datagram_size);
     }
 }
 
@@ -69,6 +79,9 @@ QuicCongestionControlAlgorithm QuicCongestionController::algorithm() const {
     }
     if (std::holds_alternative<BbrCongestionController>(storage_)) {
         return QuicCongestionControlAlgorithm::bbr;
+    }
+    if (std::holds_alternative<CopaCongestionController>(storage_)) {
+        return QuicCongestionControlAlgorithm::copa;
     }
     return QuicCongestionControlAlgorithm::newreno;
 }

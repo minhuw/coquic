@@ -96,7 +96,7 @@ constexpr std::string_view kProjectName = "coquic";
 constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
-    "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr] "
+    "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr|copa] "
     "[--testcase "
     "handshake|transfer|keyupdate|amplificationlimit|rebind-port|rebind-addr|"
     "connectionmigration|ecn|multiconnect|chacha20|retry|resumption|zerortt|v2] "

@@ -51,8 +51,8 @@ server and client containers on a Docker bridge network with `--cpuset-cpus`,
 writes per-run text and JSON files plus `.bench-results/manifest.json`, and
 records `.bench-results/environment.txt` with runner and Docker details that
 help interpret noisy GitHub-hosted measurements. By default the matrix runs each
-tuple once with NewReno, once with CUBIC, and once with BBR, using matching `--congestion-control`
-settings on both endpoints. The bridge network avoids host-loopback-only
+tuple once with NewReno, once with CUBIC, once with BBR, and once with Copa,
+using matching `--congestion-control` settings on both endpoints. The bridge network avoids host-loopback-only
 behavior such as oversized loopback MTU.
 
 Useful environment overrides:
@@ -64,4 +64,4 @@ Useful environment overrides:
 - `PERF_PORT` to move the benchmark listener port
 - `PERF_RUN_TIMEOUT_SECONDS` to adjust the per-client container timeout
 - `PERF_CONGESTION_CONTROLS` to choose algorithms, for example `bbr` or
-  `newreno cubic bbr`
+  `newreno cubic bbr copa`

@@ -21,7 +21,7 @@ grep -F -- 'image_tag="${PERF_IMAGE_TAG:-coquic-perf:quictls-musl}"' "${script}"
   exit 1
 }
 
-grep -F -- 'congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr}"' "${script}" >/dev/null || {
+grep -F -- 'congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr copa}"' "${script}" >/dev/null || {
   echo 'missing congestion-control default in harness script' >&2
   exit 1
 }
@@ -331,7 +331,7 @@ case "$1" in
       fi
     done
     case "${congestion_control}" in
-      newreno|cubic|bbr)
+      newreno|cubic|bbr|copa)
         ;;
       *)
         echo "unexpected congestion-control: ${congestion_control}; args=${args[*]}" >&2
@@ -415,7 +415,10 @@ for run_name in \
   smoke-cubic-socket-crr-s1-c2-q1 \
   smoke-bbr-socket-bulk-s1-c1-q1 \
   smoke-bbr-socket-rr-s1-c1-q4 \
-  smoke-bbr-socket-crr-s1-c2-q1
+  smoke-bbr-socket-crr-s1-c2-q1 \
+  smoke-copa-socket-bulk-s1-c1-q1 \
+  smoke-copa-socket-rr-s1-c1-q4 \
+  smoke-copa-socket-crr-s1-c2-q1
   do
   [ -f "${results_root}/${run_name}.json" ] || {
     echo "behavioral harness test missing JSON result for ${run_name}" >&2
@@ -491,6 +494,11 @@ grep -F -- '--congestion-control bbr' "${log_path}" >/dev/null || {
   exit 1
 }
 
+grep -F -- '--congestion-control copa' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test missing Copa congestion-control argument' >&2
+  exit 1
+}
+
 if grep -F -- '--network host' "${log_path}" >/dev/null; then
   echo 'behavioral harness test unexpectedly used host networking' >&2
   exit 1
@@ -508,12 +516,12 @@ if manifest.get("image_tag") != "coquic-perf:quictls-musl":
     raise SystemExit("manifest missing perf image tag")
 if manifest.get("image_attr") != "perf-image-quictls-musl":
     raise SystemExit("manifest missing perf image attr")
-if manifest.get("congestion_controls") != ["newreno", "cubic", "bbr"]:
+if manifest.get("congestion_controls") != ["newreno", "cubic", "bbr", "copa"]:
     raise SystemExit("manifest missing congestion-control list")
-if len(manifest.get("runs", [])) != 9:
+if len(manifest.get("runs", [])) != 12:
     raise SystemExit("manifest missing per-algorithm smoke runs")
 seen = {run.get("congestion_control") for run in manifest.get("runs", [])}
-if seen != {"newreno", "cubic", "bbr"}:
+if seen != {"newreno", "cubic", "bbr", "copa"}:
     raise SystemExit("manifest missing per-run congestion-control values")
 PY
 

@@ -59,7 +59,7 @@ grep -F 'bash bench/run-host-matrix.sh --preset ci' "${workflow}" >/dev/null || 
   exit 1
 }
 
-grep -F 'Run QUIC Perf CI Matrix (NewReno + CUBIC + BBR)' "${workflow}" >/dev/null || {
+grep -F 'Run QUIC Perf CI Matrix (NewReno + CUBIC + BBR + Copa)' "${workflow}" >/dev/null || {
   echo 'missing congestion-control matrix label' >&2
   exit 1
 }

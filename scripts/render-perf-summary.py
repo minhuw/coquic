@@ -74,6 +74,8 @@ def algorithm_display_name(algorithm: str) -> str:
         return "CUBIC"
     if algorithm == "bbr":
         return "BBR"
+    if algorithm == "copa":
+        return "Copa"
     return algorithm
 
 
@@ -82,6 +84,7 @@ def algorithm_sort_key(algorithm: str) -> tuple[int, str]:
         "newreno": 0,
         "cubic": 1,
         "bbr": 2,
+        "copa": 3,
     }
     return (order.get(algorithm, 100), algorithm)
 

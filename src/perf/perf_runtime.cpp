@@ -19,7 +19,7 @@ constexpr std::uint64_t kPerfTransferStreamReceiveWindow = 16ull * 1024ull * 102
 constexpr std::uint64_t kPerfAckElicitingThreshold = 128;
 constexpr std::string_view kPerfUsageLine =
     "usage: coquic-perf [server|client] [--host HOST] [--port PORT] "
-    "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr] "
+    "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr|copa] "
     "[--mode bulk|rr|crr] "
     "[--direction upload|download] [--request-bytes N] [--response-bytes N] "
     "[--streams N] [--connections N] [--requests-in-flight N] [--requests N] "

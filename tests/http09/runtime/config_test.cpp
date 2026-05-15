@@ -734,12 +734,12 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection
         const char *argv[] = {"coquic"};
         ScopedEnvVar role("ROLE", "client");
         ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
-        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "bbr");
+        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "copa");
 
         const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
-                  coquic::quic::QuicCongestionControlAlgorithm::bbr);
+                  coquic::quic::QuicCongestionControlAlgorithm::copa);
     }
 
     {
@@ -756,22 +756,22 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection
 
     {
         const char *argv[] = {"coquic", "interop-client", "--congestion-control",
-                              "cubic",  "--requests",     "https://localhost/a.txt"};
+                              "copa",   "--requests",     "https://localhost/a.txt"};
         const auto parsed = coquic::http09::parse_http09_runtime_args(
             static_cast<int>(std::size(argv)), const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
-                  coquic::quic::QuicCongestionControlAlgorithm::cubic);
+                  coquic::quic::QuicCongestionControlAlgorithm::copa);
     }
 
     const auto client_runtime = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::client,
         .requests_env = "https://localhost/a.txt",
-        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::copa,
     };
     const auto client_core = coquic::http09::make_http09_client_core_config(client_runtime);
     EXPECT_EQ(client_core.transport.congestion_control,
-              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+              coquic::quic::QuicCongestionControlAlgorithm::copa);
 
     const auto server_runtime = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::server,

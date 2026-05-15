@@ -7,6 +7,7 @@
 #include <variant>
 
 #include "src/quic/cca/bbr.h"
+#include "src/quic/cca/copa.h"
 #include "src/quic/cca/cubic.h"
 #include "src/quic/cca/newreno.h"
 #include "src/quic/core.h"
@@ -84,7 +85,8 @@ class QuicCongestionController {
     void set_test_metric(bool congestion_window, std::size_t value);
     std::size_t test_metric(bool congestion_window) const;
 
-    std::variant<NewRenoCongestionController, CubicCongestionController, BbrCongestionController>
+    std::variant<NewRenoCongestionController, CubicCongestionController, BbrCongestionController,
+                 CopaCongestionController>
         storage_;
     TestMetricHandle congestion_window_{this, true};
     TestMetricHandle bytes_in_flight_{this, false};

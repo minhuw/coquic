@@ -16,6 +16,7 @@
 namespace {
 
 using coquic::quic::BbrCongestionController;
+using coquic::quic::CopaCongestionController;
 using coquic::quic::CubicCongestionController;
 using coquic::quic::NewRenoCongestionController;
 using coquic::quic::SentPacketRecord;
@@ -116,6 +117,12 @@ TEST(QuicCongestionTest, ParsesCongestionControlAlgorithms) {
     EXPECT_EQ(optional_ref_or_terminate(bbr), coquic::quic::QuicCongestionControlAlgorithm::bbr);
     EXPECT_EQ(coquic::quic::congestion_control_algorithm_name(optional_ref_or_terminate(bbr)),
               "bbr");
+
+    const auto copa = coquic::quic::parse_congestion_control_algorithm("copa");
+    ASSERT_TRUE(copa.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(copa), coquic::quic::QuicCongestionControlAlgorithm::copa);
+    EXPECT_EQ(coquic::quic::congestion_control_algorithm_name(optional_ref_or_terminate(copa)),
+              "copa");
 
     EXPECT_FALSE(coquic::quic::parse_congestion_control_algorithm("vegas").has_value());
 }
@@ -679,6 +686,387 @@ TEST(QuicCongestionTest, CubicAckBatchOrderDoesNotChangeRecoveryExit) {
     EXPECT_FALSE(controller.recovery_start_time_.has_value());
     EXPECT_EQ(controller.bytes_in_flight(), 0u);
     EXPECT_LT(controller.congestion_window(), 18000u);
+}
+
+TEST(QuicCongestionTest, CopaUsesDelayTargetToExitSlowStartAndPacesSends) {
+    CopaCongestionController controller(/*max_datagram_size=*/1200);
+    EXPECT_EQ(controller.congestion_window(), 12000u);
+    EXPECT_FALSE(controller.next_send_time(/*bytes=*/1200).has_value());
+
+    auto first = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                  /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                  coquic::quic::test::test_time(0));
+    controller.on_packet_sent(first);
+    EXPECT_EQ(controller.bytes_in_flight(), 1200u);
+
+    const auto ack_time = coquic::quic::test::test_time(100);
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{first}, /*app_limited=*/false,
+                                ack_time,
+                                coquic::quic::RecoveryRttState{
+                                    .latest_rtt = std::chrono::milliseconds{150},
+                                    .min_rtt = std::chrono::milliseconds{100},
+                                    .smoothed_rtt = std::chrono::milliseconds{150},
+                                });
+
+    EXPECT_FALSE(controller.slow_start_);
+    EXPECT_EQ(controller.congestion_window(), 7200u);
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+
+    auto second = make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                   /*in_flight=*/true, /*bytes_in_flight=*/1200, ack_time);
+    controller.on_packet_sent(second);
+    EXPECT_TRUE(controller.next_send_time(/*bytes=*/2400).has_value());
+
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{second}, /*app_limited=*/false,
+                                coquic::quic::test::test_time(250),
+                                coquic::quic::RecoveryRttState{
+                                    .latest_rtt = std::chrono::milliseconds{120},
+                                    .min_rtt = std::chrono::milliseconds{100},
+                                    .smoothed_rtt = std::chrono::milliseconds{120},
+                                });
+    EXPECT_GT(controller.congestion_window(), 7200u);
+}
+
+TEST(QuicCongestionTest, CopaReducesWindowWhenQueueDelayExceedsTarget) {
+    CopaCongestionController controller(/*max_datagram_size=*/1200);
+    controller.slow_start_ = false;
+    controller.congestion_window_ = 48000;
+    controller.latest_rtt_ = std::chrono::milliseconds{120};
+    controller.min_rtt_ = std::chrono::milliseconds{100};
+    controller.set_pacing_rate();
+
+    auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                   /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                   coquic::quic::test::test_time(0));
+    controller.on_packet_sent(packet);
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
+                                coquic::quic::test::test_time(150),
+                                coquic::quic::RecoveryRttState{
+                                    .latest_rtt = std::chrono::milliseconds{150},
+                                    .min_rtt = std::chrono::milliseconds{100},
+                                    .smoothed_rtt = std::chrono::milliseconds{150},
+                                });
+
+    EXPECT_LT(controller.congestion_window(), 48000u);
+    EXPECT_EQ(controller.update_direction_, -1);
+}
+
+TEST(QuicCongestionTest, CopaLossDiscardAndPersistentCongestionPaths) {
+    CopaCongestionController controller(/*max_datagram_size=*/1200);
+    controller.congestion_window_ = 24000;
+    controller.on_packet_sent(/*bytes_sent=*/1200, /*ack_eliciting=*/false);
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+
+    auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                   /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                   coquic::quic::test::test_time(1));
+    controller.on_packet_sent(packet);
+    EXPECT_EQ(controller.bytes_in_flight(), 1200u);
+
+    controller.on_packets_lost(std::array<SentPacketRecord, 1>{packet});
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+
+    controller.bytes_in_flight_ = 600;
+    controller.on_packets_discarded(std::array<SentPacketRecord, 2>{
+        make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true, /*in_flight=*/false,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(2)),
+        make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(3)),
+    });
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+
+    controller.congestion_window_ = 24000;
+    controller.on_loss_event(coquic::quic::test::test_time(10), packet.sent_time);
+    EXPECT_EQ(controller.congestion_window(), 16800u);
+    controller.on_loss_event(coquic::quic::test::test_time(11), packet.sent_time);
+    EXPECT_EQ(controller.congestion_window(), 16800u);
+
+    controller.on_persistent_congestion();
+    EXPECT_EQ(controller.congestion_window(), controller.minimum_window());
+    EXPECT_FALSE(controller.slow_start_);
+}
+
+TEST(QuicCongestionTest, CopaWrapperDispatchCoversAccessorsAndCopyMove) {
+    coquic::quic::QuicCongestionController wrapper(
+        coquic::quic::QuicCongestionControlAlgorithm::copa, /*max_datagram_size=*/1200);
+
+    EXPECT_EQ(wrapper.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::copa);
+    EXPECT_EQ(wrapper.name(), "copa");
+    EXPECT_EQ(wrapper.minimum_window(), 2400u);
+    EXPECT_TRUE(std::holds_alternative<CopaCongestionController>(wrapper.storage_));
+
+    auto packet = make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
+                                   /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                   coquic::quic::test::test_time(5));
+    wrapper.on_packet_sent(packet);
+    EXPECT_EQ(wrapper.bytes_in_flight(), 1200u);
+    EXPECT_TRUE(wrapper.can_send_ack_eliciting(1200));
+
+    wrapper.on_packets_acked(std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
+                             coquic::quic::test::test_time(155),
+                             coquic::quic::RecoveryRttState{
+                                 .latest_rtt = std::chrono::milliseconds{150},
+                                 .min_rtt = std::chrono::milliseconds{100},
+                                 .smoothed_rtt = std::chrono::milliseconds{150},
+                             });
+    EXPECT_EQ(wrapper.bytes_in_flight(), 0u);
+    EXPECT_EQ(wrapper.congestion_window(), 7200u);
+
+    auto copied = wrapper;
+    EXPECT_EQ(copied.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::copa);
+
+    auto assigned = coquic::quic::QuicCongestionController(
+        coquic::quic::QuicCongestionControlAlgorithm::newreno, /*max_datagram_size=*/1200);
+    assigned = wrapper;
+    EXPECT_EQ(assigned.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::copa);
+
+    auto moved = std::move(copied);
+    EXPECT_EQ(moved.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::copa);
+
+    auto move_assigned = coquic::quic::QuicCongestionController(
+        coquic::quic::QuicCongestionControlAlgorithm::bbr, /*max_datagram_size=*/1200);
+    move_assigned = std::move(assigned);
+    EXPECT_EQ(move_assigned.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::copa);
+
+    move_assigned.congestion_window_ = 48000;
+    move_assigned.bytes_in_flight_ = 1200;
+    EXPECT_EQ(move_assigned.congestion_window(), 48000u);
+    EXPECT_EQ(move_assigned.bytes_in_flight(), 1200u);
+
+    move_assigned.on_persistent_congestion();
+    EXPECT_EQ(move_assigned.congestion_window(), move_assigned.minimum_window());
+
+    move_assigned.reset_for_new_path();
+    EXPECT_EQ(move_assigned.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::copa);
+    EXPECT_EQ(move_assigned.congestion_window(), 12000u);
+    EXPECT_EQ(move_assigned.bytes_in_flight(), 0u);
+}
+
+TEST(QuicCongestionTest, CopaPacingBudgetAndAckGuardsCoverColdPaths) {
+    CopaCongestionController controller(/*max_datagram_size=*/1200);
+
+    auto non_ack_eliciting = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/false,
+                                              /*in_flight=*/false, /*bytes_in_flight=*/1200,
+                                              coquic::quic::test::test_time(1));
+    controller.on_packet_sent(non_ack_eliciting);
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+
+    controller.pacing_budget_timestamp_ = coquic::quic::test::test_time(10);
+    controller.pacing_budget_bytes_ = 2400;
+    EXPECT_FALSE(controller.next_send_time(/*bytes=*/0).has_value());
+    EXPECT_EQ(controller.next_send_time(/*bytes=*/1200), controller.pacing_budget_timestamp_);
+
+    controller.bytes_in_flight_ = controller.congestion_window();
+    EXPECT_FALSE(controller.next_send_time(/*bytes=*/1200).has_value());
+
+    controller.bytes_in_flight_ = 0;
+    controller.pacing_budget_bytes_ = 0;
+    controller.pacing_rate_bytes_per_second_ = 0.0;
+    EXPECT_FALSE(controller.next_send_time(/*bytes=*/1200).has_value());
+    EXPECT_EQ(controller.pacing_budget_at(coquic::quic::test::test_time(11)),
+              controller.pacing_budget_cap());
+
+    controller.pacing_rate_bytes_per_second_ = 1200000.0;
+    controller.pacing_budget_bytes_ = 3000;
+    EXPECT_EQ(controller.pacing_budget_at(coquic::quic::test::test_time(9)), 2400u);
+    controller.pacing_budget_bytes_ = 0;
+    EXPECT_EQ(controller.pacing_budget_at(coquic::quic::test::test_time(11)), 1200u);
+
+    controller.bytes_in_flight_ = 1200;
+    auto old_recovery = make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                         /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                         coquic::quic::test::test_time(2));
+    auto non_in_flight = make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                          /*in_flight=*/false, /*bytes_in_flight=*/1200,
+                                          coquic::quic::test::test_time(12));
+    auto app_limited = make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,
+                                        /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                        coquic::quic::test::test_time(13));
+    auto non_ack = make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/false,
+                                    /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                    coquic::quic::test::test_time(14));
+    app_limited.app_limited = true;
+    controller.recovery_start_time_ = coquic::quic::test::test_time(10);
+    controller.on_packets_acked(
+        std::array<SentPacketRecord, 4>{
+            old_recovery,
+            non_in_flight,
+            app_limited,
+            non_ack,
+        },
+        /*app_limited=*/true, coquic::quic::test::test_time(20),
+        coquic::quic::RecoveryRttState{
+            .latest_rtt = std::chrono::milliseconds{0},
+            .min_rtt = std::chrono::milliseconds{0},
+            .smoothed_rtt = std::chrono::milliseconds{0},
+        });
+    EXPECT_FALSE(controller.recovery_start_time_.has_value());
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+    EXPECT_EQ(controller.latest_rtt_, coquic::quic::kGranularity);
+    EXPECT_EQ(controller.min_rtt_, coquic::quic::kGranularity);
+
+    controller.latest_rtt_.reset();
+    controller.min_rtt_.reset();
+    auto cold_ack = make_sent_packet(/*packet_number=*/6, /*ack_eliciting=*/true,
+                                     /*in_flight=*/false, /*bytes_in_flight=*/1200,
+                                     coquic::quic::test::test_time(21));
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{cold_ack},
+                                /*app_limited=*/false, coquic::quic::test::test_time(22),
+                                coquic::quic::RecoveryRttState{
+                                    .smoothed_rtt = std::chrono::milliseconds{0},
+                                });
+    EXPECT_FALSE(controller.latest_rtt_.has_value());
+    EXPECT_FALSE(controller.min_rtt_.has_value());
+}
+
+TEST(QuicCongestionTest, CopaTargetRttAndVelocityBranchesAreCovered) {
+    CopaCongestionController controller(/*max_datagram_size=*/1200);
+
+    controller.latest_rtt_ = std::chrono::milliseconds{100};
+    controller.min_rtt_ = std::chrono::milliseconds{100};
+    EXPECT_FALSE(controller.target_window().finite);
+    controller.latest_rtt_.reset();
+    EXPECT_FALSE(controller.target_window().finite);
+    controller.latest_rtt_ = std::chrono::milliseconds{100};
+    controller.min_rtt_.reset();
+    EXPECT_FALSE(controller.target_window().finite);
+
+    controller.update_rtt_model(coquic::quic::RecoveryRttState{
+        .smoothed_rtt = std::chrono::milliseconds{80},
+    });
+    EXPECT_EQ(controller.latest_rtt_, std::chrono::milliseconds{80});
+    EXPECT_EQ(controller.min_rtt_, std::chrono::milliseconds{80});
+
+    controller.latest_rtt_ = std::chrono::milliseconds{0};
+    controller.min_rtt_ = std::chrono::milliseconds{0};
+    controller.congestion_window_ = 12000;
+    controller.set_pacing_rate();
+    EXPECT_GT(controller.pacing_rate_bytes_per_second_, 0.0);
+
+    controller.slow_start_ = true;
+    controller.congestion_window_ = 12000;
+    controller.grow_slow_start(/*acked_bytes=*/1200, CopaCongestionController::CopaTarget{
+                                                         .finite = true,
+                                                         .window = 24000,
+                                                     });
+    EXPECT_TRUE(controller.slow_start_);
+    EXPECT_EQ(controller.congestion_window(), 13200u);
+
+    controller.slow_start_ = false;
+    controller.latest_rtt_ = std::chrono::milliseconds{100};
+    controller.min_rtt_ = std::chrono::milliseconds{100};
+    controller.congestion_window_ = 12000;
+    controller.last_velocity_update_time_ = coquic::quic::test::test_time(100);
+    controller.update_direction_ = 1;
+    controller.previous_update_direction_ = 1;
+    controller.velocity_packets_ = 1.0;
+    controller.adjust_congestion_avoidance(/*acked_bytes=*/1200,
+                                           CopaCongestionController::CopaTarget{
+                                               .finite = false,
+                                           },
+                                           coquic::quic::test::test_time(150));
+    EXPECT_EQ(controller.velocity_packets_, 1.0);
+    EXPECT_EQ(controller.update_direction_, 2);
+
+    controller.adjust_congestion_avoidance(/*acked_bytes=*/1200,
+                                           CopaCongestionController::CopaTarget{
+                                               .finite = false,
+                                           },
+                                           coquic::quic::test::test_time(220));
+    EXPECT_GT(controller.velocity_packets_, 1.0);
+    EXPECT_EQ(controller.previous_update_direction_, 2);
+    EXPECT_EQ(controller.update_direction_, 1);
+
+    controller.update_direction_ = -1;
+    controller.previous_update_direction_ = 1;
+    controller.last_velocity_update_time_ = coquic::quic::test::test_time(220);
+    controller.adjust_congestion_avoidance(/*acked_bytes=*/1200,
+                                           CopaCongestionController::CopaTarget{
+                                               .finite = true,
+                                               .window = 2400,
+                                           },
+                                           coquic::quic::test::test_time(320));
+    EXPECT_EQ(controller.velocity_packets_, 1.0);
+    EXPECT_EQ(controller.previous_update_direction_, -1);
+
+    controller.congestion_window_ = 2401;
+    controller.adjust_congestion_avoidance(/*acked_bytes=*/1,
+                                           CopaCongestionController::CopaTarget{
+                                               .finite = true,
+                                               .window = 2400,
+                                           },
+                                           coquic::quic::test::test_time(321));
+    EXPECT_EQ(controller.congestion_window(), controller.minimum_window());
+
+    controller.congestion_window_ = 2400;
+    controller.on_loss_event(coquic::quic::test::test_time(400),
+                             coquic::quic::test::test_time(401));
+    EXPECT_EQ(controller.congestion_window(), controller.minimum_window());
+}
+
+TEST(QuicCongestionTest, CopaResidualCoverageBranches) {
+    CopaCongestionController controller(/*max_datagram_size=*/1200);
+
+    auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                   /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                   coquic::quic::test::test_time(1));
+    controller.on_packet_sent(packet);
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false);
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+
+    controller.latest_rtt_.reset();
+    controller.min_rtt_ = std::chrono::milliseconds{100};
+    controller.bytes_in_flight_ = 1200;
+    auto no_latest_rtt = make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                          /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                          coquic::quic::test::test_time(2));
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{no_latest_rtt},
+                                /*app_limited=*/false, coquic::quic::test::test_time(3),
+                                coquic::quic::RecoveryRttState{
+                                    .smoothed_rtt = std::chrono::milliseconds{0},
+                                });
+    EXPECT_FALSE(controller.latest_rtt_.has_value());
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+
+    controller.latest_rtt_ = std::chrono::milliseconds{100};
+    controller.min_rtt_.reset();
+    controller.bytes_in_flight_ = 1200;
+    auto no_min_rtt = make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                       /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                       coquic::quic::test::test_time(3));
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{no_min_rtt},
+                                /*app_limited=*/false, coquic::quic::test::test_time(4),
+                                coquic::quic::RecoveryRttState{
+                                    .smoothed_rtt = std::chrono::milliseconds{0},
+                                });
+    EXPECT_EQ(controller.min_rtt_, std::chrono::milliseconds{100});
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+
+    controller.recovery_start_time_ = coquic::quic::test::test_time(10);
+    controller.on_loss_event(coquic::quic::test::test_time(20), coquic::quic::test::test_time(11));
+    EXPECT_EQ(controller.recovery_start_time_, coquic::quic::test::test_time(20));
+
+    auto app_limited_recovery_exit =
+        make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true, /*in_flight=*/false,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(21));
+    app_limited_recovery_exit.app_limited = true;
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{app_limited_recovery_exit},
+                                /*app_limited=*/true, coquic::quic::test::test_time(22),
+                                coquic::quic::RecoveryRttState{});
+    EXPECT_FALSE(controller.recovery_start_time_.has_value());
+
+    controller.pacing_budget_timestamp_ = coquic::quic::test::test_time(30);
+    controller.pacing_budget_bytes_ = 1000;
+    controller.consume_pacing_budget(/*bytes=*/1000, coquic::quic::test::test_time(30));
+    EXPECT_EQ(controller.pacing_budget_bytes_, 0u);
+
+    controller.latest_rtt_ = std::chrono::milliseconds{100};
+    controller.min_rtt_ = std::chrono::milliseconds{100};
+    controller.last_velocity_update_time_ = coquic::quic::test::test_time(40);
+    controller.previous_update_direction_ = 1;
+    controller.update_direction_ = 0;
+    controller.update_velocity(coquic::quic::test::test_time(140));
+    EXPECT_EQ(controller.previous_update_direction_, 1);
 }
 
 TEST(QuicCongestionTest, BbrSamplesBandwidthAndTracksMinimumRttFromAckedPackets) {

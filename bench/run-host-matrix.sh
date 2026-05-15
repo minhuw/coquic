@@ -14,7 +14,7 @@ server_cpus="${PERF_SERVER_CPUS:-2}"
 client_cpus="${PERF_CLIENT_CPUS:-3}"
 port="${PERF_PORT:-9443}"
 run_timeout_seconds="${PERF_RUN_TIMEOUT_SECONDS:-120}"
-congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr}"
+congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr copa}"
 preset="smoke"
 network_name=''
 server_name=''
@@ -32,7 +32,7 @@ environment overrides:
   PERF_CLIENT_CPUS           Docker cpuset for client container (default: 3)
   PERF_PORT                  UDP port for server/client (default: 9443)
   PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
-  PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr")
+  PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
 USAGE
 }
 
@@ -86,7 +86,7 @@ read -r -a congestion_control_list <<<"${congestion_controls}"
 }
 for congestion_control in "${congestion_control_list[@]}"; do
   case "${congestion_control}" in
-    newreno|cubic|bbr)
+    newreno|cubic|bbr|copa)
       ;;
     *)
       echo "unsupported congestion-control algorithm: ${congestion_control}" >&2

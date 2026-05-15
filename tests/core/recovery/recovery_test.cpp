@@ -76,6 +76,15 @@ struct PacketSpaceRecoveryTestPeer {
         return recovery.next_packet_threshold_loss_slot_;
     }
 
+    static std::uint64_t packet_reordering_threshold(const PacketSpaceRecovery &recovery) {
+        return recovery.packet_reordering_threshold_;
+    }
+
+    static std::chrono::milliseconds
+    time_reordering_threshold(const PacketSpaceRecovery &recovery) {
+        return recovery.time_reordering_threshold_;
+    }
+
     static AckApplyResult
     apply_ack_received_descending_fast(PacketSpaceRecovery &recovery,
                                        std::span<const AckPacketNumberRange> ack_ranges_descending,
@@ -88,6 +97,7 @@ struct PacketSpaceRecoveryTestPeer {
         PacketSpaceRecovery &recovery, std::span<const AckPacketNumberRange> ack_ranges_descending,
         std::uint64_t largest_acknowledged, QuicCoreTimePoint now) {
         auto state = recovery.begin_ack_received_apply(largest_acknowledged);
+        state.now = now;
         for (const auto &range : ack_ranges_descending) {
             recovery.apply_ack_range_descending(state, range);
         }
@@ -118,13 +128,18 @@ struct PacketSpaceRecoveryTestPeer {
                 continue;
             }
 
-            if (!is_packet_threshold_lost(packet_number, state.effective_largest_acked) &&
-                !is_time_threshold_lost(recovery.rtt_state_, slot.packet.sent_time, now)) {
+            if (!recovery.is_packet_threshold_lost(packet_number, state.effective_largest_acked) &&
+                !recovery.is_time_threshold_lost(slot.packet.sent_time, now)) {
                 slot_index = next_live_slot;
                 continue;
             }
 
             recovery.erase_from_tracked_sets(slot.packet);
+            if (recovery.is_packet_threshold_lost(packet_number, state.effective_largest_acked)) {
+                recovery.note_packet_threshold_loss(slot.packet, state.effective_largest_acked);
+            } else {
+                recovery.note_time_threshold_loss(slot.packet, now);
+            }
             slot.state = PacketSpaceRecovery::LedgerSlotState::declared_lost;
             state.result.lost_packets.push_back(recovery.packet_handle(slot, slot_index));
             state.mutated = true;
@@ -953,6 +968,109 @@ TEST(QuicRecoveryTest, PacketThresholdLossFrontierAdvancesAcrossAckBatches) {
     EXPECT_EQ(
         coquic::quic::test::PacketSpaceRecoveryTestPeer::next_packet_threshold_loss_slot(recovery),
         2u);
+}
+
+TEST(QuicRecoveryTest, PacketThresholdLossMarksCauseForAdaptiveReordering) {
+    PacketSpaceRecovery recovery;
+    for (std::uint64_t packet_number = 0; packet_number <= 3; ++packet_number) {
+        recovery.on_packet_sent(make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number))));
+    }
+
+    const auto result =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(10));
+
+    ASSERT_EQ(result.lost_packets.size(), 1u);
+    EXPECT_EQ(result.lost_packets.front().packet_number, 0u);
+    const auto *lost = recovery.find_packet(0);
+    ASSERT_NE(lost, nullptr);
+    EXPECT_TRUE(lost->lost_by_packet_threshold);
+    EXPECT_EQ(lost->packet_threshold_largest_acked, 3u);
+}
+
+TEST(QuicRecoveryTest, LateAckedPacketThresholdLossRaisesReorderingThreshold) {
+    PacketSpaceRecovery recovery;
+    for (std::uint64_t packet_number = 0; packet_number <= 7; ++packet_number) {
+        recovery.on_packet_sent(make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number))));
+    }
+
+    const auto reordered =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(10));
+    EXPECT_EQ(packet_numbers_from(reordered.lost_packets), (std::vector<std::uint64_t>{0}));
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::packet_reordering_threshold(recovery),
+        coquic::quic::kPacketThreshold);
+
+    const auto late =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/0), coquic::quic::test::test_time(11));
+    EXPECT_EQ(packet_numbers_from(late.late_acked_packets), (std::vector<std::uint64_t>{0}));
+    EXPECT_TRUE(late.lost_packets.empty());
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::packet_reordering_threshold(recovery), 4u);
+
+    const auto same_distance =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/4), coquic::quic::test::test_time(12));
+    EXPECT_EQ(packet_numbers_from(same_distance.acked_packets), (std::vector<std::uint64_t>{4}));
+    EXPECT_TRUE(same_distance.lost_packets.empty());
+
+    const auto larger_distance =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/5), coquic::quic::test::test_time(13));
+    EXPECT_EQ(packet_numbers_from(larger_distance.acked_packets), (std::vector<std::uint64_t>{5}));
+    EXPECT_EQ(packet_numbers_from(larger_distance.lost_packets), (std::vector<std::uint64_t>{1}));
+}
+
+TEST(QuicRecoveryTest, TimeThresholdLossMarksCauseForAdaptiveReordering) {
+    PacketSpaceRecovery recovery;
+    recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().smoothed_rtt = std::chrono::milliseconds(10);
+
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+
+    const auto result =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/1), coquic::quic::test::test_time(12));
+
+    ASSERT_EQ(result.lost_packets.size(), 1u);
+    EXPECT_EQ(result.lost_packets.front().packet_number, 0u);
+    const auto *lost = recovery.find_packet(0);
+    ASSERT_NE(lost, nullptr);
+    EXPECT_FALSE(lost->lost_by_packet_threshold);
+    EXPECT_TRUE(lost->lost_by_time_threshold);
+    EXPECT_EQ(lost->time_threshold_loss_time, coquic::quic::test::test_time(12));
+}
+
+TEST(QuicRecoveryTest, LateAckedTimeThresholdLossRaisesReorderingThreshold) {
+    PacketSpaceRecovery recovery;
+    recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().smoothed_rtt = std::chrono::milliseconds(10);
+
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(0)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(2)));
+
+    const auto loss =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/1), coquic::quic::test::test_time(12));
+    EXPECT_EQ(packet_numbers_from(loss.lost_packets), (std::vector<std::uint64_t>{0}));
+    EXPECT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::time_reordering_threshold(recovery),
+              std::chrono::milliseconds(0));
+
+    const auto late =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/0), coquic::quic::test::test_time(20));
+
+    EXPECT_EQ(packet_numbers_from(late.late_acked_packets), (std::vector<std::uint64_t>{0}));
+    EXPECT_TRUE(late.lost_packets.empty());
+    EXPECT_GE(coquic::quic::test::PacketSpaceRecoveryTestPeer::time_reordering_threshold(recovery),
+              std::chrono::milliseconds(21));
+    EXPECT_EQ(recovery.time_threshold_deadline(coquic::quic::test::test_time(2)),
+              coquic::quic::test::test_time(23));
 }
 
 TEST(QuicRecoveryTest, AckProcessingRejectsMalformedFirstAckRange) {

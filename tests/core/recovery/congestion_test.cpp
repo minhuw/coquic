@@ -213,6 +213,39 @@ TEST(QuicCongestionTest, BbrAppLimitedBubbleMarksPacketsUntilDeliveredThreshold)
     EXPECT_EQ(controller.app_limited_until_delivered_, 0u);
 }
 
+TEST(QuicCongestionTest, BbrUsesAckedPacketAppLimitedStateForBandwidthSample) {
+    BbrCongestionController controller(/*max_datagram_size=*/1200);
+    controller.total_delivered_ = 2400;
+    controller.bytes_in_flight_ = 2400;
+    controller.min_rtt_ = std::chrono::milliseconds{100};
+
+    auto first_packet =
+        make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(10));
+    first_packet.app_limited = true;
+    first_packet.delivered = 0;
+    first_packet.delivered_time = coquic::quic::test::test_time(0);
+    first_packet.first_sent_time = coquic::quic::test::test_time(0);
+    first_packet.tx_in_flight = 1200;
+
+    auto second_packet =
+        make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(11));
+    second_packet.app_limited = false;
+    second_packet.delivered = 1200;
+    second_packet.delivered_time = coquic::quic::test::test_time(1);
+    second_packet.first_sent_time = coquic::quic::test::test_time(1);
+    second_packet.tx_in_flight = 2400;
+
+    const auto rs = controller.generate_rate_sample(
+        std::array<SentPacketRecord, 2>{first_packet, second_packet},
+        /*app_limited=*/true, coquic::quic::test::test_time(111), coquic::quic::RecoveryRttState{});
+
+    EXPECT_TRUE(rs.has_newly_acked);
+    EXPECT_FALSE(rs.is_app_limited);
+    EXPECT_EQ(rs.prior_delivered, second_packet.delivered);
+}
+
 TEST(QuicCongestionTest, BbrRateSampleUsesNewestPacketNumberForEqualSendTime) {
     BbrCongestionController controller(/*max_datagram_size=*/1200);
     controller.total_delivered_ = 2400;
@@ -492,6 +525,20 @@ TEST(QuicCongestionTest, BbrLossRecoveryTransitionsOutOfProbeUpWhenInflightIsToo
     EXPECT_EQ(controller.bytes_in_flight_, 21600u);
     EXPECT_TRUE(controller.loss_in_round_);
     EXPECT_EQ(controller.loss_events_in_round_, 1u);
+    EXPECT_TRUE(controller.bw_probe_samples_);
+    EXPECT_FALSE(controller.pending_probe_bw_down_);
+    EXPECT_EQ(controller.inflight_longterm_, 24000u);
+
+    auto third_lost =
+        make_sent_packet(/*packet_number=*/12, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(5));
+    third_lost.tx_in_flight = 21600;
+    third_lost.lost = 1200;
+
+    controller.on_packets_lost(std::array<SentPacketRecord, 1>{third_lost});
+
+    EXPECT_EQ(controller.bytes_in_flight_, 20400u);
+    EXPECT_EQ(controller.loss_events_in_round_, 1u);
     EXPECT_FALSE(controller.bw_probe_samples_);
     EXPECT_TRUE(controller.pending_probe_bw_down_);
     EXPECT_LT(controller.inflight_longterm_, 24000u);
@@ -549,6 +596,42 @@ TEST(QuicCongestionTest, BbrProbeRttLifecycleRestoresProbeBwCruiseAndStartupMode
     EXPECT_EQ(startup_controller.mode_, BbrCongestionController::Mode::startup);
     EXPECT_TRUE(std::isinf(startup_controller.bw_shortterm_));
     EXPECT_EQ(startup_controller.inflight_shortterm_, std::numeric_limits<std::size_t>::max());
+}
+
+TEST(QuicCongestionTest, BbrProbeRttRefreshUsesMinRttWindow) {
+    BbrCongestionController controller(/*max_datagram_size=*/1200);
+    controller.mode_ = BbrCongestionController::Mode::probe_bw_cruise;
+    controller.full_bw_reached_ = true;
+    controller.min_rtt_ = std::chrono::milliseconds{100};
+    controller.min_rtt_stamp_ = coquic::quic::test::test_time(0);
+    controller.probe_rtt_min_delay_ = std::chrono::milliseconds{100};
+    controller.probe_rtt_min_stamp_ = coquic::quic::test::test_time(0);
+
+    controller.update_min_rtt(
+        make_rate_sample(/*delivery_rate_bytes_per_second=*/120000.0,
+                         /*newly_acked=*/1200, /*lost=*/0, /*tx_in_flight=*/1200,
+                         /*prior_delivered=*/0, /*delivered=*/1200, std::chrono::milliseconds{100}),
+        coquic::quic::test::test_time(9999));
+
+    EXPECT_FALSE(controller.probe_rtt_expired_);
+
+    controller.update_min_rtt(make_rate_sample(/*delivery_rate_bytes_per_second=*/120000.0,
+                                               /*newly_acked=*/1200, /*lost=*/0,
+                                               /*tx_in_flight=*/1200,
+                                               /*prior_delivered=*/1200, /*delivered=*/1200,
+                                               std::chrono::milliseconds{100}),
+                              coquic::quic::test::test_time(10001));
+
+    EXPECT_FALSE(controller.probe_rtt_expired_);
+
+    controller.update_min_rtt(make_rate_sample(/*delivery_rate_bytes_per_second=*/120000.0,
+                                               /*newly_acked=*/1200, /*lost=*/0,
+                                               /*tx_in_flight=*/1200,
+                                               /*prior_delivered=*/2400, /*delivered=*/1200,
+                                               std::chrono::milliseconds{100}),
+                              coquic::quic::test::test_time(30001));
+
+    EXPECT_TRUE(controller.probe_rtt_expired_);
 }
 
 TEST(QuicCongestionTest, BbrHelperPredicatesMathAndWrapperDispatchCoverAccessors) {
@@ -612,8 +695,14 @@ TEST(QuicCongestionTest, BbrHelperPredicatesMathAndWrapperDispatchCoverAccessors
     controller.full_bw_now_ = true;
     EXPECT_TRUE(controller.is_time_to_go_down(rate_sample));
 
+    const auto tolerated_single_packet_loss =
+        make_rate_sample(/*delivery_rate_bytes_per_second=*/0.0, /*newly_acked=*/0,
+                         /*lost=*/1200,
+                         /*tx_in_flight=*/24000, /*prior_delivered=*/0, /*delivered=*/0);
+    EXPECT_FALSE(controller.is_inflight_too_high(tolerated_single_packet_loss));
+
     const auto loss_rs = make_rate_sample(/*delivery_rate_bytes_per_second=*/0.0,
-                                          /*newly_acked=*/0, /*lost=*/300,
+                                          /*newly_acked=*/0, /*lost=*/1300,
                                           /*tx_in_flight=*/10000, /*prior_delivered=*/0,
                                           /*delivered=*/0);
     EXPECT_TRUE(controller.is_inflight_too_high(loss_rs));
@@ -739,17 +828,74 @@ TEST(QuicCongestionTest, AppLimitedAckSaturatesBytesInFlightWithoutGrowingWindow
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     controller.on_packet_sent(/*bytes_sent=*/1200, /*ack_eliciting=*/true);
 
+    auto ack_only_packet =
+        make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true, /*in_flight=*/false,
+                         /*bytes_in_flight=*/0, coquic::quic::test::test_time(0));
+    ack_only_packet.app_limited = true;
+    auto app_limited_packet =
+        make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/2400, coquic::quic::test::test_time(1));
+    app_limited_packet.app_limited = true;
+
     controller.on_packets_acked(
-        std::array<SentPacketRecord, 2>{
-            make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true, /*in_flight=*/false,
-                             /*bytes_in_flight=*/0, coquic::quic::test::test_time(0)),
-            make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
-                             /*bytes_in_flight=*/2400, coquic::quic::test::test_time(1)),
-        },
+        std::array<SentPacketRecord, 2>{ack_only_packet, app_limited_packet},
         /*app_limited=*/true);
 
     EXPECT_EQ(controller.bytes_in_flight(), 0u);
     EXPECT_EQ(controller.congestion_window(), 12000u);
+}
+
+TEST(QuicCongestionTest, NewRenoUsesAckedPacketAppLimitedStateForWindowGrowth) {
+    NewRenoCongestionController controller(/*max_datagram_size=*/1200);
+    controller.on_packet_sent(/*bytes_sent=*/2400, /*ack_eliciting=*/true);
+
+    auto app_limited_packet =
+        make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(0));
+    app_limited_packet.app_limited = true;
+    auto non_app_limited_packet =
+        make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(1));
+
+    controller.on_packets_acked(
+        std::array<SentPacketRecord, 2>{app_limited_packet, non_app_limited_packet},
+        /*app_limited=*/true);
+
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+    EXPECT_EQ(controller.congestion_window(), 13200u);
+}
+
+TEST(QuicCongestionTest, AppLimitedAckSentDuringRecoveryStillExitsNewRenoRecovery) {
+    NewRenoCongestionController controller(/*max_datagram_size=*/1200);
+    controller.on_packet_sent(/*bytes_sent=*/12000, /*ack_eliciting=*/true);
+    controller.on_loss_event(coquic::quic::test::test_time(5), coquic::quic::test::test_time(1));
+    ASSERT_EQ(controller.congestion_window(), 6000u);
+
+    controller.on_packet_sent(/*bytes_sent=*/1200, /*ack_eliciting=*/true);
+    auto recovery_packet =
+        make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(6));
+    recovery_packet.app_limited = true;
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{recovery_packet},
+                                /*app_limited=*/true);
+
+    EXPECT_EQ(controller.congestion_window(), 6000u);
+    EXPECT_EQ(controller.bytes_in_flight(), 12000u);
+    controller.on_loss_event(coquic::quic::test::test_time(20), coquic::quic::test::test_time(19));
+    EXPECT_EQ(controller.congestion_window(), 3000u);
+}
+
+TEST(QuicCongestionTest, CongestionWrapperDetectsWindowUnderutilizationAfterSend) {
+    coquic::quic::QuicCongestionController wrapper(
+        coquic::quic::QuicCongestionControlAlgorithm::newreno, /*max_datagram_size=*/1200);
+    wrapper.congestion_window_ = 12000;
+    wrapper.bytes_in_flight_ = 10800;
+
+    EXPECT_FALSE(wrapper.would_underutilize_congestion_window(/*bytes_sent=*/1200));
+    EXPECT_TRUE(wrapper.would_underutilize_congestion_window(/*bytes_sent=*/1199));
+
+    wrapper.bytes_in_flight_ = 12000;
+    EXPECT_FALSE(wrapper.would_underutilize_congestion_window(/*bytes_sent=*/0));
 }
 
 TEST(QuicCongestionTest, DiscardedPacketsOnlyReduceNewRenoBytesInFlight) {

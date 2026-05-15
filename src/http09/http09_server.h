@@ -21,6 +21,7 @@ void server_clear_forced_file_open_failure_path_for_tests();
 
 struct QuicHttp09ServerConfig {
     std::filesystem::path document_root;
+    bool defer_responses_until_handshake_ready = false;
 };
 
 class QuicHttp09ServerEndpoint {
@@ -47,10 +48,12 @@ class QuicHttp09ServerEndpoint {
     void pump_response_chunks(std::size_t max_chunks);
     bool queue_response_chunk(std::uint64_t stream_id, PendingResponse &response);
     bool process_receive_stream_data(const quic::QuicCoreReceiveStreamData &received);
+    bool can_send_responses() const;
     void clear_state();
 
     QuicHttp09ServerConfig config_;
     bool failed_ = false;
+    bool handshake_ready_ = false;
     std::unordered_map<std::uint64_t, PendingRequest> pending_requests_;
     std::unordered_map<std::uint64_t, PendingResponse> pending_responses_;
     std::unordered_set<std::uint64_t> closed_streams_;

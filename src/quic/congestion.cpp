@@ -25,7 +25,7 @@ constexpr double kBbrProbeRttCwndGain = 0.5;
 constexpr double kBbrFullBandwidthGrowthTarget = 1.25;
 constexpr std::uint8_t kBbrFullBandwidthRoundLimit = 3;
 constexpr std::chrono::seconds kBbrMinRttWindow{10};
-constexpr std::chrono::seconds kBbrProbeRttInterval{5};
+constexpr std::chrono::seconds kBbrProbeRttInterval{30};
 constexpr std::chrono::milliseconds kBbrProbeRttDuration{200};
 constexpr std::size_t kBbrMinimumWindowPackets = 4;
 constexpr std::chrono::milliseconds kBbrSendQuantumWindow{1};
@@ -33,7 +33,7 @@ constexpr std::size_t kBbrMaxSendQuantum = std::size_t{64} * 1024u;
 constexpr double kBbrLossThresh = 0.02;
 constexpr double kBbrBeta = 0.7;
 constexpr double kBbrHeadroom = 0.15;
-constexpr double kBbrPacingMargin = 0.99;
+constexpr double kBbrPacingMargin = 1.0;
 constexpr std::size_t kBbrExtraAckedFilterLen = 10;
 constexpr std::size_t kBbrStartupFullLossCount = 6;
 constexpr std::uint64_t kBbrMaxProbeBwRounds = 63;
@@ -132,6 +132,7 @@ void NewRenoCongestionController::on_packet_sent(std::size_t bytes_sent, bool ac
 
 void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRecord> packets,
                                                    bool app_limited) {
+    static_cast<void>(app_limited);
     const auto recovery_boundary = recovery_start_time_;
     bool exit_recovery = false;
 
@@ -144,12 +145,11 @@ void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRec
 
         const bool in_batch_recovery =
             recovery_boundary.has_value() && packet.sent_time <= *recovery_boundary;
-        if (!packet.ack_eliciting || in_batch_recovery || app_limited) {
-            continue;
-        }
-
-        if (recovery_boundary.has_value()) {
+        if (packet.ack_eliciting && recovery_boundary.has_value() && !in_batch_recovery) {
             exit_recovery = true;
+        }
+        if (!packet.ack_eliciting || in_batch_recovery || packet.app_limited) {
+            continue;
         }
 
         if (congestion_window_ < slow_start_threshold_) {
@@ -304,7 +304,7 @@ void BbrCongestionController::on_packet_sent(SentPacketRecord &packet) {
 void BbrCongestionController::on_packets_acked(std::span<const SentPacketRecord> packets,
                                                bool app_limited, QuicCoreTimePoint now,
                                                const RecoveryRttState &rtt_state) {
-    maybe_mark_connection_app_limited(app_limited);
+    static_cast<void>(app_limited);
     auto rs = generate_rate_sample(packets, app_limited, now, rtt_state);
     if (rs.has_spurious_loss) {
         handle_spurious_loss_detection(now);
@@ -1171,8 +1171,13 @@ bool BbrCongestionController::is_time_to_go_down(const RateSample &rs) {
 }
 
 bool BbrCongestionController::is_inflight_too_high(const RateSample &rs) const {
-    return (rs.tx_in_flight != 0) &
-           (static_cast<double>(rs.lost) > static_cast<double>(rs.tx_in_flight) * kBbrLossThresh);
+    if (rs.tx_in_flight == 0) {
+        return false;
+    }
+
+    const auto loss_threshold = std::max(static_cast<double>(max_datagram_size_),
+                                         static_cast<double>(rs.tx_in_flight) * kBbrLossThresh);
+    return static_cast<double>(rs.lost) > loss_threshold;
 }
 
 std::uint32_t BbrCongestionController::next_random() {
@@ -1423,6 +1428,10 @@ std::size_t QuicCongestionController::minimum_window() const {
         return std::get<NewRenoCongestionController>(storage_).minimum_window();
     }
     return std::get<BbrCongestionController>(storage_).minimum_window();
+}
+
+bool QuicCongestionController::would_underutilize_congestion_window(std::size_t bytes_sent) const {
+    return bytes_in_flight() + bytes_sent < congestion_window();
 }
 
 void QuicCongestionController::set_test_metric(bool congestion_window, std::size_t value) {

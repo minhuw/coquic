@@ -326,6 +326,7 @@ class QuicCongestionController {
     std::size_t congestion_window() const;
     std::size_t bytes_in_flight() const;
     std::size_t minimum_window() const;
+    bool would_underutilize_congestion_window(std::size_t bytes_sent) const;
 
   private:
     void set_test_metric(bool congestion_window, std::size_t value);

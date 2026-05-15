@@ -743,7 +743,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.exit_code, 1);
     EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.wait_calls, 2U);
     EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.process_datagram_calls, 1U);
-    EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.pump_calls, 1U);
+    EXPECT_EQ(pending_work_yields_to_wait_after_immediate_poll_miss.pump_calls, 2U);
 
     const auto elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait =
         coquic::http09::test::run_server_backend_scheduling_case_for_tests(
@@ -775,7 +775,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(ready_probe_idle_timeout_then_shutdown.exit_code, 1);
     EXPECT_EQ(ready_probe_idle_timeout_then_shutdown.wait_calls, 2U);
     EXPECT_EQ(ready_probe_idle_timeout_then_shutdown.process_expired_calls, 0U);
-    EXPECT_EQ(ready_probe_idle_timeout_then_shutdown.pump_calls, 1U);
+    EXPECT_EQ(ready_probe_idle_timeout_then_shutdown.pump_calls, 2U);
 
     const auto buffered_top_due_idle_timeout_skips_ready_probe =
         coquic::http09::test::run_server_backend_scheduling_case_for_tests(
@@ -802,7 +802,18 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCa
     EXPECT_EQ(ready_probe_timer_without_wakeup_falls_back_to_main_wait.exit_code, 1);
     EXPECT_EQ(ready_probe_timer_without_wakeup_falls_back_to_main_wait.wait_calls, 2U);
     EXPECT_EQ(ready_probe_timer_without_wakeup_falls_back_to_main_wait.process_expired_calls, 0U);
-    EXPECT_EQ(ready_probe_timer_without_wakeup_falls_back_to_main_wait.pump_calls, 1U);
+    EXPECT_EQ(ready_probe_timer_without_wakeup_falls_back_to_main_wait.pump_calls, 2U);
+
+    const auto deferred_output_waits_until_grace_deadline =
+        coquic::http09::test::run_server_backend_scheduling_case_for_tests(
+            coquic::http09::test::ServerBackendSchedulingCaseForTests::
+                deferred_output_waits_until_grace_deadline);
+    EXPECT_EQ(deferred_output_waits_until_grace_deadline.exit_code, 1);
+    EXPECT_EQ(deferred_output_waits_until_grace_deadline.wait_calls, 2U);
+    EXPECT_EQ(deferred_output_waits_until_grace_deadline.wait_request_delta_ms,
+              std::vector<long long>({100, -1}));
+    EXPECT_EQ(deferred_output_waits_until_grace_deadline.process_expired_calls, 1U);
+    EXPECT_EQ(deferred_output_waits_until_grace_deadline.send_calls, 1U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveServerBackendLoopCases) {

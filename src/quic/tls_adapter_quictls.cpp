@@ -53,6 +53,7 @@ using SslSessionPtr = std::unique_ptr<SSL_SESSION, decltype(&SSL_SESSION_free)>;
 constexpr std::uint16_t tls_aes_128_gcm_sha256_id = 0x1301;
 constexpr std::uint16_t tls_aes_256_gcm_sha384_id = 0x1302;
 constexpr std::uint16_t tls_chacha20_poly1305_sha256_id = 0x1303;
+constexpr std::uint32_t kQuicMaxEarlyData = 0xffffffffu;
 
 struct TlsAdapterFaultState {
     std::optional<TlsAdapterFaultPoint> fault_point;
@@ -741,8 +742,8 @@ class TlsAdapter::Impl {
         }
         SSL_CTX_sess_set_new_cb(ctx_.get(), &Impl::on_new_session);
         if (config_.accept_zero_rtt) {
-            SSL_CTX_set_max_early_data(ctx_.get(), 0xffffffffu);
-            SSL_CTX_set_recv_max_early_data(ctx_.get(), 0xffffffffu);
+            SSL_CTX_set_max_early_data(ctx_.get(), kQuicMaxEarlyData);
+            SSL_CTX_set_recv_max_early_data(ctx_.get(), kQuicMaxEarlyData);
         }
 
         if (!load_identity()) {
@@ -1300,6 +1301,16 @@ TlsAdapterTestPeer::serialize_session_bytes(const SSL_SESSION *session) {
 
 bool TlsAdapterTestPeer::deserialize_session_bytes(std::span<const std::byte> bytes) {
     return ::deserialize_session_bytes(bytes) != nullptr;
+}
+
+std::optional<std::uint32_t>
+TlsAdapterTestPeer::session_max_early_data(std::span<const std::byte> bytes) {
+    auto session = ::deserialize_session_bytes(bytes);
+    if (session == nullptr) {
+        return std::nullopt;
+    }
+
+    return SSL_SESSION_get_max_early_data(session.get());
 }
 
 int TlsAdapterTestPeer::call_on_set_encryption_secrets(TlsAdapter &adapter,

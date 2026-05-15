@@ -4644,24 +4644,46 @@ TEST(QuicCoreTest, ApplicationSendRestoresUnsentCandidateWhenCongestionBlocked) 
     EXPECT_EQ(stream.stop_sending_state, coquic::quic::StreamControlFrameState::pending);
 }
 
-TEST(QuicCoreTest,
-     ApplicationSendRestoresPendingCryptoWhenCongestionBlockedAndAckOnlySerializationFails) {
+TEST(QuicCoreTest, ApplicationSendDefersAckOnlyFallbackWhenCongestionBlockedBeforeAckDeadline) {
     auto connection = make_connected_client_connection();
     connection.application_space_.received_packets.record_received(
         /*packet_number=*/32, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
+    connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(10);
     connection.application_space_.send_crypto.append(
         coquic::quic::test::bytes_from_string("blocked-crypto"));
     connection.congestion_controller_.bytes_in_flight_ =
         connection.congestion_controller_.congestion_window();
-    coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-        coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_TRUE(datagram.empty());
-    EXPECT_TRUE(connection.has_failed());
+    EXPECT_FALSE(connection.has_failed());
     EXPECT_TRUE(connection.application_space_.send_crypto.has_pending_data());
     EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+    ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+    EXPECT_EQ(optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
+              coquic::quic::test::test_time(10));
+}
+
+TEST(QuicCoreTest, ApplicationSendAllowsDueAckOnlyFallbackWhenCongestionBlocked) {
+    auto connection = make_connected_client_connection();
+    connection.application_space_.received_packets.record_received(
+        /*packet_number=*/32, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
+    connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(1);
+    connection.application_space_.send_crypto.append(
+        coquic::quic::test::bytes_from_string("blocked-crypto"));
+    connection.congestion_controller_.bytes_in_flight_ =
+        connection.congestion_controller_.congestion_window();
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_TRUE(connection.application_space_.send_crypto.has_pending_data());
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_FALSE(connection.application_space_.pending_ack_deadline.has_value());
+    EXPECT_TRUE(datagram_has_application_ack(connection, datagram));
+    EXPECT_FALSE(datagram_has_application_stream(connection, datagram));
 }
 
 TEST(QuicCoreTest, ApplicationSendPathPreservesAckByTrimmingStreamData) {
@@ -7599,6 +7621,36 @@ TEST(QuicCoreTest, LossDetectionSkipsCongestionResponseForNonAckElicitingLoss) {
                                    coquic::quic::test::test_time(800));
 
     EXPECT_EQ(connection.congestion_controller_.congestion_window(), initial_window);
+}
+
+TEST(QuicCoreTest, FullCwndFinalSendIsNotMarkedApplicationLimited) {
+    auto connection = make_connected_client_connection();
+    connection.congestion_controller_.congestion_window_ = 2400;
+    connection.congestion_controller_.bytes_in_flight_ = 1200;
+    ASSERT_FALSE(connection.has_pending_application_send());
+
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 1,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1199,
+                                 });
+    ASSERT_TRUE(connection.application_space_.recovery.handle_for_packet_number(1).has_value());
+    EXPECT_TRUE(connection.application_space_.sent_packets.at(1).app_limited);
+
+    connection.congestion_controller_.bytes_in_flight_ = 1200;
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 2,
+                                     .sent_time = coquic::quic::test::test_time(1),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                 });
+    ASSERT_TRUE(connection.application_space_.recovery.handle_for_packet_number(2).has_value());
+    EXPECT_FALSE(connection.application_space_.sent_packets.at(2).app_limited);
 }
 
 TEST(QuicCoreTest, LossDetectionUsesDefaultAckDelayButRequiresRttSampleForPersistentCongestion) {

@@ -20,6 +20,8 @@ using quic::QuicCoreReceiveStreamData;
 using quic::QuicCoreResetStream;
 using quic::QuicCoreResult;
 using quic::QuicCoreSendStreamData;
+using quic::QuicCoreStateChange;
+using quic::QuicCoreStateEvent;
 using quic::QuicCoreStopSending;
 using quic::QuicCoreTimePoint;
 using quic::StreamDirection;
@@ -28,8 +30,9 @@ using quic::StreamInitiator;
 namespace {
 
 // Keep response bursts large enough for interop measurement cases while still
-// yielding between chunks so runtime loops can observe migration traffic.
+// yielding regularly so runtime loops can observe migration traffic.
 constexpr std::size_t kResponseChunkSize = static_cast<std::size_t>(32) * 1024U;
+constexpr std::size_t kResponseChunksPerPoll = 32;
 constexpr std::size_t kMaxBufferedRequestBytes = static_cast<std::size_t>(8) * 1024U;
 constexpr std::uint64_t kHttp09FileReadErrorCode = 1;
 
@@ -118,7 +121,13 @@ QuicHttp09EndpointUpdate QuicHttp09ServerEndpoint::on_core_result(const QuicCore
         return make_failure_update();
     }
 
+    const bool could_send_responses_before = can_send_responses();
     for (const auto &effect : result.effects) {
+        if (const auto *event = std::get_if<QuicCoreStateEvent>(&effect);
+            event != nullptr && event->change == QuicCoreStateChange::handshake_ready) {
+            handshake_ready_ = true;
+        }
+
         const auto *received = std::get_if<QuicCoreReceiveStreamData>(&effect);
         if (received == nullptr) {
             continue;
@@ -131,6 +140,9 @@ QuicHttp09EndpointUpdate QuicHttp09ServerEndpoint::on_core_result(const QuicCore
         }
     }
 
+    if (!could_send_responses_before && can_send_responses()) {
+        pump_response_chunks(1);
+    }
     return drain_pending_inputs();
 }
 
@@ -139,7 +151,9 @@ QuicHttp09EndpointUpdate QuicHttp09ServerEndpoint::poll(QuicCoreTimePoint /*now*
         return make_failure_update();
     }
 
-    pump_response_chunks(1);
+    if (can_send_responses()) {
+        pump_response_chunks(kResponseChunksPerPoll);
+    }
     return drain_pending_inputs();
 }
 
@@ -159,7 +173,7 @@ QuicHttp09EndpointUpdate QuicHttp09ServerEndpoint::drain_pending_inputs() {
         update.core_inputs.push_back(std::move(pending_core_inputs_.front()));
         pending_core_inputs_.pop_front();
     }
-    update.has_pending_work = !pending_responses_.empty();
+    update.has_pending_work = !pending_responses_.empty() & can_send_responses();
     return update;
 }
 
@@ -182,10 +196,14 @@ bool QuicHttp09ServerEndpoint::queue_response_chunk(std::uint64_t stream_id,
 
 void QuicHttp09ServerEndpoint::pump_response_chunks(std::size_t max_chunks) {
     std::size_t emitted_chunks = 0;
-    for (auto it = pending_responses_.begin();
-         it != pending_responses_.end() && emitted_chunks < max_chunks;) {
+    auto it = pending_responses_.begin();
+    while (!pending_responses_.empty() && emitted_chunks < max_chunks) {
+        if (it == pending_responses_.end()) {
+            it = pending_responses_.begin();
+        }
         const auto stream_id = it->first;
-        auto current = it++;
+        auto current = it;
+        ++it;
         if (!queue_response_chunk(stream_id, current->second)) {
             pending_responses_.erase(current);
             continue;
@@ -267,11 +285,15 @@ bool QuicHttp09ServerEndpoint::process_receive_stream_data(
         return true;
     }
 
-    if (queue_response_chunk(received.stream_id, response)) {
+    if (!can_send_responses() || queue_response_chunk(received.stream_id, response)) {
         pending_responses_.insert_or_assign(received.stream_id, std::move(response));
     }
     pending_requests_.erase(received.stream_id);
     return true;
+}
+
+bool QuicHttp09ServerEndpoint::can_send_responses() const {
+    return !config_.defer_responses_until_handshake_ready || handshake_ready_;
 }
 
 void QuicHttp09ServerEndpoint::clear_state() {

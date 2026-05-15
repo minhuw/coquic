@@ -4,77 +4,70 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
-if grep -q 'DeterminateSystems/magic-nix-cache-action@main' .github/workflows/interop.yml; then
+workflow=".github/workflows/interop.yml"
+
+if grep -q 'DeterminateSystems/magic-nix-cache-action@main' "${workflow}"; then
   echo "interop workflow must not use DeterminateSystems/magic-nix-cache-action@main" >&2
   exit 1
 fi
 
-actual_block="$(
+required_lines=(
+  "  interop-peer:"
+  "    name: \${{ matrix.display_name }} Official Runner"
+  "      fail-fast: false"
+  "          - peer: quicgo"
+  "            impl: quic-go"
+  "            image: martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424"
+  "          - peer: picoquic"
+  "            impl: picoquic"
+  "            image: privateoctopus/picoquic@sha256:7e4110e3260cd9d4f815ad63ca1d93e020e94d3a8d3cb6cb9cc5c59d97999b05"
+  "          - peer: quinn"
+  "            impl: quinn"
+  "            image: stammw/quinn-interop@sha256:5205c84e200ef1a999be602ed6eeec9a216f25ce27d5eac690fa1540ec73f355"
+  "          INTEROP_TESTCASES: \${{ matrix.testcases }}"
+  "          INTEROP_PEER_IMPL: \${{ matrix.impl }}"
+  "          INTEROP_PEER_IMAGE: \${{ matrix.image }}"
+  "          COQUIC_CONGESTION_CONTROL: \${{ matrix.congestion_control || '' }}"
+  "          name: interop-logs-\${{ matrix.peer }}"
+  "  interop-self:"
+  "          INTEROP_PEER_IMPL: coquic"
+  "          INTEROP_PEER_IMAGE: coquic-interop:quictls-musl"
+  "          INTEROP_DIRECTIONS: coquic-server"
+  "          name: interop-logs-self"
+)
+
+for line in "${required_lines[@]}"; do
+  if ! grep -Fx -- "${line}" "${workflow}" >/dev/null; then
+    echo "missing interop workflow contract line: ${line}" >&2
+    exit 1
+  fi
+done
+
+peer_count="$(
   awk '
-    /^  interop-self:$/ {
+    /^  interop-peer:$/ {
       capture = 1
     }
-    capture && /^  [^[:space:]][^:]*:$/ && $0 != "  interop-self:" {
-      exit
+    capture && /^  interop-self:$/ {
+      capture = 0
     }
-    capture {
-      print
+    capture && /^[[:space:]]+- peer: / {
+      count += 1
     }
-  ' .github/workflows/interop.yml
+    END {
+      print count + 0
+    }
+  ' "${workflow}"
 )"
 
-if [[ -z "${actual_block}" ]]; then
-  echo "missing job: interop-self" >&2
+if [[ "${peer_count}" != "3" ]]; then
+  echo "interop-peer matrix must contain exactly 3 peers, got ${peer_count}" >&2
   exit 1
 fi
 
-expected_block="$(cat <<'EOF'
-  interop-self:
-    name: Self Official Runner
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Set up Docker 29.1
-        uses: docker/setup-docker-action@v5
-        with:
-          version: v29.1.5
-
-      - name: Show Docker Version
-        run: |
-          docker version
-          docker compose version
-
-      - name: Run Official self Interop Tests
-        env:
-          INTEROP_TESTCASES: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,v2,amplificationlimit,rebind-port,rebind-addr,connectionmigration,ecn
-          INTEROP_PEER_IMPL: coquic
-          INTEROP_PEER_IMAGE: coquic-interop:quictls-musl
-          INTEROP_DIRECTIONS: coquic-server
-        run: nix develop -c bash interop/run-official.sh
-
-      - name: Upload Interop Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: interop-logs-self
-          path: .interop-logs/official
-          if-no-files-found: warn
-EOF
-)"
-
-if [[ "${actual_block}" != "${expected_block}" ]]; then
-  diff -u <(printf '%s\n' "${expected_block}") <(printf '%s\n' "${actual_block}") || true
-  echo "interop-self workflow contract mismatch" >&2
+if grep -F -- "peer: msquic" "${workflow}" >/dev/null; then
+  echo "interop-peer matrix must not include msquic while its zerortt client is broken" >&2
   exit 1
 fi
 
-echo "interop-self workflow contract looks correct"
+echo "interop workflow contract looks correct"

@@ -9,10 +9,29 @@ permissions:
   contents: read
 
 jobs:
-  interop-quicgo:
-    name: quic-go Official Runner
+  interop-peer:
+    name: ${{ matrix.display_name }} Official Runner
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - peer: quicgo
+            display_name: quic-go
+            impl: quic-go
+            image: martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424
+            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
+          - peer: picoquic
+            display_name: picoquic
+            impl: picoquic
+            image: privateoctopus/picoquic@sha256:7e4110e3260cd9d4f815ad63ca1d93e020e94d3a8d3cb6cb9cc5c59d97999b05
+            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,v2,amplificationlimit,rebind-port,rebind-addr,connectionmigration
+          - peer: quinn
+            display_name: quinn
+            impl: quinn
+            image: stammw/quinn-interop@sha256:5205c84e200ef1a999be602ed6eeec9a216f25ce27d5eac690fa1540ec73f355
+            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
 
     steps:
       - name: Checkout
@@ -46,70 +65,19 @@ jobs:
           docker version
           docker compose version
 
-      - name: Run Official quic-go Interop Tests
+      - name: Run Official ${{ matrix.display_name }} Interop Tests
         env:
-          INTEROP_TESTCASES: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
-          INTEROP_PEER_IMPL: quic-go
-          INTEROP_PEER_IMAGE: martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424
+          INTEROP_TESTCASES: ${{ matrix.testcases }}
+          INTEROP_PEER_IMPL: ${{ matrix.impl }}
+          INTEROP_PEER_IMAGE: ${{ matrix.image }}
+          COQUIC_CONGESTION_CONTROL: ${{ matrix.congestion_control || '' }}
         run: bash interop/run-official.sh
 
       - name: Upload Interop Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: interop-logs-quicgo
-          path: .interop-logs/official
-          if-no-files-found: warn
-
-  interop-picoquic:
-    name: picoquic Official Runner
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      # Remove this when GitHub runner gets docker engine >= v28.1.0.
-      - uses: docker/setup-docker-action@v5
-        with:
-          version: version=v28.3.0
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: 3.12
-
-      - name: Enable IPv6 support
-        run: sudo modprobe ip6table_filter
-
-      - name: Install Wireshark
-        run: |
-          sudo add-apt-repository ppa:wireshark-dev/nightly
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tshark
-
-      - name: Show Docker Version
-        run: |
-          docker version
-          docker compose version
-
-      - name: Run Official picoquic Interop Tests
-        env:
-          INTEROP_TESTCASES: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,v2,amplificationlimit,rebind-port,rebind-addr,connectionmigration
-          INTEROP_PEER_IMPL: picoquic
-          INTEROP_PEER_IMAGE: privateoctopus/picoquic@sha256:7e4110e3260cd9d4f815ad63ca1d93e020e94d3a8d3cb6cb9cc5c59d97999b05
-        run: bash interop/run-official.sh
-
-      - name: Upload Interop Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: interop-logs-picoquic
+          name: interop-logs-${{ matrix.peer }}
           path: .interop-logs/official
           if-no-files-found: warn
 

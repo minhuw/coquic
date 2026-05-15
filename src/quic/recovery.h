@@ -65,6 +65,10 @@ struct SentPacketRecord {
     bool app_limited = false;
     bool is_pmtu_probe = false;
     std::size_t pmtu_probe_size = 0;
+    bool lost_by_packet_threshold = false;
+    std::uint64_t packet_threshold_largest_acked = 0;
+    bool lost_by_time_threshold = false;
+    QuicCoreTimePoint time_threshold_loss_time{};
 };
 
 struct RecoveryRttState {
@@ -249,6 +253,7 @@ class PacketSpaceRecovery {
     std::optional<std::uint64_t> largest_acked_packet_number() const;
     std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet() const;
     std::optional<DeadlineTrackedPacket> earliest_loss_packet() const;
+    QuicCoreTimePoint time_threshold_deadline(QuicCoreTimePoint sent_time) const;
     std::optional<DeadlineTrackedPacket> earliest_pmtu_probe_packet() const;
     std::vector<RecoveryPacketHandle> collect_pmtu_probe_timeouts(QuicCoreTimePoint now) const;
     void rebuild_auxiliary_indexes();
@@ -280,6 +285,7 @@ class PacketSpaceRecovery {
         std::optional<std::uint64_t> previous_largest_acked;
         std::uint64_t largest_acknowledged = 0;
         std::uint64_t effective_largest_acked = 0;
+        QuicCoreTimePoint now{};
         bool largest_acked_advanced = false;
         bool mutated = false;
     };
@@ -316,6 +322,13 @@ class PacketSpaceRecovery {
     void maybe_track_as_loss_candidate(const SentPacketRecord &packet);
     void track_new_loss_candidates(std::optional<std::uint64_t> previous_largest_acked,
                                    std::uint64_t largest_acked);
+    bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked) const;
+    bool is_time_threshold_lost(QuicCoreTimePoint sent_time, QuicCoreTimePoint now) const;
+    void note_packet_threshold_loss(SentPacketRecord &packet, std::uint64_t largest_acked);
+    void note_time_threshold_loss(SentPacketRecord &packet, QuicCoreTimePoint now);
+    void clear_loss_cause(SentPacketRecord &packet);
+    void maybe_adapt_reordering_thresholds_from_spurious_loss(const SentPacketRecord &packet,
+                                                              QuicCoreTimePoint now);
     std::size_t ensure_slot_for_packet_number(std::uint64_t packet_number);
     AckApplyState begin_ack_received_apply(std::uint64_t largest_acknowledged);
     void apply_ack_range_descending(AckApplyState &state, const AckPacketNumberRange &range);
@@ -333,6 +346,8 @@ class PacketSpaceRecovery {
     std::size_t last_live_slot_ = kInvalidLedgerSlotIndex;
     std::size_t next_loss_candidate_slot_ = 0;
     std::size_t next_packet_threshold_loss_slot_ = 0;
+    std::uint64_t packet_reordering_threshold_ = kPacketThreshold;
+    std::chrono::milliseconds time_reordering_threshold_{};
     std::uint64_t compatibility_version_ = 0;
     RecoveryRttState rtt_state_;
     SentPacketsView sent_packets_{};
@@ -342,6 +357,8 @@ class PacketSpaceRecovery {
 };
 
 bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked);
+bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked,
+                              std::uint64_t packet_threshold);
 QuicCoreTimePoint compute_time_threshold_deadline(const RecoveryRttState &rtt,
                                                   QuicCoreTimePoint sent_time);
 bool is_time_threshold_lost(const RecoveryRttState &rtt, QuicCoreTimePoint sent_time,

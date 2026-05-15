@@ -30,12 +30,13 @@ std::chrono::milliseconds latest_loss_delay(const RecoveryRttState &rtt) {
     return std::max(kGranularity, rounded_up_loss_delay);
 }
 
-std::size_t packet_threshold_loss_scan_end(std::uint64_t largest_acked, std::size_t slot_count) {
-    if (largest_acked < kPacketThreshold) {
+std::size_t packet_threshold_loss_scan_end(std::uint64_t largest_acked,
+                                           std::uint64_t packet_threshold, std::size_t slot_count) {
+    if (largest_acked < packet_threshold) {
         return 0;
     }
 
-    return std::min<std::size_t>(static_cast<std::size_t>(largest_acked - kPacketThreshold + 1),
+    return std::min<std::size_t>(static_cast<std::size_t>(largest_acked - packet_threshold + 1),
                                  slot_count);
 }
 
@@ -252,6 +253,8 @@ PacketSpaceRecovery::PacketSpaceRecovery(const PacketSpaceRecovery &other)
       first_live_slot_(other.first_live_slot_), last_live_slot_(other.last_live_slot_),
       next_loss_candidate_slot_(other.next_loss_candidate_slot_),
       next_packet_threshold_loss_slot_(other.next_packet_threshold_loss_slot_),
+      packet_reordering_threshold_(other.packet_reordering_threshold_),
+      time_reordering_threshold_(other.time_reordering_threshold_),
       compatibility_version_(other.compatibility_version_), rtt_state_(other.rtt_state_),
       sent_packets_{this} {
 }
@@ -264,6 +267,8 @@ PacketSpaceRecovery::PacketSpaceRecovery(PacketSpaceRecovery &&other) noexcept
       first_live_slot_(other.first_live_slot_), last_live_slot_(other.last_live_slot_),
       next_loss_candidate_slot_(other.next_loss_candidate_slot_),
       next_packet_threshold_loss_slot_(other.next_packet_threshold_loss_slot_),
+      packet_reordering_threshold_(other.packet_reordering_threshold_),
+      time_reordering_threshold_(other.time_reordering_threshold_),
       compatibility_version_(other.compatibility_version_), rtt_state_(other.rtt_state_),
       sent_packets_{this} {
 }
@@ -281,6 +286,8 @@ PacketSpaceRecovery &PacketSpaceRecovery::operator=(const PacketSpaceRecovery &o
     last_live_slot_ = other.last_live_slot_;
     next_loss_candidate_slot_ = other.next_loss_candidate_slot_;
     next_packet_threshold_loss_slot_ = other.next_packet_threshold_loss_slot_;
+    packet_reordering_threshold_ = other.packet_reordering_threshold_;
+    time_reordering_threshold_ = other.time_reordering_threshold_;
     compatibility_version_ = other.compatibility_version_;
     rtt_state_ = other.rtt_state_;
     sent_packets_.owner = this;
@@ -300,6 +307,8 @@ PacketSpaceRecovery &PacketSpaceRecovery::operator=(PacketSpaceRecovery &&other)
     last_live_slot_ = other.last_live_slot_;
     next_loss_candidate_slot_ = other.next_loss_candidate_slot_;
     next_packet_threshold_loss_slot_ = other.next_packet_threshold_loss_slot_;
+    packet_reordering_threshold_ = other.packet_reordering_threshold_;
+    time_reordering_threshold_ = other.time_reordering_threshold_;
     compatibility_version_ = other.compatibility_version_;
     rtt_state_ = other.rtt_state_;
     sent_packets_.owner = this;
@@ -779,7 +788,7 @@ PacketSpaceRecovery::collect_time_threshold_losses(QuicCoreTimePoint now) {
             continue;
         }
 
-        if (!is_time_threshold_lost(rtt_state_, slot.packet.sent_time, now)) {
+        if (!is_time_threshold_lost(slot.packet.sent_time, now)) {
             continue;
         }
 
@@ -799,7 +808,7 @@ PacketSpaceRecovery::collect_pmtu_probe_timeouts(QuicCoreTimePoint now) const {
         if (slot.state != LedgerSlotState::sent || !slot.packet.is_pmtu_probe) {
             continue;
         }
-        if (!is_time_threshold_lost(rtt_state_, slot.packet.sent_time, now)) {
+        if (!coquic::quic::is_time_threshold_lost(rtt_state_, slot.packet.sent_time, now)) {
             continue;
         }
 
@@ -941,6 +950,7 @@ void PacketSpaceRecovery::apply_ack_range_descending(AckApplyState &state,
             state.mutated = true;
         } else if (slot.state == LedgerSlotState::declared_lost) {
             state.result.late_acked_packets.push_back(handle);
+            maybe_adapt_reordering_thresholds_from_spurious_loss(slot.packet, state.now);
             unlink_live_slot(slot_index);
             slot.acknowledged = true;
             state.mutated = true;
@@ -968,16 +978,20 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
         track_new_loss_candidates(state.previous_largest_acked, state.effective_largest_acked);
     }
 
-    const auto packet_threshold_scan_end =
-        packet_threshold_loss_scan_end(state.effective_largest_acked, slots_.size());
+    const auto packet_threshold_scan_end = packet_threshold_loss_scan_end(
+        state.effective_largest_acked, packet_reordering_threshold_, slots_.size());
     for (std::size_t slot_index = next_packet_threshold_loss_slot_;
          slot_index < packet_threshold_scan_end; ++slot_index) {
         auto &slot = slots_[slot_index];
         if (slot.state != LedgerSlotState::sent || slot.acknowledged || !slot.packet.in_flight) {
             continue;
         }
+        if (!is_packet_threshold_lost(slot.packet.packet_number, state.effective_largest_acked)) {
+            continue;
+        }
 
         // Keep the live packet metadata unchanged until connection-level loss handling consumes it.
+        note_packet_threshold_loss(slot.packet, state.effective_largest_acked);
         slot.state = LedgerSlotState::declared_lost;
         state.result.lost_packets.push_back(packet_handle(slot, slot_index));
         state.mutated = true;
@@ -993,7 +1007,7 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
         }
 
         const auto tracked = *eligible_loss_packets_.begin();
-        if (!is_time_threshold_lost(rtt_state_, tracked.sent_time, now)) {
+        if (!is_time_threshold_lost(tracked.sent_time, now)) {
             break;
         }
 
@@ -1009,6 +1023,7 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
     for (const auto slot_index : time_threshold_loss_slots) {
         auto &slot = slots_[slot_index];
         // Keep the live packet metadata unchanged until connection-level loss handling consumes it.
+        note_time_threshold_loss(slot.packet, now);
         slot.state = LedgerSlotState::declared_lost;
         state.result.lost_packets.push_back(packet_handle(slot, slot_index));
         state.mutated = true;
@@ -1025,6 +1040,7 @@ AckApplyResult PacketSpaceRecovery::apply_ack_received_descending(
     std::span<const AckPacketNumberRange> ack_ranges_descending, std::uint64_t largest_acknowledged,
     QuicCoreTimePoint now) {
     auto state = begin_ack_received_apply(largest_acknowledged);
+    state.now = now;
     for (const auto &range : ack_ranges_descending) {
         apply_ack_range_descending(state, range);
     }
@@ -1035,6 +1051,7 @@ AckApplyResult PacketSpaceRecovery::apply_ack_received(AckRangeCursor cursor,
                                                        std::uint64_t largest_acknowledged,
                                                        QuicCoreTimePoint now) {
     auto state = begin_ack_received_apply(largest_acknowledged);
+    state.now = now;
     while (const auto range = next_ack_range(cursor)) {
         apply_ack_range_descending(state, *range);
     }
@@ -1157,6 +1174,10 @@ std::optional<DeadlineTrackedPacket> PacketSpaceRecovery::earliest_loss_packet()
     return *eligible_loss_packets_.begin();
 }
 
+QuicCoreTimePoint PacketSpaceRecovery::time_threshold_deadline(QuicCoreTimePoint sent_time) const {
+    return sent_time + std::max(latest_loss_delay(rtt_state_), time_reordering_threshold_);
+}
+
 std::optional<DeadlineTrackedPacket> PacketSpaceRecovery::earliest_pmtu_probe_packet() const {
     std::optional<DeadlineTrackedPacket> earliest;
     for (auto slot_index = first_live_slot_;
@@ -1186,6 +1207,8 @@ void PacketSpaceRecovery::rebuild_auxiliary_indexes() {
                                     slots_.size())
             : 0;
     next_packet_threshold_loss_slot_ = 0;
+    packet_reordering_threshold_ = std::max(packet_reordering_threshold_, kPacketThreshold);
+    time_reordering_threshold_ = std::max(time_reordering_threshold_, std::chrono::milliseconds{});
     for (std::size_t slot_index = 0; slot_index < slots_.size(); ++slot_index) {
         auto &slot = slots_[slot_index];
         slot.prev_live_slot = kInvalidLedgerSlotIndex;
@@ -1217,8 +1240,72 @@ const RecoveryRttState &PacketSpaceRecovery::rtt_state() const {
     return rtt_state_;
 }
 
+bool PacketSpaceRecovery::is_packet_threshold_lost(std::uint64_t packet_number,
+                                                   std::uint64_t largest_acked) const {
+    return coquic::quic::is_packet_threshold_lost(packet_number, largest_acked,
+                                                  packet_reordering_threshold_);
+}
+
+bool PacketSpaceRecovery::is_time_threshold_lost(QuicCoreTimePoint sent_time,
+                                                 QuicCoreTimePoint now) const {
+    return now >= time_threshold_deadline(sent_time);
+}
+
+void PacketSpaceRecovery::note_packet_threshold_loss(SentPacketRecord &packet,
+                                                     std::uint64_t largest_acked) {
+    clear_loss_cause(packet);
+    packet.lost_by_packet_threshold = true;
+    packet.packet_threshold_largest_acked = largest_acked;
+}
+
+void PacketSpaceRecovery::note_time_threshold_loss(SentPacketRecord &packet,
+                                                   QuicCoreTimePoint now) {
+    clear_loss_cause(packet);
+    packet.lost_by_time_threshold = true;
+    packet.time_threshold_loss_time = now;
+}
+
+void PacketSpaceRecovery::clear_loss_cause(SentPacketRecord &packet) {
+    packet.lost_by_packet_threshold = false;
+    packet.packet_threshold_largest_acked = 0;
+    packet.lost_by_time_threshold = false;
+    packet.time_threshold_loss_time = {};
+}
+
+void PacketSpaceRecovery::maybe_adapt_reordering_thresholds_from_spurious_loss(
+    const SentPacketRecord &packet, QuicCoreTimePoint now) {
+    if (!packet.lost_by_packet_threshold ||
+        packet.packet_threshold_largest_acked <= packet.packet_number) {
+    } else {
+        const auto observed_reordering =
+            packet.packet_threshold_largest_acked - packet.packet_number + 1;
+        const auto adapted_threshold =
+            std::max(packet_reordering_threshold_, std::max(observed_reordering, kPacketThreshold));
+        if (adapted_threshold > packet_reordering_threshold_) {
+            packet_reordering_threshold_ = adapted_threshold;
+            next_packet_threshold_loss_slot_ = std::min(
+                next_packet_threshold_loss_slot_,
+                largest_acked_packet_number_.has_value()
+                    ? packet_threshold_loss_scan_end(*largest_acked_packet_number_,
+                                                     packet_reordering_threshold_, slots_.size())
+                    : std::size_t{0});
+        }
+    }
+
+    if (packet.lost_by_time_threshold && now > packet.sent_time) {
+        const auto observed_delay =
+            std::chrono::ceil<std::chrono::milliseconds>(now - packet.sent_time + kGranularity);
+        time_reordering_threshold_ = std::max(time_reordering_threshold_, observed_delay);
+    }
+}
+
 bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked) {
-    return largest_acked > packet_number && largest_acked - packet_number >= kPacketThreshold;
+    return is_packet_threshold_lost(packet_number, largest_acked, kPacketThreshold);
+}
+
+bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked,
+                              std::uint64_t packet_threshold) {
+    return largest_acked > packet_number && largest_acked - packet_number >= packet_threshold;
 }
 
 QuicCoreTimePoint compute_time_threshold_deadline(const RecoveryRttState &rtt,

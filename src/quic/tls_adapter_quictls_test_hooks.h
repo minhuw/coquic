@@ -84,6 +84,7 @@ class TlsAdapterTestPeer {
     static std::optional<std::vector<std::byte>>
     serialize_session_bytes(const SSL_SESSION *session);
     static bool deserialize_session_bytes(std::span<const std::byte> bytes);
+    static std::optional<std::uint32_t> session_max_early_data(std::span<const std::byte> bytes);
 
     static int call_on_set_encryption_secrets(TlsAdapter &adapter, OSSL_ENCRYPTION_LEVEL level,
                                               const uint8_t *read_secret,

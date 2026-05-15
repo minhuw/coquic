@@ -87,6 +87,10 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
 
     const auto client_core = coquic::http09::make_http09_client_core_config(overridden_runtime);
     EXPECT_EQ(client_core.application_protocol, "hq-interop");
+    EXPECT_EQ(client_core.max_outbound_datagram_size, 1472u);
+    EXPECT_EQ(client_core.transport.max_udp_payload_size, 1472u);
+    EXPECT_EQ(client_core.transport.pmtud_base_datagram_size, 1472u);
+    EXPECT_EQ(client_core.transport.pmtud_max_datagram_size, 1472u);
     EXPECT_EQ(client_core.transport.initial_max_data, 32u * 1024u * 1024u);
     EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_local, 16u * 1024u * 1024u);
     EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_remote, 256u * 1024u);
@@ -100,6 +104,10 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
     server_runtime.private_key_path = "tests/fixtures/quic-server-key.pem";
     const auto server_core = coquic::http09::make_http09_server_core_config(server_runtime);
     EXPECT_EQ(server_core.application_protocol, "hq-interop");
+    EXPECT_EQ(server_core.max_outbound_datagram_size, 1472u);
+    EXPECT_EQ(server_core.transport.max_udp_payload_size, 1472u);
+    EXPECT_EQ(server_core.transport.pmtud_base_datagram_size, 1472u);
+    EXPECT_EQ(server_core.transport.pmtud_max_datagram_size, 1472u);
     EXPECT_EQ(server_core.original_version, 0x00000001u);
     EXPECT_EQ(server_core.initial_version, 0x00000001u);
     EXPECT_EQ(server_core.supported_versions, (std::vector<std::uint32_t>{0x00000001u}));
@@ -111,6 +119,20 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
               coquic::quic::test::read_text_file("tests/fixtures/quic-server-cert.pem"));
     EXPECT_EQ(identity.private_key_pem,
               coquic::quic::test::read_text_file("tests/fixtures/quic-server-key.pem"));
+
+    const auto server_endpoint =
+        coquic::http09::test::make_runtime_server_endpoint_config_for_tests(
+            server_runtime, coquic::quic::TlsIdentity{
+                                .certificate_pem = identity.certificate_pem,
+                                .private_key_pem = identity.private_key_pem,
+                            });
+    EXPECT_EQ(server_endpoint.application_protocol, "hq-interop");
+    EXPECT_EQ(server_endpoint.max_outbound_datagram_size, 1472u);
+    EXPECT_EQ(server_endpoint.transport.max_udp_payload_size, 1472u);
+    EXPECT_EQ(server_endpoint.transport.pmtud_base_datagram_size, 1472u);
+    EXPECT_EQ(server_endpoint.transport.pmtud_max_datagram_size, 1472u);
+    EXPECT_EQ(server_endpoint.supported_versions, (std::vector<std::uint32_t>{0x00000001u}));
+    EXPECT_TRUE(server_endpoint.identity.has_value());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeLeavesQlogDisabledWhenQlogdirUnsetOrEmpty) {
@@ -718,6 +740,18 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
                   coquic::quic::QuicCongestionControlAlgorithm::bbr);
+    }
+
+    {
+        const char *argv[] = {"coquic"};
+        ScopedEnvVar role("ROLE", "client");
+        ScopedEnvVar requests("REQUESTS", "https://localhost/a.txt");
+        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "");
+
+        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
+                  coquic::quic::QuicCongestionControlAlgorithm::newreno);
     }
 
     {

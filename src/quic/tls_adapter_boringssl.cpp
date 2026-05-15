@@ -1193,6 +1193,25 @@ bool TlsAdapterTestPeer::handshake_progressed(bool pending_changed, bool secrets
                                   peer_transport_parameters_changed);
 }
 
+std::optional<std::vector<std::byte>>
+TlsAdapterTestPeer::serialize_session_bytes(const SSL_SESSION *session) {
+    return ::serialize_session_bytes(session);
+}
+
+bool TlsAdapterTestPeer::deserialize_session_bytes(std::span<const std::byte> bytes) {
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    if (ctx == nullptr) {
+        return false;
+    }
+    std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> owned_ctx(ctx, &SSL_CTX_free);
+    return ::deserialize_session_bytes(bytes, owned_ctx.get()) != nullptr;
+}
+
+std::optional<std::uint32_t>
+TlsAdapterTestPeer::session_max_early_data(std::span<const std::byte> /*bytes*/) {
+    return std::nullopt;
+}
+
 int TlsAdapterTestPeer::call_on_set_encryption_secrets(TlsAdapter &adapter,
                                                        OSSL_ENCRYPTION_LEVEL level,
                                                        const uint8_t *read_secret,

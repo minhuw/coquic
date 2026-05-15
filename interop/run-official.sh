@@ -14,12 +14,24 @@ readonly interop_testcases="${INTEROP_TESTCASES:-handshake,transfer}"
 readonly interop_directions="${INTEROP_DIRECTIONS:-both}"
 readonly interop_analysis_shell_package="${INTEROP_ANALYSIS_SHELL_PACKAGE:-nixpkgs#wireshark}"
 readonly interop_runner_output_tail_lines="${INTEROP_RUNNER_OUTPUT_TAIL_LINES:-200}"
-readonly log_root="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
+readonly interop_save_files="${INTEROP_SAVE_FILES:-0}"
+log_root_input="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
+if [[ "${log_root_input}" != /* ]]; then
+  log_root_input="${repo_root}/${log_root_input}"
+fi
+readonly log_root="${log_root_input}"
 readonly runner_repo_url="https://github.com/quic-interop/quic-interop-runner"
 readonly runner_dir="$(mktemp -d "${TMPDIR:-/tmp}/coquic-interop-runner.XXXXXX")"
 readonly runner_network_pattern='interop-runner.*_(leftnet|rightnet)$'
 readonly coquic_image="${INTEROP_COQUIC_IMAGE:-coquic-interop:quictls-musl}"
 readonly coquic_package="${INTEROP_COQUIC_PACKAGE:-interop-image-quictls-musl}"
+
+export COQUIC_RUNTIME_TRACE="${COQUIC_RUNTIME_TRACE:-}"
+export COQUIC_PACKET_TRACE="${COQUIC_PACKET_TRACE:-}"
+export COQUIC_PACKET_TRACE_SCID="${COQUIC_PACKET_TRACE_SCID:-}"
+export COQUIC_CONGESTION_CONTROL="${COQUIC_CONGESTION_CONTROL:-}"
+export COQUIC_SEND_PROFILE="${COQUIC_SEND_PROFILE:-}"
+export COQUIC_IO_PROFILE="${COQUIC_IO_PROFILE:-}"
 
 have_interop_analysis_tools() {
   command -v tshark >/dev/null 2>&1 && command -v editcap >/dev/null 2>&1
@@ -148,6 +160,30 @@ if "COQUIC_PACKET_TRACE_SCID" not in text:
                         client_env_anchor +
                         "      - COQUIC_PACKET_TRACE_SCID=$COQUIC_PACKET_TRACE_SCID\n")
 
+if "COQUIC_CONGESTION_CONTROL" not in text:
+    text = text.replace(server_env_anchor,
+                        server_env_anchor +
+                        "      - COQUIC_CONGESTION_CONTROL=$COQUIC_CONGESTION_CONTROL\n")
+    text = text.replace(client_env_anchor,
+                        client_env_anchor +
+                        "      - COQUIC_CONGESTION_CONTROL=$COQUIC_CONGESTION_CONTROL\n")
+
+if "COQUIC_SEND_PROFILE" not in text:
+    text = text.replace(server_env_anchor,
+                        server_env_anchor +
+                        "      - COQUIC_SEND_PROFILE=$COQUIC_SEND_PROFILE\n")
+    text = text.replace(client_env_anchor,
+                        client_env_anchor +
+                        "      - COQUIC_SEND_PROFILE=$COQUIC_SEND_PROFILE\n")
+
+if "COQUIC_IO_PROFILE" not in text:
+    text = text.replace(server_env_anchor,
+                        server_env_anchor +
+                        "      - COQUIC_IO_PROFILE=$COQUIC_IO_PROFILE\n")
+    text = text.replace(client_env_anchor,
+                        client_env_anchor +
+                        "      - COQUIC_IO_PROFILE=$COQUIC_IO_PROFILE\n")
+
 path.write_text(text)
 PY
 
@@ -180,6 +216,7 @@ run_direction() {
   local results_json="${direction_log_dir}/results.json"
   local runner_log_dir="${direction_log_dir}/runner"
   local runner_output_log="${direction_log_dir}/runner-output.txt"
+  local save_files_args=()
   local status
   local testcase
   local testcase_log_dir
@@ -187,6 +224,9 @@ run_direction() {
   cleanup_runner_state
   rm -rf "${direction_log_dir}"
   mkdir -p "${direction_log_dir}"
+  if [ "${interop_save_files}" = "1" ]; then
+    save_files_args=(--save-files true)
+  fi
 
   echo "== official interop: server=${server} client=${client} testcases=${interop_testcases} =="
   set +e
@@ -199,6 +239,7 @@ run_direction() {
         --test "${interop_testcases}" \
         --log-dir "${runner_log_dir}" \
         --json "${results_json}" \
+        "${save_files_args[@]}" \
         --debug
     ) > "${runner_output_log}" 2>&1
   else
@@ -211,6 +252,7 @@ run_direction() {
           --test "${interop_testcases}" \
           --log-dir "${runner_log_dir}" \
           --json "${results_json}" \
+          "${save_files_args[@]}" \
           --debug
     ) > "${runner_output_log}" 2>&1
   fi

@@ -146,6 +146,7 @@ enum class ServerBackendSchedulingCaseForTests : std::uint8_t {
     buffered_top_due_idle_timeout_skips_ready_probe,
     ready_probe_rx_datagram_success_then_shutdown,
     ready_probe_timer_without_wakeup_falls_back_to_main_wait,
+    deferred_output_waits_until_grace_deadline,
 };
 
 struct ServerLoopResultForTests {
@@ -195,6 +196,9 @@ QuicHttp09ClientConfig make_http09_client_endpoint_config_for_tests(
 quic::QuicCoreConfig
 make_http09_server_core_config_with_identity_for_tests(const Http09RuntimeConfig &config,
                                                        quic::TlsIdentity identity);
+quic::QuicCoreEndpointConfig
+make_runtime_server_endpoint_config_for_tests(const Http09RuntimeConfig &config,
+                                              quic::TlsIdentity identity);
 int run_http09_client_connection_for_tests(const Http09RuntimeConfig &config,
                                            const std::vector<QuicHttp09Request> &requests,
                                            std::uint64_t connection_index);

@@ -552,7 +552,8 @@ bool send_udp_gso_batch(std::span<const QuicIoEngineTxDatagram> datagrams,
         return true;
     }
 
-    if (errno == EINVAL || errno == EOPNOTSUPP || errno == ENOPROTOOPT || errno == EMSGSIZE) {
+    if (errno == EINVAL || errno == EOPNOTSUPP || errno == ENOPROTOOPT || errno == EMSGSIZE ||
+        errno == EIO) {
         if (errno != EMSGSIZE) {
             udp_gso_disabled() = true;
         }
@@ -2730,8 +2731,9 @@ bool poll_io_engine_send_many_batching_coverage_for_tests() {
                    engine.send_many(datagrams, "client"),
                    g_send_many_batch_coverage_trace.sendmsg_calls == 1,
                    g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
+                   internal::udp_gso_disabled(),
                }),
-               "send_many falls back from hard GSO send errors to sendmmsg");
+               "send_many disables GSO after EIO before sendmmsg fallback");
     }
 
     {

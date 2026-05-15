@@ -38,6 +38,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 
@@ -84,10 +85,12 @@ using io::test::socket_io_backend_send_datagram_for_runtime_tests;
 namespace {
 
 constexpr std::size_t kMinimumClientInitialDatagramBytes = 1200;
+constexpr std::size_t kRuntimeMaxOutboundDatagramBytes = 1472;
 constexpr std::size_t kRuntimeConnectionIdLength = 8;
 constexpr int kDefaultClientReceiveTimeoutMs = 30000;
 constexpr int kMulticonnectClientReceiveTimeoutMs = 180000;
 constexpr int kClientSuccessDrainWindowMs = 500;
+constexpr int kServerZeroRttDrainGraceMs = 100;
 constexpr int kServerIdleTimeoutMs = 1000;
 constexpr std::string_view kProjectName = "coquic";
 constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
@@ -614,6 +617,13 @@ runtime_supported_quic_versions_for_testcase(QuicHttp09Testcase testcase) {
 std::optional<PreferredAddress>
 runtime_preferred_address_for_server(const Http09RuntimeConfig &config);
 
+void configure_runtime_datagram_profile(QuicTransportConfig &transport) {
+    transport.pmtud_enabled = true;
+    transport.pmtud_base_datagram_size = kRuntimeMaxOutboundDatagramBytes;
+    transport.pmtud_max_datagram_size = kRuntimeMaxOutboundDatagramBytes;
+    transport.max_udp_payload_size = kRuntimeMaxOutboundDatagramBytes;
+}
+
 QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeConfig &config,
                                                             TlsIdentity identity) {
     const auto original_version = runtime_original_quic_version_for_testcase(config.testcase);
@@ -629,6 +639,7 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
         .application_protocol = std::string(kInteropApplicationProtocol),
         .identity = std::move(identity),
         .transport = http09_server_transport_for_testcase(transfer_like_testcase),
+        .max_outbound_datagram_size = kRuntimeMaxOutboundDatagramBytes,
         .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(transfer_like_testcase),
         .zero_rtt =
             QuicZeroRttConfig{
@@ -639,6 +650,7 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
         core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
     }
     core.transport.congestion_control = config.congestion_control;
+    configure_runtime_datagram_profile(core.transport);
     core.tls_keylog_path = config.tls_keylog_path;
     core.transport.preferred_address = runtime_preferred_address_for_server(config);
     return core;
@@ -1425,6 +1437,7 @@ struct EndpointDriveState {
     std::unordered_map<QuicPathId, RuntimeSendRoute> path_routes;
     std::unordered_map<std::string, QuicRouteHandle> route_handles_by_peer_tuple;
     std::unordered_map<QuicRouteHandle, RuntimeSendRoute> route_routes;
+    std::unordered_set<QuicConnectionHandle> handshake_ready_connections;
     QuicRouteHandle next_route_handle = 1;
 };
 
@@ -1532,9 +1545,20 @@ QuicCoreInboundDatagram make_inbound_datagram_from_io_event(const QuicIoRxDatagr
     };
 }
 
+QuicIoTxDatagram make_owning_tx_datagram(const QuicIoTxDatagram &datagram) {
+    return QuicIoTxDatagram{
+        .route_handle = datagram.route_handle,
+        .bytes = DatagramBuffer(datagram.payload()),
+        .ecn = datagram.ecn,
+        .is_pmtu_probe = datagram.is_pmtu_probe,
+    };
+}
+
 bool handle_core_effects_with_backend(const std::optional<QuicRouteHandle> &fallback_route_handle,
                                       QuicIoBackend &backend, const QuicCoreResult &result,
-                                      std::string_view role_name) {
+                                      std::string_view role_name,
+                                      std::vector<QuicIoTxDatagram> *deferred_output = nullptr) {
+    std::vector<QuicIoTxDatagram> datagrams;
     for (const auto &effect : result.effects) {
         const auto *send = std::get_if<QuicCoreSendDatagram>(&effect);
         if (send == nullptr) {
@@ -1556,17 +1580,27 @@ bool handle_core_effects_with_backend(const std::optional<QuicRouteHandle> &fall
                    << " bytes=" << send->bytes.size() << '\n';
         });
 
-        if (!backend.send(QuicIoTxDatagram{
-                .route_handle = *route_handle,
-                .bytes = send->bytes,
-                .ecn = send->ecn,
-                .is_pmtu_probe = send->is_pmtu_probe,
-            })) {
-            return false;
-        }
+        datagrams.push_back(QuicIoTxDatagram{
+            .route_handle = *route_handle,
+            .bytes_view = send->bytes.span(),
+            .ecn = send->ecn,
+            .is_pmtu_probe = send->is_pmtu_probe,
+        });
     }
 
-    return true;
+    if (datagrams.empty()) {
+        return true;
+    }
+
+    if (deferred_output != nullptr) {
+        deferred_output->reserve(deferred_output->size() + datagrams.size());
+        for (const auto &datagram : datagrams) {
+            deferred_output->push_back(make_owning_tx_datagram(datagram));
+        }
+        return true;
+    }
+
+    return backend.send_many(datagrams);
 }
 
 void record_resumption_state(EndpointDriveState &state, const QuicCoreResult &result) {
@@ -1576,6 +1610,29 @@ void record_resumption_state(EndpointDriveState &state, const QuicCoreResult &re
             state.last_resumption_state = available->state;
         }
     }
+}
+
+bool result_observes_new_handshake_ready(EndpointDriveState &state, const QuicCoreResult &result) {
+    bool observed = false;
+    for (const auto &effect : result.effects) {
+        const auto *event = std::get_if<QuicCoreStateEvent>(&effect);
+        if (event == nullptr || event->change != QuicCoreStateChange::handshake_ready) {
+            continue;
+        }
+        if (state.handshake_ready_connections.insert(event->connection).second) {
+            observed = true;
+        }
+    }
+    return observed;
+}
+
+bool result_observes_stream_data_before_handshake_ready(const EndpointDriveState &state,
+                                                        const QuicCoreResult &result) {
+    return std::any_of(result.effects.begin(), result.effects.end(), [&](const auto &effect) {
+        const auto *received = std::get_if<QuicCoreReceiveStreamData>(&effect);
+        return received != nullptr &&
+               !state.handshake_ready_connections.contains(received->connection);
+    });
 }
 
 bool observe_client_runtime_policy_effects(const QuicCoreResult &result, EndpointDriveState &state,
@@ -2802,6 +2859,7 @@ QuicCoreEndpointConfig make_runtime_server_endpoint_config(const Http09RuntimeCo
         .application_protocol = std::move(core_config.application_protocol),
         .identity = std::move(core_config.identity),
         .transport = std::move(core_config.transport),
+        .max_outbound_datagram_size = core_config.max_outbound_datagram_size,
         .allowed_tls_cipher_suites = std::move(core_config.allowed_tls_cipher_suites),
         .zero_rtt = std::move(core_config.zero_rtt),
         .qlog = std::move(core_config.qlog),
@@ -2881,6 +2939,7 @@ void ensure_server_connection_endpoints_for_accepts(ServerConnectionEndpointMap 
                           ServerConnectionEndpointState{
                               .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
                                   .document_root = document_root,
+                                  .defer_responses_until_handshake_ready = true,
                               }),
                           });
     }
@@ -3040,11 +3099,15 @@ bool process_server_endpoint_core_result_with_backend(
     QuicCore &core, EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
     const std::filesystem::path &document_root, QuicCoreResult initial_result,
     const std::optional<QuicRouteHandle> &fallback_route_handle, QuicIoBackend &backend,
-    bool *observed_send_effects = nullptr) {
+    bool *observed_send_effects = nullptr, std::vector<QuicIoTxDatagram> *deferred_output = nullptr,
+    bool *observed_early_stream_data = nullptr) {
     std::deque<QuicCoreResult> pending_results;
     pending_results.push_back(std::move(initial_result));
     if (observed_send_effects != nullptr) {
         *observed_send_effects = false;
+    }
+    if (observed_early_stream_data != nullptr) {
+        *observed_early_stream_data = false;
     }
 
     while (!pending_results.empty()) {
@@ -3060,8 +3123,13 @@ bool process_server_endpoint_core_result_with_backend(
                 *observed_send_effects = true;
             }
         }
+        if (observed_early_stream_data != nullptr &&
+            result_observes_stream_data_before_handshake_ready(transport_state, current_result)) {
+            *observed_early_stream_data = true;
+        }
+        static_cast<void>(result_observes_new_handshake_ready(transport_state, current_result));
         if (!handle_core_effects_with_backend(fallback_route_handle, backend, current_result,
-                                              "server")) {
+                                              "server", deferred_output)) {
             return false;
         }
 
@@ -3170,11 +3238,11 @@ bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transp
     return true;
 }
 
-bool pump_shared_server_endpoint_work_with_backend(QuicCore &core,
-                                                   EndpointDriveState &transport_state,
-                                                   ServerConnectionEndpointMap &endpoints,
-                                                   const std::filesystem::path &document_root,
-                                                   QuicIoBackend &backend, bool &made_progress) {
+bool pump_shared_server_endpoint_work_with_backend(
+    QuicCore &core, EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
+    const std::filesystem::path &document_root, QuicIoBackend &backend, bool &made_progress,
+    std::vector<QuicIoTxDatagram> *deferred_output = nullptr,
+    bool *observed_early_stream_data = nullptr) {
     made_progress = false;
     std::vector<QuicConnectionHandle> pending_connections;
     for (const auto &[connection, endpoint] : endpoints) {
@@ -3201,7 +3269,7 @@ bool pump_shared_server_endpoint_work_with_backend(QuicCore &core,
             bool observed_send_effects = false;
             if (!process_server_endpoint_core_result_with_backend(
                     core, transport_state, endpoints, document_root, close_result, std::nullopt,
-                    backend, &observed_send_effects)) {
+                    backend, &observed_send_effects, deferred_output, observed_early_stream_data)) {
                 return false;
             }
             made_progress = made_progress | observed_send_effects;
@@ -3215,7 +3283,8 @@ bool pump_shared_server_endpoint_work_with_backend(QuicCore &core,
         if (!process_server_endpoint_core_result_with_backend(
                 core, transport_state, endpoints, document_root,
                 advance_endpoint_connection_inputs(core, connection, update.core_inputs, now()),
-                std::nullopt, backend, &observed_send_effects)) {
+                std::nullopt, backend, &observed_send_effects, deferred_output,
+                observed_early_stream_data)) {
             return false;
         }
         made_progress = made_progress | observed_send_effects;
@@ -3259,12 +3328,45 @@ struct ServerBackendLoopDriver {
     std::function<bool(const QuicIoRxDatagram &, QuicCoreTimePoint)> process_datagram;
     std::function<bool(const QuicIoPathMtuUpdate &, QuicCoreTimePoint)> process_path_mtu_update =
         [](const QuicIoPathMtuUpdate &, QuicCoreTimePoint) { return true; };
+    std::function<bool()> flush_deferred_output = [] { return true; };
+    std::function<std::optional<QuicCoreTimePoint>()> defer_output_until = [] {
+        return std::optional<QuicCoreTimePoint>{};
+    };
 };
 
 COQUIC_NO_PROFILE bool process_path_mtu_update_event(const ServerBackendLoopDriver &driver,
                                                      const QuicIoPathMtuUpdate &update,
                                                      QuicCoreTimePoint now) {
     return driver.process_path_mtu_update(update, now);
+}
+
+std::optional<QuicCoreTimePoint>
+backend_output_wait_deadline(const std::optional<QuicCoreTimePoint> &next_wakeup,
+                             const std::optional<QuicCoreTimePoint> &defer_output_until) {
+    if (!defer_output_until.has_value()) {
+        return next_wakeup;
+    }
+    if (!next_wakeup.has_value()) {
+        return defer_output_until;
+    }
+    return std::min(*next_wakeup, *defer_output_until);
+}
+
+bool backend_deferred_output_flush_ready(
+    QuicCoreTimePoint current, const std::optional<QuicCoreTimePoint> &defer_output_until) {
+    return !defer_output_until.has_value() || current >= *defer_output_until;
+}
+
+bool flush_backend_deferred_output_if_ready(const ServerBackendLoopDriver &driver,
+                                            QuicCoreTimePoint current, bool &server_failed) {
+    if (!backend_deferred_output_flush_ready(current, driver.defer_output_until())) {
+        return true;
+    }
+    if (!driver.flush_deferred_output()) {
+        server_failed = true;
+        return false;
+    }
+    return true;
 }
 
 COQUIC_NO_PROFILE void
@@ -3539,8 +3641,18 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
                     } else if (ready_event->kind == QuicIoEvent::Kind::shutdown) {
                         return 1;
                     }
+                    // The ready probe did not surface RX, PMTU, shutdown, or a real due timer.
+                    // Flush queued output before continuing endpoint work unless an early-data
+                    // grace window is still open.
+                    static_cast<void>(flush_backend_deferred_output_if_ready(
+                        driver, driver.current_time(), server_failed));
+                    continue;
                 }
             }
+        }
+
+        if (!flush_backend_deferred_output_if_ready(driver, driver.current_time(), server_failed)) {
+            continue;
         }
 
         std::optional<QuicIoEvent> event;
@@ -3548,7 +3660,9 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
             event = buffered_event;
             buffered_event.reset();
         } else {
-            const auto wait_next_wakeup = driver.next_wakeup();
+            const auto output_defer_deadline = driver.defer_output_until();
+            const auto wait_next_wakeup =
+                backend_output_wait_deadline(driver.next_wakeup(), output_defer_deadline);
             log_wait_request("main", wait_next_wakeup, driver.current_time());
             event = driver.wait(wait_next_wakeup);
             log_wait_event("main", event);
@@ -3593,13 +3707,35 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
 int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &core,
                                    EndpointDriveState &transport_state,
                                    ServerConnectionEndpointMap &endpoints, QuicIoBackend &backend) {
+    std::vector<QuicIoTxDatagram> deferred_output;
+    std::optional<QuicCoreTimePoint> defer_output_until;
+    const auto note_early_stream_data = [&](QuicCoreTimePoint input_time) {
+        defer_output_until =
+            std::max(defer_output_until.value_or(input_time),
+                     input_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs));
+    };
+    const auto flush_deferred_output = [&]() -> bool {
+        if (deferred_output.empty()) {
+            defer_output_until.reset();
+            return true;
+        }
+        auto datagrams = std::move(deferred_output);
+        deferred_output.clear();
+        defer_output_until.reset();
+        return backend.send_many(datagrams);
+    };
     const auto process_server_datagram = [&](const QuicIoRxDatagram &datagram,
                                              QuicCoreTimePoint input_time) -> bool {
         auto inbound = make_inbound_datagram_from_io_event(datagram);
         auto result = core.advance_endpoint(std::move(inbound), input_time);
-        return process_server_endpoint_core_result_with_backend(
+        bool observed_early_stream_data = false;
+        const bool ok = process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
-            datagram.route_handle, backend);
+            datagram.route_handle, backend, nullptr, &deferred_output, &observed_early_stream_data);
+        if (ok && observed_early_stream_data) {
+            note_early_stream_data(input_time);
+        }
+        return ok;
     };
     const auto process_path_mtu_update = [&](const QuicIoPathMtuUpdate &update,
                                              QuicCoreTimePoint input_time) -> bool {
@@ -3609,9 +3745,14 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
                 .max_udp_payload_size = update.max_udp_payload_size,
             },
             input_time);
-        return process_server_endpoint_core_result_with_backend(
+        bool observed_early_stream_data = false;
+        const bool ok = process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
-            update.route_handle, backend);
+            update.route_handle, backend, nullptr, &deferred_output, &observed_early_stream_data);
+        if (ok && observed_early_stream_data) {
+            note_early_stream_data(input_time);
+        }
+        return ok;
     };
 
     return run_server_backend_loop_with_driver(ServerBackendLoopDriver{
@@ -3620,7 +3761,8 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
         .pump_endpoint_work =
             [&](bool &made_progress) {
                 return pump_shared_server_endpoint_work_with_backend(
-                    core, transport_state, endpoints, config.document_root, backend, made_progress);
+                    core, transport_state, endpoints, config.document_root, backend, made_progress,
+                    &deferred_output);
             },
         .has_pending_endpoint_work =
             [&] { return has_pending_shared_server_endpoint_work(endpoints); },
@@ -3630,12 +3772,20 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
             },
         .process_wait_timer =
             [&](QuicCoreTimePoint current) {
-                return process_server_endpoint_core_result_with_backend(
+                bool observed_early_stream_data = false;
+                const bool ok = process_server_endpoint_core_result_with_backend(
                     core, transport_state, endpoints, config.document_root,
-                    core.advance_endpoint(QuicCoreTimerExpired{}, current), std::nullopt, backend);
+                    core.advance_endpoint(QuicCoreTimerExpired{}, current), std::nullopt, backend,
+                    nullptr, &deferred_output, &observed_early_stream_data);
+                if (ok && observed_early_stream_data) {
+                    note_early_stream_data(current);
+                }
+                return ok;
             },
         .process_datagram = process_server_datagram,
         .process_path_mtu_update = process_path_mtu_update,
+        .flush_deferred_output = flush_deferred_output,
+        .defer_output_until = [&] { return defer_output_until; },
     });
 }
 
@@ -3930,6 +4080,15 @@ failure_injecting_client_loop_wait_for_tests(void *context, const RuntimeWaitCon
     return scripted_client_loop_wait_for_tests(&script, config, next_wakeup);
 }
 
+QuicIoTxDatagram owning_tx_datagram_for_tests(const QuicIoTxDatagram &datagram) {
+    return QuicIoTxDatagram{
+        .route_handle = datagram.route_handle,
+        .bytes = DatagramBuffer(datagram.payload()),
+        .ecn = datagram.ecn,
+        .is_pmtu_probe = datagram.is_pmtu_probe,
+    };
+}
+
 class ScriptedIoBackendForTests final : public QuicIoBackend {
   public:
     std::vector<QuicIoRemote> ensure_route_calls;
@@ -3957,7 +4116,7 @@ class ScriptedIoBackendForTests final : public QuicIoBackend {
     }
 
     bool send(const QuicIoTxDatagram &datagram) override {
-        sent_datagrams.push_back(datagram);
+        sent_datagrams.push_back(owning_tx_datagram_for_tests(datagram));
         return true;
     }
 };
@@ -4071,6 +4230,7 @@ struct ScriptedServerBackendSchedulingCaseForTests {
     std::vector<bool> pump_made_progress;
     std::vector<std::optional<QuicIoEvent>> wait_results;
     std::optional<QuicIoEvent> initial_buffered_event;
+    std::optional<QuicCoreTimePoint> defer_output_until;
     bool blocking_rx_requires_future_wait = false;
     std::optional<QuicIoEvent> blocking_rx_wait_result;
     std::size_t max_immediate_waits_before_failure = 0;
@@ -4559,6 +4719,40 @@ make_ready_probe_timer_without_wakeup_falls_back_to_main_wait_case_for_tests() {
     };
 }
 
+ScriptedServerBackendSchedulingCaseForTests
+make_deferred_output_waits_until_grace_deadline_case_for_tests() {
+    const auto base_time = now();
+    return ScriptedServerBackendSchedulingCaseForTests{
+        .current_times =
+            {
+                base_time,
+                base_time,
+                base_time,
+                base_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs),
+                base_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs),
+                base_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs),
+            },
+        .next_wakeup_results =
+            {
+                std::nullopt,
+            },
+        .pending_work_after_pump = {false},
+        .pump_made_progress = {false},
+        .wait_results =
+            {
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::timer_expired,
+                    .now = base_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs),
+                },
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::shutdown,
+                    .now = base_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs),
+                },
+            },
+        .defer_output_until = base_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs),
+    };
+}
+
 using ServerBackendSchedulingCaseFactoryForTests =
     ScriptedServerBackendSchedulingCaseForTests (*)();
 
@@ -4572,6 +4766,7 @@ ServerBackendSchedulingCaseFactoryForTests server_backend_scheduling_case_factor
     &make_buffered_top_due_idle_timeout_skips_ready_probe_case_for_tests,
     &make_ready_probe_rx_datagram_success_then_shutdown_case_for_tests,
     &make_ready_probe_timer_without_wakeup_falls_back_to_main_wait_case_for_tests,
+    &make_deferred_output_waits_until_grace_deadline_case_for_tests,
 };
 
 std::vector<std::byte> bytes_from_string_for_runtime_tests(std::string_view text) {
@@ -4835,6 +5030,12 @@ QuicCoreConfig
 make_http09_server_core_config_with_identity_for_tests(const Http09RuntimeConfig &config,
                                                        TlsIdentity identity) {
     return make_http09_server_core_config_with_identity(config, std::move(identity));
+}
+
+QuicCoreEndpointConfig
+make_runtime_server_endpoint_config_for_tests(const Http09RuntimeConfig &config,
+                                              TlsIdentity identity) {
+    return make_runtime_server_endpoint_config(config, std::move(identity));
 }
 
 int run_http09_client_connection_for_tests(const Http09RuntimeConfig &config,
@@ -7676,7 +7877,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         }
 
         bool send(const QuicIoTxDatagram &datagram) override {
-            sent_datagrams.push_back(datagram);
+            sent_datagrams.push_back(owning_tx_datagram_for_tests(datagram));
             return false;
         }
     };
@@ -9596,6 +9797,8 @@ run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests
     std::size_t process_expired_calls = 0;
     std::size_t process_datagram_calls = 0;
     std::size_t pump_calls = 0;
+    std::size_t flush_calls = 0;
+    std::optional<QuicCoreTimePoint> defer_output_until = script.defer_output_until;
     bool endpoint_has_pending_work = false;
     QuicCoreTimePoint last_current_time =
         script.current_times.empty() ? now() : script.current_times.front();
@@ -9680,6 +9883,13 @@ run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests
                 process_datagram_calls += 1;
                 return script.process_datagram_result;
             },
+        .flush_deferred_output =
+            [&] {
+                flush_calls += 1;
+                defer_output_until.reset();
+                return true;
+            },
+        .defer_output_until = [&] { return defer_output_until; },
     };
 
     return ServerLoopResultForTests{
@@ -9690,6 +9900,7 @@ run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests
         .process_expired_calls = process_expired_calls,
         .process_datagram_calls = process_datagram_calls,
         .pump_calls = pump_calls,
+        .send_calls = flush_calls,
     };
 }
 
@@ -9921,7 +10132,7 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
         server_name_specified = true;
     }
     if (const auto congestion_control = getenv_string("COQUIC_CONGESTION_CONTROL");
-        congestion_control.has_value()) {
+        congestion_control.has_value() && !congestion_control->empty()) {
         const auto parsed = quic::parse_congestion_control_algorithm(*congestion_control);
         if (!parsed.has_value()) {
             std::cerr << kUsageLine << '\n';
@@ -10073,12 +10284,14 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
         .server_name = config.server_name.empty() ? "localhost" : config.server_name,
         .application_protocol = std::string(kInteropApplicationProtocol),
         .transport = http09_client_transport_for_testcase(transfer_like_testcase),
+        .max_outbound_datagram_size = kRuntimeMaxOutboundDatagramBytes,
         .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(transfer_like_testcase),
     };
     if (config.qlog_directory.has_value()) {
         core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
     }
     core.transport.congestion_control = config.congestion_control;
+    configure_runtime_datagram_profile(core.transport);
     core.tls_keylog_path = config.tls_keylog_path;
     return core;
 }
@@ -10967,12 +11180,12 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                     std::nullopt,
                 },
             .pump_return_results = {true},
-            .pending_work_after_pump = {true},
-            .pump_made_progress = {true},
+            .pending_work_after_pump = {true, false},
+            .pump_made_progress = {true, false},
         });
         check("backend loop covers ready-probe idle timeouts",
               ready_probe_idle_timeout.exit_code == 1 & ready_probe_idle_timeout.wait_calls == 2 &
-                  ready_probe_idle_timeout.pump_calls == 1);
+                  ready_probe_idle_timeout.pump_calls == 2);
 
         const auto ready_probe_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time, base_time},
@@ -11011,13 +11224,14 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                     std::nullopt,
                 },
             .pump_return_results = {true},
-            .pending_work_after_pump = {true},
-            .pump_made_progress = {true},
+            .pending_work_after_pump = {true, false},
+            .pump_made_progress = {true, false},
         });
         check("backend loop ignores ready-probe timer events when wakeups are still in the future",
               ready_probe_timer_not_due.exit_code == 1 &
                   ready_probe_timer_not_due.process_expired_calls == 0 &
-                  ready_probe_timer_not_due.wait_calls == 2);
+                  ready_probe_timer_not_due.wait_calls == 2 &
+                  ready_probe_timer_not_due.pump_calls == 2);
 
         const auto ready_probe_shutdown = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},

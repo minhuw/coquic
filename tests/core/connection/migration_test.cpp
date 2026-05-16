@@ -1260,6 +1260,7 @@ TEST(QuicCoreTest, PreferredAddressMigrationUsesPreferredAddressConnectionId) {
     connection.peer_connection_ids_[2] = coquic::quic::PeerConnectionIdRecord{
         .sequence_number = 2,
         .connection_id = bytes_from_ints({0x10, 0x11}),
+        .locally_retired = true,
     };
     connection.active_peer_connection_id_sequence_ = 0;
 
@@ -1267,6 +1268,11 @@ TEST(QuicCoreTest, PreferredAddressMigrationUsesPreferredAddressConnectionId) {
         7, coquic::quic::QuicMigrationRequestReason::preferred_address);
 
     ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.peer_connection_ids_.contains(1));
+    EXPECT_EQ(connection.peer_connection_ids_.at(1).connection_id,
+              bytes_from_ints({0x41, 0x42, 0x43, 0x44}));
+    ASSERT_TRUE(connection.paths_.contains(7));
+    EXPECT_EQ(connection.paths_.at(7).peer_connection_id_sequence, 1u);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
@@ -1275,6 +1281,107 @@ TEST(QuicCoreTest, PreferredAddressMigrationUsesPreferredAddressConnectionId) {
     ASSERT_GE(datagram.size(), 5u);
     EXPECT_EQ(std::vector<std::byte>(datagram.begin() + 1, datagram.begin() + 5),
               bytes_from_ints({0x41, 0x42, 0x43, 0x44}));
+}
+
+TEST(QuicCoreTest, PreferredAddressMigrationDefersOldCidRetirementUntilAfterPathResponse) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+
+    connection.peer_transport_parameters_ = coquic::quic::TransportParameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 8,
+        .initial_source_connection_id = bytes_from_ints({0xaa}),
+        .preferred_address =
+            coquic::quic::PreferredAddress{
+                .ipv4_address = {std::byte{127}, std::byte{0}, std::byte{0}, std::byte{2}},
+                .ipv4_port = 4444,
+                .connection_id = bytes_from_ints({0x41, 0x42, 0x43, 0x44}),
+            },
+    };
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+
+    const auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::preferred_address);
+    ASSERT_TRUE(requested.has_value());
+
+    const auto outstanding_challenge =
+        optional_value_or_terminate(connection.paths_.at(7).outstanding_challenge);
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 7,
+        {coquic::quic::PathChallengeFrame{
+             .data = {std::byte{0x90}, std::byte{0x91}, std::byte{0x92}, std::byte{0x93},
+                      std::byte{0x94}, std::byte{0x95}, std::byte{0x96}, std::byte{0x97}}},
+         coquic::quic::PathResponseFrame{.data = outstanding_challenge}}));
+
+    EXPECT_TRUE(connection.paths_.at(7).validated);
+    ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
+    EXPECT_EQ(connection.pending_retire_connection_id_frames_.front().sequence_number, 0u);
+
+    const auto path_response_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(path_response_datagram.empty());
+    const auto decoded_path_response = coquic::quic::deserialize_protected_datagram(
+        path_response_datagram,
+        coquic::quic::DeserializeProtectionContext{
+            .peer_role = connection.config_.role,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.write_secret,
+            .one_rtt_key_phase = connection.application_write_key_phase_,
+            .largest_authenticated_application_packet_number =
+                connection.application_space_.largest_authenticated_packet_number,
+            .one_rtt_destination_connection_id_length = 4,
+        });
+    ASSERT_TRUE(decoded_path_response.has_value());
+    ASSERT_EQ(decoded_path_response.value().size(), 1u);
+    const auto *path_response_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded_path_response.value().front());
+    ASSERT_NE(path_response_packet, nullptr);
+
+    EXPECT_TRUE(std::ranges::any_of(path_response_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::PathResponseFrame>(frame);
+    }));
+    EXPECT_FALSE(std::ranges::any_of(path_response_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::RetireConnectionIdFrame>(frame);
+    }));
+    ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
+
+    const auto retire_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+    ASSERT_FALSE(retire_datagram.empty());
+    const auto decoded_retire = coquic::quic::deserialize_protected_datagram(
+        retire_datagram, coquic::quic::DeserializeProtectionContext{
+                             .peer_role = connection.config_.role,
+                             .client_initial_destination_connection_id =
+                                 connection.client_initial_destination_connection_id(),
+                             .one_rtt_secret = connection.application_space_.write_secret,
+                             .one_rtt_key_phase = connection.application_write_key_phase_,
+                             .largest_authenticated_application_packet_number =
+                                 connection.application_space_.largest_authenticated_packet_number,
+                             .one_rtt_destination_connection_id_length = 4,
+                         });
+    ASSERT_TRUE(decoded_retire.has_value());
+    ASSERT_EQ(decoded_retire.value().size(), 1u);
+    const auto *retire_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded_retire.value().front());
+    ASSERT_NE(retire_packet, nullptr);
+
+    EXPECT_TRUE(std::ranges::any_of(retire_packet->frames, [](const auto &frame) {
+        const auto *retire = std::get_if<coquic::quic::RetireConnectionIdFrame>(&frame);
+        return retire != nullptr && retire->sequence_number == 0;
+    }));
+    EXPECT_FALSE(std::ranges::any_of(retire_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::PathResponseFrame>(frame);
+    }));
 }
 
 TEST(QuicCoreTest, DisableActiveMigrationRejectsGenericMigrationRequest) {

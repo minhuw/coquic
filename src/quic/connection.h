@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <utility>
@@ -485,6 +486,7 @@ struct PathState {
     QuicPathId id = 0;
     bool validated = false;
     bool is_current_send_path = false;
+    bool preferred_address_path = false;
     bool challenge_pending = false;
     bool validation_initiated_locally = false;
     std::uint64_t anti_amplification_received_bytes = 0;
@@ -687,6 +689,7 @@ class QuicConnection {
                                                         QuicCoreTimePoint now);
     CodecResult<bool> process_new_connection_id_frame(const NewConnectionIdFrame &frame);
     CodecResult<bool> process_retire_connection_id_frame(const RetireConnectionIdFrame &frame);
+    CodecResult<bool> ensure_peer_preferred_address_connection_id();
     void queue_peer_connection_id_retirement(std::uint64_t sequence_number);
     void issue_spare_connection_ids();
     std::array<std::byte, 8> next_path_challenge_data(QuicPathId path_id);
@@ -733,6 +736,7 @@ class QuicConnection {
     bool can_initiate_path_validation(QuicPathId path_id) const;
     void retire_peer_connection_id_for_inactive_path(QuicPathId old_path_id,
                                                      QuicPathId new_path_id);
+    bool should_keep_current_send_path_for_inbound_non_probing(QuicPathId inbound_path_id) const;
     void maybe_switch_to_path(QuicPathId path_id, bool initiated_locally,
                               QuicCoreTimePoint now = QuicCoreClock::now());
     static void set_path_peer_connection_id_sequence(PathState &path,
@@ -799,6 +803,7 @@ class QuicConnection {
     std::optional<ConnectionId> client_initial_destination_connection_id_;
     std::optional<TransportParameters> peer_transport_parameters_;
     std::map<std::uint64_t, PeerConnectionIdRecord> peer_connection_ids_;
+    std::set<std::uint64_t> retired_peer_connection_id_sequences_;
     std::map<std::uint64_t, LocalConnectionIdRecord> local_connection_ids_;
     std::map<QuicPathId, PathState> paths_;
     std::uint64_t active_peer_connection_id_sequence_ = 0;

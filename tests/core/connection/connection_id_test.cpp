@@ -682,6 +682,63 @@ TEST(QuicCoreTest, PreferredAddressSequenceOneCanBeRetired) {
     EXPECT_TRUE(connection.local_connection_ids_.at(1).retired);
 }
 
+TEST(QuicCoreTest, RetiredPeerInitialConnectionIdIsNotRecreatedFromSourceConnectionId) {
+    auto connection = make_connected_client_connection();
+    connection.local_transport_parameters_.active_connection_id_limit = 4;
+    connection.peer_source_connection_id_ = bytes_from_ints({0xa1, 0xb2});
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xa1, 0xb2}),
+    };
+    connection.peer_connection_ids_[1] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 1,
+        .connection_id = bytes_from_ints({0x31}),
+    };
+    connection.peer_connection_ids_[2] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 2,
+        .connection_id = bytes_from_ints({0x32}),
+    };
+    connection.peer_connection_ids_[3] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 3,
+        .connection_id = bytes_from_ints({0x33}),
+    };
+    connection.queue_peer_connection_id_retirement(0);
+    ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
+
+    const auto retire_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(retire_datagram.empty());
+    ASSERT_TRUE(connection.peer_connection_ids_.contains(0));
+    ASSERT_TRUE(connection.peer_connection_ids_.at(0).retire_frame_in_flight);
+    const auto retire_packet_number = connection.application_space_.next_send_packet_number - 1;
+
+    const auto retire_acked = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = retire_packet_number,
+            .first_ack_range = 0,
+        },
+        coquic::quic::test::test_time(2), connection.local_transport_parameters_.ack_delay_exponent,
+        connection.local_transport_parameters_.max_ack_delay, /*suppress_pto_reset=*/false);
+    ASSERT_TRUE(retire_acked.has_value());
+    EXPECT_FALSE(connection.peer_connection_ids_.contains(0));
+
+    const auto replacement =
+        connection.process_new_connection_id_frame(coquic::quic::NewConnectionIdFrame{
+            .sequence_number = 4,
+            .retire_prior_to = 0,
+            .connection_id = bytes_from_ints({0x34}),
+        });
+
+    ASSERT_TRUE(replacement.has_value());
+    EXPECT_FALSE(connection.peer_connection_ids_.contains(0));
+    ASSERT_TRUE(connection.peer_connection_ids_.contains(4));
+    const auto active_count =
+        std::ranges::count_if(connection.peer_connection_ids_,
+                              [](const auto &entry) { return !entry.second.locally_retired; });
+    EXPECT_EQ(active_count, 4);
+}
+
 TEST(QuicCoreTest, CorruptedOneRttRequestConnectionIdBitflipDoesNotBlockValidRetransmit) {
     auto connection = make_connected_server_connection();
     connection.config_.source_connection_id = {

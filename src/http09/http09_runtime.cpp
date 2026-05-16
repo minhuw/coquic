@@ -1376,7 +1376,6 @@ COQUIC_NO_PROFILE void write_advance_core_output_trace(std::ostream &stream,
 COQUIC_NO_PROFILE QuicCoreResult advance_core_with_inputs(QuicCore &core,
                                                           std::span<const QuicCoreInput> inputs,
                                                           QuicCoreTimePoint step_time) {
-    QuicCoreResult combined;
     for (const auto &input : inputs) {
         with_runtime_trace([&](std::ostream &stream) {
             stream << "http09-runtime trace: advance_core input=";
@@ -1412,18 +1411,10 @@ COQUIC_NO_PROFILE QuicCoreResult advance_core_with_inputs(QuicCore &core,
                 input);
             stream << '\n';
         });
-        auto step = core.advance(input, step_time);
-        with_runtime_trace(
-            [&](std::ostream &stream) { write_advance_core_output_trace(stream, step); });
-        combined.effects.insert(combined.effects.end(),
-                                std::make_move_iterator(step.effects.begin()),
-                                std::make_move_iterator(step.effects.end()));
-        combined.next_wakeup = step.next_wakeup;
-        if (step.local_error.has_value()) {
-            combined.local_error = step.local_error;
-            break;
-        }
     }
+    auto combined = core.advance(inputs, step_time);
+    with_runtime_trace(
+        [&](std::ostream &stream) { write_advance_core_output_trace(stream, combined); });
     return combined;
 }
 

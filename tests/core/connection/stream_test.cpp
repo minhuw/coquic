@@ -118,6 +118,60 @@ TEST(QuicCoreTest, ClientCanSendOnMultipleBidirectionalStreams) {
               (coquic::quic::test::StreamPayload{4, "b", false}));
 }
 
+TEST(QuicCoreTest, BatchedStreamSendsPackIntoSharedDatagrams) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    auto *client_connection = client.connection_.get();
+    ASSERT_NE(client_connection, nullptr);
+    client_connection->config_.transport.pmtud_enabled = false;
+    client_connection->config_.max_outbound_datagram_size = 1472;
+    auto &peer_transport = optional_ref_or_terminate(client_connection->peer_transport_parameters_);
+    peer_transport.max_udp_payload_size = 1472;
+    peer_transport.initial_max_streams_bidi = 64;
+    client_connection->initialize_peer_flow_control_from_transport_parameters();
+
+    std::vector<coquic::quic::QuicCoreInput> inputs;
+    inputs.reserve(20);
+    for (std::uint64_t index = 0; index < 20; ++index) {
+        inputs.emplace_back(coquic::quic::QuicCoreSendStreamData{
+            .stream_id = index * 4,
+            .bytes = coquic::quic::test::bytes_from_string("GET /zero-rtt.txt\r\n"),
+            .fin = true,
+        });
+    }
+
+    const auto result = client.advance(inputs, coquic::quic::test::test_time(1));
+    ASSERT_FALSE(result.local_error.has_value());
+
+    const auto datagrams = coquic::quic::test::send_datagrams_from(result);
+    ASSERT_FALSE(datagrams.empty());
+    EXPECT_LT(datagrams.size(), inputs.size());
+
+    bool saw_packed_datagram = false;
+    std::vector<std::uint64_t> delivered_streams;
+    for (const auto &datagram : datagrams) {
+        const auto stream_ids = application_stream_ids_from_datagram(*client_connection, datagram);
+        if (stream_ids.size() > 1) {
+            saw_packed_datagram = true;
+        }
+        delivered_streams.insert(delivered_streams.end(), stream_ids.begin(), stream_ids.end());
+    }
+
+    EXPECT_TRUE(saw_packed_datagram);
+    EXPECT_EQ(delivered_streams.size(), inputs.size());
+
+    for (const auto &effect : result.effects) {
+        if (const auto *send = std::get_if<coquic::quic::QuicCoreSendDatagram>(&effect)) {
+            EXPECT_EQ(send->connection, 1u);
+        }
+    }
+}
+
 TEST(QuicCoreTest, ServerProcessesOneRttStreamBeforeHandshakeCompletesWhenApplicationKeysExist) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;

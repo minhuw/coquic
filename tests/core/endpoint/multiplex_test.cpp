@@ -62,6 +62,47 @@ TEST(QuicCoreEndpointTest, ConnectionCommandsOnlyAdvanceTheSelectedHandle) {
     EXPECT_EQ(core.connection_count(), 2u);
 }
 
+TEST(QuicCoreEndpointTest, ConnectionCommandStillDrainsEachStreamSend) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(1),
+            .initial_route_handle = 11,
+        },
+        coquic::quic::test::test_time(0)));
+
+    *core.connections_.at(1).connection = make_connected_client_connection();
+    core.connections_.at(1).route_handle_by_path_id.emplace(0, 11);
+    core.connections_.at(1).path_id_by_route_handle.emplace(11, 0);
+
+    const auto first = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreSendStreamData{
+                    .stream_id = 0,
+                    .bytes = bytes_from_ints({0x61}),
+                    .fin = false,
+                },
+        },
+        coquic::quic::test::test_time(1));
+    const auto second = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreSendStreamData{
+                    .stream_id = 4,
+                    .bytes = bytes_from_ints({0x62}),
+                    .fin = false,
+                },
+        },
+        coquic::quic::test::test_time(2));
+
+    EXPECT_EQ(send_effects_from(first).size(), 1u);
+    EXPECT_EQ(send_effects_from(second).size(), 1u);
+}
+
 TEST(QuicCoreEndpointTest, SharedSendCommandProducesSameDatagramAsOwnedSendCommand) {
     const auto make_ready_core = [] {
         coquic::quic::QuicCore core(make_client_endpoint_config());

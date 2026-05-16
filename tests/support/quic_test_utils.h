@@ -315,20 +315,7 @@ inline QuicCoreResult relay_datagrams_to_peer(std::span<const std::vector<std::b
 inline QuicCoreResult advance_core_with_inputs(QuicCore &core,
                                                std::span<const QuicCoreInput> inputs,
                                                QuicCoreTimePoint now) {
-    QuicCoreResult combined;
-    for (const auto &input : inputs) {
-        auto step = core.advance(input, now);
-        combined.effects.insert(combined.effects.end(),
-                                std::make_move_iterator(step.effects.begin()),
-                                std::make_move_iterator(step.effects.end()));
-        combined.next_wakeup = step.next_wakeup;
-        if (step.local_error.has_value()) {
-            combined.local_error = step.local_error;
-            break;
-        }
-    }
-
-    return combined;
+    return core.advance(inputs, now);
 }
 
 class ScopedTempDir {

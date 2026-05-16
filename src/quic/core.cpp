@@ -254,6 +254,31 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
     return result;
 }
 
+COQUIC_NO_PROFILE StreamStateResult<bool>
+queue_legacy_local_command(QuicConnection &connection, const QuicCoreSendStreamData &input) {
+    return connection.queue_stream_send(input.stream_id, input.bytes, input.fin);
+}
+
+COQUIC_NO_PROFILE StreamStateResult<bool>
+queue_legacy_local_command(QuicConnection &connection, const QuicCoreSendSharedStreamData &input) {
+    return connection.queue_stream_send_shared(input.stream_id, input.bytes, input.fin);
+}
+
+COQUIC_NO_PROFILE bool legacy_stream_send_batchable(const QuicCoreInput &input) {
+    return std::holds_alternative<QuicCoreSendStreamData>(input) ||
+           std::holds_alternative<QuicCoreSendSharedStreamData>(input);
+}
+
+COQUIC_NO_PROFILE void append_sequential_result(QuicCoreResult &target, QuicCoreResult source) {
+    target.effects.insert(target.effects.end(), std::make_move_iterator(source.effects.begin()),
+                          std::make_move_iterator(source.effects.end()));
+    target.next_wakeup = source.next_wakeup;
+    target.send_continuation_pending = source.send_continuation_pending;
+    if (!target.local_error.has_value() && source.local_error.has_value()) {
+        target.local_error = source.local_error;
+    }
+}
+
 void append_result(QuicCoreResult &target, QuicCoreResult source) {
     target.effects.insert(target.effects.end(), std::make_move_iterator(source.effects.begin()),
                           std::make_move_iterator(source.effects.end()));
@@ -3841,77 +3866,79 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         },
         input);
 
-    std::size_t emitted = 0;
-    for (; emitted < kMaxDatagramsPerDrain; ++emitted) {
-        if (!connection->has_sendable_datagram(now)) {
-            break;
-        }
-        auto datagram = connection->drain_outbound_datagram(now);
-        if (datagram.empty()) {
-            break;
-        }
-        if (emitted == 0 && connection->has_sendable_datagram(now)) {
-            result.effects.reserve(result.effects.size() + kMaxDatagramsPerDrain);
-        }
-        const auto route_handle = route_handle_for_path(entry, connection->last_drained_path_id());
-        result.effects.emplace_back(QuicCoreSendDatagram{
-            .connection = entry.handle,
-            .route_handle = route_handle,
-            .bytes = std::move(datagram),
-            .ecn = connection->last_drained_ecn_codepoint(),
-            .is_pmtu_probe = connection->last_drained_is_pmtu_probe(),
-            .packet_inspection_datagram_id =
-                connection->last_drained_packet_inspection_datagram_id(),
-        });
-    }
-    if (has_send_continuation(emitted, *connection, now)) {
-        result.next_wakeup = now;
-        result.send_continuation_pending = true;
-    }
-    while (auto received = connection->take_received_stream_data()) {
-        received->connection = entry.handle;
-        result.effects.emplace_back(std::move(*received));
-    }
-    while (const auto reset = connection->take_peer_reset_stream()) {
-        result.effects.emplace_back(*reset);
-    }
-    while (const auto stop = connection->take_peer_stop_sending()) {
-        result.effects.emplace_back(*stop);
-    }
-    while (const auto event = connection->take_state_change()) {
-        result.effects.emplace_back(QuicCoreStateEvent{
-            .change = *event,
-        });
-    }
-    while (const auto preferred = connection->take_peer_preferred_address_available()) {
-        result.effects.emplace_back(*preferred);
-    }
-    while (const auto state = connection->take_resumption_state_available()) {
-        result.effects.emplace_back(*state);
-    }
-    while (const auto status = connection->take_zero_rtt_status_event()) {
-        result.effects.emplace_back(*status);
-    }
-    while (auto token = connection->take_new_token()) {
-        result.effects.emplace_back(QuicCoreNewTokenAvailable{
-            .connection = entry.handle,
-            .token = std::move(*token),
-        });
-    }
-    while (auto inspection = connection->take_packet_inspection()) {
-        inspection->connection = entry.handle;
-        result.effects.emplace_back(std::move(*inspection));
-    }
-    if (const auto terminal = connection->take_terminal_state()) {
-        if (*terminal == QuicConnectionTerminalState::closed) {
-            result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
-                .connection = entry.handle,
-                .event = QuicCoreConnectionLifecycle::closed,
-            });
-        }
-    }
+    auto drained = drain_connection_effects(entry.handle, entry.default_route_handle,
+                                            entry.route_handle_by_path_id, *connection, now);
+    append_result(result, std::move(drained));
     legacy_config_ = std::move(config);
     return finalize_legacy_result(std::move(result), now);
+}
+
+QuicCoreResult QuicCore::advance(std::span<const QuicCoreInput> inputs, QuicCoreTimePoint now) {
+    QuicCoreResult combined;
+    for (std::size_t index = 0; index < inputs.size();) {
+        if (!legacy_stream_send_batchable(inputs[index])) {
+            auto step = advance(inputs[index], now);
+            append_sequential_result(combined, std::move(step));
+            if (combined.local_error.has_value()) {
+                break;
+            }
+            ++index;
+            continue;
+        }
+
+        if (!legacy_config_.has_value()) {
+            auto step = advance(inputs[index], now);
+            append_sequential_result(combined, std::move(step));
+            break;
+        }
+
+        QuicCoreResult result;
+        auto *entry = ensure_legacy_entry();
+        if (entry == nullptr || entry->connection == nullptr) {
+            result = finalize_legacy_result(std::move(result), now);
+            append_sequential_result(combined, std::move(result));
+            ++index;
+            continue;
+        }
+
+        std::size_t run_end = index;
+        for (; run_end < inputs.size() && legacy_stream_send_batchable(inputs[run_end]);
+             ++run_end) {
+            std::visit(
+                overloaded{
+                    [&](const QuicCoreSendStreamData &in) {
+                        const auto queued = queue_legacy_local_command(*entry->connection, in);
+                        if (!queued.has_value()) {
+                            result.local_error = stream_state_error_to_local_error(queued.error());
+                        }
+                    },
+                    [&](const QuicCoreSendSharedStreamData &in) {
+                        const auto queued = queue_legacy_local_command(*entry->connection, in);
+                        if (!queued.has_value()) {
+                            result.local_error = stream_state_error_to_local_error(queued.error());
+                        }
+                    },
+                    [&](const auto &) {},
+                },
+                inputs[run_end]);
+            if (result.local_error.has_value()) {
+                ++run_end;
+                break;
+            }
+        }
+
+        auto drained =
+            drain_connection_effects(entry->handle, entry->default_route_handle,
+                                     entry->route_handle_by_path_id, *entry->connection, now);
+        append_result(result, std::move(drained));
+        result = finalize_legacy_result(std::move(result), now);
+        append_sequential_result(combined, std::move(result));
+        if (combined.local_error.has_value()) {
+            break;
+        }
+        index = run_end;
+    }
+    return combined;
 }
 
 std::vector<ConnectionId> QuicCore::active_local_connection_ids() const {

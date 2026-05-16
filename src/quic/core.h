@@ -501,6 +501,7 @@ class QuicCore {
 
     QuicCoreResult advance_endpoint(QuicCoreEndpointInput input, QuicCoreTimePoint now);
     QuicCoreResult advance(QuicCoreInput input, QuicCoreTimePoint now);
+    QuicCoreResult advance(std::span<const QuicCoreInput> inputs, QuicCoreTimePoint now);
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     std::size_t connection_count() const;
     std::vector<QuicCoreConnectionDiagnostics> connection_diagnostics() const;

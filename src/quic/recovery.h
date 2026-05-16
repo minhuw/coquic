@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -202,6 +203,33 @@ class RecoveryPacketHandleOptional {
     std::optional<RecoveryPacketMetadata> metadata_;
 };
 
+class RecoveryPacketHandleSmallList {
+  public:
+    using iterator = RecoveryPacketHandle *;
+    using const_iterator = const RecoveryPacketHandle *;
+
+    void push_back(RecoveryPacketHandle handle);
+    bool empty() const;
+    std::size_t size() const;
+    RecoveryPacketHandle front() const;
+    std::span<const RecoveryPacketHandle> handles() const;
+    iterator begin();
+    iterator end();
+    const_iterator begin() const;
+    const_iterator end() const;
+
+  private:
+    static constexpr std::size_t kInlineCapacity = 4;
+
+    RecoveryPacketHandle *mutable_data();
+    const RecoveryPacketHandle *data() const;
+
+    std::array<RecoveryPacketHandle, kInlineCapacity> inline_handles_{};
+    std::vector<RecoveryPacketHandle> heap_handles_;
+    std::size_t size_ = 0;
+    bool heap_backed_ = false;
+};
+
 struct AckProcessingResult {
     RecoveryPacketHandleList acked_packets;
     RecoveryPacketHandleList late_acked_packets;
@@ -218,9 +246,9 @@ struct AckApplyLargestNewlyAckedPacket {
 };
 
 struct AckApplyResult {
-    std::vector<RecoveryPacketHandle> acked_packets;
-    std::vector<RecoveryPacketHandle> late_acked_packets;
-    std::vector<RecoveryPacketHandle> lost_packets;
+    RecoveryPacketHandleSmallList acked_packets;
+    RecoveryPacketHandleSmallList late_acked_packets;
+    RecoveryPacketHandleSmallList lost_packets;
     std::optional<AckApplyLargestNewlyAckedPacket> largest_newly_acked_packet;
     bool largest_acknowledged_was_newly_acked = false;
     bool has_newly_acked_ack_eliciting = false;
@@ -287,7 +315,7 @@ class PacketSpaceRecovery {
 
     struct AckApplyState {
         AckApplyResult result;
-        std::optional<std::size_t> current_live_slot;
+        std::size_t current_live_slot = kInvalidLedgerSlotIndex;
         std::optional<std::uint64_t> previous_largest_acked;
         std::uint64_t largest_acknowledged = 0;
         std::uint64_t effective_largest_acked = 0;
@@ -302,8 +330,11 @@ class PacketSpaceRecovery {
         LedgerSlotState state = LedgerSlotState::empty;
         SentPacketRecord packet;
         bool acknowledged = false;
-        std::size_t prev_live_slot = kInvalidLedgerSlotIndex;
-        std::size_t next_live_slot = kInvalidLedgerSlotIndex;
+    };
+
+    struct LiveSlotLink {
+        std::size_t prev = kInvalidLedgerSlotIndex;
+        std::size_t next = kInvalidLedgerSlotIndex;
     };
 
     static DeadlineTrackedPacket tracked_packet(const SentPacketRecord &packet);
@@ -311,8 +342,14 @@ class PacketSpaceRecovery {
                                               std::size_t slot_index);
     static void reclaim_retired_packet_storage(SentPacketRecord &packet);
     void link_live_slot(std::size_t slot_index);
+    void ensure_live_link_slot(std::size_t slot_index);
+    void set_live_link(std::size_t slot_index, LiveSlotLink link);
+    void set_live_slot_bit(std::size_t slot_index);
+    void clear_live_slot_bit(std::size_t slot_index);
+    std::size_t previous_live_slot(std::size_t slot_index) const;
+    std::size_t next_live_slot(std::size_t slot_index) const;
     void unlink_live_slot(std::size_t slot_index);
-    std::optional<std::size_t> newest_live_slot_at_or_below(std::uint64_t packet_number) const;
+    std::size_t newest_live_slot_at_or_below(std::uint64_t packet_number) const;
     SentPacketLedgerSlot *slot_for_packet_number(std::uint64_t packet_number);
     const SentPacketLedgerSlot *slot_for_packet_number(std::uint64_t packet_number) const;
     SentPacketLedgerSlot *outstanding_slot_for_packet_number(std::uint64_t packet_number);
@@ -345,6 +382,8 @@ class PacketSpaceRecovery {
     AckProcessingResult ack_processing_result_from_apply(const AckApplyResult &apply_result) const;
 
     std::deque<SentPacketLedgerSlot> slots_;
+    std::vector<LiveSlotLink> live_links_;
+    std::vector<std::uint64_t> live_slot_words_;
     mutable std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet_;
     mutable std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> eligible_loss_packets_;
     std::optional<std::uint64_t> largest_acked_packet_number_;

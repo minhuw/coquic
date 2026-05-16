@@ -120,7 +120,7 @@ struct PacketSpaceRecoveryTestPeer {
              slot_index != PacketSpaceRecovery::kInvalidLedgerSlotIndex &&
              slot_index < loss_scan_end;) {
             auto &slot = recovery.slots_[slot_index];
-            const auto next_live_slot = slot.next_live_slot;
+            const auto next_live_slot = recovery.next_live_slot(slot_index);
             const auto packet_number = slot.packet.packet_number;
             if (slot.state != PacketSpaceRecovery::LedgerSlotState::sent ||
                 !slot.packet.in_flight) {
@@ -2540,6 +2540,9 @@ TEST(QuicRecoveryTest, AckProcessingTracksLargestPacketAcrossOutOfOrderLiveSlots
                                              coquic::quic::test::test_time(3)));
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(2)));
+
+    EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.tracked_packets()),
+              (std::vector<std::uint64_t>{1, 2, 3}));
 
     const auto result = recovery.on_ack_received(
         make_ack_frame(/*largest=*/3, /*first_ack_range=*/2), coquic::quic::test::test_time(10));

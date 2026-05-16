@@ -191,7 +191,7 @@ done
 
 ci_runs=(
   '"socket bulk download 0 1048576 none 4 1 1 0ms 60s"'
-  '"socket rr stay 32 32 none 1 32 16 5s 45s"'
+  '"socket rr stay 32 32 none 1 128 4 5s 45s"'
   '"socket crr stay 32 32 none 1 64 1 5s 45s"'
 )
 

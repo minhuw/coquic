@@ -1,6 +1,7 @@
 #include "src/quic/recovery.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
@@ -246,7 +247,8 @@ PacketSpaceRecovery::PacketSpaceRecovery() : sent_packets_{this} {
 }
 
 PacketSpaceRecovery::PacketSpaceRecovery(const PacketSpaceRecovery &other)
-    : slots_(other.slots_),
+    : slots_(other.slots_), live_links_(other.live_links_),
+      live_slot_words_(other.live_slot_words_),
       latest_in_flight_ack_eliciting_packet_(other.latest_in_flight_ack_eliciting_packet_),
       eligible_loss_packets_(other.eligible_loss_packets_),
       largest_acked_packet_number_(other.largest_acked_packet_number_),
@@ -260,7 +262,8 @@ PacketSpaceRecovery::PacketSpaceRecovery(const PacketSpaceRecovery &other)
 }
 
 PacketSpaceRecovery::PacketSpaceRecovery(PacketSpaceRecovery &&other) noexcept
-    : slots_(std::move(other.slots_)),
+    : slots_(std::move(other.slots_)), live_links_(std::move(other.live_links_)),
+      live_slot_words_(std::move(other.live_slot_words_)),
       latest_in_flight_ack_eliciting_packet_(other.latest_in_flight_ack_eliciting_packet_),
       eligible_loss_packets_(std::move(other.eligible_loss_packets_)),
       largest_acked_packet_number_(other.largest_acked_packet_number_),
@@ -279,6 +282,8 @@ PacketSpaceRecovery &PacketSpaceRecovery::operator=(const PacketSpaceRecovery &o
     }
 
     slots_ = other.slots_;
+    live_links_ = other.live_links_;
+    live_slot_words_ = other.live_slot_words_;
     latest_in_flight_ack_eliciting_packet_ = other.latest_in_flight_ack_eliciting_packet_;
     eligible_loss_packets_ = other.eligible_loss_packets_;
     largest_acked_packet_number_ = other.largest_acked_packet_number_;
@@ -300,6 +305,8 @@ PacketSpaceRecovery &PacketSpaceRecovery::operator=(PacketSpaceRecovery &&other)
     }
 
     slots_ = std::move(other.slots_);
+    live_links_ = std::move(other.live_links_);
+    live_slot_words_ = std::move(other.live_slot_words_);
     latest_in_flight_ack_eliciting_packet_ = other.latest_in_flight_ack_eliciting_packet_;
     eligible_loss_packets_ = std::move(other.eligible_loss_packets_);
     largest_acked_packet_number_ = other.largest_acked_packet_number_;
@@ -429,6 +436,64 @@ const RecoveryPacketMetadata *RecoveryPacketHandleOptional::operator->() const {
     return &*metadata_;
 }
 
+void RecoveryPacketHandleSmallList::push_back(RecoveryPacketHandle handle) {
+    if (!heap_backed_ && size_ < kInlineCapacity) {
+        inline_handles_[size_] = handle;
+        ++size_;
+        return;
+    }
+
+    if (!heap_backed_) {
+        heap_handles_.reserve(kInlineCapacity * 2);
+        heap_handles_.insert(heap_handles_.end(), inline_handles_.begin(),
+                             inline_handles_.begin() + static_cast<std::ptrdiff_t>(size_));
+        heap_backed_ = true;
+    }
+
+    heap_handles_.push_back(handle);
+    size_ = heap_handles_.size();
+}
+
+bool RecoveryPacketHandleSmallList::empty() const {
+    return size_ == 0;
+}
+
+std::size_t RecoveryPacketHandleSmallList::size() const {
+    return size_;
+}
+
+RecoveryPacketHandle RecoveryPacketHandleSmallList::front() const {
+    return data()[0];
+}
+
+std::span<const RecoveryPacketHandle> RecoveryPacketHandleSmallList::handles() const {
+    return {data(), size_};
+}
+
+RecoveryPacketHandleSmallList::iterator RecoveryPacketHandleSmallList::begin() {
+    return mutable_data();
+}
+
+RecoveryPacketHandleSmallList::iterator RecoveryPacketHandleSmallList::end() {
+    return mutable_data() + size_;
+}
+
+RecoveryPacketHandleSmallList::const_iterator RecoveryPacketHandleSmallList::begin() const {
+    return data();
+}
+
+RecoveryPacketHandleSmallList::const_iterator RecoveryPacketHandleSmallList::end() const {
+    return data() + size_;
+}
+
+RecoveryPacketHandle *RecoveryPacketHandleSmallList::mutable_data() {
+    return heap_backed_ ? heap_handles_.data() : inline_handles_.data();
+}
+
+const RecoveryPacketHandle *RecoveryPacketHandleSmallList::data() const {
+    return heap_backed_ ? heap_handles_.data() : inline_handles_.data();
+}
+
 bool PacketSpaceRecovery::SentPacketsView::contains(std::uint64_t packet_number) const {
     return owner != nullptr && owner->outstanding_slot_for_packet_number(packet_number) != nullptr;
 }
@@ -487,45 +552,155 @@ void PacketSpaceRecovery::reclaim_retired_packet_storage(SentPacketRecord &packe
     packet.qlog_packet_snapshot.reset();
 }
 
-void PacketSpaceRecovery::link_live_slot(std::size_t slot_index) {
-    auto &slot = slots_[slot_index];
-    slot.prev_live_slot = last_live_slot_;
-    slot.next_live_slot = kInvalidLedgerSlotIndex;
-    if (last_live_slot_ != kInvalidLedgerSlotIndex) {
-        slots_[last_live_slot_].next_live_slot = slot_index;
-    } else {
-        first_live_slot_ = slot_index;
+void PacketSpaceRecovery::ensure_live_link_slot(std::size_t slot_index) {
+    if (slot_index >= live_links_.size()) {
+        live_links_.resize(slot_index + 1);
     }
-    last_live_slot_ = slot_index;
+}
+
+void PacketSpaceRecovery::set_live_link(std::size_t slot_index, LiveSlotLink link) {
+    ensure_live_link_slot(slot_index);
+    live_links_[slot_index] = link;
+}
+
+void PacketSpaceRecovery::set_live_slot_bit(std::size_t slot_index) {
+    const auto word_index = slot_index / 64;
+    if (word_index >= live_slot_words_.size()) {
+        live_slot_words_.resize(word_index + 1);
+    }
+    live_slot_words_[word_index] |= std::uint64_t{1} << (slot_index % 64);
+}
+
+void PacketSpaceRecovery::clear_live_slot_bit(std::size_t slot_index) {
+    const auto word_index = slot_index / 64;
+    if (word_index < live_slot_words_.size()) {
+        live_slot_words_[word_index] &= ~(std::uint64_t{1} << (slot_index % 64));
+    }
+}
+
+std::size_t PacketSpaceRecovery::previous_live_slot(std::size_t slot_index) const {
+    return live_links_[slot_index].prev;
+}
+
+std::size_t PacketSpaceRecovery::next_live_slot(std::size_t slot_index) const {
+    return live_links_[slot_index].next;
+}
+
+void PacketSpaceRecovery::link_live_slot(std::size_t slot_index) {
+    ensure_live_link_slot(slot_index);
+    set_live_link(slot_index, LiveSlotLink{});
+    set_live_slot_bit(slot_index);
+
+    if (last_live_slot_ == kInvalidLedgerSlotIndex) {
+        first_live_slot_ = slot_index;
+        last_live_slot_ = slot_index;
+        return;
+    }
+
+    if (last_live_slot_ < slot_index) {
+        set_live_link(slot_index, LiveSlotLink{
+                                      .prev = last_live_slot_,
+                                      .next = kInvalidLedgerSlotIndex,
+                                  });
+        set_live_link(last_live_slot_, LiveSlotLink{
+                                           .prev = previous_live_slot(last_live_slot_),
+                                           .next = slot_index,
+                                       });
+        last_live_slot_ = slot_index;
+        return;
+    }
+
+    if (slot_index < first_live_slot_) {
+        set_live_link(slot_index, LiveSlotLink{
+                                      .prev = kInvalidLedgerSlotIndex,
+                                      .next = first_live_slot_,
+                                  });
+        set_live_link(first_live_slot_, LiveSlotLink{
+                                            .prev = slot_index,
+                                            .next = next_live_slot(first_live_slot_),
+                                        });
+        first_live_slot_ = slot_index;
+        return;
+    }
+
+    auto next_slot = first_live_slot_;
+    while (next_slot != kInvalidLedgerSlotIndex && next_slot < slot_index) {
+        next_slot = next_live_slot(next_slot);
+    }
+    if (next_slot == kInvalidLedgerSlotIndex) {
+        set_live_link(slot_index, LiveSlotLink{
+                                      .prev = last_live_slot_,
+                                      .next = kInvalidLedgerSlotIndex,
+                                  });
+        set_live_link(last_live_slot_, LiveSlotLink{
+                                           .prev = previous_live_slot(last_live_slot_),
+                                           .next = slot_index,
+                                       });
+        last_live_slot_ = slot_index;
+        return;
+    }
+
+    const auto previous_slot = previous_live_slot(next_slot);
+    set_live_link(slot_index, LiveSlotLink{
+                                  .prev = previous_slot,
+                                  .next = next_slot,
+                              });
+    set_live_link(previous_slot, LiveSlotLink{
+                                     .prev = previous_live_slot(previous_slot),
+                                     .next = slot_index,
+                                 });
+    set_live_link(next_slot, LiveSlotLink{
+                                 .prev = slot_index,
+                                 .next = next_live_slot(next_slot),
+                             });
 }
 
 void PacketSpaceRecovery::unlink_live_slot(std::size_t slot_index) {
-    auto &slot = slots_[slot_index];
-    if (slot.prev_live_slot != kInvalidLedgerSlotIndex) {
-        slots_[slot.prev_live_slot].next_live_slot = slot.next_live_slot;
+    const auto link = live_links_[slot_index];
+    if (link.prev != kInvalidLedgerSlotIndex) {
+        live_links_[link.prev].next = link.next;
     } else {
-        first_live_slot_ = slot.next_live_slot;
+        first_live_slot_ = link.next;
     }
-    if (slot.next_live_slot != kInvalidLedgerSlotIndex) {
-        slots_[slot.next_live_slot].prev_live_slot = slot.prev_live_slot;
+    if (link.next != kInvalidLedgerSlotIndex) {
+        live_links_[link.next].prev = link.prev;
     } else {
-        last_live_slot_ = slot.prev_live_slot;
+        last_live_slot_ = link.prev;
     }
-    slot.prev_live_slot = kInvalidLedgerSlotIndex;
-    slot.next_live_slot = kInvalidLedgerSlotIndex;
+    live_links_[slot_index] = LiveSlotLink{};
+    clear_live_slot_bit(slot_index);
 }
 
-std::optional<std::size_t>
-PacketSpaceRecovery::newest_live_slot_at_or_below(std::uint64_t packet_number) const {
-    auto current = last_live_slot_;
+std::size_t PacketSpaceRecovery::newest_live_slot_at_or_below(std::uint64_t packet_number) const {
     const auto upper_bound = static_cast<std::size_t>(packet_number);
-    while (current != kInvalidLedgerSlotIndex && current > upper_bound) {
-        current = slots_[current].prev_live_slot;
+    if (upper_bound >= slots_.size()) {
+        return last_live_slot_;
     }
-    if (current == kInvalidLedgerSlotIndex) {
-        return std::nullopt;
+
+    auto word_index = upper_bound / 64;
+    if (word_index >= live_slot_words_.size()) {
+        word_index = live_slot_words_.size();
+    } else {
+        const auto bit_limit = upper_bound % 64;
+        const auto word = live_slot_words_[word_index] & (~std::uint64_t{0} >> (63 - bit_limit));
+        if (word != 0) {
+            return word_index * 64 +
+                   static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::digits - 1 -
+                                            std::countl_zero(word));
+        }
     }
-    return current;
+
+    while (word_index != 0) {
+        --word_index;
+        const auto word = live_slot_words_[word_index];
+        if (word != 0) {
+            return word_index * 64 +
+                   static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::digits - 1 -
+                                            std::countl_zero(word));
+        }
+    }
+
+    return kInvalidLedgerSlotIndex;
 }
 
 PacketSpaceRecovery::SentPacketLedgerSlot *
@@ -635,7 +810,7 @@ void PacketSpaceRecovery::refresh_latest_in_flight_ack_eliciting_packet() const 
 
     latest_in_flight_ack_eliciting_packet_.reset();
     for (auto slot_index = first_live_slot_; slot_index != kInvalidLedgerSlotIndex;
-         slot_index = slots_[slot_index].next_live_slot) {
+         slot_index = next_live_slot(slot_index)) {
         const auto &slot = slots_[slot_index];
         maybe_track_latest_in_flight_ack_eliciting_packet(slot.packet);
     }
@@ -739,7 +914,7 @@ std::vector<RecoveryPacketHandle> PacketSpaceRecovery::tracked_packets() const {
     std::vector<RecoveryPacketHandle> packets;
     packets.reserve(tracked_packet_count());
     for (auto slot_index = first_live_slot_; slot_index != kInvalidLedgerSlotIndex;
-         slot_index = slots_[slot_index].next_live_slot) {
+         slot_index = next_live_slot(slot_index)) {
         const auto &slot = slots_[slot_index];
         packets.push_back(packet_handle(slot, slot_index));
     }
@@ -749,7 +924,7 @@ std::vector<RecoveryPacketHandle> PacketSpaceRecovery::tracked_packets() const {
 std::size_t PacketSpaceRecovery::tracked_packet_count() const {
     std::size_t count = 0;
     for (auto slot_index = first_live_slot_; slot_index != kInvalidLedgerSlotIndex;
-         slot_index = slots_[slot_index].next_live_slot) {
+         slot_index = next_live_slot(slot_index)) {
         ++count;
     }
     return count;
@@ -782,7 +957,7 @@ PacketSpaceRecovery::collect_time_threshold_losses(QuicCoreTimePoint now) {
         static_cast<std::size_t>(*largest_acked_packet_number_), slots_.size());
     for (auto slot_index = first_live_slot_;
          slot_index != kInvalidLedgerSlotIndex && slot_index < loss_scan_end;
-         slot_index = slots_[slot_index].next_live_slot) {
+         slot_index = next_live_slot(slot_index)) {
         const auto &slot = slots_[slot_index];
         if (slot.state != LedgerSlotState::sent || !slot.packet.in_flight) {
             continue;
@@ -803,7 +978,7 @@ PacketSpaceRecovery::collect_pmtu_probe_timeouts(QuicCoreTimePoint now) const {
     std::vector<RecoveryPacketHandle> timed_out_packets;
     for (auto slot_index = first_live_slot_;
          slot_index != kInvalidLedgerSlotIndex && slot_index < slots_.size();
-         slot_index = slots_[slot_index].next_live_slot) {
+         slot_index = next_live_slot(slot_index)) {
         const auto &slot = slots_[slot_index];
         if (slot.state != LedgerSlotState::sent || !slot.packet.is_pmtu_probe) {
             continue;
@@ -909,29 +1084,20 @@ PacketSpaceRecovery::begin_ack_received_apply(std::uint64_t largest_acknowledged
 
 void PacketSpaceRecovery::apply_ack_range_descending(AckApplyState &state,
                                                      const AckPacketNumberRange &range) {
-    const auto previous_live_slot = [this](std::size_t slot_index) -> std::optional<std::size_t> {
-        const auto previous = slots_[slot_index].prev_live_slot;
-        if (previous == kInvalidLedgerSlotIndex) {
-            return std::nullopt;
-        }
-        return previous;
-    };
-
-    while (state.current_live_slot.has_value() && *state.current_live_slot > range.largest) {
-        state.current_live_slot = previous_live_slot(*state.current_live_slot);
+    auto current_live_slot = state.current_live_slot;
+    while (current_live_slot != kInvalidLedgerSlotIndex && current_live_slot > range.largest) {
+        current_live_slot = previous_live_slot(current_live_slot);
     }
 
-    while (state.current_live_slot.has_value() && *state.current_live_slot >= range.smallest) {
-        const auto slot_index = *state.current_live_slot;
-        const auto previous = previous_live_slot(slot_index);
+    while (current_live_slot != kInvalidLedgerSlotIndex && current_live_slot >= range.smallest) {
+        const auto slot_index = current_live_slot;
         auto &slot = slots_[slot_index];
+        const auto previous = previous_live_slot(slot_index);
         const auto handle = packet_handle(slot, slot_index);
 
         if (slot.state == LedgerSlotState::sent) {
             state.result.acked_packets.push_back(handle);
-            if (!state.result.largest_newly_acked_packet.has_value() ||
-                slot.packet.packet_number >
-                    state.result.largest_newly_acked_packet->packet_number) {
+            if (!state.result.largest_newly_acked_packet.has_value()) {
                 state.result.largest_newly_acked_packet = AckApplyLargestNewlyAckedPacket{
                     .handle = handle,
                     .packet_number = slot.packet.packet_number,
@@ -956,8 +1122,9 @@ void PacketSpaceRecovery::apply_ack_range_descending(AckApplyState &state,
             state.mutated = true;
         }
 
-        state.current_live_slot = previous;
+        current_live_slot = previous;
     }
+    state.current_live_slot = current_live_slot;
 }
 
 AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &state,
@@ -1052,6 +1219,22 @@ AckApplyResult PacketSpaceRecovery::apply_ack_received(AckRangeCursor cursor,
                                                        QuicCoreTimePoint now) {
     auto state = begin_ack_received_apply(largest_acknowledged);
     state.now = now;
+
+    if (cursor.first_range_pending) {
+        cursor.first_range_pending = false;
+        apply_ack_range_descending(state, AckPacketNumberRange{
+                                              .smallest = cursor.previous_smallest,
+                                              .largest = cursor.largest_acknowledged,
+                                          });
+    }
+
+    if ((cursor.uses_encoded_additional_ranges &&
+         cursor.next_additional_index >= cursor.additional_range_count) ||
+        (!cursor.uses_encoded_additional_ranges &&
+         cursor.next_additional_index >= cursor.additional_ranges.size())) {
+        return finish_ack_received_apply(state, now);
+    }
+
     while (const auto range = next_ack_range(cursor)) {
         apply_ack_range_descending(state, *range);
     }
@@ -1182,7 +1365,7 @@ std::optional<DeadlineTrackedPacket> PacketSpaceRecovery::earliest_pmtu_probe_pa
     std::optional<DeadlineTrackedPacket> earliest;
     for (auto slot_index = first_live_slot_;
          slot_index != kInvalidLedgerSlotIndex && slot_index < slots_.size();
-         slot_index = slots_[slot_index].next_live_slot) {
+         slot_index = next_live_slot(slot_index)) {
         const auto &slot = slots_[slot_index];
         if (slot.state != LedgerSlotState::sent || !slot.packet.is_pmtu_probe) {
             continue;
@@ -1209,10 +1392,12 @@ void PacketSpaceRecovery::rebuild_auxiliary_indexes() {
     next_packet_threshold_loss_slot_ = 0;
     packet_reordering_threshold_ = std::max(packet_reordering_threshold_, kPacketThreshold);
     time_reordering_threshold_ = std::max(time_reordering_threshold_, QuicCoreDuration{});
+    live_links_.clear();
+    live_links_.resize(slots_.size());
+    live_slot_words_.clear();
+    live_slot_words_.resize((slots_.size() + 63) / 64);
     for (std::size_t slot_index = 0; slot_index < slots_.size(); ++slot_index) {
         auto &slot = slots_[slot_index];
-        slot.prev_live_slot = kInvalidLedgerSlotIndex;
-        slot.next_live_slot = kInvalidLedgerSlotIndex;
         if ((slot.state != LedgerSlotState::sent && slot.state != LedgerSlotState::declared_lost) ||
             slot.acknowledged) {
             continue;

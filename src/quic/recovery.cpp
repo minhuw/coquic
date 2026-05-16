@@ -23,10 +23,10 @@ std::uint64_t encode_ack_delay(std::chrono::microseconds ack_delay,
     return static_cast<std::uint64_t>(ack_delay.count()) >> ack_delay_exponent;
 }
 
-std::chrono::milliseconds latest_loss_delay(const RecoveryRttState &rtt) {
+QuicCoreDuration latest_loss_delay(const RecoveryRttState &rtt) {
     const auto base_rtt =
         rtt.latest_rtt.has_value() ? std::max(*rtt.latest_rtt, rtt.smoothed_rtt) : kInitialRtt;
-    const auto rounded_up_loss_delay = std::chrono::milliseconds((base_rtt.count() * 9 + 7) / 8);
+    const auto rounded_up_loss_delay = QuicCoreDuration((base_rtt.count() * 9 + 7) / 8);
     return std::max(kGranularity, rounded_up_loss_delay);
 }
 
@@ -1208,7 +1208,7 @@ void PacketSpaceRecovery::rebuild_auxiliary_indexes() {
             : 0;
     next_packet_threshold_loss_slot_ = 0;
     packet_reordering_threshold_ = std::max(packet_reordering_threshold_, kPacketThreshold);
-    time_reordering_threshold_ = std::max(time_reordering_threshold_, std::chrono::milliseconds{});
+    time_reordering_threshold_ = std::max(time_reordering_threshold_, QuicCoreDuration{});
     for (std::size_t slot_index = 0; slot_index < slots_.size(); ++slot_index) {
         auto &slot = slots_[slot_index];
         slot.prev_live_slot = kInvalidLedgerSlotIndex;
@@ -1294,7 +1294,7 @@ void PacketSpaceRecovery::maybe_adapt_reordering_thresholds_from_spurious_loss(
 
     if (packet.lost_by_time_threshold && now > packet.sent_time) {
         const auto observed_delay =
-            std::chrono::ceil<std::chrono::milliseconds>(now - packet.sent_time + kGranularity);
+            std::chrono::ceil<QuicCoreDuration>(now - packet.sent_time + kGranularity);
         time_reordering_threshold_ = std::max(time_reordering_threshold_, observed_delay);
     }
 }
@@ -1318,10 +1318,9 @@ bool is_time_threshold_lost(const RecoveryRttState &rtt, QuicCoreTimePoint sent_
     return now >= compute_time_threshold_deadline(rtt, sent_time);
 }
 
-QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt,
-                                       std::chrono::milliseconds max_ack_delay,
+QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt, QuicCoreDuration max_ack_delay,
                                        QuicCoreTimePoint now, std::uint32_t pto_count) {
-    std::chrono::milliseconds timeout = kInitialRtt * 3;
+    auto timeout = kInitialRtt * 3;
     if (rtt.latest_rtt.has_value()) {
         timeout = rtt.smoothed_rtt + std::max(rtt.rttvar * 4, kGranularity) + max_ack_delay;
     }
@@ -1335,17 +1334,29 @@ QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt,
 
 void update_rtt(RecoveryRttState &rtt, QuicCoreTimePoint ack_receive_time,
                 const SentPacketRecord &largest_newly_acked_packet,
-                std::chrono::milliseconds ack_delay, std::chrono::milliseconds max_ack_delay) {
-    const auto latest_sample = std::chrono::duration_cast<std::chrono::milliseconds>(std::max(
-        ack_receive_time - largest_newly_acked_packet.sent_time, QuicCoreClock::duration::zero()));
+                std::chrono::microseconds ack_delay, std::chrono::microseconds max_ack_delay) {
+    const auto latest_sample_duration = std::max(
+        ack_receive_time - largest_newly_acked_packet.sent_time, QuicCoreClock::duration::zero());
+    const auto latest_sample = std::chrono::duration_cast<QuicCoreDuration>(latest_sample_duration);
     const auto first_sample = !rtt.latest_rtt.has_value();
+    auto previous_min_rtt_sample = rtt.min_rtt_sample;
+    if (!previous_min_rtt_sample.has_value() && rtt.min_rtt.has_value()) {
+        previous_min_rtt_sample = *rtt.min_rtt;
+    }
 
     rtt.latest_rtt = latest_sample;
+    rtt.latest_rtt_sample = latest_sample;
     rtt.min_rtt = rtt.min_rtt.has_value() ? std::min(*rtt.min_rtt, latest_sample) : latest_sample;
+    rtt.min_rtt_sample = previous_min_rtt_sample.has_value()
+                             ? std::min(*previous_min_rtt_sample, latest_sample)
+                             : latest_sample;
 
     if (first_sample) {
         rtt.smoothed_rtt = latest_sample;
         rtt.rttvar = latest_sample / 2;
+        rtt.latest_adjusted_rtt.reset();
+        rtt.latest_adjusted_rtt_sample.reset();
+        rtt.latest_ack_delay_compensated_rtt_sample.reset();
         return;
     }
 
@@ -1354,6 +1365,16 @@ void update_rtt(RecoveryRttState &rtt, QuicCoreTimePoint ack_receive_time,
     if (latest_sample >= *rtt.min_rtt + bounded_ack_delay) {
         adjusted_rtt = latest_sample - bounded_ack_delay;
     }
+    rtt.latest_adjusted_rtt = adjusted_rtt;
+
+    auto adjusted_rtt_us = latest_sample;
+    if (rtt.min_rtt_sample.has_value() &&
+        latest_sample >= *rtt.min_rtt_sample + bounded_ack_delay) {
+        adjusted_rtt_us = latest_sample - bounded_ack_delay;
+    }
+    rtt.latest_adjusted_rtt_sample = adjusted_rtt_us;
+    rtt.latest_ack_delay_compensated_rtt_sample =
+        latest_sample > bounded_ack_delay ? latest_sample - bounded_ack_delay : latest_sample;
 
     const auto rtt_sample_delta = rtt.smoothed_rtt > adjusted_rtt ? rtt.smoothed_rtt - adjusted_rtt
                                                                   : adjusted_rtt - rtt.smoothed_rtt;

@@ -16,7 +16,9 @@ namespace {
 constexpr std::size_t kPerfMaxOutboundDatagramSize = std::size_t{60} * 1024u;
 constexpr std::uint64_t kPerfTransferConnectionReceiveWindow = 32ull * 1024ull * 1024ull;
 constexpr std::uint64_t kPerfTransferStreamReceiveWindow = 16ull * 1024ull * 1024ull;
-constexpr std::uint64_t kPerfAckElicitingThreshold = 128;
+constexpr std::uint64_t kPerfAckElicitingThreshold = 2;
+constexpr std::uint64_t kPerfCopaBulkAckElicitingThreshold = 1;
+constexpr std::uint64_t kPerfCopaInteractiveAckElicitingThreshold = 8;
 constexpr std::string_view kPerfUsageLine =
     "usage: coquic-perf [server|client] [--host HOST] [--port PORT] "
     "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr|copa] "
@@ -47,26 +49,26 @@ std::optional<std::size_t> parse_size_arg(std::string_view value) {
     return parsed;
 }
 
-std::optional<std::chrono::milliseconds> parse_duration_arg(std::string_view value) {
+std::optional<quic::QuicCoreDuration> parse_duration_arg(std::string_view value) {
     if (value.ends_with("ms")) {
         const auto count = parse_size_arg(value.substr(0, value.size() - 2));
-        if (!count.has_value()) {
-            return std::nullopt;
-        }
-        if (*count > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
-            return std::nullopt;
-        }
-        return std::chrono::milliseconds{static_cast<std::int64_t>(*count)};
-    }
-    if (value.ends_with('s')) {
-        const auto count = parse_size_arg(value.substr(0, value.size() - 1));
         if (!count.has_value()) {
             return std::nullopt;
         }
         if (*count > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max() / 1000)) {
             return std::nullopt;
         }
-        return std::chrono::milliseconds{static_cast<std::int64_t>(*count * 1000)};
+        return quic::QuicCoreDuration{static_cast<std::int64_t>(*count * 1000)};
+    }
+    if (value.ends_with('s')) {
+        const auto count = parse_size_arg(value.substr(0, value.size() - 1));
+        if (!count.has_value()) {
+            return std::nullopt;
+        }
+        if (*count > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max() / 1000000)) {
+            return std::nullopt;
+        }
+        return quic::QuicCoreDuration{static_cast<std::int64_t>(*count * 1000000)};
     }
     return std::nullopt;
 }
@@ -373,6 +375,14 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
     return config;
 }
 
+std::uint64_t perf_ack_eliciting_threshold(const QuicPerfConfig &config) {
+    if (config.congestion_control == quic::QuicCongestionControlAlgorithm::copa) {
+        return config.mode == QuicPerfMode::bulk ? kPerfCopaBulkAckElicitingThreshold
+                                                 : kPerfCopaInteractiveAckElicitingThreshold;
+    }
+    return kPerfAckElicitingThreshold;
+}
+
 int run_perf_runtime(const QuicPerfConfig &config) {
     if (config.role == QuicPerfRole::server) {
         return run_perf_server(config);
@@ -390,7 +400,7 @@ quic::QuicCoreEndpointConfig make_perf_client_endpoint_config(const QuicPerfConf
     };
     endpoint_config.emit_shared_receive_stream_data = true;
     endpoint_config.transport.congestion_control = config.congestion_control;
-    endpoint_config.transport.ack_eliciting_threshold = kPerfAckElicitingThreshold;
+    endpoint_config.transport.ack_eliciting_threshold = perf_ack_eliciting_threshold(config);
     endpoint_config.transport.initial_max_data = kPerfTransferConnectionReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_local = kPerfTransferStreamReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_remote =
@@ -412,7 +422,7 @@ quic::QuicCoreEndpointConfig make_perf_server_endpoint_config(const QuicPerfConf
     endpoint_config.emit_shared_receive_stream_data = true;
     endpoint_config.max_outbound_datagram_size = kPerfMaxOutboundDatagramSize;
     endpoint_config.transport.congestion_control = config.congestion_control;
-    endpoint_config.transport.ack_eliciting_threshold = kPerfAckElicitingThreshold;
+    endpoint_config.transport.ack_eliciting_threshold = perf_ack_eliciting_threshold(config);
     endpoint_config.transport.initial_max_data = kPerfTransferConnectionReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_local = kPerfTransferStreamReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_remote =

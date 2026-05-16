@@ -178,15 +178,45 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesTransferSizedReceiveWindows) {
 }
 
 TEST(QuicPerfConfigTest, EndpointConfigUsesPerfAckElicitingThreshold) {
-    constexpr std::uint64_t kExpectedAckElicitingThreshold = 128;
+    constexpr std::uint64_t kExpectedAckElicitingThreshold = 2;
+    constexpr std::uint64_t kExpectedCopaBulkAckElicitingThreshold = 1;
+    constexpr std::uint64_t kExpectedCopaInteractiveAckElicitingThreshold = 8;
 
     const auto client =
         make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
     const auto server =
         make_perf_server_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::server});
+    const auto copa_client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::bulk,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::copa,
+    });
+    const auto copa_server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .mode = QuicPerfMode::bulk,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::copa,
+    });
+    const auto copa_rr_client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::rr,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::copa,
+    });
+    const auto copa_crr_server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .mode = QuicPerfMode::crr,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::copa,
+    });
 
     EXPECT_EQ(client.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
     EXPECT_EQ(server.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
+    EXPECT_EQ(copa_client.transport.ack_eliciting_threshold,
+              kExpectedCopaBulkAckElicitingThreshold);
+    EXPECT_EQ(copa_server.transport.ack_eliciting_threshold,
+              kExpectedCopaBulkAckElicitingThreshold);
+    EXPECT_EQ(copa_rr_client.transport.ack_eliciting_threshold,
+              kExpectedCopaInteractiveAckElicitingThreshold);
+    EXPECT_EQ(copa_crr_server.transport.ack_eliciting_threshold,
+              kExpectedCopaInteractiveAckElicitingThreshold);
 }
 
 } // namespace

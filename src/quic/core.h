@@ -117,6 +117,7 @@ struct QuicCoreConfig {
 
 using QuicCoreClock = std::chrono::steady_clock;
 using QuicCoreTimePoint = QuicCoreClock::time_point;
+using QuicCoreDuration = std::chrono::microseconds;
 using QuicPathId = std::uint64_t;
 using QuicConnectionHandle = std::uint64_t;
 using QuicRouteHandle = std::uint64_t;
@@ -266,7 +267,7 @@ struct QuicCoreEndpointConfig {
     bool enable_packet_inspection = false;
     bool allow_peer_address_change = true;
     bool retain_stateless_reset_tokens_after_connection_close = true;
-    std::chrono::milliseconds stateless_reset_token_retention = std::chrono::minutes(10);
+    QuicCoreDuration stateless_reset_token_retention{600000000};
 };
 
 struct QuicCoreClientConnectionConfig {

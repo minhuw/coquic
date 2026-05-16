@@ -43,7 +43,7 @@ class BbrCongestionController { // NOLINT(clang-analyzer-optin.performance.Paddi
         std::size_t tx_in_flight = 0;
         std::uint64_t prior_delivered = 0;
         std::uint64_t delivered = 0;
-        std::optional<std::chrono::milliseconds> rtt;
+        std::optional<QuicCoreDuration> rtt;
         bool is_app_limited = false;
         bool has_newly_acked = false;
         bool has_spurious_loss = false;
@@ -135,7 +135,7 @@ class BbrCongestionController { // NOLINT(clang-analyzer-optin.performance.Paddi
     std::uint64_t packets_for_bytes(std::size_t bytes) const;
     std::size_t minimum_window() const;
     std::size_t inflight_at_loss(const RateSample &rs, const SentPacketRecord &packet) const;
-    std::chrono::milliseconds model_min_rtt() const;
+    QuicCoreDuration model_min_rtt() const;
     std::size_t bdp_bytes(double gain) const;
     std::size_t quantization_budget(std::size_t inflight_cap) const;
     std::size_t inflight(double gain) const;
@@ -163,9 +163,9 @@ class BbrCongestionController { // NOLINT(clang-analyzer-optin.performance.Paddi
     std::uint8_t full_bandwidth_rounds_without_growth_ = 0;
     bool full_bw_now_ = false;
     bool full_bw_reached_ = false;
-    std::optional<std::chrono::milliseconds> min_rtt_;
+    std::optional<QuicCoreDuration> min_rtt_;
     std::optional<QuicCoreTimePoint> min_rtt_stamp_;
-    std::optional<std::chrono::milliseconds> probe_rtt_min_delay_;
+    std::optional<QuicCoreDuration> probe_rtt_min_delay_;
     std::optional<QuicCoreTimePoint> probe_rtt_min_stamp_;
     bool probe_rtt_expired_ = false;
     std::optional<QuicCoreTimePoint> probe_rtt_done_stamp_;
@@ -208,7 +208,7 @@ class BbrCongestionController { // NOLINT(clang-analyzer-optin.performance.Paddi
     std::uint8_t bw_probe_up_rounds_ = 0;
     std::uint64_t bw_probe_up_acks_ = 0;
     std::uint64_t probe_up_cnt_ = std::numeric_limits<std::uint64_t>::max();
-    std::chrono::milliseconds bw_probe_wait_{2000};
+    QuicCoreDuration bw_probe_wait_{2000000};
     std::size_t extra_acked_ = 0;
     std::array<std::size_t, 10> extra_acked_filter_{};
     std::array<std::uint64_t, 10> extra_acked_round_{};

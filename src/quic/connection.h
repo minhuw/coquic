@@ -634,7 +634,7 @@ class QuicConnection {
                                           std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);
     CodecResult<bool> process_inbound_ack_cursor(
         PacketSpaceState &packet_space, AckRangeCursor cursor, std::uint64_t largest_acknowledged,
-        std::chrono::milliseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
+        std::chrono::microseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
         const std::string &ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
         bool suppress_pto_reset);
     void reset_recovery_for_new_path(QuicPathId path_id);
@@ -662,7 +662,7 @@ class QuicConnection {
     void arm_server_zero_rtt_discard_deadline(QuicCoreTimePoint now);
     void maybe_discard_server_zero_rtt_packet_space(QuicCoreTimePoint now);
     void synchronize_recovery_rtt_state();
-    std::chrono::milliseconds path_validation_timeout_period() const;
+    QuicCoreDuration path_validation_timeout_period() const;
     void install_available_secrets();
     void collect_pending_tls_bytes();
     CodecResult<bool> sync_tls_state();

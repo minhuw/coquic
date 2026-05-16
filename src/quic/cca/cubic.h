@@ -58,7 +58,7 @@ class CubicCongestionController {
     double k_seconds_ = 0.0;
     double w_est_segments_ = 0.0;
     std::optional<QuicCoreTimePoint> epoch_start_time_;
-    std::chrono::milliseconds app_limited_pause_{0};
+    QuicCoreDuration app_limited_pause_{0};
     std::optional<QuicCoreTimePoint> app_limited_start_time_;
     HyStartPlusPlus hystart_;
 };

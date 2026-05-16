@@ -14,8 +14,8 @@ TEST(QuicPerfProtocolTest, RoundTripsSessionStartFrame) {
         .response_bytes = 96,
         .total_bytes = std::nullopt,
         .requests = 1000,
-        .warmup_ms = 250,
-        .duration_ms = 5000,
+        .warmup = coquic::quic::QuicCoreDuration{250000},
+        .duration = coquic::quic::QuicCoreDuration{5000000},
         .streams = 1,
         .connections = 1,
         .requests_in_flight = 4,
@@ -31,6 +31,8 @@ TEST(QuicPerfProtocolTest, RoundTripsSessionStartFrame) {
     EXPECT_EQ(decoded_start->mode, QuicPerfMode::rr);
     EXPECT_EQ(decoded_start->request_bytes, 64u);
     EXPECT_EQ(decoded_start->requests, std::optional<std::uint64_t>{1000u});
+    EXPECT_EQ(decoded_start->warmup, coquic::quic::QuicCoreDuration{250000});
+    EXPECT_EQ(decoded_start->duration, coquic::quic::QuicCoreDuration{5000000});
     EXPECT_EQ(decoded_start->requests_in_flight, 4u);
 }
 
@@ -43,8 +45,8 @@ TEST(QuicPerfProtocolTest, RoundTripsZeroValuedOptionalSessionStartFields) {
         .response_bytes = 0,
         .total_bytes = 0,
         .requests = 0,
-        .warmup_ms = 0,
-        .duration_ms = 5000,
+        .warmup = coquic::quic::QuicCoreDuration{0},
+        .duration = coquic::quic::QuicCoreDuration{5000000},
         .streams = 1,
         .connections = 1,
         .requests_in_flight = 1,
@@ -59,6 +61,7 @@ TEST(QuicPerfProtocolTest, RoundTripsZeroValuedOptionalSessionStartFields) {
     ASSERT_NE(decoded_start, nullptr);
     EXPECT_EQ(decoded_start->total_bytes, std::optional<std::uint64_t>{0u});
     EXPECT_EQ(decoded_start->requests, std::optional<std::uint64_t>{0u});
+    EXPECT_EQ(decoded_start->duration, coquic::quic::QuicCoreDuration{5000000});
 }
 
 TEST(QuicPerfProtocolTest, RejectsUnknownMessageTypeAndTruncatedPayload) {

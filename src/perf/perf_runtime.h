@@ -35,8 +35,8 @@ struct QuicPerfConfig {
     std::size_t requests_in_flight = 1;
     std::optional<std::size_t> requests;
     std::optional<std::size_t> total_bytes;
-    std::chrono::milliseconds warmup{0};
-    std::chrono::milliseconds duration{5000};
+    quic::QuicCoreDuration warmup{0};
+    quic::QuicCoreDuration duration{5000000};
     quic::QuicCongestionControlAlgorithm congestion_control =
         quic::QuicCongestionControlAlgorithm::newreno;
 };

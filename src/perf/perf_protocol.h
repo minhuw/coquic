@@ -14,7 +14,8 @@
 namespace coquic::perf {
 
 constexpr std::uint32_t kQuicPerfProtocolVersionLegacy = 1;
-constexpr std::uint32_t kQuicPerfProtocolVersion = 2;
+constexpr std::uint32_t kQuicPerfProtocolVersionMilliseconds = 2;
+constexpr std::uint32_t kQuicPerfProtocolVersion = 3;
 constexpr std::uint64_t kQuicPerfControlStreamId = 0;
 constexpr std::uint64_t kQuicPerfFirstDataStreamId = 4;
 constexpr std::string_view kQuicPerfApplicationProtocol = "coquic-perf/1";
@@ -34,8 +35,8 @@ struct QuicPerfSessionStart {
     std::uint64_t response_bytes = 0;
     std::optional<std::uint64_t> total_bytes;
     std::optional<std::uint64_t> requests;
-    std::uint64_t warmup_ms = 0;
-    std::uint64_t duration_ms = 0;
+    quic::QuicCoreDuration warmup{0};
+    quic::QuicCoreDuration duration{0};
     std::uint64_t streams = 1;
     std::uint64_t connections = 1;
     std::uint64_t requests_in_flight = 1;

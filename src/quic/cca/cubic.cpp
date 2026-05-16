@@ -74,8 +74,8 @@ void CubicCongestionController::on_packets_acked(std::span<const SentPacketRecor
         }
 
         if (app_limited_start_time_.has_value()) {
-            app_limited_pause_ += std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - *app_limited_start_time_);
+            app_limited_pause_ +=
+                std::chrono::duration_cast<QuicCoreDuration>(now - *app_limited_start_time_);
             app_limited_start_time_.reset();
         }
 
@@ -191,7 +191,7 @@ bool CubicCongestionController::in_recovery(const SentPacketRecord &packet) cons
 
 void CubicCongestionController::reset_epoch(QuicCoreTimePoint now) {
     epoch_start_time_ = now == QuicCoreTimePoint{} ? std::nullopt : std::optional{now};
-    app_limited_pause_ = std::chrono::milliseconds{0};
+    app_limited_pause_ = QuicCoreDuration{0};
     app_limited_start_time_.reset();
     const auto cwnd_epoch = smss_segments(congestion_window_);
     w_est_segments_ = cwnd_epoch;

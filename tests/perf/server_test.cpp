@@ -53,9 +53,26 @@ QuicPerfSessionStart make_fixed_download_start(std::uint64_t response_bytes) {
         .response_bytes = response_bytes,
         .total_bytes = std::nullopt,
         .requests = std::nullopt,
-        .warmup_ms = 0,
-        .duration_ms = 1000,
+        .warmup = coquic::quic::QuicCoreDuration{0},
+        .duration = coquic::quic::QuicCoreDuration{1000000},
         .streams = 1,
+        .connections = 1,
+        .requests_in_flight = 1,
+    };
+}
+
+QuicPerfSessionStart make_validation_start(std::uint32_t protocol_version, std::uint64_t streams) {
+    return QuicPerfSessionStart{
+        .protocol_version = protocol_version,
+        .mode = QuicPerfMode::bulk,
+        .direction = QuicPerfDirection::download,
+        .request_bytes = 0,
+        .response_bytes = 0,
+        .total_bytes = 65536,
+        .requests = std::nullopt,
+        .warmup = coquic::quic::QuicCoreDuration{0},
+        .duration = coquic::quic::QuicCoreDuration{1000000},
+        .streams = streams,
         .connections = 1,
         .requests_in_flight = 1,
     };
@@ -93,40 +110,15 @@ coquic::quic::QuicConnectionHandle accept_server_connection_for_test(QuicPerfSer
 }
 
 TEST(QuicPerfServerTest, RejectsProtocolVersionMismatch) {
-    const auto error = validate_perf_session_start(QuicPerfSessionStart{
-        .protocol_version = 99,
-        .mode = QuicPerfMode::bulk,
-        .direction = QuicPerfDirection::download,
-        .request_bytes = 0,
-        .response_bytes = 0,
-        .total_bytes = 65536,
-        .requests = std::nullopt,
-        .warmup_ms = 0,
-        .duration_ms = 1000,
-        .streams = 1,
-        .connections = 1,
-        .requests_in_flight = 1,
-    });
+    const auto error = validate_perf_session_start(make_validation_start(99, 1));
 
     ASSERT_TRUE(error.has_value());
     EXPECT_EQ(error.value_or(""), "unsupported protocol version");
 }
 
 TEST(QuicPerfServerTest, RejectsZeroStreams) {
-    const auto error = validate_perf_session_start(QuicPerfSessionStart{
-        .protocol_version = kQuicPerfProtocolVersion,
-        .mode = QuicPerfMode::bulk,
-        .direction = QuicPerfDirection::download,
-        .request_bytes = 0,
-        .response_bytes = 0,
-        .total_bytes = 65536,
-        .requests = std::nullopt,
-        .warmup_ms = 0,
-        .duration_ms = 1000,
-        .streams = 0,
-        .connections = 1,
-        .requests_in_flight = 1,
-    });
+    const auto error =
+        validate_perf_session_start(make_validation_start(kQuicPerfProtocolVersion, 0));
 
     ASSERT_TRUE(error.has_value());
     EXPECT_EQ(error.value_or(""), "streams must be greater than zero");

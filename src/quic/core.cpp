@@ -78,8 +78,8 @@ constexpr std::size_t kMinimumClientInitialDatagramBytes = 1200;
 constexpr std::size_t kEndpointConnectionIdLength = 8;
 constexpr std::size_t kMaxDatagramsPerDrain = 256;
 constexpr QuicPathId kDefaultPathId = 0;
-constexpr std::chrono::seconds kRetryTokenLifetime{10};
-constexpr std::chrono::hours kNewTokenLifetime{24};
+constexpr QuicCoreDuration kRetryTokenLifetime{10000000};
+constexpr QuicCoreDuration kNewTokenLifetime{86400000000};
 constexpr std::size_t kStatelessResetTokenLength = 16;
 constexpr std::size_t kMinimumStatelessResetDatagramSize = 21;
 constexpr std::size_t kAddressValidationTokenTagLength = 16;
@@ -420,13 +420,13 @@ COQUIC_NO_PROFILE bool append_length_prefixed_bytes(std::vector<std::byte> &byte
     return true;
 }
 
-std::uint64_t token_timestamp_ms(QuicCoreTimePoint time) {
+std::uint64_t token_timestamp_us(QuicCoreTimePoint time) {
     return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(time.time_since_epoch()).count());
+        std::chrono::duration_cast<QuicCoreDuration>(time.time_since_epoch()).count());
 }
 
-QuicCoreTimePoint token_time_from_ms(std::uint64_t milliseconds) {
-    return QuicCoreTimePoint{} + std::chrono::milliseconds(milliseconds);
+QuicCoreTimePoint token_time_from_us(std::uint64_t microseconds) {
+    return QuicCoreTimePoint{} + QuicCoreDuration(static_cast<QuicCoreDuration::rep>(microseconds));
 }
 
 COQUIC_NO_PROFILE std::optional<std::array<std::byte, kAddressValidationTokenTagLength>>
@@ -486,7 +486,7 @@ encode_address_validation_token_body(const SelfContainedAddressValidationToken &
     append_u32_be(body, token.version);
     body.push_back(token.route_handle.has_value() ? std::byte{0x01} : std::byte{0x00});
     append_u64_be(body, token.route_handle.value_or(0));
-    append_u64_be(body, token_timestamp_ms(token.expires_at));
+    append_u64_be(body, token_timestamp_us(token.expires_at));
     if (!append_length_prefixed_bytes(body, token.address_validation_identity) ||
         !append_length_prefixed_bytes(body, token.original_destination_connection_id) ||
         !append_length_prefixed_bytes(body, token.retry_source_connection_id) ||
@@ -538,7 +538,7 @@ decode_address_validation_token_body(std::span<const std::byte> body) {
         .original_destination_connection_id = std::move(*original_destination_connection_id),
         .retry_source_connection_id = std::move(*retry_source_connection_id),
         .nonce = std::move(*nonce),
-        .expires_at = token_time_from_ms(*expires_at),
+        .expires_at = token_time_from_us(*expires_at),
     };
 }
 
@@ -1516,12 +1516,12 @@ COQUIC_NO_PROFILE void QuicCore::load_consumed_address_validation_tokens() {
             continue;
         }
         const auto key = hex_decode_to_string(std::string_view(line).substr(0, separator));
-        const auto expires_at_ms =
+        const auto expires_at_us =
             parse_unsigned_decimal(std::string_view(line).substr(separator + 1u));
-        if (!key.has_value() || !expires_at_ms.has_value() || key->empty()) {
+        if (!key.has_value() || !expires_at_us.has_value() || key->empty()) {
             continue;
         }
-        consumed_address_validation_tokens_[*key] = token_time_from_ms(*expires_at_ms);
+        consumed_address_validation_tokens_[*key] = token_time_from_us(*expires_at_us);
     }
 #endif
 }
@@ -1548,7 +1548,7 @@ COQUIC_NO_PROFILE void QuicCore::persist_consumed_address_validation_tokens() {
         }
         for (const auto &[key, expires_at] : consumed_address_validation_tokens_) {
             const auto key_bytes = std::as_bytes(std::span(key.data(), key.size()));
-            output << hex_encode_bytes(key_bytes) << ' ' << token_timestamp_ms(expires_at) << '\n';
+            output << hex_encode_bytes(key_bytes) << ' ' << token_timestamp_us(expires_at) << '\n';
         }
     }
 

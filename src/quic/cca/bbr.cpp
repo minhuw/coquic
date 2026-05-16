@@ -23,11 +23,11 @@ constexpr double kBbrProbeRttPacingGain = 1.0;
 constexpr double kBbrProbeRttCwndGain = 0.5;
 constexpr double kBbrFullBandwidthGrowthTarget = 1.25;
 constexpr std::uint8_t kBbrFullBandwidthRoundLimit = 3;
-constexpr std::chrono::seconds kBbrMinRttWindow{10};
-constexpr std::chrono::seconds kBbrProbeRttInterval{30};
-constexpr std::chrono::milliseconds kBbrProbeRttDuration{200};
+constexpr QuicCoreDuration kBbrMinRttWindow{10000000};
+constexpr QuicCoreDuration kBbrProbeRttInterval{30000000};
+constexpr QuicCoreDuration kBbrProbeRttDuration{200000};
 constexpr std::size_t kBbrMinimumWindowPackets = 4;
-constexpr std::chrono::milliseconds kBbrSendQuantumWindow{1};
+constexpr QuicCoreDuration kBbrSendQuantumWindow{1000};
 constexpr std::size_t kBbrMaxSendQuantum = std::size_t{64} * 1024u;
 constexpr double kBbrLossThresh = 0.02;
 constexpr double kBbrBeta = 0.7;
@@ -604,8 +604,7 @@ void BbrCongestionController::probe_inflight_longterm_upward(const RateSample &r
 
 void BbrCongestionController::update_min_rtt(const RateSample &rs, QuicCoreTimePoint now) {
     probe_rtt_expired_ = now > probe_rtt_min_stamp_.value_or(now) + kBbrProbeRttInterval;
-    const auto probe_rtt_min_delay =
-        probe_rtt_min_delay_.value_or(std::chrono::milliseconds::max());
+    const auto probe_rtt_min_delay = probe_rtt_min_delay_.value_or(QuicCoreDuration::max());
     const auto sample_rtt = rs.rtt.value_or(probe_rtt_min_delay);
     const bool update_probe_rtt =
         rs.rtt.has_value() & ((sample_rtt < probe_rtt_min_delay) | probe_rtt_expired_ |
@@ -616,7 +615,7 @@ void BbrCongestionController::update_min_rtt(const RateSample &rs, QuicCoreTimeP
     }
 
     const auto min_rtt_expired = now > min_rtt_stamp_.value_or(now) + kBbrMinRttWindow;
-    const auto min_rtt = min_rtt_.value_or(std::chrono::milliseconds::max());
+    const auto min_rtt = min_rtt_.value_or(QuicCoreDuration::max());
     const auto sample_min_rtt = probe_rtt_min_delay_.value_or(min_rtt);
     const bool update_min_rtt_sample =
         probe_rtt_min_delay_.has_value() &
@@ -856,7 +855,7 @@ void BbrCongestionController::start_probe_bw_up(const RateSample &rs, QuicCoreTi
 
 void BbrCongestionController::pick_probe_wait() {
     rounds_since_bw_probe_ = next_random() & 1u;
-    bw_probe_wait_ = std::chrono::seconds{2} + std::chrono::milliseconds{next_random() % 1000u};
+    bw_probe_wait_ = QuicCoreDuration{2000000} + QuicCoreDuration{(next_random() % 1000u) * 1000u};
 }
 
 void BbrCongestionController::reset_full_bw() {
@@ -1018,7 +1017,7 @@ std::size_t BbrCongestionController::inflight_at_loss(const RateSample &rs,
     return std::max(minimum_window(), congestion_clamp_to_size_t(inflight_at_loss));
 }
 
-std::chrono::milliseconds BbrCongestionController::model_min_rtt() const {
+QuicCoreDuration BbrCongestionController::model_min_rtt() const {
     return std::max(min_rtt_.value_or(kInitialRtt), kGranularity);
 }
 

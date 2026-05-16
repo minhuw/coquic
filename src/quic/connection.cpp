@@ -1462,14 +1462,22 @@ COQUIC_NO_PROFILE QuicTransportErrorCode transport_error_for_codec_error(CodecEr
     return QuicTransportErrorCode::protocol_violation;
 }
 
-std::chrono::milliseconds three_pto_period(const RecoveryRttState &rtt) {
+QuicCoreDuration transport_parameter_milliseconds(std::uint64_t milliseconds) {
+    using Rep = QuicCoreDuration::rep;
+    constexpr auto max_milliseconds =
+        static_cast<std::uint64_t>(std::numeric_limits<Rep>::max() / 1000);
+    const auto clamped_milliseconds = std::min(milliseconds, max_milliseconds);
+    return QuicCoreDuration{static_cast<Rep>(clamped_milliseconds) * Rep{1000}};
+}
+
+QuicCoreDuration three_pto_period(const RecoveryRttState &rtt) {
     const auto pto_reference =
-        std::max(compute_pto_deadline(rtt, std::chrono::milliseconds(0), QuicCoreTimePoint{},
+        std::max(compute_pto_deadline(rtt, QuicCoreDuration{0}, QuicCoreTimePoint{},
                                       /*pto_count=*/0) -
                      QuicCoreTimePoint{},
                  QuicCoreClock::duration::zero());
-    return std::chrono::duration_cast<std::chrono::milliseconds>(pto_reference *
-                                                                 kPersistentCongestionThreshold);
+    return std::chrono::duration_cast<QuicCoreDuration>(pto_reference *
+                                                        kPersistentCongestionThreshold);
 }
 
 PacketSpaceState &packet_space_for_level(EncryptionLevel level, PacketSpaceState &initial_space,
@@ -1567,7 +1575,8 @@ void schedule_application_ack_deadline(PacketSpaceState &packet_space, QuicCoreT
     }
 
     if (!packet_space.pending_ack_deadline.has_value()) {
-        packet_space.pending_ack_deadline = now + std::chrono::milliseconds(max_ack_delay_ms);
+        packet_space.pending_ack_deadline =
+            now + transport_parameter_milliseconds(max_ack_delay_ms);
     }
 }
 
@@ -1842,26 +1851,25 @@ struct AckDelayExponent {
     std::uint64_t value;
 };
 
-std::chrono::milliseconds decode_ack_delay(EncodedAckDelay ack_delay,
+std::chrono::microseconds decode_ack_delay(EncodedAckDelay ack_delay,
                                            AckDelayExponent ack_delay_exponent) {
     if (ack_delay_exponent.value >= std::numeric_limits<std::uint64_t>::digits) {
-        return std::chrono::milliseconds(0);
+        return std::chrono::microseconds(0);
     }
 
     const auto max_microseconds =
         static_cast<std::uint64_t>(std::numeric_limits<std::chrono::microseconds::rep>::max()) >>
         ack_delay_exponent.value;
     const auto bounded_ack_delay = std::min<std::uint64_t>(ack_delay.value, max_microseconds);
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::microseconds(bounded_ack_delay << ack_delay_exponent.value));
+    return std::chrono::microseconds(bounded_ack_delay << ack_delay_exponent.value);
 }
 
-std::chrono::milliseconds decode_ack_delay(const AckFrame &ack, std::uint64_t ack_delay_exponent) {
+std::chrono::microseconds decode_ack_delay(const AckFrame &ack, std::uint64_t ack_delay_exponent) {
     return decode_ack_delay(EncodedAckDelay{.value = ack.ack_delay},
                             AckDelayExponent{.value = ack_delay_exponent});
 }
 
-std::chrono::milliseconds decode_ack_delay(const ReceivedAckFrame &ack,
+std::chrono::microseconds decode_ack_delay(const ReceivedAckFrame &ack,
                                            std::uint64_t ack_delay_exponent) {
     return decode_ack_delay(EncodedAckDelay{.value = ack.ack_delay},
                             AckDelayExponent{.value = ack_delay_exponent});
@@ -3136,7 +3144,7 @@ std::size_t application_ack_eliciting_frame_count(
 
 bool establishes_persistent_congestion(std::span<const SentPacketRecord> lost_packets,
                                        const RecoveryRttState &rtt,
-                                       std::chrono::milliseconds max_ack_delay) {
+                                       QuicCoreDuration max_ack_delay) {
     if (!rtt.latest_rtt.has_value()) {
         return false;
     }
@@ -4647,7 +4655,7 @@ std::optional<QuicCoreTimePoint> QuicConnection::loss_deadline() const {
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
-    const auto application_max_ack_delay = std::chrono::milliseconds(
+    const auto application_max_ack_delay = transport_parameter_milliseconds(
         peer_transport_parameters_.has_value() ? peer_transport_parameters_->max_ack_delay
                                                : TransportParameters{}.max_ack_delay);
     const auto allow_application_pto = config_.role == EndpointRole::server || handshake_confirmed_;
@@ -4661,7 +4669,7 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
     };
     const auto packet_space_pto_deadline =
         [&](const PacketSpaceState &packet_space,
-            std::chrono::milliseconds max_ack_delay) -> std::optional<QuicCoreTimePoint> {
+            QuicCoreDuration max_ack_delay) -> std::optional<QuicCoreTimePoint> {
         if (packet_space_discarded(packet_space)) {
             return std::nullopt;
         }
@@ -4675,8 +4683,8 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
     };
 
     const auto regular_deadline =
-        earliest_of({packet_space_pto_deadline(initial_space_, std::chrono::milliseconds(0)),
-                     packet_space_pto_deadline(handshake_space_, std::chrono::milliseconds(0)),
+        earliest_of({packet_space_pto_deadline(initial_space_, QuicCoreDuration{0}),
+                     packet_space_pto_deadline(handshake_space_, QuicCoreDuration{0}),
                      allow_application_pto
                          ? packet_space_pto_deadline(application_space_, application_max_ack_delay)
                          : std::nullopt});
@@ -4729,7 +4737,7 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
                                     *client_receive_keepalive_reference_time, pto_count_);
     }
 
-    return compute_pto_deadline(shared_rtt_state, std::chrono::milliseconds(0),
+    return compute_pto_deadline(shared_rtt_state, QuicCoreDuration{0},
                                 optional_ref_or_abort(client_handshake_keepalive_reference_time),
                                 std::min(pto_count_, 2u));
 }
@@ -4741,14 +4749,14 @@ std::optional<QuicCoreTimePoint> QuicConnection::ack_deadline() const {
          application_space_.pending_ack_deadline});
 }
 
-std::chrono::milliseconds QuicConnection::path_validation_timeout_period() const {
+QuicCoreDuration QuicConnection::path_validation_timeout_period() const {
     const auto pto_reference =
-        std::max(compute_pto_deadline(shared_recovery_rtt_state(), std::chrono::milliseconds(0),
+        std::max(compute_pto_deadline(shared_recovery_rtt_state(), QuicCoreDuration{0},
                                       QuicCoreTimePoint{}, /*pto_count=*/0) -
                      QuicCoreTimePoint{},
                  QuicCoreClock::duration::zero());
-    return std::chrono::duration_cast<std::chrono::milliseconds>(pto_reference *
-                                                                 kPersistentCongestionThreshold);
+    return std::chrono::duration_cast<QuicCoreDuration>(pto_reference *
+                                                        kPersistentCongestionThreshold);
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::idle_timeout_deadline() const {
@@ -4764,13 +4772,13 @@ std::optional<QuicCoreTimePoint> QuicConnection::idle_timeout_deadline() const {
         return std::nullopt;
     }
 
-    auto timeout = std::chrono::milliseconds(effective_timeout_ms);
+    auto timeout = transport_parameter_milliseconds(effective_timeout_ms);
     const auto pto_reference =
-        std::max(compute_pto_deadline(shared_recovery_rtt_state(), std::chrono::milliseconds(0),
+        std::max(compute_pto_deadline(shared_recovery_rtt_state(), QuicCoreDuration{0},
                                       QuicCoreTimePoint{}, /*pto_count=*/0) -
                      QuicCoreTimePoint{},
                  QuicCoreClock::duration::zero());
-    timeout = std::max(timeout, std::chrono::duration_cast<std::chrono::milliseconds>(
+    timeout = std::max(timeout, std::chrono::duration_cast<QuicCoreDuration>(
                                     pto_reference * kPersistentCongestionThreshold));
     return *idle_timeout_base_time_ + timeout;
 }
@@ -4837,9 +4845,9 @@ void QuicConnection::detect_lost_packets(PacketSpaceState &packet_space, QuicCor
         }
         const auto peer_max_ack_delay_ms =
             peer_transport_parameters_.value_or(TransportParameters{}).max_ack_delay;
-        const auto max_ack_delay = std::chrono::milliseconds{
-            peer_max_ack_delay_ms *
-            static_cast<std::uint64_t>(&packet_space == &application_space_)};
+        const auto max_ack_delay = (&packet_space == &application_space_)
+                                       ? transport_parameter_milliseconds(peer_max_ack_delay_ms)
+                                       : QuicCoreDuration{0};
         congestion_controller_.on_loss_event(now,
                                              latest_packet_sent_time(ack_eliciting_lost_packets));
         if (establishes_persistent_congestion(ack_eliciting_lost_packets, shared_rtt_state,
@@ -4880,7 +4888,7 @@ void QuicConnection::maybe_arm_pmtu_probe(QuicCoreTimePoint now) {
         return;
     }
     if (anti_amplification_applies(*current_send_path_id_)) {
-        path.mtu.next_probe_time = now + std::chrono::milliseconds(100);
+        path.mtu.next_probe_time = now + QuicCoreDuration{100000};
         return;
     }
     const auto probe_size = next_pmtu_probe_size(path);
@@ -4910,7 +4918,7 @@ void QuicConnection::maybe_arm_pmtu_probe(QuicCoreTimePoint now) {
 void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     PacketSpaceState *selected_packet_space = nullptr;
     std::optional<QuicCoreTimePoint> selected_deadline;
-    const auto application_max_ack_delay = std::chrono::milliseconds(
+    const auto application_max_ack_delay = transport_parameter_milliseconds(
         peer_transport_parameters_.has_value() ? peer_transport_parameters_->max_ack_delay
                                                : TransportParameters{}.max_ack_delay);
     const auto allow_application_pto = config_.role == EndpointRole::server || handshake_confirmed_;
@@ -4951,7 +4959,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     auto client_handshake_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
     if (client_handshake_keepalive_space != nullptr) {
         client_handshake_keepalive_deadline =
-            compute_pto_deadline(shared_rtt_state, std::chrono::milliseconds(0),
+            compute_pto_deadline(shared_rtt_state, QuicCoreDuration{0},
                                  optional_ref_or_abort(client_handshake_keepalive_reference_time),
                                  std::min(pto_count_, 2u));
     }
@@ -4987,7 +4995,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     const bool client_receive_keepalive_due =
         client_receive_keepalive_deadline.has_value() && now >= *client_receive_keepalive_deadline;
     const auto consider_packet_space = [&](PacketSpaceState &packet_space,
-                                           std::chrono::milliseconds max_ack_delay) {
+                                           QuicCoreDuration max_ack_delay) {
         if (packet_space_discarded(packet_space)) {
             return;
         }
@@ -5011,8 +5019,8 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         }
     };
 
-    consider_packet_space(initial_space_, std::chrono::milliseconds(0));
-    consider_packet_space(handshake_space_, std::chrono::milliseconds(0));
+    consider_packet_space(initial_space_, QuicCoreDuration{0});
+    consider_packet_space(handshake_space_, QuicCoreDuration{0});
     if (allow_application_pto) {
         consider_packet_space(application_space_, application_max_ack_delay);
     }
@@ -5389,7 +5397,7 @@ void QuicConnection::arm_server_zero_rtt_discard_deadline(QuicCoreTimePoint now)
         return;
     }
 
-    const auto max_ack_delay = std::chrono::milliseconds(
+    const auto max_ack_delay = transport_parameter_milliseconds(
         peer_transport_parameters_.value_or(TransportParameters{}).max_ack_delay);
     const auto single_pto = compute_pto_deadline(shared_recovery_rtt_state(), max_ack_delay, now,
                                                  /*pto_count=*/0) -
@@ -5466,11 +5474,16 @@ QuicCorePacketSpaceDiagnostics packet_space_diagnostics(const PacketSpaceState &
     };
 }
 
-std::optional<std::uint64_t> optional_ms(std::optional<std::chrono::milliseconds> value) {
+std::uint64_t nonnegative_milliseconds(QuicCoreDuration value) {
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(value).count();
+    return static_cast<std::uint64_t>(std::max<std::int64_t>(0, milliseconds));
+}
+
+std::optional<std::uint64_t> optional_ms(std::optional<QuicCoreDuration> value) {
     if (!value.has_value()) {
         return std::nullopt;
     }
-    return static_cast<std::uint64_t>(std::max<std::int64_t>(0, value->count()));
+    return nonnegative_milliseconds(*value);
 }
 
 QuicCoreStreamDiagnostics stream_diagnostics(const StreamState &stream) {
@@ -5534,10 +5547,8 @@ QuicCoreConnectionDiagnostics QuicConnection::diagnostics(QuicConnectionHandle h
                 .pto_count = pto_count_,
                 .latest_rtt_ms = optional_ms(rtt.latest_rtt),
                 .min_rtt_ms = optional_ms(rtt.min_rtt),
-                .smoothed_rtt_ms =
-                    static_cast<std::uint64_t>(std::max<std::int64_t>(0, rtt.smoothed_rtt.count())),
-                .rttvar_ms =
-                    static_cast<std::uint64_t>(std::max<std::int64_t>(0, rtt.rttvar.count())),
+                .smoothed_rtt_ms = nonnegative_milliseconds(rtt.smoothed_rtt),
+                .rttvar_ms = nonnegative_milliseconds(rtt.rttvar),
             },
         .flow_control =
             QuicCoreFlowControlDiagnostics{
@@ -5697,15 +5708,18 @@ QuicConnection::make_qlog_packet_snapshot(const ProtectedPacket &packet,
 
 qlog::RecoveryMetricsSnapshot QuicConnection::current_qlog_recovery_metrics() const {
     const auto &rtt = shared_recovery_rtt_state();
+    const auto to_milliseconds_double = [](QuicCoreDuration duration) {
+        return std::chrono::duration<double, std::milli>(duration).count();
+    };
     return qlog::RecoveryMetricsSnapshot{
         .min_rtt_ms = rtt.min_rtt.has_value()
-                          ? std::optional<double>(static_cast<double>(rtt.min_rtt->count()))
+                          ? std::optional<double>(to_milliseconds_double(*rtt.min_rtt))
                           : std::nullopt,
-        .smoothed_rtt_ms = static_cast<double>(rtt.smoothed_rtt.count()),
+        .smoothed_rtt_ms = to_milliseconds_double(rtt.smoothed_rtt),
         .latest_rtt_ms = rtt.latest_rtt.has_value()
-                             ? std::optional<double>(static_cast<double>(rtt.latest_rtt->count()))
+                             ? std::optional<double>(to_milliseconds_double(*rtt.latest_rtt))
                              : std::nullopt,
-        .rtt_variance_ms = static_cast<double>(rtt.rttvar.count()),
+        .rtt_variance_ms = to_milliseconds_double(rtt.rttvar),
         .pto_count = static_cast<std::uint16_t>(pto_count_),
         .congestion_window = static_cast<std::uint64_t>(congestion_controller_.congestion_window()),
         .bytes_in_flight = static_cast<std::uint64_t>(congestion_controller_.bytes_in_flight()),
@@ -6648,7 +6662,7 @@ QuicConnection::process_inbound_ack(PacketSpaceState &packet_space, const Receiv
 
 CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     PacketSpaceState &packet_space, AckRangeCursor cursor, std::uint64_t largest_acknowledged,
-    std::chrono::milliseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
+    std::chrono::microseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
     const std::string &ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
     bool suppress_pto_reset) {
     packet_space.recovery.rtt_state() = shared_recovery_rtt_state();
@@ -6797,7 +6811,7 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
         ack_result.has_newly_acked_ack_eliciting) {
         update_rtt(packet_space.recovery.rtt_state(), now,
                    SentPacketRecord{.sent_time = ack_result.largest_newly_acked_packet->sent_time},
-                   decoded_ack_delay, std::chrono::milliseconds(max_ack_delay_ms));
+                   decoded_ack_delay, transport_parameter_milliseconds(max_ack_delay_ms));
         recovery_rtt_state_ = packet_space.recovery.rtt_state();
         synchronize_recovery_rtt_state();
         if (send_profile_enabled()) {
@@ -6831,7 +6845,7 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
         congestion_controller_.on_loss_event(now,
                                              latest_packet_sent_time(ack_eliciting_lost_packets));
         if (establishes_persistent_congestion(ack_eliciting_lost_packets, shared_rtt_state,
-                                              std::chrono::milliseconds(max_ack_delay_ms))) {
+                                              transport_parameter_milliseconds(max_ack_delay_ms))) {
             if (send_profile_enabled()) {
                 ++send_profile_counters().persistent_congestion_events;
             }
@@ -8371,7 +8385,7 @@ void QuicConnection::apply_path_mtu_update(
                        [&](std::size_t probe_size) { return probe_size > path.mtu.probe_ceiling; }),
         path.mtu.failed_probe_sizes.end());
     path.mtu.next_probe_time =
-        pmtud_next_probe_time(path.mtu, QuicCoreClock::now(), std::chrono::seconds(1));
+        pmtud_next_probe_time(path.mtu, QuicCoreClock::now(), QuicCoreDuration{1000000});
 }
 
 void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_locally,
@@ -9758,7 +9772,7 @@ void QuicConnection::note_pmtu_probe_acked(const SentPacketRecord &packet, QuicC
         path.mtu.outstanding_probe_size.reset();
         path.mtu.outstanding_probe_packet_number.reset();
     }
-    path.mtu.next_probe_time = pmtud_next_probe_time(path.mtu, now, std::chrono::seconds(1));
+    path.mtu.next_probe_time = pmtud_next_probe_time(path.mtu, now, QuicCoreDuration{1000000});
 }
 
 void QuicConnection::note_pmtu_probe_lost(const SentPacketRecord &packet, QuicCoreTimePoint now) {
@@ -9775,7 +9789,7 @@ void QuicConnection::note_pmtu_probe_lost(const SentPacketRecord &packet, QuicCo
         path.mtu.outstanding_probe_size.reset();
         path.mtu.outstanding_probe_packet_number.reset();
     }
-    path.mtu.next_probe_time = pmtud_next_probe_time(path.mtu, now, std::chrono::milliseconds(100));
+    path.mtu.next_probe_time = pmtud_next_probe_time(path.mtu, now, QuicCoreDuration{100000});
 }
 
 void QuicConnection::note_inbound_datagram_bytes(std::size_t bytes) {
@@ -9821,8 +9835,7 @@ void QuicConnection::note_outbound_datagram_bytes(std::size_t bytes,
         auto &path = path_it->second;
         if (should_arm_pmtu_probe_after_send(path.mtu, application_space_.write_secret.has_value(),
                                              has_pending_application_send())) {
-            path.mtu.next_probe_time =
-                now.value_or(QuicCoreClock::now()) + std::chrono::milliseconds(10);
+            path.mtu.next_probe_time = now.value_or(QuicCoreClock::now()) + QuicCoreDuration{10000};
         }
     }
     if (effective_path_id.has_value() && anti_amplification_applies(*effective_path_id)) {

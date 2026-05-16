@@ -92,6 +92,24 @@ std::optional<QuicPerfDirection> parse_direction(std::uint8_t value) {
 constexpr std::uint8_t kSessionStartOptionalTotalBytesFlag = 0x01;
 constexpr std::uint8_t kSessionStartOptionalRequestsFlag = 0x02;
 
+std::uint64_t duration_to_u64(quic::QuicCoreDuration duration) {
+    return static_cast<std::uint64_t>(duration.count());
+}
+
+std::uint64_t duration_to_legacy_milliseconds(quic::QuicCoreDuration duration) {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(duration).count());
+}
+
+quic::QuicCoreDuration duration_from_u64(std::uint64_t microseconds) {
+    return quic::QuicCoreDuration{static_cast<quic::QuicCoreDuration::rep>(microseconds)};
+}
+
+quic::QuicCoreDuration legacy_milliseconds_from_u64(std::uint64_t milliseconds) {
+    return std::chrono::duration_cast<quic::QuicCoreDuration>(
+        std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(milliseconds)});
+}
+
 std::uint8_t session_start_optional_field_flags(const QuicPerfSessionStart &start) {
     std::uint8_t flags = 0;
     if (start.total_bytes.has_value()) {
@@ -123,8 +141,14 @@ std::vector<std::byte> encode_perf_control_message(const QuicPerfControlMessage 
                 }
                 append_u64(payload, value.total_bytes.value_or(0));
                 append_u64(payload, value.requests.value_or(0));
-                append_u64(payload, value.warmup_ms);
-                append_u64(payload, value.duration_ms);
+                if (value.protocol_version == kQuicPerfProtocolVersionLegacy ||
+                    value.protocol_version == kQuicPerfProtocolVersionMilliseconds) {
+                    append_u64(payload, duration_to_legacy_milliseconds(value.warmup));
+                    append_u64(payload, duration_to_legacy_milliseconds(value.duration));
+                } else {
+                    append_u64(payload, duration_to_u64(value.warmup));
+                    append_u64(payload, duration_to_u64(value.duration));
+                }
                 append_u64(payload, value.streams);
                 append_u64(payload, value.connections);
                 append_u64(payload, value.requests_in_flight);
@@ -174,7 +198,8 @@ std::optional<QuicPerfControlMessage> decode_perf_control_message(std::span<cons
         }
 
         std::optional<std::uint8_t> optional_flags;
-        if (protocol_version.value() == kQuicPerfProtocolVersion) {
+        if (protocol_version.value() == kQuicPerfProtocolVersion ||
+            protocol_version.value() == kQuicPerfProtocolVersionMilliseconds) {
             optional_flags = take_u8(in);
         } else if (protocol_version.value() != kQuicPerfProtocolVersionLegacy) {
             return std::nullopt;
@@ -182,14 +207,16 @@ std::optional<QuicPerfControlMessage> decode_perf_control_message(std::span<cons
 
         const auto total_bytes = take_u64(in);
         const auto requests = take_u64(in);
-        const auto warmup_ms = take_u64(in);
-        const auto duration_ms = take_u64(in);
+        const auto warmup = take_u64(in);
+        const auto duration = take_u64(in);
         const auto streams = take_u64(in);
         const auto connections = take_u64(in);
         const auto requests_in_flight = take_u64(in);
-        if ((protocol_version.value() == kQuicPerfProtocolVersion && !optional_flags.has_value()) ||
-            !total_bytes.has_value() || !requests.has_value() || !warmup_ms.has_value() ||
-            !duration_ms.has_value() || !streams.has_value() || !connections.has_value() ||
+        if (((protocol_version.value() == kQuicPerfProtocolVersion ||
+              protocol_version.value() == kQuicPerfProtocolVersionMilliseconds) &&
+             !optional_flags.has_value()) ||
+            !total_bytes.has_value() || !requests.has_value() || !warmup.has_value() ||
+            !duration.has_value() || !streams.has_value() || !connections.has_value() ||
             !requests_in_flight.has_value()) {
             return std::nullopt;
         }
@@ -226,8 +253,14 @@ std::optional<QuicPerfControlMessage> decode_perf_control_message(std::span<cons
                 start.requests = requests_value;
             }
         }
-        start.warmup_ms = warmup_ms.value();
-        start.duration_ms = duration_ms.value();
+        if (protocol_version_value == kQuicPerfProtocolVersionLegacy ||
+            protocol_version_value == kQuicPerfProtocolVersionMilliseconds) {
+            start.warmup = legacy_milliseconds_from_u64(warmup.value());
+            start.duration = legacy_milliseconds_from_u64(duration.value());
+        } else {
+            start.warmup = duration_from_u64(warmup.value());
+            start.duration = duration_from_u64(duration.value());
+        }
         start.streams = streams.value();
         start.connections = connections.value();
         start.requests_in_flight = requests_in_flight.value();

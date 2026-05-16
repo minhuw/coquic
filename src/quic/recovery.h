@@ -28,8 +28,8 @@ bool connection_key_update_and_probe_coverage_for_tests();
 
 inline constexpr std::uint64_t kPacketThreshold = 3;
 inline constexpr double kTimeThreshold = 9.0 / 8.0;
-inline constexpr std::chrono::milliseconds kGranularity{1};
-inline constexpr std::chrono::milliseconds kInitialRtt{333};
+inline constexpr QuicCoreDuration kGranularity{1000};
+inline constexpr QuicCoreDuration kInitialRtt{333000};
 
 struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     std::uint64_t packet_number = 0;
@@ -73,10 +73,15 @@ struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
 };
 
 struct RecoveryRttState {
-    std::optional<std::chrono::milliseconds> latest_rtt;
-    std::optional<std::chrono::milliseconds> min_rtt;
-    std::chrono::milliseconds smoothed_rtt{333};
-    std::chrono::milliseconds rttvar{166};
+    std::optional<QuicCoreDuration> latest_rtt;
+    std::optional<QuicCoreDuration> latest_adjusted_rtt;
+    std::optional<QuicCoreDuration> min_rtt;
+    std::optional<QuicCoreDuration> latest_rtt_sample;
+    std::optional<QuicCoreDuration> latest_adjusted_rtt_sample;
+    std::optional<QuicCoreDuration> latest_ack_delay_compensated_rtt_sample;
+    std::optional<QuicCoreDuration> min_rtt_sample;
+    QuicCoreDuration smoothed_rtt{333000};
+    QuicCoreDuration rttvar{166000};
 };
 
 struct DeadlineTrackedPacket {
@@ -348,7 +353,7 @@ class PacketSpaceRecovery {
     std::size_t next_loss_candidate_slot_ = 0;
     std::size_t next_packet_threshold_loss_slot_ = 0;
     std::uint64_t packet_reordering_threshold_ = kPacketThreshold;
-    std::chrono::milliseconds time_reordering_threshold_{};
+    QuicCoreDuration time_reordering_threshold_{};
     std::uint64_t compatibility_version_ = 0;
     RecoveryRttState rtt_state_;
     SentPacketsView sent_packets_{};
@@ -364,11 +369,10 @@ QuicCoreTimePoint compute_time_threshold_deadline(const RecoveryRttState &rtt,
                                                   QuicCoreTimePoint sent_time);
 bool is_time_threshold_lost(const RecoveryRttState &rtt, QuicCoreTimePoint sent_time,
                             QuicCoreTimePoint now);
-QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt,
-                                       std::chrono::milliseconds max_ack_delay,
+QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt, QuicCoreDuration max_ack_delay,
                                        QuicCoreTimePoint now, std::uint32_t pto_count);
 void update_rtt(RecoveryRttState &rtt, QuicCoreTimePoint ack_receive_time,
                 const SentPacketRecord &largest_newly_acked_packet,
-                std::chrono::milliseconds ack_delay, std::chrono::milliseconds max_ack_delay);
+                std::chrono::microseconds ack_delay, std::chrono::microseconds max_ack_delay);
 
 } // namespace coquic::quic

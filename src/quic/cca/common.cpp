@@ -14,8 +14,8 @@ constexpr std::uint8_t kHyStartMinRttSamples = 8;
 constexpr std::uint8_t kHyStartCssGrowthDivisor = 4;
 constexpr std::uint8_t kHyStartCssRounds = 5;
 constexpr std::size_t kHyStartNonPacedAckLimitPackets = 8;
-constexpr std::chrono::milliseconds kHyStartMinRttThreshold{4};
-constexpr std::chrono::milliseconds kHyStartMaxRttThreshold{16};
+constexpr QuicCoreDuration kHyStartMinRttThreshold{4000};
+constexpr QuicCoreDuration kHyStartMaxRttThreshold{16000};
 constexpr std::uint8_t kHyStartMinRttDivisor = 8;
 
 } // namespace
@@ -206,9 +206,10 @@ std::uint64_t congestion_saturating_add_u64(std::uint64_t lhs, std::size_t rhs) 
     return lhs + static_cast<std::uint64_t>(rhs);
 }
 
-double congestion_sample_bandwidth_bytes_per_second(
-    const SentPacketRecord &packet, std::uint64_t delivered_bytes, QuicCoreTimePoint now,
-    const std::optional<std::chrono::milliseconds> &min_rtt) {
+double
+congestion_sample_bandwidth_bytes_per_second(const SentPacketRecord &packet,
+                                             std::uint64_t delivered_bytes, QuicCoreTimePoint now,
+                                             const std::optional<QuicCoreDuration> &min_rtt) {
     static_cast<void>(min_rtt);
     if (delivered_bytes <= packet.delivered) {
         return 0.0;

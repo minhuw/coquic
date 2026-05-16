@@ -44,9 +44,9 @@ class HyStartPlusPlus {
     std::optional<std::uint64_t> latest_sent_sequence_;
     std::optional<std::uint64_t> window_end_sequence_;
     std::optional<std::uint64_t> css_entry_round_end_sequence_;
-    std::optional<std::chrono::milliseconds> last_round_min_rtt_;
-    std::optional<std::chrono::milliseconds> current_round_min_rtt_;
-    std::optional<std::chrono::milliseconds> css_baseline_min_rtt_;
+    std::optional<QuicCoreDuration> last_round_min_rtt_;
+    std::optional<QuicCoreDuration> current_round_min_rtt_;
+    std::optional<QuicCoreDuration> css_baseline_min_rtt_;
     std::uint8_t rtt_sample_count_ = 0;
     std::uint8_t css_rounds_ = 0;
 };
@@ -54,9 +54,10 @@ class HyStartPlusPlus {
 std::size_t congestion_initial_window(std::size_t max_datagram_size);
 std::size_t congestion_saturating_add(std::size_t lhs, std::size_t rhs);
 std::uint64_t congestion_saturating_add_u64(std::uint64_t lhs, std::size_t rhs);
-double congestion_sample_bandwidth_bytes_per_second(
-    const SentPacketRecord &packet, std::uint64_t delivered_bytes, QuicCoreTimePoint now,
-    const std::optional<std::chrono::milliseconds> &min_rtt);
+double congestion_sample_bandwidth_bytes_per_second(const SentPacketRecord &packet,
+                                                    std::uint64_t delivered_bytes,
+                                                    QuicCoreTimePoint now,
+                                                    const std::optional<QuicCoreDuration> &min_rtt);
 std::size_t congestion_clamp_to_size_t(double value);
 std::size_t congestion_round_to_size_t(double value);
 

@@ -56,8 +56,8 @@ QuicPerfSessionStart make_session_start(const QuicPerfConfig &config) {
         .requests = config.requests.has_value()
                         ? std::optional<std::uint64_t>{static_cast<std::uint64_t>(*config.requests)}
                         : std::nullopt,
-        .warmup_ms = static_cast<std::uint64_t>(config.warmup.count()),
-        .duration_ms = static_cast<std::uint64_t>(config.duration.count()),
+        .warmup = config.warmup,
+        .duration = config.duration,
         .streams = config.streams,
         .connections = config.connections,
         .requests_in_flight = config.requests_in_flight,
@@ -201,16 +201,16 @@ QuicPerfClient::next_wait_wakeup(std::optional<quic::QuicCoreTimePoint> core_nex
     return std::min(*core_next_wakeup, *benchmark_wakeup);
 }
 
-std::chrono::milliseconds QuicPerfClient::result_elapsed(quic::QuicCoreTimePoint now) const {
+quic::QuicCoreDuration QuicPerfClient::result_elapsed(quic::QuicCoreTimePoint now) const {
     if (timed_rr_mode() || timed_crr_mode() || timed_bulk_download_mode()) {
         if (phase_ == BenchmarkPhase::warmup) {
-            return std::chrono::milliseconds{0};
+            return quic::QuicCoreDuration{0};
         }
         const auto measurement_now = phase_ == BenchmarkPhase::drain ? measure_deadline_ : now;
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
+        return std::chrono::duration_cast<quic::QuicCoreDuration>(
             std::max(measurement_now, measure_started_at_) - measure_started_at_);
     }
-    return std::chrono::duration_cast<std::chrono::milliseconds>(now - run_started_at_);
+    return std::chrono::duration_cast<quic::QuicCoreDuration>(now - run_started_at_);
 }
 
 void QuicPerfClient::maybe_start_timed_benchmark(quic::QuicCoreTimePoint now) {
@@ -221,7 +221,7 @@ void QuicPerfClient::maybe_start_timed_benchmark(quic::QuicCoreTimePoint now) {
     run_started_at_ = now;
     measure_started_at_ = now;
     phase_ = BenchmarkPhase::warmup;
-    if (config_.warmup == std::chrono::milliseconds{0}) {
+    if (config_.warmup == quic::QuicCoreDuration{0}) {
         enter_measure_phase(now);
     }
 }
@@ -261,9 +261,7 @@ void QuicPerfClient::enter_drain_phase(quic::QuicCoreTimePoint now) {
     phase_ = BenchmarkPhase::drain;
     summary_.elapsed = result_elapsed(now);
     if (timed_bulk_download_mode()) {
-        drain_deadline_ =
-            now + std::min(config_.duration, std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                 std::chrono::seconds{2}));
+        drain_deadline_ = now + std::min(config_.duration, quic::QuicCoreDuration{2000000});
     }
     if (config_.mode == QuicPerfMode::rr) {
         std::vector<quic::QuicConnectionHandle> handles;
@@ -654,7 +652,8 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
         }
 
         if (request_it->second.counts_toward_measurement) {
-            summary_.latency_samples.push_back(now - request_it->second.started_at);
+            summary_.latency_samples.push_back(std::chrono::duration_cast<quic::QuicCoreDuration>(
+                now - request_it->second.started_at));
             ++summary_.requests_completed;
         }
         connection.outstanding_requests.erase(request_it);

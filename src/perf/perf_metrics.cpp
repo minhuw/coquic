@@ -74,7 +74,8 @@ std::string json_escape(std::string_view value) {
 
 void finalize_perf_run_summary(QuicPerfRunSummary &summary) {
     summary.latency = summarize_latency_samples(summary.latency_samples);
-    const auto seconds = std::max(static_cast<double>(summary.elapsed.count()) / 1000.0, 0.001);
+    const auto seconds =
+        std::max(static_cast<double>(summary.elapsed.count()) / 1'000'000.0, 0.001);
     summary.throughput_mib_per_s =
         static_cast<double>(summary.bytes_received + summary.bytes_sent) / (1024.0 * 1024.0) /
         seconds;
@@ -85,7 +86,7 @@ void finalize_perf_run_summary(QuicPerfRunSummary &summary) {
 }
 
 void reset_perf_run_summary_measurement(QuicPerfRunSummary &summary) {
-    summary.elapsed = std::chrono::milliseconds{0};
+    summary.elapsed = quic::QuicCoreDuration{0};
     summary.bytes_sent = 0;
     summary.bytes_received = 0;
     summary.server_bytes_sent = 0;
@@ -100,7 +101,7 @@ void reset_perf_run_summary_measurement(QuicPerfRunSummary &summary) {
 }
 
 QuicPerfLatencySummary summarize_latency_samples(
-    std::vector<std::chrono::nanoseconds> samples) { // NOLINT(performance-unnecessary-value-param)
+    std::vector<quic::QuicCoreDuration> samples) { // NOLINT(performance-unnecessary-value-param)
     if (samples.empty()) {
         return {};
     }
@@ -108,8 +109,7 @@ QuicPerfLatencySummary summarize_latency_samples(
     std::vector<std::uint64_t> micros;
     micros.reserve(samples.size());
     for (const auto sample : samples) {
-        micros.push_back(static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(sample).count()));
+        micros.push_back(static_cast<std::uint64_t>(sample.count()));
     }
     std::sort(micros.begin(), micros.end());
 
@@ -137,6 +137,8 @@ std::string render_perf_summary(const QuicPerfRunSummary &summary) {
 }
 
 std::string render_perf_json(const QuicPerfRunSummary &summary) {
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(summary.elapsed);
+    const auto warmup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(summary.warmup);
     std::ostringstream json;
     json << '{' << "\"schema_version\":" << summary.schema_version << ',' << "\"status\":\""
          << json_escape(summary.status) << "\","
@@ -147,9 +149,8 @@ std::string render_perf_json(const QuicPerfRunSummary &summary) {
          << "\"remote_host\":\"" << json_escape(summary.remote_host) << "\","
          << "\"remote_port\":" << summary.remote_port << ',' << "\"alpn\":\""
          << json_escape(summary.alpn) << "\","
-         << "\"elapsed_ms\":" << summary.elapsed.count() << ','
-         << "\"warmup_ms\":" << summary.warmup.count() << ','
-         << "\"bytes_sent\":" << summary.bytes_sent << ','
+         << "\"elapsed_ms\":" << elapsed_ms.count() << ',' << "\"warmup_ms\":" << warmup_ms.count()
+         << ',' << "\"bytes_sent\":" << summary.bytes_sent << ','
          << "\"bytes_received\":" << summary.bytes_received << ',' << "\"server_counters\":{"
          << "\"bytes_sent\":" << summary.server_bytes_sent << ','
          << "\"bytes_received\":" << summary.server_bytes_received << ','

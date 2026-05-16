@@ -2584,7 +2584,8 @@ TEST(QuicCoreTest, LossDeadlineUsesEarliestEligiblePacketWithinPacketSpace) {
                                      .in_flight = true,
                                  });
 
-    EXPECT_EQ(connection.loss_deadline(), std::optional{coquic::quic::test::test_time(12)});
+    EXPECT_EQ(connection.loss_deadline(),
+              std::optional{coquic::quic::QuicCoreTimePoint{} + std::chrono::microseconds(11250)});
 }
 
 TEST(QuicCoreTest, DeadlineHelpersPreferEarlierCandidatesAndSkipIneligiblePackets) {

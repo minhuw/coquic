@@ -80,7 +80,7 @@ struct PacketSpaceRecoveryTestPeer {
         return recovery.packet_reordering_threshold_;
     }
 
-    static std::chrono::milliseconds
+    static coquic::quic::QuicCoreDuration
     time_reordering_threshold(const PacketSpaceRecovery &recovery) {
         return recovery.time_reordering_threshold_;
     }
@@ -282,6 +282,7 @@ using coquic::quic::AckRange;
 using coquic::quic::ByteRange;
 using coquic::quic::DeadlineTrackedPacket;
 using coquic::quic::PacketSpaceRecovery;
+using coquic::quic::QuicCoreTimePoint;
 using coquic::quic::ReceivedPacketHistory;
 using coquic::quic::RecoveryPacketHandle;
 using coquic::quic::RecoveryPacketHandleList;
@@ -2666,7 +2667,12 @@ TEST(QuicRecoveryTest, FirstRttSampleResetsEstimator) {
         return;
     }
     EXPECT_EQ(*rtt.latest_rtt, std::chrono::milliseconds(60));
+    EXPECT_FALSE(rtt.latest_adjusted_rtt.has_value());
     EXPECT_EQ(*rtt.min_rtt, std::chrono::milliseconds(60));
+    EXPECT_EQ(rtt.latest_rtt_sample, std::optional{std::chrono::microseconds(60000)});
+    EXPECT_FALSE(rtt.latest_adjusted_rtt_sample.has_value());
+    EXPECT_FALSE(rtt.latest_ack_delay_compensated_rtt_sample.has_value());
+    EXPECT_EQ(rtt.min_rtt_sample, std::optional{std::chrono::microseconds(60000)});
     EXPECT_EQ(rtt.smoothed_rtt, std::chrono::milliseconds(60));
     EXPECT_EQ(rtt.rttvar, std::chrono::milliseconds(30));
 }
@@ -2685,7 +2691,60 @@ TEST(QuicRecoveryTest, SubsequentRttSamplesCanSkipAckDelayAdjustment) {
                              /*max_ack_delay=*/std::chrono::milliseconds(25));
 
     EXPECT_EQ(rtt.latest_rtt, std::optional{std::chrono::milliseconds(35)});
-    EXPECT_EQ(rtt.smoothed_rtt, std::chrono::milliseconds(39));
+    EXPECT_EQ(rtt.latest_adjusted_rtt, std::optional{std::chrono::milliseconds(35)});
+    EXPECT_EQ(rtt.latest_rtt_sample, std::optional{std::chrono::microseconds(35000)});
+    EXPECT_EQ(rtt.latest_adjusted_rtt_sample, std::optional{std::chrono::microseconds(35000)});
+    EXPECT_EQ(rtt.latest_ack_delay_compensated_rtt_sample,
+              std::optional{std::chrono::microseconds(15000)});
+    EXPECT_EQ(rtt.min_rtt_sample, std::optional{std::chrono::microseconds(30000)});
+    EXPECT_EQ(rtt.smoothed_rtt, std::chrono::microseconds(39375));
+}
+
+TEST(QuicRecoveryTest, SubsequentRttSamplesExposeMicrosecondAdjustedSample) {
+    RecoveryRttState rtt;
+    rtt.latest_rtt = std::chrono::milliseconds(100);
+    rtt.smoothed_rtt = std::chrono::milliseconds(100);
+    rtt.rttvar = std::chrono::milliseconds(50);
+    rtt.min_rtt = std::chrono::milliseconds(100);
+    rtt.min_rtt_sample = std::chrono::microseconds(100200);
+    auto sent = make_sent_packet(/*packet_number=*/9, /*ack_eliciting=*/true,
+                                 QuicCoreTimePoint{} + std::chrono::microseconds(100));
+
+    coquic::quic::update_rtt(rtt, QuicCoreTimePoint{} + std::chrono::microseconds(105800), sent,
+                             /*ack_delay=*/std::chrono::milliseconds(5),
+                             /*max_ack_delay=*/std::chrono::milliseconds(25));
+
+    EXPECT_EQ(rtt.latest_rtt, std::optional{std::chrono::microseconds(105700)});
+    EXPECT_EQ(rtt.latest_adjusted_rtt, std::optional{std::chrono::microseconds(100700)});
+    EXPECT_EQ(rtt.latest_rtt_sample, std::optional{std::chrono::microseconds(105700)});
+    EXPECT_EQ(rtt.latest_adjusted_rtt_sample, std::optional{std::chrono::microseconds(100700)});
+    EXPECT_EQ(rtt.latest_ack_delay_compensated_rtt_sample,
+              std::optional{std::chrono::microseconds(100700)});
+    EXPECT_EQ(rtt.min_rtt_sample, std::optional{std::chrono::microseconds(100200)});
+    EXPECT_EQ(rtt.smoothed_rtt, std::chrono::microseconds(100087));
+}
+
+TEST(QuicRecoveryTest, SubsequentRttSamplesUseSubmillisecondAckDelayForAdjustedSample) {
+    RecoveryRttState rtt;
+    rtt.latest_rtt = std::chrono::milliseconds(100);
+    rtt.smoothed_rtt = std::chrono::milliseconds(100);
+    rtt.rttvar = std::chrono::milliseconds(50);
+    rtt.min_rtt = std::chrono::milliseconds(100);
+    rtt.min_rtt_sample = std::chrono::microseconds(100000);
+    auto sent = make_sent_packet(/*packet_number=*/11, /*ack_eliciting=*/true,
+                                 QuicCoreTimePoint{} + std::chrono::microseconds(100));
+
+    coquic::quic::update_rtt(rtt, QuicCoreTimePoint{} + std::chrono::microseconds(101300), sent,
+                             /*ack_delay=*/std::chrono::microseconds(800),
+                             /*max_ack_delay=*/std::chrono::milliseconds(25));
+
+    EXPECT_EQ(rtt.latest_rtt, std::optional{std::chrono::microseconds(101200)});
+    EXPECT_EQ(rtt.latest_adjusted_rtt, std::optional{std::chrono::microseconds(100400)});
+    EXPECT_EQ(rtt.latest_rtt_sample, std::optional{std::chrono::microseconds(101200)});
+    EXPECT_EQ(rtt.latest_adjusted_rtt_sample, std::optional{std::chrono::microseconds(100400)});
+    EXPECT_EQ(rtt.latest_ack_delay_compensated_rtt_sample,
+              std::optional{std::chrono::microseconds(100400)});
+    EXPECT_EQ(rtt.min_rtt_sample, std::optional{std::chrono::microseconds(100000)});
 }
 
 TEST(QuicRecoveryTest, SubsequentRttSamplesHandleMissingMinRttDefensively) {
@@ -2701,7 +2760,13 @@ TEST(QuicRecoveryTest, SubsequentRttSamplesHandleMissingMinRttDefensively) {
                              /*max_ack_delay=*/std::chrono::milliseconds(25));
 
     EXPECT_EQ(rtt.latest_rtt, std::optional{std::chrono::milliseconds(50)});
-    EXPECT_EQ(rtt.smoothed_rtt, std::chrono::milliseconds(41));
+    EXPECT_EQ(rtt.latest_adjusted_rtt, std::optional{std::chrono::milliseconds(50)});
+    EXPECT_EQ(rtt.latest_rtt_sample, std::optional{std::chrono::microseconds(50000)});
+    EXPECT_EQ(rtt.latest_adjusted_rtt_sample, std::optional{std::chrono::microseconds(50000)});
+    EXPECT_EQ(rtt.latest_ack_delay_compensated_rtt_sample,
+              std::optional{std::chrono::microseconds(45000)});
+    EXPECT_EQ(rtt.min_rtt_sample, std::optional{std::chrono::microseconds(50000)});
+    EXPECT_EQ(rtt.smoothed_rtt, std::chrono::microseconds(41250));
 }
 
 TEST(QuicRecoveryTest, TimeThresholdLossUsesRttWindow) {

@@ -31,8 +31,8 @@ struct QuicPerfRunSummary {
     std::string remote_host = "127.0.0.1";
     std::uint16_t remote_port = 0;
     std::string alpn = "coquic-perf/1";
-    std::chrono::milliseconds elapsed{0};
-    std::chrono::milliseconds warmup{0};
+    quic::QuicCoreDuration elapsed{0};
+    quic::QuicCoreDuration warmup{0};
     std::uint64_t bytes_sent = 0;
     std::uint64_t bytes_received = 0;
     std::uint64_t server_bytes_sent = 0;
@@ -44,7 +44,7 @@ struct QuicPerfRunSummary {
     std::size_t requests_in_flight = 1;
     std::size_t request_bytes = 0;
     std::size_t response_bytes = 0;
-    std::vector<std::chrono::nanoseconds> latency_samples;
+    std::vector<quic::QuicCoreDuration> latency_samples;
     QuicPerfLatencySummary latency;
     double throughput_mib_per_s = 0.0;
     double throughput_gbit_per_s = 0.0;
@@ -54,7 +54,7 @@ struct QuicPerfRunSummary {
 void finalize_perf_run_summary(QuicPerfRunSummary &summary);
 void reset_perf_run_summary_measurement(QuicPerfRunSummary &summary);
 QuicPerfLatencySummary summarize_latency_samples(
-    std::vector<std::chrono::nanoseconds> samples); // NOLINT(performance-unnecessary-value-param)
+    std::vector<quic::QuicCoreDuration> samples); // NOLINT(performance-unnecessary-value-param)
 std::string render_perf_summary(const QuicPerfRunSummary &summary);
 std::string render_perf_json(const QuicPerfRunSummary &summary);
 

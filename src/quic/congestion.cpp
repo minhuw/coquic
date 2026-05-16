@@ -1,5 +1,7 @@
 #include "src/quic/congestion.h"
 
+#include <utility>
+
 namespace coquic::quic {
 
 std::string_view congestion_control_algorithm_name(QuicCongestionControlAlgorithm algorithm) {
@@ -62,13 +64,14 @@ QuicCongestionController::operator=(const QuicCongestionController &other) {
 }
 
 QuicCongestionController::QuicCongestionController(QuicCongestionController &&other) noexcept
-    : storage_(other.storage_), congestion_window_(this, true), bytes_in_flight_(this, false) {
+    : storage_(std::move(other.storage_)), congestion_window_(this, true),
+      bytes_in_flight_(this, false) {
 }
 
 QuicCongestionController &
 QuicCongestionController::operator=(QuicCongestionController &&other) noexcept {
     if (this != &other) {
-        storage_ = other.storage_;
+        storage_ = std::move(other.storage_);
     }
     return *this;
 }

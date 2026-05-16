@@ -58,7 +58,7 @@ if deploy_job is None:
     raise SystemExit("missing job: deploy-demo")
 if deploy_job.get("if") != "github.ref == 'refs/heads/main'":
     raise SystemExit(f"unexpected deploy-demo job guard: {deploy_job.get('if')!r}")
-if deploy_job.get("timeout-minutes") != 30:
+if deploy_job.get("timeout-minutes") != 60:
     raise SystemExit(f"unexpected deploy-demo timeout-minutes: {deploy_job.get('timeout-minutes')!r}")
 
 steps = deploy_job.get("steps", [])

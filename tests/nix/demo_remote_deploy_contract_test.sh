@@ -30,7 +30,7 @@ expected_paths = [
     "build.zig.zon",
     "flake.nix",
     "flake.lock",
-    "docker/h3-server/Dockerfile",
+    "demo/h3-server/Dockerfile",
     "scripts/build-boringssl-wasm.sh",
     "scripts/wasm-quic-smoke.mjs",
     ".github/workflows/deploy-demo.yml",

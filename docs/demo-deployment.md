@@ -6,6 +6,8 @@ This document covers the remote continuous deployment flow for the public
 ## Repo Layout
 
 - `demo/wasm-quic/` is the current repo-owned browser demo source.
+- `demo/h3-server/Dockerfile` is the optional container wrapper for serving
+  the built `h3-server` binary and wasm demo assets.
 - `zig build wasm-quic` writes the deployable document root to
   `zig-out/share/wasm-quic/`, including `coquic-wasm-quic.wasm`.
 - `demo/deploy/package-demo.sh` packages the built wasm demo document root.

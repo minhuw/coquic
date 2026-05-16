@@ -45,12 +45,15 @@ if ! grep -Fq 'requested_source_dir="${2:-${repo_root}/zig-out/share/wasm-quic}"
   exit 1
 fi
 
-if ! grep -Fq 'COPY zig-out/share/wasm-quic /app/www' docker/h3-server/Dockerfile; then
-  echo "docker/h3-server/Dockerfile does not copy built wasm demo output" >&2
+if ! grep -Fq 'COPY zig-out/share/wasm-quic /app/www' demo/h3-server/Dockerfile; then
+  echo "demo/h3-server/Dockerfile does not copy built wasm demo output" >&2
   exit 1
 fi
 
 for dockerignore_rule in \
+  "!demo/" \
+  "!demo/h3-server/" \
+  "!demo/h3-server/Dockerfile" \
   "!zig-out/" \
   "!zig-out/bin/" \
   "!zig-out/bin/h3-server" \

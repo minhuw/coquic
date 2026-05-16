@@ -7,6 +7,7 @@ cd "${repo_root}"
 required_paths=(
   "demo/wasm-quic/index.html"
   "demo/wasm-quic/quic-demo.js"
+  "demo/h3-server/Dockerfile"
   "demo/deploy/package-demo.sh"
   "demo/deploy/deploy-remote.sh"
   "demo/deploy/coquic-demo.service"
@@ -26,6 +27,7 @@ removed_paths=(
   "tests/nix/h3_demo_page_contract_test.sh"
   "tests/nix/h3_server_container_smoke_test.sh"
   "docs/h3-server-container.md"
+  "docker/h3-server/Dockerfile"
   "docker/h3-server/www/index.html"
 )
 

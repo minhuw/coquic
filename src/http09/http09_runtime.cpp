@@ -2219,14 +2219,29 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
             continue;
         }
 
-        if (!pump_client_endpoint_work_once().ok) {
-            return 1;
-        }
-        if (state.terminal_success) {
-            const auto current = now();
-            ensure_terminal_success_deadline(current);
-            if (should_exit_after_terminal_success(current)) {
-                return 0;
+        for (;;) {
+            const auto pump_result = pump_client_endpoint_work_once();
+            if (!pump_result.ok) {
+                return 1;
+            }
+            if (state.terminal_success) {
+                const auto current = now();
+                ensure_terminal_success_deadline(current);
+                if (should_exit_after_terminal_success(current)) {
+                    return 0;
+                }
+                break;
+            }
+            if (!pump_result.advanced_core || !state.endpoint_has_pending_work) {
+                break;
+            }
+
+            bool processed_followup_timers = false;
+            if (!process_expired_client_timer(now(), processed_followup_timers)) {
+                return 1;
+            }
+            if (processed_followup_timers) {
+                continue;
             }
         }
 
@@ -5788,6 +5803,24 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
         backend_ptr->wait_results.push_back(QuicIoEvent{
             .kind = QuicIoEvent::Kind::idle_timeout,
             .now = event_time + std::chrono::milliseconds(1),
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::pending_work_core_inputs_are_drained_before_wait:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .core_inputs =
+                {
+                    QuicCoreTimerExpired{},
+                },
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
         });
         break;
     }

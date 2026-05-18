@@ -606,6 +606,15 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_TRUE(peer_input_then_outer_pump_terminal_success.terminal_success);
     EXPECT_FALSE(peer_input_then_outer_pump_terminal_success.terminal_failure);
     EXPECT_EQ(peer_input_then_outer_pump_terminal_success.wait_calls, 2U);
+
+    const auto pending_work_core_inputs_are_drained_before_wait =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
+                pending_work_core_inputs_are_drained_before_wait);
+    EXPECT_EQ(pending_work_core_inputs_are_drained_before_wait.exit_code, 0);
+    EXPECT_TRUE(pending_work_core_inputs_are_drained_before_wait.terminal_success);
+    EXPECT_FALSE(pending_work_core_inputs_are_drained_before_wait.terminal_failure);
+    EXPECT_EQ(pending_work_core_inputs_are_drained_before_wait.wait_calls, 0U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCases) {

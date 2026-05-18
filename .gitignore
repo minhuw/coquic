@@ -6,6 +6,7 @@ out/
 .worktrees/
 coverage/
 .rag/
+.remote-ci/
 .interop-logs/
 result
 tools/rag/.venv/

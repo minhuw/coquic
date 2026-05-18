@@ -98,8 +98,8 @@ void drive_tls_handshake(TlsAdapter &client, TlsAdapter &server) {
             ASSERT_TRUE(server.provide(EncryptionLevel::handshake, client_handshake).has_value());
         }
 
-        client.poll();
-        server.poll();
+        ASSERT_TRUE(client.poll().has_value());
+        ASSERT_TRUE(server.poll().has_value());
     }
 }
 
@@ -114,8 +114,8 @@ std::optional<std::vector<std::byte>> drive_tls_until_resumption_state(TlsAdapte
                 client.provide(EncryptionLevel::application, server_application).has_value());
         }
 
-        client.poll();
-        server.poll();
+        EXPECT_TRUE(client.poll().has_value());
+        EXPECT_TRUE(server.poll().has_value());
 
         auto state = client.take_resumption_state();
         if (state.has_value()) {
@@ -481,8 +481,8 @@ TEST(QuicTlsAdapterContractTest,
                 resumed_server.provide(EncryptionLevel::handshake, client_handshake).has_value());
         }
 
-        resumed_client.poll();
-        resumed_server.poll();
+        ASSERT_TRUE(resumed_client.poll().has_value());
+        ASSERT_TRUE(resumed_server.poll().has_value());
     }
 
     EXPECT_TRUE(resumed_client.handshake_complete());
@@ -536,7 +536,7 @@ TEST(QuicTlsAdapterContractTest,
 
     EXPECT_FALSE(resumed_server.take_pending(EncryptionLevel::initial).empty());
     EXPECT_FALSE(resumed_server.take_pending(EncryptionLevel::handshake).empty());
-    resumed_server.poll();
+    EXPECT_TRUE(resumed_server.poll().has_value());
     EXPECT_FALSE(resumed_server.handshake_complete());
 }
 
@@ -893,7 +893,9 @@ TEST(QuicTlsAdapterContractTest, ProvideAndPollRejectStickyOrMissingSslState) {
                                          CodecErrorCode::invalid_packet_protection_state);
     EXPECT_TRUE(TlsAdapterTestPeer::has_sticky_error(sticky_adapter));
     EXPECT_FALSE(sticky_adapter.provide(EncryptionLevel::initial, {}).has_value());
-    sticky_adapter.poll();
+    const auto sticky_poll = sticky_adapter.poll();
+    ASSERT_FALSE(sticky_poll.has_value());
+    EXPECT_EQ(sticky_poll.error().code, CodecErrorCode::invalid_packet_protection_state);
     EXPECT_FALSE(TlsAdapterTestPeer::drive_handshake(sticky_adapter).has_value());
     TlsAdapterTestPeer::clear_sticky_error(sticky_adapter);
     EXPECT_FALSE(TlsAdapterTestPeer::has_sticky_error(sticky_adapter));
@@ -974,16 +976,22 @@ TEST(QuicTlsAdapterContractTest,
         TlsAdapterTestPeer::call_static_on_new_session_with_null_app_data(adapter, session.get()),
         0);
 
-    EXPECT_EQ(TlsAdapterTestPeer::call_static_send_alert(adapter, ssl_encryption_initial, 1), 0);
-    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
-              CodecErrorCode::invalid_packet_protection_state);
+    EXPECT_EQ(TlsAdapterTestPeer::call_static_send_alert(adapter, ssl_encryption_initial, 40), 0);
+    const auto static_alert_poll = adapter.poll();
+    ASSERT_FALSE(static_alert_poll.has_value());
+    EXPECT_EQ(static_alert_poll.error().code, CodecErrorCode::invalid_packet_protection_state);
+    EXPECT_TRUE(static_alert_poll.error().has_transport_error_code);
+    EXPECT_EQ(static_alert_poll.error().transport_error_code, 0x0128u);
 }
 
 TEST(QuicTlsAdapterContractTest, NullSslAndDirectSendAlertTestHooksRemainSafe) {
     TlsAdapter adapter(make_client_config());
-    EXPECT_EQ(TlsAdapterTestPeer::call_on_send_alert(adapter, ssl_encryption_initial, 1), 0);
-    EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(adapter),
-              CodecErrorCode::invalid_packet_protection_state);
+    EXPECT_EQ(TlsAdapterTestPeer::call_on_send_alert(adapter, ssl_encryption_initial, 40), 0);
+    const auto direct_alert_poll = adapter.poll();
+    ASSERT_FALSE(direct_alert_poll.has_value());
+    EXPECT_EQ(direct_alert_poll.error().code, CodecErrorCode::invalid_packet_protection_state);
+    EXPECT_TRUE(direct_alert_poll.error().has_transport_error_code);
+    EXPECT_EQ(direct_alert_poll.error().transport_error_code, 0x0128u);
 
     TlsAdapter missing_ssl_adapter(make_client_config());
     TlsAdapterTestPeer::reset_ssl(missing_ssl_adapter);

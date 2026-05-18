@@ -116,6 +116,8 @@ struct ScopedConnectionDrainTestHookReset {
     ~ScopedConnectionDrainTestHookReset() {
         coquic::quic::test::connection_set_force_missing_packet_metadata_for_tests(false);
         coquic::quic::test::connection_set_force_missing_fallback_packet_length_for_tests(false);
+        coquic::quic::test::connection_set_force_aead_confidentiality_limit_for_tests(false);
+        coquic::quic::test::connection_set_force_aead_integrity_limit_for_tests(false);
     }
 };
 
@@ -3267,6 +3269,23 @@ TEST(QuicCoreTest, FlushOutboundDatagramReusesAcceptedApplicationCandidateSerial
     EXPECT_FALSE(connection.has_failed());
 }
 
+TEST(QuicCoreTest, OneRttSendClosesWithAeadLimitReachedWhenConfidentialityLimitIsReached) {
+    ScopedConnectionDrainTestHookReset reset_hooks;
+
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("hello"), false)
+            .has_value());
+    coquic::quic::test::connection_set_force_aead_confidentiality_limit_for_tests(true);
+
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
+
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::closing);
+    ASSERT_TRUE(connection.pending_transport_close_.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(connection.pending_transport_close_).error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::aead_limit_reached));
+}
+
 TEST(QuicCoreTest, CoalescedInitialAndHandshakeCandidateSerializationFailureMarksConnectionFailed) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.started_ = true;
@@ -3457,6 +3476,34 @@ TEST(QuicCoreTest, PacketTraceLogsPacingSendBlockedWhenApplicationPacingDefersSe
     EXPECT_TRUE(blocked_datagram.empty());
     EXPECT_NE(stderr_output.find("quic-packet-trace send-blocked scid="), std::string::npos);
     EXPECT_NE(stderr_output.find("reason=pacing"), std::string::npos);
+}
+
+TEST(QuicCoreTest, NonPacedApplicationSendLimitsAckElicitingBurst) {
+    ScopedEnvVar trace("COQUIC_PACKET_TRACE", "1");
+
+    auto connection = make_connected_client_connection();
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = 64 * 1024;
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = 64 * 1024;
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = 1024 * 1024;
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, std::vector<std::byte>(32 * 1024, std::byte{0x41}), false)
+            .has_value());
+
+    const auto now = coquic::quic::test::test_time(1);
+    for (std::size_t index = 0; index < 10; ++index) {
+        EXPECT_FALSE(connection.drain_outbound_datagram(now).empty()) << "index=" << index;
+    }
+
+    testing::internal::CaptureStderr();
+    const auto blocked_datagram = connection.drain_outbound_datagram(now);
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(blocked_datagram.empty());
+    EXPECT_NE(stderr_output.find("reason=burst"), std::string::npos);
+    EXPECT_TRUE(connection.has_pending_application_send());
 }
 
 TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversRemainingValidationBranches) {

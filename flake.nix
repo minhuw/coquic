@@ -438,6 +438,7 @@
             (if includePreCommit then pre-commit-check.shellHook else "")
             + mkCoquicEnv profile
             + ''
+              export LD_LIBRARY_PATH="${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
               echo "${banner}"
             '';
       };
@@ -532,6 +533,7 @@
           pkgs.mkcert
           boringssl
           pkgs.python3
+          pkgs.uv
           pkgs.qdrant
           pkgs.wireshark
         ];

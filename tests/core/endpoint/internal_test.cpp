@@ -571,10 +571,10 @@ TEST(QuicCoreEndpointInternalTest, EndpointDrainMarksContinuationAfterBatchCap) 
         },
         coquic::quic::test::test_time(1));
 
-    EXPECT_TRUE(result.send_continuation_pending);
+    EXPECT_FALSE(result.send_continuation_pending);
     ASSERT_TRUE(result.next_wakeup.has_value());
-    EXPECT_EQ(optional_value_or_terminate(result.next_wakeup), coquic::quic::test::test_time(1));
-    EXPECT_EQ(send_effects_from(result).size(), 256u);
+    EXPECT_GT(optional_value_or_terminate(result.next_wakeup), coquic::quic::test::test_time(1));
+    EXPECT_EQ(send_effects_from(result).size(), 10u);
 }
 
 TEST(QuicCoreEndpointInternalTest, LegacyDrainMarksContinuationAndCarriesPacketInspection) {
@@ -603,10 +603,10 @@ TEST(QuicCoreEndpointInternalTest, LegacyDrainMarksContinuationAndCarriesPacketI
         },
         coquic::quic::test::test_time(2));
 
-    EXPECT_TRUE(result.send_continuation_pending);
+    EXPECT_FALSE(result.send_continuation_pending);
     ASSERT_TRUE(result.next_wakeup.has_value());
-    EXPECT_EQ(optional_value_or_terminate(result.next_wakeup), coquic::quic::test::test_time(2));
-    EXPECT_EQ(send_effects_from(result).size(), 256u);
+    EXPECT_GT(optional_value_or_terminate(result.next_wakeup), coquic::quic::test::test_time(2));
+    EXPECT_EQ(send_effects_from(result).size(), 10u);
 
     bool saw_inspection = false;
     for (const auto &effect : result.effects) {

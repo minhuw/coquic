@@ -55,6 +55,8 @@ struct ScopedConnectionDrainTestHookReset {
         coquic::quic::test::connection_set_force_missing_fallback_packet_length_for_tests(false);
         coquic::quic::test::connection_set_force_appended_fragment_base_datagram_failure_for_tests(
             false);
+        coquic::quic::test::connection_set_force_aead_confidentiality_limit_for_tests(false);
+        coquic::quic::test::connection_set_force_aead_integrity_limit_for_tests(false);
         coquic::quic::test::
             connection_set_force_application_candidate_estimate_failure_countdown_for_tests(-1);
         coquic::quic::test::
@@ -746,6 +748,42 @@ TEST(QuicCoreTest, CorruptedOneRttAckOnlyPacketsDoNotFailServerConnection) {
 
         EXPECT_FALSE(connection.has_failed()) << "corruption index=" << index;
     }
+}
+
+TEST(QuicCoreTest, AuthenticationFailureLimitClosesWithAeadLimitReached) {
+    coquic::quic::test::ScopedConnectionDrainTestHookReset reset_hooks;
+
+    auto base_connection = make_connected_server_connection();
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = false,
+                .destination_connection_id = base_connection.config_.source_connection_id,
+                .packet_number_length = 1,
+                .packet_number = 7,
+                .frames = {coquic::quic::PingFrame{}},
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id =
+                base_connection.client_initial_destination_connection_id(),
+            .one_rtt_secret =
+                optional_ref_or_terminate(base_connection.application_space_.read_secret),
+        });
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_FALSE(encoded.value().empty());
+
+    auto corrupted = encoded.value();
+    corrupted.back() ^= std::byte{0x01};
+    coquic::quic::test::connection_set_force_aead_integrity_limit_for_tests(true);
+
+    base_connection.process_inbound_datagram(corrupted, coquic::quic::test::test_time(1));
+
+    EXPECT_EQ(base_connection.close_mode_, coquic::quic::QuicConnectionCloseMode::closing);
+    ASSERT_TRUE(base_connection.pending_transport_close_.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(base_connection.pending_transport_close_).error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::aead_limit_reached));
 }
 
 TEST(QuicCoreTest, CorruptedOneRttAckOnlyHeaderBitFlipsDoNotFailServerConnection) {
@@ -5413,7 +5451,7 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
 
     const auto [first_burst_packets, first_largest_sent] =
         drain_burst(coquic::quic::test::test_time(1));
-    ASSERT_GE(first_burst_packets, 8u);
+    ASSERT_EQ(first_burst_packets, 10u);
     ASSERT_GT(expected_offset, 0u);
 
     ASSERT_TRUE(connection
@@ -5430,7 +5468,8 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
 
     const auto [second_burst_packets, second_largest_sent] =
         drain_burst(coquic::quic::test::test_time(3));
-    ASSERT_GT(second_burst_packets, first_burst_packets);
+    ASSERT_EQ(second_burst_packets, 10u);
+    EXPECT_GT(second_largest_sent, first_largest_sent);
 
     ASSERT_TRUE(connection
                     .process_inbound_ack(connection.application_space_,
@@ -5448,7 +5487,7 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
         drain_burst(coquic::quic::test::test_time(5));
     ASSERT_GT(third_burst_packets, 0u);
     EXPECT_GT(third_largest_sent, second_largest_sent);
-    EXPECT_GT(expected_offset, 50000u);
+    EXPECT_GT(expected_offset, 30000u);
 }
 
 TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossRepeatedCumulativeAcks) {
@@ -5600,7 +5639,7 @@ TEST(QuicCoreTest, ApplicationSendUsesConfiguredOutboundDatagramSizeLimit) {
     EXPECT_LE(datagram.size(), 4096u);
 }
 
-TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadWithoutArtificialBurstLimit) {
+TEST(QuicCoreTest, ApplicationSendStopsAtUnpacedBurstLimitWithoutAckProgress) {
     auto connection = make_connected_client_connection();
     const auto payload =
         std::vector<std::byte>(static_cast<std::size_t>(256u) * 1024u, std::byte{0x52});
@@ -5623,9 +5662,9 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadWithoutArtificialBurstLimit)
         ++emitted_packets;
     }
 
-    EXPECT_GT(emitted_packets, 21u);
-    EXPECT_FALSE(connection.has_pending_fresh_application_stream_send());
-    EXPECT_FALSE(connection.has_pending_application_send());
+    EXPECT_EQ(emitted_packets, 10u);
+    EXPECT_TRUE(connection.has_pending_fresh_application_stream_send());
+    EXPECT_TRUE(connection.has_pending_application_send());
 }
 
 TEST(QuicCoreTest, BbrPacingBlocksFurtherApplicationSendsUntilPacingWakeup) {

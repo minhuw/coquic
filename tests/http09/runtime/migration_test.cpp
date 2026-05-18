@@ -203,12 +203,14 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesLiveLikeMigrationRetransm
                     .has_value());
 
     for (std::size_t i = 0; i < 131; ++i) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(
             coquic::quic::test::test_time(static_cast<std::int64_t>(i) + 1));
         ASSERT_FALSE(datagram.empty());
         EXPECT_EQ(connection.last_drained_path_id(), 1u);
     }
     for (std::size_t i = 0; i < 22; ++i) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(
             coquic::quic::test::test_time(132 + static_cast<std::int64_t>(i)));
         ASSERT_FALSE(datagram.empty());

@@ -608,30 +608,37 @@ class QuicConnection {
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
     CodecResult<bool> process_inbound_packet(const ProtectedPacket &packet, QuicCoreTimePoint now,
-                                             QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
+                                             QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable,
+                                             bool used_previous_application_read_secret = false);
     CodecResult<bool>
     process_inbound_received_packet(const ReceivedProtectedPacket &packet, QuicCoreTimePoint now,
-                                    QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
+                                    QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable,
+                                    bool used_previous_application_read_secret = false);
     CodecResult<bool> process_inbound_crypto(EncryptionLevel level, std::span<const Frame> frames,
                                              QuicCoreTimePoint now);
     CodecResult<bool> process_inbound_received_crypto(EncryptionLevel level,
                                                       std::span<const ReceivedFrame> frames,
                                                       QuicCoreTimePoint now);
-    CodecResult<bool> process_inbound_application(std::span<const Frame> frames,
-                                                  QuicCoreTimePoint now,
-                                                  bool allow_preconnected_frames = false,
-                                                  QuicPathId path_id = 0);
-    CodecResult<bool> process_inbound_received_application(std::span<const ReceivedFrame> frames,
-                                                           QuicCoreTimePoint now,
-                                                           bool allow_preconnected_frames = false,
-                                                           QuicPathId path_id = 0);
+    CodecResult<bool>
+    process_inbound_application(std::span<const Frame> frames, QuicCoreTimePoint now,
+                                bool allow_preconnected_frames = false, QuicPathId path_id = 0,
+                                bool used_previous_application_read_secret = false);
+    CodecResult<bool> process_inbound_received_application(
+        std::span<const ReceivedFrame> frames, QuicCoreTimePoint now,
+        bool allow_preconnected_frames = false, QuicPathId path_id = 0,
+        bool used_previous_application_read_secret = false);
     CodecResult<bool> process_inbound_ack(PacketSpaceState &packet_space, const AckFrame &ack,
                                           QuicCoreTimePoint now, std::uint64_t ack_delay_exponent,
-                                          std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);
+                                          std::uint64_t max_ack_delay_ms, bool suppress_pto_reset,
+                                          bool used_previous_application_read_secret = false);
     CodecResult<bool> process_inbound_ack(PacketSpaceState &packet_space,
                                           const ReceivedAckFrame &ack, QuicCoreTimePoint now,
                                           std::uint64_t ack_delay_exponent,
-                                          std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);
+                                          std::uint64_t max_ack_delay_ms, bool suppress_pto_reset,
+                                          bool used_previous_application_read_secret = false);
+    CodecResult<bool> detect_old_key_ack_of_current_key_phase_packet(PacketSpaceState &packet_space,
+                                                                     AckRangeCursor cursor,
+                                                                     QuicCoreTimePoint now);
     CodecResult<bool> process_inbound_ack_cursor(
         PacketSpaceState &packet_space, AckRangeCursor cursor, std::uint64_t largest_acknowledged,
         std::chrono::microseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
@@ -661,6 +668,12 @@ class QuicConnection {
     std::optional<QuicCoreTimePoint> zero_rtt_discard_deadline() const;
     void arm_server_zero_rtt_discard_deadline(QuicCoreTimePoint now);
     void maybe_discard_server_zero_rtt_packet_space(QuicCoreTimePoint now);
+    void retain_previous_application_read_secret(QuicCoreTimePoint now);
+    CodecResult<bool> refresh_next_application_read_secret();
+    CodecResult<bool> ensure_next_application_read_secret();
+    void promote_next_application_read_secret();
+    std::optional<QuicCoreTimePoint> previous_application_read_secret_discard_deadline() const;
+    void maybe_discard_previous_application_read_secret(QuicCoreTimePoint now);
     void synchronize_recovery_rtt_state();
     QuicCoreDuration path_validation_timeout_period() const;
     void install_available_secrets();
@@ -782,6 +795,12 @@ class QuicConnection {
     void enter_draining_state(QuicCoreTimePoint now);
     void queue_transport_close_for_error(QuicCoreTimePoint now, const CodecError &error,
                                          std::uint64_t frame_type = 0);
+    bool note_aead_encryption_attempt(std::size_t packet_count, QuicCoreTimePoint now);
+    bool note_packet_authentication_failure(const CodecError &error, QuicCoreTimePoint now);
+    bool non_paced_burst_allows_send(bool ack_eliciting, bool bypass_congestion_window) const;
+    void note_burst_limited_ack_eliciting_send(std::size_t packet_count,
+                                               bool bypass_congestion_window);
+    void reset_unpaced_ack_eliciting_burst();
     void clear_connection_failure_effects();
     void mark_silent_close();
     void mark_failed();
@@ -811,6 +830,10 @@ class QuicConnection {
     std::uint64_t active_local_connection_id_sequence_ = 0;
     std::uint64_t next_local_connection_id_sequence_ = 1;
     std::uint64_t next_path_challenge_sequence_ = 1;
+    std::uint64_t current_application_write_key_encrypted_packets_ = 0;
+    std::uint64_t current_application_write_key_generation_ = 0;
+    std::uint64_t failed_authentication_packets_ = 0;
+    std::size_t unpaced_ack_eliciting_burst_packets_ = 0;
     bool peer_transport_parameters_validated_ = false;
     bool peer_address_validated_ = false;
     std::uint64_t anti_amplification_received_bytes_ = 0;
@@ -845,7 +868,11 @@ class QuicConnection {
     bool local_key_update_initiated_ = false;
     std::optional<std::uint64_t> current_write_phase_first_packet_number_;
     std::optional<TrafficSecret> previous_application_read_secret_;
+    std::optional<QuicCoreTimePoint> previous_application_read_secret_discard_deadline_;
     bool previous_application_read_key_phase_ = false;
+    std::optional<TrafficSecret> next_application_read_secret_;
+    std::optional<TrafficSecretCacheInputs> next_application_read_secret_source_;
+    bool next_application_read_key_phase_ = false;
     bool initial_packet_space_discarded_ = false;
     bool handshake_packet_space_discarded_ = false;
     bool handshake_confirmed_ = false;

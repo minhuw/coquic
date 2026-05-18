@@ -63,6 +63,7 @@ using SslSessionPtr = std::unique_ptr<SSL_SESSION, decltype(&SSL_SESSION_free)>;
 constexpr std::uint16_t tls_aes_128_gcm_sha256_id = 0x1301;
 constexpr std::uint16_t tls_aes_256_gcm_sha384_id = 0x1302;
 constexpr std::uint16_t tls_chacha20_poly1305_sha256_id = 0x1303;
+constexpr std::uint64_t kQuicCryptoErrorBase = 0x0100u;
 
 struct TlsAdapterFaultState {
     std::optional<TlsAdapterFaultPoint> fault_point;
@@ -102,7 +103,20 @@ COQUIC_NO_PROFILE bool consume_tls_adapter_fault(TlsAdapterFaultPoint fault_poin
     return true;
 }
 
-CodecResult<bool> tls_failure() {
+CodecError tls_alert_error(uint8_t alert) {
+    return CodecError{
+        .code = CodecErrorCode::invalid_packet_protection_state,
+        .offset = 0,
+        .transport_error_code = kQuicCryptoErrorBase + static_cast<std::uint64_t>(alert),
+        .has_transport_error_code = true,
+    };
+}
+
+CodecResult<bool> tls_failure(const std::optional<CodecError> &sticky_error) {
+    if (sticky_error.has_value()) {
+        return CodecResult<bool>::failure(*sticky_error);
+    }
+
     return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
 }
 
@@ -449,17 +463,17 @@ class TlsAdapter::Impl {
 
     CodecResult<bool> provide(EncryptionLevel level, std::span<const std::byte> bytes) {
         if (sticky_error_.has_value()) {
-            return tls_failure();
+            return tls_failure(sticky_error_);
         }
         if (ssl_ == nullptr) {
-            return tls_failure();
+            return tls_failure(sticky_error_);
         }
 
         ERR_clear_error();
         if (provide_quic_data_failed(ssl_.get(), level, bytes)) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
-            return tls_failure();
+            return tls_failure(sticky_error_);
         }
 
         if (should_process_post_handshake(level, SSL_is_init_finished(ssl_.get()) == 1)) {
@@ -469,7 +483,7 @@ class TlsAdapter::Impl {
                     .code = CodecErrorCode::invalid_packet_protection_state,
                     .offset = 0,
                 };
-                return tls_failure();
+                return tls_failure(sticky_error_);
             }
             capture_peer_transport_parameters();
             update_runtime_status();
@@ -479,12 +493,12 @@ class TlsAdapter::Impl {
         return drive_handshake();
     }
 
-    void poll() {
+    CodecResult<bool> poll() {
         if (sticky_error_.has_value()) {
-            return;
+            return tls_failure(sticky_error_);
         }
 
-        drive_handshake();
+        return drive_handshake();
     }
 
     std::vector<std::byte> take_pending(EncryptionLevel level) {
@@ -816,10 +830,10 @@ class TlsAdapter::Impl {
 
     CodecResult<bool> drive_handshake() {
         if (sticky_error_.has_value()) {
-            return tls_failure();
+            return tls_failure(sticky_error_);
         }
         if (ssl_ == nullptr) {
-            return tls_failure();
+            return tls_failure(sticky_error_);
         }
 
         while (true) {
@@ -854,7 +868,7 @@ class TlsAdapter::Impl {
 
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
-            return tls_failure();
+            return tls_failure(sticky_error_);
         }
     }
 
@@ -912,9 +926,8 @@ class TlsAdapter::Impl {
         return 1;
     }
 
-    int on_send_alert(OSSL_ENCRYPTION_LEVEL, uint8_t) {
-        sticky_error_ =
-            CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
+    int on_send_alert(OSSL_ENCRYPTION_LEVEL, uint8_t alert) {
+        sticky_error_ = tls_alert_error(alert);
         return 0;
     }
 
@@ -1038,8 +1051,8 @@ CodecResult<bool> TlsAdapter::provide(EncryptionLevel level, std::span<const std
     return impl_->provide(level, bytes);
 }
 
-void TlsAdapter::poll() {
-    impl_->poll();
+CodecResult<bool> TlsAdapter::poll() {
+    return impl_->poll();
 }
 
 std::vector<std::byte> TlsAdapter::take_pending(EncryptionLevel level) {

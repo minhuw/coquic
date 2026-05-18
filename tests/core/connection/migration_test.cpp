@@ -890,6 +890,7 @@ TEST(QuicCoreTest, AckOnlyRebindWithLargeAckRangesDoesNotFailOnSecondDrain) {
                     .has_value());
 
     while (connection.application_space_.next_send_packet_number <= 253) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(
             static_cast<std::int64_t>(connection.application_space_.next_send_packet_number)));
         ASSERT_FALSE(datagram.empty());
@@ -964,12 +965,14 @@ TEST(QuicCoreTest, LiveLikeAckOnlyRebindFirstResponseIncludesPathChallenge) {
     constexpr std::size_t kDeliveredPackets = 131;
     constexpr std::size_t kGapPackets = 22;
     for (std::size_t i = 0; i < kDeliveredPackets; ++i) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(
             coquic::quic::test::test_time(static_cast<std::int64_t>(i) + 1));
         ASSERT_FALSE(datagram.empty());
         EXPECT_EQ(connection.last_drained_path_id(), 9u);
     }
     for (std::size_t i = 0; i < kGapPackets; ++i) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(
             coquic::quic::test::test_time(static_cast<std::int64_t>(kDeliveredPackets + i + 1u)));
         ASSERT_FALSE(datagram.empty());

@@ -2137,6 +2137,7 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
     std::vector<std::uint64_t> gap_packet_numbers;
 
     for (std::size_t i = 0; i < kDeliveredPackets; ++i) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(
             coquic::quic::test::test_time(static_cast<std::int64_t>(i) + 1));
         ASSERT_FALSE(datagram.empty());
@@ -2145,6 +2146,7 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
             last_tracked_packet(connection.application_space_).packet_number);
     }
     for (std::size_t i = 0; i < kGapPackets; ++i) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(
             coquic::quic::test::test_time(static_cast<std::int64_t>(kDeliveredPackets + i + 1u)));
         ASSERT_FALSE(datagram.empty());
@@ -2251,6 +2253,7 @@ TEST(QuicCoreTest, InboundMigratedAckGapDatagramRetransmitsLostStreamData) {
     std::vector<std::uint64_t> gap_packet_numbers;
 
     for (std::size_t i = 0; i < kDeliveredPackets; ++i) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(
             coquic::quic::test::test_time(static_cast<std::int64_t>(i) + 1));
         ASSERT_FALSE(datagram.empty());
@@ -2259,6 +2262,7 @@ TEST(QuicCoreTest, InboundMigratedAckGapDatagramRetransmitsLostStreamData) {
             last_tracked_packet(connection.application_space_).packet_number);
     }
     for (std::size_t i = 0; i < kGapPackets; ++i) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(
             coquic::quic::test::test_time(static_cast<std::int64_t>(kDeliveredPackets + i + 1u)));
         ASSERT_FALSE(datagram.empty());
@@ -2407,6 +2411,7 @@ TEST(QuicCoreTest, LiveLikeMigratedAckGapDatagramRetransmitsLostStreamData) {
     std::vector<std::uint64_t> gap_packet_numbers;
 
     for (std::size_t i = 0; i < kDeliveredPackets; ++i) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(
             coquic::quic::test::test_time(static_cast<std::int64_t>(i) + 1));
         ASSERT_FALSE(datagram.empty());
@@ -2415,6 +2420,7 @@ TEST(QuicCoreTest, LiveLikeMigratedAckGapDatagramRetransmitsLostStreamData) {
             last_tracked_packet(connection.application_space_).packet_number);
     }
     for (std::size_t i = 0; i < kGapPackets; ++i) {
+        connection.reset_unpaced_ack_eliciting_burst();
         const auto datagram = connection.drain_outbound_datagram(
             coquic::quic::test::test_time(static_cast<std::int64_t>(kDeliveredPackets + i + 1u)));
         ASSERT_FALSE(datagram.empty());

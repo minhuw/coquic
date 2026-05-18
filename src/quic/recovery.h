@@ -67,6 +67,7 @@ struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     bool app_limited = false;
     bool is_pmtu_probe = false;
     std::size_t pmtu_probe_size = 0;
+    std::uint64_t protection_key_update_generation = 0;
     bool lost_by_packet_threshold = false;
     std::uint64_t packet_threshold_largest_acked = 0;
     bool lost_by_time_threshold = false;

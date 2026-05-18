@@ -62,7 +62,7 @@ class TlsAdapter {
 
     CodecResult<bool> start();
     CodecResult<bool> provide(EncryptionLevel level, std::span<const std::byte> bytes);
-    void poll();
+    CodecResult<bool> poll();
     std::vector<std::byte> take_pending(EncryptionLevel level);
     std::vector<AvailableTrafficSecret> take_available_secrets();
     std::optional<std::vector<std::byte>> take_resumption_state();

@@ -163,7 +163,7 @@ def start(repo_root: Path) -> int:
         with log_path.open("a", encoding="utf-8") as log_file:
             process = subprocess.Popen(
                 [qdrant_binary, "--config-path", str(config_path)],
-                cwd=repo_root,
+                cwd=server_dir,
                 stdin=subprocess.DEVNULL,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,

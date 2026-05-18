@@ -92,6 +92,10 @@ constexpr std::uint64_t kFrameTypeConnectionClose = 0x1c;
 constexpr std::uint64_t kFrameTypeApplicationClose = 0x1d;
 constexpr std::uint64_t kFrameTypeHandshakeDone = 0x1e;
 constexpr std::uint64_t kPreferredAddressConnectionIdSequence = 1;
+constexpr std::uint64_t kAesGcmConfidentialityLimit = std::uint64_t{1} << 23u;
+constexpr std::uint64_t kAesGcmIntegrityLimit = std::uint64_t{1} << 52u;
+constexpr std::uint64_t kChaCha20Poly1305IntegrityLimit = std::uint64_t{1} << 36u;
+constexpr std::size_t kMaxUnpacedBurstPackets = 10;
 
 struct ConnectionDrainTestHooks {
     bool force_quic_core_secret_rand_failure = false;
@@ -111,6 +115,8 @@ struct ConnectionDrainTestHooks {
     bool force_application_packet_number_exhausted = false;
     bool force_duplicate_initial_congestion_blocked = false;
     bool force_application_send_congestion_blocked = false;
+    bool force_aead_confidentiality_limit = false;
+    bool force_aead_integrity_limit = false;
     bool force_no_ack_control_candidate_estimate_failure = false;
     bool force_no_ack_control_candidate_estimate_size = false;
     std::size_t forced_no_ack_control_candidate_estimate_size = 0;
@@ -1404,6 +1410,11 @@ CodecError optimistic_ack_protocol_violation_error(std::size_t offset = 0) {
                                  offset);
 }
 
+CodecError key_update_error() {
+    return transport_codec_error(CodecErrorCode::invalid_packet_protection_state,
+                                 QuicTransportErrorCode::key_update_error, /*frame_type=*/0);
+}
+
 CodecError frame_not_allowed_protocol_violation_error(std::uint64_t frame_type,
                                                       std::size_t offset = 0) {
     return transport_codec_error(CodecErrorCode::frame_not_allowed_in_packet_type,
@@ -1429,6 +1440,16 @@ CodecError connection_id_limit_error(std::uint64_t frame_type, std::size_t offse
     return transport_codec_error(CodecErrorCode::invalid_varint,
                                  QuicTransportErrorCode::connection_id_limit_error, frame_type,
                                  offset);
+}
+
+CodecError aead_limit_reached_error() {
+    return CodecError{
+        .code = CodecErrorCode::invalid_packet_protection_state,
+        .offset = 0,
+        .transport_error_code =
+            transport_error_code_value(QuicTransportErrorCode::aead_limit_reached),
+        .has_transport_error_code = true,
+    };
 }
 
 COQUIC_NO_PROFILE QuicTransportErrorCode transport_error_for_codec_error(CodecErrorCode code) {
@@ -1538,6 +1559,29 @@ template <typename FrameRange> bool has_ack_eliciting_frame(const FrameRange &fr
     }
 
     return false;
+}
+
+bool one_rtt_packet_is_ack_eliciting(const ProtectedOneRttPacket &packet) {
+    return has_ack_eliciting_frame(packet.frames) || !packet.stream_frame_views.empty();
+}
+
+std::size_t one_rtt_packet_count(std::span<const ProtectedPacket> packets) {
+    return static_cast<std::size_t>(
+        std::ranges::count_if(packets, [](const ProtectedPacket &packet) {
+            return std::holds_alternative<ProtectedOneRttPacket>(packet);
+        }));
+}
+
+bool packet_is_one_rtt_ack_eliciting(const ProtectedPacket &packet) {
+    const auto *one_rtt = std::get_if<ProtectedOneRttPacket>(&packet);
+    return one_rtt != nullptr && one_rtt_packet_is_ack_eliciting(*one_rtt);
+}
+
+std::size_t one_rtt_ack_eliciting_packet_count(std::span<const ProtectedPacket> packets) {
+    return static_cast<std::size_t>(
+        std::ranges::count_if(packets, [](const ProtectedPacket &packet) {
+            return packet_is_one_rtt_ack_eliciting(packet);
+        }));
 }
 
 template <typename FrameRange> bool is_probing_only_frames(const FrameRange &frames) {
@@ -1699,6 +1743,42 @@ bool can_retry_short_header_with_next_key_phase(CodecErrorCode code) {
         CodecErrorCode::header_protection_failed,
     };
     return std::ranges::find(kRetryableErrors, code) != kRetryableErrors.end();
+}
+
+std::optional<std::uint64_t> confidentiality_limit_for_cipher_suite(CipherSuite cipher_suite) {
+    switch (cipher_suite) {
+    case CipherSuite::tls_aes_128_gcm_sha256:
+    case CipherSuite::tls_aes_256_gcm_sha384:
+        return kAesGcmConfidentialityLimit;
+    case CipherSuite::tls_chacha20_poly1305_sha256:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::uint64_t> integrity_limit_for_cipher_suite(CipherSuite cipher_suite) {
+    switch (cipher_suite) {
+    case CipherSuite::tls_aes_128_gcm_sha256:
+    case CipherSuite::tls_aes_256_gcm_sha384:
+        return kAesGcmIntegrityLimit;
+    case CipherSuite::tls_chacha20_poly1305_sha256:
+        return kChaCha20Poly1305IntegrityLimit;
+    }
+    return std::nullopt;
+}
+
+TrafficSecretCacheInputs traffic_secret_cache_inputs_for(const TrafficSecret &secret) {
+    return TrafficSecretCacheInputs{
+        .secret = secret.secret,
+        .header_protection_key = secret.header_protection_key,
+        .quic_version = secret.quic_version,
+    };
+}
+
+bool packet_authentication_failed(CodecErrorCode code) {
+    return code == CodecErrorCode::packet_decryption_failed ||
+           code == CodecErrorCode::header_protection_failed ||
+           code == CodecErrorCode::invalid_packet_protection_state;
 }
 
 bool is_discardable_packet_length_error(CodecErrorCode code) {
@@ -3502,6 +3582,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
     }
 
     maybe_discard_server_zero_rtt_packet_space(now);
+    maybe_discard_previous_application_read_secret(now);
 
     maybe_note_inbound_datagram_bytes(count_inbound_bytes, bytes, [&](std::size_t byte_count) {
         note_inbound_datagram_bytes(byte_count);
@@ -3642,6 +3723,12 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
         };
         const bool short_header_packet =
             (std::to_integer<std::uint8_t>(packet_bytes.front()) & 0x80u) == 0;
+        if (short_header_packet && application_space_.read_secret.has_value()) {
+            const auto next_read_ready = ensure_next_application_read_secret();
+            if (!next_read_ready.has_value()) {
+                return fail_with_codec_error("derive_next_traffic_secret", next_read_ready.error());
+            }
+        }
         if (defer_short_header_packet_before_server_handshake_complete(
                 allow_defer, short_header_packet, config_.role, status_,
                 deferred_protected_packets_, packet_bytes, packet_path_id, datagram_id,
@@ -3670,7 +3757,6 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
         }
         auto packets = timed_deserialize(current_context.value());
         bool used_previous_application_read_secret = false;
-        bool processed_current_read_phase_packet = false;
         if (!packets.has_value()) {
             if (short_header_packet && previous_application_read_secret_.has_value()) {
                 const auto previous_context = make_short_header_deserialize_context(
@@ -3689,19 +3775,13 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
             }
         }
         if (!packets.has_value()) {
-            bool retry_with_next_key_phase = false;
-            if (short_header_packet && application_space_.read_secret.has_value() &&
-                application_space_.write_secret.has_value()) {
-                retry_with_next_key_phase =
-                    can_retry_short_header_with_next_key_phase(packets.error().code);
-            }
+            const bool retry_with_next_key_phase =
+                short_header_packet && next_application_read_secret_.has_value() &&
+                application_space_.write_secret.has_value() &&
+                can_retry_short_header_with_next_key_phase(packets.error().code);
             if (retry_with_next_key_phase) {
-                const auto next_read_secret =
-                    derive_next_traffic_secret(*application_space_.read_secret).value();
-                const auto next_read_secret_optional =
-                    std::optional<TrafficSecret>{next_read_secret};
                 const auto next_context = make_short_header_deserialize_context(
-                    next_read_secret_optional, !application_read_key_phase_);
+                    next_application_read_secret_, next_application_read_key_phase_);
                 if (!next_context.has_value()) {
                     return fail_with_codec_error("expand_traffic_secret", next_context.error());
                 }
@@ -3716,10 +3796,19 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
                         return false;
                     }
 
-                    application_space_.read_secret = next_read_secret;
+                    retain_previous_application_read_secret(now);
+                    promote_next_application_read_secret();
+                    const auto following_read_secret = refresh_next_application_read_secret();
+                    if (!following_read_secret.has_value()) {
+                        log_codec_failure("derive_next_traffic_secret",
+                                          following_read_secret.error());
+                        queue_transport_close_for_error(now, following_read_secret.error());
+                        return false;
+                    }
                     application_space_.write_secret = next_write_secret.value();
-                    application_read_key_phase_ = !application_read_key_phase_;
                     application_write_key_phase_ = !application_write_key_phase_;
+                    current_application_write_key_encrypted_packets_ = 0;
+                    ++current_application_write_key_generation_;
                     current_write_phase_first_packet_number_ = std::nullopt;
                     if (!local_key_update_initiated_) {
                         local_key_update_requested_ = false;
@@ -3729,6 +3818,9 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
             }
         }
         if (!packets.has_value()) {
+            if (!note_packet_authentication_failure(packets.error(), now)) {
+                return false;
+            }
             if (packets.error().code == CodecErrorCode::missing_crypto_context) {
                 if (packet_targets_discarded_long_header_space(packet_bytes)) {
                     return true;
@@ -3796,7 +3888,8 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
                 CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
             {
                 SendProfileTimer process_timer(send_profile_counters().process_packet_ns);
-                processed = process_packet(packet, now, packet_ecn);
+                processed =
+                    process_packet(packet, now, packet_ecn, used_previous_application_read_secret);
             }
             if (!processed.has_value()) {
                 const auto traced_packet_number = protected_one_rtt_packet_number_for_trace(packet);
@@ -3814,11 +3907,6 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
                 queue_transport_close_for_error(now, processed.error());
                 return false;
             }
-            if (protected_one_rtt_packet_number_for_trace(packet).has_value() &&
-                !used_previous_application_read_secret) {
-                processed_current_read_phase_packet = true;
-            }
-
             if (packet_can_advance_tls_state(packet)) {
                 if (send_profile_enabled()) {
                     ++send_profile_counters().inbound_post_process_sync_tls_calls;
@@ -3847,10 +3935,6 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
             if (!process_decoded_packet(packets.value())) {
                 return false;
             }
-        }
-
-        if (processed_current_read_phase_packet) {
-            previous_application_read_secret_ = std::nullopt;
         }
 
         return true;
@@ -3883,8 +3967,10 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
                     return deserialize_protected_datagram(bytes, context);
                 },
                 [this](const ProtectedPacket &packet, QuicCoreTimePoint packet_now,
-                       QuicEcnCodepoint packet_ecn_value) {
-                    return process_inbound_packet(packet, packet_now, packet_ecn_value);
+                       QuicEcnCodepoint packet_ecn_value,
+                       bool used_previous_application_read_secret) {
+                    return process_inbound_packet(packet, packet_now, packet_ecn_value,
+                                                  used_previous_application_read_secret);
                 },
                 emit_qlog_event,
                 PacketProcessingLabels{
@@ -3939,8 +4025,9 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
                 return deserialize_received_protected_packet(bytes, context);
             },
             [this](const ReceivedProtectedPacket &packet, QuicCoreTimePoint packet_now,
-                   QuicEcnCodepoint packet_ecn_value) {
-                return process_inbound_received_packet(packet, packet_now, packet_ecn_value);
+                   QuicEcnCodepoint packet_ecn_value, bool used_previous_application_read_secret) {
+                return process_inbound_received_packet(packet, packet_now, packet_ecn_value,
+                                                       used_previous_application_read_secret);
             },
             [](const ReceivedProtectedPacket &) {},
             PacketProcessingLabels{
@@ -4338,6 +4425,8 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
                       << " pto_count=" << pto_count_ << '\n';
         }
     }
+
+    maybe_discard_previous_application_read_secret(now);
 }
 
 std::optional<QuicCoreReceiveStreamData> QuicConnection::take_received_stream_data() {
@@ -4556,7 +4645,9 @@ std::optional<QuicCoreTimePoint> QuicConnection::next_wakeup() const {
             : std::nullopt;
 
     return earliest_of({loss_deadline(), pto_deadline(), ack_deadline(), pmtud_deadline(),
-                        zero_rtt_discard_deadline(), pacing_deadline, idle_timeout_deadline()});
+                        zero_rtt_discard_deadline(),
+                        previous_application_read_secret_discard_deadline(), pacing_deadline,
+                        idle_timeout_deadline()});
 }
 
 std::vector<ConnectionId> QuicConnection::active_local_connection_ids() const {
@@ -5415,6 +5506,79 @@ void QuicConnection::maybe_discard_server_zero_rtt_packet_space(QuicCoreTimePoin
     server_zero_rtt_discard_deadline_.reset();
 }
 
+void QuicConnection::retain_previous_application_read_secret(QuicCoreTimePoint now) {
+    previous_application_read_secret_ = application_space_.read_secret;
+    previous_application_read_key_phase_ = application_read_key_phase_;
+    previous_application_read_secret_discard_deadline_ =
+        now + three_pto_period(shared_recovery_rtt_state());
+}
+
+CodecResult<bool> QuicConnection::refresh_next_application_read_secret() {
+    if (!application_space_.read_secret.has_value()) {
+        next_application_read_secret_.reset();
+        next_application_read_secret_source_.reset();
+        return CodecResult<bool>::success(true);
+    }
+
+    const auto next_read_secret = derive_next_traffic_secret(*application_space_.read_secret);
+    if (!next_read_secret.has_value()) {
+        return CodecResult<bool>::failure(next_read_secret.error());
+    }
+
+    next_application_read_secret_ = next_read_secret.value();
+    next_application_read_secret_source_ =
+        traffic_secret_cache_inputs_for(*application_space_.read_secret);
+    next_application_read_key_phase_ = !application_read_key_phase_;
+    return CodecResult<bool>::success(true);
+}
+
+CodecResult<bool> QuicConnection::ensure_next_application_read_secret() {
+    if (!application_space_.read_secret.has_value()) {
+        next_application_read_secret_.reset();
+        next_application_read_secret_source_.reset();
+        return CodecResult<bool>::success(true);
+    }
+
+    const auto current_source = traffic_secret_cache_inputs_for(*application_space_.read_secret);
+    if (next_application_read_secret_.has_value() &&
+        next_application_read_secret_source_.has_value() &&
+        next_application_read_secret_source_.value().secret == current_source.secret &&
+        next_application_read_secret_source_.value().header_protection_key ==
+            current_source.header_protection_key &&
+        next_application_read_secret_source_.value().quic_version == current_source.quic_version &&
+        next_application_read_key_phase_ == !application_read_key_phase_) {
+        return CodecResult<bool>::success(true);
+    }
+
+    return refresh_next_application_read_secret();
+}
+
+void QuicConnection::promote_next_application_read_secret() {
+    application_space_.read_secret = std::move(next_application_read_secret_);
+    application_read_key_phase_ = next_application_read_key_phase_;
+    next_application_read_secret_.reset();
+    next_application_read_secret_source_.reset();
+}
+
+std::optional<QuicCoreTimePoint>
+QuicConnection::previous_application_read_secret_discard_deadline() const {
+    if (!previous_application_read_secret_.has_value()) {
+        return std::nullopt;
+    }
+    return previous_application_read_secret_discard_deadline_;
+}
+
+void QuicConnection::maybe_discard_previous_application_read_secret(QuicCoreTimePoint now) {
+    const auto deadline = previous_application_read_secret_discard_deadline();
+    if (!deadline.has_value() || now < *deadline) {
+        return;
+    }
+
+    previous_application_read_secret_.reset();
+    previous_application_read_secret_discard_deadline_.reset();
+    static_cast<void>(ensure_next_application_read_secret());
+}
+
 void QuicConnection::synchronize_recovery_rtt_state() {
     if (!recovery_rtt_state_.latest_rtt.has_value()) {
         recovery_rtt_state_ = shared_recovery_rtt_state();
@@ -6097,9 +6261,10 @@ QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const 
         reader.offset() + static_cast<std::size_t>(payload_length.value().value));
 }
 
-CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &packet,
-                                                         QuicCoreTimePoint now,
-                                                         QuicEcnCodepoint ecn) {
+CodecResult<bool>
+QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTimePoint now,
+                                       QuicEcnCodepoint ecn,
+                                       bool used_previous_application_read_secret) {
     return std::visit(
         [&](const auto &protected_packet) -> CodecResult<bool> {
             using PacketType = std::decay_t<decltype(protected_packet)>;
@@ -6225,7 +6390,8 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
                         return std::holds_alternative<CryptoFrame>(frame);
                     });
                 const auto processed = process_inbound_application(
-                    protected_packet.frames, now, has_crypto_frame, last_inbound_path_id_);
+                    protected_packet.frames, now, has_crypto_frame, last_inbound_path_id_,
+                    used_previous_application_read_secret);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     if (config_.role == EndpointRole::server &&
@@ -6262,7 +6428,8 @@ CodecResult<bool> QuicConnection::process_inbound_packet(const ProtectedPacket &
 
 CodecResult<bool>
 QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &packet,
-                                                QuicCoreTimePoint now, QuicEcnCodepoint ecn) {
+                                                QuicCoreTimePoint now, QuicEcnCodepoint ecn,
+                                                bool used_previous_application_read_secret) {
     return std::visit(
         [&](const auto &protected_packet) -> CodecResult<bool> {
             using PacketType = std::decay_t<decltype(protected_packet)>;
@@ -6388,7 +6555,8 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                         return std::holds_alternative<ReceivedCryptoFrame>(frame);
                     });
                 const auto processed = process_inbound_received_application(
-                    protected_packet.frames, now, has_crypto_frame, last_inbound_path_id_);
+                    protected_packet.frames, now, has_crypto_frame, last_inbound_path_id_,
+                    used_previous_application_read_secret);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     if (config_.role == EndpointRole::server &&
@@ -6480,6 +6648,30 @@ CodecResult<bool> QuicConnection::reject_optimistic_ack_if_detected(PacketSpaceS
     const auto error = optimistic_ack_protocol_violation_error();
     queue_transport_close_for_error(now, error);
     return CodecResult<bool>::failure(error);
+}
+
+CodecResult<bool> QuicConnection::detect_old_key_ack_of_current_key_phase_packet(
+    PacketSpaceState &packet_space, AckRangeCursor cursor, QuicCoreTimePoint now) {
+    if (!packet_space_is_application(packet_space, application_space_)) {
+        return CodecResult<bool>::success(true);
+    }
+
+    while (const auto range = next_ack_range(cursor)) {
+        for (const auto handle : packet_space.recovery.tracked_packets()) {
+            if (handle.packet_number < range->smallest || handle.packet_number > range->largest) {
+                continue;
+            }
+            const auto *packet = packet_space.recovery.packet_for_handle(handle);
+            if (packet != nullptr && packet->protection_key_update_generation ==
+                                         current_application_write_key_generation_) {
+                const auto error = key_update_error();
+                queue_transport_close_for_error(now, error);
+                return CodecResult<bool>::failure(error);
+            }
+        }
+    }
+
+    return CodecResult<bool>::success(true);
 }
 
 CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
@@ -6619,7 +6811,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
                                                       const AckFrame &ack, QuicCoreTimePoint now,
                                                       std::uint64_t ack_delay_exponent,
                                                       std::uint64_t max_ack_delay_ms,
-                                                      bool suppress_pto_reset) {
+                                                      bool suppress_pto_reset,
+                                                      bool used_previous_application_read_secret) {
     const auto cursor = make_ack_range_cursor(ack);
     if (!cursor.has_value()) {
         return CodecResult<bool>::success(true);
@@ -6628,6 +6821,13 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
         reject_optimistic_ack_if_detected(packet_space, cursor.value(), now);
     if (!optimistic_ack_check.has_value()) {
         return optimistic_ack_check;
+    }
+    if (used_previous_application_read_secret) {
+        const auto key_update_check =
+            detect_old_key_ack_of_current_key_phase_packet(packet_space, cursor.value(), now);
+        if (!key_update_check.has_value()) {
+            return key_update_check;
+        }
     }
 
     const bool traces_ack = packet_space_is_application(packet_space, application_space_) &&
@@ -6641,7 +6841,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack(PacketSpaceState &packet_s
 CodecResult<bool>
 QuicConnection::process_inbound_ack(PacketSpaceState &packet_space, const ReceivedAckFrame &ack,
                                     QuicCoreTimePoint now, std::uint64_t ack_delay_exponent,
-                                    std::uint64_t max_ack_delay_ms, bool suppress_pto_reset) {
+                                    std::uint64_t max_ack_delay_ms, bool suppress_pto_reset,
+                                    bool used_previous_application_read_secret) {
     const auto cursor = make_ack_range_cursor(ack);
     if (!cursor.has_value()) {
         return CodecResult<bool>::success(true);
@@ -6650,6 +6851,13 @@ QuicConnection::process_inbound_ack(PacketSpaceState &packet_space, const Receiv
         reject_optimistic_ack_if_detected(packet_space, cursor.value(), now);
     if (!optimistic_ack_check.has_value()) {
         return optimistic_ack_check;
+    }
+    if (used_previous_application_read_secret) {
+        const auto key_update_check =
+            detect_old_key_ack_of_current_key_phase_packet(packet_space, cursor.value(), now);
+        if (!key_update_check.has_value()) {
+            return key_update_check;
+        }
     }
 
     const bool traces_ack = packet_space_is_application(packet_space, application_space_) &&
@@ -6876,6 +7084,9 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
                                         late_acked_packets.end());
         congestion_controller_.on_packets_acked(congestion_acked_packets, app_limited, now,
                                                 shared_rtt_state);
+    }
+    if (has_any_acked_packets) {
+        reset_unpaced_ack_eliciting_burst();
     }
     if (has_any_acked_packets && !suppress_pto_reset) {
         const bool keepalive_probe_packet_space =
@@ -7212,10 +7423,10 @@ void QuicConnection::rebuild_recovery(PacketSpaceState &packet_space) {
     packet_space.recovery.rebuild_auxiliary_indexes();
 }
 
-CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Frame> frames,
-                                                              QuicCoreTimePoint now,
-                                                              bool allow_preconnected_frames,
-                                                              QuicPathId path_id) {
+CodecResult<bool>
+QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicCoreTimePoint now,
+                                            bool allow_preconnected_frames, QuicPathId path_id,
+                                            bool used_previous_application_read_secret) {
     static_assert(std::variant_size_v<Frame> == 22,
                   "Update process_inbound_application when Frame gains new variants");
     const bool require_connected = !allow_preconnected_frames;
@@ -7270,9 +7481,9 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
             const auto max_ack_delay_ms = peer_transport_parameters_.has_value()
                                               ? peer_transport_parameters_->max_ack_delay
                                               : TransportParameters{}.max_ack_delay;
-            const auto processed_ack = process_inbound_ack(application_space_, *ack_frame, now,
-                                                           ack_delay_exponent, max_ack_delay_ms,
-                                                           /*suppress_pto_reset=*/false);
+            const auto processed_ack = process_inbound_ack(
+                application_space_, *ack_frame, now, ack_delay_exponent, max_ack_delay_ms,
+                /*suppress_pto_reset=*/false, used_previous_application_read_secret);
             if (!processed_ack.has_value()) {
                 return processed_ack;
             }
@@ -7644,7 +7855,7 @@ CodecResult<bool> QuicConnection::process_inbound_application(std::span<const Fr
 
 CodecResult<bool> QuicConnection::process_inbound_received_application(
     std::span<const ReceivedFrame> frames, QuicCoreTimePoint now, bool allow_preconnected_frames,
-    QuicPathId path_id) {
+    QuicPathId path_id, bool used_previous_application_read_secret) {
     static_assert(std::variant_size_v<ReceivedFrame> == 21,
                   "Update process_inbound_received_application when ReceivedFrame changes");
     const bool require_connected = !allow_preconnected_frames;
@@ -7703,9 +7914,9 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             const auto max_ack_delay_ms = peer_transport_parameters_.has_value()
                                               ? peer_transport_parameters_->max_ack_delay
                                               : TransportParameters{}.max_ack_delay;
-            const auto processed_ack = process_inbound_ack(application_space_, *ack_frame, now,
-                                                           ack_delay_exponent, max_ack_delay_ms,
-                                                           /*suppress_pto_reset=*/false);
+            const auto processed_ack = process_inbound_ack(
+                application_space_, *ack_frame, now, ack_delay_exponent, max_ack_delay_ms,
+                /*suppress_pto_reset=*/false, used_previous_application_read_secret);
             if (!processed_ack.has_value()) {
                 return processed_ack;
             }
@@ -8084,6 +8295,7 @@ void QuicConnection::install_available_secrets() {
     }
 
     bool installed_client_application_keys = false;
+    bool installed_application_read_secret = false;
     for (auto &available_secret : tls_->take_available_secrets()) {
         available_secret.secret.quic_version = current_version_;
         if (should_skip_available_secret(available_secret.level, initial_packet_space_discarded_,
@@ -8096,10 +8308,16 @@ void QuicConnection::install_available_secrets() {
         if (available_secret.sender == config_.role) {
             packet_space.write_secret = std::move(available_secret.secret);
         } else {
+            installed_application_read_secret |=
+                available_secret.level == EncryptionLevel::application;
             packet_space.read_secret = std::move(available_secret.secret);
         }
         installed_client_application_keys |= config_.role == EndpointRole::client &&
                                              available_secret.level == EncryptionLevel::application;
+    }
+
+    if (installed_application_read_secret) {
+        static_cast<void>(refresh_next_application_read_secret());
     }
 
     if (installed_client_application_keys && zero_rtt_space_.write_secret.has_value()) {
@@ -8140,7 +8358,10 @@ void QuicConnection::replay_deferred_protected_packets(QuicCoreTimePoint now) {
 
 CodecResult<bool> QuicConnection::sync_tls_state() {
     if (tls_.has_value()) {
-        tls_->poll();
+        const auto polled = tls_->poll();
+        if (!polled.has_value()) {
+            return polled;
+        }
     }
 
     install_available_secrets();
@@ -8922,6 +9143,78 @@ void QuicConnection::queue_transport_close_for_error(QuicCoreTimePoint now, cons
     const bool can_send_close = can_send_connection_close_frame();
     enter_closing_state(now, QuicConnectionTerminalState::failed);
     closing_close_packet_pending_ = can_send_close;
+}
+
+bool QuicConnection::note_aead_encryption_attempt(std::size_t packet_count, QuicCoreTimePoint now) {
+    if (packet_count == 0 || !application_space_.write_secret.has_value()) {
+        return true;
+    }
+
+    if (connection_drain_test_hooks().force_aead_confidentiality_limit) {
+        queue_transport_close_for_error(now, aead_limit_reached_error());
+        return false;
+    }
+
+    const auto limit =
+        confidentiality_limit_for_cipher_suite(application_space_.write_secret->cipher_suite);
+    if (!limit.has_value()) {
+        return true;
+    }
+    if (current_application_write_key_encrypted_packets_ > *limit - packet_count) {
+        queue_transport_close_for_error(now, aead_limit_reached_error());
+        return false;
+    }
+
+    current_application_write_key_encrypted_packets_ += packet_count;
+    return true;
+}
+
+bool QuicConnection::note_packet_authentication_failure(const CodecError &error,
+                                                        QuicCoreTimePoint now) {
+    if (!packet_authentication_failed(error.code)) {
+        return true;
+    }
+
+    ++failed_authentication_packets_;
+    if (connection_drain_test_hooks().force_aead_integrity_limit) {
+        queue_transport_close_for_error(now, aead_limit_reached_error());
+        return false;
+    }
+    if (!application_space_.read_secret.has_value()) {
+        return true;
+    }
+
+    const auto limit =
+        integrity_limit_for_cipher_suite(application_space_.read_secret->cipher_suite);
+    if (limit.has_value() && failed_authentication_packets_ > *limit) {
+        queue_transport_close_for_error(now, aead_limit_reached_error());
+        return false;
+    }
+    return true;
+}
+
+bool QuicConnection::non_paced_burst_allows_send(bool ack_eliciting,
+                                                 bool bypass_congestion_window) const {
+    if (!ack_eliciting || bypass_congestion_window ||
+        congestion_controller_.next_send_time(/*bytes=*/1).has_value()) {
+        return true;
+    }
+
+    return unpaced_ack_eliciting_burst_packets_ < kMaxUnpacedBurstPackets;
+}
+
+void QuicConnection::note_burst_limited_ack_eliciting_send(std::size_t packet_count,
+                                                           bool bypass_congestion_window) {
+    if (packet_count == 0 || bypass_congestion_window ||
+        congestion_controller_.next_send_time(/*bytes=*/1).has_value()) {
+        return;
+    }
+
+    unpaced_ack_eliciting_burst_packets_ += packet_count;
+}
+
+void QuicConnection::reset_unpaced_ack_eliciting_burst() {
+    unpaced_ack_eliciting_burst_packets_ = 0;
 }
 
 void QuicConnection::mark_failed() {
@@ -10329,16 +10622,28 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
     };
     const auto commit_serialized_datagram =
         [&](const std::vector<ProtectedPacket> &datagram_packets,
-            SerializedProtectedDatagram datagram) -> DatagramBuffer {
+            SerializedProtectedDatagram datagram, std::size_t one_rtt_encrypted_packets = 0,
+            std::size_t unpaced_ack_eliciting_packets = 0,
+            bool bypass_burst_limit = false) -> DatagramBuffer {
         SendProfileTimer commit_timer(send_profile_counters().commit_ns);
         const bool pmtu_probe_datagram = std::ranges::any_of(
             pending_tracked_packets, [](const PendingTrackedPacketScratch &pending) {
                 return pending.packet.is_pmtu_probe;
             });
+        if (one_rtt_encrypted_packets == 0) {
+            one_rtt_encrypted_packets = one_rtt_packet_count(datagram_packets);
+        }
+        if (unpaced_ack_eliciting_packets == 0) {
+            unpaced_ack_eliciting_packets = one_rtt_ack_eliciting_packet_count(datagram_packets);
+        }
+        if (!note_aead_encryption_attempt(one_rtt_encrypted_packets, now)) {
+            return {};
+        }
         if (!track_pending_packets_from_datagram(datagram)) {
             mark_failed();
             return {};
         }
+        note_burst_limited_ack_eliciting_send(unpaced_ack_eliciting_packets, bypass_burst_limit);
 
         if (pto_probe_burst_active) {
             --remaining_pto_probe_datagrams_;
@@ -11044,12 +11349,22 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                         return std::nullopt;
                     }
 
-                    previous_application_read_secret_ = application_space_.read_secret;
-                    previous_application_read_key_phase_ = application_read_key_phase_;
+                    retain_previous_application_read_secret(now);
                     application_space_.read_secret = next_read_secret.value();
-                    application_space_.write_secret = next_write_secret.value();
                     application_read_key_phase_ = !application_read_key_phase_;
+                    next_application_read_secret_.reset();
+                    next_application_read_secret_source_.reset();
+                    const auto following_read_secret = refresh_next_application_read_secret();
+                    if (!following_read_secret.has_value()) {
+                        log_codec_failure("derive_next_traffic_secret",
+                                          following_read_secret.error());
+                        mark_failed();
+                        return std::nullopt;
+                    }
+                    application_space_.write_secret = next_write_secret.value();
                     application_write_key_phase_ = !application_write_key_phase_;
+                    current_application_write_key_encrypted_packets_ = 0;
+                    ++current_application_write_key_generation_;
                     local_key_update_requested_ = false;
                     local_key_update_initiated_ = true;
                     current_write_phase_first_packet_number_ = packet_number;
@@ -12649,6 +12964,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                     ++send_profile_counters().pacing_blocks;
                 }
             };
+            const auto note_application_burst_blocked = [&](std::size_t bytes) {
+                trace_application_send_blocked("burst", bytes);
+            };
             const auto restore_and_fallback_blocked_application_candidate =
                 [&]() -> DatagramBuffer {
                 restore_unsent_application_candidate(
@@ -12724,6 +13042,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 const auto pacing_deadline = congestion_controller_.next_send_time(preflight_size);
                 if (pacing_deadline.has_value() && now < *pacing_deadline) {
                     note_application_pacing_blocked(preflight_size);
+                    return restore_and_fallback_blocked_application_candidate();
+                }
+                if (!non_paced_burst_allows_send(preflight_ack_eliciting,
+                                                 preflight_bypass_congestion_window)) {
+                    note_application_burst_blocked(preflight_size);
                     return restore_and_fallback_blocked_application_candidate();
                 }
             }
@@ -13059,6 +13382,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 note_application_pacing_blocked(candidate_datagram.value().bytes.size());
                 return restore_and_fallback_blocked_application_candidate();
             }
+            if (!non_paced_burst_allows_send(ack_eliciting, bypass_congestion_window)) {
+                note_application_burst_blocked(candidate_datagram.value().bytes.size());
+                return restore_and_fallback_blocked_application_candidate();
+            }
             last_application_send_stream_id_ = candidate_last_stream_id;
             if (send_profile_enabled()) {
                 send_profile_counters().stream_bytes += stream_fragment_bytes(stream_fragments);
@@ -13182,6 +13509,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                     .bytes_in_flight = candidate_datagram.value().bytes.size(),
                     .path_id = selected_send_path_id.value_or(0),
                     .ecn = outbound_ecn_codepoint_for_path(selected_send_path_id),
+                    .protection_key_update_generation = current_application_write_key_generation_,
                 };
                 queue_tracked_packet_at_index(
                     application_space_, std::move(sent_packet), serialized_packet_index,
@@ -13205,9 +13533,20 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 mark_connection_close_frame_sent(*application_close_frame, now);
             }
             if (use_fast_serialized_one_rtt_commit) {
-                return commit_serialized_datagram({}, std::move(candidate_datagram.value()));
+                return commit_serialized_datagram(
+                    {}, std::move(candidate_datagram.value()),
+                    /*one_rtt_encrypted_packets=*/has_application_close ||
+                            !use_zero_rtt_packet_protection
+                        ? 1
+                        : 0,
+                    /*unpaced_ack_eliciting_packets=*/static_cast<std::size_t>(ack_eliciting),
+                    /*bypass_burst_limit=*/bypass_congestion_window);
             }
-            return commit_serialized_datagram(packets, std::move(candidate_datagram.value()));
+            return commit_serialized_datagram(
+                packets, std::move(candidate_datagram.value()),
+                /*one_rtt_encrypted_packets=*/0,
+                /*unpaced_ack_eliciting_packets=*/static_cast<std::size_t>(ack_eliciting),
+                /*bypass_burst_limit=*/bypass_congestion_window);
         }
     }
 
@@ -18519,6 +18858,14 @@ void connection_set_force_missing_fallback_packet_length_for_tests(bool enabled)
 
 void connection_set_force_appended_fragment_base_datagram_failure_for_tests(bool enabled) {
     connection_drain_test_hooks().force_appended_fragment_base_datagram_failure = enabled;
+}
+
+void connection_set_force_aead_confidentiality_limit_for_tests(bool enabled) {
+    connection_drain_test_hooks().force_aead_confidentiality_limit = enabled;
+}
+
+void connection_set_force_aead_integrity_limit_for_tests(bool enabled) {
+    connection_drain_test_hooks().force_aead_integrity_limit = enabled;
 }
 
 void connection_set_force_application_candidate_estimate_failure_countdown_for_tests(int value) {

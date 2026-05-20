@@ -594,6 +594,9 @@ class QuicConnection {
                                QuicCoreTimePoint now);
     void process_inbound_datagram_owned(std::vector<std::byte> bytes, QuicCoreTimePoint now,
                                         QuicPathId path_id, QuicEcnCodepoint ecn);
+    void process_inbound_datagram_shared(std::shared_ptr<std::vector<std::byte>> storage,
+                                         std::size_t begin, std::size_t end, QuicCoreTimePoint now,
+                                         QuicPathId path_id, QuicEcnCodepoint ecn);
     void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
                                   QuicPathId path_id, QuicEcnCodepoint ecn,
                                   std::optional<std::uint32_t> inbound_datagram_id,

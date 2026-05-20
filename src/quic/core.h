@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -325,6 +326,24 @@ struct QuicCoreInboundDatagram {
     std::optional<QuicRouteHandle> route_handle;
     std::vector<std::byte> address_validation_identity;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
+    std::shared_ptr<std::vector<std::byte>> shared_bytes;
+    std::size_t begin = 0;
+    std::size_t end = 0;
+
+    std::span<const std::byte> payload() const {
+        if (shared_bytes != nullptr) {
+            const auto clamped_begin = std::min(begin, shared_bytes->size());
+            const auto clamped_end = std::min(std::max(end, clamped_begin), shared_bytes->size());
+            return std::span<const std::byte>(*shared_bytes)
+                .subspan(clamped_begin, clamped_end - clamped_begin);
+        }
+        return bytes;
+    }
+
+    std::vector<std::byte> materialize() const {
+        const auto span = payload();
+        return {span.begin(), span.end()};
+    }
 };
 
 struct QuicCorePathMtuUpdate {
@@ -665,6 +684,9 @@ class QuicCore {
     void retire_endpoint_connection_routes(const ConnectionEntry &entry, QuicCoreTimePoint now);
     void purge_expired_local_stateless_reset_tokens(QuicCoreTimePoint now);
     void refresh_server_connection_routes(ConnectionEntry &entry);
+    static void
+    remember_address_validation_identity(ConnectionEntry &entry, QuicPathId path_id,
+                                         std::span<const std::byte> address_validation_identity);
     QuicPathId remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle,
                                      std::span<const std::byte> address_validation_identity = {});
     std::optional<QuicPathId>

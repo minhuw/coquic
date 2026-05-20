@@ -4,8 +4,10 @@
 #include <sys/socket.h>
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -82,6 +84,20 @@ struct ReceiveDatagramResult {
     sockaddr_storage source{};
     socklen_t source_len = 0;
     QuicCoreTimePoint input_time{};
+    std::shared_ptr<std::vector<std::byte>> shared_bytes;
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    std::size_t udp_gro_segment_size = 0;
+
+    std::span<const std::byte> payload() const {
+        if (shared_bytes != nullptr) {
+            const auto clamped_begin = std::min(begin, shared_bytes->size());
+            const auto clamped_end = std::min(std::max(end, clamped_begin), shared_bytes->size());
+            return std::span<const std::byte>(*shared_bytes)
+                .subspan(clamped_begin, clamped_end - clamped_begin);
+        }
+        return bytes;
+    }
 };
 
 enum class PathMtuUpdateStatus : std::uint8_t {
@@ -116,6 +132,7 @@ bool should_apply_ipv6_flow_label(const sockaddr_storage &peer, socklen_t peer_l
 sockaddr_storage peer_with_ipv6_flow_label(const sockaddr_storage &peer, socklen_t peer_len,
                                            std::span<const std::byte> datagram);
 QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message);
+std::size_t recvmsg_udp_gro_segment_size_from_control(const msghdr &message);
 
 int preferred_udp_address_family(std::string_view host);
 bool resolve_udp_address(UdpAddressResolutionQuery query, ResolvedUdpAddress &resolved);

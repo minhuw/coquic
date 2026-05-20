@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -66,6 +67,18 @@ struct IoProfileCounters {
     std::uint64_t recvmmsg_datagrams = 0;
     std::uint64_t poll_calls = 0;
     std::uint64_t rx_datagrams = 0;
+    std::uint64_t udp_gro_receive_calls = 0;
+    std::uint64_t udp_gro_segments = 0;
+};
+
+struct RecvmmsgScratch {
+    std::array<std::array<std::byte, kMaxDatagramBytes>, kRecvmmsgDrainBatch> inbound{};
+    std::array<std::array<std::byte, 256>, kRecvmmsgDrainBatch> controls{};
+    std::array<sockaddr_storage, kRecvmmsgDrainBatch> sources{};
+    std::array<iovec, kRecvmmsgDrainBatch> iovecs{};
+    std::array<mmsghdr, kRecvmmsgDrainBatch> messages{};
+    std::vector<std::size_t> begins;
+    std::vector<std::size_t> sizes;
 };
 
 struct ReceiveDatagramBatchResult {
@@ -103,7 +116,9 @@ COQUIC_NO_PROFILE void print_io_profile() {
               << " send_many_datagrams=" << c.send_many_datagrams
               << " recvmsg_calls=" << c.recvmsg_calls << " recvmmsg_calls=" << c.recvmmsg_calls
               << " recvmmsg_datagrams=" << c.recvmmsg_datagrams << " poll_calls=" << c.poll_calls
-              << " rx_datagrams=" << c.rx_datagrams << '\n';
+              << " rx_datagrams=" << c.rx_datagrams
+              << " udp_gro_receive_calls=" << c.udp_gro_receive_calls
+              << " udp_gro_segments=" << c.udp_gro_segments << '\n';
 }
 
 COQUIC_NO_PROFILE void register_io_profile_printer_once() {
@@ -203,6 +218,29 @@ QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message) {
     static_cast<void>(message);
 #endif
     return QuicEcnCodepoint::unavailable;
+}
+
+std::size_t recvmsg_udp_gro_segment_size_from_control(const msghdr &message) {
+#if defined(__linux__) && defined(UDP_GRO)
+    if ((message.msg_flags & MSG_CTRUNC) != 0) {
+        return 0;
+    }
+    auto *control = CMSG_FIRSTHDR(const_cast<msghdr *>(&message));
+    while (control != nullptr) {
+        if (control->cmsg_level == SOL_UDP && control->cmsg_type == UDP_GRO) {
+            std::uint16_t segment_size = 0;
+            const auto payload_size =
+                control->cmsg_len > CMSG_LEN(0) ? control->cmsg_len - CMSG_LEN(0) : 0;
+            std::memcpy(&segment_size, CMSG_DATA(control),
+                        std::min<std::size_t>(sizeof(segment_size), payload_size));
+            return segment_size;
+        }
+        control = CMSG_NXTHDR(const_cast<msghdr *>(&message), control);
+    }
+#else
+    static_cast<void>(message);
+#endif
+    return 0;
 }
 
 bool ignorable_udp_send_error(int error_number, bool is_pmtu_probe) {
@@ -759,6 +797,22 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
             source_len = static_cast<socklen_t>(message.msg_namelen);
             if (bytes_read >= 0) {
                 inbound_ecn = recvmsg_ecn_from_control(message);
+                auto segment_size = recvmsg_udp_gro_segment_size_from_control(message);
+                if (segment_size > 0) {
+                    segment_size = std::min(segment_size, static_cast<std::size_t>(bytes_read));
+                }
+                if (segment_size > 0) {
+                    return ReceiveDatagramResult{
+                        .status = ReceiveDatagramStatus::ok,
+                        .bytes = std::vector<std::byte>(
+                            inbound.data(), inbound.data() + static_cast<std::size_t>(bytes_read)),
+                        .ecn = inbound_ecn,
+                        .source = source,
+                        .source_len = source_len,
+                        .input_time = now(),
+                        .udp_gro_segment_size = segment_size,
+                    };
+                }
             }
         }
         if (recv_call_completed(bytes_read, errno)) {
@@ -828,6 +882,84 @@ receive_datagram_batch_status_for_error(bool retryable_error) {
     return retryable_error ? ReceiveDatagramStatus::would_block : ReceiveDatagramStatus::error;
 }
 
+void append_received_datagram_segments(std::vector<ReceiveDatagramResult> &out,
+                                       ReceiveDatagramResult received) {
+    const auto received_size = received.payload().size();
+    const auto segment_size = received.udp_gro_segment_size;
+    if (segment_size == 0 || segment_size >= received_size) {
+        out.push_back(std::move(received));
+        return;
+    }
+
+    auto shared = received.shared_bytes;
+    if (shared == nullptr) {
+        shared = std::make_shared<std::vector<std::byte>>(std::move(received.bytes));
+    }
+    const auto base_begin = received.begin;
+    const auto segment_count = (received_size + segment_size - 1u) / segment_size;
+    if (io_profile_enabled()) {
+        ++io_profile_counters().udp_gro_receive_calls;
+        io_profile_counters().udp_gro_segments += segment_count;
+    }
+    for (std::size_t segment_index = 0; segment_index < segment_count; ++segment_index) {
+        const auto begin = base_begin + segment_index * segment_size;
+        const auto end = std::min(base_begin + received_size, begin + segment_size);
+        out.push_back(ReceiveDatagramResult{
+            .status = ReceiveDatagramStatus::ok,
+            .ecn = received.ecn,
+            .source = received.source,
+            .source_len = received.source_len,
+            .input_time = received.input_time,
+            .shared_bytes = shared,
+            .begin = begin,
+            .end = end,
+        });
+    }
+}
+
+void append_shared_received_datagram_segments(std::vector<ReceiveDatagramResult> &out,
+                                              const std::shared_ptr<std::vector<std::byte>> &shared,
+                                              std::size_t datagram_begin, std::size_t datagram_size,
+                                              QuicEcnCodepoint ecn, const sockaddr_storage &source,
+                                              socklen_t source_len, QuicCoreTimePoint input_time,
+                                              std::size_t udp_gro_segment_size) {
+    const auto segment_size =
+        udp_gro_segment_size > 0 ? std::min(udp_gro_segment_size, datagram_size) : 0u;
+    if (segment_size == 0 || segment_size >= datagram_size) {
+        out.push_back(ReceiveDatagramResult{
+            .status = ReceiveDatagramStatus::ok,
+            .ecn = ecn,
+            .source = source,
+            .source_len = source_len,
+            .input_time = input_time,
+            .shared_bytes = shared,
+            .begin = datagram_begin,
+            .end = datagram_begin + datagram_size,
+        });
+        return;
+    }
+
+    const auto segment_count = (datagram_size + segment_size - 1u) / segment_size;
+    if (io_profile_enabled()) {
+        ++io_profile_counters().udp_gro_receive_calls;
+        io_profile_counters().udp_gro_segments += segment_count;
+    }
+    for (std::size_t segment_index = 0; segment_index < segment_count; ++segment_index) {
+        const auto begin = datagram_begin + segment_index * segment_size;
+        const auto end = std::min(datagram_begin + datagram_size, begin + segment_size);
+        out.push_back(ReceiveDatagramResult{
+            .status = ReceiveDatagramStatus::ok,
+            .ecn = ecn,
+            .source = source,
+            .source_len = source_len,
+            .input_time = input_time,
+            .shared_bytes = shared,
+            .begin = begin,
+            .end = end,
+        });
+    }
+}
+
 ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_view role_name,
                                                   std::size_t max_datagrams) {
     if (max_datagrams == 0) {
@@ -836,9 +968,11 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
     if (recvmmsg_batch_requires_recvmsg_fallback()) {
         auto received = receive_datagram(socket_fd, role_name, MSG_DONTWAIT);
         if (received.status == ReceiveDatagramStatus::ok) {
+            std::vector<ReceiveDatagramResult> datagrams;
+            append_received_datagram_segments(datagrams, std::move(received));
             return ReceiveDatagramBatchResult{
                 .status = ReceiveDatagramStatus::ok,
-                .datagrams = {std::move(received)},
+                .datagrams = std::move(datagrams),
             };
         }
         return ReceiveDatagramBatchResult{
@@ -847,13 +981,6 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
     }
 
     const auto batch_size = std::min(max_datagrams, kRecvmmsgDrainBatch);
-    struct RecvmmsgScratch {
-        std::array<std::array<std::byte, kMaxDatagramBytes>, kRecvmmsgDrainBatch> inbound{};
-        std::array<std::array<std::byte, 256>, kRecvmmsgDrainBatch> controls{};
-        std::array<sockaddr_storage, kRecvmmsgDrainBatch> sources{};
-        std::array<iovec, kRecvmmsgDrainBatch> iovecs{};
-        std::array<mmsghdr, kRecvmmsgDrainBatch> messages{};
-    };
     static thread_local RecvmmsgScratch scratch;
 
     auto &inbound = scratch.inbound;
@@ -861,6 +988,8 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
     auto &sources = scratch.sources;
     auto &iovecs = scratch.iovecs;
     auto &messages = scratch.messages;
+    auto &begins = scratch.begins;
+    auto &sizes = scratch.sizes;
 
     for (std::size_t index = 0; index < batch_size; ++index) {
         sources[index] = {};
@@ -897,23 +1026,39 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
         io_profile_counters().rx_datagrams += static_cast<std::uint64_t>(received_count);
     }
 
-    std::vector<ReceiveDatagramResult> out;
-    out.reserve(static_cast<std::size_t>(received_count));
     const auto input_time = now();
+    const auto received_datagrams = static_cast<std::size_t>(received_count);
+    begins.resize(received_datagrams);
+    sizes.resize(received_datagrams);
+    std::size_t shared_size = 0;
     for (int index = 0; index < received_count; ++index) {
-        auto &message = messages[static_cast<std::size_t>(index)].msg_hdr;
         const auto received_size =
             static_cast<std::size_t>(messages[static_cast<std::size_t>(index)].msg_len);
-        out.push_back(ReceiveDatagramResult{
-            .status = ReceiveDatagramStatus::ok,
-            .bytes = std::vector<std::byte>(inbound[static_cast<std::size_t>(index)].data(),
-                                            inbound[static_cast<std::size_t>(index)].data() +
-                                                received_size),
-            .ecn = recvmsg_ecn_from_control(message),
-            .source = sources[static_cast<std::size_t>(index)],
-            .source_len = static_cast<socklen_t>(message.msg_namelen),
-            .input_time = input_time,
-        });
+        begins[static_cast<std::size_t>(index)] = shared_size;
+        sizes[static_cast<std::size_t>(index)] = received_size;
+        shared_size += received_size;
+    }
+
+    auto shared = std::make_shared<std::vector<std::byte>>();
+    shared->resize(shared_size);
+    for (int index = 0; index < received_count; ++index) {
+        const auto datagram_index = static_cast<std::size_t>(index);
+        std::memcpy(shared->data() + begins[datagram_index], inbound[datagram_index].data(),
+                    sizes[datagram_index]);
+    }
+
+    std::vector<ReceiveDatagramResult> out;
+    out.reserve(received_datagrams);
+    for (int index = 0; index < received_count; ++index) {
+        const auto datagram_index = static_cast<std::size_t>(index);
+        auto &message = messages[static_cast<std::size_t>(index)].msg_hdr;
+        auto segment_size = recvmsg_udp_gro_segment_size_from_control(message);
+        const auto ecn = recvmsg_ecn_from_control(message);
+        const auto source = sources[static_cast<std::size_t>(index)];
+        const auto source_len = static_cast<socklen_t>(message.msg_namelen);
+        append_shared_received_datagram_segments(out, shared, begins[datagram_index],
+                                                 sizes[datagram_index], ecn, source, source_len,
+                                                 input_time, segment_size);
     }
     return ReceiveDatagramBatchResult{
         .status = ReceiveDatagramStatus::ok,
@@ -1029,6 +1174,9 @@ QuicIoEngineEvent make_rx_event(int socket_fd, internal::ReceiveDatagramResult r
                 .peer = received.source,
                 .peer_len = received.source_len,
                 .now = event_time,
+                .shared_bytes = std::move(received.shared_bytes),
+                .begin = received.begin,
+                .end = received.end,
             },
     };
 }
@@ -1059,6 +1207,10 @@ bool PollIoEngine::send_many(std::span<const QuicIoEngineTxDatagram> datagrams,
         io_profile_counters().send_many_datagrams += datagrams.size();
     }
     return internal::send_datagrams(datagrams, role_name);
+}
+
+bool PollIoEngine::has_pending_events() const {
+    return !queued_events_.empty();
 }
 
 std::optional<QuicIoEngineEvent>
@@ -2218,6 +2370,45 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     empty_payload_header->cmsg_len = CMSG_LEN(0);
     record(internal::recvmsg_ecn_from_control(recv_message) == QuicEcnCodepoint::not_ect,
            "recvmsg ecn handles traffic-class ancillary data with no payload");
+
+#if defined(__linux__) && defined(UDP_GRO)
+    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(std::uint16_t))> gro_control{};
+    recv_message = {};
+    recv_message.msg_control = gro_control.data();
+    recv_message.msg_controllen = gro_control.size();
+    auto *gro_header = reinterpret_cast<cmsghdr *>(gro_control.data());
+    gro_header->cmsg_level = SOL_UDP;
+    gro_header->cmsg_type = UDP_GRO;
+    gro_header->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
+    const std::uint16_t gro_segment_size = 2;
+    std::memcpy(CMSG_DATA(gro_header), &gro_segment_size, sizeof(gro_segment_size));
+    record(internal::recvmsg_udp_gro_segment_size_from_control(recv_message) == gro_segment_size,
+           "recvmsg UDP GRO parser extracts segment size");
+
+    auto gro_source = loopback_peer_for_batch_tests(9443);
+    internal::ReceiveDatagramResult gro_received{
+        .status = internal::ReceiveDatagramStatus::ok,
+        .bytes = {std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
+                  std::byte{0x05}},
+        .ecn = QuicEcnCodepoint::ect0,
+        .source = gro_source,
+        .source_len = static_cast<socklen_t>(sizeof(sockaddr_in)),
+        .input_time = internal::now(),
+        .udp_gro_segment_size = gro_segment_size,
+    };
+    std::vector<internal::ReceiveDatagramResult> gro_split;
+    internal::append_received_datagram_segments(gro_split, std::move(gro_received));
+    record(all_true({
+               gro_split.size() == 3,
+               gro_split[0].payload().size() == 2,
+               gro_split[1].payload().size() == 2,
+               gro_split[2].payload().size() == 1,
+               gro_split[0].shared_bytes != nullptr,
+               gro_split[0].shared_bytes == gro_split[1].shared_bytes,
+               gro_split[0].ecn == QuicEcnCodepoint::ect0,
+           }),
+           "receive GRO split preserves datagram-sized shared slices");
+#endif
 
     sock_extended_err pmtu_error{};
     pmtu_error.ee_info = 1280;

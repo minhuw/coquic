@@ -13,4 +13,14 @@ make_endpoint_input_from_io_event(io::QuicIoEvent &event);
 
 bool flush_send_effects(io::QuicIoBackend &backend, const quic::QuicCoreResult &result);
 
+class PerfSendBuffer {
+  public:
+    bool append_or_flush(io::QuicIoBackend &backend, const quic::QuicCoreResult &result);
+    bool flush(io::QuicIoBackend &backend);
+    bool empty() const;
+
+  private:
+    std::vector<io::QuicIoTxDatagram> datagrams_;
+};
+
 } // namespace coquic::perf

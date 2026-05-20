@@ -181,6 +181,33 @@ TEST(QuicPerfServerTest, FixedDownloadPayloadCacheRetainsPreviouslyMaterializedS
     EXPECT_TRUE(server.download_payload_cache_.contains(4096));
 }
 
+TEST(QuicPerfServerTest, PerfSendBufferOwnsBufferedDatagramBytesUntilFlush) {
+    RecordingIoBackend backend;
+    PerfSendBuffer buffer;
+
+    coquic::quic::QuicCoreResult result;
+    result.effects.emplace_back(coquic::quic::QuicCoreSendDatagram{
+        .connection = 1,
+        .route_handle = 17,
+        .bytes =
+            coquic::quic::DatagramBuffer{std::vector<std::byte>{std::byte{0x01}, std::byte{0x02}}},
+    });
+
+    ASSERT_TRUE(buffer.append_or_flush(backend, result));
+    EXPECT_TRUE(backend.sent_datagrams.empty());
+
+    auto *send = std::get_if<coquic::quic::QuicCoreSendDatagram>(&result.effects.front());
+    ASSERT_NE(send, nullptr);
+    send->bytes.clear();
+
+    ASSERT_TRUE(buffer.flush(backend));
+    ASSERT_EQ(backend.sent_datagrams.size(), 1u);
+    const auto payload = backend.sent_datagrams.front().payload();
+    ASSERT_EQ(payload.size(), 2u);
+    EXPECT_EQ(payload[0], std::byte{0x01});
+    EXPECT_EQ(payload[1], std::byte{0x02});
+}
+
 TEST(QuicPerfServerTest, FixedDownloadRuntimeBranchQueuesCachedSharedPayloadOnStream) {
     auto backend = std::make_unique<RecordingIoBackend>();
     auto *backend_ptr = backend.get();

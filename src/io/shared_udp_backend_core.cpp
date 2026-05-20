@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/udp.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -78,6 +79,16 @@ void configure_udp_socket_buffers(LinuxSocketDescriptor socket) {
 
     set_buffer_option(SO_RCVBUF);
     set_buffer_option(SO_SNDBUF);
+}
+
+void configure_udp_gro_if_available(LinuxSocketDescriptor socket) {
+#if defined(__linux__) && defined(UDP_GRO)
+    const int enabled = 1;
+    static_cast<void>(socket_io_backend_ops_state().setsockopt_fn(socket.fd, SOL_UDP, UDP_GRO,
+                                                                  &enabled, sizeof(enabled)));
+#else
+    static_cast<void>(socket);
+#endif
 }
 
 COQUIC_NO_PROFILE bool socket_family_uses_ipv4_pmtud_options(int family) {
@@ -174,6 +185,7 @@ int open_udp_socket(int family) {
     }
 
     configure_udp_socket_buffers(LinuxSocketDescriptor{.fd = fd});
+    configure_udp_gro_if_available(LinuxSocketDescriptor{.fd = fd});
 
     if (!configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = fd}, family)) {
         const int option_errno = errno;
@@ -524,8 +536,15 @@ SharedUdpBackendCore::wait(std::optional<QuicCoreTimePoint> next_wakeup) {
                 .address_validation_identity = internal::address_validation_identity_from_peer(
                     completion.peer, completion.peer_len),
                 .ecn = completion.ecn,
+                .shared_bytes = std::move(completion.shared_bytes),
+                .begin = completion.begin,
+                .end = completion.end,
             },
     };
+}
+
+bool SharedUdpBackendCore::has_pending_events() const {
+    return impl_ != nullptr && impl_->engine != nullptr && impl_->engine->has_pending_events();
 }
 
 bool SharedUdpBackendCore::send(const QuicIoTxDatagram &datagram) {
@@ -678,6 +697,9 @@ COQUIC_NO_PROFILE bool socket_io_backend_configures_linux_ecn_socket_options_for
     return opened && has_call(IPPROTO_IPV6, IPV6_V6ONLY, 0) &&
            has_call(SOL_SOCKET, SO_RCVBUF, kExpectedUdpSocketBufferBytes) &&
            has_call(SOL_SOCKET, SO_SNDBUF, kExpectedUdpSocketBufferBytes) &&
+#if defined(__linux__) && defined(UDP_GRO)
+           has_call(SOL_UDP, UDP_GRO, 1) &&
+#endif
            has_call(IPPROTO_IP, IP_RECVTOS, 1) && has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1) &&
 #if defined(__linux__)
            has_call(IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO) &&

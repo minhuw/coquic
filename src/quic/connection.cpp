@@ -199,6 +199,10 @@ struct SendProfileCounters {
     std::uint64_t congestion_block_bif_sum = 0;
     std::uint64_t congestion_block_max_cwnd = 0;
     std::uint64_t congestion_block_min_cwnd = 0;
+    std::uint64_t congestion_cwnd_last = 0;
+    std::uint64_t congestion_cwnd_max = 0;
+    std::uint64_t congestion_bif_last = 0;
+    std::uint64_t congestion_bif_max = 0;
     std::uint64_t ack_frames = 0;
     std::uint64_t acked_packets = 0;
     std::uint64_t late_acked_packets = 0;
@@ -553,7 +557,11 @@ void print_send_profile() {
               << " congestion_block_bif_sum=" << c.congestion_block_bif_sum
               << " congestion_block_max_cwnd=" << c.congestion_block_max_cwnd
               << " congestion_block_min_cwnd=" << c.congestion_block_min_cwnd
-              << " ack_frames=" << c.ack_frames << " acked_packets=" << c.acked_packets
+              << " congestion_cwnd_last=" << c.congestion_cwnd_last
+              << " congestion_cwnd_max=" << c.congestion_cwnd_max
+              << " congestion_bif_last=" << c.congestion_bif_last
+              << " congestion_bif_max=" << c.congestion_bif_max << " ack_frames=" << c.ack_frames
+              << " acked_packets=" << c.acked_packets
               << " late_acked_packets=" << c.late_acked_packets
               << " ack_lost_packets=" << c.ack_lost_packets
               << " timer_lost_packets=" << c.timer_lost_packets << " acked_bytes=" << c.acked_bytes
@@ -3524,6 +3532,15 @@ void QuicConnection::process_inbound_datagram_owned(std::vector<std::byte> bytes
     const auto storage_size = storage->size();
     process_inbound_datagram(std::move(storage), 0, storage_size, now, path_id, ecn,
                              inbound_datagram_id, /*replay_trigger=*/false,
+                             /*count_inbound_bytes=*/true, /*allow_in_place_receive_decode=*/true);
+}
+
+void QuicConnection::process_inbound_datagram_shared(
+    std::shared_ptr<std::vector<std::byte>> storage, std::size_t begin, std::size_t end,
+    QuicCoreTimePoint now, QuicPathId path_id, QuicEcnCodepoint ecn) {
+    const auto inbound_datagram_id = next_qlog_inbound_datagram_id(qlog_session_.get());
+    process_inbound_datagram(std::move(storage), begin, end, now, path_id, ecn, inbound_datagram_id,
+                             /*replay_trigger=*/false,
                              /*count_inbound_bytes=*/true, /*allow_in_place_receive_decode=*/true);
 }
 
@@ -7155,6 +7172,17 @@ void QuicConnection::track_sent_packet(PacketSpaceState &packet_space, SentPacke
         }
     }
     packet_space.recovery.on_packet_sent(std::move(packet));
+    if (send_profile_enabled()) {
+        auto &profile = send_profile_counters();
+        profile.congestion_cwnd_last =
+            static_cast<std::uint64_t>(congestion_controller_.congestion_window());
+        profile.congestion_cwnd_max =
+            std::max(profile.congestion_cwnd_max, profile.congestion_cwnd_last);
+        profile.congestion_bif_last =
+            static_cast<std::uint64_t>(congestion_controller_.bytes_in_flight());
+        profile.congestion_bif_max =
+            std::max(profile.congestion_bif_max, profile.congestion_bif_last);
+    }
     maybe_emit_qlog_recovery_metrics(sent_time);
 }
 
@@ -10504,10 +10532,22 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
         return CodecResult<SerializeProtectionContext>::success(SerializeProtectionContext{
             .local_role = config_.role,
             .client_initial_destination_connection_id = client_initial_destination_connection_id(),
-            .handshake_secret = handshake_space_.write_secret,
-            .zero_rtt_secret = zero_rtt_space_.write_secret,
-            .one_rtt_secret = application_space_.write_secret,
             .one_rtt_key_phase = application_write_key_phase_,
+            .handshake_secret_ref = handshake_space_.write_secret.has_value()
+                                        ? &handshake_space_.write_secret.value()
+                                        : nullptr,
+            .zero_rtt_secret_ref = zero_rtt_space_.write_secret.has_value()
+                                       ? &zero_rtt_space_.write_secret.value()
+                                       : nullptr,
+            .one_rtt_secret_ref = application_space_.write_secret.has_value()
+                                      ? &application_space_.write_secret.value()
+                                      : nullptr,
+            .handshake_secret_cache_primed =
+                traffic_secret_cache_is_primed(handshake_space_.write_secret),
+            .zero_rtt_secret_cache_primed =
+                traffic_secret_cache_is_primed(zero_rtt_space_.write_secret),
+            .one_rtt_secret_cache_primed =
+                traffic_secret_cache_is_primed(application_space_.write_secret),
         });
     };
 
@@ -10520,18 +10560,19 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
             ++send_profile_counters().serialize_calls;
         }
         SendProfileTimer serialize_timer(send_profile_counters().serialize_ns);
-        auto datagram_packets = candidate_packets;
         const auto context = make_serialize_context();
         if (!context.has_value()) {
             return CodecResult<SerializedProtectedDatagram>::failure(context.error().code,
                                                                      context.error().offset);
         }
+        const auto *datagram_packets = &candidate_packets;
+        std::optional<std::vector<ProtectedPacket>> mutable_datagram_packets;
 
         const auto serialize_datagram = [&](const SerializeProtectionContext &serialize_context)
             -> CodecResult<SerializedProtectedDatagram> {
             if (appended_one_rtt_fragment_packet != nullptr) {
-                auto encoded =
-                    serialize_protected_datagram_with_metadata(datagram_packets, serialize_context);
+                auto encoded = serialize_protected_datagram_with_metadata(*datagram_packets,
+                                                                          serialize_context);
                 if (connection_drain_test_hooks().force_appended_fragment_base_datagram_failure) {
                     encoded = CodecResult<SerializedProtectedDatagram>::failure(
                         CodecErrorCode::packet_length_mismatch, 0);
@@ -10553,10 +10594,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 return encoded;
             }
             if (appended_packet == nullptr) {
-                return serialize_protected_datagram_with_metadata(datagram_packets,
+                return serialize_protected_datagram_with_metadata(*datagram_packets,
                                                                   serialize_context);
             }
-            return serialize_protected_datagram_with_metadata(datagram_packets, *appended_packet,
+            return serialize_protected_datagram_with_metadata(*datagram_packets, *appended_packet,
                                                               serialize_context);
         };
 
@@ -10576,23 +10617,31 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
             return datagram;
         }
 
-        for (auto &packet : datagram_packets) {
-            auto *initial = std::get_if<ProtectedInitialPacket>(&packet);
+        for (std::size_t packet_index = 0; packet_index < datagram_packets->size();
+             ++packet_index) {
+            auto *initial = std::get_if<ProtectedInitialPacket>(&(*datagram_packets)[packet_index]);
             if (initial == nullptr) {
                 continue;
             }
+            mutable_datagram_packets = candidate_packets;
+            datagram_packets = &*mutable_datagram_packets;
+            auto *mutable_initial =
+                std::get_if<ProtectedInitialPacket>(&mutable_datagram_packets->at(packet_index));
+            if (mutable_initial == nullptr) {
+                continue;
+            }
 
-            const auto frames_without_padding = initial->frames;
+            const auto frames_without_padding = mutable_initial->frames;
             const auto padding_deficit =
                 kMinimumInitialDatagramSize - datagram.value().bytes.size();
             const auto serialize_padded_initial =
                 [&](std::size_t padding_length) -> CodecResult<SerializedProtectedDatagram> {
-                initial->frames = frames_without_padding;
-                initial->frames.insert(initial->frames.end(),
-                                       static_cast<std::size_t>(padding_length != 0),
-                                       Frame{PaddingFrame{
-                                           .length = padding_length,
-                                       }});
+                mutable_initial->frames = frames_without_padding;
+                mutable_initial->frames.insert(mutable_initial->frames.end(),
+                                               static_cast<std::size_t>(padding_length != 0),
+                                               Frame{PaddingFrame{
+                                                   .length = padding_length,
+                                               }});
 
                 return serialize_datagram(serialize_context);
             };
@@ -12065,6 +12114,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
             if (!candidate_ack_frame.has_value()) {
                 return std::nullopt;
             }
+            if (candidate_ack_frame->additional_ranges.empty()) {
+                return candidate_ack_frame;
+            }
             auto candidate_size = estimate_application_candidate_size(
                 crypto_ranges, include_handshake_done, candidate_ack_frame, max_data_frame,
                 new_token_frames, new_connection_id_frames, retire_connection_id_frames,
@@ -12075,8 +12127,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now) {
                 fail_datagram_send(!pending_tracked_packets.empty());
                 return std::nullopt;
             }
-            if (candidate_ack_frame->additional_ranges.empty() ||
-                candidate_size.value() <= max_outbound_datagram_size) {
+            if (candidate_size.value() <= max_outbound_datagram_size) {
                 return candidate_ack_frame;
             }
 

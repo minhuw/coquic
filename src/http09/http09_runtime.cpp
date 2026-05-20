@@ -1533,6 +1533,9 @@ QuicCoreInboundDatagram make_inbound_datagram_from_io_event(const QuicIoRxDatagr
         .route_handle = datagram.route_handle,
         .address_validation_identity = datagram.address_validation_identity,
         .ecn = datagram.ecn,
+        .shared_bytes = datagram.shared_bytes,
+        .begin = datagram.begin,
+        .end = datagram.end,
     };
 }
 

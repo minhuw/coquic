@@ -65,7 +65,7 @@ struct ReceivedProtectedInitialPacket {
     std::uint8_t packet_number_length = 1;
     std::uint64_t packet_number = 0;
     std::shared_ptr<std::vector<std::byte>> plaintext_storage;
-    std::vector<ReceivedFrame> frames;
+    ReceivedFrameList frames;
 };
 
 struct ProtectedHandshakePacket {
@@ -84,7 +84,7 @@ struct ReceivedProtectedHandshakePacket {
     std::uint8_t packet_number_length = 1;
     std::uint64_t packet_number = 0;
     std::shared_ptr<std::vector<std::byte>> plaintext_storage;
-    std::vector<ReceivedFrame> frames;
+    ReceivedFrameList frames;
 };
 
 struct ProtectedZeroRttPacket {
@@ -103,7 +103,7 @@ struct ReceivedProtectedZeroRttPacket {
     std::uint8_t packet_number_length = 1;
     std::uint64_t packet_number = 0;
     std::shared_ptr<std::vector<std::byte>> plaintext_storage;
-    std::vector<ReceivedFrame> frames;
+    ReceivedFrameList frames;
 };
 
 struct StreamFrameSendFragment;
@@ -134,7 +134,7 @@ struct ReceivedProtectedOneRttPacket {
     std::uint8_t packet_number_length = 1;
     std::uint64_t packet_number = 0;
     std::shared_ptr<std::vector<std::byte>> plaintext_storage;
-    std::vector<ReceivedFrame> frames;
+    ReceivedFrameList frames;
 };
 
 struct ProtectedOneRttPacketView {
@@ -164,6 +164,12 @@ struct SerializeProtectionContext {
     std::optional<TrafficSecret> zero_rtt_secret;
     std::optional<TrafficSecret> one_rtt_secret;
     bool one_rtt_key_phase = false;
+    const TrafficSecret *handshake_secret_ref = nullptr;
+    const TrafficSecret *zero_rtt_secret_ref = nullptr;
+    const TrafficSecret *one_rtt_secret_ref = nullptr;
+    bool handshake_secret_cache_primed = false;
+    bool zero_rtt_secret_cache_primed = false;
+    bool one_rtt_secret_cache_primed = false;
 };
 
 struct DeserializeProtectionContext {

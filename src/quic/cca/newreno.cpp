@@ -29,7 +29,6 @@ void NewRenoCongestionController::on_packet_sent(std::size_t bytes_sent, bool ac
 }
 
 void NewRenoCongestionController::on_packet_sent(SentPacketRecord &packet) {
-    hystart_.on_packet_sent(packet);
     on_packet_sent(packet.bytes_in_flight, packet.ack_eliciting);
 }
 
@@ -59,7 +58,7 @@ void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRec
         if (packet.ack_eliciting && recovery_boundary.has_value() && !in_batch_recovery) {
             exit_recovery = true;
         }
-        if (!packet.ack_eliciting || in_batch_recovery || packet.app_limited) {
+        if (!packet.ack_eliciting || in_batch_recovery) {
             continue;
         }
 
@@ -77,13 +76,7 @@ void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRec
     }
 
     if (slow_start_acked_bytes != 0) {
-        congestion_window_ = congestion_saturating_add(
-            congestion_window_, hystart_.growth_bytes(slow_start_acked_bytes));
-        hystart_.on_slow_start_ack(packets, rtt_state);
-        if (hystart_.should_exit_slow_start()) {
-            slow_start_threshold_ = congestion_window_;
-            congestion_avoidance_credit_ = 0;
-        }
+        congestion_window_ = congestion_saturating_add(congestion_window_, slow_start_acked_bytes);
     }
 
     if (exit_recovery) {

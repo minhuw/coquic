@@ -18,6 +18,7 @@ class SharedUdpBackendCore {
     bool open_listener(std::string_view host, std::uint16_t port);
     std::optional<QuicRouteHandle> ensure_route(const QuicIoRemote &remote);
     std::optional<QuicIoEvent> wait(std::optional<QuicCoreTimePoint> next_wakeup);
+    bool has_pending_events() const;
     bool send(const QuicIoTxDatagram &datagram);
     bool send_many(std::span<const QuicIoTxDatagram> datagrams);
 

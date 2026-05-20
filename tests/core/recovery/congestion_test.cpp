@@ -265,7 +265,7 @@ TEST(QuicCongestionTest, HyStartPlusPlusCoversDisabledAndUnusableAckPaths) {
     EXPECT_FALSE(controller.hystart_.in_conservative_slow_start());
 }
 
-TEST(QuicCongestionTest, NewRenoHyStartPlusPlusEntersCssAndCapsGrowth) {
+TEST(QuicCongestionTest, NewRenoUsesRfcSlowStartGrowthWithoutDelayExit) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     auto first_round = send_hystart_round(controller, /*first_packet_number=*/1);
     ack_hystart_round(controller, first_round, std::chrono::milliseconds{100});
@@ -274,14 +274,34 @@ TEST(QuicCongestionTest, NewRenoHyStartPlusPlusEntersCssAndCapsGrowth) {
 
     auto second_round = send_hystart_round(controller, /*first_packet_number=*/9);
     ack_hystart_round(controller, second_round, std::chrono::milliseconds{120});
-    EXPECT_TRUE(controller.hystart_.in_conservative_slow_start());
+    EXPECT_FALSE(controller.hystart_.in_conservative_slow_start());
     EXPECT_EQ(controller.congestion_window(), after_first_round + 8u * kTestDatagramSize);
 
-    const auto after_css_entry = controller.congestion_window();
+    const auto after_second_round = controller.congestion_window();
     auto third_round = send_hystart_round(controller, /*first_packet_number=*/17);
     ack_hystart_round(controller, third_round, std::chrono::milliseconds{121});
-    EXPECT_TRUE(controller.hystart_.in_conservative_slow_start());
-    EXPECT_EQ(controller.congestion_window(), after_css_entry + 2u * kTestDatagramSize);
+    EXPECT_FALSE(controller.hystart_.in_conservative_slow_start());
+    EXPECT_EQ(controller.congestion_window(), after_second_round + 8u * kTestDatagramSize);
+}
+
+TEST(QuicCongestionTest, NewRenoCountsApplicationLimitedAcksForWindowGrowth) {
+    NewRenoCongestionController controller(/*max_datagram_size=*/kTestDatagramSize);
+    auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                   /*in_flight=*/true, /*bytes_in_flight=*/kTestDatagramSize,
+                                   coquic::quic::test::test_time(1));
+    packet.app_limited = true;
+    controller.on_packet_sent(packet);
+
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/true,
+                                coquic::quic::test::test_time(2),
+                                coquic::quic::RecoveryRttState{
+                                    .latest_rtt = std::chrono::milliseconds{1},
+                                    .min_rtt = std::chrono::milliseconds{1},
+                                    .smoothed_rtt = std::chrono::milliseconds{1},
+                                });
+
+    EXPECT_EQ(controller.bytes_in_flight(), 0u);
+    EXPECT_EQ(controller.congestion_window(), 11u * kTestDatagramSize);
 }
 
 TEST(QuicCongestionTest, CubicHyStartPlusPlusExitsSlowStartAfterCssRounds) {
@@ -303,7 +323,7 @@ TEST(QuicCongestionTest, CubicHyStartPlusPlusExitsSlowStartAfterCssRounds) {
 }
 
 TEST(QuicCongestionTest, HyStartPlusPlusResumesStandardSlowStartWhenDelayFalls) {
-    NewRenoCongestionController controller(/*max_datagram_size=*/kTestDatagramSize);
+    CubicCongestionController controller(/*max_datagram_size=*/kTestDatagramSize);
 
     auto first_round = send_hystart_round(controller, /*first_packet_number=*/1);
     ack_hystart_round(controller, first_round, std::chrono::milliseconds{100});
@@ -324,7 +344,7 @@ TEST(QuicCongestionTest, HyStartPlusPlusResumesStandardSlowStartWhenDelayFalls) 
 }
 
 TEST(QuicCongestionTest, HyStartPlusPlusRoundsUseSendSequenceAcrossPacketNumberSpaces) {
-    NewRenoCongestionController controller(/*max_datagram_size=*/1200);
+    CubicCongestionController controller(/*max_datagram_size=*/1200);
 
     auto initial_space_round = send_hystart_round(controller, /*first_packet_number=*/100);
     ack_hystart_round(controller, initial_space_round, std::chrono::milliseconds{100});
@@ -341,7 +361,7 @@ TEST(QuicCongestionTest, HyStartPlusPlusHandlesAckLimitsAndDisabledMode) {
     EXPECT_EQ(huge_datagram.hystart_.growth_bytes(std::numeric_limits<std::size_t>::max()),
               std::numeric_limits<std::size_t>::max());
 
-    NewRenoCongestionController controller(/*max_datagram_size=*/1200);
+    CubicCongestionController controller(/*max_datagram_size=*/1200);
     auto first_round = send_hystart_round(controller, /*first_packet_number=*/1);
     ack_hystart_round(controller, first_round, std::chrono::milliseconds{100});
     auto second_round = send_hystart_round(controller, /*first_packet_number=*/9);
@@ -2258,7 +2278,7 @@ TEST(QuicCongestionTest, PersistentCongestionCollapsesToMinimumWindow) {
     EXPECT_EQ(controller.congestion_window(), 2400u);
 }
 
-TEST(QuicCongestionTest, AppLimitedAckSaturatesBytesInFlightWithoutGrowingWindow) {
+TEST(QuicCongestionTest, AppLimitedAckSaturatesBytesInFlightAndGrowsNewRenoWindow) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     controller.on_packet_sent(/*bytes_sent=*/1200, /*ack_eliciting=*/true);
 
@@ -2276,10 +2296,10 @@ TEST(QuicCongestionTest, AppLimitedAckSaturatesBytesInFlightWithoutGrowingWindow
         /*app_limited=*/true);
 
     EXPECT_EQ(controller.bytes_in_flight(), 0u);
-    EXPECT_EQ(controller.congestion_window(), 12000u);
+    EXPECT_EQ(controller.congestion_window(), 14400u);
 }
 
-TEST(QuicCongestionTest, NewRenoUsesAckedPacketAppLimitedStateForWindowGrowth) {
+TEST(QuicCongestionTest, NewRenoCountsMixedAppLimitedAckedPacketsForWindowGrowth) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     controller.on_packet_sent(/*bytes_sent=*/2400, /*ack_eliciting=*/true);
 
@@ -2296,7 +2316,7 @@ TEST(QuicCongestionTest, NewRenoUsesAckedPacketAppLimitedStateForWindowGrowth) {
         /*app_limited=*/true);
 
     EXPECT_EQ(controller.bytes_in_flight(), 0u);
-    EXPECT_EQ(controller.congestion_window(), 13200u);
+    EXPECT_EQ(controller.congestion_window(), 14400u);
 }
 
 TEST(QuicCongestionTest, AppLimitedAckSentDuringRecoveryStillExitsNewRenoRecovery) {

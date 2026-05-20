@@ -2,8 +2,10 @@
 
 #include <sys/socket.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -38,6 +40,19 @@ struct QuicIoRxDatagram {
     std::vector<std::byte> bytes;
     std::vector<std::byte> address_validation_identity;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
+    std::shared_ptr<std::vector<std::byte>> shared_bytes;
+    std::size_t begin = 0;
+    std::size_t end = 0;
+
+    std::span<const std::byte> payload() const {
+        if (shared_bytes != nullptr) {
+            const auto clamped_begin = std::min(begin, shared_bytes->size());
+            const auto clamped_end = std::min(std::max(end, clamped_begin), shared_bytes->size());
+            return std::span<const std::byte>(*shared_bytes)
+                .subspan(clamped_begin, clamped_end - clamped_begin);
+        }
+        return bytes;
+    }
 };
 
 struct QuicIoPathMtuUpdate {
@@ -78,6 +93,9 @@ class QuicIoBackend {
 
     virtual std::optional<QuicRouteHandle> ensure_route(const QuicIoRemote &remote) = 0;
     virtual std::optional<QuicIoEvent> wait(std::optional<QuicCoreTimePoint> next_wakeup) = 0;
+    virtual bool has_pending_events() const {
+        return false;
+    }
     virtual bool send(const QuicIoTxDatagram &datagram) = 0;
     virtual bool send_many(std::span<const QuicIoTxDatagram> datagrams) {
         for (const auto &datagram : datagrams) {

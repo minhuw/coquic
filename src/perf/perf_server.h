@@ -34,6 +34,7 @@ class QuicPerfServer {
     };
 
     bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now);
+    bool flush_pending_sends();
     bool handle_stream_data(Session &session, const quic::QuicCoreReceiveStreamData &received,
                             quic::QuicCoreTimePoint now);
     bool should_exit_on_idle_empty() const;
@@ -45,6 +46,7 @@ class QuicPerfServer {
     std::unique_ptr<io::QuicIoBackend> backend_;
     std::unordered_map<std::size_t, quic::SharedBytes> download_payload_cache_;
     std::unordered_map<quic::QuicConnectionHandle, Session> sessions_;
+    PerfSendBuffer send_buffer_;
     bool accepted_session_ = false;
 };
 

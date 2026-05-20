@@ -57,6 +57,10 @@ std::optional<QuicIoEvent> IoUringBackend::wait(std::optional<QuicCoreTimePoint>
     return core_->wait(next_wakeup);
 }
 
+bool IoUringBackend::has_pending_events() const {
+    return core_ != nullptr && core_->has_pending_events();
+}
+
 bool IoUringBackend::send(const QuicIoTxDatagram &datagram) {
     return core_->send(datagram);
 }

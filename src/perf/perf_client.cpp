@@ -374,6 +374,9 @@ int QuicPerfClient::run() {
         advance_benchmark_phase(current);
 
         if (run_complete()) {
+            if (!flush_pending_sends()) {
+                return fail("client final flush failed");
+            }
             if (timed_bulk_download_mode() && config_.response_bytes > 0 &&
                 summary_.bytes_received == 0) {
                 return fail("timed bulk download measured zero bytes");
@@ -401,6 +404,9 @@ int QuicPerfClient::run() {
 
         if (!maybe_open_crr_connections(current)) {
             return fail("open crr connection failed");
+        }
+        if (!backend_->has_pending_events() && !flush_pending_sends()) {
+            return fail("client pending send flush failed");
         }
         auto event = backend_->wait(next_wait_wakeup(core_next_wakeup));
         if (!event.has_value()) {
@@ -443,6 +449,9 @@ int QuicPerfClient::run() {
                     .address_validation_identity =
                         std::move(event->datagram->address_validation_identity),
                     .ecn = event->datagram->ecn,
+                    .shared_bytes = std::move(event->datagram->shared_bytes),
+                    .begin = event->datagram->begin,
+                    .end = event->datagram->end,
                 },
                 event->now);
             if (!handle_result(inbound_result, event_handling_time)) {
@@ -481,7 +490,7 @@ bool QuicPerfClient::handle_result(const quic::QuicCoreResult &result,
         }
         return false;
     }
-    if (!flush_send_effects(*backend_, result)) {
+    if (!send_buffer_.append_or_flush(*backend_, result)) {
         summary_.failure_reason = "client flush send effects failed";
         return false;
     }
@@ -538,7 +547,7 @@ bool QuicPerfClient::handle_result(const quic::QuicCoreResult &result,
                     summary_.failure_reason = "client session_start local error";
                     return false;
                 }
-                if (!flush_send_effects(*backend_, command_result)) {
+                if (!send_buffer_.append_or_flush(*backend_, command_result)) {
                     summary_.failure_reason = "client session_start flush failed";
                     return false;
                 }
@@ -560,6 +569,14 @@ bool QuicPerfClient::handle_result(const quic::QuicCoreResult &result,
         }
     }
 
+    return true;
+}
+
+bool QuicPerfClient::flush_pending_sends() {
+    if (!send_buffer_.flush(*backend_)) {
+        summary_.failure_reason = "client flush send effects failed";
+        return false;
+    }
     return true;
 }
 
@@ -770,7 +787,8 @@ bool QuicPerfClient::open_bulk_stream(ConnectionState &connection, quic::QuicCor
                 },
         },
         now);
-    if (send_result.local_error.has_value() || !flush_send_effects(*backend_, send_result)) {
+    if (send_result.local_error.has_value() ||
+        !send_buffer_.append_or_flush(*backend_, send_result)) {
         connection.active_bulk_streams.erase(stream_id);
         summary_.failure_reason = "client timed bulk request flush failed";
         return false;
@@ -824,7 +842,9 @@ bool QuicPerfClient::maybe_start_bulk_streams(ConnectionState &connection,
                     },
             },
             now);
-        flush_send_effects(*backend_, send_result);
+        if (!send_buffer_.append_or_flush(*backend_, send_result)) {
+            return false;
+        }
         if (config_.direction == QuicPerfDirection::upload) {
             connection.bytes_sent += target_bytes;
             summary_.bytes_sent += target_bytes;
@@ -871,7 +891,7 @@ bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
             connection.outstanding_requests.erase(request_it);
             return false;
         }
-        if (!flush_send_effects(*backend_, send_result)) {
+        if (!send_buffer_.append_or_flush(*backend_, send_result)) {
             summary_.failure_reason = "client rr request flush failed";
             connection.outstanding_requests.erase(request_it);
             return false;
@@ -928,7 +948,7 @@ bool QuicPerfClient::maybe_issue_crr_request(ConnectionState &connection,
         connection.outstanding_requests.erase(request_it);
         return false;
     }
-    if (!flush_send_effects(*backend_, send_result)) {
+    if (!send_buffer_.append_or_flush(*backend_, send_result)) {
         summary_.failure_reason = "client crr request flush failed";
         connection.outstanding_requests.erase(request_it);
         return false;

@@ -1853,6 +1853,28 @@ COQUIC_NO_PROFILE void QuicCore::refresh_server_connection_routes(ConnectionEntr
     entry.initial_destination_connection_id_key = next_initial_destination_key;
 }
 
+void QuicCore::remember_address_validation_identity(
+    ConnectionEntry &entry, QuicPathId path_id,
+    std::span<const std::byte> address_validation_identity) {
+    if (address_validation_identity.empty()) {
+        return;
+    }
+
+    auto identity_it = entry.address_validation_identity_by_path_id.find(path_id);
+    if (identity_it != entry.address_validation_identity_by_path_id.end()) {
+        if (std::ranges::equal(identity_it->second, address_validation_identity)) {
+            return;
+        }
+        identity_it->second.assign(address_validation_identity.begin(),
+                                   address_validation_identity.end());
+        return;
+    }
+
+    entry.address_validation_identity_by_path_id.emplace(
+        path_id, std::vector<std::byte>(address_validation_identity.begin(),
+                                        address_validation_identity.end()));
+}
+
 COQUIC_NO_PROFILE QuicPathId
 QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle,
                                 std::span<const std::byte> address_validation_identity) {
@@ -1862,10 +1884,7 @@ QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_ha
 
     const auto existing = entry.path_id_by_route_handle.find(route_handle);
     if (existing != entry.path_id_by_route_handle.end()) {
-        if (!address_validation_identity.empty()) {
-            entry.address_validation_identity_by_path_id[existing->second] = std::vector<std::byte>(
-                address_validation_identity.begin(), address_validation_identity.end());
-        }
+        remember_address_validation_identity(entry, existing->second, address_validation_identity);
         return existing->second;
     }
 
@@ -1877,10 +1896,7 @@ QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_ha
 
     entry.path_id_by_route_handle.emplace(route_handle, path_id);
     entry.route_handle_by_path_id.emplace(path_id, route_handle);
-    if (!address_validation_identity.empty()) {
-        entry.address_validation_identity_by_path_id[path_id] = std::vector<std::byte>(
-            address_validation_identity.begin(), address_validation_identity.end());
-    }
+    remember_address_validation_identity(entry, path_id, address_validation_identity);
     return path_id;
 }
 
@@ -1890,11 +1906,8 @@ std::optional<QuicPathId> COQUIC_NO_PROFILE QuicCore::path_id_for_inbound_route(
     if (route_handle.has_value()) {
         const auto existing = entry.path_id_by_route_handle.find(*route_handle);
         if (existing != entry.path_id_by_route_handle.end()) {
-            if (!address_validation_identity.empty()) {
-                entry.address_validation_identity_by_path_id[existing->second] =
-                    std::vector<std::byte>(address_validation_identity.begin(),
-                                           address_validation_identity.end());
-            }
+            remember_address_validation_identity(entry, existing->second,
+                                                 address_validation_identity);
             return existing->second;
         }
         if (!endpoint_config_.allow_peer_address_change) {
@@ -3278,6 +3291,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
 
     if (auto *inbound = std::get_if<QuicCoreInboundDatagram>(&input); inbound != nullptr) {
         QuicCoreResult result;
+        const auto inbound_payload = inbound->payload();
         const auto drain_stateless_reset_owner = [&](QuicConnectionHandle owner) -> bool {
             const auto entry_it = connections_.find(owner);
             if (entry_it == connections_.end() || entry_it->second.connection == nullptr) {
@@ -3298,16 +3312,16 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             }
             return true;
         };
-        const auto parsed = parse_endpoint_datagram(inbound->bytes);
+        const auto parsed = parse_endpoint_datagram(inbound_payload);
         if (!parsed.has_value()) {
-            if (const auto reset_owner = detect_stateless_reset(inbound->bytes);
+            if (const auto reset_owner = detect_stateless_reset(inbound_payload);
                 reset_owner.has_value()) {
                 static_cast<void>(drain_stateless_reset_owner(*reset_owner));
             }
             return finalize_endpoint_result(std::move(result), now);
         }
 
-        if (const auto reset_owner = detect_stateless_reset(inbound->bytes);
+        if (const auto reset_owner = detect_stateless_reset(inbound_payload);
             reset_owner.has_value()) {
             static_cast<void>(drain_stateless_reset_owner(*reset_owner));
             return finalize_endpoint_result(std::move(result), now);
@@ -3323,8 +3337,14 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                 if (!path_id.has_value()) {
                     return finalize_endpoint_result(std::move(result), now);
                 }
-                entry.connection->process_inbound_datagram_owned(std::move(inbound->bytes), now,
-                                                                 *path_id, inbound->ecn);
+                if (inbound->shared_bytes != nullptr) {
+                    entry.connection->process_inbound_datagram_shared(
+                        std::move(inbound->shared_bytes), inbound->begin, inbound->end, now,
+                        *path_id, inbound->ecn);
+                } else {
+                    entry.connection->process_inbound_datagram_owned(std::move(inbound->bytes), now,
+                                                                     *path_id, inbound->ecn);
+                }
 
                 auto drained =
                     drain_connection_effects(entry.handle, entry.default_route_handle,
@@ -3356,7 +3376,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
               parsed->kind == ParsedEndpointDatagram::Kind::supported_long_header) &&
              !endpoint_supports_version);
         if (should_send_version_negotiation) {
-            if (inbound->bytes.size() >= kMinimumClientInitialDatagramBytes) {
+            if (inbound_payload.size() >= kMinimumClientInitialDatagramBytes) {
                 const auto advertised_versions =
                     parsed->kind == ParsedEndpointDatagram::Kind::unsupported_version_long_header
                         ? supported_quic_versions()
@@ -3376,14 +3396,14 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         }
 
         if (parsed->kind != ParsedEndpointDatagram::Kind::supported_initial) {
-            if (auto reset = make_stateless_reset_for_unknown_cid(*parsed, inbound->bytes,
+            if (auto reset = make_stateless_reset_for_unknown_cid(*parsed, inbound_payload,
                                                                   inbound->route_handle, now)) {
                 result.effects.emplace_back(std::move(*reset));
             }
             return finalize_endpoint_result(std::move(result), now);
         }
 
-        if (inbound->bytes.size() < kMinimumClientInitialDatagramBytes) {
+        if (inbound_payload.size() < kMinimumClientInitialDatagramBytes) {
             return finalize_endpoint_result(std::move(result), now);
         }
         if (!address_validation_identity_allowed_for_new_route(
@@ -3484,8 +3504,14 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             entry.address_validation_identity_by_path_id[path_id] =
                 inbound->address_validation_identity;
         }
-        entry.connection->process_inbound_datagram_owned(std::move(inbound->bytes), now, path_id,
-                                                         inbound->ecn);
+        if (inbound->shared_bytes != nullptr) {
+            entry.connection->process_inbound_datagram_shared(std::move(inbound->shared_bytes),
+                                                              inbound->begin, inbound->end, now,
+                                                              path_id, inbound->ecn);
+        } else {
+            entry.connection->process_inbound_datagram_owned(std::move(inbound->bytes), now,
+                                                             path_id, inbound->ecn);
+        }
         if (new_token_context.has_value()) {
             entry.connection->mark_peer_address_validated();
         }
@@ -3707,9 +3733,11 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                 if (!path_id.has_value()) {
                     return;
                 }
+                const auto inbound_payload = in.payload();
                 if (config.role == EndpointRole::client) {
                     if (!connection->is_handshake_complete()) {
-                        const auto version_negotiation = parse_version_negotiation_packet(in.bytes);
+                        const auto version_negotiation =
+                            parse_version_negotiation_packet(inbound_payload);
                         if (version_negotiation.has_value()) {
                             const bool valid_destination_connection_id =
                                 version_negotiation->destination_connection_id ==
@@ -3742,7 +3770,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                         }
                     }
 
-                    const auto retry = parse_retry_packet(in.bytes);
+                    const auto retry = parse_retry_packet(inbound_payload);
                     if (retry.has_value()) {
                         const auto original_destination_connection_id =
                             config.original_destination_connection_id.value_or(
@@ -3780,7 +3808,12 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                         return;
                     }
                 }
-                connection->process_inbound_datagram(in.bytes, now, *path_id, in.ecn);
+                if (in.shared_bytes != nullptr) {
+                    connection->process_inbound_datagram_shared(in.shared_bytes, in.begin, in.end,
+                                                                now, *path_id, in.ecn);
+                } else {
+                    connection->process_inbound_datagram(inbound_payload, now, *path_id, in.ecn);
+                }
             },
             [&](const QuicCorePathMtuUpdate &in) {
                 if (!in.route_handle.has_value()) {

@@ -92,13 +92,20 @@ int QuicPerfServer::run() {
 
         switch (event->kind) {
         case io::QuicIoEvent::Kind::idle_timeout:
+            if (!flush_pending_sends()) {
+                return 1;
+            }
             if (should_exit_on_idle_empty()) {
                 return 0;
             }
             continue;
         case io::QuicIoEvent::Kind::shutdown:
+            (void)flush_pending_sends();
             return 1;
         case io::QuicIoEvent::Kind::timer_expired:
+            if (!flush_pending_sends()) {
+                return 1;
+            }
             if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
                                event->now)) {
                 return 1;
@@ -114,6 +121,9 @@ int QuicPerfServer::run() {
                 return 1;
             }
         }
+        if (!backend_->has_pending_events() && !flush_pending_sends()) {
+            return 1;
+        }
     }
 }
 
@@ -122,7 +132,7 @@ bool QuicPerfServer::handle_result(const quic::QuicCoreResult &result,
     if (result.local_error.has_value()) {
         return false;
     }
-    if (!flush_send_effects(*backend_, result)) {
+    if (!send_buffer_.append_or_flush(*backend_, result)) {
         return false;
     }
 
@@ -150,6 +160,10 @@ bool QuicPerfServer::handle_result(const quic::QuicCoreResult &result,
     }
 
     return true;
+}
+
+bool QuicPerfServer::flush_pending_sends() {
+    return send_buffer_.flush(*backend_);
 }
 
 bool QuicPerfServer::should_exit_on_idle_empty() const {
@@ -186,7 +200,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                 },
                 now);
             if (send_result.local_error.has_value() ||
-                !flush_send_effects(*backend_, send_result)) {
+                !send_buffer_.append_or_flush(*backend_, send_result)) {
                 return false;
             }
             session.bytes_sent += response_bytes;
@@ -212,7 +226,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                 },
                 now);
             if (send_result.local_error.has_value() ||
-                !flush_send_effects(*backend_, send_result)) {
+                !send_buffer_.append_or_flush(*backend_, send_result)) {
                 return false;
             }
             session.bytes_sent += target_bytes;
@@ -251,7 +265,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                 },
                 now);
             if (send_result.local_error.has_value() ||
-                !flush_send_effects(*backend_, send_result)) {
+                !send_buffer_.append_or_flush(*backend_, send_result)) {
                 return false;
             }
             session.bytes_sent += response_bytes;
@@ -312,7 +326,7 @@ bool QuicPerfServer::send_control(Session &session, const QuicPerfControlMessage
     if (result.local_error.has_value()) {
         return false;
     }
-    return flush_send_effects(*backend_, result);
+    return send_buffer_.append_or_flush(*backend_, result);
 }
 
 } // namespace coquic::perf

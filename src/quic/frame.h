@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -210,6 +211,184 @@ using ReceivedFrame =
                  StreamsBlockedFrame, NewConnectionIdFrame, RetireConnectionIdFrame,
                  PathChallengeFrame, PathResponseFrame, TransportConnectionCloseFrame,
                  ApplicationConnectionCloseFrame, HandshakeDoneFrame>;
+
+class ReceivedFrameList {
+  public:
+    ReceivedFrameList() = default;
+
+    ReceivedFrameList(std::initializer_list<ReceivedFrame> frames) {
+        *this = frames;
+    }
+
+    ReceivedFrameList(std::vector<ReceivedFrame> frames) {
+        *this = std::move(frames);
+    }
+
+    ReceivedFrameList &operator=(std::initializer_list<ReceivedFrame> frames) {
+        clear();
+        if (frames.size() == 0) {
+            return *this;
+        }
+        if (frames.size() == 1) {
+            inline_frame_ = *frames.begin();
+            size_ = 1;
+            return *this;
+        }
+        overflow_frames_.assign(frames.begin(), frames.end());
+        size_ = overflow_frames_.size();
+        return *this;
+    }
+
+    ReceivedFrameList &operator=(const std::vector<ReceivedFrame> &frames) {
+        clear();
+        if (frames.empty()) {
+            return *this;
+        }
+        if (frames.size() == 1) {
+            inline_frame_ = frames.front();
+            size_ = 1;
+            return *this;
+        }
+        overflow_frames_ = frames;
+        size_ = overflow_frames_.size();
+        return *this;
+    }
+
+    ReceivedFrameList &operator=(std::vector<ReceivedFrame> &&frames) {
+        clear();
+        if (frames.empty()) {
+            return *this;
+        }
+        if (frames.size() == 1) {
+            inline_frame_ = std::move(frames.front());
+            size_ = 1;
+            return *this;
+        }
+        overflow_frames_ = std::move(frames);
+        size_ = overflow_frames_.size();
+        return *this;
+    }
+
+    bool empty() const {
+        return size() == 0;
+    }
+
+    std::size_t size() const {
+        return overflow_frames_.empty() ? size_ : overflow_frames_.size();
+    }
+
+    void clear() {
+        overflow_frames_.clear();
+        size_ = 0;
+    }
+
+    void reserve(std::size_t capacity) {
+        if (capacity <= 1) {
+            return;
+        }
+        ensure_overflow();
+        overflow_frames_.reserve(capacity);
+    }
+
+    void push_back(const ReceivedFrame &frame) {
+        emplace_back(frame);
+    }
+
+    void push_back(ReceivedFrame &&frame) {
+        emplace_back(std::move(frame));
+    }
+
+    template <typename... Args> ReceivedFrame &emplace_back(Args &&...args) {
+        if (overflow_frames_.empty() && size_ == 0) {
+            inline_frame_ = ReceivedFrame(std::forward<Args>(args)...);
+            size_ = 1;
+            return inline_frame_;
+        }
+
+        ensure_overflow();
+        auto &frame = overflow_frames_.emplace_back(std::forward<Args>(args)...);
+        size_ = overflow_frames_.size();
+        return frame;
+    }
+
+    ReceivedFrame &front() {
+        return (*this)[0];
+    }
+
+    const ReceivedFrame &front() const {
+        return (*this)[0];
+    }
+
+    ReceivedFrame &operator[](std::size_t index) {
+        return data()[index];
+    }
+
+    const ReceivedFrame &operator[](std::size_t index) const {
+        return data()[index];
+    }
+
+    ReceivedFrame *data() {
+        return overflow_frames_.empty() ? &inline_frame_ : overflow_frames_.data();
+    }
+
+    const ReceivedFrame *data() const {
+        return overflow_frames_.empty() ? &inline_frame_ : overflow_frames_.data();
+    }
+
+    ReceivedFrame *begin() {
+        return data();
+    }
+
+    const ReceivedFrame *begin() const {
+        return data();
+    }
+
+    const ReceivedFrame *cbegin() const {
+        return begin();
+    }
+
+    ReceivedFrame *end() {
+        return data() + size();
+    }
+
+    const ReceivedFrame *end() const {
+        return data() + size();
+    }
+
+    const ReceivedFrame *cend() const {
+        return end();
+    }
+
+    std::span<ReceivedFrame> span() {
+        return {data(), size()};
+    }
+
+    std::span<const ReceivedFrame> span() const {
+        return {data(), size()};
+    }
+
+    operator std::span<const ReceivedFrame>() const {
+        return span();
+    }
+
+    operator std::vector<ReceivedFrame>() const {
+        return {begin(), end()};
+    }
+
+  private:
+    void ensure_overflow() {
+        if (!overflow_frames_.empty()) {
+            return;
+        }
+        if (size_ == 1) {
+            overflow_frames_.push_back(std::move(inline_frame_));
+        }
+    }
+
+    ReceivedFrame inline_frame_;
+    std::size_t size_ = 0;
+    std::vector<ReceivedFrame> overflow_frames_;
+};
 
 struct FrameDecodeResult {
     Frame frame;

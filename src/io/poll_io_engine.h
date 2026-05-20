@@ -29,6 +29,7 @@ class PollIoEngine final : public QuicIoEngine {
     std::optional<QuicIoEngineEvent> wait(std::span<const int> socket_fds, int idle_timeout_ms,
                                           std::optional<quic::QuicCoreTimePoint> next_wakeup,
                                           std::string_view role_name) override;
+    bool has_pending_events() const override;
 
   private:
     std::deque<QuicIoEngineEvent> queued_events_;

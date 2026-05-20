@@ -98,10 +98,12 @@ class QuicPerfClient {
     quic::QuicCoreClientConnectionConfig make_client_open_config(std::uint64_t index) const;
     bool maybe_open_crr_connections(quic::QuicCoreTimePoint now);
     bool flush_json_result() const;
+    bool flush_pending_sends();
 
     QuicPerfConfig config_;
     quic::QuicCore core_;
     std::unique_ptr<io::QuicIoBackend> backend_;
+    PerfSendBuffer send_buffer_;
     quic::QuicRouteHandle primary_route_handle_ = 0;
     std::vector<std::byte> primary_address_validation_identity_;
     std::unordered_map<quic::QuicConnectionHandle, ConnectionState> connections_;

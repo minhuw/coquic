@@ -737,6 +737,9 @@ make_endpoint_inputs_from_io_event(const io::QuicIoEvent &event) {
                 .route_handle = event.datagram->route_handle,
                 .address_validation_identity = event.datagram->address_validation_identity,
                 .ecn = event.datagram->ecn,
+                .shared_bytes = event.datagram->shared_bytes,
+                .begin = event.datagram->begin,
+                .end = event.datagram->end,
             });
         }
         return inputs;

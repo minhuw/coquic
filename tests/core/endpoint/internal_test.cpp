@@ -577,6 +577,64 @@ TEST(QuicCoreEndpointInternalTest, EndpointDrainMarksContinuationAfterBatchCap) 
     EXPECT_EQ(send_effects_from(result).size(), 10u);
 }
 
+TEST(QuicCoreEndpointInternalTest, EndpointSendContinuationResumesPacedBurst) {
+    QuicCore endpoint(make_client_endpoint_config());
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0)));
+
+    auto &entry = endpoint.connections_.at(1);
+    *entry.connection = make_connected_client_connection();
+    entry.connection->config_.transport.pmtud_enabled = false;
+    entry.connection->config_.max_outbound_datagram_size = 1200;
+    entry.connection->congestion_controller_ = QuicCongestionController(
+        QuicCongestionControlAlgorithm::bbr, entry.connection->config_.max_outbound_datagram_size);
+    auto &bbr =
+        std::get<BbrCongestionController>(entry.connection->congestion_controller_.storage_);
+    bbr.mode_ = BbrCongestionController::Mode::probe_bw_cruise;
+    bbr.max_bandwidth_bytes_per_second_ = 120000000.0;
+    bbr.bandwidth_bytes_per_second_ = 120000000.0;
+    bbr.pacing_rate_bytes_per_second_ = 120000000.0;
+    bbr.min_rtt_ = std::chrono::milliseconds{1};
+    bbr.send_quantum_ = 400000;
+    entry.connection->congestion_controller_.congestion_window_ = 1u << 30u;
+    entry.connection->congestion_controller_.bytes_in_flight_ = 0;
+    entry.connection->connection_flow_control_.peer_max_data = 1u << 30u;
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(entry.connection->peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = 1u << 30u;
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = 1u << 30u;
+    entry.connection->initialize_peer_flow_control_from_transport_parameters();
+
+    const auto send_time = coquic::quic::test::test_time(1);
+    const auto first = endpoint.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                QuicCoreSendStreamData{
+                    .stream_id = 0,
+                    .bytes = std::vector<std::byte>(700000, std::byte{0x51}),
+                },
+        },
+        send_time);
+
+    EXPECT_TRUE(first.send_continuation_pending);
+    EXPECT_TRUE(endpoint.has_send_continuation_pending());
+    EXPECT_EQ(send_effects_from(first).size(), 256u);
+    ASSERT_TRUE(first.next_wakeup.has_value());
+    EXPECT_EQ(optional_value_or_terminate(first.next_wakeup), send_time);
+
+    const auto continued = endpoint.advance_endpoint(QuicCoreTimerExpired{}, send_time);
+
+    EXPECT_FALSE(continued.local_error.has_value());
+    EXPECT_FALSE(send_effects_from(continued).empty());
+    EXPECT_TRUE(datagram_has_application_stream(*entry.connection,
+                                                send_effects_from(continued).front().bytes));
+}
+
 TEST(QuicCoreEndpointInternalTest, LegacyDrainMarksContinuationAndCarriesPacketInspection) {
     QuicCore legacy_core(coquic::quic::test::make_client_core_config());
     *legacy_core.connection_ = make_connected_client_connection();

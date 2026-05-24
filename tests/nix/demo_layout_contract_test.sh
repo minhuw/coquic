@@ -6,7 +6,10 @@ cd "${repo_root}"
 
 required_paths=(
   "demo/wasm-quic/index.html"
+  "demo/wasm-quic/workbench.html"
   "demo/wasm-quic/quic-demo.js"
+  "demo/wasm-quic/perf-comparison.html"
+  "demo/wasm-quic/perf-comparison.js"
   "demo/h3-server/Dockerfile"
   "demo/deploy/package-demo.sh"
   "demo/deploy/deploy-remote.sh"
@@ -53,7 +56,10 @@ required_doc_markers = [
     "demo/deploy/deploy-remote.sh",
     "demo/deploy/coquic-demo.service",
     ".github/workflows/deploy-demo.yml",
+    ".github/workflows/perf.yml",
     "COQUIC_DEMO_REMOTE_SSH_KEY",
+    "perf-results.json",
+    "/opt/coquic-demo/current/site/perf-results.json",
     "COQUIC_DEMO_CERT_CHAIN_PEM",
     "COQUIC_DEMO_PRIVATE_KEY_PEM",
     "coquic.minhuw.dev",

@@ -13,7 +13,7 @@ jobs:
   perf:
     name: Advisory QUIC Perf
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -36,24 +36,114 @@ jobs:
       - name: Perf Harness Contract
         run: bash tests/nix/perf_harness_test.sh
 
-      - name: Run QUIC Perf CI Matrix (NewReno + CUBIC + BBR + Copa)
-        run: bash bench/run-host-matrix.sh --preset ci
+      - name: Run CoQUIC Perf CI Matrix (NewReno + CUBIC + BBR + Copa)
+        id: perf_coquic
+        continue-on-error: true
+        run: PERF_RESULTS_ROOT=.bench-results/coquic bash bench/run-host-matrix.sh --preset ci
+
+      - name: Run quic-go Paired Baseline
+        id: perf_quic_go
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/quic-go \
+            PERF_CLIENT_IMPL=quic-go \
+            PERF_SERVER_IMPL=quic-go \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
+      - name: Run quinn Paired Baseline
+        id: perf_quinn
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/quinn \
+            PERF_CLIENT_IMPL=quinn \
+            PERF_SERVER_IMPL=quinn \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
+      - name: Run picoquic Paired Baseline
+        id: perf_picoquic
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/picoquic \
+            PERF_CLIENT_IMPL=picoquic \
+            PERF_SERVER_IMPL=picoquic \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
 
       - name: Publish Perf Summary
         if: always()
         run: |
-          if [ -f .bench-results/manifest.json ]; then
-            python3 scripts/render-perf-summary.py               --manifest .bench-results/manifest.json               --event-name "${GITHUB_EVENT_NAME}"               --commit "${GITHUB_SHA}" >> "${GITHUB_STEP_SUMMARY}"
-          else
-            {
-              echo '## Advisory QUIC Perf'
-              echo
-              echo "Event: \`${GITHUB_EVENT_NAME}\`"
-              echo "Commit: \`${GITHUB_SHA}\`"
-              echo
-              echo 'Benchmark run did not produce `.bench-results/manifest.json`.'
-            } >> "${GITHUB_STEP_SUMMARY}"
+          python3 scripts/render-perf-comparison.py \
+            --manifest coquic=.bench-results/coquic/manifest.json \
+            --manifest quic-go=.bench-results/quic-go/manifest.json \
+            --manifest quinn=.bench-results/quinn/manifest.json \
+            --manifest picoquic=.bench-results/picoquic/manifest.json \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --commit "${GITHUB_SHA}" \
+            --json-out .bench-results/perf-results.json >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Configure Demo SSH
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s' "${COQUIC_DEMO_REMOTE_SSH_KEY}" > "${RUNNER_TEMP}/coquic-demo.key"
+          cat > "${HOME}/.ssh/known_hosts" <<'EOF'
+          coquic.minhuw.dev ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC/itFBGPd3dJ3Lgn1gx9n3i2HZox12SEmEAexK2fNT0F/PcwbxWuLX8oy08dEUu40IH3DIT1vTlf5bFzZKLVr3+pZn0JpGLSR2MAE14bvsfaoXbiZkZcliCv5tmvPx041qgAfOhQarqkKoi9J5AMxttWkc/Cr2huzVLlG/t3PJ0D3aB4XOzPCB+orSfbY4D4QWvlkEK29HN6mbGwJhSj+/V1YMubges/di6x9HNm0AGHRwSr4PAPFxQx2KMKfTFdrl21eOTQi29UHk1sI7C0Vg02TCO4TMCDRb99akAA0+Qrw8kt1d7Fh8k+3qNDY+tCnBmjAum74ATgRyvIrgLQ4Wk5QXE3NMPWNyLgNY2vYXv9Izl2GeH9PSjU6aACIXVpKEnWBCo0y6x9DZEA3Dfz4EiV9cy4fs7+W1likxhEVaPouTDtQH7EibHIdOoO++vdlmyYk2EG9Kn6W/Zqo55K+sOQ/K0S0sMuWIZQW2czAOpzs4R519WOIUNBzXkZ6rZqE=
+          coquic.minhuw.dev ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCjTT5KdjyCQ3G04Z8mUUOkXAqsdDuU4K5bB3jXi5B3aIzYK+2f0TT0XE3G0/r/KmZoSHYxb21TtjykFa47XFSA=
+          coquic.minhuw.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILi5VjtrGcYlzyYEXd4/PzQJXBjZ028DA6nJ7Xu50CJh
+          EOF
+          chmod 600 "${RUNNER_TEMP}/coquic-demo.key" "${HOME}/.ssh/known_hosts"
+
+      - name: Upload Perf Results To Demo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          if [ ! -f .bench-results/perf-results.json ]; then
+            echo "missing .bench-results/perf-results.json" >&2
+            exit 1
           fi
+          scp \
+            -P 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            .bench-results/perf-results.json \
+            minhuw@coquic.minhuw.dev:/tmp/coquic-perf-results.json
+          ssh \
+            -p 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            minhuw@coquic.minhuw.dev \
+            "sudo install -m 644 /tmp/coquic-perf-results.json /opt/coquic-demo/current/site/perf-results.json && rm -f /tmp/coquic-perf-results.json"
+
+      - name: Fail On Perf Matrix Errors
+        if: always()
+        run: |
+          failed=0
+          check_step() {
+            local label="$1"
+            local outcome="$2"
+            if [ "${outcome}" != "success" ]; then
+              echo "${label} perf step finished with outcome: ${outcome}" >&2
+              failed=1
+            fi
+          }
+          check_step "CoQUIC" "${{ steps.perf_coquic.outcome }}"
+          check_step "quic-go" "${{ steps.perf_quic_go.outcome }}"
+          check_step "quinn" "${{ steps.perf_quinn.outcome }}"
+          check_step "picoquic" "${{ steps.perf_picoquic.outcome }}"
+          exit "${failed}"
 
       - name: Upload Perf Artifacts
         if: always()

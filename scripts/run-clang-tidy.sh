@@ -9,6 +9,18 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
+if [ -z "${COQUIC_CLANG_TIDY_IN_NIX:-}" ] &&
+    { [ -z "${GTEST_INCLUDE_DIR:-}" ] ||
+      [ -z "${SPDLOG_INCLUDE_DIR:-}" ] ||
+      [ -z "${FMT_INCLUDE_DIR:-}" ] ||
+      [ -z "${LIBURING_INCLUDE_DIR:-}" ]; }; then
+    command -v nix >/dev/null || {
+        echo "clang-tidy requires nix develop or the coquic build environment" >&2
+        exit 1
+    }
+    exec nix develop -c env COQUIC_CLANG_TIDY_IN_NIX=1 bash "${BASH_SOURCE[0]}" "$@"
+fi
+
 cd "${repo_root}"
 
 "${repo_root}/scripts/refresh-compile-commands.sh"

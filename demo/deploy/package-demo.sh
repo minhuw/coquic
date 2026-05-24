@@ -23,7 +23,7 @@ if is_same_or_descendant "${output_dir}" "${source_dir}" || is_same_or_descendan
   exit 1
 fi
 
-for required_file in index.html quic-demo.js coquic-wasm-quic.wasm; do
+for required_file in index.html workbench.html quic-demo.js perf-comparison.html perf-comparison.js coquic-wasm-quic.wasm; do
   if [[ ! -f "${source_dir}/${required_file}" ]]; then
     echo "wasm demo source is missing ${required_file}: ${source_dir}" >&2
     exit 1

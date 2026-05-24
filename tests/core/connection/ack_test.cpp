@@ -5703,11 +5703,400 @@ TEST(QuicCoreTest, BbrPacingBlocksFurtherApplicationSendsUntilPacingWakeup) {
     const auto pacing_deadline =
         connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
     ASSERT_TRUE(pacing_deadline.has_value());
-    EXPECT_EQ(connection.next_wakeup(), pacing_deadline);
+    const auto quantum_deadline = connection.congestion_controller_.next_send_time(
+        connection.congestion_controller_.pacing_send_quantum());
+    ASSERT_TRUE(quantum_deadline.has_value());
+    EXPECT_EQ(connection.next_wakeup(), quantum_deadline);
+    EXPECT_FALSE(connection.has_sendable_datagram(send_time + std::chrono::milliseconds(9)));
+    EXPECT_FALSE(connection.has_sendable_datagram(optional_value_or_terminate(pacing_deadline)));
+    EXPECT_TRUE(connection.has_sendable_datagram(optional_value_or_terminate(quantum_deadline)));
     EXPECT_TRUE(
         connection.drain_outbound_datagram(send_time + std::chrono::milliseconds(9)).empty());
     EXPECT_FALSE(
-        connection.drain_outbound_datagram(optional_value_or_terminate(pacing_deadline)).empty());
+        connection.drain_outbound_datagram(optional_value_or_terminate(quantum_deadline)).empty());
+}
+
+TEST(QuicCoreTest, BbrPacingWakeupUsesSendQuantumForPureStreamData) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.pmtud_enabled = false;
+    connection.congestion_controller_ = coquic::quic::QuicCongestionController(
+        coquic::quic::QuicCongestionControlAlgorithm::bbr,
+        std::max<std::size_t>(1200, connection.config_.max_outbound_datagram_size));
+    auto &bbr =
+        std::get<coquic::quic::BbrCongestionController>(connection.congestion_controller_.storage_);
+    bbr.mode_ = coquic::quic::BbrCongestionController::Mode::probe_bw_cruise;
+    bbr.max_bandwidth_bytes_per_second_ = 120000.0;
+    bbr.bandwidth_bytes_per_second_ = 120000.0;
+    bbr.pacing_rate_bytes_per_second_ = 120000.0;
+    bbr.min_rtt_ = std::chrono::milliseconds{100};
+    bbr.send_quantum_ = 4800;
+
+    const auto payload =
+        std::vector<std::byte>(static_cast<std::size_t>(32u) * 1024u, std::byte{0x59});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    const auto send_time = coquic::quic::test::test_time(1);
+    ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+    ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+
+    const auto single_datagram_deadline =
+        connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
+    const auto quantum_deadline = connection.congestion_controller_.next_send_time(
+        connection.congestion_controller_.pacing_send_quantum());
+    ASSERT_TRUE(single_datagram_deadline.has_value());
+    ASSERT_TRUE(quantum_deadline.has_value());
+    EXPECT_LT(optional_value_or_terminate(single_datagram_deadline),
+              optional_value_or_terminate(quantum_deadline));
+    EXPECT_EQ(connection.pacing_deadline(), quantum_deadline);
+    EXPECT_EQ(connection.next_wakeup(), quantum_deadline);
+    EXPECT_FALSE(
+        connection.has_sendable_datagram(optional_value_or_terminate(single_datagram_deadline)));
+    EXPECT_TRUE(connection.has_sendable_datagram(optional_value_or_terminate(quantum_deadline)));
+}
+
+TEST(QuicCoreTest, BbrPacingWakeupUsesSingleDatagramWhenRemainingStreamDataIsSmall) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.pmtud_enabled = false;
+    connection.congestion_controller_ = coquic::quic::QuicCongestionController(
+        coquic::quic::QuicCongestionControlAlgorithm::bbr,
+        std::max<std::size_t>(1200, connection.config_.max_outbound_datagram_size));
+    auto &bbr =
+        std::get<coquic::quic::BbrCongestionController>(connection.congestion_controller_.storage_);
+    bbr.mode_ = coquic::quic::BbrCongestionController::Mode::probe_bw_cruise;
+    bbr.max_bandwidth_bytes_per_second_ = 120000.0;
+    bbr.bandwidth_bytes_per_second_ = 120000.0;
+    bbr.pacing_rate_bytes_per_second_ = 120000.0;
+    bbr.min_rtt_ = std::chrono::milliseconds{100};
+    bbr.send_quantum_ = 4800;
+
+    const auto payload = std::vector<std::byte>(
+        static_cast<std::size_t>(5u) * connection.outbound_datagram_size_limit(), std::byte{0x5b});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    const auto send_time = coquic::quic::test::test_time(1);
+    for (std::size_t index = 0; index < 4; ++index) {
+        ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+    }
+
+    const auto single_datagram_deadline =
+        connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
+    const auto quantum_deadline = connection.congestion_controller_.next_send_time(
+        connection.congestion_controller_.pacing_send_quantum());
+    ASSERT_TRUE(single_datagram_deadline.has_value());
+    ASSERT_TRUE(quantum_deadline.has_value());
+    EXPECT_LT(optional_value_or_terminate(single_datagram_deadline),
+              optional_value_or_terminate(quantum_deadline));
+    EXPECT_EQ(connection.pacing_deadline(), single_datagram_deadline);
+    EXPECT_EQ(connection.next_wakeup(), single_datagram_deadline);
+}
+
+TEST(QuicCoreTest, BbrPacingWakeupKeepsFullDatagramMinimumWithSmallCwndRemainder) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.pmtud_enabled = false;
+    connection.congestion_controller_ = coquic::quic::QuicCongestionController(
+        coquic::quic::QuicCongestionControlAlgorithm::bbr,
+        std::max<std::size_t>(1200, connection.config_.max_outbound_datagram_size));
+    auto &bbr =
+        std::get<coquic::quic::BbrCongestionController>(connection.congestion_controller_.storage_);
+    bbr.mode_ = coquic::quic::BbrCongestionController::Mode::probe_bw_cruise;
+    bbr.max_bandwidth_bytes_per_second_ = 120000.0;
+    bbr.bandwidth_bytes_per_second_ = 120000.0;
+    bbr.pacing_rate_bytes_per_second_ = 120000.0;
+    bbr.min_rtt_ = std::chrono::milliseconds{100};
+    bbr.send_quantum_ = 4800;
+
+    const auto payload = std::vector<std::byte>(4096, std::byte{0x5a});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+    connection.congestion_controller_.congestion_window_ =
+        connection.outbound_datagram_size_limit();
+    connection.congestion_controller_.bytes_in_flight_ =
+        connection.outbound_datagram_size_limit() - 1u;
+
+    EXPECT_FALSE(connection.has_sendable_datagram(coquic::quic::test::test_time(1)));
+    EXPECT_FALSE(connection.pacing_deadline().has_value());
+}
+
+TEST(QuicCoreTest, CorePacingWakeupDrainsWithoutRunningConnectionTimeout) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.pmtud_enabled = false;
+    connection.congestion_controller_ = coquic::quic::QuicCongestionController(
+        coquic::quic::QuicCongestionControlAlgorithm::bbr,
+        std::max<std::size_t>(1200, connection.config_.max_outbound_datagram_size));
+    auto &bbr =
+        std::get<coquic::quic::BbrCongestionController>(connection.congestion_controller_.storage_);
+    bbr.mode_ = coquic::quic::BbrCongestionController::Mode::probe_bw_cruise;
+    bbr.max_bandwidth_bytes_per_second_ = 120000.0;
+    bbr.bandwidth_bytes_per_second_ = 120000.0;
+    bbr.pacing_rate_bytes_per_second_ = 120000.0;
+    bbr.min_rtt_ = std::chrono::milliseconds{100};
+
+    const auto payload =
+        std::vector<std::byte>(static_cast<std::size_t>(8u) * 1024u, std::byte{0x55});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    const auto send_time = coquic::quic::test::test_time(1);
+    ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+    ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+
+    const auto pacing_deadline = connection.pacing_deadline();
+    ASSERT_TRUE(pacing_deadline.has_value());
+    const auto due = optional_value_or_terminate(pacing_deadline);
+    connection.application_space_.received_packets.record_received(
+        /*packet_number=*/41, /*ack_eliciting=*/true, send_time);
+    connection.application_space_.pending_ack_deadline = due + std::chrono::seconds{1};
+    ASSERT_FALSE(connection.non_pacing_wakeup_due(due));
+
+    coquic::quic::QuicCore core(coquic::quic::test::make_client_core_config());
+    core.connection_ = std::make_unique<coquic::quic::QuicConnection>(std::move(connection));
+    auto *entry = core.legacy_entry();
+    ASSERT_NE(entry, nullptr);
+    ASSERT_FALSE(coquic::quic::QuicCore::should_run_connection_timeout(*entry, due));
+    const auto result = core.advance(coquic::quic::QuicCoreTimerExpired{}, due);
+
+    EXPECT_FALSE(result.local_error.has_value());
+    EXPECT_FALSE(result.effects.empty());
+    EXPECT_TRUE(std::any_of(result.effects.begin(), result.effects.end(), [](const auto &effect) {
+        return std::holds_alternative<coquic::quic::QuicCoreSendDatagram>(effect);
+    }));
+    ASSERT_NE(core.connection_.get(), nullptr);
+    EXPECT_FALSE(core.connection_->application_space_.force_ack_send);
+}
+
+TEST(QuicCoreTest, CoreTimerStillRunsConnectionTimeoutForDueAckDeadline) {
+    auto connection = make_connected_client_connection();
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = 4096;
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = 4096;
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.application_space_.received_packets.record_received(
+        /*packet_number=*/41, /*ack_eliciting=*/true, coquic::quic::test::test_time(1));
+    connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(2);
+
+    coquic::quic::QuicCore core(coquic::quic::test::make_client_core_config());
+    core.connection_ = std::make_unique<coquic::quic::QuicConnection>(std::move(connection));
+    auto *entry = core.legacy_entry();
+    ASSERT_NE(entry, nullptr);
+    ASSERT_TRUE(coquic::quic::QuicCore::should_run_connection_timeout(
+        *entry, coquic::quic::test::test_time(2)));
+    const auto result =
+        core.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(2));
+
+    EXPECT_FALSE(result.local_error.has_value());
+    ASSERT_NE(core.connection_.get(), nullptr);
+    const auto send_it =
+        std::find_if(result.effects.begin(), result.effects.end(), [](const auto &effect) {
+            return std::holds_alternative<coquic::quic::QuicCoreSendDatagram>(effect);
+        });
+    ASSERT_NE(send_it, result.effects.end());
+    const auto &send = std::get<coquic::quic::QuicCoreSendDatagram>(*send_it);
+    EXPECT_TRUE(datagram_has_application_ack(*core.connection_, send.bytes));
+    EXPECT_FALSE(core.connection_->application_space_.force_ack_send);
+    EXPECT_FALSE(core.connection_->application_space_.pending_ack_deadline.has_value());
+}
+
+TEST(QuicCoreTest, HasSendableDatagramRejectsCwndBlockedApplicationStreamData) {
+    auto connection = make_connected_client_connection();
+    const auto payload = std::vector<std::byte>(4096, std::byte{0x56});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+    ASSERT_TRUE(connection.minimum_pending_application_stream_datagram_bytes().has_value());
+    const auto minimum_datagram_bytes =
+        optional_value_or_terminate(connection.minimum_pending_application_stream_datagram_bytes());
+    ASSERT_GT(connection.outbound_datagram_size_limit(), minimum_datagram_bytes);
+    connection.congestion_controller_.congestion_window_ =
+        connection.outbound_datagram_size_limit();
+    connection.congestion_controller_.bytes_in_flight_ =
+        connection.outbound_datagram_size_limit() - minimum_datagram_bytes;
+
+    EXPECT_FALSE(connection.has_sendable_datagram(coquic::quic::test::test_time(1)));
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
+}
+
+TEST(QuicCoreTest, HasSendableDatagramAllowsFullDatagramApplicationStreamData) {
+    auto connection = make_connected_client_connection();
+    const auto payload = std::vector<std::byte>(4096, std::byte{0x58});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+    connection.congestion_controller_.congestion_window_ =
+        connection.outbound_datagram_size_limit();
+    connection.congestion_controller_.bytes_in_flight_ = 0;
+
+    EXPECT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(1)));
+    EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
+}
+
+TEST(QuicCoreTest, HasSendableDatagramAllowsAckOnlyWhenApplicationStreamDataIsCwndBlocked) {
+    auto connection = make_connected_client_connection();
+    const auto payload = std::vector<std::byte>(4096, std::byte{0x57});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+    const auto minimum_datagram_bytes =
+        optional_value_or_terminate(connection.minimum_pending_application_stream_datagram_bytes());
+    connection.congestion_controller_.congestion_window_ =
+        connection.outbound_datagram_size_limit();
+    connection.congestion_controller_.bytes_in_flight_ =
+        connection.outbound_datagram_size_limit() - minimum_datagram_bytes;
+    connection.application_space_.received_packets.record_received(
+        /*packet_number=*/41, /*ack_eliciting=*/true, coquic::quic::test::test_time(1));
+    connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(1);
+
+    EXPECT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(2)));
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_TRUE(datagram_has_application_ack(connection, datagram));
+}
+
+TEST(QuicCoreTest, AckDueBeforeBbrQuantumDoesNotPullApplicationStreamData) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.pmtud_enabled = false;
+    connection.congestion_controller_ = coquic::quic::QuicCongestionController(
+        coquic::quic::QuicCongestionControlAlgorithm::bbr,
+        std::max<std::size_t>(1200, connection.config_.max_outbound_datagram_size));
+    auto &bbr =
+        std::get<coquic::quic::BbrCongestionController>(connection.congestion_controller_.storage_);
+    bbr.mode_ = coquic::quic::BbrCongestionController::Mode::probe_bw_cruise;
+    bbr.max_bandwidth_bytes_per_second_ = 120000.0;
+    bbr.bandwidth_bytes_per_second_ = 120000.0;
+    bbr.pacing_rate_bytes_per_second_ = 120000.0;
+    bbr.min_rtt_ = std::chrono::milliseconds{100};
+    bbr.send_quantum_ = 4800;
+
+    const auto payload =
+        std::vector<std::byte>(static_cast<std::size_t>(32u) * 1024u, std::byte{0x5c});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    const auto send_time = coquic::quic::test::test_time(1);
+    ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+    ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+
+    const auto single_datagram_deadline =
+        connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
+    const auto quantum_deadline = connection.congestion_controller_.next_send_time(
+        connection.congestion_controller_.pacing_send_quantum());
+    ASSERT_TRUE(single_datagram_deadline.has_value());
+    ASSERT_TRUE(quantum_deadline.has_value());
+    ASSERT_LT(optional_value_or_terminate(single_datagram_deadline),
+              optional_value_or_terminate(quantum_deadline));
+
+    const auto ack_due = send_time + std::chrono::milliseconds{1};
+    ASSERT_LT(ack_due, optional_value_or_terminate(quantum_deadline));
+    connection.application_space_.received_packets.record_received(
+        /*packet_number=*/41, /*ack_eliciting=*/true, send_time);
+    connection.application_space_.pending_ack_deadline = ack_due;
+
+    EXPECT_TRUE(connection.has_sendable_datagram(ack_due));
+    const auto ack_datagram = connection.drain_outbound_datagram(ack_due);
+    ASSERT_FALSE(ack_datagram.empty());
+    EXPECT_TRUE(datagram_has_application_ack(connection, ack_datagram));
+    EXPECT_FALSE(datagram_has_application_stream(connection, ack_datagram));
+    EXPECT_FALSE(connection.last_drained_allows_send_continuation());
+    EXPECT_TRUE(connection.has_pending_fresh_application_stream_send());
+    EXPECT_FALSE(connection.has_sendable_datagram(ack_due));
+    EXPECT_TRUE(connection.has_sendable_datagram(optional_value_or_terminate(quantum_deadline)));
+
+    const auto stream_datagram =
+        connection.drain_outbound_datagram(optional_value_or_terminate(quantum_deadline));
+    ASSERT_FALSE(stream_datagram.empty());
+    EXPECT_FALSE(datagram_has_application_ack(connection, stream_datagram));
+    EXPECT_TRUE(datagram_has_application_stream(connection, stream_datagram));
+    EXPECT_TRUE(connection.last_drained_allows_send_continuation());
+}
+
+TEST(QuicCoreTest, ContinuedBbrPacedBurstCanSendBeforeNextQuantumDeadline) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.pmtud_enabled = false;
+    connection.congestion_controller_ = coquic::quic::QuicCongestionController(
+        coquic::quic::QuicCongestionControlAlgorithm::bbr,
+        std::max<std::size_t>(1200, connection.config_.max_outbound_datagram_size));
+    auto &bbr =
+        std::get<coquic::quic::BbrCongestionController>(connection.congestion_controller_.storage_);
+    bbr.mode_ = coquic::quic::BbrCongestionController::Mode::probe_bw_cruise;
+    bbr.max_bandwidth_bytes_per_second_ = 120000.0;
+    bbr.bandwidth_bytes_per_second_ = 120000.0;
+    bbr.pacing_rate_bytes_per_second_ = 120000.0;
+    bbr.min_rtt_ = std::chrono::milliseconds{100};
+    bbr.send_quantum_ = 4800;
+
+    const auto payload =
+        std::vector<std::byte>(static_cast<std::size_t>(32u) * 1024u, std::byte{0x5d});
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.initial_max_data = payload.size();
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = payload.size();
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = static_cast<std::size_t>(1024) * 1024u;
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    const auto send_time = coquic::quic::test::test_time(1);
+    ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+    ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
+
+    const auto quantum_deadline = connection.congestion_controller_.next_send_time(
+        connection.congestion_controller_.pacing_send_quantum());
+    ASSERT_TRUE(quantum_deadline.has_value());
+    const auto due = optional_value_or_terminate(quantum_deadline);
+    std::size_t normally_paced_datagrams = 0;
+    while (connection.has_sendable_datagram(due, /*continue_paced_burst=*/false)) {
+        const auto stream_datagram =
+            connection.drain_outbound_datagram(due, /*continue_paced_burst=*/false);
+        ASSERT_FALSE(stream_datagram.empty());
+        EXPECT_TRUE(datagram_has_application_stream(connection, stream_datagram));
+        EXPECT_TRUE(connection.last_drained_allows_send_continuation());
+        ++normally_paced_datagrams;
+        ASSERT_LT(normally_paced_datagrams, 8u);
+    }
+    EXPECT_GT(normally_paced_datagrams, 0u);
+    ASSERT_TRUE(connection.has_pending_fresh_application_stream_send());
+    EXPECT_FALSE(connection.has_sendable_datagram(due));
+    EXPECT_TRUE(connection.has_sendable_datagram(due, /*continue_paced_burst=*/true));
+
+    const auto continued_stream_datagram =
+        connection.drain_outbound_datagram(due, /*continue_paced_burst=*/true);
+    ASSERT_FALSE(continued_stream_datagram.empty());
+    EXPECT_TRUE(datagram_has_application_stream(connection, continued_stream_datagram));
+    EXPECT_TRUE(connection.last_drained_allows_send_continuation());
 }
 
 TEST(QuicCoreTest, PathResponseCanBeSentWhileApplicationStreamDataIsQueued) {

@@ -849,6 +849,10 @@ TEST(SocketIoBackendTest, PollIoEngineInternalCoverageHookExercisesRemainingBran
                     poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_tests());
 }
 
+TEST(SocketIoBackendTest, PollIoEngineRestampsQueuedReceiveEvents) {
+    EXPECT_TRUE(coquic::io::test::poll_io_engine_restamps_queued_receive_events_for_tests());
+}
+
 TEST(SocketIoBackendTest, PollIoEngineSendManyBatchingCoverageHookExercisesBatchPaths) {
     EXPECT_TRUE(coquic::io::test::poll_io_engine_send_many_batching_coverage_for_tests());
 }

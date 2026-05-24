@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="coquic-perf-marker" content="coquic-perf-comparison-v1">
+    <title>coquic performance comparison</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #091015;
+        --surface: #0f1a21;
+        --surface-2: #14232c;
+        --surface-3: #1b2d37;
+        --ink: #edf7f7;
+        --muted: #91a5ad;
+        --soft: #c3d4d8;
+        --line: #253943;
+        --line-strong: #38505b;
+        --client: #24b5a6;
+        --client-ink: #9ff4e8;
+        --server: #e39a3b;
+        --server-ink: #ffd8a3;
+        --packet: #63a6ff;
+        --packet-ink: #cfe5ff;
+        --danger: #ff786d;
+        --warning: #f5c451;
+        --ok: #6be0a3;
+        --shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+        --radius: 8px;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-width: 320px;
+        background: var(--bg);
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: linear-gradient(180deg, #0b141a 0%, #091015 48%, #071014 100%);
+        letter-spacing: 0;
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+        background-size: 44px 44px;
+        mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.95), transparent 78%);
+      }
+
+      main {
+        position: relative;
+        width: min(100%, 1380px);
+        margin: 0 auto;
+        padding: 22px 18px 40px;
+      }
+
+      header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 20px;
+        min-height: 92px;
+        padding: 18px 0 20px;
+        border-bottom: 1px solid rgba(145, 165, 173, 0.22);
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        margin-top: 8px;
+        font-size: clamp(28px, 4vw, 46px);
+        line-height: 1.02;
+        font-weight: 820;
+        max-width: 760px;
+      }
+
+      h2 {
+        font-size: 14px;
+        line-height: 1.2;
+        font-weight: 800;
+      }
+
+      button,
+      a {
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--client-ink);
+        font-family: var(--mono);
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--client);
+        box-shadow: 0 0 0 5px rgba(36, 181, 166, 0.14);
+      }
+
+      .subhead {
+        max-width: 760px;
+        margin-top: 10px;
+        color: var(--soft);
+        font-size: 15px;
+        line-height: 1.55;
+      }
+
+      .header-nav {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .header-nav a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        padding: 0 14px;
+        border: 1px solid rgba(145, 165, 173, 0.28);
+        border-radius: 7px;
+        color: var(--soft);
+        font-size: 13px;
+        font-weight: 800;
+        text-decoration: none;
+        transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+      }
+
+      .header-nav a:hover,
+      .header-nav a:focus-visible {
+        border-color: rgba(111, 243, 226, 0.72);
+        color: var(--ink);
+        background: rgba(36, 181, 166, 0.1);
+        outline: none;
+      }
+
+      .header-nav a[aria-current="page"] {
+        border-color: rgba(36, 181, 166, 0.68);
+        color: var(--client-ink);
+        background: rgba(36, 181, 166, 0.12);
+      }
+
+      .snapshot-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin: 18px 0 14px;
+      }
+
+      .stat-card,
+      .chart-panel,
+      .table-panel,
+      .source-panel {
+        border: 1px solid rgba(145, 165, 173, 0.24);
+        border-radius: var(--radius);
+        background: rgba(15, 26, 33, 0.92);
+        box-shadow: var(--shadow), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+      }
+
+      .stat-card {
+        display: grid;
+        align-content: start;
+        gap: 8px;
+        min-height: 132px;
+        padding: 14px;
+      }
+
+      .stat-card span {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .stat-card strong {
+        color: var(--ink);
+        font-family: var(--mono);
+        font-size: 22px;
+        line-height: 1.08;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .stat-card small {
+        color: var(--soft);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .comparison-shell {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 14px;
+        align-items: start;
+      }
+
+      .chart-panel,
+      .table-panel,
+      .source-panel {
+        min-width: 0;
+      }
+
+      .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 14px 12px;
+        border-bottom: 1px solid rgba(145, 165, 173, 0.18);
+      }
+
+      .panel-head p {
+        margin-top: 5px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+
+      .plot-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        padding: 14px;
+      }
+
+      .plot {
+        min-width: 0;
+        padding: 12px;
+        border: 1px solid rgba(145, 165, 173, 0.16);
+        border-radius: 7px;
+        background: rgba(5, 14, 18, 0.26);
+      }
+
+      .plot h3 {
+        color: var(--ink);
+        font-size: 13px;
+        line-height: 1.2;
+        font-weight: 850;
+      }
+
+      .plot p {
+        margin-top: 4px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+
+      .bar-list {
+        display: grid;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      .bar-row {
+        display: grid;
+        grid-template-columns: minmax(108px, 0.42fr) minmax(0, 1fr) minmax(92px, auto);
+        align-items: center;
+        gap: 10px;
+        min-height: 46px;
+      }
+
+      .bar-label {
+        display: grid;
+        gap: 3px;
+        min-width: 0;
+      }
+
+      .bar-label strong {
+        overflow: hidden;
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 850;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .bar-label span {
+        overflow: hidden;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .bar-track {
+        position: relative;
+        min-width: 0;
+        height: 13px;
+        overflow: hidden;
+        border: 1px solid rgba(145, 165, 173, 0.22);
+        border-radius: 999px;
+        background: rgba(5, 14, 18, 0.5);
+      }
+
+      .bar-fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: var(--bar-width, 0%);
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--bar-color), rgba(255, 255, 255, 0.26));
+      }
+
+      .bar-value {
+        color: var(--ink);
+        font-family: var(--mono);
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        min-width: 860px;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        padding: 11px 12px;
+        border-bottom: 1px solid rgba(145, 165, 173, 0.16);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      td {
+        color: var(--soft);
+        font-size: 13px;
+      }
+
+      td.metric {
+        color: var(--ink);
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+
+      th.metric {
+        text-align: right;
+      }
+
+      .impl-cell {
+        display: grid;
+        gap: 4px;
+      }
+
+      .impl-cell strong {
+        color: var(--ink);
+        font-size: 13px;
+      }
+
+      .impl-cell span {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 24px;
+        padding: 0 8px;
+        border: 1px solid rgba(145, 165, 173, 0.24);
+        border-radius: 999px;
+        color: var(--soft);
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .pill.ok {
+        border-color: rgba(107, 224, 163, 0.42);
+        color: var(--ok);
+      }
+
+      .pill.warn {
+        border-color: rgba(245, 196, 81, 0.48);
+        color: var(--warning);
+      }
+
+      .source-panel {
+        margin-top: 14px;
+      }
+
+      .source-list {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        padding: 14px;
+      }
+
+      .source-item {
+        display: grid;
+        gap: 7px;
+        min-height: 104px;
+        padding: 12px;
+        border: 1px solid rgba(145, 165, 173, 0.16);
+        border-radius: 7px;
+        background: rgba(5, 14, 18, 0.26);
+      }
+
+      .source-item strong {
+        color: var(--ink);
+        font-size: 13px;
+      }
+
+      .source-item span {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .adapter-note {
+        padding: 0 14px 14px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      @media (max-width: 1080px) {
+        .snapshot-grid,
+        .source-list {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .plot-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 680px) {
+        main {
+          padding: 14px 12px 28px;
+        }
+
+        header {
+          grid-template-columns: 1fr;
+          align-items: start;
+          gap: 16px;
+        }
+
+        h1 {
+          font-size: 31px;
+        }
+
+        .header-nav {
+          justify-content: flex-start;
+        }
+
+        .snapshot-grid,
+        .source-list {
+          grid-template-columns: 1fr;
+        }
+
+        .panel-head {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .bar-row {
+          grid-template-columns: 1fr;
+          align-items: start;
+          gap: 7px;
+          min-height: 72px;
+        }
+
+        .bar-value {
+          text-align: left;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <span class="eyebrow">QUIC performance</span>
+          <h1>coquic performance comparison</h1>
+          <p class="subhead">CI snapshot across CoQUIC congestion controls and paired quic-go, quinn, and picoquic baselines.</p>
+        </div>
+        <nav class="header-nav" aria-label="Demo views">
+          <a href="./index.html">Home</a>
+          <a href="./workbench.html">Workbench</a>
+          <a href="./perf-comparison.html" aria-current="page">Performance</a>
+        </nav>
+      </header>
+
+      <section class="snapshot-grid" id="snapshot-grid" aria-label="Performance snapshot"></section>
+
+      <section class="comparison-shell" aria-label="Performance comparison">
+        <div class="chart-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Performance Barplots</h2>
+              <p id="data-source-label">perf-results.json fallback snapshot</p>
+            </div>
+          </div>
+          <div class="plot-grid" id="plot-grid"></div>
+        </div>
+
+        <div class="table-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Implementation Matrix</h2>
+              <p>bulk_mib_per_s / rr_requests_per_s / crr_requests_per_s</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Implementation</th>
+                  <th>Pair</th>
+                  <th>CC</th>
+                  <th>Status</th>
+                  <th class="metric">Bulk MiB/s</th>
+                  <th class="metric">Bulk Gbit/s</th>
+                  <th class="metric">RR req/s</th>
+                  <th class="metric">CRR req/s</th>
+                </tr>
+              </thead>
+              <tbody id="comparison-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="source-panel" aria-label="Benchmark sources">
+        <div class="panel-head">
+          <div>
+            <h2>Benchmark Sources</h2>
+            <p>latest local CI manifests used as the demo seed</p>
+          </div>
+        </div>
+        <div class="source-list" id="source-list"></div>
+        <p class="adapter-note">picoquic is measured through the native pqbench adapter, so it is a paired picoquic baseline rather than the CoQUIC perf control-stream protocol.</p>
+      </section>
+    </main>
+    <script src="./perf-comparison.js"></script>
+  </body>
+</html>

@@ -7,6 +7,18 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 compile_commands="${repo_root}/compile_commands.json"
 lock_file="${repo_root}/.zig-cache/compile-commands.lock"
 
+if [ -z "${COQUIC_CLANG_TIDY_IN_NIX:-}" ] &&
+    { [ -z "${GTEST_INCLUDE_DIR:-}" ] ||
+      [ -z "${SPDLOG_INCLUDE_DIR:-}" ] ||
+      [ -z "${FMT_INCLUDE_DIR:-}" ] ||
+      [ -z "${LIBURING_INCLUDE_DIR:-}" ]; }; then
+    command -v nix >/dev/null || {
+        echo "clang-tidy compile database generation requires nix develop or the coquic build environment" >&2
+        exit 1
+    }
+    exec nix develop -c env COQUIC_CLANG_TIDY_IN_NIX=1 bash "${BASH_SOURCE[0]}"
+fi
+
 mkdir -p "${repo_root}/.zig-cache"
 exec 9>"${lock_file}"
 flock 9

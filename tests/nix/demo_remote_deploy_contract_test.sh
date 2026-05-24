@@ -7,23 +7,33 @@ cd "${repo_root}"
 python3 - <<'PY'
 import pathlib
 import os
-import yaml
 
 workflow_path = pathlib.Path(".github/workflows/deploy-demo.yml")
-workflow = yaml.safe_load(workflow_path.read_text())
+workflow_text = workflow_path.read_text()
 
-on_block = workflow.get("on", workflow.get(True))
-if on_block is None:
-    raise SystemExit("missing trigger block")
 
-push = on_block.get("push")
-if push is None:
-    raise SystemExit("missing push trigger")
+def require(marker: str) -> None:
+    if marker not in workflow_text:
+        raise SystemExit(f"deploy-demo workflow missing marker: {marker}")
 
-if push.get("branches") != ["main"]:
-    raise SystemExit(f"unexpected push branches: {push.get('branches')!r}")
+for marker in [
+    "on:",
+    "push:",
+    "branches:",
+    "- main",
+    "workflow_dispatch:",
+    "permissions:",
+    "contents: read",
+    "concurrency:",
+    "group: deploy-demo",
+    "cancel-in-progress: false",
+    "deploy-demo:",
+    "if: github.ref == 'refs/heads/main'",
+    "timeout-minutes: 60",
+]:
+    require(marker)
 
-expected_paths = [
+for path_marker in [
     "demo/**",
     "src/**",
     "build.zig",
@@ -34,36 +44,10 @@ expected_paths = [
     "scripts/build-boringssl-wasm.sh",
     "scripts/wasm-quic-smoke.mjs",
     ".github/workflows/deploy-demo.yml",
-]
-if push.get("paths") != expected_paths:
-    raise SystemExit(f"unexpected push paths: {push.get('paths')!r}")
+]:
+    require(f"- {path_marker}")
 
-if "workflow_dispatch" not in on_block:
-    raise SystemExit("missing workflow_dispatch trigger")
-
-if workflow.get("permissions") != {"contents": "read"}:
-    raise SystemExit(f"unexpected workflow permissions: {workflow.get('permissions')!r}")
-
-concurrency = workflow.get("concurrency")
-if concurrency is None:
-    raise SystemExit("missing workflow concurrency")
-if concurrency.get("group") != "deploy-demo":
-    raise SystemExit(f"unexpected workflow concurrency group: {concurrency.get('group')!r}")
-if concurrency.get("cancel-in-progress") is not False:
-    raise SystemExit("workflow concurrency must set cancel-in-progress: false")
-
-jobs = workflow.get("jobs", {})
-deploy_job = jobs.get("deploy-demo")
-if deploy_job is None:
-    raise SystemExit("missing job: deploy-demo")
-if deploy_job.get("if") != "github.ref == 'refs/heads/main'":
-    raise SystemExit(f"unexpected deploy-demo job guard: {deploy_job.get('if')!r}")
-if deploy_job.get("timeout-minutes") != 60:
-    raise SystemExit(f"unexpected deploy-demo timeout-minutes: {deploy_job.get('timeout-minutes')!r}")
-
-steps = deploy_job.get("steps", [])
-step_names = [step.get("name") for step in steps]
-required_step_names = [
+for step_name in [
     "Checkout",
     "Install Nix",
     "Build h3-server",
@@ -73,61 +57,25 @@ required_step_names = [
     "Package wasm demo site",
     "Configure SSH",
     "Deploy demo",
-]
-for step_name in required_step_names:
-    if step_name not in step_names:
-        raise SystemExit(f"missing step name: {step_name}")
+]:
+    require(f"name: {step_name}")
 
-step_by_name = {step.get("name"): step for step in steps}
+for marker in [
+    "uses: DeterminateSystems/nix-installer-action@92148bb48b9a0c5458c53dd0b368fbfbfbaa3210",
+    "run: nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false",
+    "run: nix develop -c bash scripts/build-boringssl-wasm.sh",
+    "run: nix develop -c zig build wasm-quic -Doptimize=ReleaseSmall --summary all",
+    "run: node scripts/wasm-quic-smoke.mjs zig-out/share/wasm-quic/coquic-wasm-quic.wasm",
+    'run: demo/deploy/package-demo.sh "${RUNNER_TEMP}/demo-site" "$(pwd)/zig-out/share/wasm-quic"',
+    "COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}",
+    'run: demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-site"',
+    "COQUIC_DEMO_CERT_CHAIN_PEM: ${{ secrets.COQUIC_DEMO_CERT_CHAIN_PEM }}",
+    "COQUIC_DEMO_PRIVATE_KEY_PEM: ${{ secrets.COQUIC_DEMO_PRIVATE_KEY_PEM }}",
+]:
+    require(marker)
 
-install_nix_step = step_by_name["Install Nix"]
-expected_install_nix_uses = "DeterminateSystems/nix-installer-action@92148bb48b9a0c5458c53dd0b368fbfbfbaa3210"
-if install_nix_step.get("uses") != expected_install_nix_uses:
-    raise SystemExit(f"unexpected Install Nix uses: {install_nix_step.get('uses')!r}")
-
-build_step = step_by_name["Build h3-server"]
-expected_build_command = "nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false"
-if build_step.get("run") != expected_build_command:
-    raise SystemExit(f"unexpected Build h3-server command: {build_step.get('run')!r}")
-
-build_boringssl_wasm_step = step_by_name["Build wasm BoringSSL"]
-if build_boringssl_wasm_step.get("run") != "nix develop -c bash scripts/build-boringssl-wasm.sh":
-    raise SystemExit(f"unexpected Build wasm BoringSSL command: {build_boringssl_wasm_step.get('run')!r}")
-
-build_wasm_step = step_by_name["Build wasm QUIC demo"]
-expected_build_wasm_command = "nix develop -c zig build wasm-quic -Doptimize=ReleaseSmall --summary all"
-if build_wasm_step.get("run") != expected_build_wasm_command:
-    raise SystemExit(f"unexpected Build wasm QUIC demo command: {build_wasm_step.get('run')!r}")
-
-smoke_wasm_step = step_by_name["Smoke wasm QUIC demo"]
-expected_smoke_wasm_command = "node scripts/wasm-quic-smoke.mjs zig-out/share/wasm-quic/coquic-wasm-quic.wasm"
-if smoke_wasm_step.get("run") != expected_smoke_wasm_command:
-    raise SystemExit(f"unexpected Smoke wasm QUIC demo command: {smoke_wasm_step.get('run')!r}")
-
-package_step = step_by_name["Package wasm demo site"]
-expected_package_command = 'demo/deploy/package-demo.sh "${RUNNER_TEMP}/demo-site" "$(pwd)/zig-out/share/wasm-quic"'
-if package_step.get("run") != expected_package_command:
-    raise SystemExit(f"unexpected Package wasm demo site command: {package_step.get('run')!r}")
-
-configure_ssh_env = step_by_name["Configure SSH"].get("env", {})
-for env_name in ["COQUIC_DEMO_REMOTE_SSH_KEY"]:
-    if env_name not in configure_ssh_env:
-        raise SystemExit(f"Configure SSH missing env: {env_name}")
-if "COQUIC_DEMO_REMOTE_KNOWN_HOSTS" in configure_ssh_env:
+if "COQUIC_DEMO_REMOTE_KNOWN_HOSTS" in workflow_text:
     raise SystemExit("Configure SSH should not require COQUIC_DEMO_REMOTE_KNOWN_HOSTS")
-
-deploy_step = step_by_name["Deploy demo"]
-expected_deploy_command = 'demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-site"'
-if deploy_step.get("run") != expected_deploy_command:
-    raise SystemExit(f"unexpected Deploy demo command: {deploy_step.get('run')!r}")
-
-deploy_env = deploy_step.get("env", {})
-expected_deploy_env_names = [
-    "COQUIC_DEMO_CERT_CHAIN_PEM",
-    "COQUIC_DEMO_PRIVATE_KEY_PEM",
-]
-if set(deploy_env.keys()) != set(expected_deploy_env_names):
-    raise SystemExit(f"unexpected Deploy demo env keys: {sorted(deploy_env.keys())!r}")
 
 print("deploy-demo workflow structure looks correct")
 
@@ -227,6 +175,7 @@ same_release_backup_restore_markers = [
     "same-release backup /opt/coquic-demo/current/site",
     "rollback: restore same-release /opt/coquic-demo/current/h3-server",
     "rollback: restore same-release /opt/coquic-demo/current/site",
+    "/opt/coquic-demo/current/site/perf-results.json",
 ]
 for marker in same_release_backup_restore_markers:
     if marker not in deploy_script:

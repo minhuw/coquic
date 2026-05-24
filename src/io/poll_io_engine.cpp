@@ -1181,6 +1181,16 @@ QuicIoEngineEvent make_rx_event(int socket_fd, internal::ReceiveDatagramResult r
     };
 }
 
+void refresh_queued_receive_event_time(QuicIoEngineEvent &event) {
+    if (event.kind != QuicIoEngineEvent::Kind::rx_datagram || !event.rx.has_value()) {
+        return;
+    }
+
+    const auto event_time = internal::now();
+    event.now = event_time;
+    event.rx->now = event_time;
+}
+
 } // namespace
 
 bool PollIoEngine::register_socket(int socket_fd) {
@@ -1219,6 +1229,7 @@ PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
     if (!queued_events_.empty()) {
         auto event = std::move(queued_events_.front());
         queued_events_.pop_front();
+        refresh_queued_receive_event_time(event);
         return event;
     }
     if (socket_fds.empty()) {
@@ -2084,6 +2095,62 @@ bool socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests() {
         received.ecn == QuicEcnCodepoint::ect0,
         g_retry_readable_poll_for_tests.poll_calls == 2,
         g_retry_readable_poll_for_tests.recvmsg_calls == 2,
+    });
+}
+
+bool poll_io_engine_restamps_queued_receive_events_for_tests() {
+    PollIoEngine engine;
+    const auto first_time = QuicCoreTimePoint{} + std::chrono::microseconds{1};
+    const auto queued_time = QuicCoreTimePoint{} + std::chrono::microseconds{2};
+    auto shared = std::make_shared<std::vector<std::byte>>(
+        std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}});
+
+    engine.queued_events_.push_back(QuicIoEngineEvent{
+        .kind = QuicIoEngineEvent::Kind::rx_datagram,
+        .now = first_time,
+        .rx =
+            QuicIoEngineRxCompletion{
+                .socket_fd = 77,
+                .bytes = {std::byte{0x01}},
+                .now = first_time,
+            },
+    });
+    engine.queued_events_.push_back(QuicIoEngineEvent{
+        .kind = QuicIoEngineEvent::Kind::rx_datagram,
+        .now = queued_time,
+        .rx =
+            QuicIoEngineRxCompletion{
+                .socket_fd = 78,
+                .shared_bytes = shared,
+                .begin = 0,
+                .end = shared->size(),
+                .now = queued_time,
+            },
+    });
+    engine.queued_events_.push_back(QuicIoEngineEvent{
+        .kind = QuicIoEngineEvent::Kind::timer_expired,
+        .now = queued_time,
+    });
+
+    constexpr std::array<int, 1> kSockets = {79};
+    const auto first = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    const auto second = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    const auto third = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    if (!first.has_value() || !second.has_value() || !third.has_value() || !first->rx.has_value() ||
+        !second->rx.has_value()) {
+        return false;
+    }
+
+    return all_true({
+        first->kind == QuicIoEngineEvent::Kind::rx_datagram,
+        second->kind == QuicIoEngineEvent::Kind::rx_datagram,
+        third->kind == QuicIoEngineEvent::Kind::timer_expired,
+        first->now != first_time,
+        first->rx->now == first->now,
+        second->now != queued_time,
+        second->rx->now == second->now,
+        third->now == queued_time,
+        second->rx->shared_bytes == shared,
     });
 }
 

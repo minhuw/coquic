@@ -393,11 +393,13 @@ int QuicPerfClient::run() {
         }
 
         const auto core_next_wakeup = core_.next_wakeup();
-        if (core_next_wakeup.has_value() && *core_next_wakeup <= current &&
-            !core_.has_send_continuation_pending()) {
+        if (core_next_wakeup.has_value() && *core_next_wakeup <= current) {
             if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, current),
                                current)) {
                 return fail("client timer handling failed");
+            }
+            if (!flush_pending_sends()) {
+                return fail("client timer flush failed");
             }
             continue;
         }
@@ -405,7 +407,7 @@ int QuicPerfClient::run() {
         if (!maybe_open_crr_connections(current)) {
             return fail("open crr connection failed");
         }
-        if (!backend_->has_pending_events() && !flush_pending_sends()) {
+        if (!flush_pending_sends()) {
             return fail("client pending send flush failed");
         }
         auto event = backend_->wait(next_wait_wakeup(core_next_wakeup));
@@ -426,6 +428,9 @@ int QuicPerfClient::run() {
                 if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
                                    event_handling_time)) {
                     return fail("client timer event failed");
+                }
+                if (!flush_pending_sends()) {
+                    return fail("client timer event flush failed");
                 }
             }
             continue;

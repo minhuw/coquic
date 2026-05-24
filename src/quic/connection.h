@@ -530,6 +530,7 @@ class QuicConnection {
     void queue_new_token(std::vector<std::byte> token);
     void request_key_update();
     DatagramBuffer drain_outbound_datagram(QuicCoreTimePoint now);
+    DatagramBuffer drain_outbound_datagram(QuicCoreTimePoint now, bool continue_paced_burst);
     void on_timeout(QuicCoreTimePoint now);
     std::optional<QuicCoreReceiveStreamData> take_received_stream_data();
     std::optional<QuicCorePeerResetStream> take_peer_reset_stream();
@@ -544,8 +545,10 @@ class QuicConnection {
     std::optional<QuicPathId> last_drained_path_id() const;
     QuicEcnCodepoint last_drained_ecn_codepoint() const;
     bool last_drained_is_pmtu_probe() const;
+    bool last_drained_allows_send_continuation() const;
     std::uint64_t last_drained_packet_inspection_datagram_id() const;
     bool has_sendable_datagram(QuicCoreTimePoint now) const;
+    bool has_sendable_datagram(QuicCoreTimePoint now, bool continue_paced_burst) const;
     std::optional<QuicCoreTimePoint> next_wakeup() const;
     std::vector<ConnectionId> active_local_connection_ids() const;
     std::vector<StatelessResetTokenRecord> active_local_stateless_reset_tokens() const;
@@ -659,6 +662,9 @@ class QuicConnection {
     std::optional<QuicCoreTimePoint> loss_deadline() const;
     std::optional<QuicCoreTimePoint> pto_deadline() const;
     std::optional<QuicCoreTimePoint> ack_deadline() const;
+    std::optional<QuicCoreTimePoint> pacing_deadline() const;
+    std::optional<QuicCoreTimePoint> non_pacing_wakeup_deadline() const;
+    bool non_pacing_wakeup_due(QuicCoreTimePoint now) const;
     std::optional<QuicCoreTimePoint> idle_timeout_deadline() const;
     void detect_lost_packets(QuicCoreTimePoint now);
     void detect_lost_packets(PacketSpaceState &packet_space, QuicCoreTimePoint now);
@@ -742,6 +748,12 @@ class QuicConnection {
     bool has_pending_application_send() const;
     bool has_pending_congestion_controlled_send() const;
     bool has_pending_fresh_application_stream_send() const;
+    bool has_pending_application_control_send(bool application_ack_due) const;
+    std::optional<std::size_t> minimum_pending_application_stream_wire_bytes() const;
+    std::optional<std::size_t> minimum_pending_application_stream_datagram_bytes() const;
+    std::optional<std::size_t> application_stream_pacing_deadline_bytes() const;
+    std::optional<std::size_t> application_stream_pacing_deadline_bytes(
+        std::optional<std::size_t> minimum_datagram_bytes) const;
     std::uint64_t total_queued_stream_bytes() const;
     void maybe_queue_connection_blocked_frame();
     void maybe_queue_stream_blocked_frame(StreamState &stream);
@@ -790,7 +802,8 @@ class QuicConnection {
     ConnectionId
     outbound_destination_connection_id(std::optional<QuicPathId> path_id = std::nullopt) const;
     ConnectionId client_initial_destination_connection_id() const;
-    DatagramBuffer flush_outbound_datagram(QuicCoreTimePoint now);
+    DatagramBuffer flush_outbound_datagram(QuicCoreTimePoint now,
+                                           bool continue_paced_burst = false);
     bool can_send_connection_close_frame() const;
     std::optional<Frame> connection_close_frame_for_send() const;
     void mark_connection_close_frame_sent(const Frame &frame, QuicCoreTimePoint now);
@@ -800,9 +813,11 @@ class QuicConnection {
                                          std::uint64_t frame_type = 0);
     bool note_aead_encryption_attempt(std::size_t packet_count, QuicCoreTimePoint now);
     bool note_packet_authentication_failure(const CodecError &error, QuicCoreTimePoint now);
-    bool non_paced_burst_allows_send(bool ack_eliciting, bool bypass_congestion_window) const;
-    void note_burst_limited_ack_eliciting_send(std::size_t packet_count,
-                                               bool bypass_congestion_window);
+    bool non_paced_burst_allows_send(bool ack_eliciting, bool bypass_congestion_window,
+                                     std::optional<bool> pacing_controlled = std::nullopt) const;
+    void
+    note_burst_limited_ack_eliciting_send(std::size_t packet_count, bool bypass_congestion_window,
+                                          std::optional<bool> pacing_controlled = std::nullopt);
     void reset_unpaced_ack_eliciting_burst();
     void clear_connection_failure_effects();
     void mark_silent_close();
@@ -912,6 +927,8 @@ class QuicConnection {
     std::optional<QuicPathId> last_drained_path_id_;
     QuicEcnCodepoint last_drained_ecn_codepoint_ = QuicEcnCodepoint::not_ect;
     bool last_drained_is_pmtu_probe_ = false;
+    bool last_drained_allows_send_continuation_ = false;
+    std::optional<QuicCoreTimePoint> last_send_continuation_time_;
     std::uint64_t next_packet_inspection_datagram_id_ = 1;
     std::uint64_t last_drained_packet_inspection_datagram_id_ = 0;
     QuicPathId last_inbound_path_id_ = 0;

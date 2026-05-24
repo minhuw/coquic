@@ -29,7 +29,7 @@ if [[ -e demo/site/index.html ]]; then
   exit 1
 fi
 
-for packaged_file in index.html quic-demo.js coquic-wasm-quic.wasm; do
+for packaged_file in index.html workbench.html quic-demo.js perf-comparison.html perf-comparison.js coquic-wasm-quic.wasm; do
   if [[ ! -f "${output_dir}/${packaged_file}" ]]; then
     echo "missing packaged wasm demo file: ${packaged_file}" >&2
     exit 1
@@ -68,17 +68,31 @@ done
 
 for marker in \
   "coquic-wasm-demo-v1" \
+  "coquic-demo-home-v1" \
+  "Protocol Workbench" \
+  "Performance Dashboard" \
+  "workbench.html" \
+  "perf-comparison.html"; do
+  if ! grep -Fq -- "${marker}" "${output_dir}/index.html"; then
+    echo "packaged demo homepage missing marker: ${marker}" >&2
+    exit 1
+  fi
+done
+
+for marker in \
+  "coquic-wasm-demo-v1" \
   "coquic wasm QUIC" \
   "Datagram And Event Trace" \
   "Packet Log" \
   "Packet Details" \
   "Download PCAP" \
+  "perf-comparison.html" \
   "global-timer" \
   "module-state" \
   "start-label" \
   "step-label"; do
-  if ! grep -Fq -- "${marker}" "${output_dir}/index.html"; then
-    echo "packaged demo page missing marker: ${marker}" >&2
+  if ! grep -Fq -- "${marker}" "${output_dir}/workbench.html"; then
+    echo "packaged workbench page missing marker: ${marker}" >&2
     exit 1
   fi
 done
@@ -90,6 +104,24 @@ for marker in \
   "runDemo"; do
   if ! grep -Fq -- "${marker}" "${output_dir}/quic-demo.js"; then
     echo "packaged wasm demo script missing marker: ${marker}" >&2
+    exit 1
+  fi
+done
+
+for marker in \
+  "coquic-perf-comparison-v1" \
+  "coquic performance comparison" \
+  "perf-results.json" \
+  "Performance Barplots" \
+  "quic-go" \
+  "quinn" \
+  "picoquic" \
+  "throughput_mib_per_s" \
+  "bulk_mib_per_s" \
+  "rr_requests_per_s" \
+  "crr_requests_per_s"; do
+  if ! grep -Fq -- "${marker}" "${output_dir}/perf-comparison.html" "${output_dir}/perf-comparison.js"; then
+    echo "packaged perf comparison assets missing marker: ${marker}" >&2
     exit 1
   fi
 done
@@ -109,7 +141,7 @@ for removed_marker in \
   "runProbe" \
   "fonts.googleapis.com" \
   "fonts.gstatic.com"; do
-  if grep -Fq -- "${removed_marker}" "${output_dir}/index.html"; then
+  if grep -Fq -- "${removed_marker}" "${output_dir}/index.html" "${output_dir}/workbench.html"; then
     echo "packaged demo page still contains removed marker: ${removed_marker}" >&2
     exit 1
   fi

@@ -900,9 +900,9 @@ TEST(QuicCoreTest, LocalKeyUpdateRetainsPreviousReadKeysUntilPeerRespondsInNewPh
     ASSERT_TRUE(followup_next_read_secret.has_value());
     EXPECT_EQ(optional_ref_or_terminate(connection.next_application_read_secret_).secret,
               followup_next_read_secret.value().secret);
-    ASSERT_TRUE(connection.next_wakeup().has_value());
+    const auto discard_deadline = optional_value_or_terminate(connection.next_wakeup());
 
-    connection.on_timeout(*connection.next_wakeup());
+    connection.on_timeout(discard_deadline);
 
     EXPECT_FALSE(connection.previous_application_read_secret_.has_value());
     EXPECT_FALSE(connection.previous_application_read_secret_discard_deadline_.has_value());

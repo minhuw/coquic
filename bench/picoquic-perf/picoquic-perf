@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import math
+import os
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+
+PQBENCH = os.environ.get("PQBENCH_BIN", "/usr/local/bin/pqbench")
+ALPN = "perf"
+IDLE_TIMEOUT_MS = "1000"
+
+
+@dataclass
+class OptionalInt:
+    value: int = 0
+    set: bool = False
+
+
+def parse_duration(value: str) -> float:
+    if value.endswith("ms"):
+        return int(value[:-2]) / 1000.0
+    if value.endswith("s"):
+        return int(value[:-1])
+    raise ValueError(f"invalid duration: {value}")
+
+
+def add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=4433)
+    parser.add_argument("--server-name", default="localhost")
+    parser.add_argument("--verify-peer", action="store_true")
+    parser.add_argument("--io-backend", default="socket")
+    parser.add_argument("--congestion-control", default="default")
+    parser.add_argument("--certificate-chain", default="tests/fixtures/quic-server-cert.pem")
+    parser.add_argument("--private-key", default="tests/fixtures/quic-server-key.pem")
+    parser.add_argument("--disable-pmtud", action="store_true")
+    parser.add_argument("--mode", choices=["bulk", "rr", "crr"], default="bulk")
+    parser.add_argument("--direction", choices=["upload", "download", "stay"], default="download")
+    parser.add_argument("--request-bytes", type=int, default=64)
+    parser.add_argument("--response-bytes", type=int, default=64)
+    parser.add_argument("--streams", type=int, default=1)
+    parser.add_argument("--connections", type=int, default=1)
+    parser.add_argument("--requests-in-flight", type=int, default=1)
+    parser.add_argument("--requests", type=int)
+    parser.add_argument("--total-bytes", type=int)
+    parser.add_argument("--warmup", default="0ms")
+    parser.add_argument("--duration", default="5s")
+    parser.add_argument("--json-out")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="picoquic-perf")
+    sub = parser.add_subparsers(dest="role", required=True)
+    add_common_args(sub.add_parser("server"))
+    add_common_args(sub.add_parser("client"))
+    args = parser.parse_args()
+    args.warmup_seconds = parse_duration(args.warmup)
+    args.duration_seconds = parse_duration(args.duration)
+    return args
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.io_backend not in ("socket", "io_uring"):
+        raise ValueError(f"unsupported io-backend label: {args.io_backend}")
+    if args.io_backend != "socket":
+        raise ValueError("picoquic-perf only supports the socket backend")
+    if args.congestion_control != "default":
+        raise ValueError("picoquic-perf only supports the default congestion-control label")
+    if args.streams <= 0 or args.connections <= 0 or args.requests_in_flight <= 0:
+        raise ValueError("streams, connections, and requests-in-flight must be greater than zero")
+    if args.mode == "bulk" and args.direction == "upload":
+        raise ValueError("picoquic-perf adapter only supports download bulk")
+
+
+def run_server(args: argparse.Namespace) -> int:
+    cmd = [
+        PQBENCH,
+        "-c",
+        args.certificate_chain,
+        "-k",
+        args.private_key,
+        "-p",
+        str(args.port),
+        "-d",
+        IDLE_TIMEOUT_MS,
+        "-G",
+        "bbr",
+    ]
+    child: subprocess.Popen | None = None
+    stopping = False
+
+    def stop(signum: int, _frame: object) -> None:
+        nonlocal stopping, child
+        stopping = True
+        if child is not None:
+            child.terminate()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    while not stopping:
+        child = subprocess.Popen(cmd)
+        rc = child.wait()
+        child = None
+        if stopping:
+            return 0
+        if rc != 0:
+            return rc
+        time.sleep(0.05)
+    return 0
+
+
+def run_client(args: argparse.Namespace) -> dict:
+    summary = new_summary(args)
+    try:
+        scenario, planned_requests, planned_sent, planned_received = build_scenario(args)
+        command = base_client_command(args, scenario)
+        if args.warmup_seconds > 0:
+            time.sleep(args.warmup_seconds)
+        start = time.monotonic()
+        if args.mode == "crr":
+            skipped = run_crr_waves(args, scenario)
+            summary["skipped_setup_errors"] = skipped
+            planned_requests = args._crr_completed if hasattr(args, "_crr_completed") else planned_requests
+            planned_sent = planned_requests * args.request_bytes
+            planned_received = planned_requests * args.response_bytes
+        else:
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        elapsed = max(time.monotonic() - start, 0.001)
+        summary["elapsed_ms"] = int(round(elapsed * 1000))
+        summary["bytes_sent"] = planned_sent
+        summary["bytes_received"] = planned_received
+        summary["server_counters"] = {
+            "bytes_sent": planned_received,
+            "bytes_received": planned_sent,
+            "requests_completed": planned_requests,
+        }
+        summary["requests_completed"] = planned_requests
+    except Exception as exc:
+        summary["status"] = "failed"
+        summary["failure_reason"] = str(exc)
+    finalize_summary(summary)
+    return summary
+
+
+def base_client_command(args: argparse.Namespace, scenario: str, connections: int | None = None) -> list[str]:
+    server = f"{args.host}:{args.port}"
+    return [
+        PQBENCH,
+        "-p",
+        str(args.port),
+        "-d",
+        IDLE_TIMEOUT_MS,
+        "-G",
+        "bbr",
+        server,
+        str(connections if connections is not None else args.connections),
+        scenario,
+    ]
+
+
+def build_scenario(args: argparse.Namespace) -> tuple[str, int, int, int]:
+    if args.mode == "bulk":
+        total = args.total_bytes if args.total_bytes is not None else target_total_bytes(args)
+        repeat = max(args.streams, 1)
+        per_stream = max(math.ceil(total / repeat), 1)
+        post_size = max(args.request_bytes, 8)
+        scenario = f"*{repeat}:{post_size}:{per_stream};"
+        return scenario, repeat * args.connections, repeat * args.connections * post_size, total * args.connections
+    if args.mode == "rr":
+        requests = args.requests if args.requests is not None else target_requests(args)
+        per_connection = max(math.ceil(requests / args.connections), 1)
+        scenario = f"*{per_connection}:{args.request_bytes}:{args.response_bytes};"
+        planned = per_connection * args.connections
+        return scenario, planned, planned * args.request_bytes, planned * args.response_bytes
+    if args.mode == "crr":
+        scenario = f"*1:{args.request_bytes}:{args.response_bytes};"
+        requests = args.requests if args.requests is not None else target_crr_requests(args)
+        return scenario, requests, requests * args.request_bytes, requests * args.response_bytes
+    raise ValueError(f"unsupported mode: {args.mode}")
+
+
+def target_total_bytes(args: argparse.Namespace) -> int:
+    # The native picoquic quicperf app is finite. Use a large transfer sized by
+    # duration so bulk remains long enough to measure without changing MTU or ACKs.
+    mib_per_second_probe = 128
+    return max(args.streams * 1024 * 1024, int(args.duration_seconds * mib_per_second_probe * 1024 * 1024))
+
+
+def target_requests(args: argparse.Namespace) -> int:
+    # Keep finite RR scenarios in the same order as the measured duration while
+    # avoiding very large scenario strings.
+    return max(args.connections * args.requests_in_flight, int(args.duration_seconds * 50_000))
+
+
+def target_crr_requests(args: argparse.Namespace) -> int:
+    return max(args.connections, int(args.duration_seconds * args.connections * 8))
+
+
+def run_crr_waves(args: argparse.Namespace, scenario: str) -> int:
+    completed = 0
+    skipped = 0
+    deadline = time.monotonic() + args.duration_seconds
+    target = args.requests if args.requests is not None else None
+    while time.monotonic() < deadline and (target is None or completed < target):
+        wave = args.connections
+        if target is not None:
+            wave = min(wave, target - completed)
+        if wave <= 0:
+            break
+        try:
+            subprocess.run(
+                base_client_command(args, scenario, wave),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            completed += wave
+        except subprocess.CalledProcessError as exc:
+            output = (exc.stdout or "") + (exc.stderr or "")
+            if "Connection refused" in output or "refused" in output:
+                skipped += wave
+                time.sleep(0.002)
+                continue
+            raise
+    args._crr_completed = completed
+    return skipped
+
+
+def new_summary(args: argparse.Namespace) -> dict:
+    direction = "download" if args.direction == "stay" else args.direction
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "mode": args.mode,
+        "direction": direction,
+        "backend": "picoquic",
+        "congestion_control": args.congestion_control,
+        "remote_host": args.host,
+        "remote_port": args.port,
+        "alpn": ALPN,
+        "elapsed_ms": 0,
+        "warmup_ms": int(round(args.warmup_seconds * 1000)),
+        "bytes_sent": 0,
+        "bytes_received": 0,
+        "server_counters": {
+            "bytes_sent": 0,
+            "bytes_received": 0,
+            "requests_completed": 0,
+        },
+        "requests_completed": 0,
+        "streams": args.streams,
+        "connections": args.connections,
+        "requests_in_flight": args.requests_in_flight,
+        "request_bytes": args.request_bytes,
+        "response_bytes": args.response_bytes,
+        "throughput_mib_per_s": 0.0,
+        "throughput_gbit_per_s": 0.0,
+        "requests_per_s": 0.0,
+        "latency": {
+            "min_us": 0,
+            "avg_us": 0,
+            "p50_us": 0,
+            "p90_us": 0,
+            "p99_us": 0,
+            "max_us": 0,
+        },
+    }
+
+
+def finalize_summary(summary: dict) -> None:
+    elapsed_ms = summary.get("elapsed_ms") or max(summary.get("warmup_ms", 0), 1)
+    summary["elapsed_ms"] = elapsed_ms
+    seconds = max(elapsed_ms / 1000.0, 0.001)
+    total = summary.get("bytes_sent", 0) + summary.get("bytes_received", 0)
+    summary["throughput_mib_per_s"] = total / (1024 * 1024) / seconds
+    summary["throughput_gbit_per_s"] = total * 8 / 1_000_000_000 / seconds
+    summary["requests_per_s"] = summary.get("requests_completed", 0) / seconds
+
+
+def emit_summary(summary: dict, path: str | None) -> None:
+    print(
+        "status={status} mode={mode} cc={cc} direction={direction} "
+        "throughput_mib/s={mib:.3f} throughput_gbit/s={gbit:.3f} requests/s={rps:.3f}".format(
+            status=summary["status"],
+            mode=summary["mode"],
+            cc=summary["congestion_control"],
+            direction=summary["direction"],
+            mib=summary["throughput_mib_per_s"],
+            gbit=summary["throughput_gbit_per_s"],
+            rps=summary["requests_per_s"],
+        )
+    )
+    if path:
+        Path(path).write_text(json.dumps(summary, indent=2) + "\n")
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        validate_args(args)
+    except Exception as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    if args.role == "server":
+        return run_server(args)
+    summary = run_client(args)
+    emit_summary(summary, args.json_out)
+    return 0 if summary["status"] == "ok" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

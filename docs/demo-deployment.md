@@ -16,6 +16,8 @@ This document covers the remote continuous deployment flow for the public
 - `demo/deploy/coquic-demo.service` is the systemd unit installed on the
   remote host.
 - `.github/workflows/deploy-demo.yml` is the GitHub Actions entrypoint.
+- `.github/workflows/perf.yml` uploads the latest `perf-results.json` snapshot
+  into the live demo site after successful `main` branch perf runs.
 
 The current workflow builds the wasm demo first, then packages
 `zig-out/share/wasm-quic/`. The deploy script accepts any prepared document-root
@@ -42,6 +44,15 @@ default. The workflow also writes a pinned `known_hosts` file for
 
 The workflow runs on pushes to `main` that touch the demo deployment surface,
 and it also supports manual `workflow_dispatch` runs.
+
+The perf workflow reuses `COQUIC_DEMO_REMOTE_SSH_KEY` to upload
+`.bench-results/perf-results.json` to:
+
+- `/opt/coquic-demo/current/site/perf-results.json`
+
+That file is read by the public performance dashboard. Pull request runs still
+render the GitHub step summary and upload Actions artifacts, but they do not
+publish to the demo machine.
 
 ## Remote Host Requirements
 

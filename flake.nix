@@ -404,10 +404,23 @@
         {
           name,
           coquicPackage,
+          quicgoPerfClient ? null,
+          quinnPerfClient ? null,
+          picoquicPerfClient ? null,
         }:
         pkgs.runCommand "${name}-overlay" { } ''
           mkdir -p $out/usr/local/bin
           ln -s ${coquicPackage}/bin/coquic-perf $out/usr/local/bin/coquic-perf
+          ${lib.optionalString (quicgoPerfClient != null) ''
+            ln -s ${quicgoPerfClient}/bin/quicgo-perf $out/usr/local/bin/quicgo-perf
+          ''}
+          ${lib.optionalString (quinnPerfClient != null) ''
+            ln -s ${quinnPerfClient}/bin/quinn-perf $out/usr/local/bin/quinn-perf
+          ''}
+          ${lib.optionalString (picoquicPerfClient != null) ''
+            ln -s ${picoquicPerfClient}/bin/picoquic-perf $out/usr/local/bin/picoquic-perf
+            ln -s ${picoquicPerfClient}/bin/pqbench $out/usr/local/bin/pqbench
+          ''}
         '';
       mkCoquicShell =
         {
@@ -446,6 +459,103 @@
       quictlsMuslPackage = mkCoquicPackage quictlsMuslProfile;
       boringsslPackage = mkCoquicPackage boringsslProfile;
       boringsslMuslPackage = mkCoquicPackage boringsslMuslProfile;
+      quicgoPerfClient = pkgs.buildGoModule {
+        pname = "quicgo-perf-client";
+        version = "dev";
+        src = ./bench/quicgo-perf;
+        vendorHash = "sha256-yXErKYCgQLSlmivNBjgqG3NzKQ9KvsvV+8fdFoCJks8=";
+        env.CGO_ENABLED = "0";
+      };
+      quinnPerfClient = pkgs.rustPlatform.buildRustPackage {
+        pname = "quinn-perf-client";
+        version = "dev";
+        src = ./bench/quinn-perf;
+        cargoHash = "sha256-k3wfuwWKkH6lMe6TXRwts5qIX1xC47x/JvbfF6Pkw2c=";
+      };
+      picotlsSrc = pkgs.fetchFromGitHub {
+        owner = "h2o";
+        repo = "picotls";
+        rev = "bfa67875982afc4c24f21e146cef4747fa189c2f";
+        fetchSubmodules = true;
+        hash = "sha256-67U2C33ROWgEW9poAA3GtiKvoamBWfGmKiT7wpP5BJM=";
+      };
+      picoquicSrc = pkgs.fetchFromGitHub {
+        owner = "private-octopus";
+        repo = "picoquic";
+        rev = "49c239b54a4e724dba07ba1cc55c78e2b277ead9";
+        hash = "sha256-oR+AIvyRMGsLJC6igro+CtFQN1J2Ey53EBc4Z6+EG/c=";
+      };
+      picotlsPackage = pkgs.stdenv.mkDerivation {
+        pname = "picotls-for-picoquic";
+        version = "dev";
+        src = picotlsSrc;
+        nativeBuildInputs = [
+          pkgs.cmake
+          pkgs.ninja
+          pkgs.pkg-config
+        ];
+        buildInputs = [
+          pkgs.openssl
+        ];
+        cmakeFlags = [
+          "-DWITH_FUSION=OFF"
+          "-DWITH_DTRACE=OFF"
+        ];
+        buildPhase = ''
+          runHook preBuild
+          cmake --build . --target picotls-core picotls-minicrypto picotls-openssl
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out/lib $out/include
+          cp libpicotls-core.a libpicotls-minicrypto.a libpicotls-openssl.a $out/lib/
+          cp -R $src/include/. $out/include/
+          runHook postInstall
+        '';
+      };
+      picoquicPerfClient = pkgs.stdenv.mkDerivation {
+        pname = "picoquic-perf-client";
+        version = "dev";
+        src = picoquicSrc;
+        nativeBuildInputs = [
+          pkgs.cmake
+          pkgs.ninja
+        ];
+        buildInputs = [
+          pkgs.openssl
+          picotlsPackage
+        ];
+        cmakeFlags = [
+          "-Dpicoquic_BUILD_TESTS=OFF"
+          "-DBUILD_PICO_SIM=OFF"
+          "-DBUILD_DEMO=OFF"
+          "-DBUILD_PQBENCH=ON"
+          "-DBUILD_LOGREADER=OFF"
+          "-DBUILD_LOGLIB=ON"
+          "-DBUILD_HTTP=ON"
+          "-DPICOQUIC_FETCH_PTLS=OFF"
+          "-DPTLS_CORE_LIBRARY=${picotlsPackage}/lib/libpicotls-core.a"
+          "-DPTLS_OPENSSL_LIBRARY=${picotlsPackage}/lib/libpicotls-openssl.a"
+          "-DPTLS_MINICRYPTO_LIBRARY=${picotlsPackage}/lib/libpicotls-minicrypto.a"
+          "-DPTLS_INCLUDE_DIR=${picotlsPackage}/include"
+        ];
+        buildPhase = ''
+          runHook preBuild
+          cmake --build . --target pqbench
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out/bin
+          cp pqbench $out/bin/pqbench
+          cp ${./bench/picoquic-perf/picoquic-perf} $out/bin/picoquic-perf
+          substituteInPlace $out/bin/picoquic-perf \
+            --replace-fail '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3'
+          chmod +x $out/bin/picoquic-perf
+          runHook postInstall
+        '';
+      };
       quictlsMuslImage = pkgs.dockerTools.buildLayeredImage {
         name = "coquic-interop";
         tag = "quictls-musl";
@@ -469,6 +579,9 @@
           (mkPerfEndpointOverlay {
             name = "coquic-perf-quictls-musl";
             coquicPackage = quictlsMuslPackage;
+            inherit quicgoPerfClient;
+            inherit quinnPerfClient;
+            inherit picoquicPerfClient;
           })
         ];
         config = {
@@ -484,6 +597,9 @@
           (mkPerfEndpointOverlay {
             name = "coquic-perf-quictls-musl";
             coquicPackage = quictlsMuslPackage;
+            inherit quicgoPerfClient;
+            inherit quinnPerfClient;
+            inherit picoquicPerfClient;
           })
         ];
         config = {
@@ -599,6 +715,9 @@
         interop-image-boringssl-musl = boringsslMuslImage;
         perf-image-quictls-musl = quictlsMuslPerfImage;
         perf-image-stream-quictls-musl = quictlsMuslPerfImageStream;
+        quicgo-perf-client = quicgoPerfClient;
+        quinn-perf-client = quinnPerfClient;
+        picoquic-perf-client = picoquicPerfClient;
       };
 
       apps.${system} = {

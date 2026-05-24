@@ -26,6 +26,16 @@ grep -F -- 'congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr c
   exit 1
 }
 
+grep -F -- 'client_impl="${PERF_CLIENT_IMPL:-coquic}"' "${script}" >/dev/null || {
+  echo 'missing client implementation default in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'server_impl="${PERF_SERVER_IMPL:-coquic}"' "${script}" >/dev/null || {
+  echo 'missing server implementation default in harness script' >&2
+  exit 1
+}
+
 grep -F -- 'nix build --print-out-paths ".#${image_attr}"' "${script}" >/dev/null || {
   echo 'missing nix image build in harness script' >&2
   exit 1
@@ -43,6 +53,61 @@ grep -F -- 'docker network create "${network_name}"' "${script}" >/dev/null || {
 
 grep -F -- 'topology=docker-bridge-two-containers' "${script}" >/dev/null || {
   echo 'missing Docker bridge topology marker in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'client_impl=${client_impl}' "${script}" >/dev/null || {
+  echo 'missing client implementation environment marker in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'server_impl=${server_impl}' "${script}" >/dev/null || {
+  echo 'missing server implementation environment marker in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'coquic|quic-go|quinn|picoquic)' "${script}" >/dev/null || {
+  echo 'missing quic-go implementation validation in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'coquic|quic-go|quinn|picoquic)' "${script}" >/dev/null || {
+  echo 'missing quinn implementation validation in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'coquic|quic-go|quinn|picoquic)' "${script}" >/dev/null || {
+  echo 'missing picoquic implementation validation in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'unsupported server implementation' "${script}" >/dev/null || {
+  echo 'missing server implementation validation in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/quicgo-perf' "${script}" >/dev/null || {
+  echo 'missing quic-go Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/quinn-perf' "${script}" >/dev/null || {
+  echo 'missing quinn Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/picoquic-perf' "${script}" >/dev/null || {
+  echo 'missing picoquic Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- "'client_impl': client_impl" "${script}" >/dev/null || {
+  echo 'missing client implementation manifest field in harness script' >&2
+  exit 1
+}
+
+grep -F -- "'server_impl': server_impl" "${script}" >/dev/null || {
+  echo 'missing server implementation manifest field in harness script' >&2
   exit 1
 }
 
@@ -212,6 +277,36 @@ grep -F -- 'perf-image-quictls-musl' "${flake}" >/dev/null || {
   exit 1
 }
 
+grep -F -- 'quicgoPerfClient = pkgs.buildGoModule' "${flake}" >/dev/null || {
+  echo 'missing quic-go perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${quicgoPerfClient}/bin/quicgo-perf $out/usr/local/bin/quicgo-perf' "${flake}" >/dev/null || {
+  echo 'missing quic-go perf client in perf image overlay' >&2
+  exit 1
+}
+
+grep -F -- 'quinnPerfClient = pkgs.rustPlatform.buildRustPackage' "${flake}" >/dev/null || {
+  echo 'missing quinn perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${quinnPerfClient}/bin/quinn-perf $out/usr/local/bin/quinn-perf' "${flake}" >/dev/null || {
+  echo 'missing quinn perf client in perf image overlay' >&2
+  exit 1
+}
+
+grep -F -- 'picoquicPerfClient = pkgs.stdenv.mkDerivation' "${flake}" >/dev/null || {
+  echo 'missing picoquic perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${picoquicPerfClient}/bin/picoquic-perf $out/usr/local/bin/picoquic-perf' "${flake}" >/dev/null || {
+  echo 'missing picoquic perf client in perf image overlay' >&2
+  exit 1
+}
+
 grep -F -- '.bench-results/' "${ignore_file}" >/dev/null || {
   echo 'missing benchmark results ignore rule' >&2
   exit 1
@@ -307,6 +402,10 @@ case "$1" in
           name="$2"
           shift 2
           ;;
+        --entrypoint)
+          args+=("$1" "$2")
+          shift 2
+          ;;
         --network|--cpuset-cpus|-v)
           shift 2
           ;;
@@ -323,6 +422,9 @@ case "$1" in
     if [ "${args[0]:-}" = 'coquic-perf:quictls-musl' ]; then
       role_index=1
     fi
+    if [ "${args[0]:-}" = '--entrypoint' ]; then
+      role_index=3
+    fi
     role="${args[${role_index}]:-}"
     congestion_control=''
     for ((i = 0; i < ${#args[@]}; i++)); do
@@ -331,7 +433,7 @@ case "$1" in
       fi
     done
     case "${congestion_control}" in
-      newreno|cubic|bbr|copa)
+      newreno|cubic|bbr|copa|default)
         ;;
       *)
         echo "unexpected congestion-control: ${congestion_control}; args=${args[*]}" >&2
@@ -518,11 +620,165 @@ if manifest.get("image_attr") != "perf-image-quictls-musl":
     raise SystemExit("manifest missing perf image attr")
 if manifest.get("congestion_controls") != ["newreno", "cubic", "bbr", "copa"]:
     raise SystemExit("manifest missing congestion-control list")
+if manifest.get("client_impl") != "coquic":
+    raise SystemExit("manifest missing default client implementation")
+if manifest.get("server_impl") != "coquic":
+    raise SystemExit("manifest missing default server implementation")
 if len(manifest.get("runs", [])) != 12:
     raise SystemExit("manifest missing per-algorithm smoke runs")
 seen = {run.get("congestion_control") for run in manifest.get("runs", [])}
 if seen != {"newreno", "cubic", "bbr", "copa"}:
     raise SystemExit("manifest missing per-run congestion-control values")
+PY
+
+rm -f "${log_path}" "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
+  "${results_root}"/*.cid "${results_root}/environment.txt"
+
+PATH="${fake_bin_dir}:$PATH" \
+FAKE_PERF_LOG="${log_path}" \
+FAKE_PERF_IMAGE="${fake_image}" \
+FAKE_RESULTS_ROOT="${results_root}" \
+PERF_RESULTS_ROOT="${results_root}" \
+PERF_CLIENT_IMPL=quic-go \
+PERF_SERVER_IMPL=quic-go \
+PERF_CONGESTION_CONTROLS=default \
+bash "${script}" --preset smoke >/dev/null
+
+for run_name in \
+  smoke-quic-go-to-quic-go-default-socket-bulk-s1-c1-q1 \
+  smoke-quic-go-to-quic-go-default-socket-rr-s1-c1-q4 \
+  smoke-quic-go-to-quic-go-default-socket-crr-s1-c2-q1
+  do
+  [ -f "${results_root}/${run_name}.json" ] || {
+    echo "behavioral harness test missing quic-go JSON result for ${run_name}" >&2
+    exit 1
+  }
+done
+
+grep -F -- '--entrypoint /usr/local/bin/quicgo-perf coquic-perf:quictls-musl client' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use quic-go client entrypoint' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/quicgo-perf coquic-perf:quictls-musl server' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use quic-go server entrypoint' >&2
+  exit 1
+}
+
+python3 - "${results_root}/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if manifest.get("client_impl") != "quic-go":
+    raise SystemExit("manifest missing quic-go client implementation")
+if manifest.get("server_impl") != "quic-go":
+    raise SystemExit("manifest missing quic-go server implementation")
+if manifest.get("congestion_controls") != ["default"]:
+    raise SystemExit("manifest missing quic-go congestion-control subset")
+if len(manifest.get("runs", [])) != 3:
+    raise SystemExit("manifest missing quic-go smoke runs")
+PY
+
+rm -f "${log_path}" "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
+  "${results_root}"/*.cid "${results_root}/environment.txt"
+
+PATH="${fake_bin_dir}:$PATH" \
+FAKE_PERF_LOG="${log_path}" \
+FAKE_PERF_IMAGE="${fake_image}" \
+FAKE_RESULTS_ROOT="${results_root}" \
+PERF_RESULTS_ROOT="${results_root}" \
+PERF_CLIENT_IMPL=quinn \
+PERF_SERVER_IMPL=quinn \
+PERF_CONGESTION_CONTROLS=default \
+bash "${script}" --preset smoke >/dev/null
+
+for run_name in \
+  smoke-quinn-to-quinn-default-socket-bulk-s1-c1-q1 \
+  smoke-quinn-to-quinn-default-socket-rr-s1-c1-q4 \
+  smoke-quinn-to-quinn-default-socket-crr-s1-c2-q1
+  do
+  [ -f "${results_root}/${run_name}.json" ] || {
+    echo "behavioral harness test missing quinn JSON result for ${run_name}" >&2
+    exit 1
+  }
+done
+
+grep -F -- '--entrypoint /usr/local/bin/quinn-perf coquic-perf:quictls-musl client' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use quinn client entrypoint' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/quinn-perf coquic-perf:quictls-musl server' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use quinn server entrypoint' >&2
+  exit 1
+}
+
+python3 - "${results_root}/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if manifest.get("client_impl") != "quinn":
+    raise SystemExit("manifest missing quinn client implementation")
+if manifest.get("server_impl") != "quinn":
+    raise SystemExit("manifest missing quinn server implementation")
+if manifest.get("congestion_controls") != ["default"]:
+    raise SystemExit("manifest missing quinn congestion-control subset")
+if len(manifest.get("runs", [])) != 3:
+    raise SystemExit("manifest missing quinn smoke runs")
+PY
+
+rm -f "${log_path}" "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
+  "${results_root}"/*.cid "${results_root}/environment.txt"
+
+PATH="${fake_bin_dir}:$PATH" \
+FAKE_PERF_LOG="${log_path}" \
+FAKE_PERF_IMAGE="${fake_image}" \
+FAKE_RESULTS_ROOT="${results_root}" \
+PERF_RESULTS_ROOT="${results_root}" \
+PERF_CLIENT_IMPL=picoquic \
+PERF_SERVER_IMPL=picoquic \
+PERF_CONGESTION_CONTROLS=default \
+bash "${script}" --preset smoke >/dev/null
+
+for run_name in \
+  smoke-picoquic-to-picoquic-default-socket-bulk-s1-c1-q1 \
+  smoke-picoquic-to-picoquic-default-socket-rr-s1-c1-q4 \
+  smoke-picoquic-to-picoquic-default-socket-crr-s1-c2-q1
+  do
+  [ -f "${results_root}/${run_name}.json" ] || {
+    echo "behavioral harness test missing picoquic JSON result for ${run_name}" >&2
+    exit 1
+  }
+done
+
+grep -F -- '--entrypoint /usr/local/bin/picoquic-perf coquic-perf:quictls-musl client' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use picoquic client entrypoint' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/picoquic-perf coquic-perf:quictls-musl server' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use picoquic server entrypoint' >&2
+  exit 1
+}
+
+python3 - "${results_root}/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if manifest.get("client_impl") != "picoquic":
+    raise SystemExit("manifest missing picoquic client implementation")
+if manifest.get("server_impl") != "picoquic":
+    raise SystemExit("manifest missing picoquic server implementation")
+if manifest.get("congestion_controls") != ["default"]:
+    raise SystemExit("manifest missing picoquic congestion-control subset")
+if len(manifest.get("runs", [])) != 3:
+    raise SystemExit("manifest missing picoquic smoke runs")
 PY
 
 echo 'perf harness contract looks correct'

@@ -3481,15 +3481,20 @@ TEST(QuicCoreTest, PacketTraceLogsPacingSendBlockedWhenApplicationPacingDefersSe
 TEST(QuicCoreTest, NonPacedApplicationSendLimitsAckElicitingBurst) {
     ScopedEnvVar trace("COQUIC_PACKET_TRACE", "1");
 
+    constexpr std::size_t kConnectionCredit = std::size_t{64} * 1024u;
+    constexpr std::size_t kCongestionWindow = std::size_t{1024} * 1024u;
+    constexpr std::size_t kPayloadSize = std::size_t{32} * 1024u;
+
     auto connection = make_connected_client_connection();
     auto &peer_transport_parameters =
         optional_ref_or_terminate(connection.peer_transport_parameters_);
-    peer_transport_parameters.initial_max_data = 64 * 1024;
-    peer_transport_parameters.initial_max_stream_data_bidi_remote = 64 * 1024;
+    peer_transport_parameters.initial_max_data = kConnectionCredit;
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = kConnectionCredit;
     connection.initialize_peer_flow_control_from_transport_parameters();
-    connection.congestion_controller_.congestion_window_ = 1024 * 1024;
+    connection.congestion_controller_.congestion_window_ = kCongestionWindow;
     ASSERT_TRUE(
-        connection.queue_stream_send(0, std::vector<std::byte>(32 * 1024, std::byte{0x41}), false)
+        connection
+            .queue_stream_send(0, std::vector<std::byte>(kPayloadSize, std::byte{0x41}), false)
             .has_value());
 
     const auto now = coquic::quic::test::test_time(1);

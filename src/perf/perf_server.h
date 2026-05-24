@@ -34,6 +34,7 @@ class QuicPerfServer {
     };
 
     bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now);
+    bool drain_pending_backend_events();
     bool flush_pending_sends();
     bool handle_stream_data(Session &session, const quic::QuicCoreReceiveStreamData &received,
                             quic::QuicCoreTimePoint now);

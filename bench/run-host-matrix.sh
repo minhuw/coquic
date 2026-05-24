@@ -15,6 +15,8 @@ client_cpus="${PERF_CLIENT_CPUS:-3}"
 port="${PERF_PORT:-9443}"
 run_timeout_seconds="${PERF_RUN_TIMEOUT_SECONDS:-120}"
 congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr copa}"
+client_impl="${PERF_CLIENT_IMPL:-coquic}"
+server_impl="${PERF_SERVER_IMPL:-coquic}"
 preset="smoke"
 network_name=''
 server_name=''
@@ -33,6 +35,8 @@ environment overrides:
   PERF_PORT                  UDP port for server/client (default: 9443)
   PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
   PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
+  PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, or picoquic (default: coquic)
+  PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, or picoquic (default: coquic)
 USAGE
 }
 
@@ -88,12 +92,39 @@ for congestion_control in "${congestion_control_list[@]}"; do
   case "${congestion_control}" in
     newreno|cubic|bbr|copa)
       ;;
+    default)
+      if [ "${client_impl}" = "${server_impl}" ] \
+        && { [ "${client_impl}" = 'quic-go' ] || [ "${client_impl}" = 'quinn' ] || [ "${client_impl}" = 'picoquic' ]; }; then
+        :
+      else
+        echo 'congestion-control label "default" is only supported for paired quic-go, quinn, or picoquic runs' >&2
+        exit 1
+      fi
+      ;;
     *)
       echo "unsupported congestion-control algorithm: ${congestion_control}" >&2
       exit 1
       ;;
   esac
 done
+
+case "${client_impl}" in
+  coquic|quic-go|quinn|picoquic)
+    ;;
+  *)
+    echo "unsupported client implementation: ${client_impl}" >&2
+    exit 1
+    ;;
+esac
+
+case "${server_impl}" in
+  coquic|quic-go|quinn|picoquic)
+    ;;
+  *)
+    echo "unsupported server implementation: ${server_impl}" >&2
+    exit 1
+    ;;
+esac
 
 rm -f "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
   "${results_root}"/*.cid \
@@ -161,6 +192,8 @@ docker network create "${network_name}" >/dev/null
   echo "port=${port}"
   echo "run_timeout_seconds=${run_timeout_seconds}"
   echo "congestion_controls=${congestion_controls}"
+  echo "client_impl=${client_impl}"
+  echo "server_impl=${server_impl}"
   echo
   docker version
   echo
@@ -180,7 +213,11 @@ docker network create "${network_name}" >/dev/null
 for congestion_control in "${congestion_control_list[@]}"; do
   for run in "${runs[@]}"; do
     read -r backend mode direction request_bytes response_bytes limit streams connections inflight warmup duration <<<"${run}"
-    run_name="${preset}-${congestion_control}-${backend}-${mode}-s${streams}-c${connections}-q${inflight}"
+    if [ "${client_impl}" = 'coquic' ] && [ "${server_impl}" = 'coquic' ]; then
+      run_name="${preset}-${congestion_control}-${backend}-${mode}-s${streams}-c${connections}-q${inflight}"
+    else
+      run_name="${preset}-${client_impl}-to-${server_impl}-${congestion_control}-${backend}-${mode}-s${streams}-c${connections}-q${inflight}"
+    fi
     json_path="${results_root}/${run_name}.json"
     txt_path="${results_root}/${run_name}.txt"
     server_log_path="${results_root}/${run_name}.server.log"
@@ -190,11 +227,25 @@ for congestion_control in "${congestion_control_list[@]}"; do
 
     cleanup_containers
 
+    server_entrypoint=()
+    case "${server_impl}" in
+      quic-go)
+        server_entrypoint=(--entrypoint /usr/local/bin/quicgo-perf)
+        ;;
+      quinn)
+        server_entrypoint=(--entrypoint /usr/local/bin/quinn-perf)
+        ;;
+      picoquic)
+        server_entrypoint=(--entrypoint /usr/local/bin/picoquic-perf)
+        ;;
+    esac
+
     docker run -d --rm \
       --name "${server_name}" \
       --network "${network_name}" \
       --cpuset-cpus "${server_cpus}" \
       -v "${repo_root}/tests/fixtures:/certs:ro" \
+      "${server_entrypoint[@]}" \
       "${image_tag}" server \
       --host 0.0.0.0 \
       --port "${port}" \
@@ -232,11 +283,25 @@ for congestion_control in "${congestion_control_list[@]}"; do
     fi
 
     set +e
+    client_entrypoint=()
+    case "${client_impl}" in
+      quic-go)
+        client_entrypoint=(--entrypoint /usr/local/bin/quicgo-perf)
+        ;;
+      quinn)
+        client_entrypoint=(--entrypoint /usr/local/bin/quinn-perf)
+        ;;
+      picoquic)
+        client_entrypoint=(--entrypoint /usr/local/bin/picoquic-perf)
+        ;;
+    esac
+
     timeout --kill-after=5s "${run_timeout_seconds}s" docker run --rm \
       --name "${client_name}" \
       --network "${network_name}" \
       --cpuset-cpus "${client_cpus}" \
       -v "${results_root}:/results" \
+      "${client_entrypoint[@]}" \
       "${image_tag}" "${client_args[@]}" | tee "${txt_path}"
     client_status=${PIPESTATUS[0]}
     set -e
@@ -258,7 +323,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
   done
 done
 
-python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${image_attr}" "${image_tag}" "${congestion_controls}"
+python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${image_attr}" "${image_tag}" "${congestion_controls}" "${client_impl}" "${server_impl}"
 import json
 import pathlib
 import sys
@@ -269,6 +334,8 @@ preset = sys.argv[3]
 image_attr = sys.argv[4]
 image_tag = sys.argv[5]
 congestion_controls = sys.argv[6].split()
+client_impl = sys.argv[7]
+server_impl = sys.argv[8]
 
 runs = []
 for path in sorted(root.glob('*.json')):
@@ -287,6 +354,8 @@ manifest = {
     'image_attr': image_attr,
     'image_tag': image_tag,
     'congestion_controls': congestion_controls,
+    'client_impl': client_impl,
+    'server_impl': server_impl,
     'results_root': str(root),
     'runs': runs,
 }

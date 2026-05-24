@@ -33,15 +33,33 @@ class RecordingIoBackend final : public coquic::io::QuicIoBackend {
 
     std::optional<coquic::io::QuicIoEvent>
     wait(std::optional<coquic::quic::QuicCoreTimePoint>) override {
-        return std::nullopt;
+        operations.push_back("wait");
+        if (pending_events.empty()) {
+            return std::nullopt;
+        }
+        auto event = pending_events.front();
+        pending_events.erase(pending_events.begin());
+        return event;
+    }
+
+    bool has_pending_events() const override {
+        return !pending_events.empty();
     }
 
     bool send(const coquic::io::QuicIoTxDatagram &datagram) override {
-        sent_datagrams.push_back(datagram);
+        operations.push_back("send");
+        sent_datagrams.push_back(coquic::io::QuicIoTxDatagram{
+            .route_handle = datagram.route_handle,
+            .bytes = coquic::quic::DatagramBuffer{datagram.payload()},
+            .ecn = datagram.ecn,
+            .is_pmtu_probe = datagram.is_pmtu_probe,
+        });
         return true;
     }
 
+    std::vector<coquic::io::QuicIoEvent> pending_events;
     std::vector<coquic::io::QuicIoTxDatagram> sent_datagrams;
+    std::vector<std::string> operations;
 };
 
 QuicPerfSessionStart make_fixed_download_start(std::uint64_t response_bytes) {
@@ -194,6 +212,7 @@ TEST(QuicPerfServerTest, PerfSendBufferOwnsBufferedDatagramBytesUntilFlush) {
     });
 
     ASSERT_TRUE(buffer.append_or_flush(backend, result));
+    EXPECT_EQ(buffer.size(), 1u);
     EXPECT_TRUE(backend.sent_datagrams.empty());
 
     auto *send = std::get_if<coquic::quic::QuicCoreSendDatagram>(&result.effects.front());
@@ -201,11 +220,58 @@ TEST(QuicPerfServerTest, PerfSendBufferOwnsBufferedDatagramBytesUntilFlush) {
     send->bytes.clear();
 
     ASSERT_TRUE(buffer.flush(backend));
+    EXPECT_EQ(buffer.size(), 0u);
     ASSERT_EQ(backend.sent_datagrams.size(), 1u);
     const auto payload = backend.sent_datagrams.front().payload();
     ASSERT_EQ(payload.size(), 2u);
     EXPECT_EQ(payload[0], std::byte{0x01});
     EXPECT_EQ(payload[1], std::byte{0x02});
+}
+
+TEST(QuicPerfServerTest, PerfSendBufferReportsBufferedDatagramCount) {
+    RecordingIoBackend backend;
+    PerfSendBuffer buffer;
+
+    coquic::quic::QuicCoreResult result;
+    result.effects.emplace_back(coquic::quic::QuicCoreSendDatagram{
+        .connection = 1,
+        .route_handle = 17,
+        .bytes = coquic::quic::DatagramBuffer{std::vector<std::byte>{std::byte{0x01}}},
+    });
+
+    EXPECT_EQ(buffer.size(), 0u);
+    ASSERT_TRUE(buffer.append_or_flush(backend, result));
+    EXPECT_EQ(buffer.size(), 1u);
+    EXPECT_TRUE(backend.sent_datagrams.empty());
+    ASSERT_TRUE(buffer.flush(backend));
+    EXPECT_EQ(buffer.size(), 0u);
+    EXPECT_EQ(backend.sent_datagrams.size(), 1u);
+}
+
+TEST(QuicPerfServerTest, FlushDrainsQueuedBackendEventsBeforeSendingBufferedDatagrams) {
+    auto backend = std::make_unique<RecordingIoBackend>();
+    auto *backend_ptr = backend.get();
+    backend_ptr->pending_events.push_back(coquic::io::QuicIoEvent{
+        .kind = coquic::io::QuicIoEvent::Kind::timer_expired,
+        .now = coquic::quic::test::test_time(1),
+    });
+    QuicPerfServer server(QuicPerfConfig{}, std::move(backend));
+    coquic::quic::QuicCoreResult result;
+    result.effects.emplace_back(coquic::quic::QuicCoreSendDatagram{
+        .connection = 1,
+        .route_handle = 17,
+        .bytes = coquic::quic::DatagramBuffer{std::vector<std::byte>{std::byte{0x01}}},
+    });
+
+    ASSERT_TRUE(server.send_buffer_.append_or_flush(*backend_ptr, result));
+    EXPECT_TRUE(backend_ptr->operations.empty());
+    ASSERT_TRUE(server.flush_pending_sends());
+
+    ASSERT_EQ(backend_ptr->operations.size(), 2u);
+    EXPECT_EQ(backend_ptr->operations[0], "wait");
+    EXPECT_EQ(backend_ptr->operations[1], "send");
+    EXPECT_TRUE(backend_ptr->pending_events.empty());
+    EXPECT_EQ(backend_ptr->sent_datagrams.size(), 1u);
 }
 
 TEST(QuicPerfServerTest, FixedDownloadRuntimeBranchQueuesCachedSharedPayloadOnStream) {

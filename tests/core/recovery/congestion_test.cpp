@@ -284,7 +284,7 @@ TEST(QuicCongestionTest, NewRenoUsesRfcSlowStartGrowthWithoutDelayExit) {
     EXPECT_EQ(controller.congestion_window(), after_second_round + 8u * kTestDatagramSize);
 }
 
-TEST(QuicCongestionTest, NewRenoCountsApplicationLimitedAcksForWindowGrowth) {
+TEST(QuicCongestionTest, NewRenoSkipsApplicationLimitedAcksForWindowGrowth) {
     NewRenoCongestionController controller(/*max_datagram_size=*/kTestDatagramSize);
     auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
                                    /*in_flight=*/true, /*bytes_in_flight=*/kTestDatagramSize,
@@ -301,7 +301,7 @@ TEST(QuicCongestionTest, NewRenoCountsApplicationLimitedAcksForWindowGrowth) {
                                 });
 
     EXPECT_EQ(controller.bytes_in_flight(), 0u);
-    EXPECT_EQ(controller.congestion_window(), 11u * kTestDatagramSize);
+    EXPECT_EQ(controller.congestion_window(), 10u * kTestDatagramSize);
 }
 
 TEST(QuicCongestionTest, CubicHyStartPlusPlusExitsSlowStartAfterCssRounds) {
@@ -1184,6 +1184,7 @@ TEST(QuicCongestionTest, CopaWrapperDispatchCoversAccessorsAndCopyMove) {
     wrapper.on_packet_sent(packet);
     EXPECT_EQ(wrapper.bytes_in_flight(), 1200u);
     EXPECT_TRUE(wrapper.can_send_ack_eliciting(1200));
+    EXPECT_EQ(wrapper.pacing_send_quantum(), 2400u);
 
     wrapper.on_packets_acked(std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
                              coquic::quic::test::test_time(155),
@@ -1831,6 +1832,17 @@ TEST(QuicCongestionTest, BbrUpdatesLossSignalsAndLongTermBandwidthModel) {
     EXPECT_EQ(controller.cycle_count_, 1u);
     EXPECT_DOUBLE_EQ(controller.max_bandwidth_bytes_per_second_, 50000.0);
     EXPECT_EQ(controller.inflight_longterm_, 18000u);
+    EXPECT_EQ(controller.ack_phase_, BbrCongestionController::AckPhase::refilling);
+
+    controller.round_start_ = true;
+    controller.adapt_long_term_model(
+        make_rate_sample(/*delivery_rate_bytes_per_second=*/0.0, /*newly_acked=*/0, /*lost=*/0,
+                         /*tx_in_flight=*/18000, /*prior_delivered=*/0, /*delivered=*/0,
+                         std::nullopt, /*is_app_limited=*/false,
+                         /*has_newly_acked=*/false));
+
+    EXPECT_EQ(controller.cycle_count_, 1u);
+    EXPECT_DOUBLE_EQ(controller.max_bandwidth_bytes_per_second_, 50000.0);
 }
 
 TEST(QuicCongestionTest, BbrProbeBwCycleTransitionsAcrossAllPhases) {
@@ -2118,6 +2130,7 @@ TEST(QuicCongestionTest, BbrHelperPredicatesMathAndWrapperDispatchCoverAccessors
     bbr.bandwidth_bytes_per_second_ = 120000.0;
     bbr.pacing_rate_bytes_per_second_ = 120000.0;
     bbr.min_rtt_ = std::chrono::milliseconds{100};
+    bbr.send_quantum_ = 4800;
 
     auto wrapper_packet =
         make_sent_packet(/*packet_number=*/9, /*ack_eliciting=*/true, /*in_flight=*/true,
@@ -2125,6 +2138,7 @@ TEST(QuicCongestionTest, BbrHelperPredicatesMathAndWrapperDispatchCoverAccessors
     wrapper.on_packet_sent(wrapper_packet);
     ASSERT_TRUE(wrapper.can_send_ack_eliciting(1200));
     ASSERT_TRUE(wrapper.next_send_time(2400).has_value());
+    EXPECT_EQ(wrapper.pacing_send_quantum(), 4800u);
 
     wrapper.on_packets_acked(std::array<SentPacketRecord, 1>{wrapper_packet}, /*app_limited=*/false,
                              coquic::quic::test::test_time(100),
@@ -2185,6 +2199,7 @@ TEST(QuicCongestionTest, CubicWrapperDispatchCoversAccessorsAndCopyMove) {
     EXPECT_EQ(wrapper.bytes_in_flight(), 1200u);
     EXPECT_TRUE(wrapper.can_send_ack_eliciting(1200));
     EXPECT_FALSE(wrapper.next_send_time(1200).has_value());
+    EXPECT_EQ(wrapper.pacing_send_quantum(), 1200u);
 
     wrapper.on_packets_acked(std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
                              coquic::quic::test::test_time(101),
@@ -2278,7 +2293,7 @@ TEST(QuicCongestionTest, PersistentCongestionCollapsesToMinimumWindow) {
     EXPECT_EQ(controller.congestion_window(), 2400u);
 }
 
-TEST(QuicCongestionTest, AppLimitedAckSaturatesBytesInFlightAndGrowsNewRenoWindow) {
+TEST(QuicCongestionTest, AppLimitedAckSaturatesBytesInFlightWithoutGrowingNewRenoWindow) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     controller.on_packet_sent(/*bytes_sent=*/1200, /*ack_eliciting=*/true);
 
@@ -2296,10 +2311,10 @@ TEST(QuicCongestionTest, AppLimitedAckSaturatesBytesInFlightAndGrowsNewRenoWindo
         /*app_limited=*/true);
 
     EXPECT_EQ(controller.bytes_in_flight(), 0u);
-    EXPECT_EQ(controller.congestion_window(), 14400u);
+    EXPECT_EQ(controller.congestion_window(), 12000u);
 }
 
-TEST(QuicCongestionTest, NewRenoCountsMixedAppLimitedAckedPacketsForWindowGrowth) {
+TEST(QuicCongestionTest, NewRenoSkipsMixedAppLimitedAckedPacketsForWindowGrowth) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     controller.on_packet_sent(/*bytes_sent=*/2400, /*ack_eliciting=*/true);
 
@@ -2316,7 +2331,7 @@ TEST(QuicCongestionTest, NewRenoCountsMixedAppLimitedAckedPacketsForWindowGrowth
         /*app_limited=*/true);
 
     EXPECT_EQ(controller.bytes_in_flight(), 0u);
-    EXPECT_EQ(controller.congestion_window(), 14400u);
+    EXPECT_EQ(controller.congestion_window(), 13200u);
 }
 
 TEST(QuicCongestionTest, AppLimitedAckSentDuringRecoveryStillExitsNewRenoRecovery) {
@@ -2342,6 +2357,7 @@ TEST(QuicCongestionTest, AppLimitedAckSentDuringRecoveryStillExitsNewRenoRecover
 TEST(QuicCongestionTest, CongestionWrapperDetectsWindowUnderutilizationAfterSend) {
     coquic::quic::QuicCongestionController wrapper(
         coquic::quic::QuicCongestionControlAlgorithm::newreno, /*max_datagram_size=*/1200);
+    EXPECT_EQ(wrapper.pacing_send_quantum(), 1200u);
     wrapper.congestion_window_ = 12000;
     wrapper.bytes_in_flight_ = 10800;
 
@@ -2766,7 +2782,7 @@ TEST(QuicCongestionTest, BbrModelAndBudgetColdBranches) {
         make_rate_sample(/*delivery_rate_bytes_per_second=*/0.0, /*newly_acked=*/0,
                          /*lost=*/0, /*tx_in_flight=*/0, /*prior_delivered=*/0,
                          /*delivered=*/0));
-    EXPECT_EQ(controller.ack_phase_, BbrCongestionController::AckPhase::probe_stopping);
+    EXPECT_EQ(controller.ack_phase_, BbrCongestionController::AckPhase::refilling);
 
     controller.mode_ = BbrCongestionController::Mode::probe_bw_up;
     controller.congestion_window_ = 24000;

@@ -7,6 +7,8 @@
 namespace coquic::perf {
 namespace {
 
+constexpr std::size_t kMaxPendingBackendEventsBeforeFlush = 64;
+
 std::vector<std::byte> make_payload(std::size_t bytes) {
     return std::vector<std::byte>(bytes, std::byte{0x5a});
 }
@@ -76,10 +78,12 @@ int QuicPerfServer::run() {
     for (;;) {
         const auto current = quic::QuicCoreClock::now();
         const auto next_wakeup = core_.next_wakeup();
-        if (next_wakeup.has_value() && *next_wakeup <= current &&
-            !core_.has_send_continuation_pending()) {
+        if (next_wakeup.has_value() && *next_wakeup <= current) {
             if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, current),
                                current)) {
+                return 1;
+            }
+            if (!flush_pending_sends()) {
                 return 1;
             }
             continue;
@@ -110,6 +114,9 @@ int QuicPerfServer::run() {
                                event->now)) {
                 return 1;
             }
+            if (!flush_pending_sends()) {
+                return 1;
+            }
             continue;
         case io::QuicIoEvent::Kind::path_mtu_update:
         case io::QuicIoEvent::Kind::rx_datagram:
@@ -121,7 +128,7 @@ int QuicPerfServer::run() {
                 return 1;
             }
         }
-        if (!backend_->has_pending_events() && !flush_pending_sends()) {
+        if (!flush_pending_sends()) {
             return 1;
         }
     }
@@ -162,7 +169,49 @@ bool QuicPerfServer::handle_result(const quic::QuicCoreResult &result,
     return true;
 }
 
+bool QuicPerfServer::drain_pending_backend_events() {
+    if (backend_ == nullptr) {
+        return true;
+    }
+
+    for (std::size_t drained = 0;
+         drained < kMaxPendingBackendEventsBeforeFlush && backend_->has_pending_events();
+         ++drained) {
+        auto event = backend_->wait(std::nullopt);
+        if (!event.has_value()) {
+            return false;
+        }
+
+        switch (event->kind) {
+        case io::QuicIoEvent::Kind::idle_timeout:
+            return true;
+        case io::QuicIoEvent::Kind::shutdown:
+            return false;
+        case io::QuicIoEvent::Kind::timer_expired:
+            if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
+                               event->now)) {
+                return false;
+            }
+            continue;
+        case io::QuicIoEvent::Kind::path_mtu_update:
+        case io::QuicIoEvent::Kind::rx_datagram:
+            break;
+        }
+
+        if (auto input = make_endpoint_input_from_io_event(*event); input.has_value()) {
+            if (!handle_result(core_.advance_endpoint(std::move(*input), event->now), event->now)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 bool QuicPerfServer::flush_pending_sends() {
+    if (!drain_pending_backend_events()) {
+        return false;
+    }
     return send_buffer_.flush(*backend_);
 }
 

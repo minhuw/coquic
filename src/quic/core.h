@@ -542,6 +542,7 @@ class QuicCore {
         std::vector<std::string> peer_stateless_reset_token_keys;
         std::optional<std::string> initial_destination_connection_id_key;
         std::optional<QuicCoreTimePoint> send_continuation_wakeup;
+        bool send_continuation_drain = false;
         std::vector<QuicRouteHandle> new_token_issued_routes;
         std::unordered_map<QuicPathId, std::vector<std::byte>>
             address_validation_identity_by_path_id;
@@ -695,8 +696,11 @@ class QuicCore {
                               std::span<const std::byte> address_validation_identity = {});
     static std::optional<QuicRouteHandle>
     route_handle_for_path(const ConnectionEntry &entry, const std::optional<QuicPathId> &path_id);
+    static bool should_run_connection_timeout(const ConnectionEntry &entry, QuicCoreTimePoint now);
+    static void maybe_run_connection_timeout(ConnectionEntry &entry, QuicCoreTimePoint now);
     static void note_send_continuation(ConnectionEntry &entry, const QuicCoreResult &result,
                                        QuicCoreTimePoint now);
+    static bool take_send_continuation_drain(ConnectionEntry &entry);
     QuicCoreResult finalize_endpoint_result(QuicCoreResult result, QuicCoreTimePoint now);
     QuicCoreResult finalize_legacy_result(QuicCoreResult result, QuicCoreTimePoint now);
 

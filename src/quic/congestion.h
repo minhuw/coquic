@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -13,6 +14,34 @@
 #include "src/quic/core.h"
 
 namespace coquic::quic {
+
+struct QuicCongestionDebugMetrics {
+    std::uint64_t mode = 0;
+    std::uint64_t bandwidth_bps = 0;
+    std::uint64_t max_bandwidth_bps = 0;
+    std::uint64_t pacing_rate_bps = 0;
+    std::uint64_t bdp_bytes = 0;
+    std::uint64_t max_inflight = 0;
+    std::uint64_t send_quantum = 0;
+    std::uint64_t pacing_budget = 0;
+    std::uint64_t inflight_longterm = 0;
+    std::uint64_t inflight_shortterm = 0;
+    std::uint64_t extra_acked = 0;
+    std::uint64_t total_delivered = 0;
+    std::uint64_t total_lost = 0;
+    std::uint64_t latest_rtt_us = 0;
+    std::uint64_t min_rtt_us = 0;
+    std::uint64_t unjittered_rtt_us = 0;
+    std::uint64_t target_window = 0;
+    std::uint64_t round_count = 0;
+    bool app_limited = false;
+    bool full_bw_reached = false;
+    bool finite_inflight_longterm = false;
+    bool finite_inflight_shortterm = false;
+    bool slow_start = false;
+    bool startup_probe_complete = false;
+    bool finite_target_window = false;
+};
 
 class QuicCongestionController {
   public:
@@ -64,6 +93,7 @@ class QuicCongestionController {
     std::string_view name() const;
     bool can_send_ack_eliciting(std::size_t bytes) const;
     std::optional<QuicCoreTimePoint> next_send_time(std::size_t bytes) const;
+    std::size_t pacing_send_quantum() const;
     void on_packet_sent(std::size_t bytes_sent, bool ack_eliciting);
     void on_packet_sent(SentPacketRecord &packet);
     void on_packets_acked(std::span<const SentPacketRecord> packets, bool app_limited,
@@ -80,6 +110,7 @@ class QuicCongestionController {
     std::size_t bytes_in_flight() const;
     std::size_t minimum_window() const;
     bool would_underutilize_congestion_window(std::size_t bytes_sent) const;
+    QuicCongestionDebugMetrics debug_metrics(QuicCoreTimePoint now) const;
 
   private:
     void set_test_metric(bool congestion_window, std::size_t value);

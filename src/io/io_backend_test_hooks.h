@@ -138,6 +138,7 @@ bool socket_io_backend_send_uses_route_handle_for_tests();
 bool socket_io_backend_wait_returns_second_route_datagram_for_tests();
 bool socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests();
 bool socket_io_backend_poll_engine_primes_descriptor_cache_for_tests();
+bool poll_io_engine_restamps_queued_receive_events_for_tests();
 bool socket_io_backend_configures_linux_ecn_socket_options_for_tests();
 bool socket_io_backend_sendmsg_uses_outbound_ecn_for_tests();
 bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests();

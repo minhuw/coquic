@@ -404,6 +404,10 @@ sudo install -m 755 "${remote_upload_dir}/h3-server" "${remote_release_dir}/h3-s
 sudo rm -rf "${remote_release_dir}/site"
 sudo install -d -m 755 "${remote_release_dir}/site"
 sudo tar -xf "${remote_upload_dir}/site.tar" -C "${remote_release_dir}/site"
+if sudo test -f /opt/coquic-demo/current/site/perf-results.json &&
+   ! sudo test -f "${remote_release_dir}/site/perf-results.json"; then
+  sudo install -m 644 /opt/coquic-demo/current/site/perf-results.json "${remote_release_dir}/site/perf-results.json"
+fi
 
 sudo install -m 644 "${remote_upload_dir}/coquic-demo.service" /etc/systemd/system/coquic-demo.service
 sudo install -m 644 "${remote_upload_dir}/fullchain.pem" /etc/coquic-demo/tls/fullchain.pem

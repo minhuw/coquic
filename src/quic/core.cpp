@@ -91,9 +91,12 @@ constexpr std::byte kServerConnectionIdPrefix{0x53};
 static_assert(kStreamStateErrorMap.size() ==
               static_cast<std::size_t>(StreamStateErrorCode::final_size_conflict) + 1);
 
-COQUIC_NO_PROFILE bool has_send_continuation(std::size_t emitted, const QuicConnection &connection,
+COQUIC_NO_PROFILE bool has_send_continuation(std::size_t emitted,
+                                             bool last_drained_allows_send_continuation,
+                                             const QuicConnection &connection,
                                              QuicCoreTimePoint now) {
-    return emitted == kMaxDatagramsPerDrain && connection.has_sendable_datagram(now);
+    return emitted == kMaxDatagramsPerDrain && last_drained_allows_send_continuation &&
+           connection.has_sendable_datagram(now, /*continue_paced_burst=*/true);
 }
 
 COQUIC_NO_PROFILE bool wakeup_not_due(const std::optional<QuicCoreTimePoint> &wakeup,
@@ -150,19 +153,23 @@ QuicCoreLocalError stream_state_error_to_local_error(const StreamStateError &err
 COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
     QuicConnectionHandle handle, const std::optional<QuicRouteHandle> &default_route_handle,
     const std::unordered_map<QuicPathId, QuicRouteHandle> &route_handle_by_path_id,
-    QuicConnection &connection, QuicCoreTimePoint now) {
+    QuicConnection &connection, QuicCoreTimePoint now, bool continue_paced_burst = false) {
     QuicCoreResult result;
 
     std::size_t emitted = 0;
+    bool last_drained_allows_send_continuation = false;
     for (; emitted < kMaxDatagramsPerDrain; ++emitted) {
-        if (!connection.has_sendable_datagram(now)) {
+        if (!connection.has_sendable_datagram(now, continue_paced_burst)) {
             break;
         }
-        auto datagram = connection.drain_outbound_datagram(now);
+        auto datagram = connection.drain_outbound_datagram(now, continue_paced_burst);
         if (datagram.empty()) {
             break;
         }
-        if (emitted == 0 && connection.has_sendable_datagram(now)) {
+        last_drained_allows_send_continuation = connection.last_drained_allows_send_continuation();
+        continue_paced_burst = last_drained_allows_send_continuation;
+        if (emitted == 0 && last_drained_allows_send_continuation &&
+            connection.has_sendable_datagram(now, /*continue_paced_burst=*/true)) {
             result.effects.reserve(kMaxDatagramsPerDrain);
         }
 
@@ -181,7 +188,7 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
                 connection.last_drained_packet_inspection_datagram_id(),
         });
     }
-    if (has_send_continuation(emitted, connection, now)) {
+    if (has_send_continuation(emitted, last_drained_allows_send_continuation, connection, now)) {
         result.next_wakeup = now;
         result.send_continuation_pending = true;
     }
@@ -1939,28 +1946,29 @@ QuicCore::route_handle_for_path(const ConnectionEntry &entry,
     return entry.default_route_handle;
 }
 
+bool QuicCore::should_run_connection_timeout(const ConnectionEntry &entry, QuicCoreTimePoint now) {
+    return !entry.send_continuation_wakeup.has_value() &&
+           entry.connection->non_pacing_wakeup_due(now);
+}
+
+void QuicCore::maybe_run_connection_timeout(ConnectionEntry &entry, QuicCoreTimePoint now) {
+    if (should_run_connection_timeout(entry, now)) {
+        entry.connection->on_timeout(now);
+    }
+}
+
 template <typename Entry>
 COQUIC_NO_PROFILE void store_send_continuation_wakeup(Entry &entry, bool send_continuation_pending,
                                                       QuicCoreTimePoint now) {
     entry.send_continuation_wakeup =
         send_continuation_pending ? std::optional<QuicCoreTimePoint>{now} : std::nullopt;
+    entry.send_continuation_drain = send_continuation_pending;
 }
 
 template <typename Entry>
 COQUIC_NO_PROFILE std::optional<QuicCoreTimePoint> next_entry_wakeup(const Entry &entry) {
     return entry.send_continuation_wakeup.has_value() ? entry.send_continuation_wakeup
                                                       : entry.connection->next_wakeup();
-}
-
-template <typename Entry> COQUIC_NO_PROFILE bool should_run_connection_timeout(const Entry &entry) {
-    return !entry.send_continuation_wakeup.has_value();
-}
-
-template <typename Entry>
-COQUIC_NO_PROFILE void maybe_run_connection_timeout(Entry &entry, QuicCoreTimePoint now) {
-    if (should_run_connection_timeout(entry)) {
-        entry.connection->on_timeout(now);
-    }
 }
 
 template <typename Entry>
@@ -3136,11 +3144,7 @@ std::optional<QuicCoreTimePoint> QuicCore::next_wakeup() const {
         if (entry.connection == nullptr) {
             continue;
         }
-        if (entry.send_continuation_wakeup.has_value()) {
-            earliest = std::min(earliest.value_or(*entry.send_continuation_wakeup),
-                                *entry.send_continuation_wakeup);
-        }
-        const auto candidate = entry.connection->next_wakeup();
+        const auto candidate = next_entry_wakeup(entry);
         if (!candidate.has_value()) {
             continue;
         }
@@ -3152,6 +3156,12 @@ std::optional<QuicCoreTimePoint> QuicCore::next_wakeup() const {
 void QuicCore::note_send_continuation(ConnectionEntry &entry, const QuicCoreResult &result,
                                       QuicCoreTimePoint now) {
     store_send_continuation_wakeup(entry, result.send_continuation_pending, now);
+}
+
+bool QuicCore::take_send_continuation_drain(ConnectionEntry &entry) {
+    const bool continue_paced_burst = entry.send_continuation_drain;
+    entry.send_continuation_drain = false;
+    return continue_paced_burst;
 }
 
 QuicCoreResult QuicCore::finalize_endpoint_result(QuicCoreResult result, QuicCoreTimePoint now) {
@@ -3346,9 +3356,9 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                                                                      *path_id, inbound->ecn);
                 }
 
-                auto drained =
-                    drain_connection_effects(entry.handle, entry.default_route_handle,
-                                             entry.route_handle_by_path_id, *entry.connection, now);
+                auto drained = drain_connection_effects(
+                    entry.handle, entry.default_route_handle, entry.route_handle_by_path_id,
+                    *entry.connection, now, take_send_continuation_drain(entry));
                 drain_queued_server_new_token(entry, drained, now);
                 const bool remove_entry =
                     should_remove_endpoint_connection_entry(*entry.connection, drained, now);
@@ -3548,9 +3558,9 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                 continue;
             }
             entry.connection->apply_path_mtu_update(*path_id, mtu->max_udp_payload_size);
-            auto drained =
-                drain_connection_effects(entry.handle, entry.default_route_handle,
-                                         entry.route_handle_by_path_id, *entry.connection, now);
+            auto drained = drain_connection_effects(
+                entry.handle, entry.default_route_handle, entry.route_handle_by_path_id,
+                *entry.connection, now, take_send_continuation_drain(entry));
             note_send_continuation(entry, drained, now);
             append_result(result, std::move(drained));
             refresh_server_connection_routes(entry);
@@ -3658,9 +3668,9 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             },
             command->input);
 
-        auto drained =
-            drain_connection_effects(entry.handle, entry.default_route_handle,
-                                     entry.route_handle_by_path_id, *entry.connection, now);
+        auto drained = drain_connection_effects(entry.handle, entry.default_route_handle,
+                                                entry.route_handle_by_path_id, *entry.connection,
+                                                now, take_send_continuation_drain(entry));
         const bool remove_entry =
             should_remove_endpoint_connection_entry(*entry.connection, drained, now);
         note_send_continuation(entry, drained, now);
@@ -3682,10 +3692,11 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             continue;
         }
 
+        const bool continue_paced_burst = take_send_continuation_drain(entry);
         maybe_run_connection_timeout(entry, now);
-        auto drained =
-            drain_connection_effects(entry.handle, entry.default_route_handle,
-                                     entry.route_handle_by_path_id, *entry.connection, now);
+        auto drained = drain_connection_effects(entry.handle, entry.default_route_handle,
+                                                entry.route_handle_by_path_id, *entry.connection,
+                                                now, continue_paced_burst);
         const bool remove_entry =
             should_remove_endpoint_connection_entry(*entry.connection, drained, now);
         note_send_continuation(entry, drained, now);
@@ -3900,7 +3911,8 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
         input);
 
     auto drained = drain_connection_effects(entry.handle, entry.default_route_handle,
-                                            entry.route_handle_by_path_id, *connection, now);
+                                            entry.route_handle_by_path_id, *connection, now,
+                                            take_send_continuation_drain(entry));
     append_result(result, std::move(drained));
     legacy_config_ = std::move(config);
     return finalize_legacy_result(std::move(result), now);
@@ -3960,9 +3972,9 @@ QuicCoreResult QuicCore::advance(std::span<const QuicCoreInput> inputs, QuicCore
             }
         }
 
-        auto drained =
-            drain_connection_effects(entry->handle, entry->default_route_handle,
-                                     entry->route_handle_by_path_id, *entry->connection, now);
+        auto drained = drain_connection_effects(entry->handle, entry->default_route_handle,
+                                                entry->route_handle_by_path_id, *entry->connection,
+                                                now, take_send_continuation_drain(*entry));
         append_result(result, std::move(drained));
         result = finalize_legacy_result(std::move(result), now);
         append_sequential_result(combined, std::move(result));

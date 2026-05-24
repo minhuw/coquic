@@ -115,4 +115,8 @@ bool PerfSendBuffer::empty() const {
     return datagrams_.empty();
 }
 
+std::size_t PerfSendBuffer::size() const {
+    return datagrams_.size();
+}
+
 } // namespace coquic::perf

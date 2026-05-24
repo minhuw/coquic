@@ -58,7 +58,7 @@ void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRec
         if (packet.ack_eliciting && recovery_boundary.has_value() && !in_batch_recovery) {
             exit_recovery = true;
         }
-        if (!packet.ack_eliciting || in_batch_recovery) {
+        if (!packet.ack_eliciting || in_batch_recovery || packet.app_limited) {
             continue;
         }
 

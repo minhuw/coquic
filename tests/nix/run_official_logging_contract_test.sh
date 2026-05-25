@@ -16,6 +16,21 @@ grep -F 'show_runner_output_tail()' "${script}" >/dev/null || {
   exit 1
 }
 
+grep -F 'readonly interop_retry_testcases="${INTEROP_RETRY_TESTCASES:-amplificationlimit}"' "${script}" >/dev/null || {
+  echo "run-official must keep amplificationlimit isolated retry configurable" >&2
+  exit 1
+}
+
+grep -F 'Retrying official ${server}/${client} testcase in isolation: ${testcase}' "${script}" >/dev/null || {
+  echo "run-official must isolate retryable official testcase failures" >&2
+  exit 1
+}
+
+grep -F 'mark_official_testcases_recovered "${results_json}"' "${script}" >/dev/null || {
+  echo "run-official must record recovered official testcase retries" >&2
+  exit 1
+}
+
 grep -F 'Official runner output saved to ${runner_output_log}' "${script}" >/dev/null || {
   echo "run-official must record where full runner output was written" >&2
   exit 1

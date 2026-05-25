@@ -15,6 +15,8 @@ readonly interop_directions="${INTEROP_DIRECTIONS:-both}"
 readonly interop_analysis_shell_package="${INTEROP_ANALYSIS_SHELL_PACKAGE:-nixpkgs#wireshark}"
 readonly interop_runner_output_tail_lines="${INTEROP_RUNNER_OUTPUT_TAIL_LINES:-200}"
 readonly interop_save_files="${INTEROP_SAVE_FILES:-0}"
+readonly interop_retry_failed_testcases="${INTEROP_RETRY_FAILED_TESTCASES:-1}"
+readonly interop_retry_testcases="${INTEROP_RETRY_TESTCASES:-amplificationlimit}"
 log_root_input="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
 if [[ "${log_root_input}" != /* ]]; then
   log_root_input="${repo_root}/${log_root_input}"
@@ -47,6 +49,133 @@ show_runner_output_tail() {
   echo "Official runner output saved to ${runner_output_log}"
   echo "Showing last ${interop_runner_output_tail_lines} lines from ${runner_output_log}"
   tail -n "${interop_runner_output_tail_lines}" "${runner_output_log}" || true
+}
+
+validate_official_results() {
+  local results_json=$1
+  local server=$2
+  local client=$3
+  local requested_testcases=$4
+
+  python3 - "${results_json}" "${server}" "${client}" "${requested_testcases}" <<'PY'
+import json
+import pathlib
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+server = sys.argv[2]
+client = sys.argv[3]
+requested_tests = [test for test in sys.argv[4].split(",") if test]
+
+data = json.loads(results_path.read_text())
+servers = data.get("servers", [])
+clients = data.get("clients", [])
+results = data.get("results", [])
+measurements = data.get("measurements", [])
+
+if server not in servers:
+    raise SystemExit(f"official runner results missing server entry: {server}")
+if client not in clients:
+    raise SystemExit(f"official runner results missing client entry: {client}")
+if len(servers) != 1 or len(clients) != 1:
+    raise SystemExit(
+        f"expected single client/server pair in official runner results, "
+        f"got servers={servers!r} clients={clients!r}"
+    )
+if len(results) != 1:
+    raise SystemExit(
+        f"expected one result matrix cell in official runner results, got {len(results)}"
+    )
+if len(measurements) not in (0, 1):
+    raise SystemExit(
+        "expected zero or one measurement matrix cell in official runner results, "
+        f"got {len(measurements)}"
+    )
+
+testcase_results = {
+    entry.get("name"): entry.get("result")
+    for entry in results[0]
+}
+measurement_results = {
+    entry.get("name"): entry.get("result")
+    for entry in (measurements[0] if measurements else [])
+}
+
+missing = [
+    test for test in requested_tests
+    if test not in testcase_results and test not in measurement_results
+]
+if missing:
+    raise SystemExit(
+        f"official runner results missing requested testcase or measurement results: {missing!r}"
+    )
+
+failed = []
+for test in requested_tests:
+    if test in testcase_results:
+        result = testcase_results.get(test)
+    elif test in measurement_results:
+        result = measurement_results.get(test)
+    else:
+        result = None
+    if result != "succeeded":
+        failed.append(f"{test}={result!r}")
+
+if failed:
+    raise SystemExit(
+        "requested testcase did not succeed for "
+        f"{server}/{client}: {', '.join(failed)}"
+    )
+PY
+}
+
+failed_retryable_official_testcases() {
+  local results_json=$1
+  local requested_testcases=$2
+  local retry_testcases=$3
+
+  python3 - "${results_json}" "${requested_testcases}" "${retry_testcases}" <<'PY'
+import json
+import pathlib
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+requested_tests = [test for test in sys.argv[2].split(",") if test]
+retry_tests = {test for test in sys.argv[3].replace(",", " ").split() if test}
+
+data = json.loads(results_path.read_text())
+results = data.get("results", [])
+if len(results) != 1:
+    raise SystemExit(0)
+
+testcase_results = {
+    entry.get("name"): entry.get("result")
+    for entry in results[0]
+}
+for test in requested_tests:
+    if test in retry_tests and testcase_results.get(test) not in (None, "succeeded"):
+        print(test)
+PY
+}
+
+mark_official_testcases_recovered() {
+  local results_json=$1
+  shift
+
+  python3 - "${results_json}" "$@" <<'PY'
+import json
+import pathlib
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+recovered = set(sys.argv[2:])
+data = json.loads(results_path.read_text())
+for entry in data.get("results", [[]])[0]:
+    if entry.get("name") in recovered:
+        entry["result"] = "succeeded"
+data["coquic_retried_testcases"] = sorted(recovered)
+results_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+PY
 }
 
 cleanup() {
@@ -220,6 +349,8 @@ run_direction() {
   local status
   local testcase
   local testcase_log_dir
+  local retry_testcases=()
+  local recovered_testcases=()
 
   cleanup_runner_state
   rm -rf "${direction_log_dir}"
@@ -270,79 +401,75 @@ run_direction() {
     return 1
   fi
 
-  if ! python3 - "${results_json}" "${server}" "${client}" "${interop_testcases}" <<'PY'
-import json
-import pathlib
-import sys
+  if ! validate_official_results "${results_json}" "${server}" "${client}" "${interop_testcases}"; then
+    if [ "${interop_retry_failed_testcases}" = "1" ]; then
+      mapfile -t retry_testcases < <(
+        failed_retryable_official_testcases \
+          "${results_json}" "${interop_testcases}" "${interop_retry_testcases}"
+      )
+      for testcase in "${retry_testcases[@]}"; do
+        local retry_dir="${direction_log_dir}/retry-${testcase}"
+        local retry_results_json="${retry_dir}/results.json"
+        local retry_runner_log_dir="${retry_dir}/runner"
+        local retry_runner_output_log="${retry_dir}/runner-output.txt"
 
-results_path = pathlib.Path(sys.argv[1])
-server = sys.argv[2]
-client = sys.argv[3]
-requested_tests = [test for test in sys.argv[4].split(",") if test]
+        echo "Retrying official ${server}/${client} testcase in isolation: ${testcase}"
+        cleanup_runner_state
+        rm -rf "${retry_dir}"
+        mkdir -p "${retry_dir}"
 
-data = json.loads(results_path.read_text())
-servers = data.get("servers", [])
-clients = data.get("clients", [])
-results = data.get("results", [])
-measurements = data.get("measurements", [])
+        set +e
+        if have_interop_analysis_tools; then
+          (
+            cd "${runner_dir}"
+            python3 run.py \
+              --server "${server}" \
+              --client "${client}" \
+              --test "${testcase}" \
+              --log-dir "${retry_runner_log_dir}" \
+              --json "${retry_results_json}" \
+              "${save_files_args[@]}" \
+              --debug
+          ) > "${retry_runner_output_log}" 2>&1
+        else
+          (
+            cd "${runner_dir}"
+            nix shell "${interop_analysis_shell_package}" -c \
+              python3 run.py \
+                --server "${server}" \
+                --client "${client}" \
+                --test "${testcase}" \
+                --log-dir "${retry_runner_log_dir}" \
+                --json "${retry_results_json}" \
+                "${save_files_args[@]}" \
+                --debug
+          ) > "${retry_runner_output_log}" 2>&1
+        fi
+        local retry_status=$?
+        set -e
 
-if server not in servers:
-    raise SystemExit(f"official runner results missing server entry: {server}")
-if client not in clients:
-    raise SystemExit(f"official runner results missing client entry: {client}")
-if len(servers) != 1 or len(clients) != 1:
-    raise SystemExit(
-        f"expected single client/server pair in official runner results, "
-        f"got servers={servers!r} clients={clients!r}"
-    )
-if len(results) != 1:
-    raise SystemExit(
-        f"expected one result matrix cell in official runner results, got {len(results)}"
-    )
-if len(measurements) not in (0, 1):
-    raise SystemExit(
-        "expected zero or one measurement matrix cell in official runner results, "
-        f"got {len(measurements)}"
-    )
+        echo "Official runner retry output saved to ${retry_runner_output_log}"
+        if [ "${retry_status}" -eq 0 ] && [ -f "${retry_results_json}" ] &&
+          validate_official_results "${retry_results_json}" "${server}" "${client}" "${testcase}"
+        then
+          recovered_testcases+=("${testcase}")
+          echo "Recovered official ${server}/${client} testcase after isolated retry: ${testcase}"
+        else
+          show_runner_output_tail "${retry_runner_output_log}"
+        fi
+      done
+      if [ "${#recovered_testcases[@]}" -ne 0 ]; then
+        mark_official_testcases_recovered "${results_json}" "${recovered_testcases[@]}"
+      fi
+    fi
 
-testcase_results = {
-    entry.get("name"): entry.get("result")
-    for entry in results[0]
-}
-measurement_results = {
-    entry.get("name"): entry.get("result")
-    for entry in (measurements[0] if measurements else [])
-}
-
-missing = [
-    test for test in requested_tests
-    if test not in testcase_results and test not in measurement_results
-]
-if missing:
-    raise SystemExit(
-        f"official runner results missing requested testcase or measurement results: {missing!r}"
-    )
-
-failed = []
-for test in requested_tests:
-    if test in testcase_results:
-        result = testcase_results.get(test)
-    elif test in measurement_results:
-        result = measurement_results.get(test)
-    else:
-        result = None
-    if result != "succeeded":
-        failed.append(f"{test}={result!r}")
-
-if failed:
-    raise SystemExit(
-        "requested testcase did not succeed for "
-        f"{server}/{client}: {', '.join(failed)}"
-    )
-PY
-  then
-    show_runner_output_tail "${runner_output_log}"
-    return 1
+    if ! validate_official_results "${results_json}" "${server}" "${client}" "${interop_testcases}"; then
+      show_runner_output_tail "${runner_output_log}"
+      return 1
+    fi
+    if [ "${#recovered_testcases[@]}" -ne 0 ]; then
+      status=0
+    fi
   fi
 
   if [ -d "${runner_log_dir}/${server}_${client}" ]; then

@@ -91,6 +91,36 @@ jobs:
             PERF_CONGESTION_CONTROLS=default \
             bash bench/run-host-matrix.sh --preset ci
 
+      - name: Run quicly Paired Baseline
+        id: perf_quicly
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/quicly \
+            PERF_CLIENT_IMPL=quicly \
+            PERF_SERVER_IMPL=quicly \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
+      - name: Run Google QUICHE Paired Baseline
+        id: perf_google_quiche
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/google-quiche \
+            PERF_CLIENT_IMPL=google-quiche \
+            PERF_SERVER_IMPL=google-quiche \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
+      - name: Run TQUIC Paired Baseline
+        id: perf_tquic
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/tquic \
+            PERF_CLIENT_IMPL=tquic \
+            PERF_SERVER_IMPL=tquic \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
       - name: Run mvfst Paired Baseline
         id: perf_mvfst
         continue-on-error: true
@@ -171,6 +201,9 @@ jobs:
             --manifest picoquic=.bench-results/picoquic/manifest.json \
             --manifest msquic=.bench-results/msquic/manifest.json \
             --manifest quiche=.bench-results/quiche/manifest.json \
+            --manifest quicly=.bench-results/quicly/manifest.json \
+            --manifest google-quiche=.bench-results/google-quiche/manifest.json \
+            --manifest tquic=.bench-results/tquic/manifest.json \
             --manifest mvfst=.bench-results/mvfst/manifest.json \
             --manifest s2n-quic=.bench-results/s2n-quic/manifest.json \
             --manifest xquic=.bench-results/xquic/manifest.json \
@@ -244,6 +277,9 @@ jobs:
           check_step "picoquic" "${{ steps.perf_picoquic.outcome }}"
           check_step "MSQUIC" "${{ steps.perf_msquic.outcome }}"
           check_step "quiche" "${{ steps.perf_quiche.outcome }}"
+          check_step "quicly" "${{ steps.perf_quicly.outcome }}"
+          check_step "Google QUICHE" "${{ steps.perf_google_quiche.outcome }}"
+          check_step "TQUIC" "${{ steps.perf_tquic.outcome }}"
           check_step "mvfst" "${{ steps.perf_mvfst.outcome }}"
           check_step "s2n-quic" "${{ steps.perf_s2n_quic.outcome }}"
           check_step "xquic" "${{ steps.perf_xquic.outcome }}"

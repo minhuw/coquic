@@ -80,6 +80,15 @@ for marker in \
   'PERF_RESULTS_ROOT=.bench-results/quiche' \
   'PERF_CLIENT_IMPL=quiche' \
   'PERF_SERVER_IMPL=quiche' \
+  'PERF_RESULTS_ROOT=.bench-results/quicly' \
+  'PERF_CLIENT_IMPL=quicly' \
+  'PERF_SERVER_IMPL=quicly' \
+  'PERF_RESULTS_ROOT=.bench-results/google-quiche' \
+  'PERF_CLIENT_IMPL=google-quiche' \
+  'PERF_SERVER_IMPL=google-quiche' \
+  'PERF_RESULTS_ROOT=.bench-results/tquic' \
+  'PERF_CLIENT_IMPL=tquic' \
+  'PERF_SERVER_IMPL=tquic' \
   'PERF_RESULTS_ROOT=.bench-results/mvfst' \
   'PERF_CLIENT_IMPL=mvfst' \
   'PERF_SERVER_IMPL=mvfst' \
@@ -130,6 +139,9 @@ for marker in \
   '--manifest picoquic=.bench-results/picoquic/manifest.json' \
   '--manifest msquic=.bench-results/msquic/manifest.json' \
   '--manifest quiche=.bench-results/quiche/manifest.json' \
+  '--manifest quicly=.bench-results/quicly/manifest.json' \
+  '--manifest google-quiche=.bench-results/google-quiche/manifest.json' \
+  '--manifest tquic=.bench-results/tquic/manifest.json' \
   '--manifest mvfst=.bench-results/mvfst/manifest.json' \
   '--manifest s2n-quic=.bench-results/s2n-quic/manifest.json' \
   '--manifest xquic=.bench-results/xquic/manifest.json' \
@@ -160,6 +172,21 @@ grep -F 'steps.perf_msquic.outcome' "${workflow}" >/dev/null || {
 
 grep -F 'steps.perf_quiche.outcome' "${workflow}" >/dev/null || {
   echo 'missing quiche failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_quicly.outcome' "${workflow}" >/dev/null || {
+  echo 'missing quicly failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_google_quiche.outcome' "${workflow}" >/dev/null || {
+  echo 'missing Google QUICHE failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_tquic.outcome' "${workflow}" >/dev/null || {
+  echo 'missing TQUIC failure gate marker' >&2
   exit 1
 }
 

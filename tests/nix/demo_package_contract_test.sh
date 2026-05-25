@@ -118,6 +118,9 @@ for marker in \
   "picoquic" \
   "MSQUIC" \
   "quiche" \
+  "quicly" \
+  "google-quiche" \
+  "TQUIC" \
   "throughput_mib_per_s" \
   "bulk_mib_per_s" \
   "rr_requests_per_s" \

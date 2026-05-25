@@ -409,6 +409,9 @@
           picoquicPerfClient ? null,
           msquicPerfClient ? null,
           quichePerfClient ? null,
+          quiclyPerfClient ? null,
+          googleQuichePerfClient ? null,
+          tquicPerfClient ? null,
           mvfstPerfClient ? null,
           s2nQuicPerfClient ? null,
           xquicPerfClient ? null,
@@ -434,6 +437,15 @@
           ''}
           ${lib.optionalString (quichePerfClient != null) ''
             ln -s ${quichePerfClient}/bin/quiche-perf $out/usr/local/bin/quiche-perf
+          ''}
+          ${lib.optionalString (quiclyPerfClient != null) ''
+            ln -s ${quiclyPerfClient}/bin/quicly-perf $out/usr/local/bin/quicly-perf
+          ''}
+          ${lib.optionalString (googleQuichePerfClient != null) ''
+            ln -s ${googleQuichePerfClient}/bin/google-quiche-perf $out/usr/local/bin/google-quiche-perf
+          ''}
+          ${lib.optionalString (tquicPerfClient != null) ''
+            ln -s ${tquicPerfClient}/bin/tquic-perf $out/usr/local/bin/tquic-perf
           ''}
           ${lib.optionalString (mvfstPerfClient != null) ''
             ln -s ${mvfstPerfClient}/bin/mvfst-perf $out/usr/local/bin/mvfst-perf
@@ -535,6 +547,7 @@
         nativeBuildInputs = [
           pkgs.cmake
           pkgs.makeWrapper
+          pkgs.perl
           pkgs.pkg-config
         ];
         buildInputs = [
@@ -812,6 +825,195 @@
           export PATH="${pkgs.cmake}/bin:${pkgs.gnumake}/bin:$PATH"
         '';
       };
+      quiclySrc = pkgs.fetchFromGitHub {
+        owner = "h2o";
+        repo = "quicly";
+        rev = "c49ed0e53bebba42d03e51c7e546fc01be504314";
+        fetchSubmodules = true;
+        hash = "sha256-iE5ayIIdZptR/O5y3kq5/OZQEYvQJDADzX8aU3GlQcY=";
+      };
+      quiclyPerfClient = pkgs.stdenv.mkDerivation {
+        pname = "quicly-perf-client";
+        version = "dev";
+        src = quiclySrc;
+        perfSource = ./bench/quicly-perf/quicly-perf;
+        nativeBuildInputs = [
+          pkgs.cmake
+          pkgs.makeWrapper
+          pkgs.perl
+          pkgs.pkg-config
+        ];
+        buildInputs = [
+          pkgs.openssl
+        ];
+        cmakeFlags = [
+          "-DWITH_FUSION=OFF"
+          "-DCMAKE_BUILD_TYPE=Release"
+        ];
+        buildPhase = ''
+          runHook preBuild
+          cmake --build . --target cli
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out/bin $out/libexec/quicly-perf $out/share/quicly-perf
+          cp cli $out/libexec/quicly-perf/cli
+          cp "$perfSource" $out/share/quicly-perf/quicly-perf.py
+          makeWrapper ${pkgs.python3}/bin/python3 $out/bin/quicly-perf \
+            --add-flags "$out/share/quicly-perf/quicly-perf.py" \
+            --set QUICLY_PERF_BIN_DIR "$out/libexec/quicly-perf"
+          runHook postInstall
+        '';
+      };
+      googleQuicheSrc = pkgs.fetchFromGitHub {
+        owner = "google";
+        repo = "quiche";
+        rev = "9164946d4091960f1c4b52998a588e581953fdb7";
+        hash = "sha256-WcO0VUMsT5gxxN3Sx85drcPafUBcUbKr/82TsFpJm0I=";
+      };
+      googleQuicheBazelCentralRegistry = pkgs.fetchFromGitHub {
+        owner = "bazelbuild";
+        repo = "bazel-central-registry";
+        rev = "5079f39dd37c78df6c2172b7a03b696f2525d0a8";
+        hash = "sha256-AjmbMHjHLwGuWwp88B3QhYBbktCOhPL/L8sRa3Pf7w0=";
+      };
+      googleQuichePerfClient = pkgs.buildBazelPackage {
+        pname = "google-quiche-perf-client";
+        version = "dev";
+        src = googleQuicheSrc;
+        perfSource = ./bench/google-quiche-perf/google-quiche-perf;
+        bazel = pkgs.bazel_7;
+        bazelFlags = [
+          "--registry"
+          "file://${googleQuicheBazelCentralRegistry}"
+        ];
+        postPatch = ''
+          substituteInPlace .bazelversion --replace-fail '8.2.1' '7.6.0'
+          echo "common --repository_cache=\"$bazelOut/external/repository_cache\"" >> .bazelrc
+        '';
+        nativeBuildInputs = [
+          pkgs.jdk
+          pkgs.makeWrapper
+        ];
+        buildInputs = [
+          pkgs.icu
+        ];
+        removeRulesCC = false;
+        bazelBuildFlags = [
+          "--repository_cache=$bazelOut/external/repository_cache"
+          "--repository_disable_download"
+          "-c opt"
+        ];
+        bazelTargets = [
+          "//quiche:quic_client"
+          "//quiche:quic_server"
+        ];
+        fetchAttrs = {
+          hash = "sha256-2p2vy5FHFg8rRw+2ctOBZOmGicC3Bi5l2frfEuA/FRM=";
+          postPatch = ''
+            substituteInPlace .bazelversion --replace-fail '8.2.1' '7.6.0'
+            echo "common --repository_cache=\"$bazelOut/external/repository_cache\"" >> .bazelrc
+          '';
+          installPhase = ''
+            runHook preInstall
+
+            rm -rf $bazelOut/external/{bazel_tools,\@bazel_tools.marker}
+            rm -rf $bazelOut/external/{embedded_jdk,\@embedded_jdk.marker}
+            rm -rf $bazelOut/external/{local_config_cc,\@local_config_cc.marker}
+            rm -rf $bazelOut/external/{local_*,\@local_*.marker}
+
+            rm -rf $bazelOut/external/*[~+]{local_config_cc,local_config_cc.marker}
+            rm -rf $bazelOut/external/*[~+]{local_config_sh,local_config_sh.marker}
+            rm -rf $bazelOut/external/*[~+]{local_jdk,local_jdk.marker}
+
+            find $bazelOut/external -name '@*\.marker' -exec sh -c 'echo > {}' \;
+            rm -rf $(find $bazelOut/external -type d -name .git)
+            rm -rf $(find $bazelOut/external -type d -name .svn)
+            rm -rf $(find $bazelOut/external -type d -name .hg)
+
+            find $bazelOut/external -maxdepth 1 -type l | while read symlink; do
+              name="$(basename "$symlink")"
+              rm "$symlink"
+              test -f "$bazelOut/external/@$name.marker" && rm "$bazelOut/external/@$name.marker" || true
+            done
+
+            find $bazelOut/external -type l | while read symlink; do
+              new_target="$(readlink "$symlink" | sed "s,$NIX_BUILD_TOP,NIX_BUILD_TOP,")"
+              rm "$symlink"
+              ln -sf "$new_target" "$symlink"
+            done
+
+            echo '${pkgs.bazel_7.name}' > $bazelOut/external/.nix-bazel-version
+
+            (cd $bazelOut/ && tar czf $out --sort=name --mtime='@1' --owner=0 --group=0 --numeric-owner external/)
+
+            runHook postInstall
+          '';
+        };
+        buildAttrs = {
+          preConfigure = ''
+            echo "common --repository_cache=\"$bazelOut/external/repository_cache\"" >> .bazelrc
+            echo "common --repository_disable_download" >> .bazelrc
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin $out/libexec/google-quiche-perf $out/share/google-quiche-perf
+            cp bazel-bin/quiche/quic_client bazel-bin/quiche/quic_server $out/libexec/google-quiche-perf/
+            cp "$perfSource" $out/share/google-quiche-perf/google-quiche-perf.py
+            makeWrapper ${pkgs.python3}/bin/python3 $out/bin/google-quiche-perf \
+              --add-flags "$out/share/google-quiche-perf/google-quiche-perf.py" \
+              --set GOOGLE_QUICHE_PERF_BIN_DIR "$out/libexec/google-quiche-perf"
+            runHook postInstall
+          '';
+        };
+      };
+      tquicSrc = pkgs.fetchFromGitHub {
+        owner = "Tencent";
+        repo = "tquic";
+        rev = "0169abde20c6701c68b1ac5021c3e64702f20cfa";
+        hash = "sha256-9jdkcYCvnYXMPDacEWSymPXDgq8gDs8uzP7XaCiF4HA=";
+      };
+      tquicPerfClient = pkgs.rust_1_88.packages.stable.rustPlatform.buildRustPackage {
+        pname = "tquic-perf-client";
+        version = "dev";
+        src = tquicSrc;
+        buildAndTestSubdir = "tools";
+        cargoLock.lockFile = ./bench/tquic-perf/Cargo.lock;
+        perfSource = ./bench/tquic-perf/tquic-perf;
+        nativeBuildInputs = [
+          pkgs.cmake
+          pkgs.makeWrapper
+          pkgs.ninja
+          pkgs.perl
+        ];
+        buildInputs = [
+          pkgs.boringssl
+        ];
+        BORINGSSL_LIB_DIR = "${pkgs.boringssl}/lib";
+        RUSTFLAGS = "-C link-arg=-lstdc++";
+        dontUseNinjaBuild = true;
+        dontUseNinjaInstall = true;
+        doCheck = false;
+        postPatch = ''
+          cp ${./bench/tquic-perf/Cargo.lock} Cargo.lock
+        '';
+        cargoBuildFlags = [
+          "--bin"
+          "tquic_client"
+          "--bin"
+          "tquic_server"
+        ];
+        postInstall = ''
+          mkdir -p $out/libexec/tquic-perf $out/share/tquic-perf
+          mv $out/bin/tquic_client $out/libexec/tquic-perf/tquic_client
+          mv $out/bin/tquic_server $out/libexec/tquic-perf/tquic_server
+          cp "$perfSource" $out/share/tquic-perf/tquic-perf.py
+          makeWrapper ${pkgs.python3}/bin/python3 $out/bin/tquic-perf \
+            --add-flags "$out/share/tquic-perf/tquic-perf.py" \
+            --set TQUIC_PERF_BIN_DIR "$out/libexec/tquic-perf"
+        '';
+      };
       xquicSrc = pkgs.fetchFromGitHub {
         owner = "alibaba";
         repo = "xquic";
@@ -977,6 +1179,9 @@
             inherit picoquicPerfClient;
             inherit msquicPerfClient;
             inherit quichePerfClient;
+            inherit quiclyPerfClient;
+            inherit googleQuichePerfClient;
+            inherit tquicPerfClient;
             inherit mvfstPerfClient;
             inherit s2nQuicPerfClient;
             inherit xquicPerfClient;
@@ -1004,6 +1209,9 @@
             inherit picoquicPerfClient;
             inherit msquicPerfClient;
             inherit quichePerfClient;
+            inherit quiclyPerfClient;
+            inherit googleQuichePerfClient;
+            inherit tquicPerfClient;
             inherit mvfstPerfClient;
             inherit s2nQuicPerfClient;
             inherit xquicPerfClient;
@@ -1131,6 +1339,9 @@
         picoquic-perf-client = picoquicPerfClient;
         msquic-perf-client = msquicPerfClient;
         quiche-perf-client = quichePerfClient;
+        quicly-perf-client = quiclyPerfClient;
+        google-quiche-perf-client = googleQuichePerfClient;
+        tquic-perf-client = tquicPerfClient;
         mvfst-perf-client = mvfstPerfClient;
         s2n-quic-perf-client = s2nQuicPerfClient;
         xquic-perf-client = xquicPerfClient;

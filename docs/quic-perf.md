@@ -57,8 +57,9 @@ behavior such as oversized loopback MTU.
 
 Paired external baseline runs are available with `PERF_CLIENT_IMPL` and
 `PERF_SERVER_IMPL` set to the same implementation name. The current baseline
-set is `quic-go`, `quinn`, `picoquic`, `msquic`, `quiche`, `mvfst`,
-`s2n-quic`, `xquic`, `aioquic`, `ngtcp2`, `lsquic`, and `neqo`; those runs use
+set is `quic-go`, `quinn`, `picoquic`, `msquic`, `quiche`, `quicly`,
+`google-quiche`, `tquic`, `mvfst`, `s2n-quic`, `xquic`, `aioquic`,
+`ngtcp2`, `lsquic`, and `neqo`; those runs use
 `PERF_CONGESTION_CONTROLS=default` so each implementation keeps its own default
 congestion-control configuration.
 

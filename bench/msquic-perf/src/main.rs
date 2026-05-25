@@ -763,7 +763,6 @@ async fn close_crr_connection(connection: CrrConnectionState) {
         poll_fn(|cx| connection.conn.poll_shutdown(cx, 0)),
     )
     .await;
-    std::mem::forget(connection);
 }
 
 async fn wait_for_ready(control: &mut Stream) -> Result<(), AnyError> {

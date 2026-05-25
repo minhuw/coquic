@@ -35,6 +35,21 @@ const fallbackPerfSnapshot = {
       missing: true,
     },
     {
+      label: "quicly",
+      path: "perf-results.json",
+      missing: true,
+    },
+    {
+      label: "google-quiche",
+      path: "perf-results.json",
+      missing: true,
+    },
+    {
+      label: "tquic",
+      path: "perf-results.json",
+      missing: true,
+    },
+    {
       label: "mvfst",
       path: "perf-results.json",
       missing: true,
@@ -80,6 +95,9 @@ const colors = {
   picoquic: "#f5c451",
   msquic: "#b56cff",
   quiche: "#ea6a7a",
+  quicly: "#47c1a8",
+  "google-quiche": "#4f8df7",
+  tquic: "#f08b44",
   mvfst: "#57c785",
   "s2n-quic": "#9b8cff",
   xquic: "#f47f42",
@@ -260,7 +278,7 @@ function renderPlots() {
 
 function renderTable() {
   const rows = [...activeSnapshot.rows].sort((left, right) => {
-    const implOrder = ["coquic", "quic-go", "quinn", "picoquic", "msquic", "quiche", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
+    const implOrder = ["coquic", "quic-go", "quinn", "picoquic", "msquic", "quiche", "quicly", "google-quiche", "tquic", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
     const modeOrder = { bulk: 0, rr: 1, crr: 2 };
     const leftImpl = implOrder.indexOf(left.implementation);
     const rightImpl = implOrder.indexOf(right.implementation);

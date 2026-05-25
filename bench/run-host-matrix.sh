@@ -36,8 +36,8 @@ environment overrides:
   PERF_PORT                  UDP port for server/client (default: 9443)
   PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
   PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
-  PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
-  PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
+  PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
+  PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
 USAGE
 }
 
@@ -95,7 +95,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
       ;;
     default)
       if [ "${client_impl}" = "${server_impl}" ] \
-        && { [ "${client_impl}" = 'quic-go' ] || [ "${client_impl}" = 'quinn' ] || [ "${client_impl}" = 'picoquic' ] || [ "${client_impl}" = 'msquic' ] || [ "${client_impl}" = 'quiche' ] || [ "${client_impl}" = 'mvfst' ] || [ "${client_impl}" = 's2n-quic' ] || [ "${client_impl}" = 'xquic' ] || [ "${client_impl}" = 'aioquic' ] || [ "${client_impl}" = 'ngtcp2' ] || [ "${client_impl}" = 'lsquic' ] || [ "${client_impl}" = 'neqo' ]; }; then
+        && { [ "${client_impl}" = 'quic-go' ] || [ "${client_impl}" = 'quinn' ] || [ "${client_impl}" = 'picoquic' ] || [ "${client_impl}" = 'msquic' ] || [ "${client_impl}" = 'quiche' ] || [ "${client_impl}" = 'quicly' ] || [ "${client_impl}" = 'google-quiche' ] || [ "${client_impl}" = 'tquic' ] || [ "${client_impl}" = 'mvfst' ] || [ "${client_impl}" = 's2n-quic' ] || [ "${client_impl}" = 'xquic' ] || [ "${client_impl}" = 'aioquic' ] || [ "${client_impl}" = 'ngtcp2' ] || [ "${client_impl}" = 'lsquic' ] || [ "${client_impl}" = 'neqo' ]; }; then
         :
       else
         echo 'congestion-control label "default" is only supported for paired external baseline runs' >&2
@@ -110,7 +110,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
 done
 
 case "${client_impl}" in
-  coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)
+  coquic|quic-go|quinn|picoquic|msquic|quiche|quicly|google-quiche|tquic|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)
     ;;
   *)
     echo "unsupported client implementation: ${client_impl}" >&2
@@ -119,7 +119,7 @@ case "${client_impl}" in
 esac
 
 case "${server_impl}" in
-  coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)
+  coquic|quic-go|quinn|picoquic|msquic|quiche|quicly|google-quiche|tquic|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)
     ;;
   *)
     echo "unsupported server implementation: ${server_impl}" >&2
@@ -245,6 +245,15 @@ for congestion_control in "${congestion_control_list[@]}"; do
       quiche)
         server_entrypoint=(--entrypoint /usr/local/bin/quiche-perf)
         ;;
+      quicly)
+        server_entrypoint=(--entrypoint /usr/local/bin/quicly-perf)
+        ;;
+      google-quiche)
+        server_entrypoint=(--entrypoint /usr/local/bin/google-quiche-perf)
+        ;;
+      tquic)
+        server_entrypoint=(--entrypoint /usr/local/bin/tquic-perf)
+        ;;
       mvfst)
         server_entrypoint=(--entrypoint /usr/local/bin/mvfst-perf)
         ;;
@@ -331,6 +340,15 @@ for congestion_control in "${congestion_control_list[@]}"; do
         ;;
       quiche)
         client_entrypoint=(--entrypoint /usr/local/bin/quiche-perf)
+        ;;
+      quicly)
+        client_entrypoint=(--entrypoint /usr/local/bin/quicly-perf)
+        ;;
+      google-quiche)
+        client_entrypoint=(--entrypoint /usr/local/bin/google-quiche-perf)
+        ;;
+      tquic)
+        client_entrypoint=(--entrypoint /usr/local/bin/tquic-perf)
         ;;
       mvfst)
         client_entrypoint=(--entrypoint /usr/local/bin/mvfst-perf)

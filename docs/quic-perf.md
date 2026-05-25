@@ -55,6 +55,12 @@ tuple once with NewReno, once with CUBIC, once with BBR, and once with Copa,
 using matching `--congestion-control` settings on both endpoints. The bridge network avoids host-loopback-only
 behavior such as oversized loopback MTU.
 
+Paired external baseline runs are available with `PERF_CLIENT_IMPL` and
+`PERF_SERVER_IMPL` set to the same implementation name. The current baseline
+set is `quic-go`, `quinn`, `picoquic`, `msquic`, `quiche`, `mvfst`,
+`s2n-quic`, and `xquic`; those runs use `PERF_CONGESTION_CONTROLS=default` so
+each implementation keeps its own default congestion-control configuration.
+
 Useful environment overrides:
 
 - `PERF_RESULTS_ROOT` to choose a different output directory

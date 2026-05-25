@@ -66,17 +66,17 @@ grep -F -- 'server_impl=${server_impl}' "${script}" >/dev/null || {
   exit 1
 }
 
-grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche)' "${script}" >/dev/null || {
+grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic)' "${script}" >/dev/null || {
   echo 'missing quic-go implementation validation in harness script' >&2
   exit 1
 }
 
-grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche)' "${script}" >/dev/null || {
+grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic)' "${script}" >/dev/null || {
   echo 'missing quinn implementation validation in harness script' >&2
   exit 1
 }
 
-grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche)' "${script}" >/dev/null || {
+grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic)' "${script}" >/dev/null || {
   echo 'missing picoquic implementation validation in harness script' >&2
   exit 1
 }
@@ -108,6 +108,21 @@ grep -F -- '--entrypoint /usr/local/bin/msquic-perf' "${script}" >/dev/null || {
 
 grep -F -- '--entrypoint /usr/local/bin/quiche-perf' "${script}" >/dev/null || {
   echo 'missing quiche Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/mvfst-perf' "${script}" >/dev/null || {
+  echo 'missing mvfst Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/s2n-quic-perf' "${script}" >/dev/null || {
+  echo 'missing s2n-quic Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/xquic-perf' "${script}" >/dev/null || {
+  echo 'missing xquic Docker entrypoint override in harness script' >&2
   exit 1
 }
 
@@ -231,6 +246,11 @@ grep -F -- 'timeout --kill-after=5s "${run_timeout_seconds}s" docker run --rm' "
   exit 1
 }
 
+grep -F -- 'PERF_MSQUIC_BULK_TOTAL_BYTES:-1073741824' "${script}" >/dev/null || {
+  echo 'missing fixed-size MSQUIC paired bulk override in harness script' >&2
+  exit 1
+}
+
 grep -F -- '--congestion-control "${congestion_control}"' "${script}" >/dev/null || {
   echo 'missing congestion-control forwarding in harness script' >&2
   exit 1
@@ -334,6 +354,36 @@ grep -F -- 'quichePerfClient = pkgs.rustPlatform.buildRustPackage' "${flake}" >/
 
 grep -F -- 'ln -s ${quichePerfClient}/bin/quiche-perf $out/usr/local/bin/quiche-perf' "${flake}" >/dev/null || {
   echo 'missing quiche perf client in perf image overlay' >&2
+  exit 1
+}
+
+grep -F -- 'mvfstPerfClient = pkgs.stdenv.mkDerivation' "${flake}" >/dev/null || {
+  echo 'missing mvfst perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${mvfstPerfClient}/bin/mvfst-perf $out/usr/local/bin/mvfst-perf' "${flake}" >/dev/null || {
+  echo 'missing mvfst perf client in perf image overlay' >&2
+  exit 1
+}
+
+grep -F -- 's2nQuicPerfClient = pkgs.rust_1_88.packages.stable.rustPlatform.buildRustPackage' "${flake}" >/dev/null || {
+  echo 'missing s2n-quic perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${s2nQuicPerfClient}/bin/s2n-quic-perf $out/usr/local/bin/s2n-quic-perf' "${flake}" >/dev/null || {
+  echo 'missing s2n-quic perf client in perf image overlay' >&2
+  exit 1
+}
+
+grep -F -- 'xquicPerfClient = pkgs.stdenv.mkDerivation' "${flake}" >/dev/null || {
+  echo 'missing xquic perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${xquicPerfClient}/bin/xquic-perf $out/usr/local/bin/xquic-perf' "${flake}" >/dev/null || {
+  echo 'missing xquic perf client in perf image overlay' >&2
   exit 1
 }
 

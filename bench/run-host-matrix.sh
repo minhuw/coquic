@@ -36,8 +36,8 @@ environment overrides:
   PERF_PORT                  UDP port for server/client (default: 9443)
   PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
   PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
-  PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, picoquic, msquic, or quiche (default: coquic)
-  PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, picoquic, msquic, or quiche (default: coquic)
+  PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, mvfst, s2n-quic, or xquic (default: coquic)
+  PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, mvfst, s2n-quic, or xquic (default: coquic)
 USAGE
 }
 
@@ -95,7 +95,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
       ;;
     default)
       if [ "${client_impl}" = "${server_impl}" ] \
-        && { [ "${client_impl}" = 'quic-go' ] || [ "${client_impl}" = 'quinn' ] || [ "${client_impl}" = 'picoquic' ] || [ "${client_impl}" = 'msquic' ] || [ "${client_impl}" = 'quiche' ]; }; then
+        && { [ "${client_impl}" = 'quic-go' ] || [ "${client_impl}" = 'quinn' ] || [ "${client_impl}" = 'picoquic' ] || [ "${client_impl}" = 'msquic' ] || [ "${client_impl}" = 'quiche' ] || [ "${client_impl}" = 'mvfst' ] || [ "${client_impl}" = 's2n-quic' ] || [ "${client_impl}" = 'xquic' ]; }; then
         :
       else
         echo 'congestion-control label "default" is only supported for paired external baseline runs' >&2
@@ -110,7 +110,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
 done
 
 case "${client_impl}" in
-  coquic|quic-go|quinn|picoquic|msquic|quiche)
+  coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic)
     ;;
   *)
     echo "unsupported client implementation: ${client_impl}" >&2
@@ -119,7 +119,7 @@ case "${client_impl}" in
 esac
 
 case "${server_impl}" in
-  coquic|quic-go|quinn|picoquic|msquic|quiche)
+  coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic)
     ;;
   *)
     echo "unsupported server implementation: ${server_impl}" >&2
@@ -245,6 +245,15 @@ for congestion_control in "${congestion_control_list[@]}"; do
       quiche)
         server_entrypoint=(--entrypoint /usr/local/bin/quiche-perf)
         ;;
+      mvfst)
+        server_entrypoint=(--entrypoint /usr/local/bin/mvfst-perf)
+        ;;
+      s2n-quic)
+        server_entrypoint=(--entrypoint /usr/local/bin/s2n-quic-perf)
+        ;;
+      xquic)
+        server_entrypoint=(--entrypoint /usr/local/bin/xquic-perf)
+        ;;
     esac
 
     docker run -d --rm \
@@ -282,8 +291,12 @@ for congestion_control in "${congestion_control_list[@]}"; do
 
     if [ "${mode}" = 'bulk' ]; then
       client_args+=(--direction "${direction}")
-      if [ "${limit}" != 'none' ]; then
-        client_args+=(--total-bytes "${limit}")
+      bulk_limit="${limit}"
+      if [ "${limit}" = 'none' ] && [ "${client_impl}" = 'msquic' ] && [ "${server_impl}" = 'msquic' ]; then
+        bulk_limit="${PERF_MSQUIC_BULK_TOTAL_BYTES:-1073741824}"
+      fi
+      if [ "${bulk_limit}" != 'none' ]; then
+        client_args+=(--total-bytes "${bulk_limit}")
       fi
     elif [ "${limit}" != 'none' ]; then
       client_args+=(--requests "${limit}")
@@ -307,6 +320,15 @@ for congestion_control in "${congestion_control_list[@]}"; do
       quiche)
         client_entrypoint=(--entrypoint /usr/local/bin/quiche-perf)
         ;;
+      mvfst)
+        client_entrypoint=(--entrypoint /usr/local/bin/mvfst-perf)
+        ;;
+      s2n-quic)
+        client_entrypoint=(--entrypoint /usr/local/bin/s2n-quic-perf)
+        ;;
+      xquic)
+        client_entrypoint=(--entrypoint /usr/local/bin/xquic-perf)
+        ;;
     esac
 
     timeout --kill-after=5s "${run_timeout_seconds}s" docker run --rm \
@@ -314,6 +336,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
       --network "${network_name}" \
       --cpuset-cpus "${client_cpus}" \
       -v "${results_root}:/results" \
+      -v "${repo_root}/tests/fixtures:/certs:ro" \
       "${client_entrypoint[@]}" \
       "${image_tag}" "${client_args[@]}" | tee "${txt_path}"
     client_status=${PIPESTATUS[0]}

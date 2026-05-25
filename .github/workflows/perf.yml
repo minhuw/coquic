@@ -91,6 +91,36 @@ jobs:
             PERF_CONGESTION_CONTROLS=default \
             bash bench/run-host-matrix.sh --preset ci
 
+      - name: Run mvfst Paired Baseline
+        id: perf_mvfst
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/mvfst \
+            PERF_CLIENT_IMPL=mvfst \
+            PERF_SERVER_IMPL=mvfst \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
+      - name: Run s2n-quic Paired Baseline
+        id: perf_s2n_quic
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/s2n-quic \
+            PERF_CLIENT_IMPL=s2n-quic \
+            PERF_SERVER_IMPL=s2n-quic \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
+      - name: Run xquic Paired Baseline
+        id: perf_xquic
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/xquic \
+            PERF_CLIENT_IMPL=xquic \
+            PERF_SERVER_IMPL=xquic \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
       - name: Publish Perf Summary
         if: always()
         run: |
@@ -101,6 +131,9 @@ jobs:
             --manifest picoquic=.bench-results/picoquic/manifest.json \
             --manifest msquic=.bench-results/msquic/manifest.json \
             --manifest quiche=.bench-results/quiche/manifest.json \
+            --manifest mvfst=.bench-results/mvfst/manifest.json \
+            --manifest s2n-quic=.bench-results/s2n-quic/manifest.json \
+            --manifest xquic=.bench-results/xquic/manifest.json \
             --event-name "${GITHUB_EVENT_NAME}" \
             --commit "${GITHUB_SHA}" \
             --json-out .bench-results/perf-results.json >> "${GITHUB_STEP_SUMMARY}"
@@ -167,6 +200,9 @@ jobs:
           check_step "picoquic" "${{ steps.perf_picoquic.outcome }}"
           check_step "MSQUIC" "${{ steps.perf_msquic.outcome }}"
           check_step "quiche" "${{ steps.perf_quiche.outcome }}"
+          check_step "mvfst" "${{ steps.perf_mvfst.outcome }}"
+          check_step "s2n-quic" "${{ steps.perf_s2n_quic.outcome }}"
+          check_step "xquic" "${{ steps.perf_xquic.outcome }}"
           exit "${failed}"
 
       - name: Upload Perf Artifacts

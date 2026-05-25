@@ -80,6 +80,15 @@ for marker in \
   'PERF_RESULTS_ROOT=.bench-results/quiche' \
   'PERF_CLIENT_IMPL=quiche' \
   'PERF_SERVER_IMPL=quiche' \
+  'PERF_RESULTS_ROOT=.bench-results/mvfst' \
+  'PERF_CLIENT_IMPL=mvfst' \
+  'PERF_SERVER_IMPL=mvfst' \
+  'PERF_RESULTS_ROOT=.bench-results/s2n-quic' \
+  'PERF_CLIENT_IMPL=s2n-quic' \
+  'PERF_SERVER_IMPL=s2n-quic' \
+  'PERF_RESULTS_ROOT=.bench-results/xquic' \
+  'PERF_CLIENT_IMPL=xquic' \
+  'PERF_SERVER_IMPL=xquic' \
   'PERF_CONGESTION_CONTROLS=default'; do
   if ! grep -F "${marker}" "${workflow}" >/dev/null; then
     echo "missing baseline perf workflow marker: ${marker}" >&2
@@ -108,7 +117,10 @@ for marker in \
   '--manifest quinn=.bench-results/quinn/manifest.json' \
   '--manifest picoquic=.bench-results/picoquic/manifest.json' \
   '--manifest msquic=.bench-results/msquic/manifest.json' \
-  '--manifest quiche=.bench-results/quiche/manifest.json'; do
+  '--manifest quiche=.bench-results/quiche/manifest.json' \
+  '--manifest mvfst=.bench-results/mvfst/manifest.json' \
+  '--manifest s2n-quic=.bench-results/s2n-quic/manifest.json' \
+  '--manifest xquic=.bench-results/xquic/manifest.json'; do
   if ! grep -F -- "${marker}" "${workflow}" >/dev/null; then
     echo "missing comparison manifest marker: ${marker}" >&2
     exit 1
@@ -132,6 +144,21 @@ grep -F 'steps.perf_msquic.outcome' "${workflow}" >/dev/null || {
 
 grep -F 'steps.perf_quiche.outcome' "${workflow}" >/dev/null || {
   echo 'missing quiche failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_mvfst.outcome' "${workflow}" >/dev/null || {
+  echo 'missing mvfst failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_s2n_quic.outcome' "${workflow}" >/dev/null || {
+  echo 'missing s2n-quic failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_xquic.outcome' "${workflow}" >/dev/null || {
+  echo 'missing xquic failure gate marker' >&2
   exit 1
 }
 

@@ -409,6 +409,9 @@
           picoquicPerfClient ? null,
           msquicPerfClient ? null,
           quichePerfClient ? null,
+          mvfstPerfClient ? null,
+          s2nQuicPerfClient ? null,
+          xquicPerfClient ? null,
         }:
         pkgs.runCommand "${name}-overlay" { } ''
           mkdir -p $out/usr/local/bin
@@ -427,6 +430,15 @@
           ''}
           ${lib.optionalString (quichePerfClient != null) ''
             ln -s ${quichePerfClient}/bin/quiche-perf $out/usr/local/bin/quiche-perf
+          ''}
+          ${lib.optionalString (mvfstPerfClient != null) ''
+            ln -s ${mvfstPerfClient}/bin/mvfst-perf $out/usr/local/bin/mvfst-perf
+          ''}
+          ${lib.optionalString (s2nQuicPerfClient != null) ''
+            ln -s ${s2nQuicPerfClient}/bin/s2n-quic-perf $out/usr/local/bin/s2n-quic-perf
+          ''}
+          ${lib.optionalString (xquicPerfClient != null) ''
+            ln -s ${xquicPerfClient}/bin/xquic-perf $out/usr/local/bin/xquic-perf
           ''}
         '';
       mkCoquicShell =
@@ -478,6 +490,75 @@
         version = "dev";
         src = ./bench/quinn-perf;
         cargoHash = "sha256-k3wfuwWKkH6lMe6TXRwts5qIX1xC47x/JvbfF6Pkw2c=";
+      };
+      sodiumCmakeModule = pkgs.writeTextDir "share/cmake/Modules/FindSodium.cmake" ''
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(Sodium REQUIRED IMPORTED_TARGET libsodium)
+        if (NOT TARGET Sodium::sodium)
+          add_library(Sodium::sodium ALIAS PkgConfig::Sodium)
+        endif()
+        set(Sodium_FOUND TRUE)
+      '';
+      mvfstPerfClient = pkgs.stdenv.mkDerivation {
+        pname = "mvfst-perf-client";
+        version = "dev";
+        src = ./bench/mvfst-perf;
+        nativeBuildInputs = [
+          pkgs.cmake
+          pkgs.makeWrapper
+          pkgs.ninja
+          pkgs.pkg-config
+        ];
+        buildInputs = [
+          pkgs.mvfst
+          pkgs.folly
+          pkgs.fizz
+          pkgs.boost
+          pkgs.gflags
+          pkgs.glog
+          pkgs.openssl
+          pkgs.zlib
+          pkgs.libsodium
+          pkgs.libsodium.dev
+        ];
+        cmakeFlags = [
+          "-DCMAKE_MODULE_PATH=${sodiumCmakeModule}/share/cmake/Modules"
+        ];
+        postFixup = ''
+          wrapProgram "$out/bin/mvfst-perf" \
+            --prefix LD_LIBRARY_PATH : ${
+              lib.makeLibraryPath [
+                pkgs.mvfst
+                pkgs.folly
+                pkgs.fizz
+                pkgs.boost
+                pkgs.gflags
+                pkgs.glog
+                pkgs.openssl
+                pkgs.zlib
+                pkgs.libsodium
+                pkgs.double-conversion
+                pkgs.libevent
+                pkgs.fmt
+                pkgs.xz
+                pkgs.lz4
+                pkgs.zstd
+                pkgs.libunwind
+                pkgs.icu
+                pkgs.stdenv.cc.cc.lib
+              ]
+            }
+        '';
+      };
+      s2nQuicPerfClient = pkgs.rust_1_88.packages.stable.rustPlatform.buildRustPackage {
+        pname = "s2n-quic-perf-client";
+        version = "dev";
+        src = ./bench/s2n-quic-perf;
+        cargoHash = "sha256-cGC5UYgVifuln5xb3cCLs+RgRRKItBhw2SlQOfZPXs8=";
+        nativeBuildInputs = [
+          pkgs.cmake
+          pkgs.pkg-config
+        ];
       };
       libmsquicForMsquicPerf = pkgs.libmsquic.overrideAttrs (
         finalAttrs: _previousAttrs: {
@@ -534,6 +615,52 @@
         ];
         preBuild = ''
           export PATH="${pkgs.cmake}/bin:${pkgs.gnumake}/bin:$PATH"
+        '';
+      };
+      xquicSrc = pkgs.fetchFromGitHub {
+        owner = "alibaba";
+        repo = "xquic";
+        rev = "64b8df3ac3f64111eb9e00be1a952ba5b07144bb";
+        hash = "sha256-jKmJqRslYw216iVXHlL1X1rNp1edKYHmTp2oRAG3YG8=";
+      };
+      xquicPerfClient = pkgs.stdenv.mkDerivation {
+        pname = "xquic-perf-client";
+        version = "dev";
+        src = xquicSrc;
+        perfSource = ./bench/xquic-perf/xquic-perf.c;
+        nativeBuildInputs = [
+          pkgs.cmake
+          pkgs.pkg-config
+        ];
+        buildInputs = [
+          pkgs.boringssl
+        ];
+        CFLAGS = "-Wno-error=dangling-pointer";
+        cmakeFlags = [
+          "-DSSL_TYPE=boringssl"
+          "-DSSL_PATH=${pkgs.boringssl.dev}"
+          "-DSSL_INC_PATH=${pkgs.boringssl.dev}/include"
+          "-DSSL_LIB_PATH=${pkgs.boringssl.out}/lib/libssl.a;${pkgs.boringssl.out}/lib/libcrypto.a"
+          "-DXQC_ENABLE_RENO=ON"
+          "-DXQC_ENABLE_COPA=ON"
+        ];
+        buildPhase = ''
+          runHook preBuild
+          cmake --build . --target xquic-static
+          $CXX -O3 -std=gnu++17 -x c "$perfSource" -x none \
+            -I$src/include \
+            -o xquic-perf \
+            libxquic-static.a \
+            ${pkgs.boringssl.out}/lib/libssl.a \
+            ${pkgs.boringssl.out}/lib/libcrypto.a \
+            -ldl -lpthread -lm
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out/bin
+          cp xquic-perf $out/bin/xquic-perf
+          runHook postInstall
         '';
       };
       picotlsSrc = pkgs.fetchFromGitHub {
@@ -655,6 +782,9 @@
             inherit picoquicPerfClient;
             inherit msquicPerfClient;
             inherit quichePerfClient;
+            inherit mvfstPerfClient;
+            inherit s2nQuicPerfClient;
+            inherit xquicPerfClient;
           })
         ];
         config = {
@@ -675,6 +805,9 @@
             inherit picoquicPerfClient;
             inherit msquicPerfClient;
             inherit quichePerfClient;
+            inherit mvfstPerfClient;
+            inherit s2nQuicPerfClient;
+            inherit xquicPerfClient;
           })
         ];
         config = {
@@ -795,6 +928,9 @@
         picoquic-perf-client = picoquicPerfClient;
         msquic-perf-client = msquicPerfClient;
         quiche-perf-client = quichePerfClient;
+        mvfst-perf-client = mvfstPerfClient;
+        s2n-quic-perf-client = s2nQuicPerfClient;
+        xquic-perf-client = xquicPerfClient;
       };
 
       apps.${system} = {

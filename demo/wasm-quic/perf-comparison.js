@@ -34,6 +34,21 @@ const fallbackPerfSnapshot = {
       path: "perf-results.json",
       missing: true,
     },
+    {
+      label: "mvfst",
+      path: "perf-results.json",
+      missing: true,
+    },
+    {
+      label: "s2n-quic",
+      path: "perf-results.json",
+      missing: true,
+    },
+    {
+      label: "xquic",
+      path: "perf-results.json",
+      missing: true,
+    },
   ],
   rows: [],
 };
@@ -45,6 +60,9 @@ const colors = {
   picoquic: "#f5c451",
   msquic: "#b56cff",
   quiche: "#ea6a7a",
+  mvfst: "#57c785",
+  "s2n-quic": "#9b8cff",
+  xquic: "#f47f42",
 };
 
 const modeConfig = {
@@ -218,7 +236,7 @@ function renderPlots() {
 
 function renderTable() {
   const rows = [...activeSnapshot.rows].sort((left, right) => {
-    const implOrder = ["coquic", "quic-go", "quinn", "picoquic", "msquic", "quiche"];
+    const implOrder = ["coquic", "quic-go", "quinn", "picoquic", "msquic", "quiche", "mvfst", "s2n-quic", "xquic"];
     const modeOrder = { bulk: 0, rr: 1, crr: 2 };
     const leftImpl = implOrder.indexOf(left.implementation);
     const rightImpl = implOrder.indexOf(right.implementation);

@@ -21,6 +21,7 @@ preset="smoke"
 network_name=''
 server_name=''
 client_name=''
+failed_runs=0
 
 usage() {
   cat <<'USAGE'
@@ -322,16 +323,16 @@ for congestion_control in "${congestion_control_list[@]}"; do
     docker rm -f "${server_name}" >/dev/null 2>&1 || true
     docker rm -f "${client_name}" >/dev/null 2>&1 || true
 
-    if [ "${client_status}" -ne 0 ]; then
-      echo "client container failed for ${run_name} with status ${client_status}" >&2
-      exit "${client_status}"
-    fi
-
     if [ ! -f "${results_root}/result.json" ]; then
       echo "missing JSON result for ${run_name}: ${results_root}/result.json" >&2
-      exit 1
+      exit "${client_status:-1}"
     fi
     mv "${results_root}/result.json" "${json_path}"
+
+    if [ "${client_status}" -ne 0 ]; then
+      echo "client container failed for ${run_name} with status ${client_status}; kept ${json_path}" >&2
+      failed_runs=1
+    fi
   done
 done
 
@@ -375,3 +376,29 @@ manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
 PY
 
 echo "wrote manifest to ${manifest_path}"
+
+if ! python3 - <<'PY' "${manifest_path}"; then
+import json
+import pathlib
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+manifest = json.loads(manifest_path.read_text())
+failed = [
+    run
+    for run in manifest.get("runs", [])
+    if isinstance(run, dict) and run.get("status") != "ok"
+]
+for run in failed:
+    result = run.get("result_file", "<unknown>")
+    reason = run.get("failure_reason", "")
+    if reason:
+        print(f"failed benchmark result: {result}: {reason}", file=sys.stderr)
+    else:
+        print(f"failed benchmark result: {result}", file=sys.stderr)
+sys.exit(1 if failed else 0)
+PY
+  failed_runs=1
+fi
+
+exit "${failed_runs}"

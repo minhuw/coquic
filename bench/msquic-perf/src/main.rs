@@ -24,6 +24,7 @@ const STREAM_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const STREAM_FINISH_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_CHUNK_SIZE: usize = 32 * 1024;
 const READ_CHUNK_SIZE: usize = 64 * 1024;
+const TIMED_BULK_RESPONSE_BYTES: u64 = 1_u64 << 62;
 
 const MESSAGE_SESSION_START: u8 = 1;
 const MESSAGE_SESSION_READY: u8 = 2;
@@ -110,22 +111,28 @@ struct MeasuredCounters {
 }
 
 struct ConnectionState {
-    conn: Connection,
     control_recv: Arc<Mutex<Stream>>,
-    _registration: Arc<msquic::Registration>,
+    conn: Connection,
     _configuration: Arc<msquic::Configuration>,
+    _registration: Arc<msquic::Registration>,
 }
 
-#[derive(Default)]
-struct BulkStreamResult {
-    counts: bool,
-    received: u64,
-    err: Option<String>,
+struct CrrConnectionState {
+    conn: Connection,
+    _configuration: Arc<msquic::Configuration>,
+    _registration: Arc<msquic::Registration>,
+}
+
+#[derive(Clone)]
+struct ClientMsQuicContext {
+    registration: Arc<msquic::Registration>,
+    configuration: Arc<msquic::Configuration>,
 }
 
 #[derive(Default)]
 struct RRStreamResult {
     counts: bool,
+    skipped_setup: bool,
     latency: Duration,
     received: u64,
     err: Option<String>,
@@ -373,8 +380,11 @@ async fn handle_server_connection(conn: Connection) -> Result<(), AnyError> {
     let mut control_stream = conn.accept_inbound_stream().await?;
     let msg = read_control_message(&mut control_stream).await?;
     let Some(start) = msg.start else {
-        let _ = send_control_message(control_stream, encode_session_error("expected session_start"))
-            .await;
+        let _ = send_control_message(
+            control_stream,
+            encode_session_error("expected session_start"),
+        )
+        .await;
         let _ = conn.shutdown(1);
         return Ok(());
     };
@@ -479,7 +489,11 @@ async fn run_client(cfg: &Config) -> Result<RunSummary, AnyError> {
         mode: cfg.mode.clone(),
         direction: normalized_direction(&cfg.direction).to_string(),
         request_bytes: cfg.request_bytes,
-        response_bytes: cfg.response_bytes,
+        response_bytes: if is_timed_bulk_download(cfg) {
+            TIMED_BULK_RESPONSE_BYTES
+        } else {
+            cfg.response_bytes
+        },
         total_bytes: cfg.total_bytes,
         requests: cfg.requests,
         warmup: cfg.warmup,
@@ -489,9 +503,10 @@ async fn run_client(cfg: &Config) -> Result<RunSummary, AnyError> {
         requests_in_flight: cfg.requests_in_flight,
     };
 
+    let client_context = Arc::new(client_msquic_context(cfg)?);
     let mut connections = Vec::new();
     if cfg.mode != MODE_CRR {
-        connections = open_connections(cfg, &start, cfg.connections).await?;
+        connections = open_connections(cfg, &start, cfg.connections, &client_context).await?;
     }
 
     let counters = Arc::new(MeasuredCounters::default());
@@ -515,7 +530,7 @@ async fn run_client(cfg: &Config) -> Result<RunSummary, AnyError> {
             }
         }
         MODE_CRR => {
-            run_crr(cfg, &start, counters.clone()).await?;
+            run_crr(cfg, &start, counters.clone(), client_context).await?;
             if cfg.requests.set {
                 run_start.elapsed()
             } else {
@@ -585,6 +600,24 @@ fn expects_session_complete(cfg: &Config) -> bool {
     (cfg.mode == MODE_BULK && cfg.total_bytes.set) || (cfg.mode == MODE_RR && cfg.requests.set)
 }
 
+fn is_timed_bulk_download(cfg: &Config) -> bool {
+    cfg.mode == MODE_BULK && cfg.direction == DIRECTION_DOWNLOAD && !cfg.total_bytes.set
+}
+
+fn client_msquic_context(cfg: &Config) -> Result<ClientMsQuicContext, AnyError> {
+    let registration = Arc::new(msquic_registration()?);
+    let configuration = Arc::new(msquic_configuration(
+        &registration,
+        None,
+        cfg.verify_peer,
+        &cfg.congestion_control,
+    )?);
+    Ok(ClientMsQuicContext {
+        registration,
+        configuration,
+    })
+}
+
 fn msquic_registration() -> Result<msquic::Registration, AnyError> {
     Ok(msquic::Registration::new(
         &msquic::RegistrationConfig::new()
@@ -624,7 +657,9 @@ fn msquic_configuration(
                     as u16,
             );
         }
-        other => return Err(format!("msquic-perf unsupported congestion-control label: {other}").into()),
+        other => {
+            return Err(format!("msquic-perf unsupported congestion-control label: {other}").into())
+        }
     }
 
     let configuration = msquic::Configuration::open(registration, &alpn, Some(&settings))?;
@@ -646,25 +681,19 @@ async fn open_connections(
     cfg: &Config,
     start: &SessionStart,
     count: u64,
+    context: &ClientMsQuicContext,
 ) -> Result<Vec<ConnectionState>, AnyError> {
     let mut out = Vec::with_capacity(int_cap(count));
-    let registration = Arc::new(msquic_registration()?);
-    let configuration = Arc::new(msquic_configuration(
-        &registration,
-        None,
-        cfg.verify_peer,
-        &cfg.congestion_control,
-    )?);
     for _ in 0..count {
-        let conn = Connection::new(&registration)?;
+        let conn = Connection::new(&context.registration)?;
         timeout_result(
             "msquic connection start",
             SETUP_TIMEOUT,
-            conn.start(&configuration, &cfg.host, cfg.port),
+            conn.start(&context.configuration, &cfg.host, cfg.port),
         )
         .await?;
-        let mut control = open_bidi_stream(&conn, "msquic control stream open", SETUP_TIMEOUT)
-            .await?;
+        let mut control =
+            open_bidi_stream(&conn, "msquic control stream open", SETUP_TIMEOUT).await?;
         timeout_result(
             "msquic control stream write",
             SETUP_TIMEOUT,
@@ -679,13 +708,65 @@ async fn open_connections(
         .await?;
         wait_for_ready(&mut control).await?;
         out.push(ConnectionState {
-            conn,
             control_recv: Arc::new(Mutex::new(control)),
-            _registration: registration.clone(),
-            _configuration: configuration.clone(),
+            conn,
+            _configuration: context.configuration.clone(),
+            _registration: context.registration.clone(),
         });
     }
     Ok(out)
+}
+
+fn shutdown_connections(connections: &[ConnectionState]) {
+    for c in connections {
+        let _ = c.conn.shutdown(0);
+    }
+}
+
+async fn open_crr_connection(
+    cfg: &Config,
+    start: &SessionStart,
+    context: &ClientMsQuicContext,
+) -> Result<CrrConnectionState, AnyError> {
+    let conn = Connection::new(&context.registration)?;
+    conn.set_share_binding(true)
+        .map_err(|err| format!("msquic crr share udp binding: {err} ({err:?})"))?;
+    timeout_result(
+        "msquic crr connection start",
+        SETUP_TIMEOUT,
+        conn.start(&context.configuration, &cfg.host, cfg.port),
+    )
+    .await?;
+    let mut control =
+        open_bidi_stream(&conn, "msquic crr control stream open", SETUP_TIMEOUT).await?;
+    timeout_result(
+        "msquic crr control stream write",
+        SETUP_TIMEOUT,
+        control.write_all(&encode_session_start(start)),
+    )
+    .await?;
+    timeout_result(
+        "msquic crr control stream finish",
+        SETUP_TIMEOUT,
+        poll_fn(|cx| control.poll_finish_write(cx)),
+    )
+    .await?;
+    wait_for_ready(&mut control).await?;
+    let _ = control.abort_read(0);
+    Ok(CrrConnectionState {
+        conn,
+        _configuration: context.configuration.clone(),
+        _registration: context.registration.clone(),
+    })
+}
+
+async fn close_crr_connection(connection: CrrConnectionState) {
+    let _ = time::timeout(
+        DEFAULT_DRAIN_TIMEOUT,
+        poll_fn(|cx| connection.conn.poll_shutdown(cx, 0)),
+    )
+    .await;
+    std::mem::forget(connection);
 }
 
 async fn wait_for_ready(control: &mut Stream) -> Result<(), AnyError> {
@@ -710,77 +791,127 @@ async fn run_timed_bulk_download(
 ) -> Result<(), AnyError> {
     let measure_start = Instant::now() + cfg.warmup;
     let measure_deadline = measure_start + cfg.duration;
-    let (tx, mut rx) = mpsc::channel(int_cap(cfg.streams * cfg.connections + 64));
-    let active = Arc::new(AtomicU64::new(0));
-    let next_connection = AtomicU64::new(0);
+    let (tx, mut rx) = mpsc::channel(int_cap(cfg.streams * cfg.connections + 1));
+    let mut handles = Vec::with_capacity(int_cap(cfg.streams * connections.len() as u64));
 
     for c in connections {
         for _ in 0..cfg.streams {
-            open_bulk_download(c.conn.clone(), false, tx.clone(), active.clone());
+            handles.push(open_timed_bulk_download(
+                c.conn.clone(),
+                measure_start,
+                measure_deadline,
+                counters.clone(),
+                tx.clone(),
+            ));
+        }
+    }
+    drop(tx);
+
+    while Instant::now() < measure_deadline {
+        let Some(err) = recv_bulk_error_until(&mut rx, measure_deadline)? else {
+            continue;
+        };
+        if !err.is_empty() {
+            return Err(err.into());
         }
     }
 
-    time::sleep_until(tokio::time::Instant::from_std(measure_start)).await;
-    while Instant::now() < measure_deadline {
-        let result = rx.recv().await.ok_or("bulk result channel closed")?;
-        if let Some(err) = result.err {
-            return Err(err.into());
-        }
-        if result.counts {
-            counters
-                .bytes_received
-                .fetch_add(result.received, Ordering::Relaxed);
-        }
-        while active.load(Ordering::Relaxed) < cfg.streams * cfg.connections
-            && Instant::now() < measure_deadline
-        {
-            let index = next_connection.fetch_add(1, Ordering::Relaxed);
-            let conn = &connections[(index as usize) % connections.len()];
-            open_bulk_download(conn.conn.clone(), true, tx.clone(), active.clone());
-        }
-    }
+    shutdown_connections(connections);
+
     let drain_deadline = Instant::now() + DEFAULT_DRAIN_TIMEOUT;
-    while active.load(Ordering::Relaxed) != 0 && Instant::now() < drain_deadline {
-        if let Some(result) = rx.recv().await {
-            if let Some(err) = result.err {
-                return Err(err.into());
-            }
+    for handle in handles {
+        let now = Instant::now();
+        if now >= drain_deadline {
+            break;
+        }
+        match time::timeout(drain_deadline.saturating_duration_since(now), handle).await {
+            Ok(Ok(Ok(()))) | Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {}
         }
     }
     Ok(())
 }
 
-fn open_bulk_download(
-    conn: Connection,
-    counts: bool,
-    tx: mpsc::Sender<BulkStreamResult>,
-    active: Arc<AtomicU64>,
-) {
-    active.fetch_add(1, Ordering::Relaxed);
-    tokio::spawn(async move {
-        let result = run_bulk_download_stream(conn).await;
-        active.fetch_sub(1, Ordering::Relaxed);
-        let _ = tx
-            .send(match result {
-                Ok(received) => BulkStreamResult {
-                    counts,
-                    received,
-                    err: None,
-                },
-                Err(err) => BulkStreamResult {
-                    counts,
-                    received: 0,
-                    err: Some(err.to_string()),
-                },
-            })
-            .await;
-    });
+fn recv_bulk_error_until(
+    rx: &mut mpsc::Receiver<Option<String>>,
+    deadline: Instant,
+) -> Result<Option<String>, AnyError> {
+    loop {
+        match rx.try_recv() {
+            Ok(result) => return Ok(result),
+            Err(mpsc::error::TryRecvError::Disconnected) => return Ok(None),
+            Err(mpsc::error::TryRecvError::Empty) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Ok(None);
+                }
+                std::thread::sleep(cmp::min(
+                    deadline.saturating_duration_since(now),
+                    Duration::from_millis(1),
+                ));
+            }
+        }
+    }
 }
 
-async fn run_bulk_download_stream(conn: Connection) -> Result<u64, AnyError> {
+fn open_timed_bulk_download(
+    conn: Connection,
+    measure_start: Instant,
+    measure_deadline: Instant,
+    counters: Arc<MeasuredCounters>,
+    tx: mpsc::Sender<Option<String>>,
+) -> tokio::task::JoinHandle<Result<(), AnyError>> {
+    tokio::spawn(async move {
+        let result =
+            run_timed_bulk_download_stream(conn, measure_start, measure_deadline, counters).await;
+        let _ = tx
+            .send(if let Err(err) = &result {
+                Some(err.to_string())
+            } else {
+                None
+            })
+            .await;
+        result
+    })
+}
+
+async fn run_timed_bulk_download_stream(
+    conn: Connection,
+    measure_start: Instant,
+    measure_deadline: Instant,
+    counters: Arc<MeasuredCounters>,
+) -> Result<(), AnyError> {
     let mut stream = open_bidi_stream(&conn, "msquic data stream open", SETUP_TIMEOUT).await?;
     finish_stream_write(&mut stream).await?;
-    copy_and_count_with_timeout(&mut stream).await
+    let mut buf = vec![0_u8; READ_CHUNK_SIZE];
+    loop {
+        let now = Instant::now();
+        if now >= measure_deadline {
+            return Ok(());
+        }
+        let read = match time::timeout_at(
+            tokio::time::Instant::from_std(measure_deadline),
+            stream.read(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok(read)) => read,
+            Ok(Err(err)) => {
+                if Instant::now() >= measure_deadline {
+                    return Ok(());
+                }
+                return Err(err.into());
+            }
+            Err(_) => return Ok(()),
+        };
+        if read == 0 {
+            return Ok(());
+        }
+        if now >= measure_start {
+            counters
+                .bytes_received
+                .fetch_add(read as u64, Ordering::Relaxed);
+        }
+    }
 }
 
 async fn run_fixed_bulk(
@@ -872,7 +1003,9 @@ async fn run_rr(
         if let Some(err) = result.err {
             return Err(err.into());
         }
-        if result.counts && Instant::now() > measure_start {
+        if result.skipped_setup {
+            // Timed CRR setup churn is exposed through skipped_setup_errors.
+        } else if result.counts && Instant::now() > measure_start {
             counters
                 .bytes_sent
                 .fetch_add(cfg.request_bytes, Ordering::Relaxed);
@@ -920,12 +1053,14 @@ fn open_rr_stream(
             .send(match result {
                 Ok((latency, received)) => RRStreamResult {
                     counts,
+                    skipped_setup: false,
                     latency,
                     received,
                     err: None,
                 },
                 Err(err) => RRStreamResult {
                     counts,
+                    skipped_setup: false,
                     latency: Duration::ZERO,
                     received: 0,
                     err: Some(err.to_string()),
@@ -939,6 +1074,7 @@ async fn run_crr(
     cfg: &Config,
     start: &SessionStart,
     counters: Arc<MeasuredCounters>,
+    context: Arc<ClientMsQuicContext>,
 ) -> Result<(), AnyError> {
     let measure_start = Instant::now() + cfg.warmup;
     let measure_deadline = measure_start + cfg.duration;
@@ -957,6 +1093,7 @@ async fn run_crr(
             started.clone(),
             active.clone(),
             counters.clone(),
+            context.clone(),
         ) {
             break;
         }
@@ -999,6 +1136,7 @@ async fn run_crr(
             started.clone(),
             active.clone(),
             counters.clone(),
+            context.clone(),
         );
     }
     Ok(())
@@ -1014,6 +1152,7 @@ fn start_one_crr(
     started: Arc<AtomicU64>,
     active: Arc<AtomicU64>,
     counters: Arc<MeasuredCounters>,
+    context: Arc<ClientMsQuicContext>,
 ) -> bool {
     if cfg.requests.set && started.load(Ordering::Relaxed) >= cfg.requests.value {
         return false;
@@ -1025,10 +1164,10 @@ fn start_one_crr(
     tokio::spawn(async move {
         let _permit = sem.acquire_owned().await.expect("semaphore closed");
         let result = async {
-            let connections = open_connections(&cfg, &start, 1).await?;
-            let conn = connections[0].conn.clone();
+            let connection = open_crr_connection(&cfg, &start, &context).await?;
+            let conn = connection.conn.clone();
             let out = run_request_response_stream(conn, cfg.request_bytes).await;
-            std::mem::forget(connections);
+            close_crr_connection(connection).await;
             out
         }
         .await;
@@ -1040,19 +1179,35 @@ fn start_one_crr(
                 message.received = received;
             }
             Err(err) => {
-                if !cfg.requests.set && err.to_string().contains("refused") {
+                let err = err.to_string();
+                if is_timed_crr_setup_error(&cfg, &err) {
+                    message.skipped_setup = true;
                     counters
                         .skipped_setup_errors
                         .fetch_add(1, Ordering::Relaxed);
                     time::sleep(Duration::from_millis(2)).await;
                 } else {
-                    message.err = Some(err.to_string());
+                    message.err = Some(err);
                 }
             }
         }
         let _ = tx.send(message).await;
     });
     true
+}
+
+fn is_timed_crr_setup_error(cfg: &Config, err: &str) -> bool {
+    if cfg.requests.set {
+        return false;
+    }
+    let is_setup = err.starts_with("msquic crr connection start")
+        || err.starts_with("msquic crr control stream");
+    is_setup
+        && (err.contains("QUIC_STATUS_ADDRESS_IN_USE")
+            || err.contains("ADDRESS_IN_USE")
+            || err.contains("QUIC_STATUS_CONNECTION_REFUSED")
+            || err.contains("refused")
+            || err.contains("timed out after"))
 }
 
 async fn run_request_response_stream(
@@ -1345,11 +1500,11 @@ async fn copy_and_count_with_timeout(recv: &mut Stream) -> Result<u64, AnyError>
 
 async fn timeout_result<T, E, F>(label: &str, timeout: Duration, future: F) -> Result<T, AnyError>
 where
-    E: std::error::Error + Send + Sync + 'static,
+    E: std::error::Error + std::fmt::Debug + Send + Sync + 'static,
     F: std::future::Future<Output = Result<T, E>>,
 {
     match time::timeout(timeout, future).await {
-        Ok(result) => result.map_err(|err| err.into()),
+        Ok(result) => result.map_err(|err| format!("{label}: {err} ({err:?})").into()),
         Err(_) => Err(format!("{label} timed out after {} ms", duration_millis(timeout)).into()),
     }
 }
@@ -1359,7 +1514,7 @@ where
     F: std::future::Future<Output = Result<T, AnyError>>,
 {
     match time::timeout(timeout, future).await {
-        Ok(result) => result,
+        Ok(result) => result.map_err(|err| format!("{label}: {err}").into()),
         Err(_) => Err(format!("{label} timed out after {} ms", duration_millis(timeout)).into()),
     }
 }
@@ -1379,10 +1534,7 @@ fn summarize_latency(samples: &[Duration]) -> LatencySummary {
     if samples.is_empty() {
         return LatencySummary::default();
     }
-    let mut micros: Vec<u64> = samples
-        .iter()
-        .map(|sample| sample.as_micros() as u64)
-        .collect();
+    let mut micros: Vec<u64> = samples.iter().map(latency_micros).collect();
     micros.sort_unstable();
     let total: u64 = micros.iter().sum();
     LatencySummary {
@@ -1392,6 +1544,15 @@ fn summarize_latency(samples: &[Duration]) -> LatencySummary {
         p90_us: percentile(&micros, 90.0),
         p99_us: percentile(&micros, 99.0),
         max_us: micros[micros.len() - 1],
+    }
+}
+
+fn latency_micros(sample: &Duration) -> u64 {
+    let nanos = sample.as_nanos();
+    if nanos == 0 {
+        1
+    } else {
+        nanos.div_ceil(1_000) as u64
     }
 }
 

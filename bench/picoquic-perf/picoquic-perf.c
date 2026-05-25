@@ -570,6 +570,9 @@ static void maybe_finish_client(app_ctx_t *app) {
         app->finished = 1;
         return;
     }
+    if (!app->initial_opened) {
+        return;
+    }
     if (is_mode(&app->cfg, "bulk")) {
         if (app->cfg.total_bytes.set) {
             if (app->active_streams == 0 && app->started_requests >= app->cfg.streams) {
@@ -852,7 +855,8 @@ static int loop_callback(picoquic_quic_t *quic, picoquic_packet_loop_cb_enum mod
             if (app->finished) {
                 return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
             }
-            if (time_check->current_time > app->measure_deadline + DRAIN_TIMEOUT_US) {
+            if (app->measure_deadline != 0 &&
+                time_check->current_time > app->measure_deadline + DRAIN_TIMEOUT_US) {
                 return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
             }
             if (time_check->delta_t > 1000) {

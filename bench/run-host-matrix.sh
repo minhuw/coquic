@@ -36,8 +36,8 @@ environment overrides:
   PERF_PORT                  UDP port for server/client (default: 9443)
   PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
   PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
-  PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, mvfst, s2n-quic, or xquic (default: coquic)
-  PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, mvfst, s2n-quic, or xquic (default: coquic)
+  PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
+  PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
 USAGE
 }
 
@@ -95,7 +95,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
       ;;
     default)
       if [ "${client_impl}" = "${server_impl}" ] \
-        && { [ "${client_impl}" = 'quic-go' ] || [ "${client_impl}" = 'quinn' ] || [ "${client_impl}" = 'picoquic' ] || [ "${client_impl}" = 'msquic' ] || [ "${client_impl}" = 'quiche' ] || [ "${client_impl}" = 'mvfst' ] || [ "${client_impl}" = 's2n-quic' ] || [ "${client_impl}" = 'xquic' ]; }; then
+        && { [ "${client_impl}" = 'quic-go' ] || [ "${client_impl}" = 'quinn' ] || [ "${client_impl}" = 'picoquic' ] || [ "${client_impl}" = 'msquic' ] || [ "${client_impl}" = 'quiche' ] || [ "${client_impl}" = 'mvfst' ] || [ "${client_impl}" = 's2n-quic' ] || [ "${client_impl}" = 'xquic' ] || [ "${client_impl}" = 'aioquic' ] || [ "${client_impl}" = 'ngtcp2' ] || [ "${client_impl}" = 'lsquic' ] || [ "${client_impl}" = 'neqo' ]; }; then
         :
       else
         echo 'congestion-control label "default" is only supported for paired external baseline runs' >&2
@@ -110,7 +110,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
 done
 
 case "${client_impl}" in
-  coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic)
+  coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)
     ;;
   *)
     echo "unsupported client implementation: ${client_impl}" >&2
@@ -119,7 +119,7 @@ case "${client_impl}" in
 esac
 
 case "${server_impl}" in
-  coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic)
+  coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)
     ;;
   *)
     echo "unsupported server implementation: ${server_impl}" >&2
@@ -254,6 +254,18 @@ for congestion_control in "${congestion_control_list[@]}"; do
       xquic)
         server_entrypoint=(--entrypoint /usr/local/bin/xquic-perf)
         ;;
+      aioquic)
+        server_entrypoint=(--entrypoint /usr/local/bin/aioquic-perf)
+        ;;
+      ngtcp2)
+        server_entrypoint=(--entrypoint /usr/local/bin/ngtcp2-perf)
+        ;;
+      lsquic)
+        server_entrypoint=(--entrypoint /usr/local/bin/lsquic-perf)
+        ;;
+      neqo)
+        server_entrypoint=(--entrypoint /usr/local/bin/neqo-perf)
+        ;;
     esac
 
     docker run -d --rm \
@@ -293,7 +305,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
       client_args+=(--direction "${direction}")
       bulk_limit="${limit}"
       if [ "${limit}" = 'none' ] && [ "${client_impl}" = 'msquic' ] && [ "${server_impl}" = 'msquic' ]; then
-        bulk_limit="${PERF_MSQUIC_BULK_TOTAL_BYTES:-1073741824}"
+        bulk_limit="${PERF_MSQUIC_BULK_TOTAL_BYTES:-134217728}"
       fi
       if [ "${bulk_limit}" != 'none' ]; then
         client_args+=(--total-bytes "${bulk_limit}")
@@ -328,6 +340,18 @@ for congestion_control in "${congestion_control_list[@]}"; do
         ;;
       xquic)
         client_entrypoint=(--entrypoint /usr/local/bin/xquic-perf)
+        ;;
+      aioquic)
+        client_entrypoint=(--entrypoint /usr/local/bin/aioquic-perf)
+        ;;
+      ngtcp2)
+        client_entrypoint=(--entrypoint /usr/local/bin/ngtcp2-perf)
+        ;;
+      lsquic)
+        client_entrypoint=(--entrypoint /usr/local/bin/lsquic-perf)
+        ;;
+      neqo)
+        client_entrypoint=(--entrypoint /usr/local/bin/neqo-perf)
         ;;
     esac
 

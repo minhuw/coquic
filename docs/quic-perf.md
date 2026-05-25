@@ -58,8 +58,9 @@ behavior such as oversized loopback MTU.
 Paired external baseline runs are available with `PERF_CLIENT_IMPL` and
 `PERF_SERVER_IMPL` set to the same implementation name. The current baseline
 set is `quic-go`, `quinn`, `picoquic`, `msquic`, `quiche`, `mvfst`,
-`s2n-quic`, and `xquic`; those runs use `PERF_CONGESTION_CONTROLS=default` so
-each implementation keeps its own default congestion-control configuration.
+`s2n-quic`, `xquic`, `aioquic`, `ngtcp2`, `lsquic`, and `neqo`; those runs use
+`PERF_CONGESTION_CONTROLS=default` so each implementation keeps its own default
+congestion-control configuration.
 
 Useful environment overrides:
 
@@ -71,3 +72,6 @@ Useful environment overrides:
 - `PERF_RUN_TIMEOUT_SECONDS` to adjust the per-client container timeout
 - `PERF_CONGESTION_CONTROLS` to choose algorithms, for example `bbr` or
   `newreno cubic bbr copa`
+- `PERF_MSQUIC_BULK_TOTAL_BYTES` to override the paired MSQUIC fixed bulk
+  transfer size used when the CI bulk tuple otherwise requests an unbounded
+  timed transfer (default: `134217728`)

@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import math
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+
+APPLICATION_PROTOCOL = "h3"
+MODE_BULK = "bulk"
+MODE_RR = "rr"
+MODE_CRR = "crr"
+DIRECTION_UPLOAD = "upload"
+DIRECTION_DOWNLOAD = "download"
+DIRECTION_STAY = "stay"
+TRANSFER_CONNECTION_WINDOW = 32 * 1024 * 1024
+TRANSFER_STREAM_WINDOW = 16 * 1024 * 1024
+DEFAULT_MAX_RUN_REQUESTS = 4096
+
+
+@dataclass
+class OptionalU64:
+    value: int = 0
+    set: bool = False
+
+
+@dataclass
+class Config:
+    role: str
+    host: str = "127.0.0.1"
+    port: int = 4433
+    server_name: str = "localhost"
+    verify_peer: bool = False
+    io_backend: str = "socket"
+    congestion_control: str = "default"
+    certificate_chain: str = "tests/fixtures/quic-server-cert.pem"
+    private_key: str = "tests/fixtures/quic-server-key.pem"
+    disable_pmtud: bool = True
+    mode: str = MODE_BULK
+    direction: str = DIRECTION_DOWNLOAD
+    request_bytes: int = 64
+    response_bytes: int = 64
+    streams: int = 1
+    connections: int = 1
+    requests_in_flight: int = 1
+    requests: OptionalU64 = field(default_factory=OptionalU64)
+    total_bytes: OptionalU64 = field(default_factory=OptionalU64)
+    warmup: float = 0.0
+    duration: float = 5.0
+    json_out: Optional[str] = None
+
+
+@dataclass
+class Counters:
+    bytes_sent: int = 0
+    bytes_received: int = 0
+    requests_completed: int = 0
+    skipped_setup_errors: int = 0
+    latencies: list[float] = field(default_factory=list)
+
+
+def parse_duration(value: str) -> float:
+    if value.endswith("ms"):
+        return int(value[:-2]) / 1000.0
+    if value.endswith("s"):
+        return int(value[:-1])
+    raise argparse.ArgumentTypeError(f"invalid duration: {value}")
+
+
+def parse_args(argv: list[str]) -> Config:
+    if len(argv) < 2 or argv[1] not in ("client", "server"):
+        print("usage: ngtcp2-perf [client|server] [options]", file=sys.stderr)
+        raise SystemExit(2)
+
+    parser = argparse.ArgumentParser(prog="ngtcp2-perf")
+    parser.add_argument("role", choices=("client", "server"))
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=4433)
+    parser.add_argument("--server-name", default="localhost")
+    parser.add_argument("--verify-peer", action="store_true")
+    parser.add_argument("--io-backend", default="socket")
+    parser.add_argument("--congestion-control", default="default")
+    parser.add_argument("--certificate-chain", default="tests/fixtures/quic-server-cert.pem")
+    parser.add_argument("--private-key", default="tests/fixtures/quic-server-key.pem")
+    parser.add_argument("--disable-pmtud", action="store_true", default=True)
+    parser.add_argument("--mode", default=MODE_BULK)
+    parser.add_argument("--direction", default=DIRECTION_DOWNLOAD)
+    parser.add_argument("--request-bytes", type=int, default=64)
+    parser.add_argument("--response-bytes", type=int, default=64)
+    parser.add_argument("--streams", type=int, default=1)
+    parser.add_argument("--connections", type=int, default=1)
+    parser.add_argument("--requests-in-flight", type=int, default=1)
+    parser.add_argument("--requests", type=int)
+    parser.add_argument("--total-bytes", type=int)
+    parser.add_argument("--warmup", type=parse_duration, default=0.0)
+    parser.add_argument("--duration", type=parse_duration, default=5.0)
+    parser.add_argument("--json-out")
+    ns = parser.parse_args(argv[1:])
+
+    cfg = Config(
+        role=ns.role,
+        host=ns.host,
+        port=ns.port,
+        server_name=ns.server_name,
+        verify_peer=ns.verify_peer,
+        io_backend=ns.io_backend,
+        congestion_control=ns.congestion_control,
+        certificate_chain=ns.certificate_chain,
+        private_key=ns.private_key,
+        disable_pmtud=ns.disable_pmtud,
+        mode=ns.mode,
+        direction=ns.direction,
+        request_bytes=ns.request_bytes,
+        response_bytes=ns.response_bytes,
+        streams=ns.streams,
+        connections=ns.connections,
+        requests_in_flight=ns.requests_in_flight,
+        requests=OptionalU64(ns.requests or 0, ns.requests is not None),
+        total_bytes=OptionalU64(ns.total_bytes or 0, ns.total_bytes is not None),
+        warmup=ns.warmup,
+        duration=ns.duration,
+        json_out=ns.json_out,
+    )
+    validate_config(cfg)
+    return cfg
+
+
+def validate_config(cfg: Config) -> None:
+    if cfg.mode not in (MODE_BULK, MODE_RR, MODE_CRR):
+        raise SystemExit(f"unsupported mode: {cfg.mode}")
+    if cfg.io_backend != "socket":
+        raise SystemExit("ngtcp2-perf only supports the socket backend")
+    if cfg.congestion_control not in ("default", "newreno", "reno", "cubic", "bbr", "copa"):
+        raise SystemExit(f"unsupported congestion-control label: {cfg.congestion_control}")
+    if cfg.congestion_control == "copa":
+        raise SystemExit(
+            "ngtcp2-perf does not provide Copa; use PERF_CONGESTION_CONTROLS=default"
+        )
+    if cfg.direction not in (DIRECTION_UPLOAD, DIRECTION_DOWNLOAD, DIRECTION_STAY):
+        raise SystemExit(f"unsupported direction: {cfg.direction}")
+    if cfg.streams <= 0 or cfg.connections <= 0 or cfg.requests_in_flight <= 0:
+        raise SystemExit("streams, connections, and requests-in-flight must be greater than zero")
+
+
+def upstream_dir() -> Path:
+    return Path(os.environ.get("NGTCP2_PERF_BIN_DIR", "/usr/local/libexec/ngtcp2-perf"))
+
+
+def ngtcp2_cc(label: str) -> str:
+    if label in ("default", "cubic"):
+        return "cubic"
+    if label in ("newreno", "reno"):
+        return "reno"
+    return label
+
+
+def run_server(cfg: Config) -> int:
+    args = [
+        str(upstream_dir() / "qtlsserver"),
+        "--quiet",
+        "--no-quic-dump",
+        "--no-http-dump",
+        "--max-data",
+        str(TRANSFER_CONNECTION_WINDOW),
+        "--max-stream-data-bidi-remote",
+        str(TRANSFER_STREAM_WINDOW),
+        "--max-stream-window",
+        str(TRANSFER_STREAM_WINDOW),
+        "--max-window",
+        str(TRANSFER_CONNECTION_WINDOW),
+        "--max-dyn-length",
+        str(max(TRANSFER_CONNECTION_WINDOW, 1 << 30)),
+        "--cc",
+        ngtcp2_cc(cfg.congestion_control),
+    ]
+    if cfg.disable_pmtud:
+        args.append("--no-pmtud")
+    args.extend([cfg.host, str(cfg.port), cfg.private_key, cfg.certificate_chain])
+    os.execv(args[0], args)
+    return 127
+
+
+def run_client(cfg: Config) -> dict:
+    counters = Counters()
+    start = time.monotonic()
+    if cfg.warmup > 0 and not cfg.requests.set and not cfg.total_bytes.set:
+        time.sleep(cfg.warmup)
+    measure_start = time.monotonic()
+
+    if cfg.mode == MODE_BULK:
+        run_bulk(cfg, counters)
+    elif cfg.mode == MODE_RR:
+        run_rr(cfg, counters)
+    else:
+        run_crr(cfg, counters)
+
+    elapsed = time.monotonic() - (measure_start if not cfg.requests.set else start)
+    summary = new_run_summary(cfg)
+    summary["elapsed_ms"] = duration_millis(elapsed)
+    summary["bytes_sent"] = counters.bytes_sent
+    summary["bytes_received"] = counters.bytes_received
+    summary["requests_completed"] = counters.requests_completed
+    summary["skipped_setup_errors"] = counters.skipped_setup_errors
+    summary["server_counters"] = {
+        "bytes_sent": counters.bytes_received,
+        "bytes_received": counters.bytes_sent,
+        "requests_completed": counters.requests_completed,
+    }
+    summary["latency"] = summarize_latency(counters.latencies)
+    finalize_summary(summary)
+    return summary
+
+
+def run_bulk(cfg: Config, counters: Counters) -> None:
+    if cfg.direction == DIRECTION_UPLOAD:
+        per_request_sent = max(cfg.request_bytes, cfg.response_bytes)
+        per_request_received = 0
+        response_bytes = 0
+    else:
+        per_request_sent = cfg.request_bytes
+        per_request_received = cfg.response_bytes
+        response_bytes = cfg.response_bytes
+
+    if cfg.total_bytes.set:
+        target = cfg.total_bytes.value
+        unit = max(1, per_request_received if cfg.direction == DIRECTION_DOWNLOAD else per_request_sent)
+        count = max(1, math.ceil(target / unit))
+        run_requests(cfg, count, response_bytes, counters)
+        return
+
+    deadline = time.monotonic() + cfg.duration
+    while time.monotonic() < deadline:
+        count = max(1, cfg.streams * cfg.connections)
+        before = time.monotonic()
+        run_requests(cfg, count, response_bytes, counters)
+        if time.monotonic() - before > cfg.duration * 2:
+            break
+
+
+def run_rr(cfg: Config, counters: Counters) -> None:
+    if cfg.requests.set:
+        count = cfg.requests.value
+        run_requests(cfg, count, cfg.response_bytes, counters, latency=True)
+        return
+
+    deadline = time.monotonic() + cfg.duration
+    while time.monotonic() < deadline:
+        count = max(1, min(DEFAULT_MAX_RUN_REQUESTS, cfg.requests_in_flight))
+        run_requests(cfg, count, cfg.response_bytes, counters, latency=True)
+
+
+def run_crr(cfg: Config, counters: Counters) -> None:
+    if cfg.requests.set:
+        remaining = cfg.requests.value
+        while remaining > 0:
+            batch = min(remaining, cfg.connections)
+            run_requests(cfg, batch, cfg.response_bytes, counters, latency=True)
+            remaining -= batch
+        return
+
+    deadline = time.monotonic() + cfg.duration
+    while time.monotonic() < deadline:
+        batch = max(1, cfg.connections)
+        run_requests(cfg, batch, cfg.response_bytes, counters, latency=True)
+
+
+def run_requests(
+    cfg: Config,
+    count: int,
+    response_bytes: int,
+    counters: Counters,
+    latency: bool = False,
+) -> None:
+    urls = [f"https://{cfg.server_name}:{cfg.port}/{response_bytes}" for _ in range(count)]
+    args = [
+        str(upstream_dir() / "qtlsclient"),
+        "--quiet",
+        "--no-quic-dump",
+        "--no-http-dump",
+        "--no-pmtud",
+        "--exit-on-all-streams-close",
+        "--cc",
+        ngtcp2_cc(cfg.congestion_control),
+        "--sni",
+        cfg.server_name,
+        "--nstreams",
+        str(count),
+        "--max-data",
+        str(TRANSFER_CONNECTION_WINDOW),
+        "--max-stream-data-bidi-local",
+        str(TRANSFER_STREAM_WINDOW),
+        "--max-stream-window",
+        str(TRANSFER_STREAM_WINDOW),
+        "--max-window",
+        str(TRANSFER_CONNECTION_WINDOW),
+        cfg.host,
+        str(cfg.port),
+        *urls,
+    ]
+    started = time.monotonic()
+    subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    elapsed = time.monotonic() - started
+    request_bytes = 0 if cfg.mode == MODE_BULK and cfg.direction == DIRECTION_DOWNLOAD else cfg.request_bytes
+    counters.bytes_sent += request_bytes * count
+    counters.bytes_received += response_bytes * count
+    counters.requests_completed += count
+    if latency and count > 0:
+        counters.latencies.extend([elapsed / count] * count)
+
+
+def new_run_summary(cfg: Config) -> dict:
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "mode": cfg.mode,
+        "direction": cfg.direction,
+        "backend": cfg.io_backend,
+        "congestion_control": cfg.congestion_control,
+        "remote_host": cfg.host,
+        "remote_port": cfg.port,
+        "alpn": APPLICATION_PROTOCOL,
+        "elapsed_ms": 0,
+        "warmup_ms": duration_millis(cfg.warmup),
+        "bytes_sent": 0,
+        "bytes_received": 0,
+        "server_counters": {
+            "bytes_sent": 0,
+            "bytes_received": 0,
+            "requests_completed": 0,
+        },
+        "requests_completed": 0,
+        "streams": cfg.streams,
+        "connections": cfg.connections,
+        "requests_in_flight": cfg.requests_in_flight,
+        "request_bytes": cfg.request_bytes,
+        "response_bytes": cfg.response_bytes,
+        "throughput_mib_per_s": 0.0,
+        "throughput_gbit_per_s": 0.0,
+        "requests_per_s": 0.0,
+        "latency": summarize_latency([]),
+    }
+
+
+def finalize_summary(summary: dict) -> None:
+    elapsed_ms = summary["elapsed_ms"] or summary["warmup_ms"]
+    seconds = max(elapsed_ms / 1000.0, 0.001)
+    total_bytes = summary["bytes_sent"] + summary["bytes_received"]
+    summary["throughput_mib_per_s"] = total_bytes / (1024.0 * 1024.0) / seconds
+    summary["throughput_gbit_per_s"] = (total_bytes * 8.0) / 1_000_000_000.0 / seconds
+    summary["requests_per_s"] = summary["requests_completed"] / seconds
+    if summary.get("skipped_setup_errors", 0) == 0:
+        summary.pop("skipped_setup_errors", None)
+    if not summary.get("failure_reason"):
+        summary.pop("failure_reason", None)
+
+
+def summarize_latency(samples: list[float]) -> dict:
+    if not samples:
+        return {
+            "min_us": 0,
+            "avg_us": 0,
+            "p50_us": 0,
+            "p90_us": 0,
+            "p99_us": 0,
+            "max_us": 0,
+        }
+    micros = sorted(int(sample * 1_000_000) for sample in samples)
+    return {
+        "min_us": micros[0],
+        "avg_us": sum(micros) // len(micros),
+        "p50_us": percentile(micros, 50.0),
+        "p90_us": percentile(micros, 90.0),
+        "p99_us": percentile(micros, 99.0),
+        "max_us": micros[-1],
+    }
+
+
+def percentile(sorted_values: list[int], pct: float) -> int:
+    rank = math.ceil((pct / 100.0) * len(sorted_values))
+    return sorted_values[max(0, min(rank - 1, len(sorted_values) - 1))]
+
+
+def duration_millis(seconds: float) -> int:
+    return int(seconds * 1000)
+
+
+def emit_summary(summary: dict, json_out: Optional[str]) -> None:
+    print(
+        "status={status} mode={mode} cc={cc} direction={direction} "
+        "throughput_mib/s={mib:.3f} throughput_gbit/s={gbit:.3f} requests/s={rps:.3f}".format(
+            status=summary["status"],
+            mode=summary["mode"],
+            cc=summary["congestion_control"],
+            direction=summary["direction"],
+            mib=summary["throughput_mib_per_s"],
+            gbit=summary["throughput_gbit_per_s"],
+            rps=summary["requests_per_s"],
+        )
+    )
+    if json_out:
+        with open(json_out, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+            f.write("\n")
+
+
+def main() -> None:
+    cfg = parse_args(sys.argv)
+    if cfg.role == "server":
+        raise SystemExit(run_server(cfg))
+
+    summary = new_run_summary(cfg)
+    try:
+        summary = run_client(cfg)
+    except Exception as exc:
+        summary["status"] = "failed"
+        summary["failure_reason"] = str(exc)
+        finalize_summary(summary)
+    emit_summary(summary, cfg.json_out)
+    raise SystemExit(0 if summary["status"] == "ok" else 1)
+
+
+if __name__ == "__main__":
+    main()

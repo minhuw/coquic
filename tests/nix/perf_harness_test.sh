@@ -66,17 +66,17 @@ grep -F -- 'server_impl=${server_impl}' "${script}" >/dev/null || {
   exit 1
 }
 
-grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic)' "${script}" >/dev/null || {
+grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)' "${script}" >/dev/null || {
   echo 'missing quic-go implementation validation in harness script' >&2
   exit 1
 }
 
-grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic)' "${script}" >/dev/null || {
+grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)' "${script}" >/dev/null || {
   echo 'missing quinn implementation validation in harness script' >&2
   exit 1
 }
 
-grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic)' "${script}" >/dev/null || {
+grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)' "${script}" >/dev/null || {
   echo 'missing picoquic implementation validation in harness script' >&2
   exit 1
 }
@@ -123,6 +123,26 @@ grep -F -- '--entrypoint /usr/local/bin/s2n-quic-perf' "${script}" >/dev/null ||
 
 grep -F -- '--entrypoint /usr/local/bin/xquic-perf' "${script}" >/dev/null || {
   echo 'missing xquic Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/aioquic-perf' "${script}" >/dev/null || {
+  echo 'missing aioquic Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/ngtcp2-perf' "${script}" >/dev/null || {
+  echo 'missing ngtcp2 Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/lsquic-perf' "${script}" >/dev/null || {
+  echo 'missing LSQUIC Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/neqo-perf' "${script}" >/dev/null || {
+  echo 'missing Neqo Docker entrypoint override in harness script' >&2
   exit 1
 }
 
@@ -246,7 +266,7 @@ grep -F -- 'timeout --kill-after=5s "${run_timeout_seconds}s" docker run --rm' "
   exit 1
 }
 
-grep -F -- 'PERF_MSQUIC_BULK_TOTAL_BYTES:-1073741824' "${script}" >/dev/null || {
+grep -F -- 'PERF_MSQUIC_BULK_TOTAL_BYTES:-134217728' "${script}" >/dev/null || {
   echo 'missing fixed-size MSQUIC paired bulk override in harness script' >&2
   exit 1
 }
@@ -384,6 +404,46 @@ grep -F -- 'xquicPerfClient = pkgs.stdenv.mkDerivation' "${flake}" >/dev/null ||
 
 grep -F -- 'ln -s ${xquicPerfClient}/bin/xquic-perf $out/usr/local/bin/xquic-perf' "${flake}" >/dev/null || {
   echo 'missing xquic perf client in perf image overlay' >&2
+  exit 1
+}
+
+grep -F -- 'aioquicPerfClient = pkgs.stdenvNoCC.mkDerivation' "${flake}" >/dev/null || {
+  echo 'missing aioquic perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${aioquicPerfClient}/bin/aioquic-perf $out/usr/local/bin/aioquic-perf' "${flake}" >/dev/null || {
+  echo 'missing aioquic perf client in perf image overlay' >&2
+  exit 1
+}
+
+grep -F -- 'ngtcp2PerfClient = pkgs.stdenv.mkDerivation' "${flake}" >/dev/null || {
+  echo 'missing ngtcp2 perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${ngtcp2PerfClient}/bin/ngtcp2-perf $out/usr/local/bin/ngtcp2-perf' "${flake}" >/dev/null || {
+  echo 'missing ngtcp2 perf client in perf image overlay' >&2
+  exit 1
+}
+
+grep -F -- 'lsquicPerfClient = pkgs.stdenv.mkDerivation' "${flake}" >/dev/null || {
+  echo 'missing LSQUIC perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${lsquicPerfClient}/bin/lsquic-perf $out/usr/local/bin/lsquic-perf' "${flake}" >/dev/null || {
+  echo 'missing LSQUIC perf client in perf image overlay' >&2
+  exit 1
+}
+
+grep -F -- 'neqoPerfClient = pkgs.rustPlatform.buildRustPackage' "${flake}" >/dev/null || {
+  echo 'missing Neqo perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${neqoPerfClient}/bin/neqo-perf $out/usr/local/bin/neqo-perf' "${flake}" >/dev/null || {
+  echo 'missing Neqo perf client in perf image overlay' >&2
   exit 1
 }
 

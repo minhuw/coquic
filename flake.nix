@@ -412,6 +412,10 @@
           mvfstPerfClient ? null,
           s2nQuicPerfClient ? null,
           xquicPerfClient ? null,
+          aioquicPerfClient ? null,
+          ngtcp2PerfClient ? null,
+          lsquicPerfClient ? null,
+          neqoPerfClient ? null,
         }:
         pkgs.runCommand "${name}-overlay" { } ''
           mkdir -p $out/usr/local/bin
@@ -439,6 +443,18 @@
           ''}
           ${lib.optionalString (xquicPerfClient != null) ''
             ln -s ${xquicPerfClient}/bin/xquic-perf $out/usr/local/bin/xquic-perf
+          ''}
+          ${lib.optionalString (aioquicPerfClient != null) ''
+            ln -s ${aioquicPerfClient}/bin/aioquic-perf $out/usr/local/bin/aioquic-perf
+          ''}
+          ${lib.optionalString (ngtcp2PerfClient != null) ''
+            ln -s ${ngtcp2PerfClient}/bin/ngtcp2-perf $out/usr/local/bin/ngtcp2-perf
+          ''}
+          ${lib.optionalString (lsquicPerfClient != null) ''
+            ln -s ${lsquicPerfClient}/bin/lsquic-perf $out/usr/local/bin/lsquic-perf
+          ''}
+          ${lib.optionalString (neqoPerfClient != null) ''
+            ln -s ${neqoPerfClient}/bin/neqo-perf $out/usr/local/bin/neqo-perf
           ''}
         '';
       mkCoquicShell =
@@ -490,6 +506,185 @@
         version = "dev";
         src = ./bench/quinn-perf;
         cargoHash = "sha256-k3wfuwWKkH6lMe6TXRwts5qIX1xC47x/JvbfF6Pkw2c=";
+      };
+      aioquicPerfClient = pkgs.stdenvNoCC.mkDerivation {
+        pname = "aioquic-perf-client";
+        version = "dev";
+        src = ./bench/aioquic-perf;
+        dontBuild = true;
+        pythonEnv = pkgs.python3.withPackages (ps: [
+          ps.aioquic
+        ]);
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out/bin $out/share/aioquic-perf
+          cp aioquic-perf $out/share/aioquic-perf/aioquic-perf.py
+          makeWrapper "$pythonEnv/bin/python" "$out/bin/aioquic-perf" \
+            --add-flags "$out/share/aioquic-perf/aioquic-perf.py"
+          runHook postInstall
+        '';
+        nativeBuildInputs = [
+          pkgs.makeWrapper
+        ];
+      };
+      ngtcp2PerfClient = pkgs.stdenv.mkDerivation {
+        pname = "ngtcp2-perf-client";
+        version = pkgs.ngtcp2.version;
+        src = pkgs.ngtcp2.src;
+        perfSource = ./bench/ngtcp2-perf/ngtcp2-perf;
+        nativeBuildInputs = [
+          pkgs.cmake
+          pkgs.makeWrapper
+          pkgs.pkg-config
+        ];
+        buildInputs = [
+          pkgs.brotli
+          pkgs.libev
+          pkgs.nghttp3
+          pkgs.quictls
+        ];
+        cmakeFlags = [
+          "-DENABLE_STATIC_LIB=FALSE"
+          "-DENABLE_SHARED_LIB=TRUE"
+          "-DENABLE_LIB_ONLY=FALSE"
+          "-DENABLE_OPENSSL=TRUE"
+          "-DENABLE_GNUTLS=FALSE"
+          "-DENABLE_BORINGSSL=FALSE"
+          "-DENABLE_PICOTLS=FALSE"
+          "-DENABLE_WOLFSSL=FALSE"
+          "-DBUILD_TESTING=OFF"
+        ];
+        buildPhase = ''
+          runHook preBuild
+          cmake --build . --target qtlsclient qtlsserver
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out/bin $out/lib $out/libexec/ngtcp2-perf $out/share/ngtcp2-perf
+          cp examples/qtlsclient examples/qtlsserver $out/libexec/ngtcp2-perf/
+          cp lib/libngtcp2.so* crypto/quictls/libngtcp2_crypto_quictls.so* $out/lib/
+          ngtcp2_rpath="${
+            lib.makeLibraryPath [
+              pkgs.brotli.lib
+              pkgs.libev
+              pkgs.nghttp3
+              pkgs.quictls
+              pkgs.stdenv.cc.cc.lib
+            ]
+          }:$out/lib"
+          patchelf --set-rpath "$ngtcp2_rpath" \
+            $out/libexec/ngtcp2-perf/qtlsclient \
+            $out/libexec/ngtcp2-perf/qtlsserver
+          for libfile in $out/lib/*.so*; do
+            if [ -f "$libfile" ] && [ ! -L "$libfile" ]; then
+              patchelf --set-rpath "$ngtcp2_rpath" "$libfile"
+            fi
+          done
+          cp "$perfSource" $out/share/ngtcp2-perf/ngtcp2-perf.py
+          makeWrapper ${pkgs.python3}/bin/python3 $out/bin/ngtcp2-perf \
+            --add-flags "$out/share/ngtcp2-perf/ngtcp2-perf.py" \
+            --set NGTCP2_PERF_BIN_DIR "$out/libexec/ngtcp2-perf"
+          runHook postInstall
+        '';
+      };
+      lsquicSrc = pkgs.fetchFromGitHub {
+        owner = "litespeedtech";
+        repo = "lsquic";
+        rev = "v4.7.0";
+        fetchSubmodules = true;
+        hash = "sha256-42U9ZkS1mEajZrsXqYFDJX7Mr6Mr8+r8SjczzVQtTPY=";
+      };
+      lsquicPerfClient = pkgs.stdenv.mkDerivation {
+        pname = "lsquic-perf-client";
+        version = "4.7.0";
+        src = lsquicSrc;
+        perfSource = ./bench/lsquic-perf/lsquic-perf;
+        nativeBuildInputs = [
+          pkgs.cmake
+          pkgs.makeWrapper
+          pkgs.perl
+        ];
+        buildInputs = [
+          pkgs.boringssl
+          pkgs.libevent
+          pkgs.zlib
+        ];
+        cmakeFlags = [
+          "-DCMAKE_BUILD_TYPE=Release"
+          "-DLSQUIC_LIBSSL=BORINGSSL"
+          "-DLSQUIC_BIN=ON"
+          "-DLSQUIC_TESTS=OFF"
+          "-DLIBSSL_DIR=${pkgs.boringssl}"
+          "-DSSLLIB_INCLUDE=${pkgs.boringssl.dev}/include"
+          "-DLIBSSL_LIB_ssl=${pkgs.boringssl}/lib/libssl.a"
+          "-DLIBSSL_LIB_crypto=${pkgs.boringssl}/lib/libcrypto.a"
+          "-DZLIB_INCLUDE_DIR=${pkgs.zlib.dev}/include"
+          "-DZLIB_LIB=${pkgs.zlib.static}/lib/libz.a"
+          "-DEVENT_INCLUDE_DIR=${pkgs.libevent.dev}/include"
+          "-DEVENT_LIB=${pkgs.libevent}/lib/libevent.so"
+        ];
+        buildPhase = ''
+          runHook preBuild
+          cmake --build . --target perf_client perf_server
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out/bin $out/libexec/lsquic-perf $out/share/lsquic-perf
+          cp bin/perf_client bin/perf_server $out/libexec/lsquic-perf/
+          cp "$perfSource" $out/share/lsquic-perf/lsquic-perf.py
+          makeWrapper ${pkgs.python3}/bin/python3 $out/bin/lsquic-perf \
+            --add-flags "$out/share/lsquic-perf/lsquic-perf.py" \
+            --set LSQUIC_PERF_BIN_DIR "$out/libexec/lsquic-perf" \
+            --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath [ pkgs.libevent pkgs.stdenv.cc.cc.lib ]}"
+          runHook postInstall
+        '';
+      };
+      neqoSrc = pkgs.fetchFromGitHub {
+        owner = "mozilla";
+        repo = "neqo";
+        rev = "v0.8.1";
+        hash = "sha256-zt4zizNhbk2a9fn1r3mq9dwOz6EOOD+MlTIiIZ6ibfM=";
+      };
+      neqoPerfClient = pkgs.rustPlatform.buildRustPackage {
+        pname = "neqo-perf-client";
+        version = "0.8.1";
+        src = neqoSrc;
+        cargoLock.lockFile = ./bench/neqo-perf/Cargo.lock;
+        buildAndTestSubdir = "neqo-bin";
+        perfSource = ./bench/neqo-perf/neqo-perf;
+        nativeBuildInputs = [
+          pkgs.makeWrapper
+          pkgs.pkg-config
+          pkgs.rustPlatform.bindgenHook
+        ];
+        buildInputs = [
+          pkgs.nspr
+          pkgs.nss
+        ];
+        cargoBuildFlags = [
+          "--bin"
+          "neqo-client"
+          "--bin"
+          "neqo-server"
+        ];
+        doCheck = false;
+        postPatch = ''
+          cp ${./bench/neqo-perf/Cargo.lock} Cargo.lock
+        '';
+        postInstall = ''
+          mkdir -p $out/libexec/neqo-perf $out/share/neqo-perf
+          mv $out/bin/neqo-client $out/libexec/neqo-perf/neqo-client
+          mv $out/bin/neqo-server $out/libexec/neqo-perf/neqo-server
+          cp -R $src/test-fixture/db $out/libexec/neqo-perf/db
+          cp "$perfSource" $out/share/neqo-perf/neqo-perf.py
+          makeWrapper ${pkgs.python3}/bin/python3 $out/bin/neqo-perf \
+            --add-flags "$out/share/neqo-perf/neqo-perf.py" \
+            --set NEQO_PERF_BIN_DIR "$out/libexec/neqo-perf" \
+            --set NEQO_PERF_DB "$out/libexec/neqo-perf/db" \
+            --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath [ pkgs.nspr pkgs.nss pkgs.sqlite pkgs.zlib pkgs.stdenv.cc.cc.lib ]}"
+        '';
       };
       sodiumCmakeModule = pkgs.writeTextDir "share/cmake/Modules/FindSodium.cmake" ''
         find_package(PkgConfig REQUIRED)
@@ -785,6 +980,10 @@
             inherit mvfstPerfClient;
             inherit s2nQuicPerfClient;
             inherit xquicPerfClient;
+            inherit aioquicPerfClient;
+            inherit ngtcp2PerfClient;
+            inherit lsquicPerfClient;
+            inherit neqoPerfClient;
           })
         ];
         config = {
@@ -808,6 +1007,10 @@
             inherit mvfstPerfClient;
             inherit s2nQuicPerfClient;
             inherit xquicPerfClient;
+            inherit aioquicPerfClient;
+            inherit ngtcp2PerfClient;
+            inherit lsquicPerfClient;
+            inherit neqoPerfClient;
           })
         ];
         config = {
@@ -931,6 +1134,10 @@
         mvfst-perf-client = mvfstPerfClient;
         s2n-quic-perf-client = s2nQuicPerfClient;
         xquic-perf-client = xquicPerfClient;
+        aioquic-perf-client = aioquicPerfClient;
+        ngtcp2-perf-client = ngtcp2PerfClient;
+        lsquic-perf-client = lsquicPerfClient;
+        neqo-perf-client = neqoPerfClient;
       };
 
       apps.${system} = {

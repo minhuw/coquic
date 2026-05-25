@@ -1,0 +1,658 @@
+#!/usr/bin/env python3
+import argparse
+import asyncio
+import json
+import math
+import os
+import socket
+import ssl
+import sys
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from typing import Optional
+
+from aioquic.asyncio import connect, serve
+from aioquic.asyncio.protocol import QuicConnectionProtocol
+from aioquic.quic.configuration import QuicConfiguration
+
+
+APPLICATION_PROTOCOL = "coquic-perf/1"
+TRANSFER_CONNECTION_WINDOW = 32 * 1024 * 1024
+TRANSFER_STREAM_WINDOW = 16 * 1024 * 1024
+READ_CHUNK_SIZE = 64 * 1024
+WRITE_CHUNK_SIZE = 32 * 1024
+HANDSHAKE_TIMEOUT = 10.0
+DRAIN_TIMEOUT = 2.0
+
+MODE_BULK = "bulk"
+MODE_RR = "rr"
+MODE_CRR = "crr"
+DIRECTION_UPLOAD = "upload"
+DIRECTION_DOWNLOAD = "download"
+DIRECTION_STAY = "stay"
+
+
+@dataclass
+class OptionalU64:
+    value: int = 0
+    set: bool = False
+
+
+@dataclass
+class Config:
+    role: str
+    host: str = "127.0.0.1"
+    port: int = 4433
+    server_name: str = "localhost"
+    verify_peer: bool = False
+    io_backend: str = "socket"
+    congestion_control: str = "default"
+    certificate_chain: str = "tests/fixtures/quic-server-cert.pem"
+    private_key: str = "tests/fixtures/quic-server-key.pem"
+    disable_pmtud: bool = True
+    mode: str = MODE_BULK
+    direction: str = DIRECTION_DOWNLOAD
+    request_bytes: int = 64
+    response_bytes: int = 64
+    streams: int = 1
+    connections: int = 1
+    requests_in_flight: int = 1
+    requests: OptionalU64 = field(default_factory=OptionalU64)
+    total_bytes: OptionalU64 = field(default_factory=OptionalU64)
+    warmup: float = 0.0
+    duration: float = 5.0
+    json_out: Optional[str] = None
+
+
+@dataclass
+class Counters:
+    bytes_sent: int = 0
+    bytes_received: int = 0
+    requests_completed: int = 0
+    skipped_setup_errors: int = 0
+    latencies: list[float] = field(default_factory=list)
+
+
+@dataclass
+class CompletedStream:
+    counts: bool
+    request_bytes: int
+    received: int
+    latency: float
+
+
+@dataclass
+class OpenConnection:
+    protocol: QuicConnectionProtocol
+    manager: object
+
+
+def parse_duration(value: str) -> float:
+    if value.endswith("ms"):
+        return int(value[:-2]) / 1000.0
+    if value.endswith("s"):
+        return int(value[:-1])
+    raise argparse.ArgumentTypeError(f"invalid duration: {value}")
+
+
+def parse_args(argv: list[str]) -> Config:
+    if len(argv) < 2 or argv[1] not in ("client", "server"):
+        print("usage: aioquic-perf [client|server] [options]", file=sys.stderr)
+        raise SystemExit(2)
+
+    parser = argparse.ArgumentParser(prog="aioquic-perf", add_help=True)
+    parser.add_argument("role", choices=("client", "server"))
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=4433)
+    parser.add_argument("--server-name", default="localhost")
+    parser.add_argument("--verify-peer", action="store_true")
+    parser.add_argument("--io-backend", default="socket")
+    parser.add_argument("--congestion-control", default="default")
+    parser.add_argument("--certificate-chain", default="tests/fixtures/quic-server-cert.pem")
+    parser.add_argument("--private-key", default="tests/fixtures/quic-server-key.pem")
+    parser.add_argument("--disable-pmtud", action="store_true", default=True)
+    parser.add_argument("--mode", default=MODE_BULK)
+    parser.add_argument("--direction", default=DIRECTION_DOWNLOAD)
+    parser.add_argument("--request-bytes", type=int, default=64)
+    parser.add_argument("--response-bytes", type=int, default=64)
+    parser.add_argument("--streams", type=int, default=1)
+    parser.add_argument("--connections", type=int, default=1)
+    parser.add_argument("--requests-in-flight", type=int, default=1)
+    parser.add_argument("--requests", type=int)
+    parser.add_argument("--total-bytes", type=int)
+    parser.add_argument("--warmup", type=parse_duration, default=0.0)
+    parser.add_argument("--duration", type=parse_duration, default=5.0)
+    parser.add_argument("--json-out")
+    ns = parser.parse_args(argv[1:])
+
+    cfg = Config(
+        role=ns.role,
+        host=ns.host,
+        port=ns.port,
+        server_name=ns.server_name,
+        verify_peer=ns.verify_peer,
+        io_backend=ns.io_backend,
+        congestion_control=ns.congestion_control,
+        certificate_chain=ns.certificate_chain,
+        private_key=ns.private_key,
+        disable_pmtud=ns.disable_pmtud,
+        mode=ns.mode,
+        direction=ns.direction,
+        request_bytes=ns.request_bytes,
+        response_bytes=ns.response_bytes,
+        streams=ns.streams,
+        connections=ns.connections,
+        requests_in_flight=ns.requests_in_flight,
+        requests=OptionalU64(ns.requests or 0, ns.requests is not None),
+        total_bytes=OptionalU64(ns.total_bytes or 0, ns.total_bytes is not None),
+        warmup=ns.warmup,
+        duration=ns.duration,
+        json_out=ns.json_out,
+    )
+    validate_config(cfg)
+    return cfg
+
+
+def validate_config(cfg: Config) -> None:
+    if cfg.mode not in (MODE_BULK, MODE_RR, MODE_CRR):
+        raise SystemExit(f"unsupported mode: {cfg.mode}")
+    if cfg.io_backend != "socket":
+        raise SystemExit("aioquic-perf only supports the socket backend")
+    if cfg.congestion_control not in ("default", "newreno", "cubic", "bbr", "copa"):
+        raise SystemExit(f"unsupported congestion-control label: {cfg.congestion_control}")
+    if cfg.congestion_control in ("bbr", "copa"):
+        raise SystemExit(
+            "aioquic-perf does not provide BBR or Copa; use PERF_CONGESTION_CONTROLS=default"
+        )
+    if cfg.direction not in (DIRECTION_UPLOAD, DIRECTION_DOWNLOAD, DIRECTION_STAY):
+        raise SystemExit(f"unsupported direction: {cfg.direction}")
+    if cfg.streams <= 0 or cfg.connections <= 0 or cfg.requests_in_flight <= 0:
+        raise SystemExit("streams, connections, and requests-in-flight must be greater than zero")
+
+
+def aioquic_cc(label: str) -> str:
+    if label in ("default", "newreno"):
+        return "reno"
+    return label
+
+
+def quic_config(cfg: Config, is_client: bool) -> QuicConfiguration:
+    configuration = QuicConfiguration(
+        is_client=is_client,
+        alpn_protocols=[APPLICATION_PROTOCOL],
+        congestion_control_algorithm=aioquic_cc(cfg.congestion_control),
+        idle_timeout=30.0,
+        max_data=TRANSFER_CONNECTION_WINDOW,
+        max_stream_data=TRANSFER_STREAM_WINDOW,
+        max_datagram_size=1350,
+        server_name=cfg.server_name if is_client else None,
+    )
+    if is_client:
+        if not cfg.verify_peer:
+            configuration.verify_mode = ssl.CERT_NONE
+    else:
+        configuration.load_cert_chain(cfg.certificate_chain, cfg.private_key)
+    return configuration
+
+
+async def run_server(cfg: Config) -> None:
+    def stream_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        asyncio.create_task(handle_server_stream(reader, writer))
+
+    server = await serve(
+        cfg.host,
+        cfg.port,
+        configuration=quic_config(cfg, is_client=False),
+        stream_handler=stream_handler,
+    )
+    try:
+        await asyncio.Event().wait()
+    finally:
+        server.close()
+
+
+async def handle_server_stream(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    try:
+        header = await reader.readexactly(16)
+        request_bytes = int.from_bytes(header[:8], "big")
+        response_bytes = int.from_bytes(header[8:], "big")
+        remaining = request_bytes
+        while remaining > 0:
+            data = await reader.read(min(READ_CHUNK_SIZE, remaining))
+            if not data:
+                break
+            remaining -= len(data)
+        payload = b"\x5a" * WRITE_CHUNK_SIZE
+        remaining = response_bytes
+        while remaining > 0:
+            chunk = min(remaining, len(payload))
+            writer.write(payload[:chunk])
+            await writer.drain()
+            remaining -= chunk
+        writer.write_eof()
+        await writer.drain()
+    except Exception:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
+@asynccontextmanager
+async def open_connection(cfg: Config):
+    async with connect(
+        cfg.host,
+        cfg.port,
+        configuration=quic_config(cfg, is_client=True),
+        create_protocol=QuicConnectionProtocol,
+        wait_connected=True,
+    ) as protocol:
+        yield protocol
+
+
+async def run_client(cfg: Config) -> dict:
+    started = time.monotonic()
+    counters = Counters()
+    if cfg.mode == MODE_BULK:
+        if cfg.direction == DIRECTION_DOWNLOAD and not cfg.total_bytes.set:
+            await run_timed_bulk_download(cfg, counters)
+            elapsed = cfg.duration
+        else:
+            await run_fixed_bulk(cfg, counters)
+            elapsed = time.monotonic() - started
+    elif cfg.mode == MODE_RR:
+        await run_rr(cfg, counters)
+        elapsed = time.monotonic() - started if cfg.requests.set else cfg.duration
+    elif cfg.mode == MODE_CRR:
+        await run_crr(cfg, counters)
+        elapsed = time.monotonic() - started if cfg.requests.set else cfg.duration
+    else:
+        raise RuntimeError(f"unsupported mode: {cfg.mode}")
+
+    summary = new_run_summary(cfg)
+    summary["elapsed_ms"] = duration_millis(elapsed)
+    summary["bytes_sent"] = counters.bytes_sent
+    summary["bytes_received"] = counters.bytes_received
+    summary["requests_completed"] = counters.requests_completed
+    summary["skipped_setup_errors"] = counters.skipped_setup_errors
+    summary["server_counters"] = {
+        "bytes_sent": counters.bytes_received,
+        "bytes_received": counters.bytes_sent,
+        "requests_completed": counters.requests_completed,
+    }
+    summary["latency"] = summarize_latency(counters.latencies)
+    finalize_summary(summary)
+    return summary
+
+
+async def run_timed_bulk_download(cfg: Config, counters: Counters) -> None:
+    measure_start = time.monotonic() + cfg.warmup
+    measure_deadline = measure_start + cfg.duration
+    connections = await open_connections(cfg)
+    tasks: set[asyncio.Task[CompletedStream]] = set()
+    try:
+        protocols = [connection.protocol for connection in connections]
+        for protocol in protocols:
+            for _ in range(cfg.streams):
+                tasks.add(
+                    asyncio.create_task(
+                        run_stream(protocol, False, 0, cfg.response_bytes)
+                    )
+                )
+        while time.monotonic() < measure_deadline:
+            if not tasks:
+                break
+            done, tasks = await asyncio.wait(
+                tasks,
+                timeout=max(0.0, measure_deadline - time.monotonic()),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                completed = task.result()
+                if completed.counts and time.monotonic() >= measure_start:
+                    counters.bytes_sent += completed.request_bytes
+                    counters.bytes_received += completed.received
+                    counters.requests_completed += 1
+            while (
+                len(tasks) < cfg.streams * cfg.connections
+                and time.monotonic() < measure_deadline
+            ):
+                protocol = protocols[len(tasks) % len(protocols)]
+                tasks.add(
+                    asyncio.create_task(
+                        run_stream(
+                            protocol,
+                            time.monotonic() >= measure_start,
+                            0,
+                            cfg.response_bytes,
+                        )
+                    )
+                )
+        await drain_tasks(tasks)
+    finally:
+        await close_connections(connections)
+
+
+async def run_fixed_bulk(cfg: Config, counters: Counters) -> None:
+    if not cfg.total_bytes.set:
+        raise RuntimeError("fixed bulk requires --total-bytes for aioquic client")
+    connections = await open_connections(cfg)
+    try:
+        protocols = [connection.protocol for connection in connections]
+        task_count = cfg.streams * cfg.connections
+        per_stream = cfg.total_bytes.value // task_count
+        remainder = cfg.total_bytes.value % task_count
+        tasks = []
+        for i in range(task_count):
+            target = per_stream + (1 if i < remainder else 0)
+            request_bytes = target if cfg.direction == DIRECTION_UPLOAD else 0
+            response_bytes = 0 if cfg.direction == DIRECTION_UPLOAD else target
+            tasks.append(
+                asyncio.create_task(
+                        run_stream(
+                        protocols[i % len(protocols)],
+                        True,
+                        request_bytes,
+                        response_bytes,
+                    )
+                )
+            )
+        for completed in await asyncio.gather(*tasks):
+            counters.bytes_sent += completed.request_bytes
+            counters.bytes_received += completed.received
+            counters.requests_completed += 1
+    finally:
+        await close_connections(connections)
+
+
+async def run_rr(cfg: Config, counters: Counters) -> None:
+    measure_start = time.monotonic() + cfg.warmup
+    measure_deadline = measure_start + cfg.duration
+    connections = await open_connections(cfg)
+    started = 0
+    tasks: set[asyncio.Task[CompletedStream]] = set()
+    try:
+        protocols = [connection.protocol for connection in connections]
+        while len(tasks) < cfg.requests_in_flight:
+            tasks.add(
+                asyncio.create_task(
+                    run_stream(
+                        protocols[started % len(protocols)],
+                        cfg.requests.set or time.monotonic() >= measure_start,
+                        cfg.request_bytes,
+                        cfg.response_bytes,
+                    )
+                )
+            )
+            started += 1
+        while True:
+            if cfg.requests.set and started >= cfg.requests.value and not tasks:
+                break
+            if not cfg.requests.set and time.monotonic() >= measure_deadline:
+                break
+            done, tasks = await asyncio.wait(
+                tasks,
+                timeout=max(0.001, measure_deadline - time.monotonic()),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                completed = task.result()
+                if completed.counts and time.monotonic() >= measure_start:
+                    counters.bytes_sent += completed.request_bytes
+                    counters.bytes_received += completed.received
+                    counters.requests_completed += 1
+                    counters.latencies.append(completed.latency)
+            while len(tasks) < cfg.requests_in_flight:
+                if cfg.requests.set and started >= cfg.requests.value:
+                    break
+                if not cfg.requests.set and time.monotonic() >= measure_deadline:
+                    break
+                tasks.add(
+                    asyncio.create_task(
+                        run_stream(
+                            protocols[started % len(protocols)],
+                            cfg.requests.set or time.monotonic() >= measure_start,
+                            cfg.request_bytes,
+                            cfg.response_bytes,
+                        )
+                    )
+                )
+                started += 1
+        await drain_tasks(tasks)
+    finally:
+        await close_connections(connections)
+
+
+async def run_crr(cfg: Config, counters: Counters) -> None:
+    measure_start = time.monotonic() + cfg.warmup
+    measure_deadline = measure_start + cfg.duration
+    started = 0
+    tasks: set[asyncio.Task[Optional[CompletedStream]]] = set()
+    while True:
+        while len(tasks) < cfg.connections:
+            if cfg.requests.set and started >= cfg.requests.value:
+                break
+            if not cfg.requests.set and time.monotonic() >= measure_deadline:
+                break
+            counts = cfg.requests.set or time.monotonic() >= measure_start
+            tasks.add(asyncio.create_task(run_crr_once(cfg, counts)))
+            started += 1
+        if cfg.requests.set and started >= cfg.requests.value and not tasks:
+            break
+        if not cfg.requests.set and time.monotonic() >= measure_deadline and not tasks:
+            break
+        if not tasks:
+            break
+        done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            try:
+                completed = task.result()
+            except Exception:
+                if cfg.requests.set:
+                    raise
+                counters.skipped_setup_errors += 1
+                continue
+            if completed and completed.counts and time.monotonic() >= measure_start:
+                counters.bytes_sent += completed.request_bytes
+                counters.bytes_received += completed.received
+                counters.requests_completed += 1
+                counters.latencies.append(completed.latency)
+
+
+async def run_crr_once(cfg: Config, counts: bool) -> CompletedStream:
+    async with open_connection(cfg) as protocol:
+        return await run_stream(protocol, counts, cfg.request_bytes, cfg.response_bytes)
+
+
+async def open_connections(cfg: Config) -> list[OpenConnection]:
+    managers = []
+    connections = []
+    try:
+        for _ in range(cfg.connections):
+            manager = open_connection(cfg)
+            protocol = await asyncio.wait_for(manager.__aenter__(), timeout=HANDSHAKE_TIMEOUT)
+            managers.append(manager)
+            connections.append(OpenConnection(protocol=protocol, manager=manager))
+        return connections
+    except Exception:
+        for manager in managers:
+            await manager.__aexit__(None, None, None)
+        raise
+
+
+async def close_connections(connections: list[OpenConnection]) -> None:
+    for connection in connections:
+        connection.protocol.close()
+    for connection in connections:
+        await connection.manager.__aexit__(None, None, None)
+
+
+async def run_stream(
+    protocol: QuicConnectionProtocol, counts: bool, request_bytes: int, response_bytes: int
+) -> CompletedStream:
+    started = time.monotonic()
+    reader, writer = await protocol.create_stream()
+    try:
+        writer.write(request_bytes.to_bytes(8, "big") + response_bytes.to_bytes(8, "big"))
+        payload = b"\x5a" * WRITE_CHUNK_SIZE
+        remaining = request_bytes
+        while remaining > 0:
+            chunk = min(remaining, len(payload))
+            writer.write(payload[:chunk])
+            await writer.drain()
+            remaining -= chunk
+        writer.write_eof()
+        await writer.drain()
+
+        received = 0
+        while True:
+            data = await asyncio.wait_for(reader.read(READ_CHUNK_SIZE), timeout=HANDSHAKE_TIMEOUT)
+            if not data:
+                break
+            received += len(data)
+    finally:
+        writer.close()
+    if received != response_bytes:
+        raise RuntimeError(f"aioquic stream received {received} bytes, expected {response_bytes}")
+    return CompletedStream(
+        counts=counts,
+        request_bytes=request_bytes,
+        received=received,
+        latency=time.monotonic() - started,
+    )
+
+
+async def drain_tasks(tasks: set[asyncio.Task]) -> None:
+    if not tasks:
+        return
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), DRAIN_TIMEOUT)
+    except asyncio.TimeoutError:
+        for task in tasks:
+            task.cancel()
+
+
+def new_run_summary(cfg: Config) -> dict:
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "mode": cfg.mode,
+        "direction": cfg.direction,
+        "backend": cfg.io_backend,
+        "congestion_control": cfg.congestion_control,
+        "remote_host": cfg.host,
+        "remote_port": cfg.port,
+        "alpn": APPLICATION_PROTOCOL,
+        "elapsed_ms": 0,
+        "warmup_ms": duration_millis(cfg.warmup),
+        "bytes_sent": 0,
+        "bytes_received": 0,
+        "server_counters": {
+            "bytes_sent": 0,
+            "bytes_received": 0,
+            "requests_completed": 0,
+        },
+        "requests_completed": 0,
+        "streams": cfg.streams,
+        "connections": cfg.connections,
+        "requests_in_flight": cfg.requests_in_flight,
+        "request_bytes": cfg.request_bytes,
+        "response_bytes": cfg.response_bytes,
+        "throughput_mib_per_s": 0.0,
+        "throughput_gbit_per_s": 0.0,
+        "requests_per_s": 0.0,
+        "latency": summarize_latency([]),
+    }
+
+
+def finalize_summary(summary: dict) -> None:
+    elapsed_ms = summary["elapsed_ms"] or summary["warmup_ms"]
+    seconds = max(elapsed_ms / 1000.0, 0.001)
+    total_bytes = summary["bytes_sent"] + summary["bytes_received"]
+    summary["throughput_mib_per_s"] = total_bytes / (1024.0 * 1024.0) / seconds
+    summary["throughput_gbit_per_s"] = (total_bytes * 8.0) / 1_000_000_000.0 / seconds
+    summary["requests_per_s"] = summary["requests_completed"] / seconds
+    if summary.get("skipped_setup_errors", 0) == 0:
+        summary.pop("skipped_setup_errors", None)
+    if not summary.get("failure_reason"):
+        summary.pop("failure_reason", None)
+
+
+def summarize_latency(samples: list[float]) -> dict:
+    if not samples:
+        return {
+            "min_us": 0,
+            "avg_us": 0,
+            "p50_us": 0,
+            "p90_us": 0,
+            "p99_us": 0,
+            "max_us": 0,
+        }
+    micros = sorted(int(sample * 1_000_000) for sample in samples)
+    return {
+        "min_us": micros[0],
+        "avg_us": sum(micros) // len(micros),
+        "p50_us": percentile(micros, 50.0),
+        "p90_us": percentile(micros, 90.0),
+        "p99_us": percentile(micros, 99.0),
+        "max_us": micros[-1],
+    }
+
+
+def percentile(sorted_values: list[int], pct: float) -> int:
+    rank = math.ceil((pct / 100.0) * len(sorted_values))
+    return sorted_values[max(0, min(rank - 1, len(sorted_values) - 1))]
+
+
+def duration_millis(seconds: float) -> int:
+    return int(seconds * 1000)
+
+
+def emit_summary(summary: dict, json_out: Optional[str]) -> None:
+    print(
+        "status={status} mode={mode} cc={cc} direction={direction} "
+        "throughput_mib/s={mib:.3f} throughput_gbit/s={gbit:.3f} requests/s={rps:.3f}".format(
+            status=summary["status"],
+            mode=summary["mode"],
+            cc=summary["congestion_control"],
+            direction=summary["direction"],
+            mib=summary["throughput_mib_per_s"],
+            gbit=summary["throughput_gbit_per_s"],
+            rps=summary["requests_per_s"],
+        )
+    )
+    if json_out:
+        with open(json_out, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+            f.write("\n")
+
+
+async def main_async() -> int:
+    cfg = parse_args(sys.argv)
+    if cfg.role == "server":
+        await run_server(cfg)
+        return 0
+
+    summary = new_run_summary(cfg)
+    try:
+        summary = await run_client(cfg)
+    except Exception as exc:
+        summary["status"] = "failed"
+        summary["failure_reason"] = str(exc)
+        finalize_summary(summary)
+    emit_summary(summary, cfg.json_out)
+    return 0 if summary["status"] == "ok" else 1
+
+
+def main() -> None:
+    try:
+        raise SystemExit(asyncio.run(main_async()))
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+
+
+if __name__ == "__main__":
+    main()

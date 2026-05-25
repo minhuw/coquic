@@ -49,6 +49,26 @@ const fallbackPerfSnapshot = {
       path: "perf-results.json",
       missing: true,
     },
+    {
+      label: "aioquic",
+      path: "perf-results.json",
+      missing: true,
+    },
+    {
+      label: "ngtcp2",
+      path: "perf-results.json",
+      missing: true,
+    },
+    {
+      label: "lsquic",
+      path: "perf-results.json",
+      missing: true,
+    },
+    {
+      label: "neqo",
+      path: "perf-results.json",
+      missing: true,
+    },
   ],
   rows: [],
 };
@@ -63,6 +83,10 @@ const colors = {
   mvfst: "#57c785",
   "s2n-quic": "#9b8cff",
   xquic: "#f47f42",
+  aioquic: "#4db7e5",
+  ngtcp2: "#d979a8",
+  lsquic: "#6f9d55",
+  neqo: "#c59b72",
 };
 
 const modeConfig = {
@@ -236,7 +260,7 @@ function renderPlots() {
 
 function renderTable() {
   const rows = [...activeSnapshot.rows].sort((left, right) => {
-    const implOrder = ["coquic", "quic-go", "quinn", "picoquic", "msquic", "quiche", "mvfst", "s2n-quic", "xquic"];
+    const implOrder = ["coquic", "quic-go", "quinn", "picoquic", "msquic", "quiche", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
     const modeOrder = { bulk: 0, rr: 1, crr: 2 };
     const leftImpl = implOrder.indexOf(left.implementation);
     const rightImpl = implOrder.indexOf(right.implementation);

@@ -89,6 +89,18 @@ for marker in \
   'PERF_RESULTS_ROOT=.bench-results/xquic' \
   'PERF_CLIENT_IMPL=xquic' \
   'PERF_SERVER_IMPL=xquic' \
+  'PERF_RESULTS_ROOT=.bench-results/aioquic' \
+  'PERF_CLIENT_IMPL=aioquic' \
+  'PERF_SERVER_IMPL=aioquic' \
+  'PERF_RESULTS_ROOT=.bench-results/ngtcp2' \
+  'PERF_CLIENT_IMPL=ngtcp2' \
+  'PERF_SERVER_IMPL=ngtcp2' \
+  'PERF_RESULTS_ROOT=.bench-results/lsquic' \
+  'PERF_CLIENT_IMPL=lsquic' \
+  'PERF_SERVER_IMPL=lsquic' \
+  'PERF_RESULTS_ROOT=.bench-results/neqo' \
+  'PERF_CLIENT_IMPL=neqo' \
+  'PERF_SERVER_IMPL=neqo' \
   'PERF_CONGESTION_CONTROLS=default'; do
   if ! grep -F "${marker}" "${workflow}" >/dev/null; then
     echo "missing baseline perf workflow marker: ${marker}" >&2
@@ -120,7 +132,11 @@ for marker in \
   '--manifest quiche=.bench-results/quiche/manifest.json' \
   '--manifest mvfst=.bench-results/mvfst/manifest.json' \
   '--manifest s2n-quic=.bench-results/s2n-quic/manifest.json' \
-  '--manifest xquic=.bench-results/xquic/manifest.json'; do
+  '--manifest xquic=.bench-results/xquic/manifest.json' \
+  '--manifest aioquic=.bench-results/aioquic/manifest.json' \
+  '--manifest ngtcp2=.bench-results/ngtcp2/manifest.json' \
+  '--manifest lsquic=.bench-results/lsquic/manifest.json' \
+  '--manifest neqo=.bench-results/neqo/manifest.json'; do
   if ! grep -F -- "${marker}" "${workflow}" >/dev/null; then
     echo "missing comparison manifest marker: ${marker}" >&2
     exit 1
@@ -159,6 +175,26 @@ grep -F 'steps.perf_s2n_quic.outcome' "${workflow}" >/dev/null || {
 
 grep -F 'steps.perf_xquic.outcome' "${workflow}" >/dev/null || {
   echo 'missing xquic failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_aioquic.outcome' "${workflow}" >/dev/null || {
+  echo 'missing aioquic failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_ngtcp2.outcome' "${workflow}" >/dev/null || {
+  echo 'missing ngtcp2 failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_lsquic.outcome' "${workflow}" >/dev/null || {
+  echo 'missing LSQUIC failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_neqo.outcome' "${workflow}" >/dev/null || {
+  echo 'missing Neqo failure gate marker' >&2
   exit 1
 }
 

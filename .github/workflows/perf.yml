@@ -121,6 +121,46 @@ jobs:
             PERF_CONGESTION_CONTROLS=default \
             bash bench/run-host-matrix.sh --preset ci
 
+      - name: Run aioquic Paired Baseline
+        id: perf_aioquic
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/aioquic \
+            PERF_CLIENT_IMPL=aioquic \
+            PERF_SERVER_IMPL=aioquic \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
+      - name: Run ngtcp2 Paired Baseline
+        id: perf_ngtcp2
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/ngtcp2 \
+            PERF_CLIENT_IMPL=ngtcp2 \
+            PERF_SERVER_IMPL=ngtcp2 \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
+      - name: Run LSQUIC Paired Baseline
+        id: perf_lsquic
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/lsquic \
+            PERF_CLIENT_IMPL=lsquic \
+            PERF_SERVER_IMPL=lsquic \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
+      - name: Run Neqo Paired Baseline
+        id: perf_neqo
+        continue-on-error: true
+        run: |
+          PERF_RESULTS_ROOT=.bench-results/neqo \
+            PERF_CLIENT_IMPL=neqo \
+            PERF_SERVER_IMPL=neqo \
+            PERF_CONGESTION_CONTROLS=default \
+            bash bench/run-host-matrix.sh --preset ci
+
       - name: Publish Perf Summary
         if: always()
         run: |
@@ -134,6 +174,10 @@ jobs:
             --manifest mvfst=.bench-results/mvfst/manifest.json \
             --manifest s2n-quic=.bench-results/s2n-quic/manifest.json \
             --manifest xquic=.bench-results/xquic/manifest.json \
+            --manifest aioquic=.bench-results/aioquic/manifest.json \
+            --manifest ngtcp2=.bench-results/ngtcp2/manifest.json \
+            --manifest lsquic=.bench-results/lsquic/manifest.json \
+            --manifest neqo=.bench-results/neqo/manifest.json \
             --event-name "${GITHUB_EVENT_NAME}" \
             --commit "${GITHUB_SHA}" \
             --json-out .bench-results/perf-results.json >> "${GITHUB_STEP_SUMMARY}"
@@ -203,6 +247,10 @@ jobs:
           check_step "mvfst" "${{ steps.perf_mvfst.outcome }}"
           check_step "s2n-quic" "${{ steps.perf_s2n_quic.outcome }}"
           check_step "xquic" "${{ steps.perf_xquic.outcome }}"
+          check_step "aioquic" "${{ steps.perf_aioquic.outcome }}"
+          check_step "ngtcp2" "${{ steps.perf_ngtcp2.outcome }}"
+          check_step "LSQUIC" "${{ steps.perf_lsquic.outcome }}"
+          check_step "Neqo" "${{ steps.perf_neqo.outcome }}"
           exit "${failed}"
 
       - name: Upload Perf Artifacts

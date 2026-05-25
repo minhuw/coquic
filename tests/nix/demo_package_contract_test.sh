@@ -116,6 +116,8 @@ for marker in \
   "quic-go" \
   "quinn" \
   "picoquic" \
+  "MSQUIC" \
+  "quiche" \
   "throughput_mib_per_s" \
   "bulk_mib_per_s" \
   "rr_requests_per_s" \

@@ -14,3 +14,4 @@ tools/rag/**/__pycache__/
 tools/rag/**/*.egg-info/
 compile_commands.json
 .bench-results/
+bench/*/target/

@@ -66,17 +66,17 @@ grep -F -- 'server_impl=${server_impl}' "${script}" >/dev/null || {
   exit 1
 }
 
-grep -F -- 'coquic|quic-go|quinn|picoquic)' "${script}" >/dev/null || {
+grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche)' "${script}" >/dev/null || {
   echo 'missing quic-go implementation validation in harness script' >&2
   exit 1
 }
 
-grep -F -- 'coquic|quic-go|quinn|picoquic)' "${script}" >/dev/null || {
+grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche)' "${script}" >/dev/null || {
   echo 'missing quinn implementation validation in harness script' >&2
   exit 1
 }
 
-grep -F -- 'coquic|quic-go|quinn|picoquic)' "${script}" >/dev/null || {
+grep -F -- 'coquic|quic-go|quinn|picoquic|msquic|quiche)' "${script}" >/dev/null || {
   echo 'missing picoquic implementation validation in harness script' >&2
   exit 1
 }
@@ -98,6 +98,16 @@ grep -F -- '--entrypoint /usr/local/bin/quinn-perf' "${script}" >/dev/null || {
 
 grep -F -- '--entrypoint /usr/local/bin/picoquic-perf' "${script}" >/dev/null || {
   echo 'missing picoquic Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/msquic-perf' "${script}" >/dev/null || {
+  echo 'missing MSQUIC Docker entrypoint override in harness script' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/quiche-perf' "${script}" >/dev/null || {
+  echo 'missing quiche Docker entrypoint override in harness script' >&2
   exit 1
 }
 
@@ -307,8 +317,33 @@ grep -F -- 'ln -s ${picoquicPerfClient}/bin/picoquic-perf $out/usr/local/bin/pic
   exit 1
 }
 
+grep -F -- 'msquicPerfClient = pkgs.rustPlatform.buildRustPackage' "${flake}" >/dev/null || {
+  echo 'missing MSQUIC perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${msquicPerfClient}/bin/msquic-perf $out/usr/local/bin/msquic-perf' "${flake}" >/dev/null || {
+  echo 'missing MSQUIC perf client in perf image overlay' >&2
+  exit 1
+}
+
+grep -F -- 'quichePerfClient = pkgs.rustPlatform.buildRustPackage' "${flake}" >/dev/null || {
+  echo 'missing quiche perf client package in flake.nix' >&2
+  exit 1
+}
+
+grep -F -- 'ln -s ${quichePerfClient}/bin/quiche-perf $out/usr/local/bin/quiche-perf' "${flake}" >/dev/null || {
+  echo 'missing quiche perf client in perf image overlay' >&2
+  exit 1
+}
+
 grep -F -- '.bench-results/' "${ignore_file}" >/dev/null || {
   echo 'missing benchmark results ignore rule' >&2
+  exit 1
+}
+
+grep -F -- 'bench/*/target/' "${ignore_file}" >/dev/null || {
+  echo 'missing benchmark Rust target ignore rule' >&2
   exit 1
 }
 
@@ -779,6 +814,106 @@ if manifest.get("congestion_controls") != ["default"]:
     raise SystemExit("manifest missing picoquic congestion-control subset")
 if len(manifest.get("runs", [])) != 3:
     raise SystemExit("manifest missing picoquic smoke runs")
+PY
+
+rm -f "${log_path}" "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
+  "${results_root}"/*.cid "${results_root}/environment.txt"
+
+PATH="${fake_bin_dir}:$PATH" \
+FAKE_PERF_LOG="${log_path}" \
+FAKE_PERF_IMAGE="${fake_image}" \
+FAKE_RESULTS_ROOT="${results_root}" \
+PERF_RESULTS_ROOT="${results_root}" \
+PERF_CLIENT_IMPL=msquic \
+PERF_SERVER_IMPL=msquic \
+PERF_CONGESTION_CONTROLS=default \
+bash "${script}" --preset smoke >/dev/null
+
+for run_name in \
+  smoke-msquic-to-msquic-default-socket-bulk-s1-c1-q1 \
+  smoke-msquic-to-msquic-default-socket-rr-s1-c1-q4 \
+  smoke-msquic-to-msquic-default-socket-crr-s1-c2-q1
+  do
+  [ -f "${results_root}/${run_name}.json" ] || {
+    echo "behavioral harness test missing MSQUIC JSON result for ${run_name}" >&2
+    exit 1
+  }
+done
+
+grep -F -- '--entrypoint /usr/local/bin/msquic-perf coquic-perf:quictls-musl client' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use MSQUIC client entrypoint' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/msquic-perf coquic-perf:quictls-musl server' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use MSQUIC server entrypoint' >&2
+  exit 1
+}
+
+python3 - "${results_root}/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if manifest.get("client_impl") != "msquic":
+    raise SystemExit("manifest missing MSQUIC client implementation")
+if manifest.get("server_impl") != "msquic":
+    raise SystemExit("manifest missing MSQUIC server implementation")
+if manifest.get("congestion_controls") != ["default"]:
+    raise SystemExit("manifest missing MSQUIC congestion-control subset")
+if len(manifest.get("runs", [])) != 3:
+    raise SystemExit("manifest missing MSQUIC smoke runs")
+PY
+
+rm -f "${log_path}" "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
+  "${results_root}"/*.cid "${results_root}/environment.txt"
+
+PATH="${fake_bin_dir}:$PATH" \
+FAKE_PERF_LOG="${log_path}" \
+FAKE_PERF_IMAGE="${fake_image}" \
+FAKE_RESULTS_ROOT="${results_root}" \
+PERF_RESULTS_ROOT="${results_root}" \
+PERF_CLIENT_IMPL=quiche \
+PERF_SERVER_IMPL=quiche \
+PERF_CONGESTION_CONTROLS=default \
+bash "${script}" --preset smoke >/dev/null
+
+for run_name in \
+  smoke-quiche-to-quiche-default-socket-bulk-s1-c1-q1 \
+  smoke-quiche-to-quiche-default-socket-rr-s1-c1-q4 \
+  smoke-quiche-to-quiche-default-socket-crr-s1-c2-q1
+  do
+  [ -f "${results_root}/${run_name}.json" ] || {
+    echo "behavioral harness test missing quiche JSON result for ${run_name}" >&2
+    exit 1
+  }
+done
+
+grep -F -- '--entrypoint /usr/local/bin/quiche-perf coquic-perf:quictls-musl client' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use quiche client entrypoint' >&2
+  exit 1
+}
+
+grep -F -- '--entrypoint /usr/local/bin/quiche-perf coquic-perf:quictls-musl server' "${log_path}" >/dev/null || {
+  echo 'behavioral harness test did not use quiche server entrypoint' >&2
+  exit 1
+}
+
+python3 - "${results_root}/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if manifest.get("client_impl") != "quiche":
+    raise SystemExit("manifest missing quiche client implementation")
+if manifest.get("server_impl") != "quiche":
+    raise SystemExit("manifest missing quiche server implementation")
+if manifest.get("congestion_controls") != ["default"]:
+    raise SystemExit("manifest missing quiche congestion-control subset")
+if len(manifest.get("runs", [])) != 3:
+    raise SystemExit("manifest missing quiche smoke runs")
 PY
 
 echo 'perf harness contract looks correct'

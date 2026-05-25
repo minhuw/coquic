@@ -74,6 +74,12 @@ for marker in \
   'PERF_RESULTS_ROOT=.bench-results/picoquic' \
   'PERF_CLIENT_IMPL=picoquic' \
   'PERF_SERVER_IMPL=picoquic' \
+  'PERF_RESULTS_ROOT=.bench-results/msquic' \
+  'PERF_CLIENT_IMPL=msquic' \
+  'PERF_SERVER_IMPL=msquic' \
+  'PERF_RESULTS_ROOT=.bench-results/quiche' \
+  'PERF_CLIENT_IMPL=quiche' \
+  'PERF_SERVER_IMPL=quiche' \
   'PERF_CONGESTION_CONTROLS=default'; do
   if ! grep -F "${marker}" "${workflow}" >/dev/null; then
     echo "missing baseline perf workflow marker: ${marker}" >&2
@@ -100,7 +106,9 @@ for marker in \
   '--manifest coquic=.bench-results/coquic/manifest.json' \
   '--manifest quic-go=.bench-results/quic-go/manifest.json' \
   '--manifest quinn=.bench-results/quinn/manifest.json' \
-  '--manifest picoquic=.bench-results/picoquic/manifest.json'; do
+  '--manifest picoquic=.bench-results/picoquic/manifest.json' \
+  '--manifest msquic=.bench-results/msquic/manifest.json' \
+  '--manifest quiche=.bench-results/quiche/manifest.json'; do
   if ! grep -F -- "${marker}" "${workflow}" >/dev/null; then
     echo "missing comparison manifest marker: ${marker}" >&2
     exit 1
@@ -114,6 +122,16 @@ grep -F 'Fail On Perf Matrix Errors' "${workflow}" >/dev/null || {
 
 grep -F 'steps.perf_picoquic.outcome' "${workflow}" >/dev/null || {
   echo 'missing picoquic failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_msquic.outcome' "${workflow}" >/dev/null || {
+  echo 'missing MSQUIC failure gate marker' >&2
+  exit 1
+}
+
+grep -F 'steps.perf_quiche.outcome' "${workflow}" >/dev/null || {
+  echo 'missing quiche failure gate marker' >&2
   exit 1
 }
 

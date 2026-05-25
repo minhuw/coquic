@@ -35,8 +35,8 @@ environment overrides:
   PERF_PORT                  UDP port for server/client (default: 9443)
   PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
   PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
-  PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, or picoquic (default: coquic)
-  PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, or picoquic (default: coquic)
+  PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, picoquic, msquic, or quiche (default: coquic)
+  PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, picoquic, msquic, or quiche (default: coquic)
 USAGE
 }
 
@@ -94,10 +94,10 @@ for congestion_control in "${congestion_control_list[@]}"; do
       ;;
     default)
       if [ "${client_impl}" = "${server_impl}" ] \
-        && { [ "${client_impl}" = 'quic-go' ] || [ "${client_impl}" = 'quinn' ] || [ "${client_impl}" = 'picoquic' ]; }; then
+        && { [ "${client_impl}" = 'quic-go' ] || [ "${client_impl}" = 'quinn' ] || [ "${client_impl}" = 'picoquic' ] || [ "${client_impl}" = 'msquic' ] || [ "${client_impl}" = 'quiche' ]; }; then
         :
       else
-        echo 'congestion-control label "default" is only supported for paired quic-go, quinn, or picoquic runs' >&2
+        echo 'congestion-control label "default" is only supported for paired external baseline runs' >&2
         exit 1
       fi
       ;;
@@ -109,7 +109,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
 done
 
 case "${client_impl}" in
-  coquic|quic-go|quinn|picoquic)
+  coquic|quic-go|quinn|picoquic|msquic|quiche)
     ;;
   *)
     echo "unsupported client implementation: ${client_impl}" >&2
@@ -118,7 +118,7 @@ case "${client_impl}" in
 esac
 
 case "${server_impl}" in
-  coquic|quic-go|quinn|picoquic)
+  coquic|quic-go|quinn|picoquic|msquic|quiche)
     ;;
   *)
     echo "unsupported server implementation: ${server_impl}" >&2
@@ -238,6 +238,12 @@ for congestion_control in "${congestion_control_list[@]}"; do
       picoquic)
         server_entrypoint=(--entrypoint /usr/local/bin/picoquic-perf)
         ;;
+      msquic)
+        server_entrypoint=(--entrypoint /usr/local/bin/msquic-perf)
+        ;;
+      quiche)
+        server_entrypoint=(--entrypoint /usr/local/bin/quiche-perf)
+        ;;
     esac
 
     docker run -d --rm \
@@ -293,6 +299,12 @@ for congestion_control in "${congestion_control_list[@]}"; do
         ;;
       picoquic)
         client_entrypoint=(--entrypoint /usr/local/bin/picoquic-perf)
+        ;;
+      msquic)
+        client_entrypoint=(--entrypoint /usr/local/bin/msquic-perf)
+        ;;
+      quiche)
+        client_entrypoint=(--entrypoint /usr/local/bin/quiche-perf)
         ;;
     esac
 

@@ -407,6 +407,8 @@
           quicgoPerfClient ? null,
           quinnPerfClient ? null,
           picoquicPerfClient ? null,
+          msquicPerfClient ? null,
+          quichePerfClient ? null,
         }:
         pkgs.runCommand "${name}-overlay" { } ''
           mkdir -p $out/usr/local/bin
@@ -419,7 +421,12 @@
           ''}
           ${lib.optionalString (picoquicPerfClient != null) ''
             ln -s ${picoquicPerfClient}/bin/picoquic-perf $out/usr/local/bin/picoquic-perf
-            ln -s ${picoquicPerfClient}/bin/pqbench $out/usr/local/bin/pqbench
+          ''}
+          ${lib.optionalString (msquicPerfClient != null) ''
+            ln -s ${msquicPerfClient}/bin/msquic-perf $out/usr/local/bin/msquic-perf
+          ''}
+          ${lib.optionalString (quichePerfClient != null) ''
+            ln -s ${quichePerfClient}/bin/quiche-perf $out/usr/local/bin/quiche-perf
           ''}
         '';
       mkCoquicShell =
@@ -472,6 +479,63 @@
         src = ./bench/quinn-perf;
         cargoHash = "sha256-k3wfuwWKkH6lMe6TXRwts5qIX1xC47x/JvbfF6Pkw2c=";
       };
+      libmsquicForMsquicPerf = pkgs.libmsquic.overrideAttrs (
+        finalAttrs: _previousAttrs: {
+          version = "2.5.4";
+          src = pkgs.fetchFromGitHub {
+            owner = "microsoft";
+            repo = "msquic";
+            tag = "v${finalAttrs.version}";
+            hash = "sha256-si9g67j/A6sbsCWWxs2YhZpXhx34GpxWNOFnWtaqnEQ=";
+            fetchSubmodules = true;
+          };
+          buildInputs = [
+            pkgs.libatomic_ops
+          ]
+          ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            pkgs.lttng-tools
+          ];
+        }
+      );
+      msquicPerfClient = pkgs.rustPlatform.buildRustPackage {
+        pname = "msquic-perf-client";
+        version = "dev";
+        src = ./bench/msquic-perf;
+        cargoHash = "sha256-XOSZdG0Af1XZkuXDOCIVSONlxQzHu/LRI5tR3bxXRV4=";
+        buildInputs = [
+          libmsquicForMsquicPerf
+        ];
+        postPatch = ''
+          substituteInPlace "$cargoDepsCopy/msquic-async-0.4.1/Cargo.toml" \
+            --replace-fail 'msquic-2-5-static = ["msquic-v2-5/static"]' 'msquic-2-5-static = ["msquic-v2-5"]' \
+            --replace-fail 'features = ["preview-api"]' 'features = ["preview-api", "find"]' \
+            --replace-fail 'version = "2.5.1-beta"' $'version = "2.5.1-beta"\ndefault-features = false'
+          substituteInPlace "$cargoDepsCopy/msquic-2.5.1-beta/scripts/build.rs" \
+            --replace-fail 'let installed_dir = "/usr/lib/x86_64-linux-gnu";' 'let installed_dir = "${libmsquicForMsquicPerf}/lib";'
+        '';
+      };
+      quichePerfClient = pkgs.rustPlatform.buildRustPackage {
+        pname = "quiche-perf-client";
+        version = "dev";
+        src = ./bench/quiche-perf;
+        cargoHash = "sha256-cBSmg8lqYTkGR71SyIxHFo3fXRxffwjv/L/LUNdPLIE=";
+        nativeBuildInputs = [
+          llvmPkgs.clang
+          llvmPkgs.libclang
+          pkgs.pkg-config
+        ];
+        buildInputs = [
+          pkgs.libffi
+        ];
+        LIBCLANG_PATH = "${llvmPkgs.libclang.lib}/lib";
+        LD_LIBRARY_PATH = lib.makeLibraryPath [
+          llvmPkgs.libclang.lib
+          pkgs.libffi
+        ];
+        preBuild = ''
+          export PATH="${pkgs.cmake}/bin:${pkgs.gnumake}/bin:$PATH"
+        '';
+      };
       picotlsSrc = pkgs.fetchFromGitHub {
         owner = "h2o";
         repo = "picotls";
@@ -518,9 +582,11 @@
         pname = "picoquic-perf-client";
         version = "dev";
         src = picoquicSrc;
+        perfSource = ./bench/picoquic-perf/picoquic-perf.c;
         nativeBuildInputs = [
           pkgs.cmake
           pkgs.ninja
+          pkgs.pkg-config
         ];
         buildInputs = [
           pkgs.openssl
@@ -530,10 +596,10 @@
           "-Dpicoquic_BUILD_TESTS=OFF"
           "-DBUILD_PICO_SIM=OFF"
           "-DBUILD_DEMO=OFF"
-          "-DBUILD_PQBENCH=ON"
+          "-DBUILD_PQBENCH=OFF"
           "-DBUILD_LOGREADER=OFF"
           "-DBUILD_LOGLIB=ON"
-          "-DBUILD_HTTP=ON"
+          "-DBUILD_HTTP=OFF"
           "-DPICOQUIC_FETCH_PTLS=OFF"
           "-DPTLS_CORE_LIBRARY=${picotlsPackage}/lib/libpicotls-core.a"
           "-DPTLS_OPENSSL_LIBRARY=${picotlsPackage}/lib/libpicotls-openssl.a"
@@ -542,17 +608,22 @@
         ];
         buildPhase = ''
           runHook preBuild
-          cmake --build . --target pqbench
+          cmake --build . --target picoquic-core picoquic-log
+          $CC -O3 -std=c11 -Wall -Wextra \
+            -I$src/picoquic -I$src/loglib \
+            "$perfSource" \
+            -o picoquic-perf \
+            -Wl,--start-group libpicoquic-core.a libpicoquic-log.a -Wl,--end-group \
+            ${picotlsPackage}/lib/libpicotls-openssl.a \
+            ${picotlsPackage}/lib/libpicotls-minicrypto.a \
+            ${picotlsPackage}/lib/libpicotls-core.a \
+            -lssl -lcrypto -lpthread
           runHook postBuild
         '';
         installPhase = ''
           runHook preInstall
           mkdir -p $out/bin
-          cp pqbench $out/bin/pqbench
-          cp ${./bench/picoquic-perf/picoquic-perf} $out/bin/picoquic-perf
-          substituteInPlace $out/bin/picoquic-perf \
-            --replace-fail '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3'
-          chmod +x $out/bin/picoquic-perf
+          cp picoquic-perf $out/bin/picoquic-perf
           runHook postInstall
         '';
       };
@@ -582,6 +653,8 @@
             inherit quicgoPerfClient;
             inherit quinnPerfClient;
             inherit picoquicPerfClient;
+            inherit msquicPerfClient;
+            inherit quichePerfClient;
           })
         ];
         config = {
@@ -600,6 +673,8 @@
             inherit quicgoPerfClient;
             inherit quinnPerfClient;
             inherit picoquicPerfClient;
+            inherit msquicPerfClient;
+            inherit quichePerfClient;
           })
         ];
         config = {
@@ -718,6 +793,8 @@
         quicgo-perf-client = quicgoPerfClient;
         quinn-perf-client = quinnPerfClient;
         picoquic-perf-client = picoquicPerfClient;
+        msquic-perf-client = msquicPerfClient;
+        quiche-perf-client = quichePerfClient;
       };
 
       apps.${system} = {

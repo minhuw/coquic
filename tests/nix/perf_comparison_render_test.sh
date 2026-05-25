@@ -71,12 +71,16 @@ JSON
 make_manifest "${tmpdir}/coquic" coquic coquic bbr 46.626 4030.511 63.578 ok ""
 make_manifest "${tmpdir}/quic-go" quic-go quic-go default 358.0833333333333 11454.066666666668 404.6222222222222 failed "client wait failed"
 make_manifest "${tmpdir}/quinn" quinn quinn default 527.2166666666667 33868.73333333333 648.8222222222222 ok ""
+make_manifest "${tmpdir}/msquic" msquic msquic default 188.5 21000.125 512.25 ok ""
+make_manifest "${tmpdir}/quiche" quiche quiche default 241.75 17000.5 444.125 ok ""
 
 python3 "${script}" \
   --manifest "coquic=${tmpdir}/coquic/manifest.json" \
   --manifest "quic-go=${tmpdir}/quic-go/manifest.json" \
   --manifest "quinn=${tmpdir}/quinn/manifest.json" \
   --manifest "picoquic=${tmpdir}/missing/manifest.json" \
+  --manifest "msquic=${tmpdir}/msquic/manifest.json" \
+  --manifest "quiche=${tmpdir}/quiche/manifest.json" \
   --event-name pull_request \
   --commit 0123456789abcdef0123456789abcdef01234567 \
   --json-out "${json_output}" \
@@ -104,6 +108,16 @@ grep -F -- '- `coquic`: `' "${output}" >/dev/null || {
 
 grep -F -- '- `picoquic`: missing `' "${output}" >/dev/null || {
   echo 'missing absent picoquic manifest line' >&2
+  exit 1
+}
+
+grep -F -- '- `msquic`: `' "${output}" >/dev/null || {
+  echo 'missing MSQUIC manifest line' >&2
+  exit 1
+}
+
+grep -F -- '- `quiche`: `' "${output}" >/dev/null || {
+  echo 'missing quiche manifest line' >&2
   exit 1
 }
 
@@ -152,10 +166,10 @@ grep -F -- '- `quic-go/default/crr`: client wait failed' "${output}" >/dev/null 
   exit 1
 }
 
-grep -F '`picoquic` is driven through the native `pqbench` adapter' "${output}" >/dev/null || {
-  echo 'missing picoquic adapter note' >&2
+if grep -F '`picoquic` is driven through the native `pqbench` adapter' "${output}" >/dev/null; then
+  echo 'unexpected stale picoquic adapter note' >&2
   exit 1
-}
+fi
 
 python3 - <<'PY' "${json_output}"
 import json
@@ -172,14 +186,17 @@ if payload.get("commit") != "0123456789abcdef0123456789abcdef01234567":
 if "generated_at" not in payload:
     raise SystemExit("missing perf JSON generated_at")
 sources = payload.get("sources")
-if not isinstance(sources, list) or len(sources) != 4:
+if not isinstance(sources, list) or len(sources) != 6:
     raise SystemExit("unexpected perf JSON sources")
 rows = payload.get("rows")
-if not isinstance(rows, list) or len(rows) != 9:
+if not isinstance(rows, list) or len(rows) != 15:
     raise SystemExit("unexpected perf JSON rows")
 missing = [source for source in sources if source.get("label") == "picoquic"][0]
 if missing.get("missing") is not True:
     raise SystemExit("missing picoquic source was not marked missing")
+labels = {source.get("label") for source in sources}
+if not {"msquic", "quiche"}.issubset(labels):
+    raise SystemExit("missing external baseline sources")
 quic_go_crr = [
     row for row in rows
     if row.get("implementation") == "quic-go" and row.get("mode") == "crr"

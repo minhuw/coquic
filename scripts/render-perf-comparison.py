@@ -310,10 +310,6 @@ def main() -> int:
                 )
             print()
 
-        if any("picoquic" in source["label"].lower() for source in sources):
-            print("### Notes")
-            print()
-            print("- `picoquic` is driven through the native `pqbench` adapter, so it is a paired picoquic baseline rather than the CoQUIC perf control-stream protocol.")
         return 0
     except ValueError as exc:
         return fail(str(exc))

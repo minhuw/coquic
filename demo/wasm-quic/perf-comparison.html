@@ -337,6 +337,27 @@
         text-align: right;
       }
 
+      .empty-state,
+      .empty-cell {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .empty-state {
+        min-height: 46px;
+        padding: 12px;
+        border: 1px dashed rgba(145, 165, 173, 0.26);
+        border-radius: 7px;
+        background: rgba(5, 14, 18, 0.22);
+      }
+
+      .empty-cell {
+        padding: 18px 14px;
+        text-align: left;
+      }
+
       .table-wrap {
         overflow-x: auto;
       }
@@ -528,7 +549,7 @@
         <div>
           <span class="eyebrow">QUIC performance</span>
           <h1>coquic performance comparison</h1>
-          <p class="subhead">CI snapshot across CoQUIC congestion controls and paired quic-go, quinn, and picoquic baselines.</p>
+          <p class="subhead">CI snapshot across CoQUIC congestion controls and paired quic-go, quinn, picoquic, MSQUIC, and quiche baselines.</p>
         </div>
         <nav class="header-nav" aria-label="Demo views">
           <a href="./index.html">Home</a>
@@ -544,7 +565,7 @@
           <div class="panel-head">
             <div>
               <h2>Performance Barplots</h2>
-              <p id="data-source-label">perf-results.json fallback snapshot</p>
+              <p id="data-source-label">waiting for perf-results.json</p>
             </div>
           </div>
           <div class="plot-grid" id="plot-grid"></div>
@@ -581,11 +602,10 @@
         <div class="panel-head">
           <div>
             <h2>Benchmark Sources</h2>
-            <p>latest local CI manifests used as the demo seed</p>
+            <p>workflow manifests included in the uploaded result payload</p>
           </div>
         </div>
         <div class="source-list" id="source-list"></div>
-        <p class="adapter-note">picoquic is measured through the native pqbench adapter, so it is a paired picoquic baseline rather than the CoQUIC perf control-stream protocol.</p>
       </section>
     </main>
     <script src="./perf-comparison.js"></script>

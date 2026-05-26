@@ -7,7 +7,11 @@ tmpdir="$(mktemp -d)"
 output="$(mktemp)"
 stderr_output="$(mktemp)"
 json_output="$(mktemp)"
-trap 'rm -rf "${tmpdir}" "${output}" "${stderr_output}" "${json_output}"' EXIT
+coquic_snapshot="$(mktemp)"
+quic_go_snapshot="$(mktemp)"
+merged_snapshot="$(mktemp)"
+json_nested_output="$(mktemp -d)/nested/perf-results.json"
+trap 'rm -rf "${tmpdir}" "${output}" "${stderr_output}" "${json_output}" "${coquic_snapshot}" "${quic_go_snapshot}" "${merged_snapshot}"' EXIT
 
 make_manifest() {
   local dir="$1"
@@ -205,6 +209,60 @@ if quic_go_crr.get("skipped_setup_errors") != 7:
     raise SystemExit("missing skipped setup errors in perf JSON")
 if quic_go_crr.get("pair") != "quic-go -> quic-go":
     raise SystemExit("missing implementation pair in perf JSON")
+PY
+
+python3 "${script}" \
+  --manifest "picoquic=${tmpdir}/missing/manifest.json" \
+  --event-name workflow_dispatch \
+  --commit nested-output \
+  --json-out "${json_nested_output}" \
+  > /dev/null
+
+if [[ ! -f "${json_nested_output}" ]]; then
+  echo 'renderer did not create nested JSON output directory' >&2
+  exit 1
+fi
+
+python3 "${script}" \
+  --manifest "coquic=${tmpdir}/coquic/manifest.json" \
+  --event-name workflow_dispatch \
+  --commit coquic-snapshot \
+  --json-out "${coquic_snapshot}" \
+  > /dev/null
+
+python3 "${script}" \
+  --manifest "quic-go=${tmpdir}/quic-go/manifest.json" \
+  --event-name workflow_dispatch \
+  --commit quic-go-snapshot \
+  --json-out "${quic_go_snapshot}" \
+  > /dev/null
+
+python3 "${script}" \
+  --manifest "coquic=${coquic_snapshot}" \
+  --manifest "quic-go=${quic_go_snapshot}" \
+  --event-name workflow_dispatch \
+  --commit merged-snapshot \
+  --json-out "${merged_snapshot}" \
+  > /dev/null
+
+python3 - <<'PY' "${merged_snapshot}"
+import json
+import pathlib
+import sys
+
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
+sources = payload.get("sources")
+rows = payload.get("rows")
+if not isinstance(sources, list) or len(sources) != 2:
+    raise SystemExit("merged perf snapshot sources were not preserved")
+if not isinstance(rows, list) or len(rows) != 6:
+    raise SystemExit("merged perf snapshot rows were not preserved")
+labels = {source.get("label") for source in sources}
+if labels != {"coquic", "quic-go"}:
+    raise SystemExit("merged perf snapshot labels are wrong")
+pairs = {row.get("pair") for row in rows}
+if not {"coquic -> coquic", "quic-go -> quic-go"}.issubset(pairs):
+    raise SystemExit("merged perf snapshot rows lost implementation pairs")
 PY
 
 invalid_manifest="${tmpdir}/invalid.json"

@@ -1196,6 +1196,42 @@
           WorkingDir = "/";
         };
       };
+      mkQuictlsMuslPerfImage =
+        name: perfClients:
+        pkgs.dockerTools.buildLayeredImage {
+          inherit name;
+          tag = "quictls-musl";
+          fromImage = simulatorEndpointBase;
+          contents = [
+            (mkPerfEndpointOverlay (
+              {
+                name = "${name}-quictls-musl";
+                coquicPackage = quictlsMuslPackage;
+              }
+              // perfClients
+            ))
+          ];
+          config = {
+            Entrypoint = [ "/usr/local/bin/coquic-perf" ];
+            WorkingDir = "/";
+          };
+        };
+      quictlsMuslCoquicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-coquic" { };
+      quictlsMuslQuicgoPerfImage = mkQuictlsMuslPerfImage "coquic-perf-quic-go" { inherit quicgoPerfClient; };
+      quictlsMuslQuinnPerfImage = mkQuictlsMuslPerfImage "coquic-perf-quinn" { inherit quinnPerfClient; };
+      quictlsMuslPicoquicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-picoquic" { inherit picoquicPerfClient; };
+      quictlsMuslMsquicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-msquic" { inherit msquicPerfClient; };
+      quictlsMuslQuichePerfImage = mkQuictlsMuslPerfImage "coquic-perf-quiche" { inherit quichePerfClient; };
+      quictlsMuslQuiclyPerfImage = mkQuictlsMuslPerfImage "coquic-perf-quicly" { inherit quiclyPerfClient; };
+      quictlsMuslGoogleQuichePerfImage = mkQuictlsMuslPerfImage "coquic-perf-google-quiche" { inherit googleQuichePerfClient; };
+      quictlsMuslTquicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-tquic" { inherit tquicPerfClient; };
+      quictlsMuslMvfstPerfImage = mkQuictlsMuslPerfImage "coquic-perf-mvfst" { inherit mvfstPerfClient; };
+      quictlsMuslS2nQuicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-s2n-quic" { inherit s2nQuicPerfClient; };
+      quictlsMuslXquicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-xquic" { inherit xquicPerfClient; };
+      quictlsMuslAioquicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-aioquic" { inherit aioquicPerfClient; };
+      quictlsMuslNgtcp2PerfImage = mkQuictlsMuslPerfImage "coquic-perf-ngtcp2" { inherit ngtcp2PerfClient; };
+      quictlsMuslLsquicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-lsquic" { inherit lsquicPerfClient; };
+      quictlsMuslNeqoPerfImage = mkQuictlsMuslPerfImage "coquic-perf-neqo" { inherit neqoPerfClient; };
       quictlsMuslPerfImageStream = pkgs.dockerTools.streamLayeredImage {
         name = "coquic-perf";
         tag = "quictls-musl";
@@ -1334,6 +1370,22 @@
         interop-image-boringssl-musl = boringsslMuslImage;
         perf-image-quictls-musl = quictlsMuslPerfImage;
         perf-image-stream-quictls-musl = quictlsMuslPerfImageStream;
+        perf-image-coquic-quictls-musl = quictlsMuslCoquicPerfImage;
+        perf-image-quic-go-quictls-musl = quictlsMuslQuicgoPerfImage;
+        perf-image-quinn-quictls-musl = quictlsMuslQuinnPerfImage;
+        perf-image-picoquic-quictls-musl = quictlsMuslPicoquicPerfImage;
+        perf-image-msquic-quictls-musl = quictlsMuslMsquicPerfImage;
+        perf-image-quiche-quictls-musl = quictlsMuslQuichePerfImage;
+        perf-image-quicly-quictls-musl = quictlsMuslQuiclyPerfImage;
+        perf-image-google-quiche-quictls-musl = quictlsMuslGoogleQuichePerfImage;
+        perf-image-tquic-quictls-musl = quictlsMuslTquicPerfImage;
+        perf-image-mvfst-quictls-musl = quictlsMuslMvfstPerfImage;
+        perf-image-s2n-quic-quictls-musl = quictlsMuslS2nQuicPerfImage;
+        perf-image-xquic-quictls-musl = quictlsMuslXquicPerfImage;
+        perf-image-aioquic-quictls-musl = quictlsMuslAioquicPerfImage;
+        perf-image-ngtcp2-quictls-musl = quictlsMuslNgtcp2PerfImage;
+        perf-image-lsquic-quictls-musl = quictlsMuslLsquicPerfImage;
+        perf-image-neqo-quictls-musl = quictlsMuslNeqoPerfImage;
         quicgo-perf-client = quicgoPerfClient;
         quinn-perf-client = quinnPerfClient;
         picoquic-perf-client = picoquicPerfClient;

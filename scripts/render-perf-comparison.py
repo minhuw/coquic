@@ -171,6 +171,32 @@ def row_from_run(label: str, manifest_path: Path, manifest: dict, record: dict) 
     }
 
 
+def rows_from_snapshot(label: str, path: Path, snapshot: dict) -> tuple[list[dict], list[dict]]:
+    sources = snapshot.get("sources")
+    rows = snapshot.get("rows")
+    if not isinstance(sources, list) or not isinstance(rows, list):
+        raise ValueError(f"snapshot `{path}` must contain sources and rows lists")
+
+    normalized_sources = []
+    for source in sources:
+        if not isinstance(source, dict):
+            raise ValueError(f"snapshot `{path}` source entries must be objects")
+        source_copy = dict(source)
+        if not source_copy.get("label"):
+            source_copy["label"] = label
+        if not source_copy.get("missing"):
+            source_copy["path"] = str(path)
+        normalized_sources.append(source_copy)
+
+    normalized_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError(f"snapshot `{path}` row entries must be objects")
+        normalized_rows.append(dict(row))
+
+    return normalized_sources, normalized_rows
+
+
 def primary_metric(row: dict) -> tuple[str, float, str]:
     if row["mode"] == "bulk":
         return ("Throughput MiB/s", row["throughput_mib_per_s"], format_decimal(row["throughput_mib_per_s"]))
@@ -206,6 +232,11 @@ def build_payload(manifest_specs: list[str]) -> tuple[list[dict], list[dict]]:
             sources.append({"label": label, "path": str(path), "missing": True})
             continue
         manifest = load_manifest(path)
+        if "schema_version" in manifest and "sources" in manifest and "rows" in manifest:
+            snapshot_sources, snapshot_rows = rows_from_snapshot(label, path, manifest)
+            sources.extend(snapshot_sources)
+            rows.extend(snapshot_rows)
+            continue
         runs = manifest.get("runs", [])
         ok_count = sum(1 for record in runs if isinstance(record, dict) and record.get("status") == "ok")
         sources.append(
@@ -232,7 +263,9 @@ def write_json_payload(args: argparse.Namespace, sources: list[dict], rows: list
         "sources": sources,
         "rows": rows,
     }
-    Path(args.json_out).write_text(json.dumps(output, indent=2) + "\n")
+    json_out = Path(args.json_out)
+    json_out.parent.mkdir(parents=True, exist_ok=True)
+    json_out.write_text(json.dumps(output, indent=2) + "\n")
 
 
 def main() -> int:

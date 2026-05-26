@@ -353,6 +353,29 @@ grep -F -- 'perf-image-quictls-musl' "${flake}" >/dev/null || {
   exit 1
 }
 
+for attr in \
+  'perf-image-coquic-quictls-musl' \
+  'perf-image-quic-go-quictls-musl' \
+  'perf-image-quinn-quictls-musl' \
+  'perf-image-picoquic-quictls-musl' \
+  'perf-image-msquic-quictls-musl' \
+  'perf-image-quiche-quictls-musl' \
+  'perf-image-quicly-quictls-musl' \
+  'perf-image-google-quiche-quictls-musl' \
+  'perf-image-tquic-quictls-musl' \
+  'perf-image-mvfst-quictls-musl' \
+  'perf-image-s2n-quic-quictls-musl' \
+  'perf-image-xquic-quictls-musl' \
+  'perf-image-aioquic-quictls-musl' \
+  'perf-image-ngtcp2-quictls-musl' \
+  'perf-image-lsquic-quictls-musl' \
+  'perf-image-neqo-quictls-musl'; do
+  grep -F -- "${attr}" "${flake}" >/dev/null || {
+    echo "missing split perf image package export in flake.nix: ${attr}" >&2
+    exit 1
+  }
+done
+
 grep -F -- 'quicgoPerfClient = pkgs.buildGoModule' "${flake}" >/dev/null || {
   echo 'missing quic-go perf client package in flake.nix' >&2
   exit 1
@@ -513,11 +536,13 @@ grep -F -- 'bench/*/target/' "${ignore_file}" >/dev/null || {
   exit 1
 }
 
-image_path="$(nix build --no-link --print-out-paths .#perf-image-quictls-musl)"
-[ -f "${image_path}" ] || {
-  echo 'real perf image package did not produce a tarball path' >&2
-  exit 1
-}
+if [ "${PERF_HARNESS_TEST_REAL_IMAGE:-0}" = 1 ]; then
+  image_path="$(nix build --no-link --print-out-paths .#perf-image-quictls-musl)"
+  [ -f "${image_path}" ] || {
+    echo 'real perf image package did not produce a tarball path' >&2
+    exit 1
+  }
+fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT

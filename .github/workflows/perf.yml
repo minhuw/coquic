@@ -9,10 +9,10 @@ permissions:
   contents: read
 
 jobs:
-  perf:
-    name: Advisory QUIC Perf
+  perf-contract:
+    name: Perf Harness Contract
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -20,8 +20,162 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Perf Harness Contract
+        run: bash tests/nix/perf_harness_test.sh
+
+  perf-impl:
+    name: ${{ matrix.display_name }} Perf
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      NIX_CONFIG: |
+        max-jobs = 2
+        cores = 2
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: coquic
+            display_name: CoQUIC
+            client_impl: coquic
+            server_impl: coquic
+            congestion_controls: newreno cubic bbr copa
+            image_attr: perf-image-coquic-quictls-musl
+            image_tag: coquic-perf-coquic:quictls-musl
+          - label: quic-go
+            display_name: quic-go
+            client_impl: quic-go
+            server_impl: quic-go
+            congestion_controls: default
+            image_attr: perf-image-quic-go-quictls-musl
+            image_tag: coquic-perf-quic-go:quictls-musl
+          - label: quinn
+            display_name: quinn
+            client_impl: quinn
+            server_impl: quinn
+            congestion_controls: default
+            image_attr: perf-image-quinn-quictls-musl
+            image_tag: coquic-perf-quinn:quictls-musl
+          - label: picoquic
+            display_name: picoquic
+            client_impl: picoquic
+            server_impl: picoquic
+            congestion_controls: default
+            image_attr: perf-image-picoquic-quictls-musl
+            image_tag: coquic-perf-picoquic:quictls-musl
+          - label: msquic
+            display_name: MSQUIC
+            client_impl: msquic
+            server_impl: msquic
+            congestion_controls: default
+            image_attr: perf-image-msquic-quictls-musl
+            image_tag: coquic-perf-msquic:quictls-musl
+          - label: quiche
+            display_name: quiche
+            client_impl: quiche
+            server_impl: quiche
+            congestion_controls: default
+            image_attr: perf-image-quiche-quictls-musl
+            image_tag: coquic-perf-quiche:quictls-musl
+          - label: quicly
+            display_name: quicly
+            client_impl: quicly
+            server_impl: quicly
+            congestion_controls: default
+            image_attr: perf-image-quicly-quictls-musl
+            image_tag: coquic-perf-quicly:quictls-musl
+          - label: google-quiche
+            display_name: Google QUICHE
+            client_impl: google-quiche
+            server_impl: google-quiche
+            congestion_controls: default
+            image_attr: perf-image-google-quiche-quictls-musl
+            image_tag: coquic-perf-google-quiche:quictls-musl
+          - label: tquic
+            display_name: TQUIC
+            client_impl: tquic
+            server_impl: tquic
+            congestion_controls: default
+            image_attr: perf-image-tquic-quictls-musl
+            image_tag: coquic-perf-tquic:quictls-musl
+          - label: mvfst
+            display_name: mvfst
+            client_impl: mvfst
+            server_impl: mvfst
+            congestion_controls: default
+            image_attr: perf-image-mvfst-quictls-musl
+            image_tag: coquic-perf-mvfst:quictls-musl
+          - label: s2n-quic
+            display_name: s2n-quic
+            client_impl: s2n-quic
+            server_impl: s2n-quic
+            congestion_controls: default
+            image_attr: perf-image-s2n-quic-quictls-musl
+            image_tag: coquic-perf-s2n-quic:quictls-musl
+          - label: xquic
+            display_name: xquic
+            client_impl: xquic
+            server_impl: xquic
+            congestion_controls: default
+            image_attr: perf-image-xquic-quictls-musl
+            image_tag: coquic-perf-xquic:quictls-musl
+          - label: aioquic
+            display_name: aioquic
+            client_impl: aioquic
+            server_impl: aioquic
+            congestion_controls: default
+            image_attr: perf-image-aioquic-quictls-musl
+            image_tag: coquic-perf-aioquic:quictls-musl
+          - label: ngtcp2
+            display_name: ngtcp2
+            client_impl: ngtcp2
+            server_impl: ngtcp2
+            congestion_controls: default
+            image_attr: perf-image-ngtcp2-quictls-musl
+            image_tag: coquic-perf-ngtcp2:quictls-musl
+          - label: lsquic
+            display_name: LSQUIC
+            client_impl: lsquic
+            server_impl: lsquic
+            congestion_controls: default
+            image_attr: perf-image-lsquic-quictls-musl
+            image_tag: coquic-perf-lsquic:quictls-musl
+          - label: neqo
+            display_name: Neqo
+            client_impl: neqo
+            server_impl: neqo
+            congestion_controls: default
+            image_attr: perf-image-neqo-quictls-musl
+            image_tag: coquic-perf-neqo:quictls-musl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Free Runner Disk
+        run: |
+          df -h
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/share/dotnet
+          sudo docker image prune -af || true
+          df -h
+
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Configure Nix Build Parallelism
+        run: |
+          mkdir -p "${HOME}/.config/nix"
+          {
+            echo 'max-jobs = 2'
+            echo 'cores = 2'
+          } >> "${HOME}/.config/nix/nix.conf"
 
       # Remove this when GitHub runner gets docker engine >= v28.1.0.
       - uses: docker/setup-docker-action@v5
@@ -32,184 +186,92 @@ jobs:
         run: |
           docker version
 
-      - name: Perf Harness Contract
-        run: bash tests/nix/perf_harness_test.sh
-
-      - name: Run CoQUIC Perf CI Matrix (NewReno + CUBIC + BBR + Copa)
-        id: perf_coquic
+      - name: Run ${{ matrix.display_name }} Perf CI Matrix
+        id: run_perf
         continue-on-error: true
-        run: PERF_RESULTS_ROOT=.bench-results/coquic bash bench/run-host-matrix.sh --preset ci
+        env:
+          PERF_RESULTS_ROOT: .bench-results/${{ matrix.label }}
+          PERF_CLIENT_IMPL: ${{ matrix.client_impl }}
+          PERF_SERVER_IMPL: ${{ matrix.server_impl }}
+          PERF_CONGESTION_CONTROLS: ${{ matrix.congestion_controls }}
+          PERF_IMAGE_ATTR: ${{ matrix.image_attr }}
+          PERF_IMAGE_TAG: ${{ matrix.image_tag }}
+        run: bash bench/run-host-matrix.sh --preset ci
 
-      - name: Run quic-go Paired Baseline
-        id: perf_quic_go
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/quic-go \
-            PERF_CLIENT_IMPL=quic-go \
-            PERF_SERVER_IMPL=quic-go \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run quinn Paired Baseline
-        id: perf_quinn
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/quinn \
-            PERF_CLIENT_IMPL=quinn \
-            PERF_SERVER_IMPL=quinn \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run picoquic Paired Baseline
-        id: perf_picoquic
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/picoquic \
-            PERF_CLIENT_IMPL=picoquic \
-            PERF_SERVER_IMPL=picoquic \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run MSQUIC Paired Baseline
-        id: perf_msquic
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/msquic \
-            PERF_CLIENT_IMPL=msquic \
-            PERF_SERVER_IMPL=msquic \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run quiche Paired Baseline
-        id: perf_quiche
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/quiche \
-            PERF_CLIENT_IMPL=quiche \
-            PERF_SERVER_IMPL=quiche \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run quicly Paired Baseline
-        id: perf_quicly
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/quicly \
-            PERF_CLIENT_IMPL=quicly \
-            PERF_SERVER_IMPL=quicly \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run Google QUICHE Paired Baseline
-        id: perf_google_quiche
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/google-quiche \
-            PERF_CLIENT_IMPL=google-quiche \
-            PERF_SERVER_IMPL=google-quiche \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run TQUIC Paired Baseline
-        id: perf_tquic
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/tquic \
-            PERF_CLIENT_IMPL=tquic \
-            PERF_SERVER_IMPL=tquic \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run mvfst Paired Baseline
-        id: perf_mvfst
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/mvfst \
-            PERF_CLIENT_IMPL=mvfst \
-            PERF_SERVER_IMPL=mvfst \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run s2n-quic Paired Baseline
-        id: perf_s2n_quic
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/s2n-quic \
-            PERF_CLIENT_IMPL=s2n-quic \
-            PERF_SERVER_IMPL=s2n-quic \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run xquic Paired Baseline
-        id: perf_xquic
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/xquic \
-            PERF_CLIENT_IMPL=xquic \
-            PERF_SERVER_IMPL=xquic \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run aioquic Paired Baseline
-        id: perf_aioquic
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/aioquic \
-            PERF_CLIENT_IMPL=aioquic \
-            PERF_SERVER_IMPL=aioquic \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run ngtcp2 Paired Baseline
-        id: perf_ngtcp2
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/ngtcp2 \
-            PERF_CLIENT_IMPL=ngtcp2 \
-            PERF_SERVER_IMPL=ngtcp2 \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run LSQUIC Paired Baseline
-        id: perf_lsquic
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/lsquic \
-            PERF_CLIENT_IMPL=lsquic \
-            PERF_SERVER_IMPL=lsquic \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Run Neqo Paired Baseline
-        id: perf_neqo
-        continue-on-error: true
-        run: |
-          PERF_RESULTS_ROOT=.bench-results/neqo \
-            PERF_CLIENT_IMPL=neqo \
-            PERF_SERVER_IMPL=neqo \
-            PERF_CONGESTION_CONTROLS=default \
-            bash bench/run-host-matrix.sh --preset ci
-
-      - name: Publish Perf Summary
+      - name: Publish ${{ matrix.display_name }} Perf Summary
         if: always()
         run: |
           python3 scripts/render-perf-comparison.py \
-            --manifest coquic=.bench-results/coquic/manifest.json \
-            --manifest quic-go=.bench-results/quic-go/manifest.json \
-            --manifest quinn=.bench-results/quinn/manifest.json \
-            --manifest picoquic=.bench-results/picoquic/manifest.json \
-            --manifest msquic=.bench-results/msquic/manifest.json \
-            --manifest quiche=.bench-results/quiche/manifest.json \
-            --manifest quicly=.bench-results/quicly/manifest.json \
-            --manifest google-quiche=.bench-results/google-quiche/manifest.json \
-            --manifest tquic=.bench-results/tquic/manifest.json \
-            --manifest mvfst=.bench-results/mvfst/manifest.json \
-            --manifest s2n-quic=.bench-results/s2n-quic/manifest.json \
-            --manifest xquic=.bench-results/xquic/manifest.json \
-            --manifest aioquic=.bench-results/aioquic/manifest.json \
-            --manifest ngtcp2=.bench-results/ngtcp2/manifest.json \
-            --manifest lsquic=.bench-results/lsquic/manifest.json \
-            --manifest neqo=.bench-results/neqo/manifest.json \
+            --manifest "${{ matrix.label }}=.bench-results/${{ matrix.label }}/manifest.json" \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --commit "${GITHUB_SHA}" \
+            --json-out ".bench-results/perf-results-${{ matrix.label }}.json" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload ${{ matrix.display_name }} Perf Result Snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ matrix.label }}
+          path: .bench-results/perf-results-${{ matrix.label }}.json
+          if-no-files-found: error
+
+      - name: Upload ${{ matrix.display_name }} Perf Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-artifacts-${{ matrix.label }}
+          path: .bench-results/${{ matrix.label }}
+          include-hidden-files: true
+          if-no-files-found: warn
+
+      - name: Fail On ${{ matrix.display_name }} Perf Errors
+        if: always()
+        run: |
+          if [ "${{ steps.run_perf.outcome }}" != "success" ]; then
+            echo "${{ matrix.display_name }} perf step finished with outcome: ${{ steps.run_perf.outcome }}" >&2
+            exit 1
+          fi
+
+  publish-perf-results:
+    name: Publish Perf Results
+    runs-on: ubuntu-latest
+    needs:
+      - perf-contract
+      - perf-impl
+    if: always()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download Perf Result Snapshots
+        uses: actions/download-artifact@v8
+        with:
+          pattern: perf-results-*
+          path: .bench-results/downloaded
+          merge-multiple: true
+
+      - name: Merge Perf Result Snapshots
+        run: |
+          python3 scripts/render-perf-comparison.py \
+            --manifest coquic=.bench-results/downloaded/perf-results-coquic.json \
+            --manifest quic-go=.bench-results/downloaded/perf-results-quic-go.json \
+            --manifest quinn=.bench-results/downloaded/perf-results-quinn.json \
+            --manifest picoquic=.bench-results/downloaded/perf-results-picoquic.json \
+            --manifest msquic=.bench-results/downloaded/perf-results-msquic.json \
+            --manifest quiche=.bench-results/downloaded/perf-results-quiche.json \
+            --manifest quicly=.bench-results/downloaded/perf-results-quicly.json \
+            --manifest google-quiche=.bench-results/downloaded/perf-results-google-quiche.json \
+            --manifest tquic=.bench-results/downloaded/perf-results-tquic.json \
+            --manifest mvfst=.bench-results/downloaded/perf-results-mvfst.json \
+            --manifest s2n-quic=.bench-results/downloaded/perf-results-s2n-quic.json \
+            --manifest xquic=.bench-results/downloaded/perf-results-xquic.json \
+            --manifest aioquic=.bench-results/downloaded/perf-results-aioquic.json \
+            --manifest ngtcp2=.bench-results/downloaded/perf-results-ngtcp2.json \
+            --manifest lsquic=.bench-results/downloaded/perf-results-lsquic.json \
+            --manifest neqo=.bench-results/downloaded/perf-results-neqo.json \
             --event-name "${GITHUB_EVENT_NAME}" \
             --commit "${GITHUB_SHA}" \
             --json-out .bench-results/perf-results.json >> "${GITHUB_STEP_SUMMARY}"
@@ -286,34 +348,20 @@ jobs:
             minhuw@coquic.minhuw.dev \
             "sudo install -m 644 /tmp/coquic-perf-results.json /opt/coquic-demo/current/site/perf-results.json && sudo install -m 644 /tmp/coquic-perf-history.json /opt/coquic-demo/current/site/perf-history.json && rm -f /tmp/coquic-perf-results.json /tmp/coquic-perf-history.json"
 
-      - name: Fail On Perf Matrix Errors
+      - name: Fail On Perf Job Errors
         if: always()
         run: |
           failed=0
-          check_step() {
+          check_job() {
             local label="$1"
-            local outcome="$2"
-            if [ "${outcome}" != "success" ]; then
-              echo "${label} perf step finished with outcome: ${outcome}" >&2
+            local result="$2"
+            if [ "${result}" != "success" ]; then
+              echo "${label} job finished with result: ${result}" >&2
               failed=1
             fi
           }
-          check_step "CoQUIC" "${{ steps.perf_coquic.outcome }}"
-          check_step "quic-go" "${{ steps.perf_quic_go.outcome }}"
-          check_step "quinn" "${{ steps.perf_quinn.outcome }}"
-          check_step "picoquic" "${{ steps.perf_picoquic.outcome }}"
-          check_step "MSQUIC" "${{ steps.perf_msquic.outcome }}"
-          check_step "quiche" "${{ steps.perf_quiche.outcome }}"
-          check_step "quicly" "${{ steps.perf_quicly.outcome }}"
-          check_step "Google QUICHE" "${{ steps.perf_google_quiche.outcome }}"
-          check_step "TQUIC" "${{ steps.perf_tquic.outcome }}"
-          check_step "mvfst" "${{ steps.perf_mvfst.outcome }}"
-          check_step "s2n-quic" "${{ steps.perf_s2n_quic.outcome }}"
-          check_step "xquic" "${{ steps.perf_xquic.outcome }}"
-          check_step "aioquic" "${{ steps.perf_aioquic.outcome }}"
-          check_step "ngtcp2" "${{ steps.perf_ngtcp2.outcome }}"
-          check_step "LSQUIC" "${{ steps.perf_lsquic.outcome }}"
-          check_step "Neqo" "${{ steps.perf_neqo.outcome }}"
+          check_job "perf-contract" "${{ needs.perf-contract.result }}"
+          check_job "perf-impl" "${{ needs.perf-impl.result }}"
           exit "${failed}"
 
       - name: Upload Perf Artifacts

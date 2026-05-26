@@ -183,7 +183,7 @@ for marker in \
 done
 
 for marker in \
-  'uses: actions/download-artifact@v8' \
+  'uses: actions/download-artifact@v4' \
   'pattern: perf-results-*' \
   'path: .bench-results/downloaded' \
   'merge-multiple: true' \

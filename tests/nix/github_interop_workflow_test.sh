@@ -118,4 +118,9 @@ grep -F 'github.ref == '\''refs/heads/main'\''' "${workflow}" >/dev/null || {
   exit 1
 }
 
+grep -F 'uses: actions/download-artifact@v4' "${workflow}" >/dev/null || {
+  echo 'interop workflow must use a valid download-artifact action version' >&2
+  exit 1
+}
+
 echo "interop workflow contract looks correct"

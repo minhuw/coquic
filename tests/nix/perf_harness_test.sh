@@ -228,6 +228,36 @@ grep -F -- 'client->unregisterStreamWriteCallback(id)' "${mvfst_perf}" >/dev/nul
   exit 1
 }
 
+grep -F -- '#include <quic/congestion_control/CongestionControllerFactory.h>' "${mvfst_perf}" >/dev/null || {
+  echo 'mvfst perf client must include the congestion-controller factory API' >&2
+  exit 1
+}
+
+grep -F -- '#include <quic/congestion_control/ServerCongestionControllerFactory.h>' "${mvfst_perf}" >/dev/null || {
+  echo 'mvfst perf server must include the server congestion-controller factory API' >&2
+  exit 1
+}
+
+grep -F -- 'std::make_shared<quic::DefaultCongestionControllerFactory>()' "${mvfst_perf}" >/dev/null || {
+  echo 'mvfst client must set a congestion-controller factory to avoid per-transport warning spam' >&2
+  exit 1
+}
+
+grep -F -- 'std::make_shared<quic::ServerCongestionControllerFactory>()' "${mvfst_perf}" >/dev/null || {
+  echo 'mvfst server must set a congestion-controller factory explicitly' >&2
+  exit 1
+}
+
+grep -F -- 'constexpr uint32_t kServerHostId = 1;' "${mvfst_perf}" >/dev/null || {
+  echo 'mvfst perf server must use a nonzero host id to avoid default host-id warning spam' >&2
+  exit 1
+}
+
+grep -F -- 'server->setHostId(kServerHostId);' "${mvfst_perf}" >/dev/null || {
+  echo 'mvfst perf server must set the nonzero host id before start' >&2
+  exit 1
+}
+
 if grep -F -- 'apps.${system}.${binary_attr}.program' "${script}" >/dev/null; then
   echo 'unexpected app fallback in harness script' >&2
   exit 1

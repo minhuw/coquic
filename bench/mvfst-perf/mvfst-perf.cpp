@@ -41,6 +41,8 @@
 #include <quic/common/BufUtil.h>
 #include <quic/common/events/FollyQuicEventBase.h>
 #include <quic/common/udpsocket/FollyQuicAsyncUDPSocket.h>
+#include <quic/congestion_control/CongestionControllerFactory.h>
+#include <quic/congestion_control/ServerCongestionControllerFactory.h>
 #include <quic/fizz/client/handshake/FizzClientQuicHandshakeContext.h>
 #include <quic/fizz/handshake/QuicFizzFactory.h>
 #include <quic/server/QuicServer.h>
@@ -56,6 +58,7 @@ constexpr std::string_view kApplicationProtocol = "coquic-perf/1";
 constexpr uint64_t kTransferConnectionWindow = 32ull * 1024ull * 1024ull;
 constexpr uint64_t kTransferStreamWindow = 16ull * 1024ull * 1024ull;
 constexpr size_t kWriteChunkSize = 32 * 1024;
+constexpr uint32_t kServerHostId = 1;
 constexpr auto kDrainTimeout = std::chrono::seconds(2);
 
 constexpr std::string_view kModeBulk = "bulk";
@@ -675,6 +678,9 @@ class PerfServerTransportFactory : public quic::QuicServerTransportFactory {
 
 void runServer(const Config &cfg) {
     auto server = quic::QuicServer::createQuicServer(transportSettings(cfg));
+    server->setHostId(kServerHostId);
+    server->setCongestionControllerFactory(
+        std::make_shared<quic::ServerCongestionControllerFactory>());
     server->setQuicServerTransportFactory(std::make_unique<PerfServerTransportFactory>());
     server->setFizzContext(makeServerCtx(cfg));
     server->start(folly::SocketAddress(cfg.host.c_str(), cfg.port), 0);
@@ -714,6 +720,8 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                                                                   makeClientHandshakeCtx());
             client_->setHostname(cfg_.serverName);
             client_->addNewPeerAddress(folly::SocketAddress(peerHost.c_str(), cfg_.port));
+            client_->setCongestionControllerFactory(
+                std::make_shared<quic::DefaultCongestionControllerFactory>());
             client_->setTransportSettings(transportSettings(cfg_));
             client_->start(this, this);
         });

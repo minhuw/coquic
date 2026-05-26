@@ -1,8 +1,8 @@
 name: Interop
 
 on:
-  pull_request:
-  push:
+  schedule:
+    - cron: "0 3 * * *"
   workflow_dispatch:
 
 permissions:

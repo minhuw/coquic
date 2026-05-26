@@ -71,6 +71,7 @@ summary:focus-visible {
 
 main {
   width: min(100%, 1340px);
+  margin: 0 auto;
   padding: 0 24px 56px;
 }
 

@@ -26,7 +26,8 @@
       }
 
       .interop-main {
-        width: min(100%, 1380px);
+        width: min(100%, 1340px);
+        margin: 0 auto;
       }
 
       .interop-shell {
@@ -82,10 +83,10 @@
       }
 
       .compat-matrix {
-        width: 100%;
-        min-width: 1180px;
+        width: max-content;
+        min-width: 100%;
         border-collapse: collapse;
-        table-layout: fixed;
+        table-layout: auto;
       }
 
       .compat-matrix th,
@@ -113,6 +114,18 @@
         font-size: 11px;
         font-weight: 600;
         text-transform: uppercase;
+      }
+
+      .compat-matrix th:nth-child(n + 3),
+      .compat-matrix td:nth-child(n + 3) {
+        width: 82px;
+        min-width: 82px;
+        max-width: 82px;
+      }
+
+      .compat-matrix thead th:nth-child(n + 3) {
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .compat-matrix .corner,
@@ -204,9 +217,9 @@
       .test-cell {
         display: inline-grid;
         place-items: center;
-        min-width: 48px;
+        min-width: 58px;
         min-height: 30px;
-        padding: 7px 9px;
+        padding: 7px 10px;
         border: 1px solid var(--line);
         border-radius: 999px;
         background: var(--surface-2);

@@ -248,9 +248,68 @@
 
       .plot-grid {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: 176px minmax(0, 1fr);
         gap: 12px;
         padding: 14px;
+      }
+
+      .plot-tabs {
+        display: grid;
+        align-content: start;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .plot-tab {
+        display: grid;
+        justify-items: start;
+        gap: 4px;
+        min-height: 74px;
+        padding: 11px;
+        border: 1px solid rgba(145, 165, 173, 0.18);
+        border-radius: 7px;
+        color: var(--soft);
+        background: rgba(5, 14, 18, 0.28);
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .plot-tab:hover,
+      .plot-tab:focus-visible {
+        border-color: rgba(111, 243, 226, 0.56);
+        outline: none;
+      }
+
+      .plot-tab[aria-selected="true"] {
+        border-color: rgba(36, 181, 166, 0.72);
+        background: rgba(36, 181, 166, 0.12);
+      }
+
+      .plot-tab span {
+        color: var(--client-ink);
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 850;
+      }
+
+      .plot-tab strong {
+        color: var(--ink);
+        font-size: 13px;
+        line-height: 1.2;
+      }
+
+      .plot-tab small {
+        overflow: hidden;
+        max-width: 100%;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .plot-panel-active {
+        min-width: 0;
       }
 
       .trend-panel {
@@ -392,34 +451,120 @@
 
       .bar-row {
         display: grid;
-        grid-template-columns: minmax(108px, 0.42fr) minmax(0, 1fr) minmax(92px, auto);
+        grid-template-columns: 34px 196px minmax(0, 1fr) minmax(112px, auto);
         align-items: center;
         gap: 10px;
         min-height: 46px;
+        padding: 3px 6px;
+        border: 1px solid transparent;
+        border-radius: 7px;
+      }
+
+      .bar-row.own-impl {
+        border-color: rgba(36, 181, 166, 0.5);
+        background: rgba(36, 181, 166, 0.08);
+      }
+
+      .rank-badge {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border: 1px solid rgba(145, 165, 173, 0.24);
+        border-radius: 999px;
+        color: var(--muted);
+        background: rgba(5, 14, 18, 0.42);
+        font-family: var(--mono);
+        font-size: 10px;
+        font-weight: 900;
+        line-height: 1;
+      }
+
+      .rank-1,
+      .rank-2,
+      .rank-3 {
+        align-self: center;
+        width: 24px;
+        height: 24px;
+        margin-left: 2px;
+        border-radius: 50%;
+        font-size: 11px;
+        box-shadow: 0 2px 0 rgba(0, 0, 0, 0.18);
+      }
+
+      .rank-1::before,
+      .rank-2::before,
+      .rank-3::before {
+        content: "";
+        position: absolute;
+        top: -7px;
+        width: 16px;
+        height: 10px;
+        clip-path: polygon(0 0, 46% 0, 50% 100%, 0 100%);
+        background: #6f7f92;
+        transform: rotate(-18deg);
+        z-index: -1;
+      }
+
+      .rank-1::after,
+      .rank-2::after,
+      .rank-3::after {
+        content: "";
+        position: absolute;
+        top: -7px;
+        width: 16px;
+        height: 10px;
+        clip-path: polygon(54% 0, 100% 0, 100% 100%, 50% 100%);
+        background: #4b5d78;
+        transform: rotate(18deg);
+        z-index: -1;
+      }
+
+      .rank-1 {
+        border-color: rgba(245, 196, 81, 0.78);
+        color: #2b1d00;
+        background: linear-gradient(180deg, #ffe28a, #f5c451);
+      }
+
+      .rank-2 {
+        border-color: rgba(205, 216, 224, 0.76);
+        color: #111820;
+        background: linear-gradient(180deg, #f3f8fb, #aebbc5);
+      }
+
+      .rank-3 {
+        border-color: rgba(205, 136, 84, 0.78);
+        color: #221006;
+        background: linear-gradient(180deg, #f2ba7d, #bf7442);
       }
 
       .bar-label {
-        display: grid;
-        gap: 3px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
         min-width: 0;
+        width: 100%;
       }
 
-      .bar-label strong {
+      .identity-name {
         overflow: hidden;
         color: var(--ink);
         font-size: 13px;
         font-weight: 850;
+        text-decoration: none;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
 
-      .bar-label span {
-        overflow: hidden;
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+      .identity-name:hover,
+      .identity-name:focus-visible,
+      .identity-icon:hover,
+      .identity-icon:focus-visible {
+        outline: none;
+        border-color: rgba(111, 243, 226, 0.72);
+        color: var(--client-ink);
       }
 
       .bar-track {
@@ -511,14 +656,15 @@
         text-align: right;
       }
 
+      tbody tr.own-impl {
+        background: rgba(36, 181, 166, 0.07);
+        box-shadow: inset 3px 0 0 rgba(36, 181, 166, 0.82);
+      }
+
       .impl-cell {
         display: grid;
         gap: 4px;
-      }
-
-      .impl-cell strong {
-        color: var(--ink);
-        font-size: 13px;
+        min-width: 0;
       }
 
       .impl-cell span {
@@ -528,35 +674,81 @@
       }
 
       .meta-cell {
-        display: grid;
-        gap: 6px;
+        overflow: hidden;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         min-width: 168px;
       }
 
-      .meta-line {
-        display: grid;
-        grid-template-columns: 22px minmax(28px, auto) minmax(0, 1fr);
+      .identity-group {
+        display: inline-grid;
+        grid-template-columns: minmax(0, 1fr) 8px 22px 8px 22px;
         align-items: center;
-        gap: 7px;
+        column-gap: 5px;
         min-height: 24px;
+        line-height: 1;
+        max-width: 100%;
         min-width: 0;
+        width: 100%;
+        vertical-align: middle;
       }
 
-      .meta-icon {
+      .identity-group > .identity-name {
+        min-width: 0;
+        line-height: 22px;
+      }
+
+      .identity-separator {
+        color: rgba(145, 165, 173, 0.5);
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1;
+        text-align: center;
+      }
+
+      .identity-icon {
+        position: relative;
         display: inline-flex;
         align-items: center;
         justify-content: center;
         width: 22px;
         height: 22px;
-        border: 1px solid rgba(145, 165, 173, 0.24);
+        overflow: hidden;
+        border: 1px solid rgba(145, 165, 173, 0.22);
         border-radius: 6px;
-        color: var(--client-ink);
-        background: rgba(36, 181, 166, 0.09);
+        background: rgba(248, 250, 252, 0.92);
       }
 
-      .meta-line.code .meta-icon {
-        color: var(--packet-ink);
-        background: rgba(99, 166, 255, 0.1);
+      .identity-icon img {
+        position: relative;
+        z-index: 1;
+        width: 16px;
+        height: 16px;
+        object-fit: contain;
+      }
+
+      .identity-icon.vendor img {
+        width: 20px;
+        height: 20px;
+        border-radius: 4px;
+      }
+
+      .identity-icon img + .identity-fallback {
+        display: none;
+      }
+
+      .identity-fallback {
+        font-family: var(--mono);
+        font-size: 10px;
+        font-weight: 850;
+        line-height: 1;
+      }
+
+      .identity-fallback {
+        color: #091015;
       }
 
       .meta-icon-svg {
@@ -567,32 +759,6 @@
         stroke-width: 2;
         stroke-linecap: round;
         stroke-linejoin: round;
-      }
-
-      .meta-code {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 28px;
-        min-height: 20px;
-        padding: 0 5px;
-        border: 1px solid rgba(145, 165, 173, 0.2);
-        border-radius: 5px;
-        color: var(--ink);
-        font-family: var(--mono);
-        font-size: 10px;
-        font-weight: 850;
-        line-height: 1;
-      }
-
-      .meta-label {
-        min-width: 0;
-        overflow: hidden;
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
       }
 
       .pill {
@@ -706,7 +872,11 @@
         }
 
         .plot-grid {
-          grid-template-columns: 1fr;
+          grid-template-columns: 150px minmax(0, 1fr);
+        }
+
+        .bar-row {
+          grid-template-columns: 34px 178px minmax(0, 1fr) minmax(106px, auto);
         }
       }
 
@@ -734,6 +904,18 @@
           grid-template-columns: 1fr;
         }
 
+        .plot-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .plot-tabs {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .plot-tab {
+          min-height: 64px;
+        }
+
         .panel-head {
           align-items: flex-start;
           flex-direction: column;
@@ -744,10 +926,19 @@
         }
 
         .bar-row {
-          grid-template-columns: 1fr;
+          grid-template-columns: 34px minmax(0, 1fr);
           align-items: start;
           gap: 7px;
           min-height: 72px;
+        }
+
+        .bar-track,
+        .bar-value {
+          grid-column: 2;
+        }
+
+        .bar-label {
+          max-width: 100%;
         }
 
         .bar-value {
@@ -799,7 +990,7 @@
           <div class="panel-head">
             <div>
               <h2>Implementation Matrix</h2>
-              <p>bulk_mib_per_s / rr_requests_per_s / crr_requests_per_s</p>
+              <p>Throughput and request rate by benchmark mode</p>
             </div>
           </div>
           <div class="table-wrap">
@@ -809,12 +1000,11 @@
                   <th>Implementation</th>
                   <th>Steward / Language</th>
                   <th>Pair</th>
-                  <th>CC</th>
                   <th>Status</th>
-                  <th class="metric">Bulk MiB/s</th>
-                  <th class="metric">Bulk Gbit/s</th>
-                  <th class="metric">RR req/s</th>
-                  <th class="metric">CRR req/s</th>
+                  <th class="metric">Bulk<br>MiB/s</th>
+                  <th class="metric">Bulk<br>Gbit/s</th>
+                  <th class="metric">RR<br>req/s</th>
+                  <th class="metric">CRR<br>req/s</th>
                 </tr>
               </thead>
               <tbody id="comparison-body"></tbody>

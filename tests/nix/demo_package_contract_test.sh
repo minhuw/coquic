@@ -119,8 +119,22 @@ for marker in \
   "Performance Barplots" \
   "Daily Performance Trends" \
   "Steward / Language" \
+  "plot-tabs" \
+  "plot-tab" \
+  "rank-badge" \
+  "rank-1" \
+  "own-impl" \
   "companyCode" \
   "languageCode" \
+  "githubAvatar" \
+  "sourceUrl" \
+  "companyUrl" \
+  "noopener noreferrer" \
+  "companyIcon" \
+  "google.com/s2/favicons" \
+  "devicons/devicon@v2.17.0" \
+  "identity-group" \
+  "identity-icon" \
   "setup skips" \
   "quic-go" \
   "quinn" \
@@ -134,9 +148,10 @@ for marker in \
   "Microsoft" \
   "Rust" \
   "throughput_mib_per_s" \
-  "bulk_mib_per_s" \
-  "rr_requests_per_s" \
-  "crr_requests_per_s"; do
+  "requests_per_s" \
+  "MiB/s" \
+  "Reqs/s" \
+  "Throughput and request rate"; do
   if ! grep -Fq -- "${marker}" "${output_dir}/perf-comparison.html" "${output_dir}/perf-comparison.js"; then
     echo "packaged perf comparison assets missing marker: ${marker}" >&2
     exit 1

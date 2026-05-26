@@ -109,38 +109,48 @@ const colors = {
 
 const implementationOrder = ["coquic", "quic-go", "quinn", "picoquic", "msquic", "quiche", "quicly", "google-quiche", "tquic", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
 
+const deviconBase = "https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/";
+
+const languageIconSources = {
+  C: `${deviconBase}c/c-original.svg`,
+  "C++": `${deviconBase}cplusplus/cplusplus-original.svg`,
+  Go: `${deviconBase}go/go-original.svg`,
+  Python: `${deviconBase}python/python-original.svg`,
+  Rust: `${deviconBase}rust/rust-original.svg`,
+};
+
+function vendorFavicon(domain) {
+  return `https://www.google.com/s2/favicons?sz=64&domain=${domain}`;
+}
+
+function githubAvatar(owner) {
+  return `https://github.com/${owner}.png?size=64`;
+}
+
+function githubPage(owner, repo) {
+  return repo ? `https://github.com/${owner}/${repo}` : `https://github.com/${owner}`;
+}
+
 const implementationMeta = {
-  coquic: { company: "CoQUIC", companyCode: "CQ", language: "C++", languageCode: "C++" },
-  "quic-go": { company: "quic-go", companyCode: "QG", language: "Go", languageCode: "Go" },
-  quinn: { company: "Quinn", companyCode: "QN", language: "Rust", languageCode: "Rs" },
-  picoquic: { company: "Private Octopus", companyCode: "PO", language: "C", languageCode: "C" },
-  msquic: { company: "Microsoft", companyCode: "MS", language: "C", languageCode: "C" },
-  quiche: { company: "Cloudflare", companyCode: "CF", language: "Rust", languageCode: "Rs" },
-  quicly: { company: "H2O Project", companyCode: "H2", language: "C", languageCode: "C" },
-  "google-quiche": { company: "Google", companyCode: "G", language: "C++", languageCode: "C++" },
-  tquic: { company: "Tencent", companyCode: "TC", language: "Rust", languageCode: "Rs" },
-  mvfst: { company: "Meta", companyCode: "M", language: "C++", languageCode: "C++" },
-  "s2n-quic": { company: "AWS", companyCode: "AWS", language: "Rust", languageCode: "Rs" },
-  xquic: { company: "Alibaba", companyCode: "A", language: "C", languageCode: "C" },
-  aioquic: { company: "aioquic", companyCode: "AQ", language: "Python", languageCode: "Py" },
-  ngtcp2: { company: "ngtcp2", companyCode: "NG", language: "C", languageCode: "C" },
-  lsquic: { company: "LiteSpeed", companyCode: "LS", language: "C", languageCode: "C" },
-  neqo: { company: "Mozilla", companyCode: "MZ", language: "Rust", languageCode: "Rs" },
+  coquic: { company: "CoQUIC", companyCode: "CQ", companyIcon: githubAvatar("minhuw"), companyUrl: githubPage("minhuw"), sourceUrl: githubPage("minhuw", "coquic"), language: "C++", languageCode: "C++" },
+  "quic-go": { company: "quic-go", companyCode: "QG", companyIcon: githubAvatar("quic-go"), companyUrl: githubPage("quic-go"), sourceUrl: githubPage("quic-go", "quic-go"), language: "Go", languageCode: "Go" },
+  quinn: { company: "Quinn", companyCode: "QN", companyIcon: githubAvatar("quinn-rs"), companyUrl: githubPage("quinn-rs"), sourceUrl: githubPage("quinn-rs", "quinn"), language: "Rust", languageCode: "Rs" },
+  picoquic: { company: "Private Octopus", companyCode: "PO", companyIcon: githubAvatar("private-octopus"), companyUrl: githubPage("private-octopus"), sourceUrl: githubPage("private-octopus", "picoquic"), language: "C", languageCode: "C" },
+  msquic: { company: "Microsoft", companyCode: "MS", companyIcon: vendorFavicon("microsoft.com"), companyUrl: "https://github.com/microsoft", sourceUrl: githubPage("microsoft", "msquic"), language: "C", languageCode: "C" },
+  quiche: { company: "Cloudflare", companyCode: "CF", companyIcon: vendorFavicon("cloudflare.com"), companyUrl: "https://github.com/cloudflare", sourceUrl: githubPage("cloudflare", "quiche"), language: "Rust", languageCode: "Rs" },
+  quicly: { company: "H2O Project", companyCode: "H2", companyIcon: githubAvatar("h2o"), companyUrl: githubPage("h2o"), sourceUrl: githubPage("h2o", "quicly"), language: "C", languageCode: "C" },
+  "google-quiche": { company: "Google", companyCode: "G", companyIcon: vendorFavicon("google.com"), companyUrl: "https://github.com/google", sourceUrl: githubPage("google", "quiche"), language: "C++", languageCode: "C++" },
+  tquic: { company: "Tencent", companyCode: "TC", companyIcon: vendorFavicon("tencent.com"), companyUrl: "https://github.com/tencent", sourceUrl: githubPage("tencent", "tquic"), language: "Rust", languageCode: "Rs" },
+  mvfst: { company: "Meta", companyCode: "M", companyIcon: vendorFavicon("meta.com"), companyUrl: "https://github.com/facebook", sourceUrl: githubPage("facebook", "mvfst"), language: "C++", languageCode: "C++" },
+  "s2n-quic": { company: "AWS", companyCode: "AWS", companyIcon: vendorFavicon("aws.amazon.com"), companyUrl: "https://github.com/aws", sourceUrl: githubPage("aws", "s2n-quic"), language: "Rust", languageCode: "Rs" },
+  xquic: { company: "Alibaba", companyCode: "A", companyIcon: vendorFavicon("alibabacloud.com"), companyUrl: "https://github.com/alibaba", sourceUrl: githubPage("alibaba", "xquic"), language: "C", languageCode: "C" },
+  aioquic: { company: "aioquic", companyCode: "AQ", companyIcon: githubAvatar("aiortc"), companyUrl: githubPage("aiortc"), sourceUrl: githubPage("aiortc", "aioquic"), language: "Python", languageCode: "Py" },
+  ngtcp2: { company: "ngtcp2", companyCode: "NG", companyIcon: githubAvatar("ngtcp2"), companyUrl: githubPage("ngtcp2"), sourceUrl: githubPage("ngtcp2", "ngtcp2"), language: "C", languageCode: "C" },
+  lsquic: { company: "LiteSpeed", companyCode: "LS", companyIcon: vendorFavicon("litespeedtech.com"), companyUrl: "https://github.com/litespeedtech", sourceUrl: githubPage("litespeedtech", "lsquic"), language: "C", languageCode: "C" },
+  neqo: { company: "Mozilla", companyCode: "MZ", companyIcon: vendorFavicon("mozilla.org"), companyUrl: "https://github.com/mozilla", sourceUrl: githubPage("mozilla", "neqo"), language: "Rust", languageCode: "Rs" },
 };
 
 const iconPaths = {
-  company: [
-    { name: "path", attrs: { d: "M4 21V7.5L12 3l8 4.5V21" } },
-    { name: "path", attrs: { d: "M8 21v-8h8v8" } },
-    { name: "path", attrs: { d: "M8 9h.01" } },
-    { name: "path", attrs: { d: "M12 9h.01" } },
-    { name: "path", attrs: { d: "M16 9h.01" } },
-  ],
-  code: [
-    { name: "path", attrs: { d: "m8 9-4 3 4 3" } },
-    { name: "path", attrs: { d: "m16 9 4 3-4 3" } },
-    { name: "path", attrs: { d: "m14 5-4 14" } },
-  ],
   warning: [
     { name: "path", attrs: { d: "M12 3 2.8 19h18.4L12 3Z" } },
     { name: "path", attrs: { d: "M12 8v5" } },
@@ -152,6 +162,8 @@ const modeConfig = {
   bulk: {
     title: "Bulk Download",
     metric: "throughput_mib_per_s",
+    metricLabel: "Throughput",
+    metricDetail: "MiB/s",
     unit: "MiB/s",
     decimals: 3,
     summaryLabel: "bulk leader",
@@ -159,6 +171,8 @@ const modeConfig = {
   rr: {
     title: "Request/Response",
     metric: "requests_per_s",
+    metricLabel: "Requests",
+    metricDetail: "Reqs/s",
     unit: "req/s",
     decimals: 0,
     summaryLabel: "rr leader",
@@ -166,6 +180,8 @@ const modeConfig = {
   crr: {
     title: "Connection Request/Response",
     metric: "requests_per_s",
+    metricLabel: "Connection requests",
+    metricDetail: "Reqs/s",
     unit: "req/s",
     decimals: 0,
     summaryLabel: "crr leader",
@@ -176,6 +192,7 @@ let activeSnapshot = fallbackPerfSnapshot;
 let activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
 let dataSource = "waiting for perf-results.json";
 let historySource = "waiting for perf-history.json";
+let activePlotMode = "bulk";
 
 function formatNumber(value, decimals = 3) {
   return Number(value).toLocaleString("en-US", {
@@ -185,7 +202,80 @@ function formatNumber(value, decimals = 3) {
 }
 
 function implementationInfo(implementation) {
-  return implementationMeta[implementation] || { company: "unknown", companyCode: "?", language: "unknown", languageCode: "?" };
+  return implementationMeta[implementation] || { company: "unknown", companyCode: "?", companyIcon: "", companyUrl: "", sourceUrl: "", language: "unknown", languageCode: "?" };
+}
+
+function decorateExternalLink(link, label) {
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.title = label;
+  link.setAttribute("aria-label", label);
+}
+
+function renderIdentityIcon(kind, iconUrl, code, label, url) {
+  const badge = document.createElement(url ? "a" : "span");
+  badge.className = `identity-icon ${kind}`;
+  if (url) {
+    badge.href = url;
+    decorateExternalLink(badge, label);
+  } else {
+    badge.title = label;
+    badge.setAttribute("aria-label", label);
+  }
+
+  if (iconUrl) {
+    const image = document.createElement("img");
+    image.src = iconUrl;
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.referrerPolicy = "no-referrer";
+    image.addEventListener("error", () => image.remove(), { once: true });
+    badge.append(image);
+  }
+
+  const fallback = document.createElement("span");
+  fallback.className = "identity-fallback";
+  fallback.textContent = code;
+
+  badge.append(fallback);
+  return badge;
+}
+
+function renderImplementationIdentity(implementation, info) {
+  const group = document.createElement("span");
+  group.className = "identity-group";
+  group.setAttribute("aria-label", `${implementation}, ${info.company}, ${info.language}`);
+
+  const name = document.createElement(info.sourceUrl ? "a" : "span");
+  name.className = "identity-name";
+  name.textContent = implementation;
+  if (info.sourceUrl) {
+    name.href = info.sourceUrl;
+    decorateExternalLink(name, implementation);
+  } else {
+    name.title = implementation;
+  }
+
+  const separatorA = document.createElement("span");
+  separatorA.className = "identity-separator";
+  separatorA.setAttribute("aria-hidden", "true");
+  separatorA.textContent = "|";
+
+  const separatorB = document.createElement("span");
+  separatorB.className = "identity-separator";
+  separatorB.setAttribute("aria-hidden", "true");
+  separatorB.textContent = "|";
+
+  group.append(
+    name,
+    separatorA,
+    renderIdentityIcon("vendor", info.companyIcon, info.companyCode, info.company, info.companyUrl),
+    separatorB,
+    renderIdentityIcon("language", languageIconSources[info.language], info.languageCode, info.language),
+  );
+
+  return group;
 }
 
 function makeIcon(name) {
@@ -202,26 +292,6 @@ function makeIcon(name) {
     svg.append(node);
   }
   return svg;
-}
-
-function renderMetaLine(iconName, code, label) {
-  const line = document.createElement("span");
-  line.className = `meta-line ${iconName}`;
-
-  const icon = document.createElement("span");
-  icon.className = "meta-icon";
-  icon.append(makeIcon(iconName));
-
-  const codeLabel = document.createElement("b");
-  codeLabel.className = "meta-code";
-  codeLabel.textContent = code;
-
-  const text = document.createElement("span");
-  text.className = "meta-label";
-  text.textContent = label;
-
-  line.append(icon, codeLabel, text);
-  return line;
 }
 
 function formatDateLabel(date) {
@@ -277,7 +347,7 @@ function renderSnapshot() {
     return {
       label: config.summaryLabel,
       value: `${formatNumber(row[config.metric], config.decimals)} ${config.unit}`,
-      detail: `${row.implementation}, ${row.congestion_control}`,
+      detail: row.implementation,
     };
   });
 
@@ -287,7 +357,7 @@ function renderSnapshot() {
     cards.push({
       label: "coquic best bulk",
       value: `${formatNumber(bestCoquic.throughput_mib_per_s)} MiB/s`,
-      detail: `${bestCoquic.congestion_control}, current CI snapshot`,
+      detail: "current CI snapshot",
     });
   } else {
     cards.push(emptyCard("coquic best bulk", "waiting for CoQUIC rows"));
@@ -320,7 +390,7 @@ function renderBarplot(mode) {
   const heading = document.createElement("h3");
   heading.textContent = config.title;
   const subtitle = document.createElement("p");
-  subtitle.textContent = config.metric;
+  subtitle.textContent = config.metricDetail;
   const list = document.createElement("div");
   list.className = "bar-list";
 
@@ -334,20 +404,22 @@ function renderBarplot(mode) {
   }
 
   list.replaceChildren(
-    ...rows.map((row) => {
+    ...rows.map((row, index) => {
       const value = Number(row[config.metric]);
       const percent = maxValue > 0 ? Math.max((value / maxValue) * 100, 0.8) : 0;
       const element = document.createElement("div");
-      element.className = "bar-row";
+      element.className = `bar-row${row.implementation === "coquic" ? " own-impl" : ""}`;
+
+      const rank = index + 1;
+      const rankBadge = document.createElement("span");
+      rankBadge.className = `rank-badge rank-${rank <= 3 ? rank : "default"}`;
+      rankBadge.title = `Rank ${rank}`;
+      rankBadge.textContent = String(rank);
 
       const label = document.createElement("div");
       label.className = "bar-label";
-      const name = document.createElement("strong");
-      name.textContent = row.implementation;
-      const cc = document.createElement("span");
       const info = implementationInfo(row.implementation);
-      cc.textContent = `${info.company} · ${info.language} · ${row.congestion_control}`;
-      label.append(name, cc);
+      label.append(renderImplementationIdentity(row.implementation, info));
 
       const track = document.createElement("div");
       track.className = "bar-track";
@@ -361,7 +433,7 @@ function renderBarplot(mode) {
       metricValue.className = "bar-value";
       metricValue.textContent = `${formatNumber(value, config.decimals)} ${config.unit}`;
 
-      element.append(label, track, metricValue);
+      element.append(rankBadge, label, track, metricValue);
       return element;
     }),
   );
@@ -370,12 +442,52 @@ function renderBarplot(mode) {
   return plot;
 }
 
+function selectPlotMode(mode) {
+  if (!modeConfig[mode]) {
+    return;
+  }
+  activePlotMode = mode;
+  renderPlots();
+}
+
 function renderPlots() {
   document.getElementById("data-source-label").textContent = dataSource;
+  const tabs = document.createElement("div");
+  tabs.className = "plot-tabs";
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "Benchmark mode");
+  tabs.replaceChildren(
+    ...Object.entries(modeConfig).map(([mode, config]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "plot-tab";
+      button.id = `plot-tab-${mode}`;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", mode === activePlotMode ? "true" : "false");
+      button.setAttribute("aria-controls", "plot-panel");
+      button.addEventListener("click", () => selectPlotMode(mode));
+
+      const label = document.createElement("span");
+      label.textContent = mode.toUpperCase();
+      const title = document.createElement("strong");
+      title.textContent = config.title;
+      const metric = document.createElement("small");
+      metric.textContent = config.metricDetail;
+      button.append(label, title, metric);
+      return button;
+    }),
+  );
+
+  const panel = document.createElement("div");
+  panel.className = "plot-panel-active";
+  panel.id = "plot-panel";
+  panel.setAttribute("role", "tabpanel");
+  panel.setAttribute("aria-labelledby", `plot-tab-${activePlotMode}`);
+  panel.append(renderBarplot(activePlotMode));
+
   document.getElementById("plot-grid").replaceChildren(
-    renderBarplot("bulk"),
-    renderBarplot("rr"),
-    renderBarplot("crr"),
+    tabs,
+    panel,
   );
 }
 
@@ -425,7 +537,7 @@ function renderTrendChart(mode) {
   const title = document.createElement("h3");
   title.textContent = config.title;
   const subtitle = document.createElement("p");
-  subtitle.textContent = `${config.metric} over ${snapshots.length || 0} day${snapshots.length === 1 ? "" : "s"}`;
+  subtitle.textContent = `${config.metricDetail} over ${snapshots.length || 0} day${snapshots.length === 1 ? "" : "s"}`;
   heading.append(title, subtitle);
 
   if (!snapshots.length) {
@@ -575,7 +687,7 @@ function renderTable() {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
     td.className = "empty-cell";
-    td.colSpan = 9;
+    td.colSpan = 8;
     td.textContent = "No benchmark rows loaded. The dashboard will use perf-results.json when the perf workflow uploads it.";
     tr.append(td);
     document.getElementById("comparison-body").replaceChildren(tr);
@@ -584,34 +696,29 @@ function renderTable() {
   document.getElementById("comparison-body").replaceChildren(
     ...rows.map((row) => {
       const tr = document.createElement("tr");
+      if (row.implementation === "coquic") {
+        tr.className = "own-impl";
+      }
       const setupSkips = Number(row.skipped_setup_errors || 0);
       const statusClass = row.status === "ok" ? "ok" : "warn";
 
       const implementation = document.createElement("td");
       const implCell = document.createElement("div");
       implCell.className = "impl-cell";
-      const name = document.createElement("strong");
-      name.textContent = row.implementation;
+      const info = implementationInfo(row.implementation);
       const mode = document.createElement("span");
       mode.textContent = row.mode;
-      implCell.append(name, mode);
+      implCell.append(renderImplementationIdentity(row.implementation, info), mode);
       implementation.append(implCell);
 
-      const info = implementationInfo(row.implementation);
       const metadata = document.createElement("td");
       const metadataCell = document.createElement("div");
       metadataCell.className = "meta-cell";
-      metadataCell.append(renderMetaLine("company", info.companyCode, info.company), renderMetaLine("code", info.languageCode, info.language));
+      metadataCell.textContent = `${info.company} / ${info.language}`;
       metadata.append(metadataCell);
 
       const pair = document.createElement("td");
       pair.textContent = row.pair;
-
-      const cc = document.createElement("td");
-      const ccPill = document.createElement("span");
-      ccPill.className = "pill";
-      ccPill.textContent = row.congestion_control;
-      cc.append(ccPill);
 
       const status = document.createElement("td");
       const statusCell = document.createElement("div");
@@ -642,7 +749,7 @@ function renderTable() {
       crr.className = "metric";
       crr.textContent = row.mode === "crr" ? formatNumber(row.requests_per_s, 0) : "-";
 
-      tr.append(implementation, metadata, pair, cc, status, bulkMib, bulkGbit, rr, crr);
+      tr.append(implementation, metadata, pair, status, bulkMib, bulkGbit, rr, crr);
       return tr;
     }),
   );

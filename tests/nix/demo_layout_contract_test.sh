@@ -10,6 +10,8 @@ required_paths=(
   "demo/wasm-quic/quic-demo.js"
   "demo/wasm-quic/perf-comparison.html"
   "demo/wasm-quic/perf-comparison.js"
+  "demo/wasm-quic/interop-results.html"
+  "demo/wasm-quic/interop-results.js"
   "demo/h3-server/Dockerfile"
   "demo/deploy/package-demo.sh"
   "demo/deploy/deploy-remote.sh"
@@ -57,9 +59,12 @@ required_doc_markers = [
     "demo/deploy/coquic-demo.service",
     ".github/workflows/deploy-demo.yml",
     ".github/workflows/perf.yml",
+    ".github/workflows/interop.yml",
     "COQUIC_DEMO_REMOTE_SSH_KEY",
     "perf-results.json",
     "/opt/coquic-demo/current/site/perf-results.json",
+    "interop-results.json",
+    "/opt/coquic-demo/current/site/interop-results.json",
     "COQUIC_DEMO_CERT_CHAIN_PEM",
     "COQUIC_DEMO_PRIVATE_KEY_PEM",
     "coquic.minhuw.dev",

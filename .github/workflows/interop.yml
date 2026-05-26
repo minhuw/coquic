@@ -66,12 +66,24 @@ jobs:
           docker compose version
 
       - name: Run Official ${{ matrix.display_name }} Interop Tests
+        id: run_interop
+        continue-on-error: true
         env:
           INTEROP_TESTCASES: ${{ matrix.testcases }}
           INTEROP_PEER_IMPL: ${{ matrix.impl }}
           INTEROP_PEER_IMAGE: ${{ matrix.image }}
           COQUIC_CONGESTION_CONTROL: ${{ matrix.congestion_control || '' }}
         run: bash interop/run-official.sh
+
+      - name: Publish ${{ matrix.display_name }} Interop Summary
+        if: always()
+        run: |
+          python3 scripts/render-interop-results.py \
+            --result "${{ matrix.peer }}-server=.interop-logs/official/coquic_${{ matrix.impl }}/results.json" \
+            --result "${{ matrix.peer }}-client=.interop-logs/official/${{ matrix.impl }}_coquic/results.json" \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --commit "${GITHUB_SHA}" \
+            --json-out .interop-logs/interop-results-${{ matrix.peer }}.json >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload Interop Logs
         if: always()
@@ -80,6 +92,22 @@ jobs:
           name: interop-logs-${{ matrix.peer }}
           path: .interop-logs/official
           if-no-files-found: warn
+
+      - name: Upload Interop Result Snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-results-${{ matrix.peer }}
+          path: .interop-logs/interop-results-${{ matrix.peer }}.json
+          if-no-files-found: error
+
+      - name: Fail On ${{ matrix.display_name }} Interop Errors
+        if: always()
+        run: |
+          if [ "${{ steps.run_interop.outcome }}" != "success" ]; then
+            echo "${{ matrix.display_name }} interop step finished with outcome: ${{ steps.run_interop.outcome }}" >&2
+            exit 1
+          fi
 
   interop-self:
     name: Self Official Runner
@@ -119,12 +147,23 @@ jobs:
           docker compose version
 
       - name: Run Official self Interop Tests
+        id: run_interop
+        continue-on-error: true
         env:
           INTEROP_TESTCASES: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,v2,amplificationlimit,rebind-port,rebind-addr,connectionmigration,ecn
           INTEROP_PEER_IMPL: coquic
           INTEROP_PEER_IMAGE: coquic-interop:quictls-musl
           INTEROP_DIRECTIONS: coquic-server
         run: bash interop/run-official.sh
+
+      - name: Publish self Interop Summary
+        if: always()
+        run: |
+          python3 scripts/render-interop-results.py \
+            --result self=.interop-logs/official/coquic_coquic/results.json \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --commit "${GITHUB_SHA}" \
+            --json-out .interop-logs/interop-results-self.json >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload Interop Logs
         if: always()
@@ -133,3 +172,111 @@ jobs:
           name: interop-logs-self
           path: .interop-logs/official
           if-no-files-found: warn
+
+      - name: Upload Interop Result Snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-results-self
+          path: .interop-logs/interop-results-self.json
+          if-no-files-found: error
+
+      - name: Fail On self Interop Errors
+        if: always()
+        run: |
+          if [ "${{ steps.run_interop.outcome }}" != "success" ]; then
+            echo "self interop step finished with outcome: ${{ steps.run_interop.outcome }}" >&2
+            exit 1
+          fi
+
+  publish-interop-results:
+    name: Publish Interop Results
+    runs-on: ubuntu-latest
+    needs:
+      - interop-peer
+      - interop-self
+    if: always()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download Interop Result Snapshots
+        uses: actions/download-artifact@v8
+        with:
+          pattern: interop-results-*
+          path: .interop-results/downloaded
+          merge-multiple: true
+
+      - name: Merge Interop Result Snapshot
+        run: |
+          python3 scripts/render-interop-results.py \
+            --result quicgo-server=.interop-results/downloaded/interop-results-quicgo.json \
+            --result picoquic-server=.interop-results/downloaded/interop-results-picoquic.json \
+            --result quinn-server=.interop-results/downloaded/interop-results-quinn.json \
+            --result self=.interop-results/downloaded/interop-results-self.json \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --commit "${GITHUB_SHA}" \
+            --json-out .interop-results/interop-results.json >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Configure Demo SSH
+        if: github.ref == 'refs/heads/main'
+        env:
+          COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s' "${COQUIC_DEMO_REMOTE_SSH_KEY}" > "${RUNNER_TEMP}/coquic-demo.key"
+          cat > "${HOME}/.ssh/known_hosts" <<'EOF'
+          coquic.minhuw.dev ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC/itFBGPd3dJ3Lgn1gx9n3i2HZox12SEmEAexK2fNT0F/PcwbxWuLX8oy08dEUu40IH3DIT1vTlf5bFzZKLVr3+pZn0JpGLSR2MAE14bvsfaoXbiZkZcliCv5tmvPx041qgAfOhQarqkKoi9J5AMxttWkc/Cr2huzVLlG/t3PJ0D3aB4XOzPCB+orSfbY4D4QWvlkEK29HN6mbGwJhSj+/V1YMubges/di6x9HNm0AGHRwSr4PAPFxQx2KMKfTFdrl21eOTQi29UHk1sI7C0Vg02TCO4TMCDRb99akAA0+Qrw8kt1d7Fh8k+3qNDY+tCnBmjAum74ATgRyvIrgLQ4Wk5QXE3NMPWNyLgNY2vYXv9Izl2GeH9PSjU6aACIXVpKEnWBCo0y6x9DZEA3Dfz4EiV9cy4fs7+W1likxhEVaPouTDtQH7EibHIdOoO++vdlmyYk2EG9Kn6W/Zqo55K+sOQ/K0S0sMuWIZQW2czAOpzs4R519WOIUNBzXkZ6rZqE=
+          coquic.minhuw.dev ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCjTT5KdjyCQ3G04Z8mUUOkXAqsdDuU4K5bB3jXi5B3aIzYK+2f0TT0XE3G0/r/KmZoSHYxb21TtjykFa47XFSA=
+          coquic.minhuw.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILi5VjtrGcYlzyYEXd4/PzQJXBjZ028DA6nJ7Xu50CJh
+          EOF
+          chmod 600 "${RUNNER_TEMP}/coquic-demo.key" "${HOME}/.ssh/known_hosts"
+
+      - name: Upload Interop Results To Demo
+        if: github.ref == 'refs/heads/main'
+        run: |
+          if [ ! -f .interop-results/interop-results.json ]; then
+            echo "missing .interop-results/interop-results.json" >&2
+            exit 1
+          fi
+          scp \
+            -P 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            .interop-results/interop-results.json \
+            minhuw@coquic.minhuw.dev:/tmp/coquic-interop-results.json
+          ssh \
+            -p 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            minhuw@coquic.minhuw.dev \
+            "sudo install -m 644 /tmp/coquic-interop-results.json /opt/coquic-demo/current/site/interop-results.json && rm -f /tmp/coquic-interop-results.json"
+
+      - name: Fail On Interop Job Errors
+        if: always()
+        run: |
+          failed=0
+          check_job() {
+            local label="$1"
+            local result="$2"
+            if [ "${result}" != "success" ]; then
+              echo "${label} job finished with result: ${result}" >&2
+              failed=1
+            fi
+          }
+          check_job "interop-peer" "${{ needs.interop-peer.result }}"
+          check_job "interop-self" "${{ needs.interop-self.result }}"
+          exit "${failed}"

@@ -17,7 +17,9 @@ This document covers the remote continuous deployment flow for the public
   remote host.
 - `.github/workflows/deploy-demo.yml` is the GitHub Actions entrypoint.
 - `.github/workflows/perf.yml` uploads the latest `perf-results.json` snapshot
-  into the live demo site after successful `main` branch perf runs.
+  into the live demo site after `main` branch perf runs.
+- `.github/workflows/interop.yml` uploads the latest `interop-results.json`
+  snapshot into the live demo site after `main` branch interop runs.
 
 The current workflow builds the wasm demo first, then packages
 `zig-out/share/wasm-quic/`. The deploy script accepts any prepared document-root
@@ -50,9 +52,14 @@ The perf workflow reuses `COQUIC_DEMO_REMOTE_SSH_KEY` to upload
 
 - `/opt/coquic-demo/current/site/perf-results.json`
 
-That file is read by the public performance dashboard. Pull request runs still
-render the GitHub step summary and upload Actions artifacts, but they do not
-publish to the demo machine.
+The interop workflow reuses the same secret to upload
+`.interop-results/interop-results.json` to:
+
+- `/opt/coquic-demo/current/site/interop-results.json`
+
+Those files are read by the public performance and interop dashboards. The perf
+and interop workflows run daily or via manual `workflow_dispatch`; only runs on
+the `main` branch publish snapshots to the demo machine.
 
 ## Remote Host Requirements
 

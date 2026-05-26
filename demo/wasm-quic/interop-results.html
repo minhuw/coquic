@@ -3,26 +3,22 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="coquic-perf-marker" content="coquic-perf-comparison-v1">
-    <title>coquic performance comparison</title>
+    <meta name="coquic-interop-marker" content="coquic-interop-results-v1">
+    <title>coquic interop results</title>
     <style>
       :root {
         color-scheme: dark;
         --bg: #091015;
         --surface: #0f1a21;
         --surface-2: #14232c;
-        --surface-3: #1b2d37;
         --ink: #edf7f7;
         --muted: #91a5ad;
         --soft: #c3d4d8;
         --line: #253943;
-        --line-strong: #38505b;
         --client: #24b5a6;
         --client-ink: #9ff4e8;
         --server: #e39a3b;
-        --server-ink: #ffd8a3;
         --packet: #63a6ff;
-        --packet-ink: #cfe5ff;
         --danger: #ff786d;
         --warning: #f5c451;
         --ok: #6be0a3;
@@ -93,13 +89,13 @@
         max-width: 760px;
       }
 
-      h2 {
+      h2,
+      h3 {
         font-size: 14px;
         line-height: 1.2;
         font-weight: 800;
       }
 
-      button,
       a {
         -webkit-tap-highlight-color: transparent;
       }
@@ -176,8 +172,8 @@
       }
 
       .stat-card,
-      .chart-panel,
-      .table-panel,
+      .peer-card,
+      .matrix-panel,
       .source-panel {
         border: 1px solid rgba(145, 165, 173, 0.24);
         border-radius: var(--radius);
@@ -215,147 +211,81 @@
         line-height: 1.45;
       }
 
-      .comparison-shell {
+      .peer-grid {
         display: grid;
-        grid-template-columns: 1fr;
-        gap: 14px;
-        align-items: start;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 14px;
       }
 
-      .chart-panel,
-      .table-panel,
-      .source-panel {
-        min-width: 0;
+      .peer-card {
+        display: grid;
+        gap: 12px;
+        min-height: 172px;
+        padding: 14px;
       }
 
+      .peer-head,
+      .score,
       .panel-head {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        padding: 14px 14px 12px;
+      }
+
+      .peer-head strong {
+        font-size: 16px;
+      }
+
+      .score span {
+        font-family: var(--mono);
+        font-size: 28px;
+        font-weight: 850;
+      }
+
+      .score small,
+      .peer-card p {
+        color: var(--soft);
+        font-size: 12px;
+      }
+
+      .result-track {
+        overflow: hidden;
+        height: 10px;
+        border: 1px solid rgba(145, 165, 173, 0.2);
+        border-radius: 999px;
+        background: rgba(9, 16, 21, 0.88);
+      }
+
+      .result-fill {
+        width: var(--bar-width);
+        min-width: 2px;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--bar-color);
+      }
+
+      .matrix-shell {
+        display: grid;
+        gap: 14px;
+      }
+
+      .matrix-panel,
+      .source-panel {
+        overflow: hidden;
+      }
+
+      .panel-head {
+        padding: 14px;
         border-bottom: 1px solid rgba(145, 165, 173, 0.18);
       }
 
       .panel-head p {
-        margin-top: 5px;
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-      }
-
-      .plot-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 12px;
-        padding: 14px;
-      }
-
-      .plot {
-        min-width: 0;
-        padding: 12px;
-        border: 1px solid rgba(145, 165, 173, 0.16);
-        border-radius: 7px;
-        background: rgba(5, 14, 18, 0.26);
-      }
-
-      .plot h3 {
-        color: var(--ink);
-        font-size: 13px;
-        line-height: 1.2;
-        font-weight: 850;
-      }
-
-      .plot p {
         margin-top: 4px;
         color: var(--muted);
         font-family: var(--mono);
-        font-size: 11px;
-      }
-
-      .bar-list {
-        display: grid;
-        gap: 10px;
-        margin-top: 12px;
-      }
-
-      .bar-row {
-        display: grid;
-        grid-template-columns: minmax(108px, 0.42fr) minmax(0, 1fr) minmax(92px, auto);
-        align-items: center;
-        gap: 10px;
-        min-height: 46px;
-      }
-
-      .bar-label {
-        display: grid;
-        gap: 3px;
-        min-width: 0;
-      }
-
-      .bar-label strong {
-        overflow: hidden;
-        color: var(--ink);
-        font-size: 13px;
-        font-weight: 850;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .bar-label span {
-        overflow: hidden;
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .bar-track {
-        position: relative;
-        min-width: 0;
-        height: 13px;
-        overflow: hidden;
-        border: 1px solid rgba(145, 165, 173, 0.22);
-        border-radius: 999px;
-        background: rgba(5, 14, 18, 0.5);
-      }
-
-      .bar-fill {
-        position: absolute;
-        inset: 0 auto 0 0;
-        width: var(--bar-width, 0%);
-        border-radius: inherit;
-        background: linear-gradient(90deg, var(--bar-color), rgba(255, 255, 255, 0.26));
-      }
-
-      .bar-value {
-        color: var(--ink);
-        font-family: var(--mono);
         font-size: 12px;
-        font-variant-numeric: tabular-nums;
-        text-align: right;
-      }
-
-      .empty-state,
-      .empty-cell {
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 12px;
-        line-height: 1.45;
-      }
-
-      .empty-state {
-        min-height: 46px;
-        padding: 12px;
-        border: 1px dashed rgba(145, 165, 173, 0.26);
-        border-radius: 7px;
-        background: rgba(5, 14, 18, 0.22);
-      }
-
-      .empty-cell {
-        padding: 18px 14px;
-        text-align: left;
       }
 
       .table-wrap {
@@ -364,16 +294,17 @@
 
       table {
         width: 100%;
-        min-width: 860px;
+        min-width: 760px;
         border-collapse: collapse;
       }
 
       th,
       td {
         padding: 11px 12px;
-        border-bottom: 1px solid rgba(145, 165, 173, 0.16);
+        border-bottom: 1px solid rgba(145, 165, 173, 0.14);
         text-align: left;
-        vertical-align: top;
+        vertical-align: middle;
+        white-space: nowrap;
       }
 
       th {
@@ -389,55 +320,61 @@
         font-size: 13px;
       }
 
-      td.metric {
+      .case-name {
         color: var(--ink);
-        font-family: var(--mono);
-        font-variant-numeric: tabular-nums;
-        text-align: right;
+        font-weight: 800;
       }
 
-      th.metric {
-        text-align: right;
-      }
-
-      .impl-cell {
-        display: grid;
-        gap: 4px;
-      }
-
-      .impl-cell strong {
-        color: var(--ink);
-        font-size: 13px;
-      }
-
-      .impl-cell span {
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-      }
-
-      .pill {
+      .pill,
+      .result-pill {
         display: inline-flex;
         align-items: center;
-        justify-content: center;
         min-height: 24px;
         padding: 0 8px;
         border: 1px solid rgba(145, 165, 173, 0.24);
         border-radius: 999px;
-        color: var(--soft);
+        color: var(--muted);
         font-family: var(--mono);
         font-size: 11px;
         font-weight: 800;
       }
 
-      .pill.ok {
+      .result-pill.succeeded {
         border-color: rgba(107, 224, 163, 0.42);
         color: var(--ok);
+        background: rgba(107, 224, 163, 0.11);
       }
 
-      .pill.warn {
+      .result-pill.failed {
+        border-color: rgba(255, 120, 109, 0.46);
+        color: var(--danger);
+        background: rgba(255, 120, 109, 0.12);
+      }
+
+      .result-pill.unsupported {
         border-color: rgba(245, 196, 81, 0.48);
         color: var(--warning);
+        background: rgba(245, 196, 81, 0.12);
+      }
+
+      .result-pill.unknown {
+        color: var(--muted);
+      }
+
+      .empty-cell,
+      .empty-state {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      .empty-state {
+        grid-column: 1 / -1;
+        min-height: 96px;
+        padding: 18px;
+        border: 1px dashed rgba(145, 165, 173, 0.3);
+        border-radius: var(--radius);
+        background: rgba(15, 26, 33, 0.66);
       }
 
       .source-panel {
@@ -446,19 +383,19 @@
 
       .source-list {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 10px;
         padding: 14px;
       }
 
       .source-item {
         display: grid;
-        gap: 7px;
-        min-height: 104px;
-        padding: 12px;
-        border: 1px solid rgba(145, 165, 173, 0.16);
+        gap: 5px;
+        min-width: 0;
+        padding: 11px;
+        border: 1px solid rgba(145, 165, 173, 0.18);
         border-radius: 7px;
-        background: rgba(5, 14, 18, 0.26);
+        background: rgba(9, 16, 21, 0.42);
       }
 
       .source-item strong {
@@ -467,53 +404,15 @@
       }
 
       .source-item span {
+        overflow-wrap: anywhere;
         color: var(--muted);
         font-family: var(--mono);
         font-size: 11px;
-        line-height: 1.45;
-        overflow-wrap: anywhere;
       }
 
-      .adapter-note {
-        padding: 0 14px 14px;
-        color: var(--muted);
-        font-size: 12px;
-        line-height: 1.45;
-      }
-
-      @media (prefers-reduced-motion: reduce) {
-        *,
-        *::before,
-        *::after {
-          scroll-behavior: auto !important;
-          transition-duration: 0.01ms !important;
-        }
-      }
-
-      @media (max-width: 1080px) {
-        .snapshot-grid,
-        .source-list {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-
-        .plot-grid {
-          grid-template-columns: 1fr;
-        }
-      }
-
-      @media (max-width: 680px) {
-        main {
-          padding: 14px 12px 28px;
-        }
-
+      @media (max-width: 980px) {
         header {
           grid-template-columns: 1fr;
-          align-items: start;
-          gap: 16px;
-        }
-
-        h1 {
-          font-size: 31px;
         }
 
         .header-nav {
@@ -521,24 +420,28 @@
         }
 
         .snapshot-grid,
+        .peer-grid,
+        .source-list {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 640px) {
+        main {
+          padding-inline: 12px;
+        }
+
+        .snapshot-grid,
+        .peer-grid,
         .source-list {
           grid-template-columns: 1fr;
         }
 
-        .panel-head {
+        .panel-head,
+        .peer-head,
+        .score {
           align-items: flex-start;
           flex-direction: column;
-        }
-
-        .bar-row {
-          grid-template-columns: 1fr;
-          align-items: start;
-          gap: 7px;
-          min-height: 72px;
-        }
-
-        .bar-value {
-          text-align: left;
         }
       }
     </style>
@@ -547,68 +450,71 @@
     <main>
       <header>
         <div>
-          <span class="eyebrow">QUIC performance</span>
-          <h1>coquic performance comparison</h1>
-          <p class="subhead">CI snapshot across CoQUIC congestion controls and paired quic-go, quinn, picoquic, MSQUIC, quiche, quicly, Google QUICHE, TQUIC, mvfst, s2n-quic, xquic, aioquic, ngtcp2, LSQUIC, and Neqo baselines.</p>
+          <span class="eyebrow">QUIC interop</span>
+          <h1>coquic interop results</h1>
+          <p class="subhead">Daily official runner snapshot for CoQUIC against quic-go, picoquic, quinn, and the self-hosted CoQUIC lane.</p>
         </div>
         <nav class="header-nav" aria-label="Demo views">
           <a href="./index.html">Home</a>
           <a href="./workbench.html">Workbench</a>
-          <a href="./perf-comparison.html" aria-current="page">Performance</a>
-          <a href="./interop-results.html">Interop</a>
+          <a href="./perf-comparison.html">Performance</a>
+          <a href="./interop-results.html" aria-current="page">Interop</a>
         </nav>
       </header>
 
-      <section class="snapshot-grid" id="snapshot-grid" aria-label="Performance snapshot"></section>
+      <section class="snapshot-grid" id="snapshot-grid" aria-label="Interop snapshot"></section>
+      <section class="peer-grid" id="peer-grid" aria-label="Interop peer summaries"></section>
 
-      <section class="comparison-shell" aria-label="Performance comparison">
-        <div class="chart-panel">
+      <section class="matrix-shell" aria-label="Interop result matrix">
+        <div class="matrix-panel">
           <div class="panel-head">
             <div>
-              <h2>Performance Barplots</h2>
-              <p id="data-source-label">waiting for perf-results.json</p>
+              <h2>Interop Matrix</h2>
+              <p id="data-source-label">waiting for interop-results.json</p>
             </div>
           </div>
-          <div class="plot-grid" id="plot-grid"></div>
+          <div class="table-wrap">
+            <table>
+              <thead id="matrix-head"></thead>
+              <tbody id="matrix-body"></tbody>
+            </table>
+          </div>
         </div>
 
-        <div class="table-panel">
+        <div class="matrix-panel">
           <div class="panel-head">
             <div>
-              <h2>Implementation Matrix</h2>
-              <p>bulk_mib_per_s / rr_requests_per_s / crr_requests_per_s</p>
+              <h2>Failed Or Unsupported Cases</h2>
+              <p>non-succeeded cases from the uploaded official runner payload</p>
             </div>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Implementation</th>
-                  <th>Pair</th>
-                  <th>CC</th>
-                  <th>Status</th>
-                  <th class="metric">Bulk MiB/s</th>
-                  <th class="metric">Bulk Gbit/s</th>
-                  <th class="metric">RR req/s</th>
-                  <th class="metric">CRR req/s</th>
+                  <th>Peer</th>
+                  <th>Direction</th>
+                  <th>Case</th>
+                  <th>Result</th>
+                  <th>Details</th>
                 </tr>
               </thead>
-              <tbody id="comparison-body"></tbody>
+              <tbody id="failure-body"></tbody>
             </table>
           </div>
         </div>
       </section>
 
-      <section class="source-panel" aria-label="Benchmark sources">
+      <section class="source-panel" aria-label="Interop result sources">
         <div class="panel-head">
           <div>
-            <h2>Benchmark Sources</h2>
-            <p>workflow manifests included in the uploaded result payload</p>
+            <h2>Result Sources</h2>
+            <p>official runner JSON files included in the uploaded result payload</p>
           </div>
         </div>
         <div class="source-list" id="source-list"></div>
       </section>
     </main>
-    <script src="./perf-comparison.js"></script>
+    <script src="./interop-results.js"></script>
   </body>
 </html>

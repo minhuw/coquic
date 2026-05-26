@@ -408,6 +408,10 @@ if sudo test -f /opt/coquic-demo/current/site/perf-results.json &&
    ! sudo test -f "${remote_release_dir}/site/perf-results.json"; then
   sudo install -m 644 /opt/coquic-demo/current/site/perf-results.json "${remote_release_dir}/site/perf-results.json"
 fi
+if sudo test -f /opt/coquic-demo/current/site/interop-results.json &&
+   ! sudo test -f "${remote_release_dir}/site/interop-results.json"; then
+  sudo install -m 644 /opt/coquic-demo/current/site/interop-results.json "${remote_release_dir}/site/interop-results.json"
+fi
 
 sudo install -m 644 "${remote_upload_dir}/coquic-demo.service" /etc/systemd/system/coquic-demo.service
 sudo install -m 644 "${remote_upload_dir}/fullchain.pem" /etc/coquic-demo/tls/fullchain.pem

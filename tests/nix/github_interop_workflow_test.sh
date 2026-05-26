@@ -6,6 +6,31 @@ cd "${repo_root}"
 
 workflow=".github/workflows/interop.yml"
 
+grep -F 'schedule:' "${workflow}" >/dev/null || {
+  echo 'missing interop schedule trigger' >&2
+  exit 1
+}
+
+grep -F 'cron: "0 3 * * *"' "${workflow}" >/dev/null || {
+  echo 'missing daily interop cron trigger' >&2
+  exit 1
+}
+
+grep -F 'workflow_dispatch:' "${workflow}" >/dev/null || {
+  echo 'missing interop workflow_dispatch trigger' >&2
+  exit 1
+}
+
+if grep -F 'pull_request:' "${workflow}" >/dev/null; then
+  echo 'interop workflow must not use pull_request trigger' >&2
+  exit 1
+fi
+
+if grep -F 'push:' "${workflow}" >/dev/null; then
+  echo 'interop workflow must not use push trigger' >&2
+  exit 1
+fi
+
 if grep -q 'DeterminateSystems/magic-nix-cache-action@main' "${workflow}"; then
   echo "interop workflow must not use DeterminateSystems/magic-nix-cache-action@main" >&2
   exit 1
@@ -28,12 +53,25 @@ required_lines=(
   "          INTEROP_PEER_IMPL: \${{ matrix.impl }}"
   "          INTEROP_PEER_IMAGE: \${{ matrix.image }}"
   "          COQUIC_CONGESTION_CONTROL: \${{ matrix.congestion_control || '' }}"
+  "            --json-out .interop-logs/interop-results-\${{ matrix.peer }}.json >> \"\${GITHUB_STEP_SUMMARY}\""
   "          name: interop-logs-\${{ matrix.peer }}"
+  "          name: interop-results-\${{ matrix.peer }}"
   "  interop-self:"
   "          INTEROP_PEER_IMPL: coquic"
   "          INTEROP_PEER_IMAGE: coquic-interop:quictls-musl"
   "          INTEROP_DIRECTIONS: coquic-server"
+  "            --json-out .interop-logs/interop-results-self.json >> \"\${GITHUB_STEP_SUMMARY}\""
   "          name: interop-logs-self"
+  "          name: interop-results-self"
+  "  publish-interop-results:"
+  "      - interop-peer"
+  "      - interop-self"
+  "          pattern: interop-results-*"
+  "            --json-out .interop-results/interop-results.json >> \"\${GITHUB_STEP_SUMMARY}\""
+  "      - name: Configure Demo SSH"
+  "      - name: Upload Interop Results To Demo"
+  "            minhuw@coquic.minhuw.dev:/tmp/coquic-interop-results.json"
+  "            \"sudo install -m 644 /tmp/coquic-interop-results.json /opt/coquic-demo/current/site/interop-results.json && rm -f /tmp/coquic-interop-results.json\""
 )
 
 for line in "${required_lines[@]}"; do
@@ -69,5 +107,15 @@ if grep -F -- "peer: msquic" "${workflow}" >/dev/null; then
   echo "interop-peer matrix must not include msquic while its zerortt client is broken" >&2
   exit 1
 fi
+
+grep -F 'python3 scripts/render-interop-results.py' "${workflow}" >/dev/null || {
+  echo 'missing interop result renderer step' >&2
+  exit 1
+}
+
+grep -F 'github.ref == '\''refs/heads/main'\''' "${workflow}" >/dev/null || {
+  echo 'missing main branch guard for demo interop upload' >&2
+  exit 1
+}
 
 echo "interop workflow contract looks correct"

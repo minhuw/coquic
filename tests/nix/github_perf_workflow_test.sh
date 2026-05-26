@@ -9,35 +9,31 @@ workflow="${repo_root}/.github/workflows/perf.yml"
   exit 1
 }
 
-grep -F 'pull_request:' "${workflow}" >/dev/null || {
-  echo 'missing pull_request trigger' >&2
+grep -F 'schedule:' "${workflow}" >/dev/null || {
+  echo 'missing schedule trigger' >&2
   exit 1
 }
 
-grep -F 'push:' "${workflow}" >/dev/null || {
-  echo 'missing push trigger' >&2
+grep -F 'cron: "0 4 * * *"' "${workflow}" >/dev/null || {
+  echo 'missing daily perf cron trigger' >&2
   exit 1
 }
 
-grep -F 'branches:' "${workflow}" >/dev/null || {
-  echo 'missing push branch filter' >&2
+grep -F 'workflow_dispatch:' "${workflow}" >/dev/null || {
+  echo 'missing workflow_dispatch trigger' >&2
   exit 1
 }
 
-grep -F -- '- main' "${workflow}" >/dev/null || {
-  echo 'missing main branch filter' >&2
-  exit 1
-}
-
-if grep -F 'schedule:' "${workflow}" >/dev/null; then
-  echo 'perf workflow must not use schedule trigger' >&2
+if grep -F 'pull_request:' "${workflow}" >/dev/null; then
+  echo 'perf workflow must not use pull_request trigger' >&2
   exit 1
 fi
 
-if grep -F 'workflow_dispatch:' "${workflow}" >/dev/null; then
-  echo 'perf workflow must not use workflow_dispatch trigger' >&2
+if grep -F 'push:' "${workflow}" >/dev/null; then
+  echo 'perf workflow must not use push trigger' >&2
   exit 1
 fi
+
 
 grep -F 'runs-on: ubuntu-latest' "${workflow}" >/dev/null || {
   echo 'missing ubuntu-latest runner' >&2
@@ -229,7 +225,7 @@ for marker in \
   'Configure Demo SSH' \
   'COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}' \
   'Upload Perf Results To Demo' \
-  'github.event_name == '\''push'\'' && github.ref == '\''refs/heads/main'\''' \
+  'github.ref == '\''refs/heads/main'\''' \
   'scp \' \
   'ssh \' \
   'minhuw@coquic.minhuw.dev:/tmp/coquic-perf-results.json' \

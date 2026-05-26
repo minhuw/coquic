@@ -63,6 +63,8 @@ required_doc_markers = [
     "COQUIC_DEMO_REMOTE_SSH_KEY",
     "perf-results.json",
     "/opt/coquic-demo/current/site/perf-results.json",
+    "perf-history.json",
+    "/opt/coquic-demo/current/site/perf-history.json",
     "interop-results.json",
     "/opt/coquic-demo/current/site/interop-results.json",
     "COQUIC_DEMO_CERT_CHAIN_PEM",

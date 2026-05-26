@@ -115,7 +115,10 @@ for marker in \
   "coquic-perf-comparison-v1" \
   "coquic performance comparison" \
   "perf-results.json" \
+  "perf-history.json" \
   "Performance Barplots" \
+  "Daily Performance Trends" \
+  "Steward / Language" \
   "quic-go" \
   "quinn" \
   "picoquic" \
@@ -124,6 +127,9 @@ for marker in \
   "quicly" \
   "google-quiche" \
   "TQUIC" \
+  "Cloudflare" \
+  "Microsoft" \
+  "Rust" \
   "throughput_mib_per_s" \
   "bulk_mib_per_s" \
   "rr_requests_per_s" \

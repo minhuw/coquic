@@ -128,6 +128,11 @@ grep -F -- '--json-out .bench-results/perf-results.json' "${workflow}" >/dev/nul
   exit 1
 }
 
+grep -F 'python3 scripts/update-perf-history.py' "${workflow}" >/dev/null || {
+  echo 'missing perf history updater step' >&2
+  exit 1
+}
+
 for marker in \
   '--manifest coquic=.bench-results/coquic/manifest.json' \
   '--manifest quic-go=.bench-results/quic-go/manifest.json' \
@@ -226,10 +231,14 @@ for marker in \
   'COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}' \
   'Upload Perf Results To Demo' \
   'github.ref == '\''refs/heads/main'\''' \
+  'sudo cat /opt/coquic-demo/current/site/perf-history.json' \
+  '--json-out .bench-results/perf-history.json' \
   'scp \' \
   'ssh \' \
   'minhuw@coquic.minhuw.dev:/tmp/coquic-perf-results.json' \
-  '/opt/coquic-demo/current/site/perf-results.json'; do
+  'minhuw@coquic.minhuw.dev:/tmp/coquic-perf-history.json' \
+  '/opt/coquic-demo/current/site/perf-results.json' \
+  '/opt/coquic-demo/current/site/perf-history.json'; do
   if ! grep -F -- "${marker}" "${workflow}" >/dev/null; then
     echo "missing demo perf upload workflow marker: ${marker}" >&2
     exit 1

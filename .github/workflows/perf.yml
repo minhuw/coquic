@@ -235,6 +235,23 @@ jobs:
             echo "missing .bench-results/perf-results.json" >&2
             exit 1
           fi
+          mkdir -p .bench-results/history
+          ssh \
+            -p 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            minhuw@coquic.minhuw.dev \
+            "if sudo test -f /opt/coquic-demo/current/site/perf-history.json; then sudo cat /opt/coquic-demo/current/site/perf-history.json; fi" \
+            > .bench-results/history/perf-history.json
+          python3 scripts/update-perf-history.py \
+            --snapshot .bench-results/perf-results.json \
+            --history .bench-results/history/perf-history.json \
+            --json-out .bench-results/perf-history.json
           scp \
             -P 22 \
             -i "${RUNNER_TEMP}/coquic-demo.key" \
@@ -246,6 +263,17 @@ jobs:
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
             .bench-results/perf-results.json \
             minhuw@coquic.minhuw.dev:/tmp/coquic-perf-results.json
+          scp \
+            -P 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            .bench-results/perf-history.json \
+            minhuw@coquic.minhuw.dev:/tmp/coquic-perf-history.json
           ssh \
             -p 22 \
             -i "${RUNNER_TEMP}/coquic-demo.key" \
@@ -256,7 +284,7 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
             minhuw@coquic.minhuw.dev \
-            "sudo install -m 644 /tmp/coquic-perf-results.json /opt/coquic-demo/current/site/perf-results.json && rm -f /tmp/coquic-perf-results.json"
+            "sudo install -m 644 /tmp/coquic-perf-results.json /opt/coquic-demo/current/site/perf-results.json && sudo install -m 644 /tmp/coquic-perf-history.json /opt/coquic-demo/current/site/perf-history.json && rm -f /tmp/coquic-perf-results.json /tmp/coquic-perf-history.json"
 
       - name: Fail On Perf Matrix Errors
         if: always()

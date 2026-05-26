@@ -17,7 +17,8 @@ This document covers the remote continuous deployment flow for the public
   remote host.
 - `.github/workflows/deploy-demo.yml` is the GitHub Actions entrypoint.
 - `.github/workflows/perf.yml` uploads the latest `perf-results.json` snapshot
-  into the live demo site after `main` branch perf runs.
+  and appends `perf-history.json` into the live demo site after `main` branch
+  perf runs.
 - `.github/workflows/interop.yml` uploads the latest `interop-results.json`
   snapshot into the live demo site after `main` branch interop runs.
 
@@ -48,18 +49,21 @@ The workflow runs on pushes to `main` that touch the demo deployment surface,
 and it also supports manual `workflow_dispatch` runs.
 
 The perf workflow reuses `COQUIC_DEMO_REMOTE_SSH_KEY` to upload
-`.bench-results/perf-results.json` to:
+`.bench-results/perf-results.json` and `.bench-results/perf-history.json` to:
 
 - `/opt/coquic-demo/current/site/perf-results.json`
+- `/opt/coquic-demo/current/site/perf-history.json`
 
 The interop workflow reuses the same secret to upload
 `.interop-results/interop-results.json` to:
 
 - `/opt/coquic-demo/current/site/interop-results.json`
 
-Those files are read by the public performance and interop dashboards. The perf
-and interop workflows run daily or via manual `workflow_dispatch`; only runs on
-the `main` branch publish snapshots to the demo machine.
+Those files are read by the public performance and interop dashboards. The
+performance dashboard uses `perf-results.json` for the latest snapshot and
+`perf-history.json` for daily trends. The perf and interop workflows run daily
+or via manual `workflow_dispatch`; only runs on the `main` branch publish
+snapshots to the demo machine.
 
 ## Remote Host Requirements
 

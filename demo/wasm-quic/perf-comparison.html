@@ -177,6 +177,7 @@
 
       .stat-card,
       .chart-panel,
+      .trend-panel,
       .table-panel,
       .source-panel {
         border: 1px solid rgba(145, 165, 173, 0.24);
@@ -223,6 +224,7 @@
       }
 
       .chart-panel,
+      .trend-panel,
       .table-panel,
       .source-panel {
         min-width: 0;
@@ -249,6 +251,115 @@
         grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 12px;
         padding: 14px;
+      }
+
+      .trend-panel {
+        overflow: hidden;
+      }
+
+      .trend-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+        padding: 14px;
+      }
+
+      .trend-chart {
+        min-width: 0;
+        padding: 12px;
+        border: 1px solid rgba(145, 165, 173, 0.16);
+        border-radius: 7px;
+        background: rgba(5, 14, 18, 0.26);
+      }
+
+      .trend-head {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+
+      .trend-head h3 {
+        color: var(--ink);
+        font-size: 13px;
+        line-height: 1.2;
+        font-weight: 850;
+      }
+
+      .trend-head p {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+
+      .trend-svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        min-height: 210px;
+      }
+
+      .trend-grid-line {
+        stroke: rgba(145, 165, 173, 0.16);
+        stroke-width: 1;
+      }
+
+      .trend-axis-label {
+        fill: var(--muted);
+        font-family: var(--mono);
+        font-size: 10px;
+      }
+
+      .trend-line {
+        fill: none;
+        stroke-width: 2.2;
+        stroke-linejoin: round;
+        stroke-linecap: round;
+      }
+
+      .trend-point {
+        stroke: rgba(9, 16, 21, 0.92);
+        stroke-width: 1.2;
+      }
+
+      .trend-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+        margin-top: 10px;
+      }
+
+      .trend-legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 26px;
+        padding: 0 8px;
+        border: 1px solid rgba(145, 165, 173, 0.18);
+        border-radius: 999px;
+        background: rgba(9, 16, 21, 0.42);
+      }
+
+      .trend-legend i {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--legend-color);
+      }
+
+      .trend-legend b,
+      .trend-legend small {
+        font-family: var(--mono);
+        font-size: 10px;
+      }
+
+      .trend-legend b {
+        color: var(--ink);
+      }
+
+      .trend-legend small {
+        color: var(--muted);
       }
 
       .plot {
@@ -405,15 +516,23 @@
         gap: 4px;
       }
 
-      .impl-cell strong {
+      .impl-cell strong,
+      .meta-cell strong {
         color: var(--ink);
         font-size: 13px;
       }
 
-      .impl-cell span {
+      .impl-cell span,
+      .meta-cell span {
         color: var(--muted);
         font-family: var(--mono);
         font-size: 11px;
+      }
+
+      .meta-cell {
+        display: grid;
+        gap: 4px;
+        min-width: 132px;
       }
 
       .pill {
@@ -530,6 +649,10 @@
           flex-direction: column;
         }
 
+        .trend-head {
+          flex-direction: column;
+        }
+
         .bar-row {
           grid-template-columns: 1fr;
           align-items: start;
@@ -572,6 +695,16 @@
           <div class="plot-grid" id="plot-grid"></div>
         </div>
 
+        <div class="trend-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Daily Performance Trends</h2>
+              <p id="history-source-label">waiting for perf-history.json</p>
+            </div>
+          </div>
+          <div class="trend-grid" id="trend-grid"></div>
+        </div>
+
         <div class="table-panel">
           <div class="panel-head">
             <div>
@@ -584,6 +717,7 @@
               <thead>
                 <tr>
                   <th>Implementation</th>
+                  <th>Steward / Language</th>
                   <th>Pair</th>
                   <th>CC</th>
                   <th>Status</th>

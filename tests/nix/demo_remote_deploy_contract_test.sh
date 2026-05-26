@@ -176,6 +176,7 @@ same_release_backup_restore_markers = [
     "rollback: restore same-release /opt/coquic-demo/current/h3-server",
     "rollback: restore same-release /opt/coquic-demo/current/site",
     "/opt/coquic-demo/current/site/perf-results.json",
+    "/opt/coquic-demo/current/site/perf-history.json",
     "/opt/coquic-demo/current/site/interop-results.json",
 ]
 for marker in same_release_backup_restore_markers:

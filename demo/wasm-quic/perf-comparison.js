@@ -110,22 +110,42 @@ const colors = {
 const implementationOrder = ["coquic", "quic-go", "quinn", "picoquic", "msquic", "quiche", "quicly", "google-quiche", "tquic", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
 
 const implementationMeta = {
-  coquic: { company: "CoQUIC", language: "C++" },
-  "quic-go": { company: "quic-go", language: "Go" },
-  quinn: { company: "Quinn", language: "Rust" },
-  picoquic: { company: "Private Octopus", language: "C" },
-  msquic: { company: "Microsoft", language: "C" },
-  quiche: { company: "Cloudflare", language: "Rust" },
-  quicly: { company: "H2O Project", language: "C" },
-  "google-quiche": { company: "Google", language: "C++" },
-  tquic: { company: "Tencent", language: "Rust" },
-  mvfst: { company: "Meta", language: "C++" },
-  "s2n-quic": { company: "AWS", language: "Rust" },
-  xquic: { company: "Alibaba", language: "C" },
-  aioquic: { company: "aioquic", language: "Python" },
-  ngtcp2: { company: "ngtcp2", language: "C" },
-  lsquic: { company: "LiteSpeed", language: "C" },
-  neqo: { company: "Mozilla", language: "Rust" },
+  coquic: { company: "CoQUIC", companyCode: "CQ", language: "C++", languageCode: "C++" },
+  "quic-go": { company: "quic-go", companyCode: "QG", language: "Go", languageCode: "Go" },
+  quinn: { company: "Quinn", companyCode: "QN", language: "Rust", languageCode: "Rs" },
+  picoquic: { company: "Private Octopus", companyCode: "PO", language: "C", languageCode: "C" },
+  msquic: { company: "Microsoft", companyCode: "MS", language: "C", languageCode: "C" },
+  quiche: { company: "Cloudflare", companyCode: "CF", language: "Rust", languageCode: "Rs" },
+  quicly: { company: "H2O Project", companyCode: "H2", language: "C", languageCode: "C" },
+  "google-quiche": { company: "Google", companyCode: "G", language: "C++", languageCode: "C++" },
+  tquic: { company: "Tencent", companyCode: "TC", language: "Rust", languageCode: "Rs" },
+  mvfst: { company: "Meta", companyCode: "M", language: "C++", languageCode: "C++" },
+  "s2n-quic": { company: "AWS", companyCode: "AWS", language: "Rust", languageCode: "Rs" },
+  xquic: { company: "Alibaba", companyCode: "A", language: "C", languageCode: "C" },
+  aioquic: { company: "aioquic", companyCode: "AQ", language: "Python", languageCode: "Py" },
+  ngtcp2: { company: "ngtcp2", companyCode: "NG", language: "C", languageCode: "C" },
+  lsquic: { company: "LiteSpeed", companyCode: "LS", language: "C", languageCode: "C" },
+  neqo: { company: "Mozilla", companyCode: "MZ", language: "Rust", languageCode: "Rs" },
+};
+
+const iconPaths = {
+  company: [
+    { name: "path", attrs: { d: "M4 21V7.5L12 3l8 4.5V21" } },
+    { name: "path", attrs: { d: "M8 21v-8h8v8" } },
+    { name: "path", attrs: { d: "M8 9h.01" } },
+    { name: "path", attrs: { d: "M12 9h.01" } },
+    { name: "path", attrs: { d: "M16 9h.01" } },
+  ],
+  code: [
+    { name: "path", attrs: { d: "m8 9-4 3 4 3" } },
+    { name: "path", attrs: { d: "m16 9 4 3-4 3" } },
+    { name: "path", attrs: { d: "m14 5-4 14" } },
+  ],
+  warning: [
+    { name: "path", attrs: { d: "M12 3 2.8 19h18.4L12 3Z" } },
+    { name: "path", attrs: { d: "M12 8v5" } },
+    { name: "path", attrs: { d: "M12 16.5h.01" } },
+  ],
 };
 
 const modeConfig = {
@@ -165,7 +185,43 @@ function formatNumber(value, decimals = 3) {
 }
 
 function implementationInfo(implementation) {
-  return implementationMeta[implementation] || { company: "unknown", language: "unknown" };
+  return implementationMeta[implementation] || { company: "unknown", companyCode: "?", language: "unknown", languageCode: "?" };
+}
+
+function makeIcon(name) {
+  const svg = makeSvgElement("svg");
+  svg.setAttribute("class", "meta-icon-svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const part of iconPaths[name] || []) {
+    const node = makeSvgElement(part.name);
+    for (const [key, value] of Object.entries(part.attrs)) {
+      node.setAttribute(key, value);
+    }
+    svg.append(node);
+  }
+  return svg;
+}
+
+function renderMetaLine(iconName, code, label) {
+  const line = document.createElement("span");
+  line.className = `meta-line ${iconName}`;
+
+  const icon = document.createElement("span");
+  icon.className = "meta-icon";
+  icon.append(makeIcon(iconName));
+
+  const codeLabel = document.createElement("b");
+  codeLabel.className = "meta-code";
+  codeLabel.textContent = code;
+
+  const text = document.createElement("span");
+  text.className = "meta-label";
+  text.textContent = label;
+
+  line.append(icon, codeLabel, text);
+  return line;
 }
 
 function formatDateLabel(date) {
@@ -528,8 +584,8 @@ function renderTable() {
   document.getElementById("comparison-body").replaceChildren(
     ...rows.map((row) => {
       const tr = document.createElement("tr");
-      const statusClass = row.status === "ok" && !row.skipped_setup_errors ? "ok" : "warn";
-      const statusText = row.skipped_setup_errors ? `${row.status}, ${row.skipped_setup_errors} skipped` : row.status;
+      const setupSkips = Number(row.skipped_setup_errors || 0);
+      const statusClass = row.status === "ok" ? "ok" : "warn";
 
       const implementation = document.createElement("td");
       const implCell = document.createElement("div");
@@ -545,11 +601,7 @@ function renderTable() {
       const metadata = document.createElement("td");
       const metadataCell = document.createElement("div");
       metadataCell.className = "meta-cell";
-      const company = document.createElement("strong");
-      company.textContent = info.company;
-      const language = document.createElement("span");
-      language.textContent = info.language;
-      metadataCell.append(company, language);
+      metadataCell.append(renderMetaLine("company", info.companyCode, info.company), renderMetaLine("code", info.languageCode, info.language));
       metadata.append(metadataCell);
 
       const pair = document.createElement("td");
@@ -562,10 +614,20 @@ function renderTable() {
       cc.append(ccPill);
 
       const status = document.createElement("td");
+      const statusCell = document.createElement("div");
+      statusCell.className = "status-cell";
       const statusPill = document.createElement("span");
       statusPill.className = `pill ${statusClass}`;
-      statusPill.textContent = statusText;
-      status.append(statusPill);
+      statusPill.textContent = row.status;
+      statusCell.append(statusPill);
+      if (setupSkips > 0) {
+        const setupDetail = document.createElement("span");
+        setupDetail.className = "status-detail";
+        setupDetail.title = "Individual timed CRR connection setup attempts skipped inside this completed benchmark run.";
+        setupDetail.append(makeIcon("warning"), document.createTextNode(`${setupSkips} setup skips`));
+        statusCell.append(setupDetail);
+      }
+      status.append(statusCell);
 
       const bulkMib = document.createElement("td");
       bulkMib.className = "metric";

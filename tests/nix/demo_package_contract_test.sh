@@ -119,6 +119,9 @@ for marker in \
   "Performance Barplots" \
   "Daily Performance Trends" \
   "Steward / Language" \
+  "companyCode" \
+  "languageCode" \
+  "setup skips" \
   "quic-go" \
   "quinn" \
   "picoquic" \

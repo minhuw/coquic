@@ -756,22 +756,25 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
     }
 
     void close() {
-        if (!client_) {
-            return;
-        }
-        std::vector<quic::StreamId> streams;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (const auto &[id, _] : streams_) {
-                streams.push_back(id);
+        evb_->runInEventBaseThreadAndWait([this] {
+            if (!client_) {
+                return;
             }
-        }
-        auto client = std::move(client_);
-        evb_->runInEventBaseThreadAndWait([client, streams = std::move(streams)] {
+            std::vector<quic::StreamId> streams;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (const auto &[id, _] : streams_) {
+                    streams.push_back(id);
+                }
+                streams_.clear();
+                connected_ = false;
+            }
+            auto client = std::move(client_);
             client->setConnectionSetupCallback(nullptr);
             client->setConnectionCallback(nullptr);
             for (auto id : streams) {
                 client->setReadCallback(id, nullptr, quic::none);
+                client->unregisterStreamWriteCallback(id);
             }
             client->closeNow(quic::Optional<quic::QuicError>());
         });

@@ -6,6 +6,7 @@ script="${repo_root}/bench/run-host-matrix.sh"
 flake="${repo_root}/flake.nix"
 ignore_file="${repo_root}/.gitignore"
 msquic_perf="${repo_root}/bench/msquic-perf/src/main.rs"
+mvfst_perf="${repo_root}/bench/mvfst-perf/mvfst-perf.cpp"
 
 [ -f "${script}" ] || {
   echo "missing harness script: ${script}" >&2
@@ -14,6 +15,11 @@ msquic_perf="${repo_root}/bench/msquic-perf/src/main.rs"
 
 [ -f "${msquic_perf}" ] || {
   echo "missing MSQUIC perf client: ${msquic_perf}" >&2
+  exit 1
+}
+
+[ -f "${mvfst_perf}" ] || {
+  echo "missing mvfst perf client: ${mvfst_perf}" >&2
   exit 1
 }
 
@@ -216,6 +222,11 @@ if grep -F -- 'std::mem::forget(connection)' "${msquic_perf}" >/dev/null; then
   echo 'MSQUIC CRR must drop completed connections to avoid exhausting file descriptors' >&2
   exit 1
 fi
+
+grep -F -- 'client->unregisterStreamWriteCallback(id)' "${mvfst_perf}" >/dev/null || {
+  echo 'mvfst teardown must unregister pending stream write callbacks before closing' >&2
+  exit 1
+}
 
 if grep -F -- 'apps.${system}.${binary_attr}.program' "${script}" >/dev/null; then
   echo 'unexpected app fallback in harness script' >&2

@@ -4,35 +4,12 @@ const fallbackInteropSnapshot = {
   event_name: "local",
   commit: "awaiting-ci-results",
   sources: [
-    {
-      label: "quic-go",
-      path: "interop-results.json",
-      missing: true,
-    },
-    {
-      label: "picoquic",
-      path: "interop-results.json",
-      missing: true,
-    },
-    {
-      label: "quinn",
-      path: "interop-results.json",
-      missing: true,
-    },
-    {
-      label: "self",
-      path: "interop-results.json",
-      missing: true,
-    },
+    { label: "quic-go", path: "interop-results.json", missing: true },
+    { label: "picoquic", path: "interop-results.json", missing: true },
+    { label: "quinn", path: "interop-results.json", missing: true },
+    { label: "self", path: "interop-results.json", missing: true },
   ],
   rows: [],
-};
-
-const resultColors = {
-  succeeded: "#6be0a3",
-  failed: "#ff786d",
-  unsupported: "#f5c451",
-  unknown: "#91a5ad",
 };
 
 const caseOrder = [
@@ -64,20 +41,39 @@ const caseOrder = [
 let activeSnapshot = fallbackInteropSnapshot;
 let dataSource = "waiting for interop-results.json";
 
-function formatNumber(value) {
-  return Number(value || 0).toLocaleString("en-US");
+function githubAvatar(owner) {
+  return `https://github.com/${owner}.png?size=64`;
 }
 
+function vendorFavicon(domain) {
+  return `https://www.google.com/s2/favicons?sz=64&domain=${domain}`;
+}
+
+const implementationMeta = {
+  coquic: { name: "CoQUIC", code: "CQ", avatar: githubAvatar("minhuw") },
+  "quic-go": { name: "quic-go", code: "QG", avatar: githubAvatar("quic-go") },
+  quinn: { name: "quinn", code: "QN", avatar: githubAvatar("quinn-rs") },
+  picoquic: { name: "picoquic", code: "PO", avatar: githubAvatar("private-octopus") },
+  msquic: { name: "msquic", code: "MS", avatar: vendorFavicon("microsoft.com") },
+  quiche: { name: "quiche", code: "CF", avatar: vendorFavicon("cloudflare.com") },
+  quicly: { name: "quicly", code: "H2", avatar: githubAvatar("h2o") },
+  "google-quiche": { name: "google-quiche", code: "G", avatar: vendorFavicon("google.com") },
+  tquic: { name: "tquic", code: "TC", avatar: vendorFavicon("tencent.com") },
+  mvfst: { name: "mvfst", code: "M", avatar: vendorFavicon("meta.com") },
+  "s2n-quic": { name: "s2n-quic", code: "AWS", avatar: vendorFavicon("aws.amazon.com") },
+  xquic: { name: "xquic", code: "A", avatar: vendorFavicon("alibabacloud.com") },
+  aioquic: { name: "aioquic", code: "AQ", avatar: githubAvatar("aiortc") },
+  ngtcp2: { name: "ngtcp2", code: "NG", avatar: githubAvatar("ngtcp2") },
+  lsquic: { name: "lsquic", code: "LS", avatar: vendorFavicon("litespeedtech.com") },
+  neqo: { name: "neqo", code: "MZ", avatar: vendorFavicon("mozilla.org") },
+};
+
 function sourceRows() {
-  return activeSnapshot.sources.filter((source) => !source.missing);
+  return (activeSnapshot.sources || []).filter((source) => !source.missing && source.server && source.client);
 }
 
 function loadedRows() {
   return activeSnapshot.rows || [];
-}
-
-function statusForRow(row) {
-  return resultColors[row.result] ? row.result : "unknown";
 }
 
 function caseSortKey(name) {
@@ -85,258 +81,153 @@ function caseSortKey(name) {
   return index === -1 ? caseOrder.length : index;
 }
 
-function peerLabel(source) {
-  if (!source || source.missing) {
-    return "missing";
+function implementationOrder(names) {
+  const preferred = ["coquic", "quic-go", "picoquic", "quinn", "msquic", "quiche", "ngtcp2", "lsquic", "mvfst"];
+  return [...names].sort((left, right) => {
+    const leftIndex = preferred.indexOf(left);
+    const rightIndex = preferred.indexOf(right);
+    return (leftIndex === -1 ? preferred.length : leftIndex) - (rightIndex === -1 ? preferred.length : rightIndex) || left.localeCompare(right);
+  });
+}
+
+function sourceKey(server, client) {
+  return `${server}->${client}`;
+}
+
+function laneSortKey(source) {
+  const peer = source.server === "coquic" ? source.client : source.server;
+  const direction = source.server === "coquic" ? 0 : 1;
+  const orderedPeers = implementationOrder(new Set(sourceRows().map((row) => (row.server === "coquic" ? row.client : row.server))));
+  const peerIndex = orderedPeers.indexOf(peer);
+  return [peerIndex === -1 ? orderedPeers.length : peerIndex, direction, sourceKey(source.server, source.client)];
+}
+
+function resultToken(result) {
+  if (result === "succeeded") {
+    return "pass";
   }
-  if (source.server === "coquic" && source.client === "coquic") {
-    return "coquic self";
+  if (result === "failed") {
+    return "fail";
   }
-  return source.peer || `${source.server} / ${source.client}`;
+  if (result === "unsupported") {
+    return "skip";
+  }
+  return "-";
 }
 
-function columnLabel(source) {
-  const direction = source.direction ? ` ${source.direction}` : "";
-  return `${peerLabel(source)}${direction}`;
+function resultClass(result) {
+  if (result === "succeeded" || result === "failed" || result === "unsupported") {
+    return result;
+  }
+  return "unknown";
 }
 
-function renderSnapshot() {
-  const rows = loadedRows();
-  const total = rows.length;
-  const succeeded = rows.filter((row) => row.result === "succeeded").length;
-  const failed = rows.filter((row) => row.result === "failed").length;
-  const unsupported = rows.filter((row) => row.result === "unsupported").length;
-  const peers = new Set(sourceRows().map((source) => peerLabel(source)));
-  const cards = [
-    {
-      label: "cases succeeded",
-      value: `${formatNumber(succeeded)} / ${formatNumber(total)}`,
-      detail: total ? "official runner snapshot" : "waiting for CI interop data",
-    },
-    {
-      label: "peer lanes",
-      value: formatNumber(peers.size),
-      detail: peers.size ? [...peers].join(", ") : "quic-go, picoquic, quinn, self",
-    },
-    {
-      label: "failed cases",
-      value: formatNumber(failed),
-      detail: failed ? "inspect the matrix below" : "no loaded failures",
-    },
-    {
-      label: "unsupported",
-      value: formatNumber(unsupported),
-      detail: unsupported ? "reported by the official runner" : "none in loaded data",
-    },
-  ];
+function renderParticipant(name) {
+  const meta = implementationMeta[name] || { name, code: name.slice(0, 2).toUpperCase(), avatar: "" };
+  const chip = document.createElement("span");
+  chip.className = `participant-chip${name === "coquic" ? " coquic" : ""}`;
 
-  document.getElementById("snapshot-grid").replaceChildren(
-    ...cards.map((card) => {
-      const element = document.createElement("article");
-      element.className = "stat-card";
-
-      const label = document.createElement("span");
-      label.textContent = card.label;
-      const value = document.createElement("strong");
-      value.textContent = card.value;
-      const detail = document.createElement("small");
-      detail.textContent = card.detail;
-
-      element.append(label, value, detail);
-      return element;
-    }),
-  );
-}
-
-function renderPeerCards() {
-  const sources = sourceRows();
-  const peerGrid = document.getElementById("peer-grid");
-  if (!sources.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "No interop sources loaded. The dashboard will use interop-results.json when the interop workflow uploads it.";
-    peerGrid.replaceChildren(empty);
-    return;
+  if (meta.avatar) {
+    const image = document.createElement("img");
+    image.src = meta.avatar;
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.referrerPolicy = "no-referrer";
+    image.addEventListener("error", () => image.remove(), { once: true });
+    chip.append(image);
   }
 
-  peerGrid.replaceChildren(
-    ...sources.map((source) => {
-      const total = Number(source.total || 0);
-      const succeeded = Number(source.succeeded || 0);
-      const percent = total > 0 ? Math.round((succeeded / total) * 100) : 0;
-      const element = document.createElement("article");
-      element.className = "peer-card";
-
-      const header = document.createElement("div");
-      header.className = "peer-head";
-      const title = document.createElement("strong");
-      title.textContent = peerLabel(source);
-      const direction = document.createElement("span");
-      direction.className = "pill";
-      direction.textContent = source.direction || "unknown";
-      header.append(title, direction);
-
-      const score = document.createElement("div");
-      score.className = "score";
-      const scoreText = document.createElement("span");
-      scoreText.textContent = `${succeeded}/${total}`;
-      const scoreMeta = document.createElement("small");
-      scoreMeta.textContent = `${percent}% succeeded`;
-      score.append(scoreText, scoreMeta);
-
-      const bar = document.createElement("div");
-      bar.className = "result-track";
-      const fill = document.createElement("div");
-      fill.className = "result-fill";
-      fill.style.setProperty("--bar-width", `${percent}%`);
-      fill.style.setProperty("--bar-color", failedColor(source));
-      bar.append(fill);
-
-      const detail = document.createElement("p");
-      detail.textContent = `${source.server} -> ${source.client}${source.quic_version ? `, ${source.quic_version}` : ""}`;
-
-      element.append(header, score, bar, detail);
-      return element;
-    }),
-  );
-}
-
-function failedColor(source) {
-  if (Number(source.failed || 0) > 0 || Number(source.other || 0) > 0) {
-    return resultColors.failed;
-  }
-  if (Number(source.unsupported || 0) > 0) {
-    return resultColors.unsupported;
-  }
-  return resultColors.succeeded;
-}
-
-function testNames() {
-  const names = new Set(loadedRows().map((row) => row.name));
-  return [...names].sort((left, right) => caseSortKey(left) - caseSortKey(right) || left.localeCompare(right));
-}
-
-function sourceKey(source) {
-  return `${source.label}:${source.server}:${source.client}`;
-}
-
-function rowKey(row) {
-  return `${row.label}:${row.server}:${row.client}`;
+  const fallback = document.createElement("span");
+  fallback.className = "participant-fallback";
+  fallback.textContent = meta.code;
+  const label = document.createElement("strong");
+  label.textContent = meta.name;
+  chip.append(fallback, label);
+  return chip;
 }
 
 function renderMatrix() {
-  const sources = sourceRows();
-  const tests = testNames();
-  const body = document.getElementById("matrix-body");
+  const sources = sourceRows().filter((source) => source.server === "coquic" || source.client === "coquic");
+  const rows = loadedRows().filter((row) => row.server === "coquic" || row.client === "coquic");
   const head = document.getElementById("matrix-head");
+  const body = document.getElementById("matrix-body");
+  const dataSourceLabel = document.getElementById("data-source-label");
+  if (dataSourceLabel) {
+    dataSourceLabel.textContent = dataSource;
+  }
+  if (!head || !body) {
+    return;
+  }
 
-  head.replaceChildren();
+  const tests = [...new Set(rows.map((row) => row.name))].sort((left, right) => caseSortKey(left) - caseSortKey(right) || left.localeCompare(right));
+  const rowByLaneAndTest = new Map(rows.map((row) => [`${sourceKey(row.server, row.client)}:${row.name}`, row]));
+  const lanes = [...sources].sort((left, right) => {
+    const leftKey = laneSortKey(left);
+    const rightKey = laneSortKey(right);
+    return leftKey[0] - rightKey[0] || leftKey[1] - rightKey[1] || leftKey[2].localeCompare(rightKey[2]);
+  });
+
   const headRow = document.createElement("tr");
-  const testHeader = document.createElement("th");
-  testHeader.textContent = "Case";
-  headRow.append(testHeader);
-  for (const source of sources) {
+  const clientHeader = document.createElement("th");
+  clientHeader.className = "corner";
+  clientHeader.textContent = "Client";
+  headRow.append(clientHeader);
+  const serverHeader = document.createElement("th");
+  serverHeader.className = "server-column";
+  serverHeader.textContent = "Server";
+  headRow.append(serverHeader);
+  for (const test of tests) {
     const th = document.createElement("th");
-    th.textContent = columnLabel(source);
+    th.title = test;
+    th.textContent = test;
     headRow.append(th);
   }
-  head.append(headRow);
+  head.replaceChildren(headRow);
 
-  if (!sources.length || !tests.length) {
+  if (!lanes.length || !tests.length) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
     td.className = "empty-cell";
-    td.colSpan = Math.max(sources.length + 1, 1);
-    td.textContent = "No interop rows loaded.";
-    tr.append(td);
-    body.replaceChildren(tr);
-    return;
-  }
-
-  const bySourceAndTest = new Map();
-  for (const row of loadedRows()) {
-    bySourceAndTest.set(`${rowKey(row)}:${row.name}`, row);
-  }
-
-  body.replaceChildren(
-    ...tests.map((test) => {
-      const tr = document.createElement("tr");
-      const name = document.createElement("td");
-      name.className = "case-name";
-      name.textContent = test;
-      tr.append(name);
-
-      for (const source of sources) {
-        const row = bySourceAndTest.get(`${sourceKey(source)}:${test}`);
-        const td = document.createElement("td");
-        const pill = document.createElement("span");
-        const status = row ? statusForRow(row) : "unknown";
-        pill.className = `result-pill ${status}`;
-        pill.textContent = row ? row.result : "-";
-        if (row && row.details) {
-          pill.title = row.details;
-        }
-        td.append(pill);
-        tr.append(td);
-      }
-      return tr;
-    }),
-  );
-}
-
-function renderFailures() {
-  const notable = loadedRows().filter((row) => row.result !== "succeeded");
-  const body = document.getElementById("failure-body");
-  if (!notable.length) {
-    const tr = document.createElement("tr");
-    const td = document.createElement("td");
-    td.className = "empty-cell";
-    td.colSpan = 5;
-    td.textContent = loadedRows().length ? "No failed or unsupported cases in the loaded snapshot." : "No interop rows loaded.";
+    td.colSpan = Math.max(tests.length + 1, 1);
+    td.textContent = "No CoQUIC interop rows loaded.";
     tr.append(td);
     body.replaceChildren(tr);
     return;
   }
 
   body.replaceChildren(
-    ...notable.map((row) => {
-      const tr = document.createElement("tr");
-      for (const value of [row.peer, row.direction, row.name, row.result, row.details || "-"]) {
+    ...lanes.map((source) => {
+    const tr = document.createElement("tr");
+      const clientCell = document.createElement("th");
+      clientCell.className = "participant-name";
+      clientCell.scope = "row";
+      clientCell.append(renderParticipant(source.client));
+      tr.append(clientCell);
+
+      const serverCell = document.createElement("td");
+      serverCell.className = "server-column";
+      serverCell.append(renderParticipant(source.server));
+      tr.append(serverCell);
+
+      for (const test of tests) {
         const td = document.createElement("td");
-        td.textContent = value;
+        const row = rowByLaneAndTest.get(`${sourceKey(source.server, source.client)}:${test}`);
+        const result = row ? row.result : "unknown";
+        const cell = document.createElement("span");
+        cell.className = `test-cell ${resultClass(result)}`;
+        cell.textContent = resultToken(result);
+        cell.title = row ? `${source.server} -> ${source.client}: ${test} ${row.result}${row.details ? ` (${row.details})` : ""}` : `${source.server} -> ${source.client}: ${test} not reported`;
+        td.append(cell);
         tr.append(td);
       }
       return tr;
-    }),
-  );
-}
-
-function renderSources() {
-  document.getElementById("data-source-label").textContent = dataSource;
-  document.getElementById("source-list").replaceChildren(
-    ...activeSnapshot.sources.map((source) => {
-      const element = document.createElement("div");
-      element.className = "source-item";
-      const name = document.createElement("strong");
-      name.textContent = source.label;
-      const pair = document.createElement("span");
-      pair.textContent = source.missing
-        ? "missing result"
-        : `${source.server} -> ${source.client}, ${source.succeeded}/${source.total} succeeded`;
-      const sourcePath = document.createElement("span");
-      sourcePath.textContent = source.path;
-      element.append(name, pair, sourcePath);
-      return element;
     }),
   );
 }
 
 function renderAll() {
-  renderSnapshot();
-  renderPeerCards();
   renderMatrix();
-  renderFailures();
-  renderSources();
 }
 
 async function loadLiveSnapshot() {

@@ -1483,21 +1483,23 @@
         }
       }
     </style>
+    <link rel="stylesheet" href="./demo-theme.css">
   </head>
   <body>
     <main>
+      <nav class="top-nav" aria-label="Demo views">
+        <a class="top-nav-home" href="./index.html">Home</a>
+        <span class="top-nav-links">
+          <a href="./workbench.html" aria-current="page">Workbench</a>
+          <a href="./perf-comparison.html">Performance</a>
+          <a href="./interop-results.html">Interop</a>
+        </span>
+      </nav>
       <header>
         <div>
           <span class="eyebrow">wasm QUIC laboratory</span>
           <h1>coquic protocol workbench</h1>
-          <p class="subhead">Run two QUIC endpoints inside one browser process, relay datagrams through shared memory, and inspect each packet like a compact protocol analyzer.</p>
         </div>
-        <nav class="header-nav" aria-label="Demo views">
-          <a href="./index.html">Home</a>
-          <a href="./workbench.html" aria-current="page">Workbench</a>
-          <a href="./perf-comparison.html">Performance</a>
-          <a href="./interop-results.html">Interop</a>
-        </nav>
       </header>
 
       <section class="packet-stage" aria-label="QUIC packet exchange">

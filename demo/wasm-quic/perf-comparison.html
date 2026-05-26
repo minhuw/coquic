@@ -246,6 +246,54 @@
         font-size: 11px;
       }
 
+      .source-time {
+        position: relative;
+        display: inline-grid;
+        flex: 0 0 auto;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        border: 1px solid rgba(145, 165, 173, 0.24);
+        border-radius: 7px;
+        color: var(--muted);
+        background: rgba(5, 14, 18, 0.26);
+      }
+
+      .source-time svg {
+        width: 16px;
+        height: 16px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .source-time::after {
+        content: attr(data-tooltip);
+        position: absolute;
+        right: 0;
+        bottom: calc(100% + 8px);
+        z-index: 2;
+        display: none;
+        min-width: max-content;
+        padding: 6px 8px;
+        border: 1px solid rgba(145, 165, 173, 0.24);
+        border-radius: 7px;
+        color: var(--ink);
+        background: var(--surface);
+        box-shadow: 0 12px 34px rgba(0, 0, 0, 0.16);
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 800;
+        line-height: 1;
+      }
+
+      .source-time:hover::after,
+      .source-time:focus-visible::after {
+        display: block;
+      }
+
       .plot-grid {
         display: grid;
         grid-template-columns: 176px minmax(0, 1fr);
@@ -324,6 +372,7 @@
       }
 
       .trend-chart {
+        position: relative;
         min-width: 0;
         padding: 12px;
         border: 1px solid rgba(145, 165, 173, 0.16);
@@ -380,6 +429,50 @@
       .trend-point {
         stroke: rgba(9, 16, 21, 0.92);
         stroke-width: 1.2;
+      }
+
+      .trend-hit-point {
+        fill: transparent;
+        cursor: pointer;
+        outline: none;
+      }
+
+      .trend-hover-plane {
+        fill: transparent;
+        cursor: crosshair;
+        pointer-events: all;
+      }
+
+      .trend-tooltip {
+        position: absolute;
+        z-index: 4;
+        display: none;
+        min-width: max-content;
+        max-width: 220px;
+        padding: 8px 10px;
+        border: 1px solid rgba(145, 165, 173, 0.24);
+        border-radius: 7px;
+        background: var(--surface);
+        color: var(--ink);
+        box-shadow: 0 16px 44px rgba(0, 0, 0, 0.18);
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1.35;
+        pointer-events: none;
+      }
+
+      .trend-tooltip.visible {
+        display: grid;
+        gap: 3px;
+      }
+
+      .trend-tooltip strong {
+        color: var(--ink);
+        font-size: 12px;
+      }
+
+      .trend-tooltip span {
+        color: var(--muted);
       }
 
       .trend-legend {
@@ -946,32 +1039,37 @@
         }
       }
     </style>
+    <link rel="stylesheet" href="./demo-theme.css">
   </head>
   <body>
     <main>
+      <nav class="top-nav" aria-label="Demo views">
+        <a class="top-nav-home" href="./index.html">Home</a>
+        <span class="top-nav-links">
+          <a href="./workbench.html">Workbench</a>
+          <a href="./perf-comparison.html" aria-current="page">Performance</a>
+          <a href="./interop-results.html">Interop</a>
+        </span>
+      </nav>
       <header>
         <div>
           <span class="eyebrow">QUIC performance</span>
           <h1>coquic performance comparison</h1>
-          <p class="subhead">CI snapshot across CoQUIC congestion controls and paired quic-go, quinn, picoquic, MSQUIC, quiche, quicly, Google QUICHE, TQUIC, mvfst, s2n-quic, xquic, aioquic, ngtcp2, LSQUIC, and Neqo baselines.</p>
         </div>
-        <nav class="header-nav" aria-label="Demo views">
-          <a href="./index.html">Home</a>
-          <a href="./workbench.html">Workbench</a>
-          <a href="./perf-comparison.html" aria-current="page">Performance</a>
-          <a href="./interop-results.html">Interop</a>
-        </nav>
       </header>
-
-      <section class="snapshot-grid" id="snapshot-grid" aria-label="Performance snapshot"></section>
 
       <section class="comparison-shell" aria-label="Performance comparison">
         <div class="chart-panel">
           <div class="panel-head">
             <div>
               <h2>Performance Barplots</h2>
-              <p id="data-source-label">waiting for perf-results.json</p>
             </div>
+            <span class="source-time" id="data-source-label" tabindex="0" title="waiting" data-tooltip="waiting" aria-label="Benchmark data time: waiting">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M12 7v5l3 2"></path>
+              </svg>
+            </span>
           </div>
           <div class="plot-grid" id="plot-grid"></div>
         </div>
@@ -985,43 +1083,8 @@
           </div>
           <div class="trend-grid" id="trend-grid"></div>
         </div>
-
-        <div class="table-panel">
-          <div class="panel-head">
-            <div>
-              <h2>Implementation Matrix</h2>
-              <p>Throughput and request rate by benchmark mode</p>
-            </div>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Implementation</th>
-                  <th>Steward / Language</th>
-                  <th>Pair</th>
-                  <th>Status</th>
-                  <th class="metric">Bulk<br>MiB/s</th>
-                  <th class="metric">Bulk<br>Gbit/s</th>
-                  <th class="metric">RR<br>req/s</th>
-                  <th class="metric">CRR<br>req/s</th>
-                </tr>
-              </thead>
-              <tbody id="comparison-body"></tbody>
-            </table>
-          </div>
-        </div>
       </section>
 
-      <section class="source-panel" aria-label="Benchmark sources">
-        <div class="panel-head">
-          <div>
-            <h2>Benchmark Sources</h2>
-            <p>workflow manifests included in the uploaded result payload</p>
-          </div>
-        </div>
-        <div class="source-list" id="source-list"></div>
-      </section>
     </main>
     <script src="./perf-comparison.js"></script>
   </body>

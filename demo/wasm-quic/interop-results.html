@@ -6,513 +6,289 @@
     <meta name="coquic-interop-marker" content="coquic-interop-results-v1">
     <title>coquic interop results</title>
     <style>
-      :root {
-        color-scheme: dark;
-        --bg: #091015;
-        --surface: #0f1a21;
-        --surface-2: #14232c;
-        --ink: #edf7f7;
-        --muted: #91a5ad;
-        --soft: #c3d4d8;
-        --line: #253943;
-        --client: #24b5a6;
-        --client-ink: #9ff4e8;
-        --server: #e39a3b;
-        --packet: #63a6ff;
-        --danger: #ff786d;
-        --warning: #f5c451;
-        --ok: #6be0a3;
-        --shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
-        --radius: 8px;
-        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-      }
-
       * {
         box-sizing: border-box;
       }
 
       html {
         min-width: 320px;
-        background: var(--bg);
       }
 
       body {
         margin: 0;
         min-height: 100vh;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        color: var(--ink);
-        background: linear-gradient(180deg, #0b141a 0%, #091015 48%, #071014 100%);
-        letter-spacing: 0;
-      }
-
-      body::before {
-        content: "";
-        position: fixed;
-        inset: 0;
-        pointer-events: none;
-        background-image:
-          linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
-        background-size: 44px 44px;
-        mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.95), transparent 78%);
-      }
-
-      main {
-        position: relative;
-        width: min(100%, 1380px);
-        margin: 0 auto;
-        padding: 22px 18px 40px;
-      }
-
-      header {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 20px;
-        min-height: 92px;
-        padding: 18px 0 20px;
-        border-bottom: 1px solid rgba(145, 165, 173, 0.22);
       }
 
       h1,
       h2,
-      h3,
       p {
         margin: 0;
       }
 
-      h1 {
-        margin-top: 8px;
-        font-size: clamp(28px, 4vw, 46px);
-        line-height: 1.02;
-        font-weight: 820;
-        max-width: 760px;
+      .interop-main {
+        width: min(100%, 1380px);
       }
 
-      h2,
-      h3 {
-        font-size: 14px;
-        line-height: 1.2;
-        font-weight: 800;
+      .interop-shell {
+        margin-top: 22px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        overflow: hidden;
       }
 
-      a {
-        -webkit-tap-highlight-color: transparent;
-      }
-
-      .eyebrow {
-        display: inline-flex;
+      .interop-head {
+        display: flex;
         align-items: center;
-        gap: 8px;
-        color: var(--client-ink);
+        justify-content: space-between;
+        gap: 16px;
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .interop-head p {
+        margin-top: 5px;
+        color: var(--muted);
         font-family: var(--mono);
         font-size: 12px;
-        font-weight: 700;
-        text-transform: uppercase;
       }
 
-      .eyebrow::before {
-        content: "";
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: var(--client);
-        box-shadow: 0 0 0 5px rgba(36, 181, 166, 0.14);
-      }
-
-      .subhead {
-        max-width: 760px;
-        margin-top: 10px;
-        color: var(--soft);
-        font-size: 15px;
-        line-height: 1.55;
-      }
-
-      .header-nav {
-        display: flex;
+      .interop-legend {
+        display: inline-flex;
         flex-wrap: wrap;
         justify-content: flex-end;
         gap: 8px;
       }
 
-      .header-nav a {
+      .interop-legend span {
         display: inline-flex;
         align-items: center;
-        justify-content: center;
-        min-height: 40px;
-        padding: 0 14px;
-        border: 1px solid rgba(145, 165, 173, 0.28);
-        border-radius: 7px;
-        color: var(--soft);
-        font-size: 13px;
-        font-weight: 800;
-        text-decoration: none;
-        transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
-      }
-
-      .header-nav a:hover,
-      .header-nav a:focus-visible {
-        border-color: rgba(111, 243, 226, 0.72);
-        color: var(--ink);
-        background: rgba(36, 181, 166, 0.1);
-        outline: none;
-      }
-
-      .header-nav a[aria-current="page"] {
-        border-color: rgba(36, 181, 166, 0.68);
-        color: var(--client-ink);
-        background: rgba(36, 181, 166, 0.12);
-      }
-
-      .snapshot-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 12px;
-        margin: 18px 0 14px;
-      }
-
-      .stat-card,
-      .peer-card,
-      .matrix-panel,
-      .source-panel {
-        border: 1px solid rgba(145, 165, 173, 0.24);
-        border-radius: var(--radius);
-        background: rgba(15, 26, 33, 0.92);
-        box-shadow: var(--shadow), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
-      }
-
-      .stat-card {
-        display: grid;
-        align-content: start;
-        gap: 8px;
-        min-height: 132px;
-        padding: 14px;
-      }
-
-      .stat-card span {
+        gap: 6px;
+        min-height: 26px;
         color: var(--muted);
         font-family: var(--mono);
         font-size: 11px;
-        font-weight: 700;
-        text-transform: uppercase;
       }
 
-      .stat-card strong {
-        color: var(--ink);
-        font-family: var(--mono);
-        font-size: 22px;
-        line-height: 1.08;
-        font-variant-numeric: tabular-nums;
-      }
-
-      .stat-card small {
-        color: var(--soft);
-        font-size: 12px;
-        line-height: 1.45;
-      }
-
-      .peer-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 12px;
-        margin-bottom: 14px;
-      }
-
-      .peer-card {
-        display: grid;
-        gap: 12px;
-        min-height: 172px;
-        padding: 14px;
-      }
-
-      .peer-head,
-      .score,
-      .panel-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-      }
-
-      .peer-head strong {
-        font-size: 16px;
-      }
-
-      .score span {
-        font-family: var(--mono);
-        font-size: 28px;
-        font-weight: 850;
-      }
-
-      .score small,
-      .peer-card p {
-        color: var(--soft);
-        font-size: 12px;
-      }
-
-      .result-track {
-        overflow: hidden;
+      .interop-legend i {
+        width: 10px;
         height: 10px;
-        border: 1px solid rgba(145, 165, 173, 0.2);
         border-radius: 999px;
-        background: rgba(9, 16, 21, 0.88);
+        background: var(--legend-color);
       }
 
-      .result-fill {
-        width: var(--bar-width);
-        min-width: 2px;
-        height: 100%;
-        border-radius: inherit;
-        background: var(--bar-color);
+      .compat-wrap {
+        overflow: auto;
       }
 
-      .matrix-shell {
-        display: grid;
-        gap: 14px;
-      }
-
-      .matrix-panel,
-      .source-panel {
-        overflow: hidden;
-      }
-
-      .panel-head {
-        padding: 14px;
-        border-bottom: 1px solid rgba(145, 165, 173, 0.18);
-      }
-
-      .panel-head p {
-        margin-top: 4px;
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 12px;
-      }
-
-      .table-wrap {
-        overflow-x: auto;
-      }
-
-      table {
+      .compat-matrix {
         width: 100%;
-        min-width: 760px;
+        min-width: 1180px;
         border-collapse: collapse;
+        table-layout: fixed;
       }
 
-      th,
-      td {
-        padding: 11px 12px;
-        border-bottom: 1px solid rgba(145, 165, 173, 0.14);
-        text-align: left;
+      .compat-matrix th,
+      .compat-matrix td {
+        padding: 10px;
+        border-bottom: 1px solid var(--line);
+        border-right: 1px solid var(--line);
+        text-align: center;
         vertical-align: middle;
         white-space: nowrap;
       }
 
-      th {
+      .compat-matrix th:last-child,
+      .compat-matrix td:last-child {
+        border-right: 0;
+      }
+
+      .compat-matrix thead th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        background: var(--surface);
         color: var(--muted);
         font-family: var(--mono);
         font-size: 11px;
-        font-weight: 800;
+        font-weight: 600;
         text-transform: uppercase;
       }
 
-      td {
-        color: var(--soft);
-        font-size: 13px;
+      .compat-matrix .corner,
+      .compat-matrix .participant-name {
+        position: sticky;
+        left: 0;
+        z-index: 2;
+        background: var(--surface);
+        text-align: left;
+        width: 154px;
+        min-width: 154px;
+        max-width: 154px;
       }
 
-      .case-name {
+      .compat-matrix .participant-name {
         color: var(--ink);
-        font-weight: 800;
+        font-weight: 600;
       }
 
-      .pill,
-      .result-pill {
+      .compat-matrix .server-column {
+        position: sticky;
+        left: 154px;
+        z-index: 2;
+        background: var(--surface);
+        border-right: 2px solid var(--line-strong);
+        text-align: left;
+        width: 154px;
+        min-width: 154px;
+        max-width: 154px;
+      }
+
+      .participant-chip {
         display: inline-flex;
         align-items: center;
-        min-height: 24px;
-        padding: 0 8px;
-        border: 1px solid rgba(145, 165, 173, 0.24);
-        border-radius: 999px;
+        gap: 7px;
+        width: 100%;
+        min-height: 28px;
+        padding: 5px 8px;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .participant-chip img,
+      .participant-fallback {
+        width: 20px;
+        height: 20px;
+        flex: 0 0 auto;
+        border-radius: 5px;
+      }
+
+      .participant-chip img {
+        object-fit: cover;
+      }
+
+      .participant-fallback {
+        display: inline-grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
         color: var(--muted);
         font-family: var(--mono);
+        font-size: 9px;
+        font-weight: 600;
+        line-height: 1;
+      }
+
+      .participant-chip img + .participant-fallback {
+        display: none;
+      }
+
+      .participant-chip strong {
+        min-width: 0;
+        overflow: hidden;
+        font: inherit;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .participant-chip.coquic {
+        border-color: rgba(245, 78, 0, 0.28);
+        background: #fff4ee;
+        color: var(--client);
+        font-family: var(--mono);
+      }
+
+      .test-cell {
+        display: inline-grid;
+        place-items: center;
+        min-width: 48px;
+        min-height: 30px;
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-2);
+        font-family: var(--mono);
         font-size: 11px;
-        font-weight: 800;
+        font-weight: 600;
+        line-height: 1;
+        text-transform: uppercase;
       }
 
-      .result-pill.succeeded {
-        border-color: rgba(107, 224, 163, 0.42);
+      .test-cell.succeeded {
+        border-color: rgba(31, 138, 101, 0.28);
+        background: #edf8f4;
         color: var(--ok);
-        background: rgba(107, 224, 163, 0.11);
       }
 
-      .result-pill.failed {
-        border-color: rgba(255, 120, 109, 0.46);
-        color: var(--danger);
-        background: rgba(255, 120, 109, 0.12);
-      }
-
-      .result-pill.unsupported {
-        border-color: rgba(245, 196, 81, 0.48);
+      .test-cell.unsupported {
+        border-color: rgba(192, 133, 50, 0.3);
+        background: #fff8e7;
         color: var(--warning);
-        background: rgba(245, 196, 81, 0.12);
       }
 
-      .result-pill.unknown {
+      .test-cell.failed {
+        border-color: rgba(207, 45, 86, 0.28);
+        background: #fff5f6;
+        color: var(--danger);
+      }
+
+      .test-cell.unknown {
         color: var(--muted);
       }
 
-      .empty-cell,
-      .empty-state {
+      .empty-cell {
+        padding: 18px;
         color: var(--muted);
         font-family: var(--mono);
         font-size: 12px;
+        text-align: left;
       }
 
-      .empty-state {
-        grid-column: 1 / -1;
-        min-height: 96px;
-        padding: 18px;
-        border: 1px dashed rgba(145, 165, 173, 0.3);
-        border-radius: var(--radius);
-        background: rgba(15, 26, 33, 0.66);
-      }
-
-      .source-panel {
-        margin-top: 14px;
-      }
-
-      .source-list {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
-        padding: 14px;
-      }
-
-      .source-item {
-        display: grid;
-        gap: 5px;
-        min-width: 0;
-        padding: 11px;
-        border: 1px solid rgba(145, 165, 173, 0.18);
-        border-radius: 7px;
-        background: rgba(9, 16, 21, 0.42);
-      }
-
-      .source-item strong {
-        color: var(--ink);
-        font-size: 13px;
-      }
-
-      .source-item span {
-        overflow-wrap: anywhere;
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-      }
-
-      @media (max-width: 980px) {
-        header {
-          grid-template-columns: 1fr;
-        }
-
-        .header-nav {
-          justify-content: flex-start;
-        }
-
-        .snapshot-grid,
-        .peer-grid,
-        .source-list {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-      }
-
-      @media (max-width: 640px) {
-        main {
-          padding-inline: 12px;
-        }
-
-        .snapshot-grid,
-        .peer-grid,
-        .source-list {
-          grid-template-columns: 1fr;
-        }
-
-        .panel-head,
-        .peer-head,
-        .score {
+      @media (max-width: 680px) {
+        .interop-head {
           align-items: flex-start;
           flex-direction: column;
         }
+
+        .interop-legend {
+          justify-content: flex-start;
+        }
       }
     </style>
+    <link rel="stylesheet" href="./demo-theme.css">
   </head>
   <body>
-    <main>
-      <header>
-        <div>
-          <span class="eyebrow">QUIC interop</span>
-          <h1>coquic interop results</h1>
-          <p class="subhead">Daily official runner snapshot for CoQUIC against quic-go, picoquic, quinn, and the self-hosted CoQUIC lane.</p>
-        </div>
-        <nav class="header-nav" aria-label="Demo views">
-          <a href="./index.html">Home</a>
+    <main class="interop-main">
+      <nav class="top-nav" aria-label="Demo views">
+        <a class="top-nav-home" href="./index.html">Home</a>
+        <span class="top-nav-links">
           <a href="./workbench.html">Workbench</a>
           <a href="./perf-comparison.html">Performance</a>
           <a href="./interop-results.html" aria-current="page">Interop</a>
-        </nav>
-      </header>
+        </span>
+      </nav>
 
-      <section class="snapshot-grid" id="snapshot-grid" aria-label="Interop snapshot"></section>
-      <section class="peer-grid" id="peer-grid" aria-label="Interop peer summaries"></section>
-
-      <section class="matrix-shell" aria-label="Interop result matrix">
-        <div class="matrix-panel">
-          <div class="panel-head">
-            <div>
-              <h2>Interop Matrix</h2>
-              <p id="data-source-label">waiting for interop-results.json</p>
-            </div>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead id="matrix-head"></thead>
-              <tbody id="matrix-body"></tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="matrix-panel">
-          <div class="panel-head">
-            <div>
-              <h2>Failed Or Unsupported Cases</h2>
-              <p>non-succeeded cases from the uploaded official runner payload</p>
-            </div>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Peer</th>
-                  <th>Direction</th>
-                  <th>Case</th>
-                  <th>Result</th>
-                  <th>Details</th>
-                </tr>
-              </thead>
-              <tbody id="failure-body"></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <section class="source-panel" aria-label="Interop result sources">
-        <div class="panel-head">
+      <section class="interop-shell" aria-label="CoQUIC interop test-case matrix">
+        <div class="interop-head">
           <div>
-            <h2>Result Sources</h2>
-            <p>official runner JSON files included in the uploaded result payload</p>
+            <h1>CoQUIC Interop Matrix</h1>
+            <p id="data-source-label">waiting for interop-results.json</p>
+          </div>
+          <div class="interop-legend" aria-label="Compatibility result legend">
+            <span><i style="--legend-color: var(--ok);"></i>pass</span>
+            <span><i style="--legend-color: var(--warning);"></i>unsupported</span>
+            <span><i style="--legend-color: var(--danger);"></i>failed</span>
           </div>
         </div>
-        <div class="source-list" id="source-list"></div>
+        <div class="compat-wrap">
+          <table class="compat-matrix">
+            <thead id="matrix-head"></thead>
+            <tbody id="matrix-body"></tbody>
+          </table>
+        </div>
       </section>
     </main>
     <script src="./interop-results.js"></script>

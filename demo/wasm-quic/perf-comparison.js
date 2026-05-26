@@ -190,7 +190,7 @@ const modeConfig = {
 
 let activeSnapshot = fallbackPerfSnapshot;
 let activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
-let dataSource = "waiting for perf-results.json";
+let dataSourceTime = "waiting";
 let historySource = "waiting for perf-history.json";
 let activePlotMode = "bulk";
 
@@ -313,20 +313,29 @@ function dateFromGeneratedAt(generatedAt) {
   return parsed.toISOString().slice(0, 10);
 }
 
-function bestRowsByImplementation(mode) {
+function timeFromGeneratedAt(generatedAt) {
+  const parsed = new Date(generatedAt);
+  if (Number.isNaN(parsed.getTime())) {
+    return "unavailable";
+  }
+  return parsed.toISOString().slice(11, 19) + "Z";
+}
+
+function leaderboardRows(mode) {
   const config = modeConfig[mode];
   const best = new Map();
   for (const row of activeSnapshot.rows.filter((candidate) => candidate.mode === mode && candidate.status === "ok")) {
-    const current = best.get(row.implementation);
+    const key = row.implementation === "coquic" ? `${row.implementation}:${row.congestion_control || "default"}` : row.implementation;
+    const current = best.get(key);
     if (!current || Number(row[config.metric]) > Number(current[config.metric])) {
-      best.set(row.implementation, row);
+      best.set(key, row);
     }
   }
   return [...best.values()].sort((left, right) => Number(right[config.metric]) - Number(left[config.metric]));
 }
 
 function bestRow(mode) {
-  return bestRowsByImplementation(mode)[0];
+  return leaderboardRows(mode)[0];
 }
 
 function emptyCard(label, detail) {
@@ -338,6 +347,10 @@ function emptyCard(label, detail) {
 }
 
 function renderSnapshot() {
+  const snapshotGrid = document.getElementById("snapshot-grid");
+  if (!snapshotGrid) {
+    return;
+  }
   const cards = ["bulk", "rr", "crr"].map((mode) => {
     const config = modeConfig[mode];
     const row = bestRow(mode);
@@ -363,7 +376,7 @@ function renderSnapshot() {
     cards.push(emptyCard("coquic best bulk", "waiting for CoQUIC rows"));
   }
 
-  document.getElementById("snapshot-grid").replaceChildren(
+  snapshotGrid.replaceChildren(
     ...cards.map((card) => {
       const element = document.createElement("article");
       element.className = "stat-card";
@@ -383,7 +396,7 @@ function renderSnapshot() {
 
 function renderBarplot(mode) {
   const config = modeConfig[mode];
-  const rows = bestRowsByImplementation(mode);
+  const rows = leaderboardRows(mode);
   const maxValue = rows.length ? Math.max(...rows.map((row) => Number(row[config.metric]))) : 0;
   const plot = document.createElement("section");
   plot.className = "plot";
@@ -419,7 +432,8 @@ function renderBarplot(mode) {
       const label = document.createElement("div");
       label.className = "bar-label";
       const info = implementationInfo(row.implementation);
-      label.append(renderImplementationIdentity(row.implementation, info));
+      const displayName = row.implementation === "coquic" && row.congestion_control ? `coquic[${row.congestion_control}]` : row.implementation;
+      label.append(renderImplementationIdentity(displayName, info));
 
       const track = document.createElement("div");
       track.className = "bar-track";
@@ -451,7 +465,12 @@ function selectPlotMode(mode) {
 }
 
 function renderPlots() {
-  document.getElementById("data-source-label").textContent = dataSource;
+  const dataSourceLabel = document.getElementById("data-source-label");
+  if (dataSourceLabel) {
+    dataSourceLabel.title = dataSourceTime;
+    dataSourceLabel.dataset.tooltip = dataSourceTime;
+    dataSourceLabel.setAttribute("aria-label", `Benchmark data time: ${dataSourceTime}`);
+  }
   const tabs = document.createElement("div");
   tabs.className = "plot-tabs";
   tabs.setAttribute("role", "tablist");
@@ -584,6 +603,49 @@ function renderTrendChart(mode) {
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", `${config.title} trend`);
+  const tooltip = document.createElement("div");
+  tooltip.className = "trend-tooltip";
+  tooltip.setAttribute("role", "tooltip");
+
+  function showTrendTooltip(event, detail, x, y) {
+    tooltip.replaceChildren();
+    const name = document.createElement("strong");
+    name.textContent = detail.title;
+    const value = document.createElement("span");
+    value.textContent = detail.value;
+    const date = document.createElement("span");
+    date.textContent = detail.date;
+    tooltip.append(name, value, date);
+    tooltip.classList.add("visible");
+
+    const chartRect = chart.getBoundingClientRect();
+    const svgRect = svg.getBoundingClientRect();
+    const pointX = (x / width) * svgRect.width + svgRect.left - chartRect.left;
+    const pointY = (y / height) * svgRect.height + svgRect.top - chartRect.top;
+    tooltip.style.left = `${Math.min(Math.max(pointX + 12, 8), chartRect.width - 180)}px`;
+    tooltip.style.top = `${Math.max(pointY - 56, 8)}px`;
+  }
+
+  function hideTrendTooltip() {
+    tooltip.classList.remove("visible");
+  }
+  const interactivePoints = [];
+
+  function showNearestTrendPoint(event) {
+    if (!interactivePoints.length) {
+      return;
+    }
+    const svgRect = svg.getBoundingClientRect();
+    const x = ((event.clientX - svgRect.left) / svgRect.width) * width;
+    const y = ((event.clientY - svgRect.top) / svgRect.height) * height;
+    const nearest = interactivePoints.reduce((best, point) => {
+      const distance = (point.x - x) ** 2 + (point.y - y) ** 2;
+      return !best || distance < best.distance ? { point, distance } : best;
+    }, null);
+    if (nearest) {
+      showTrendTooltip(event, nearest.point.detail, nearest.point.x, nearest.point.y);
+    }
+  }
 
   for (let tick = 0; tick <= 4; tick += 1) {
     const value = (maxValue * tick) / 4;
@@ -629,18 +691,49 @@ function renderTrendChart(mode) {
     svg.append(path);
 
     for (const point of filtered) {
+      const x = xForIndex(point.index);
+      const y = yForValue(point.value);
+      const detail = {
+        title: implementation,
+        value: `${formatNumber(point.value, config.decimals)} ${config.unit}`,
+        date: snapshots[point.index].date || snapshots[point.index].generated_at || "latest",
+      };
       const circle = makeSvgElement("circle");
       circle.setAttribute("class", "trend-point");
-      circle.setAttribute("cx", xForIndex(point.index));
-      circle.setAttribute("cy", yForValue(point.value));
+      circle.setAttribute("cx", x);
+      circle.setAttribute("cy", y);
       circle.setAttribute("r", "2.7");
       circle.setAttribute("fill", colors[implementation] || "#c3d4d8");
-      const titleNode = makeSvgElement("title");
-      titleNode.textContent = `${implementation} ${snapshots[point.index].date}: ${formatNumber(point.value, config.decimals)} ${config.unit}`;
-      circle.append(titleNode);
       svg.append(circle);
+
+      const hitPoint = makeSvgElement("circle");
+      hitPoint.setAttribute("class", "trend-hit-point");
+      hitPoint.setAttribute("cx", x);
+      hitPoint.setAttribute("cy", y);
+      hitPoint.setAttribute("r", "9");
+      hitPoint.setAttribute("tabindex", "0");
+      hitPoint.setAttribute("aria-label", `${detail.title}, ${detail.value}, ${detail.date}`);
+      hitPoint.addEventListener("mouseenter", (event) => showTrendTooltip(event, detail, x, y));
+      hitPoint.addEventListener("mousemove", (event) => showTrendTooltip(event, detail, x, y));
+      hitPoint.addEventListener("mouseleave", hideTrendTooltip);
+      hitPoint.addEventListener("focus", (event) => showTrendTooltip(event, detail, x, y));
+      hitPoint.addEventListener("blur", hideTrendTooltip);
+      svg.append(hitPoint);
+      interactivePoints.push({ x, y, detail });
     }
   }
+
+  const hoverPlane = makeSvgElement("rect");
+  hoverPlane.setAttribute("class", "trend-hover-plane");
+  hoverPlane.setAttribute("x", margin.left);
+  hoverPlane.setAttribute("y", margin.top);
+  hoverPlane.setAttribute("width", plotWidth);
+  hoverPlane.setAttribute("height", plotHeight);
+  hoverPlane.addEventListener("mousemove", showNearestTrendPoint);
+  hoverPlane.addEventListener("mouseleave", hideTrendTooltip);
+  svg.addEventListener("mousemove", showNearestTrendPoint);
+  svg.addEventListener("mouseleave", hideTrendTooltip);
+  svg.append(hoverPlane);
 
   const legend = document.createElement("div");
   legend.className = "trend-legend";
@@ -659,7 +752,7 @@ function renderTrendChart(mode) {
     }),
   );
 
-  chart.append(heading, svg, legend);
+  chart.append(heading, svg, tooltip, legend);
   return chart;
 }
 
@@ -673,6 +766,10 @@ function renderTrends() {
 }
 
 function renderTable() {
+  const comparisonBody = document.getElementById("comparison-body");
+  if (!comparisonBody) {
+    return;
+  }
   const rows = [...activeSnapshot.rows].sort((left, right) => {
     const modeOrder = { bulk: 0, rr: 1, crr: 2 };
     const leftImpl = implementationOrder.indexOf(left.implementation);
@@ -690,10 +787,10 @@ function renderTable() {
     td.colSpan = 8;
     td.textContent = "No benchmark rows loaded. The dashboard will use perf-results.json when the perf workflow uploads it.";
     tr.append(td);
-    document.getElementById("comparison-body").replaceChildren(tr);
+    comparisonBody.replaceChildren(tr);
     return;
   }
-  document.getElementById("comparison-body").replaceChildren(
+  comparisonBody.replaceChildren(
     ...rows.map((row) => {
       const tr = document.createElement("tr");
       if (row.implementation === "coquic") {
@@ -756,7 +853,11 @@ function renderTable() {
 }
 
 function renderSources() {
-  document.getElementById("source-list").replaceChildren(
+  const sourceList = document.getElementById("source-list");
+  if (!sourceList) {
+    return;
+  }
+  sourceList.replaceChildren(
     ...activeSnapshot.sources.map((source) => {
       const element = document.createElement("div");
       element.className = "source-item";
@@ -791,10 +892,10 @@ async function loadLiveData() {
       throw new Error("invalid perf-results.json");
     }
     activeSnapshot = snapshot;
-    dataSource = `perf-results.json from ${snapshot.generated_at || "latest workflow"}`;
+    dataSourceTime = timeFromGeneratedAt(snapshot.generated_at);
   } catch {
     activeSnapshot = fallbackPerfSnapshot;
-    dataSource = "perf-results.json not available yet";
+    dataSourceTime = "unavailable";
   }
   try {
     const response = await fetch("./perf-history.json", { cache: "no-store" });

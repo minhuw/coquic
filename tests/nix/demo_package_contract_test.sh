@@ -29,7 +29,7 @@ if [[ -e demo/site/index.html ]]; then
   exit 1
 fi
 
-for packaged_file in index.html workbench.html quic-demo.js perf-comparison.html perf-comparison.js interop-results.html interop-results.js coquic-wasm-quic.wasm; do
+for packaged_file in index.html workbench.html demo-theme.css quic-demo.js perf-comparison.html perf-comparison.js interop-results.html interop-results.js coquic-wasm-quic.wasm; do
   if [[ ! -f "${output_dir}/${packaged_file}" ]]; then
     echo "missing packaged wasm demo file: ${packaged_file}" >&2
     exit 1
@@ -69,9 +69,11 @@ done
 for marker in \
   "coquic-wasm-demo-v1" \
   "coquic-demo-home-v1" \
-  "Protocol Workbench" \
-  "Performance Dashboard" \
-  "Interop Dashboard" \
+  "from Prompt to Packet." \
+  "codex-word" \
+  "quic-word" \
+  "slogan-hero" \
+  "demo-theme.css" \
   "workbench.html" \
   "perf-comparison.html" \
   "interop-results.html"; do
@@ -88,6 +90,7 @@ for marker in \
   "Packet Log" \
   "Packet Details" \
   "Download PCAP" \
+  "demo-theme.css" \
   "perf-comparison.html" \
   "interop-results.html" \
   "global-timer" \
@@ -114,11 +117,11 @@ done
 for marker in \
   "coquic-perf-comparison-v1" \
   "coquic performance comparison" \
+  "demo-theme.css" \
   "perf-results.json" \
   "perf-history.json" \
   "Performance Barplots" \
   "Daily Performance Trends" \
-  "Steward / Language" \
   "plot-tabs" \
   "plot-tab" \
   "rank-badge" \
@@ -139,19 +142,16 @@ for marker in \
   "quic-go" \
   "quinn" \
   "picoquic" \
-  "MSQUIC" \
   "quiche" \
   "quicly" \
   "google-quiche" \
-  "TQUIC" \
   "Cloudflare" \
   "Microsoft" \
   "Rust" \
   "throughput_mib_per_s" \
   "requests_per_s" \
   "MiB/s" \
-  "Reqs/s" \
-  "Throughput and request rate"; do
+  "Reqs/s"; do
   if ! grep -Fq -- "${marker}" "${output_dir}/perf-comparison.html" "${output_dir}/perf-comparison.js"; then
     echo "packaged perf comparison assets missing marker: ${marker}" >&2
     exit 1
@@ -161,15 +161,16 @@ done
 for marker in \
   "coquic-interop-results-v1" \
   "coquic interop results" \
+  "demo-theme.css" \
   "interop-results.json" \
-  "Interop Matrix" \
-  "Failed Or Unsupported Cases" \
-  "official runner" \
+  "CoQUIC Interop Matrix" \
+  "participant-chip" \
+  "participant-fallback" \
+  "githubAvatar" \
+  "test-cell" \
   "quic-go" \
   "picoquic" \
-  "quinn" \
-  "amplificationlimit" \
-  "result-pill"; do
+  "quinn"; do
   if ! grep -Fq -- "${marker}" "${output_dir}/interop-results.html" "${output_dir}/interop-results.js"; then
     echo "packaged interop result assets missing marker: ${marker}" >&2
     exit 1

@@ -543,10 +543,9 @@
         pname = "ngtcp2-perf-client";
         version = pkgs.ngtcp2.version;
         src = pkgs.ngtcp2.src;
-        perfSource = ./bench/ngtcp2-perf/ngtcp2-perf;
+        perfSource = ./bench/ngtcp2-perf/ngtcp2-perf.c;
         nativeBuildInputs = [
           pkgs.cmake
-          pkgs.makeWrapper
           pkgs.perl
           pkgs.pkg-config
         ];
@@ -569,13 +568,37 @@
         ];
         buildPhase = ''
           runHook preBuild
-          cmake --build . --target qtlsclient qtlsserver
+          cmake --build . --target ngtcp2 ngtcp2_crypto_quictls
+          $CC \
+            -O2 \
+            -I$src/lib/includes \
+            -Ilib/includes \
+            -I$src/crypto/includes \
+            -I${pkgs.quictls.dev}/include \
+            -o ngtcp2-perf \
+            "$perfSource" \
+            lib/libngtcp2.so \
+            crypto/quictls/libngtcp2_crypto_quictls.so \
+            -L${pkgs.quictls.out}/lib \
+            -Wl,-rpath,$out/lib \
+            -Wl,-rpath,${
+              lib.makeLibraryPath [
+                pkgs.brotli.lib
+                pkgs.libev
+                pkgs.nghttp3
+                pkgs.quictls
+                pkgs.glibc
+                pkgs.stdenv.cc.cc.lib
+              ]
+            } \
+            -lssl \
+            -lcrypto \
+            -lm
           runHook postBuild
         '';
         installPhase = ''
           runHook preInstall
-          mkdir -p $out/bin $out/lib $out/libexec/ngtcp2-perf $out/share/ngtcp2-perf
-          cp examples/qtlsclient examples/qtlsserver $out/libexec/ngtcp2-perf/
+          mkdir -p $out/bin $out/lib
           cp lib/libngtcp2.so* crypto/quictls/libngtcp2_crypto_quictls.so* $out/lib/
           ngtcp2_rpath="${
             lib.makeLibraryPath [
@@ -583,21 +606,16 @@
               pkgs.libev
               pkgs.nghttp3
               pkgs.quictls
+              pkgs.glibc
               pkgs.stdenv.cc.cc.lib
             ]
           }:$out/lib"
-          patchelf --set-rpath "$ngtcp2_rpath" \
-            $out/libexec/ngtcp2-perf/qtlsclient \
-            $out/libexec/ngtcp2-perf/qtlsserver
+          cp ngtcp2-perf $out/bin/ngtcp2-perf
           for libfile in $out/lib/*.so*; do
             if [ -f "$libfile" ] && [ ! -L "$libfile" ]; then
               patchelf --set-rpath "$ngtcp2_rpath" "$libfile"
             fi
           done
-          cp "$perfSource" $out/share/ngtcp2-perf/ngtcp2-perf.py
-          makeWrapper ${pkgs.python3}/bin/python3 $out/bin/ngtcp2-perf \
-            --add-flags "$out/share/ngtcp2-perf/ngtcp2-perf.py" \
-            --set NGTCP2_PERF_BIN_DIR "$out/libexec/ngtcp2-perf"
           runHook postInstall
         '';
       };
@@ -680,7 +698,7 @@
         src = neqoSrc;
         cargoLock.lockFile = ./bench/neqo-perf/Cargo.lock;
         buildAndTestSubdir = "neqo-bin";
-        perfSource = ./bench/neqo-perf/neqo-perf;
+        perfSource = ./bench/neqo-perf/neqo-perf.rs;
         nativeBuildInputs = [
           pkgs.makeWrapper
           pkgs.pkg-config
@@ -692,23 +710,24 @@
         ];
         cargoBuildFlags = [
           "--bin"
-          "neqo-client"
-          "--bin"
-          "neqo-server"
+          "neqo-perf"
         ];
         doCheck = false;
         postPatch = ''
           cp ${./bench/neqo-perf/Cargo.lock} Cargo.lock
+          cp "$perfSource" neqo-bin/src/bin/neqo-perf.rs
+          cat >> neqo-bin/Cargo.toml <<'EOF'
+
+[[bin]]
+name = "neqo-perf"
+path = "src/bin/neqo-perf.rs"
+bench = false
+EOF
         '';
         postInstall = ''
-          mkdir -p $out/libexec/neqo-perf $out/share/neqo-perf
-          mv $out/bin/neqo-client $out/libexec/neqo-perf/neqo-client
-          mv $out/bin/neqo-server $out/libexec/neqo-perf/neqo-server
+          mkdir -p $out/libexec/neqo-perf
           cp -R $src/test-fixture/db $out/libexec/neqo-perf/db
-          cp "$perfSource" $out/share/neqo-perf/neqo-perf.py
-          makeWrapper ${pkgs.python3}/bin/python3 $out/bin/neqo-perf \
-            --add-flags "$out/share/neqo-perf/neqo-perf.py" \
-            --set NEQO_PERF_BIN_DIR "$out/libexec/neqo-perf" \
+          wrapProgram $out/bin/neqo-perf \
             --set NEQO_PERF_DB "$out/libexec/neqo-perf/db" \
             --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath [ pkgs.nspr pkgs.nss pkgs.sqlite pkgs.zlib pkgs.stdenv.cc.cc.lib ]}"
         '';
@@ -909,7 +928,7 @@
         pname = "google-quiche-perf-client";
         version = "dev";
         src = googleQuicheSrc;
-        perfSource = ./bench/google-quiche-perf/google-quiche-perf;
+        perfSource = ./bench/google-quiche-perf/google-quiche-perf.cc;
         bazel = pkgs.bazel_7;
         bazelFlags = [
           "--registry"
@@ -918,10 +937,25 @@
         postPatch = ''
           substituteInPlace .bazelversion --replace-fail '8.2.1' '7.6.0'
           echo "common --repository_cache=\"$bazelOut/external/repository_cache\"" >> .bazelrc
+          cp "$perfSource" quiche/quic/tools/google_quiche_perf.cc
+          cat >> quiche/BUILD.bazel <<'EOF'
+
+cc_binary(
+    name = "google_quiche_perf",
+    srcs = ["quic/tools/google_quiche_perf.cc"],
+    deps = [
+        ":io_tool_support",
+        ":quiche_core",
+        ":quiche_tool_support",
+        "@boringssl//:crypto",
+        "@com_google_absl//absl/log:initialize",
+        "@com_google_absl//absl/strings",
+    ],
+)
+EOF
         '';
         nativeBuildInputs = [
           pkgs.jdk
-          pkgs.makeWrapper
         ];
         buildInputs = [
           pkgs.icu
@@ -933,8 +967,7 @@
           "-c opt"
         ];
         bazelTargets = [
-          "//quiche:quic_client"
-          "//quiche:quic_server"
+          "//quiche:google_quiche_perf"
         ];
         fetchAttrs = {
           hash = "sha256-2p2vy5FHFg8rRw+2ctOBZOmGicC3Bi5l2frfEuA/FRM=";
@@ -985,12 +1018,8 @@
           '';
           installPhase = ''
             runHook preInstall
-            mkdir -p $out/bin $out/libexec/google-quiche-perf $out/share/google-quiche-perf
-            cp bazel-bin/quiche/quic_client bazel-bin/quiche/quic_server $out/libexec/google-quiche-perf/
-            cp "$perfSource" $out/share/google-quiche-perf/google-quiche-perf.py
-            makeWrapper ${pkgs.python3}/bin/python3 $out/bin/google-quiche-perf \
-              --add-flags "$out/share/google-quiche-perf/google-quiche-perf.py" \
-              --set GOOGLE_QUICHE_PERF_BIN_DIR "$out/libexec/google-quiche-perf"
+            mkdir -p $out/bin
+            cp bazel-bin/quiche/google_quiche_perf $out/bin/google-quiche-perf
             runHook postInstall
           '';
         };
@@ -1007,7 +1036,7 @@
         src = tquicSrc;
         buildAndTestSubdir = "tools";
         cargoLock.lockFile = ./bench/tquic-perf/Cargo.lock;
-        perfSource = ./bench/tquic-perf/tquic-perf;
+        perfSource = ./bench/tquic-perf/tquic-perf.rs;
         nativeBuildInputs = [
           pkgs.cmake
           pkgs.makeWrapper
@@ -1024,21 +1053,14 @@
         doCheck = false;
         postPatch = ''
           cp ${./bench/tquic-perf/Cargo.lock} Cargo.lock
+          cp "$perfSource" tools/src/bin/tquic-perf.rs
         '';
         cargoBuildFlags = [
           "--bin"
-          "tquic_client"
-          "--bin"
-          "tquic_server"
+          "tquic-perf"
         ];
         postInstall = ''
-          mkdir -p $out/libexec/tquic-perf $out/share/tquic-perf
-          mv $out/bin/tquic_client $out/libexec/tquic-perf/tquic_client
-          mv $out/bin/tquic_server $out/libexec/tquic-perf/tquic_server
-          cp "$perfSource" $out/share/tquic-perf/tquic-perf.py
-          makeWrapper ${pkgs.python3}/bin/python3 $out/bin/tquic-perf \
-            --add-flags "$out/share/tquic-perf/tquic-perf.py" \
-            --set TQUIC_PERF_BIN_DIR "$out/libexec/tquic-perf"
+          mkdir -p $out/bin
         '';
       };
       xquicSrc = pkgs.fetchFromGitHub {

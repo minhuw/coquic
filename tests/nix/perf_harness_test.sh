@@ -9,6 +9,10 @@ msquic_perf="${repo_root}/bench/msquic-perf/src/main.rs"
 mvfst_perf="${repo_root}/bench/mvfst-perf/mvfst-perf.cpp"
 lsquic_perf="${repo_root}/bench/lsquic-perf/lsquic-perf.c"
 quicly_perf="${repo_root}/bench/quicly-perf/quicly-perf.c"
+google_quiche_perf="${repo_root}/bench/google-quiche-perf/google-quiche-perf.cc"
+tquic_perf="${repo_root}/bench/tquic-perf/tquic-perf.rs"
+ngtcp2_perf="${repo_root}/bench/ngtcp2-perf/ngtcp2-perf.c"
+neqo_perf="${repo_root}/bench/neqo-perf/neqo-perf.rs"
 
 [ -f "${script}" ] || {
   echo "missing harness script: ${script}" >&2
@@ -32,6 +36,26 @@ quicly_perf="${repo_root}/bench/quicly-perf/quicly-perf.c"
 
 [ -f "${quicly_perf}" ] || {
   echo "missing native quicly perf client: ${quicly_perf}" >&2
+  exit 1
+}
+
+[ -f "${google_quiche_perf}" ] || {
+  echo "missing native Google QUICHE perf client: ${google_quiche_perf}" >&2
+  exit 1
+}
+
+[ -f "${tquic_perf}" ] || {
+  echo "missing native TQUIC perf client: ${tquic_perf}" >&2
+  exit 1
+}
+
+[ -f "${ngtcp2_perf}" ] || {
+  echo "missing native ngtcp2 perf client: ${ngtcp2_perf}" >&2
+  exit 1
+}
+
+[ -f "${neqo_perf}" ] || {
+  echo "missing native Neqo perf client: ${neqo_perf}" >&2
   exit 1
 }
 
@@ -524,6 +548,36 @@ grep -F -- 'googleQuichePerfClient = pkgs.buildBazelPackage' "${flake}" >/dev/nu
   exit 1
 }
 
+grep -F -- 'perfSource = ./bench/google-quiche-perf/google-quiche-perf.cc;' "${flake}" >/dev/null || {
+  echo 'Google QUICHE perf client package must build the native C++ adapter' >&2
+  exit 1
+}
+
+grep -F -- 'name = "google_quiche_perf"' "${flake}" >/dev/null || {
+  echo 'Google QUICHE perf client package must define a native Bazel binary' >&2
+  exit 1
+}
+
+grep -F -- '//quiche:google_quiche_perf' "${flake}" >/dev/null || {
+  echo 'Google QUICHE perf client package must build the native Bazel target' >&2
+  exit 1
+}
+
+grep -F -- 'quic::QuicDefaultClient' "${google_quiche_perf}" >/dev/null || {
+  echo 'Google QUICHE perf client must use the native QuicDefaultClient API' >&2
+  exit 1
+}
+
+grep -F -- 'quic::QuicServer' "${google_quiche_perf}" >/dev/null || {
+  echo 'Google QUICHE perf client must use the native QuicServer API' >&2
+  exit 1
+}
+
+if grep -F -- 'subprocess' "${google_quiche_perf}" >/dev/null; then
+  echo 'Google QUICHE perf client must not shell out through subprocess' >&2
+  exit 1
+fi
+
 grep -F -- 'ln -s ${googleQuichePerfClient}/bin/google-quiche-perf $out/usr/local/bin/google-quiche-perf' "${flake}" >/dev/null || {
   echo 'missing Google QUICHE perf client in perf image overlay' >&2
   exit 1
@@ -584,6 +638,36 @@ grep -F -- 'ngtcp2PerfClient = pkgs.stdenv.mkDerivation' "${flake}" >/dev/null |
   exit 1
 }
 
+grep -F -- 'perfSource = ./bench/ngtcp2-perf/ngtcp2-perf.c;' "${flake}" >/dev/null || {
+  echo 'ngtcp2 perf client package must build the native C adapter' >&2
+  exit 1
+}
+
+grep -F -- 'cmake --build . --target ngtcp2 ngtcp2_crypto_quictls' "${flake}" >/dev/null || {
+  echo 'ngtcp2 perf client package must build ngtcp2 libraries' >&2
+  exit 1
+}
+
+grep -F -- 'lib/libngtcp2.so' "${flake}" >/dev/null || {
+  echo 'ngtcp2 perf client package must link directly against libngtcp2' >&2
+  exit 1
+}
+
+grep -F -- '#include <ngtcp2/ngtcp2.h>' "${ngtcp2_perf}" >/dev/null || {
+  echo 'ngtcp2 perf client must use the native ngtcp2 API' >&2
+  exit 1
+}
+
+grep -F -- 'ngtcp2_conn_open_bidi_stream' "${ngtcp2_perf}" >/dev/null || {
+  echo 'ngtcp2 perf client must create streams through the native ngtcp2 API' >&2
+  exit 1
+}
+
+if grep -F -- 'subprocess' "${ngtcp2_perf}" >/dev/null; then
+  echo 'ngtcp2 perf client must not shell out through subprocess' >&2
+  exit 1
+fi
+
 grep -F -- 'ln -s ${ngtcp2PerfClient}/bin/ngtcp2-perf $out/usr/local/bin/ngtcp2-perf' "${flake}" >/dev/null || {
   echo 'missing ngtcp2 perf client in perf image overlay' >&2
   exit 1
@@ -633,6 +717,36 @@ grep -F -- 'neqoPerfClient = pkgs.rustPlatform.buildRustPackage' "${flake}" >/de
   echo 'missing Neqo perf client package in flake.nix' >&2
   exit 1
 }
+
+grep -F -- 'perfSource = ./bench/neqo-perf/neqo-perf.rs;' "${flake}" >/dev/null || {
+  echo 'Neqo perf client package must build the native Rust adapter' >&2
+  exit 1
+}
+
+grep -F -- 'cp "$perfSource" neqo-bin/src/bin/neqo-perf.rs' "${flake}" >/dev/null || {
+  echo 'Neqo perf client package must inject the native Rust adapter into neqo-bin' >&2
+  exit 1
+}
+
+grep -F -- '"neqo-perf"' "${flake}" >/dev/null || {
+  echo 'Neqo perf client package must build the neqo-perf binary' >&2
+  exit 1
+}
+
+grep -F -- 'use neqo_transport::' "${neqo_perf}" >/dev/null || {
+  echo 'Neqo perf client must use the native neqo_transport API' >&2
+  exit 1
+}
+
+grep -F -- 'stream_create(StreamType::BiDi)' "${neqo_perf}" >/dev/null || {
+  echo 'Neqo perf client must create streams through the native Neqo API' >&2
+  exit 1
+}
+
+if grep -F -- 'subprocess' "${neqo_perf}" >/dev/null; then
+  echo 'Neqo perf client must not shell out through subprocess' >&2
+  exit 1
+fi
 
 grep -F -- 'ln -s ${neqoPerfClient}/bin/neqo-perf $out/usr/local/bin/neqo-perf' "${flake}" >/dev/null || {
   echo 'missing Neqo perf client in perf image overlay' >&2

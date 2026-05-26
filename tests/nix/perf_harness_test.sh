@@ -7,6 +7,8 @@ flake="${repo_root}/flake.nix"
 ignore_file="${repo_root}/.gitignore"
 msquic_perf="${repo_root}/bench/msquic-perf/src/main.rs"
 mvfst_perf="${repo_root}/bench/mvfst-perf/mvfst-perf.cpp"
+lsquic_perf="${repo_root}/bench/lsquic-perf/lsquic-perf.c"
+quicly_perf="${repo_root}/bench/quicly-perf/quicly-perf.c"
 
 [ -f "${script}" ] || {
   echo "missing harness script: ${script}" >&2
@@ -20,6 +22,16 @@ mvfst_perf="${repo_root}/bench/mvfst-perf/mvfst-perf.cpp"
 
 [ -f "${mvfst_perf}" ] || {
   echo "missing mvfst perf client: ${mvfst_perf}" >&2
+  exit 1
+}
+
+[ -f "${lsquic_perf}" ] || {
+  echo "missing native LSQUIC perf client: ${lsquic_perf}" >&2
+  exit 1
+}
+
+[ -f "${quicly_perf}" ] || {
+  echo "missing native quicly perf client: ${quicly_perf}" >&2
   exit 1
 }
 
@@ -472,6 +484,36 @@ grep -F -- 'quiclyPerfClient = pkgs.stdenv.mkDerivation' "${flake}" >/dev/null |
   exit 1
 }
 
+grep -F -- 'perfSource = ./bench/quicly-perf/quicly-perf.c;' "${flake}" >/dev/null || {
+  echo 'quicly perf client package must build the native C adapter' >&2
+  exit 1
+}
+
+grep -F -- 'cmake --build . --target quicly' "${flake}" >/dev/null || {
+  echo 'quicly perf client package must build the quicly library target' >&2
+  exit 1
+}
+
+grep -F -- 'libquicly.a' "${flake}" >/dev/null || {
+  echo 'quicly perf client package must link directly against libquicly' >&2
+  exit 1
+}
+
+grep -F -- '#include "quicly.h"' "${quicly_perf}" >/dev/null || {
+  echo 'quicly perf client must use the native quicly API' >&2
+  exit 1
+}
+
+grep -F -- 'quicly_open_stream' "${quicly_perf}" >/dev/null || {
+  echo 'quicly perf client must create streams through the native quicly API' >&2
+  exit 1
+}
+
+if grep -F -- 'subprocess' "${quicly_perf}" >/dev/null; then
+  echo 'quicly perf client must not shell out through subprocess' >&2
+  exit 1
+fi
+
 grep -F -- 'ln -s ${quiclyPerfClient}/bin/quicly-perf $out/usr/local/bin/quicly-perf' "${flake}" >/dev/null || {
   echo 'missing quicly perf client in perf image overlay' >&2
   exit 1
@@ -551,6 +593,36 @@ grep -F -- 'lsquicPerfClient = pkgs.stdenv.mkDerivation' "${flake}" >/dev/null |
   echo 'missing LSQUIC perf client package in flake.nix' >&2
   exit 1
 }
+
+grep -F -- 'perfSource = ./bench/lsquic-perf/lsquic-perf.c;' "${flake}" >/dev/null || {
+  echo 'LSQUIC perf client package must build the native C adapter' >&2
+  exit 1
+}
+
+grep -F -- 'cmake --build . --target lsquic' "${flake}" >/dev/null || {
+  echo 'LSQUIC perf client package must build the LSQUIC library target' >&2
+  exit 1
+}
+
+grep -F -- 'src/liblsquic/liblsquic.a' "${flake}" >/dev/null || {
+  echo 'LSQUIC perf client package must link directly against liblsquic' >&2
+  exit 1
+}
+
+grep -F -- '#include "lsquic.h"' "${lsquic_perf}" >/dev/null || {
+  echo 'LSQUIC perf client must use the native LSQUIC API' >&2
+  exit 1
+}
+
+grep -F -- 'lsquic_conn_make_stream' "${lsquic_perf}" >/dev/null || {
+  echo 'LSQUIC perf client must create streams through the native LSQUIC API' >&2
+  exit 1
+}
+
+if grep -F -- 'subprocess' "${lsquic_perf}" >/dev/null; then
+  echo 'LSQUIC perf client must not shell out through subprocess' >&2
+  exit 1
+fi
 
 grep -F -- 'ln -s ${lsquicPerfClient}/bin/lsquic-perf $out/usr/local/bin/lsquic-perf' "${flake}" >/dev/null || {
   echo 'missing LSQUIC perf client in perf image overlay' >&2

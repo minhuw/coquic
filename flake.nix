@@ -612,10 +612,9 @@
         pname = "lsquic-perf-client";
         version = "4.7.0";
         src = lsquicSrc;
-        perfSource = ./bench/lsquic-perf/lsquic-perf;
+        perfSource = ./bench/lsquic-perf/lsquic-perf.c;
         nativeBuildInputs = [
           pkgs.cmake
-          pkgs.makeWrapper
           pkgs.perl
         ];
         buildInputs = [
@@ -639,18 +638,33 @@
         ];
         buildPhase = ''
           runHook preBuild
-          cmake --build . --target perf_client perf_server
+          cmake --build . --target lsquic
+          $CC -O3 -std=gnu11 -Wall -Wextra \
+            -I$src/include \
+            -I$src/bin \
+            -I$src/src/lshpack \
+            -I$src/src/liblsquic \
+            -I$src/src/liblsquic/ls-qpack \
+            -Ibin \
+            "$perfSource" \
+            "$src/bin/prog.c" \
+            "$src/bin/test_common.c" \
+            "$src/bin/test_cert.c" \
+            -o lsquic-perf \
+            src/liblsquic/liblsquic.a \
+            ${pkgs.boringssl}/lib/libssl.a \
+            ${pkgs.boringssl}/lib/libcrypto.a \
+            ${pkgs.zlib.static}/lib/libz.a \
+            ${pkgs.libevent}/lib/libevent.so \
+            -lstdc++ -lpthread -lm
           runHook postBuild
         '';
         installPhase = ''
           runHook preInstall
-          mkdir -p $out/bin $out/libexec/lsquic-perf $out/share/lsquic-perf
-          cp bin/perf_client bin/perf_server $out/libexec/lsquic-perf/
-          cp "$perfSource" $out/share/lsquic-perf/lsquic-perf.py
-          makeWrapper ${pkgs.python3}/bin/python3 $out/bin/lsquic-perf \
-            --add-flags "$out/share/lsquic-perf/lsquic-perf.py" \
-            --set LSQUIC_PERF_BIN_DIR "$out/libexec/lsquic-perf" \
-            --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath [ pkgs.libevent pkgs.stdenv.cc.cc.lib ]}"
+          mkdir -p $out/bin
+          cp lsquic-perf $out/bin/lsquic-perf
+          patchelf --set-rpath "${lib.makeLibraryPath [ pkgs.libevent pkgs.stdenv.cc.cc.lib ]}" \
+            $out/bin/lsquic-perf
           runHook postInstall
         '';
       };
@@ -836,10 +850,9 @@
         pname = "quicly-perf-client";
         version = "dev";
         src = quiclySrc;
-        perfSource = ./bench/quicly-perf/quicly-perf;
+        perfSource = ./bench/quicly-perf/quicly-perf.c;
         nativeBuildInputs = [
           pkgs.cmake
-          pkgs.makeWrapper
           pkgs.perl
           pkgs.pkg-config
         ];
@@ -852,17 +865,31 @@
         ];
         buildPhase = ''
           runHook preBuild
-          cmake --build . --target cli
+          cmake --build . --target quicly
+          $CC -O3 -std=gnu11 -Wall -Wextra \
+            -DQUICLY_USE_TRACER=0 \
+            -I$src/include \
+            -I$src/deps/klib \
+            -I$src/deps/picotls/include \
+            -I$src/deps/picotest \
+            -I. \
+            "$perfSource" \
+            "$src/deps/picotls/lib/hpke.c" \
+            "$src/deps/picotls/lib/openssl.c" \
+            "$src/deps/picotls/lib/pembase64.c" \
+            "$src/deps/picotls/lib/picotls.c" \
+            -o quicly-perf \
+            libquicly.a \
+            ${pkgs.openssl.out}/lib/libcrypto.so \
+            -ldl -lm
           runHook postBuild
         '';
         installPhase = ''
           runHook preInstall
-          mkdir -p $out/bin $out/libexec/quicly-perf $out/share/quicly-perf
-          cp cli $out/libexec/quicly-perf/cli
-          cp "$perfSource" $out/share/quicly-perf/quicly-perf.py
-          makeWrapper ${pkgs.python3}/bin/python3 $out/bin/quicly-perf \
-            --add-flags "$out/share/quicly-perf/quicly-perf.py" \
-            --set QUICLY_PERF_BIN_DIR "$out/libexec/quicly-perf"
+          mkdir -p $out/bin
+          cp quicly-perf $out/bin/quicly-perf
+          patchelf --set-rpath "${lib.makeLibraryPath [ pkgs.openssl pkgs.stdenv.cc.cc.lib ]}" \
+            $out/bin/quicly-perf
           runHook postInstall
         '';
       };

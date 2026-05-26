@@ -71,6 +71,7 @@ for marker in \
   'Free Runner Disk' \
   '/opt/hostedtoolcache/CodeQL' \
   '/usr/share/dotnet' \
+  'DeterminateSystems/nix-installer-action@v22' \
   'Configure Nix Build Parallelism' \
   'docker/setup-docker-action@v5' \
   'version: version=v28.3.0'; do

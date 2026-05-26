@@ -14,9 +14,9 @@ use std::{
 use neqo_common::{event::Provider, Datagram, IpTos};
 use neqo_crypto::{init, init_db, AllowZeroRtt, AntiReplay, AuthenticationStatus};
 use neqo_transport::{
-    server::Server, CongestionControlAlgorithm, Connection, ConnectionEvent,
-    ConnectionIdGenerator, ConnectionParameters, EmptyConnectionIdGenerator, Output,
-    RandomConnectionIdGenerator, State, StreamId, StreamType, Version,
+    server::Server, CongestionControlAlgorithm, Connection, ConnectionEvent, ConnectionIdGenerator,
+    ConnectionParameters, EmptyConnectionIdGenerator, Output, RandomConnectionIdGenerator, State,
+    StreamId, StreamType, Version,
 };
 use tokio::{net::UdpSocket, time};
 
@@ -208,7 +208,10 @@ impl ClientBatch {
                 ConnectionEvent::RecvStreamReadable { stream_id } => {
                     self.read_stream(conn, stream_id, counters)?;
                 }
-                ConnectionEvent::RecvStreamReset { stream_id, app_error } => {
+                ConnectionEvent::RecvStreamReset {
+                    stream_id,
+                    app_error,
+                } => {
                     return Err(format!(
                         "neqo stream {stream_id} reset by peer with error {app_error}"
                     ));
@@ -217,7 +220,9 @@ impl ClientBatch {
                 | ConnectionEvent::StateChange(State::Closing { error: reason, .. })
                 | ConnectionEvent::StateChange(State::Draining { error: reason, .. }) => {
                     if !self.is_done() {
-                        return Err(format!("neqo connection closed before batch completed: {reason:?}"));
+                        return Err(format!(
+                            "neqo connection closed before batch completed: {reason:?}"
+                        ));
                     }
                 }
                 ConnectionEvent::SendStreamComplete { .. }
@@ -410,10 +415,6 @@ impl PerfServer {
 
     fn process(&mut self, dgram: Option<&Datagram>, now: Instant) -> Output {
         self.server.process(dgram, now)
-    }
-
-    fn has_events(&self) -> bool {
-        self.server.has_active_connections()
     }
 
     fn process_events(&mut self) -> Result<(), String> {
@@ -659,13 +660,11 @@ fn take_value(args: &[String], i: &mut usize, arg: &str) -> Result<String, Strin
 }
 
 fn parse_u64(text: &str, name: &str) -> Result<u64, String> {
-    text.parse()
-        .map_err(|_| format!("invalid {name}: {text}"))
+    text.parse().map_err(|_| format!("invalid {name}: {text}"))
 }
 
 fn parse_u16(text: &str, name: &str) -> Result<u16, String> {
-    text.parse()
-        .map_err(|_| format!("invalid {name}: {text}"))
+    text.parse().map_err(|_| format!("invalid {name}: {text}"))
 }
 
 fn parse_duration(text: &str) -> Result<Duration, String> {
@@ -688,7 +687,10 @@ fn validate_config(cfg: &Config) -> Result<(), String> {
     match cfg.congestion_control.as_str() {
         "default" | "newreno" | "reno" | "cubic" => {}
         "bbr" | "copa" => {
-            return Err("neqo-perf does not provide BBR or Copa; use PERF_CONGESTION_CONTROLS=default".to_string());
+            return Err(
+                "neqo-perf does not provide BBR or Copa; use PERF_CONGESTION_CONTROLS=default"
+                    .to_string(),
+            );
         }
         other => return Err(format!("unsupported congestion-control label: {other}")),
     }
@@ -696,7 +698,9 @@ fn validate_config(cfg: &Config) -> Result<(), String> {
         return Err(format!("unsupported direction: {}", cfg.direction));
     }
     if cfg.streams == 0 || cfg.connections == 0 || cfg.requests_in_flight == 0 {
-        return Err("streams, connections, and requests-in-flight must be greater than zero".to_string());
+        return Err(
+            "streams, connections, and requests-in-flight must be greater than zero".to_string(),
+        );
     }
     Ok(())
 }
@@ -781,39 +785,65 @@ async fn drain_server_output(
     }
 }
 
-fn drain_client_socket(
+async fn handle_process_output(
+    socket: &UdpSocket,
+    output: Output,
+) -> Result<Option<Duration>, AnyError> {
+    match output {
+        Output::Datagram(dgram) => {
+            send_output(socket, dgram).await?;
+            Ok(None)
+        }
+        Output::Callback(timeout) => Ok(Some(timeout)),
+        Output::None => Ok(None),
+    }
+}
+
+async fn drain_client_socket(
     socket: &UdpSocket,
     conn: &mut Connection,
     local_addr: SocketAddr,
-) -> Result<(), AnyError> {
+) -> Result<Option<Duration>, AnyError> {
     let mut buf = [0u8; READ_BUF_SIZE];
+    let mut next_timeout = None;
     loop {
         match socket.try_recv_from(&mut buf) {
             Ok((read, remote)) => {
                 let dgram =
                     Datagram::new(remote, local_addr, IpTos::default(), buf[..read].to_vec());
-                let _ = conn.process(Some(&dgram), Instant::now());
+                if let Some(timeout) =
+                    handle_process_output(socket, conn.process(Some(&dgram), Instant::now()))
+                        .await?
+                {
+                    next_timeout = Some(timeout);
+                }
             }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(next_timeout),
             Err(err) => return Err(err.into()),
         }
     }
 }
 
-fn drain_server_socket(
+async fn drain_server_socket(
     socket: &UdpSocket,
     server: &mut PerfServer,
     local_addr: SocketAddr,
-) -> Result<(), AnyError> {
+) -> Result<Option<Duration>, AnyError> {
     let mut buf = [0u8; READ_BUF_SIZE];
+    let mut next_timeout = None;
     loop {
         match socket.try_recv_from(&mut buf) {
             Ok((read, remote)) => {
                 let dgram =
                     Datagram::new(remote, local_addr, IpTos::default(), buf[..read].to_vec());
-                server.process(Some(&dgram), Instant::now());
+                if let Some(timeout) =
+                    handle_process_output(socket, server.process(Some(&dgram), Instant::now()))
+                        .await?
+                {
+                    next_timeout = Some(timeout);
+                }
             }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(next_timeout),
             Err(err) => return Err(err.into()),
         }
     }
@@ -887,6 +917,7 @@ async fn run_request_batch(
             .await
             .map_err(|err| format!("neqo socket wait failed: {err}"))?;
         drain_client_socket(&socket, &mut conn, local_addr)
+            .await
             .map_err(|err| format!("neqo socket read failed: {err}"))?;
     }
 
@@ -902,15 +933,16 @@ async fn run_request_batch(
     }
 }
 
-async fn run_bulk(
-    cfg: &Config,
-    counters: &mut Counters,
-) -> Result<(), String> {
+async fn run_bulk(cfg: &Config, counters: &mut Counters) -> Result<(), String> {
     let (request_bytes, response_bytes, unit) = if cfg.direction == "upload" {
         let request_bytes = cfg.request_bytes.max(cfg.response_bytes);
         (request_bytes, 0, request_bytes.max(1))
     } else {
-        (cfg.request_bytes, cfg.response_bytes, cfg.response_bytes.max(1))
+        (
+            cfg.request_bytes,
+            cfg.response_bytes,
+            cfg.response_bytes.max(1),
+        )
     };
     let shape = RequestShape {
         request_bytes,
@@ -1016,15 +1048,16 @@ async fn run_server(cfg: &Config) -> Result<(), AnyError> {
     let mut server = PerfServer::new(cfg)?;
 
     loop {
+        let socket_timeout = drain_server_socket(&socket, &mut server, local_addr).await?;
         server
             .process_events()
             .map_err(|err| format!("neqo server event failed: {err}"))?;
         let next_timeout = drain_server_output(&mut server, &socket).await?;
-        if server.has_events() {
-            continue;
-        }
-        wait_socket(&socket, next_timeout.or(Some(SERVER_POLL))).await?;
-        drain_server_socket(&socket, &mut server, local_addr)?;
+        wait_socket(
+            &socket,
+            next_timeout.or(socket_timeout).or(Some(SERVER_POLL)),
+        )
+        .await?;
     }
 }
 
@@ -1055,7 +1088,10 @@ fn summarize_latency(samples: &[Duration]) -> LatencySummary {
     if samples.is_empty() {
         return LatencySummary::default();
     }
-    let mut micros: Vec<u64> = samples.iter().map(|sample| duration_micros(*sample)).collect();
+    let mut micros: Vec<u64> = samples
+        .iter()
+        .map(|sample| duration_micros(*sample))
+        .collect();
     micros.sort_unstable();
     let sum: u64 = micros.iter().sum();
     LatencySummary {
@@ -1180,11 +1216,7 @@ fn write_summary_json(out: &mut dyn Write, summary: &RunSummary<'_>) -> std::io:
     }
     writeln!(out, "  \"streams\": {},", cfg.streams)?;
     writeln!(out, "  \"connections\": {},", cfg.connections)?;
-    writeln!(
-        out,
-        "  \"requests_in_flight\": {},",
-        cfg.requests_in_flight
-    )?;
+    writeln!(out, "  \"requests_in_flight\": {},", cfg.requests_in_flight)?;
     writeln!(out, "  \"request_bytes\": {},", cfg.request_bytes)?;
     writeln!(out, "  \"response_bytes\": {},", cfg.response_bytes)?;
     writeln!(

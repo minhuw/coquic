@@ -214,10 +214,16 @@ docker network create "${network_name}" >/dev/null
 for congestion_control in "${congestion_control_list[@]}"; do
   for run in "${runs[@]}"; do
     read -r backend mode direction request_bytes response_bytes limit streams connections inflight warmup duration <<<"${run}"
+    effective_connections="${connections}"
+    effective_inflight="${inflight}"
+    if [ "${client_impl}" = 'lsquic' ] && [ "${server_impl}" = 'lsquic' ] && [ "${mode}" != 'bulk' ]; then
+      effective_connections=1
+      effective_inflight=$((inflight * connections))
+    fi
     if [ "${client_impl}" = 'coquic' ] && [ "${server_impl}" = 'coquic' ]; then
-      run_name="${preset}-${congestion_control}-${backend}-${mode}-s${streams}-c${connections}-q${inflight}"
+      run_name="${preset}-${congestion_control}-${backend}-${mode}-s${streams}-c${effective_connections}-q${effective_inflight}"
     else
-      run_name="${preset}-${client_impl}-to-${server_impl}-${congestion_control}-${backend}-${mode}-s${streams}-c${connections}-q${inflight}"
+      run_name="${preset}-${client_impl}-to-${server_impl}-${congestion_control}-${backend}-${mode}-s${streams}-c${effective_connections}-q${effective_inflight}"
     fi
     json_path="${results_root}/${run_name}.json"
     txt_path="${results_root}/${run_name}.txt"
@@ -303,8 +309,8 @@ for congestion_control in "${congestion_control_list[@]}"; do
       --request-bytes "${request_bytes}"
       --response-bytes "${response_bytes}"
       --streams "${streams}"
-      --connections "${connections}"
-      --requests-in-flight "${inflight}"
+      --connections "${effective_connections}"
+      --requests-in-flight "${effective_inflight}"
       --warmup "${warmup}"
       --duration "${duration}"
       --json-out /results/result.json

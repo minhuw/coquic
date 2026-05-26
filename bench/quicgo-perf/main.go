@@ -198,6 +198,11 @@ type connectionState struct {
 	control quic.Stream
 }
 
+type clientDialer struct {
+	transport *quic.Transport
+	remote    *net.UDPAddr
+}
+
 type bulkStreamResult struct {
 	counts   bool
 	received uint64
@@ -496,10 +501,15 @@ func runClient(cfg config) (runSummary, error) {
 		requestsInFlight: cfg.requestsInFlight,
 	}
 
+	dialer, err := newClientDialer(cfg)
+	if err != nil {
+		return summary, err
+	}
+	defer dialer.Close()
+
 	var connections []connectionState
 	if cfg.mode != modeCRR {
-		var err error
-		connections, err = openConnections(context.Background(), cfg, start, cfg.connections)
+		connections, err = openConnections(context.Background(), dialer, cfg, start, cfg.connections)
 		if err != nil {
 			return summary, err
 		}
@@ -508,7 +518,6 @@ func runClient(cfg config) (runSummary, error) {
 
 	counters := &measuredCounters{}
 	var elapsed time.Duration
-	var err error
 	runStart := time.Now()
 	switch cfg.mode {
 	case modeBulk:
@@ -527,7 +536,7 @@ func runClient(cfg config) (runSummary, error) {
 			elapsed = cfg.duration
 		}
 	case modeCRR:
-		err = runCRR(cfg, start, counters)
+		err = runCRR(cfg, start, counters, dialer)
 		if cfg.requests.set {
 			elapsed = time.Since(runStart)
 		} else {
@@ -590,10 +599,31 @@ func expectsSessionComplete(cfg config) bool {
 	return cfg.mode == modeRR && cfg.requests.set
 }
 
-func openConnections(ctx context.Context, cfg config, start sessionStart, count uint64) ([]connectionState, error) {
+func newClientDialer(cfg config) (*clientDialer, error) {
+	remote, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", cfg.host, cfg.port))
+	if err != nil {
+		return nil, fmt.Errorf("resolve quic-go server address: %w", err)
+	}
+	local := &net.UDPAddr{IP: net.IPv4zero, Port: 0}
+	if remote.IP != nil && remote.IP.To4() == nil {
+		local.IP = net.IPv6zero
+	}
+	udpConn, err := net.ListenUDP("udp", local)
+	if err != nil {
+		return nil, fmt.Errorf("open quic-go client UDP socket: %w", err)
+	}
+	transport := &quic.Transport{Conn: udpConn}
+	return &clientDialer{transport: transport, remote: remote}, nil
+}
+
+func (d *clientDialer) Close() {
+	_ = d.transport.Close()
+}
+
+func openConnections(ctx context.Context, dialer *clientDialer, cfg config, start sessionStart, count uint64) ([]connectionState, error) {
 	connections := make([]connectionState, 0, intCap(count))
 	for i := uint64(0); i < count; i++ {
-		conn, err := dialConnection(ctx, cfg)
+		conn, err := dialer.dialConnection(ctx, cfg)
 		if err != nil {
 			closeConnections(connections)
 			return nil, fmt.Errorf("dial quic-go connection: %w", err)
@@ -630,10 +660,10 @@ func openConnections(ctx context.Context, cfg config, start sessionStart, count 
 	return connections, nil
 }
 
-func dialConnection(ctx context.Context, cfg config) (quic.Connection, error) {
+func (d *clientDialer) dialConnection(ctx context.Context, cfg config) (quic.Connection, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	return quic.DialAddr(dialCtx, fmt.Sprintf("%s:%d", cfg.host, cfg.port), &tls.Config{
+	return d.transport.Dial(dialCtx, d.remote, &tls.Config{
 		ServerName:         cfg.serverName,
 		InsecureSkipVerify: !cfg.verifyPeer, //nolint:gosec
 		NextProtos:         []string{applicationProtocol},
@@ -855,7 +885,7 @@ func runRR(cfg config, connections []connectionState, counters *measuredCounters
 	return nil
 }
 
-func runCRR(cfg config, start sessionStart, counters *measuredCounters) error {
+func runCRR(cfg config, start sessionStart, counters *measuredCounters, dialer *clientDialer) error {
 	measureStart := time.Now().Add(cfg.warmup)
 	measureDeadline := measureStart.Add(cfg.duration)
 	sem := make(chan struct{}, intCap(cfg.connections))
@@ -874,7 +904,7 @@ func runCRR(cfg config, start sessionStart, counters *measuredCounters) error {
 		active.Add(1)
 		go func() {
 			defer func() { <-sem }()
-			connections, err := openConnections(ctx, cfg, start, 1)
+			connections, err := openConnections(ctx, dialer, cfg, start, 1)
 			if err != nil {
 				resultCh <- rrStreamResult{counts: counts, err: maybeSkipCRRSetupError(cfg, counters, counts, err)}
 				return
@@ -925,7 +955,7 @@ func runCRR(cfg config, start sessionStart, counters *measuredCounters) error {
 }
 
 func maybeSkipCRRSetupError(cfg config, counters *measuredCounters, counts bool, err error) error {
-	if cfg.mode == modeCRR && !cfg.requests.set && isConnectionRefused(err) {
+	if cfg.mode == modeCRR && !cfg.requests.set && isTransientCRRSetupError(err) {
 		counters.skippedSetupErrors.Add(1)
 		time.Sleep(2 * time.Millisecond)
 		return nil
@@ -933,9 +963,20 @@ func maybeSkipCRRSetupError(cfg config, counters *measuredCounters, counts bool,
 	return err
 }
 
-func isConnectionRefused(err error) bool {
+func isTransientCRRSetupError(err error) bool {
+	if isDeadlineExceeded(err) {
+		return true
+	}
 	var transportErr *quic.TransportError
 	return errors.As(err, &transportErr) && transportErr.ErrorCode == quic.ConnectionRefused
+}
+
+func isDeadlineExceeded(err error) bool {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func runRequestResponseStream(ctx context.Context, conn quic.Connection, requestBytes uint64) (time.Duration, uint64, error) {

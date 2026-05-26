@@ -974,6 +974,22 @@ EOF
           postPatch = ''
             substituteInPlace .bazelversion --replace-fail '8.2.1' '7.6.0'
             echo "common --repository_cache=\"$bazelOut/external/repository_cache\"" >> .bazelrc
+            cp "$perfSource" quiche/quic/tools/google_quiche_perf.cc
+            cat >> quiche/BUILD.bazel <<'EOF'
+
+cc_binary(
+    name = "google_quiche_perf",
+    srcs = ["quic/tools/google_quiche_perf.cc"],
+    deps = [
+        ":io_tool_support",
+        ":quiche_core",
+        ":quiche_tool_support",
+        "@boringssl//:crypto",
+        "@com_google_absl//absl/log:initialize",
+        "@com_google_absl//absl/strings",
+    ],
+)
+EOF
           '';
           installPhase = ''
             runHook preInstall

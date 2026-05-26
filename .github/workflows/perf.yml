@@ -167,7 +167,7 @@ jobs:
           df -h
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@v22
 
       - name: Configure Nix Build Parallelism
         run: |

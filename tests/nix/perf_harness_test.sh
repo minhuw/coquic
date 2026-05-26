@@ -463,6 +463,11 @@ grep -F -- 'ln -s ${quicgoPerfClient}/bin/quicgo-perf $out/usr/local/bin/quicgo-
   exit 1
 }
 
+grep -F -- 'isTransientCRRSetupError' "${repo_root}/bench/quicgo-perf/main.go" >/dev/null || {
+  echo 'quic-go perf client must tolerate transient CRR setup failures during timed runs' >&2
+  exit 1
+}
+
 grep -F -- 'quinnPerfClient = pkgs.rustPlatform.buildRustPackage' "${flake}" >/dev/null || {
   echo 'missing quinn perf client package in flake.nix' >&2
   exit 1
@@ -557,6 +562,14 @@ grep -F -- 'name = "google_quiche_perf"' "${flake}" >/dev/null || {
   echo 'Google QUICHE perf client package must define a native Bazel binary' >&2
   exit 1
 }
+
+google_quiche_target_defs="$(
+  grep -F -- 'name = "google_quiche_perf"' "${flake}" | wc -l | tr -d ' '
+)"
+if [ "${google_quiche_target_defs}" -lt 2 ]; then
+  echo 'Google QUICHE perf client package must define the native Bazel binary in fetch and build phases' >&2
+  exit 1
+fi
 
 grep -F -- '//quiche:google_quiche_perf' "${flake}" >/dev/null || {
   echo 'Google QUICHE perf client package must build the native Bazel target' >&2
@@ -703,6 +716,11 @@ grep -F -- 'lsquic_conn_make_stream' "${lsquic_perf}" >/dev/null || {
   exit 1
 }
 
+grep -F -- "effective_inflight=\$((inflight * connections))" "${script}" >/dev/null || {
+  echo 'harness must fold LSQUIC RR/CRR connection fanout into stream concurrency' >&2
+  exit 1
+}
+
 if grep -F -- 'subprocess' "${lsquic_perf}" >/dev/null; then
   echo 'LSQUIC perf client must not shell out through subprocess' >&2
   exit 1
@@ -740,6 +758,16 @@ grep -F -- 'use neqo_transport::' "${neqo_perf}" >/dev/null || {
 
 grep -F -- 'stream_create(StreamType::BiDi)' "${neqo_perf}" >/dev/null || {
   echo 'Neqo perf client must create streams through the native Neqo API' >&2
+  exit 1
+}
+
+grep -F -- 'handle_process_output(socket, server.process(Some(&dgram), Instant::now()))' "${neqo_perf}" >/dev/null || {
+  echo 'Neqo perf server must send immediate output produced by socket input' >&2
+  exit 1
+}
+
+grep -F -- 'handle_process_output(socket, conn.process(Some(&dgram), Instant::now()))' "${neqo_perf}" >/dev/null || {
+  echo 'Neqo perf client must send immediate output produced by socket input' >&2
   exit 1
 }
 

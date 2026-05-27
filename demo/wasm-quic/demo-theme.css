@@ -193,6 +193,21 @@ h3 {
   text-decoration: none;
 }
 
+.top-nav .repo-link {
+  width: 56px;
+  margin-left: 10px;
+  border-left: 1px solid var(--line);
+  border-radius: 0 6px 6px 0;
+  padding-inline: 18px 6px;
+}
+
+.top-nav .repo-link svg {
+  width: 32px;
+  height: 32px;
+  display: block;
+  fill: currentColor;
+}
+
 .top-nav-home {
   width: 48px;
   height: 48px;

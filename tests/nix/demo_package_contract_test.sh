@@ -119,7 +119,7 @@ done
 
 for marker in \
   "coquic-perf-comparison-v1" \
-  "coquic performance comparison" \
+  "CoQUIC Performance Comparison" \
   "coquic-logo.svg" \
   "demo-theme.css" \
   "perf-results.json" \

@@ -499,10 +499,24 @@ docker network ls --format '{{.Name}}' |
   grep -E -- "${runner_network_pattern}" |
   xargs -r docker network rm >/dev/null 2>&1 || true
 
+run_both_directions() {
+  local first_status=0
+  local second_status=0
+
+  run_direction coquic "${interop_peer_impl}" || first_status=$?
+  run_direction "${interop_peer_impl}" coquic || second_status=$?
+
+  if [ "${first_status}" -ne 0 ] || [ "${second_status}" -ne 0 ]; then
+    echo "One or more official interop directions failed: " \
+      "coquic/${interop_peer_impl}=${first_status}, " \
+      "${interop_peer_impl}/coquic=${second_status}" >&2
+    return 1
+  fi
+}
+
 case "${interop_directions}" in
   both)
-    run_direction coquic "${interop_peer_impl}"
-    run_direction "${interop_peer_impl}" coquic
+    run_both_directions
     ;;
   coquic-server)
     run_direction coquic "${interop_peer_impl}"

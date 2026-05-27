@@ -2,18 +2,19 @@
   <img src="demo/wasm-quic/coquic-logo.svg" alt="CoQUIC logo" width="96" height="96">
 </p>
 
-# coquic
-
 <p align="center">
   <a href="https://github.com/minhuw/coquic/actions/workflows/ci.yml"><img src="https://github.com/minhuw/coquic/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://app.codecov.io/github/minhuw/coquic"><img src="https://codecov.io/github/minhuw/coquic/graph/badge.svg?branch=main" alt="codecov"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://coquic.minhuw.dev/"><img src="https://img.shields.io/badge/website-coquic.minhuw.dev-0F62FE" alt="website"></a>
-  <a href="https://coquic.minhuw.dev/perf-comparison.html"><img src="https://img.shields.io/badge/performance-dashboard-0F62FE" alt="performance dashboard"></a>
+  <a href="https://coquic.minhuw.dev/"><img src="https://img.shields.io/badge/Website-CoQUIC-0F62FE" alt="CoQUIC website"></a>
+  <a href="https://coquic.minhuw.dev/perf-comparison.html"><img src="https://img.shields.io/badge/Performance-Dashboard-0F62FE" alt="CoQUIC performance dashboard"></a>
 </p>
 
 <p align="center">
   <a href="https://github.com/minhuw/coquic"><img src="https://img.shields.io/badge/AI%20Generated-100%25-0F62FE?labelColor=161616" alt="AI Generated 100%"></a>
+  <a href="https://openai.com/codex/"><img src="https://img.shields.io/badge/Powered%20by-Codex-0F62FE?labelColor=161616" alt="Powered by Codex"></a>
+  <a href="https://openai.com/index/introducing-gpt-5-4/"><img src="https://img.shields.io/badge/Generated%20with-GPT--5.4-10A37F?labelColor=161616" alt="Generated with GPT-5.4"></a>
+  <a href="https://openai.com/index/introducing-gpt-5-5/"><img src="https://img.shields.io/badge/Generated%20with-GPT--5.5-10A37F?labelColor=161616" alt="Generated with GPT-5.5"></a>
 </p>
 
 <p align="center">
@@ -27,5 +28,7 @@
   <a href="https://www.rfc-editor.org/rfc/rfc9369"><img src="https://img.shields.io/badge/RFC-9369-brightgreen" alt="RFC 9369"></a>
   <a href="https://datatracker.ietf.org/doc/draft-ietf-quic-qlog-main-schema/"><img src="https://img.shields.io/badge/qlog-draft--13-9cf" alt="qlog draft 13"></a>
 </p>
+
+# CoQUIC
 
 CoQUIC is an experimental QUIC implementation exploring how far Codex, paired with GPT-5.4 and later models, can go in building a full-featured transport stack.

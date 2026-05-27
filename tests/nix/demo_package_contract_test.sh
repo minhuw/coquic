@@ -29,7 +29,7 @@ if [[ -e demo/site/index.html ]]; then
   exit 1
 fi
 
-for packaged_file in index.html workbench.html demo-theme.css quic-demo.js perf-comparison.html perf-comparison.js interop-results.html interop-results.js coquic-wasm-quic.wasm; do
+for packaged_file in index.html workbench.html demo-theme.css coquic-logo.svg quic-demo.js perf-comparison.html perf-comparison.js interop-results.html interop-results.js coquic-wasm-quic.wasm; do
   if [[ ! -f "${output_dir}/${packaged_file}" ]]; then
     echo "missing packaged wasm demo file: ${packaged_file}" >&2
     exit 1
@@ -73,6 +73,8 @@ for marker in \
   "codex-word" \
   "quic-word" \
   "slogan-hero" \
+  "slogan-logo" \
+  "coquic-logo.svg" \
   "demo-theme.css" \
   "workbench.html" \
   "perf-comparison.html" \
@@ -86,6 +88,7 @@ done
 for marker in \
   "coquic-wasm-demo-v1" \
   "coquic wasm QUIC" \
+  "coquic-logo.svg" \
   "Datagram And Event Trace" \
   "Packet Log" \
   "Packet Details" \
@@ -117,6 +120,7 @@ done
 for marker in \
   "coquic-perf-comparison-v1" \
   "coquic performance comparison" \
+  "coquic-logo.svg" \
   "demo-theme.css" \
   "perf-results.json" \
   "perf-history.json" \
@@ -161,6 +165,7 @@ done
 for marker in \
   "coquic-interop-results-v1" \
   "coquic interop results" \
+  "coquic-logo.svg" \
   "demo-theme.css" \
   "interop-results.json" \
   "CoQUIC Interop Matrix" \

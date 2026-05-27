@@ -25,12 +25,15 @@
         margin: 0;
       }
     </style>
+    <link rel="icon" href="./coquic-logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="./demo-theme.css">
   </head>
   <body>
     <main class="home-page">
       <nav class="top-nav" aria-label="Demo views">
-        <a class="top-nav-home" href="./index.html" aria-current="page">Home</a>
+        <a class="top-nav-home" href="./index.html" aria-label="Home" aria-current="page">
+          <img src="./coquic-logo.svg" alt="" aria-hidden="true">
+        </a>
         <span class="top-nav-links">
           <a href="./workbench.html">Workbench</a>
           <a href="./perf-comparison.html">Performance</a>
@@ -39,6 +42,7 @@
       </nav>
 
       <section class="slogan-hero" aria-label="coquic slogan">
+        <img class="slogan-logo" src="./coquic-logo.svg" alt="CoQUIC logo">
         <h1><span class="codex-word">Co</span><span class="quic-word">QUIC</span><span class="slogan-rest">, from Prompt to Packet.</span></h1>
         <div class="home-actions" aria-label="Feature links">
           <a class="home-action" href="./workbench.html">Workbench</a>

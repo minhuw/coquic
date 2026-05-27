@@ -208,8 +208,8 @@
       }
 
       .participant-chip.coquic {
-        border-color: rgba(245, 78, 0, 0.28);
-        background: #fff4ee;
+        border-color: rgba(15, 98, 254, 0.28);
+        background: #edf5ff;
         color: var(--client);
         font-family: var(--mono);
       }
@@ -238,13 +238,13 @@
 
       .test-cell.unsupported {
         border-color: rgba(192, 133, 50, 0.3);
-        background: #fff8e7;
+        background: #fcf4d6;
         color: var(--warning);
       }
 
       .test-cell.failed {
         border-color: rgba(207, 45, 86, 0.28);
-        background: #fff5f6;
+        background: #fff1f1;
         color: var(--danger);
       }
 
@@ -271,12 +271,15 @@
         }
       }
     </style>
+    <link rel="icon" href="./coquic-logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="./demo-theme.css">
   </head>
   <body>
     <main class="interop-main">
       <nav class="top-nav" aria-label="Demo views">
-        <a class="top-nav-home" href="./index.html">Home</a>
+        <a class="top-nav-home" href="./index.html" aria-label="Home">
+          <img src="./coquic-logo.svg" alt="" aria-hidden="true">
+        </a>
         <span class="top-nav-links">
           <a href="./workbench.html">Workbench</a>
           <a href="./perf-comparison.html">Performance</a>

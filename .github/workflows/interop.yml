@@ -32,6 +32,26 @@ jobs:
             impl: quinn
             image: stammw/quinn-interop@sha256:5205c84e200ef1a999be602ed6eeec9a216f25ce27d5eac690fa1540ec73f355
             testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
+          - peer: msquic
+            display_name: msquic
+            impl: msquic
+            image: ghcr.io/microsoft/msquic/qns:main
+            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
+          - peer: quiche
+            display_name: quiche
+            impl: quiche
+            image: cloudflare/quiche-qns:latest
+            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
+          - peer: ngtcp2
+            display_name: ngtcp2
+            impl: ngtcp2
+            image: ghcr.io/ngtcp2/ngtcp2-interop:latest
+            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
+          - peer: s2n-quic
+            display_name: s2n-quic
+            impl: s2n-quic
+            image: ghcr.io/aws/s2n-quic/s2n-quic-qns:latest
+            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
 
     steps:
       - name: Checkout
@@ -216,6 +236,10 @@ jobs:
             --result quicgo-server=.interop-results/downloaded/interop-results-quicgo.json \
             --result picoquic-server=.interop-results/downloaded/interop-results-picoquic.json \
             --result quinn-server=.interop-results/downloaded/interop-results-quinn.json \
+            --result msquic-server=.interop-results/downloaded/interop-results-msquic.json \
+            --result quiche-server=.interop-results/downloaded/interop-results-quiche.json \
+            --result ngtcp2-server=.interop-results/downloaded/interop-results-ngtcp2.json \
+            --result s2n-quic-server=.interop-results/downloaded/interop-results-s2n-quic.json \
             --result self=.interop-results/downloaded/interop-results-self.json \
             --event-name "${GITHUB_EVENT_NAME}" \
             --commit "${GITHUB_SHA}" \

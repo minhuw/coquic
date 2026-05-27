@@ -10,6 +10,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://coquic.minhuw.dev/"><img src="https://img.shields.io/badge/website-coquic.minhuw.dev-0F62FE" alt="website"></a>
   <a href="https://coquic.minhuw.dev/perf-comparison.html"><img src="https://img.shields.io/badge/performance-dashboard-0F62FE" alt="performance dashboard"></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/minhuw/coquic"><img src="https://img.shields.io/badge/AI%20Generated-100%25-0F62FE?labelColor=161616" alt="AI Generated 100%"></a>
 </p>
 

@@ -740,6 +740,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
                   coquic::quic::QuicCongestionControlAlgorithm::copa);
+        EXPECT_TRUE(optional_ref_or_terminate(parsed).congestion_control_explicit);
     }
 
     {
@@ -752,6 +753,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
                   coquic::quic::QuicCongestionControlAlgorithm::newreno);
+        EXPECT_FALSE(optional_ref_or_terminate(parsed).congestion_control_explicit);
     }
 
     {
@@ -762,6 +764,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
                   coquic::quic::QuicCongestionControlAlgorithm::copa);
+        EXPECT_TRUE(optional_ref_or_terminate(parsed).congestion_control_explicit);
     }
 
     const auto client_runtime = coquic::http09::Http09RuntimeConfig{
@@ -782,6 +785,122 @@ TEST(QuicHttp09RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection
     const auto server_core = coquic::http09::make_http09_server_core_config(server_runtime);
     EXPECT_EQ(server_core.transport.congestion_control,
               coquic::quic::QuicCongestionControlAlgorithm::bbr);
+}
+
+TEST(QuicHttp09RuntimeTest, TransferRuntimeDefaultsToBbrUnlessCongestionControlIsExplicit) {
+    const auto transfer_client =
+        coquic::http09::make_http09_client_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::client,
+            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
+            .requests_env = "https://localhost/a.txt",
+        });
+    const auto transfer_server =
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
+            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+        });
+    const auto keyupdate_server =
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
+            .testcase = coquic::http09::QuicHttp09Testcase::keyupdate,
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+        });
+    const auto handshake_client =
+        coquic::http09::make_http09_client_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::client,
+            .testcase = coquic::http09::QuicHttp09Testcase::handshake,
+        });
+    const auto explicit_transfer_newreno_server =
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
+            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+            .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::newreno,
+            .congestion_control_explicit = true,
+        });
+
+    EXPECT_EQ(transfer_client.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+    EXPECT_EQ(transfer_server.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+    EXPECT_EQ(keyupdate_server.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::bbr);
+    EXPECT_EQ(handshake_client.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::newreno);
+    EXPECT_EQ(explicit_transfer_newreno_server.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::newreno);
+}
+
+TEST(QuicHttp09RuntimeTest, ExplicitTransferRuntimeDisablesHyStartPlusPlusForLossBasedControllers) {
+    const auto default_config = coquic::quic::QuicCoreConfig{};
+    EXPECT_TRUE(default_config.transport.enable_hystart_plus_plus);
+
+    const auto explicit_transfer_newreno_client =
+        coquic::http09::make_http09_client_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::client,
+            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
+            .requests_env = "https://localhost/a.txt",
+            .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::newreno,
+            .congestion_control_explicit = true,
+        });
+    const auto explicit_transfer_newreno_server =
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
+            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+            .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::newreno,
+            .congestion_control_explicit = true,
+        });
+    const auto explicit_transfer_cubic_server =
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
+            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+            .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::cubic,
+            .congestion_control_explicit = true,
+        });
+    const auto handshake_newreno_client =
+        coquic::http09::make_http09_client_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::client,
+            .testcase = coquic::http09::QuicHttp09Testcase::handshake,
+        });
+    const auto transfer_bbr_client =
+        coquic::http09::make_http09_client_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::client,
+            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
+            .requests_env = "https://localhost/a.txt",
+            .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
+            .congestion_control_explicit = true,
+        });
+    const auto implicit_transfer_client =
+        coquic::http09::make_http09_client_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::client,
+            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
+            .requests_env = "https://localhost/a.txt",
+        });
+    const auto explicit_keyupdate_newreno_server =
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
+            .testcase = coquic::http09::QuicHttp09Testcase::keyupdate,
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+            .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::newreno,
+            .congestion_control_explicit = true,
+        });
+
+    EXPECT_FALSE(explicit_transfer_newreno_client.transport.enable_hystart_plus_plus);
+    EXPECT_FALSE(explicit_transfer_newreno_server.transport.enable_hystart_plus_plus);
+    EXPECT_FALSE(explicit_transfer_cubic_server.transport.enable_hystart_plus_plus);
+    EXPECT_TRUE(handshake_newreno_client.transport.enable_hystart_plus_plus);
+    EXPECT_TRUE(transfer_bbr_client.transport.enable_hystart_plus_plus);
+    EXPECT_TRUE(implicit_transfer_client.transport.enable_hystart_plus_plus);
+    EXPECT_FALSE(explicit_keyupdate_newreno_server.transport.enable_hystart_plus_plus);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeRejectsInvalidCongestionControlSelection) {

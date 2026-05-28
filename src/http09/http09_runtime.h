@@ -35,6 +35,7 @@ struct Http09RuntimeConfig {
     std::optional<std::filesystem::path> tls_keylog_path;
     quic::QuicCongestionControlAlgorithm congestion_control =
         quic::QuicCongestionControlAlgorithm::newreno;
+    bool congestion_control_explicit = false;
 };
 
 struct ParsedHttp09Authority {

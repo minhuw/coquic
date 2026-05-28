@@ -12,6 +12,14 @@
 #define COQUIC_NO_PROFILE
 #endif
 
+#if !defined(COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE)
+#if defined(__wasm__)
+#define COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE 1
+#else
+#define COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE 0
+#endif
+#endif
+
 namespace coquic::quic {
 
 namespace {
@@ -21,6 +29,9 @@ constexpr std::size_t kDatagramByteStorageCacheSlots = 128;
 constexpr std::size_t kDatagramByteStorageCacheBucketBytes = std::size_t{4} * 1024;
 
 COQUIC_NO_PROFILE std::size_t datagram_byte_storage_allocation_count(std::size_t count) {
+#if COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE != 0
+    return count;
+#else
     if (count < kDatagramByteStorageCacheBucketBytes || count > kDatagramByteStorageCacheMaxBytes) {
         return count;
     }
@@ -28,8 +39,10 @@ COQUIC_NO_PROFILE std::size_t datagram_byte_storage_allocation_count(std::size_t
     return ((count + kDatagramByteStorageCacheBucketBytes - 1) /
             kDatagramByteStorageCacheBucketBytes) *
            kDatagramByteStorageCacheBucketBytes;
+#endif
 }
 
+#if COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE == 0
 struct DatagramByteStorageCache {
     struct Entry {
         std::byte *pointer = nullptr;
@@ -82,6 +95,7 @@ COQUIC_NO_PROFILE DatagramByteStorageCache &datagram_byte_storage_cache() {
     thread_local DatagramByteStorageCache cache;
     return cache;
 }
+#endif
 
 std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> output,
                                                        std::size_t *offset, std::uint64_t value) {
@@ -128,10 +142,12 @@ COQUIC_NO_PROFILE std::byte *allocate_datagram_byte_storage(std::size_t count) {
     }
 
     const auto allocation_count = datagram_byte_storage_allocation_count(count);
+#if COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE == 0
     auto &cache = datagram_byte_storage_cache();
     if (auto cached = cache.take(allocation_count)) {
         return *cached;
     }
+#endif
 
     return std::allocator<std::byte>{}.allocate(allocation_count);
 }
@@ -143,10 +159,12 @@ COQUIC_NO_PROFILE void deallocate_datagram_byte_storage(std::byte *pointer,
     }
 
     const auto allocation_count = datagram_byte_storage_allocation_count(count);
+#if COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE == 0
     if (allocation_count <= kDatagramByteStorageCacheMaxBytes &&
         datagram_byte_storage_cache().put(pointer, allocation_count)) {
         return;
     }
+#endif
 
     std::allocator<std::byte>{}.deallocate(pointer, allocation_count);
 }

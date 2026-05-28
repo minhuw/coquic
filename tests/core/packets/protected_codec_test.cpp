@@ -495,6 +495,86 @@ TEST(QuicProtectedCodecTest, DeserializesReceivedOneRttPacketFromSharedStorageSu
     EXPECT_EQ(stream->stream_data.storage(), storage);
 }
 
+TEST(QuicProtectedCodecTest, FastDeserializesReceivedOneRttStreamPacketWithoutFrameList) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames = {
+        coquic::quic::StreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 11,
+            .offset = 7,
+            .stream_data = {std::byte{0x31}, std::byte{0x32}, std::byte{0x33}},
+        },
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{packet},
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                       /*secret_size=*/16));
+    ASSERT_TRUE(encoded.has_value());
+
+    auto storage = std::make_shared<std::vector<std::byte>>(encoded.value());
+    const auto decoded = coquic::quic::deserialize_received_protected_packet_fast(
+        storage, 0, storage->size(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                         /*secret_size=*/16));
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *one_rtt =
+        std::get_if<coquic::quic::ReceivedProtectedOneRttStreamPacket>(&decoded.value());
+    ASSERT_NE(one_rtt, nullptr);
+    EXPECT_EQ(one_rtt->plaintext_storage, storage);
+    EXPECT_TRUE(one_rtt->spin_bit);
+    EXPECT_EQ(one_rtt->destination_connection_id, packet.destination_connection_id);
+    EXPECT_EQ(one_rtt->packet_number_length, kOneRttPacketNumberLength);
+    EXPECT_EQ(one_rtt->packet_number, kOneRttPacketNumber);
+    EXPECT_TRUE(one_rtt->stream.fin);
+    EXPECT_TRUE(one_rtt->stream.has_offset);
+    EXPECT_TRUE(one_rtt->stream.has_length);
+    EXPECT_EQ(one_rtt->stream.stream_id, 11u);
+    EXPECT_EQ(one_rtt->stream.offset, std::optional<std::uint64_t>{7u});
+    EXPECT_EQ(one_rtt->stream.stream_data,
+              (std::vector<std::byte>{std::byte{0x31}, std::byte{0x32}, std::byte{0x33}}));
+    EXPECT_EQ(one_rtt->stream.stream_data.storage(), storage);
+}
+
+TEST(QuicProtectedCodecTest, DeserializesReceivedOneRttAckOnlyPacketWithoutFrameList) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames = {
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 0xa82f9b30ULL,
+            .ack_delay = 7,
+            .first_ack_range = 0,
+        },
+    };
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{packet},
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                       /*secret_size=*/16));
+    ASSERT_TRUE(encoded.has_value());
+
+    auto storage = std::make_shared<std::vector<std::byte>>(encoded.value());
+    const auto decoded = coquic::quic::deserialize_received_protected_packet(
+        storage, 0, storage->size(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                         /*secret_size=*/16));
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *ack_only =
+        std::get_if<coquic::quic::ReceivedProtectedOneRttAckOnlyPacket>(&decoded.value());
+    ASSERT_NE(ack_only, nullptr);
+    EXPECT_EQ(ack_only->plaintext_storage, storage);
+    EXPECT_TRUE(ack_only->spin_bit);
+    EXPECT_EQ(ack_only->destination_connection_id, packet.destination_connection_id);
+    EXPECT_EQ(ack_only->packet_number_length, kOneRttPacketNumberLength);
+    EXPECT_EQ(ack_only->packet_number, kOneRttPacketNumber);
+    EXPECT_EQ(ack_only->ack.largest_acknowledged, 0xa82f9b30ULL);
+    EXPECT_EQ(ack_only->ack.ack_delay, 7u);
+    EXPECT_EQ(ack_only->ack.first_ack_range, 0u);
+}
+
 TEST(QuicProtectedCodecTest, ReceivedProtectedPacketSharedStorageRejectsInvalidRanges) {
     auto storage = std::make_shared<std::vector<std::byte>>(
         std::vector<std::byte>{std::byte{0x40}, std::byte{0x00}});
@@ -3463,6 +3543,162 @@ TEST(QuicProtectedCodecTest, OutboundAckFrameSerializesLikeMaterializedAckFrame)
     ASSERT_TRUE(encoded_view.has_value());
     ASSERT_TRUE(encoded_frame.has_value());
     EXPECT_EQ(encoded_view.value(), encoded_frame.value());
+}
+
+TEST(QuicProtectedCodecTest, SimpleOutboundAckFrameSerializesLikeMaterializedAckFrame) {
+    auto outbound_packet = make_minimal_one_rtt_packet();
+    const auto ack_header = coquic::quic::OutboundAckHeader{
+        .largest_acknowledged = 7,
+        .ack_delay = 3,
+        .first_ack_range = 2,
+    };
+    outbound_packet.frames = {
+        coquic::quic::Frame{coquic::quic::OutboundAckFrame{
+            .header = ack_header,
+        }},
+    };
+
+    auto materialized_packet = make_minimal_one_rtt_packet();
+    materialized_packet.frames = {
+        coquic::quic::Frame{coquic::quic::AckFrame{
+            .largest_acknowledged = ack_header.largest_acknowledged,
+            .ack_delay = ack_header.ack_delay,
+            .first_ack_range = ack_header.first_ack_range,
+        }},
+    };
+
+    const auto context =
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+    const auto encoded_outbound = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{outbound_packet}, context);
+    const auto encoded_materialized = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{materialized_packet}, context);
+
+    ASSERT_TRUE(encoded_outbound.has_value());
+    ASSERT_TRUE(encoded_materialized.has_value());
+    EXPECT_EQ(encoded_outbound.value(), encoded_materialized.value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded_outbound.value(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+
+    const auto *one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded.value().front());
+    ASSERT_NE(one_rtt, nullptr);
+    ASSERT_EQ(one_rtt->frames.size(), 1u);
+    const auto *ack = std::get_if<coquic::quic::AckFrame>(&one_rtt->frames.front());
+    ASSERT_NE(ack, nullptr);
+    EXPECT_EQ(ack->largest_acknowledged, ack_header.largest_acknowledged);
+    EXPECT_EQ(ack->ack_delay, ack_header.ack_delay);
+    EXPECT_EQ(ack->first_ack_range, ack_header.first_ack_range);
+    EXPECT_TRUE(ack->additional_ranges.empty());
+    EXPECT_FALSE(ack->ecn_counts.has_value());
+}
+
+TEST(QuicProtectedCodecTest, SimpleOutboundAckWithRangesSerializesLikeMaterializedAckFrame) {
+    auto outbound_packet = make_minimal_one_rtt_packet();
+    const auto ack_header = coquic::quic::OutboundAckHeader{
+        .largest_acknowledged = 42,
+        .ack_delay = 3,
+        .first_ack_range = 0,
+        .additional_ranges =
+            {
+                coquic::quic::AckRange{
+                    .gap = 0,
+                    .range_length = 0,
+                },
+            },
+    };
+    outbound_packet.frames = {
+        coquic::quic::Frame{coquic::quic::OutboundAckFrame{
+            .header = ack_header,
+        }},
+    };
+
+    auto materialized_packet = make_minimal_one_rtt_packet();
+    materialized_packet.frames = {
+        coquic::quic::Frame{coquic::quic::AckFrame{
+            .largest_acknowledged = ack_header.largest_acknowledged,
+            .ack_delay = ack_header.ack_delay,
+            .first_ack_range = ack_header.first_ack_range,
+            .additional_ranges = ack_header.additional_ranges,
+        }},
+    };
+
+    const auto context =
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+    const auto encoded_outbound = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{outbound_packet}, context);
+    const auto encoded_materialized = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{materialized_packet}, context);
+
+    ASSERT_TRUE(encoded_outbound.has_value());
+    ASSERT_TRUE(encoded_materialized.has_value());
+    EXPECT_EQ(encoded_outbound.value(), encoded_materialized.value());
+
+    const auto decoded = coquic::quic::deserialize_protected_datagram(
+        encoded_outbound.value(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+
+    const auto *one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded.value().front());
+    ASSERT_NE(one_rtt, nullptr);
+    ASSERT_EQ(one_rtt->frames.size(), 1u);
+    const auto *ack = std::get_if<coquic::quic::AckFrame>(&one_rtt->frames.front());
+    ASSERT_NE(ack, nullptr);
+    EXPECT_EQ(ack->largest_acknowledged, ack_header.largest_acknowledged);
+    EXPECT_EQ(ack->ack_delay, ack_header.ack_delay);
+    EXPECT_EQ(ack->first_ack_range, ack_header.first_ack_range);
+    ASSERT_EQ(ack->additional_ranges.size(), ack_header.additional_ranges.size());
+    EXPECT_EQ(ack->additional_ranges.front().gap, ack_header.additional_ranges.front().gap);
+    EXPECT_EQ(ack->additional_ranges.front().range_length,
+              ack_header.additional_ranges.front().range_length);
+    EXPECT_FALSE(ack->ecn_counts.has_value());
+}
+
+TEST(QuicProtectedCodecTest, SimpleOutboundAckEcnFrameSerializesLikeMaterializedAckFrame) {
+    auto outbound_packet = make_minimal_one_rtt_packet();
+    const auto ack_header = coquic::quic::OutboundAckHeader{
+        .largest_acknowledged = 9,
+        .ack_delay = 4,
+        .first_ack_range = 1,
+        .ecn_counts =
+            coquic::quic::AckEcnCounts{
+                .ect0 = 11,
+                .ect1 = 0,
+                .ecn_ce = 2,
+            },
+    };
+    outbound_packet.frames = {
+        coquic::quic::Frame{coquic::quic::OutboundAckFrame{
+            .header = ack_header,
+        }},
+    };
+
+    auto materialized_packet = make_minimal_one_rtt_packet();
+    materialized_packet.frames = {
+        coquic::quic::Frame{coquic::quic::AckFrame{
+            .largest_acknowledged = ack_header.largest_acknowledged,
+            .ack_delay = ack_header.ack_delay,
+            .first_ack_range = ack_header.first_ack_range,
+            .ecn_counts = ack_header.ecn_counts,
+        }},
+    };
+
+    const auto context =
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+    const auto encoded_outbound = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{outbound_packet}, context);
+    const auto encoded_materialized = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{materialized_packet}, context);
+
+    ASSERT_TRUE(encoded_outbound.has_value());
+    ASSERT_TRUE(encoded_materialized.has_value());
+    EXPECT_EQ(encoded_outbound.value(), encoded_materialized.value());
 }
 
 TEST(QuicProtectedCodecTest, RejectsEmptyReceivedProtectedDatagram) {

@@ -17,11 +17,14 @@ constexpr std::size_t kHyStartNonPacedAckLimitPackets = 8;
 constexpr QuicCoreDuration kHyStartMinRttThreshold{4000};
 constexpr QuicCoreDuration kHyStartMaxRttThreshold{16000};
 constexpr std::uint8_t kHyStartMinRttDivisor = 8;
+constexpr QuicCoreDuration kQuinnPacingBurstInterval{2000};
+constexpr std::size_t kQuinnPacingMinimumBurstPackets = 10;
+constexpr std::size_t kQuinnPacingMaximumBurstPackets = 256;
 
 } // namespace
 
-HyStartPlusPlus::HyStartPlusPlus(std::size_t max_datagram_size)
-    : max_datagram_size_(max_datagram_size) {
+HyStartPlusPlus::HyStartPlusPlus(std::size_t max_datagram_size, bool enabled)
+    : max_datagram_size_(max_datagram_size), enabled_(enabled) {
 }
 
 void HyStartPlusPlus::on_packet_sent(SentPacketRecord &packet) {
@@ -36,23 +39,19 @@ void HyStartPlusPlus::on_packet_sent(SentPacketRecord &packet) {
 }
 
 std::size_t HyStartPlusPlus::growth_bytes(std::size_t newly_acked_bytes) const {
+    if (!enabled_ || mode_ != Mode::conservative_slow_start) {
+        return newly_acked_bytes;
+    }
     const auto ack_limit = max_datagram_size_ > std::numeric_limits<std::size_t>::max() /
                                                     kHyStartNonPacedAckLimitPackets
                                ? std::numeric_limits<std::size_t>::max()
                                : kHyStartNonPacedAckLimitPackets * max_datagram_size_;
     const auto limited_acked_bytes = std::min(newly_acked_bytes, ack_limit);
-    if (!enabled_ || mode_ != Mode::conservative_slow_start) {
-        return limited_acked_bytes;
-    }
     return limited_acked_bytes / kHyStartCssGrowthDivisor;
 }
 
 void HyStartPlusPlus::on_slow_start_ack(std::span<const SentPacketRecord> packets,
                                         const RecoveryRttState &rtt_state) {
-    if (!enabled_ || !rtt_state.latest_rtt.has_value()) {
-        return;
-    }
-
     std::optional<std::uint64_t> largest_acked_send_sequence;
     for (const auto &packet : packets) {
         if (!packet.ack_eliciting || packet.app_limited || packet.congestion_send_sequence == 0) {
@@ -63,7 +62,28 @@ void HyStartPlusPlus::on_slow_start_ack(std::span<const SentPacketRecord> packet
                 ? std::max(*largest_acked_send_sequence, packet.congestion_send_sequence)
                 : packet.congestion_send_sequence;
     }
-    if (!largest_acked_send_sequence.has_value()) {
+    on_slow_start_ack_sequence(largest_acked_send_sequence, rtt_state);
+}
+
+void HyStartPlusPlus::on_slow_start_ack(std::span<const AckedStreamPacketSample> packets,
+                                        const RecoveryRttState &rtt_state) {
+    std::optional<std::uint64_t> largest_acked_send_sequence;
+    for (const auto &packet : packets) {
+        if (packet.congestion_send_sequence == 0) {
+            continue;
+        }
+        largest_acked_send_sequence =
+            largest_acked_send_sequence.has_value()
+                ? std::max(*largest_acked_send_sequence, packet.congestion_send_sequence)
+                : packet.congestion_send_sequence;
+    }
+    on_slow_start_ack_sequence(largest_acked_send_sequence, rtt_state);
+}
+
+void HyStartPlusPlus::on_slow_start_ack_sequence(
+    std::optional<std::uint64_t> largest_acked_send_sequence, const RecoveryRttState &rtt_state) {
+    if (!enabled_ || !rtt_state.latest_rtt.has_value() ||
+        !largest_acked_send_sequence.has_value()) {
         return;
     }
 
@@ -249,6 +269,58 @@ std::size_t congestion_round_to_size_t(double value) {
         return std::numeric_limits<std::size_t>::max();
     }
     return static_cast<std::size_t>(std::llround(value));
+}
+
+QuicCoreClock::duration congestion_pacing_delay_for_deficit(std::size_t deficit_bytes,
+                                                            double rate_bytes_per_second) {
+    if (deficit_bytes == 0 || rate_bytes_per_second <= 0.0) {
+        return QuicCoreClock::duration::zero();
+    }
+
+    constexpr double kClockTicksPerSecond =
+        static_cast<double>(QuicCoreClock::duration::period::den) /
+        static_cast<double>(QuicCoreClock::duration::period::num);
+    const auto delay_ticks = std::ceil(static_cast<double>(deficit_bytes) * kClockTicksPerSecond /
+                                       rate_bytes_per_second);
+    using TickRep = QuicCoreClock::duration::rep;
+    if (delay_ticks >= static_cast<double>(std::numeric_limits<TickRep>::max())) {
+        return QuicCoreClock::duration::max();
+    }
+    return QuicCoreClock::duration{static_cast<TickRep>(delay_ticks)};
+}
+
+std::size_t congestion_pacing_replenished_bytes(QuicCoreClock::duration elapsed,
+                                                double rate_bytes_per_second) {
+    if (elapsed <= QuicCoreClock::duration::zero() || rate_bytes_per_second <= 0.0) {
+        return 0;
+    }
+
+    constexpr double kClockTicksPerSecond =
+        static_cast<double>(QuicCoreClock::duration::period::den) /
+        static_cast<double>(QuicCoreClock::duration::period::num);
+    const auto replenished =
+        (static_cast<double>(elapsed.count()) * rate_bytes_per_second) / kClockTicksPerSecond;
+    return congestion_clamp_to_size_t(replenished);
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+std::size_t congestion_quinn_pacing_budget_cap(std::size_t congestion_window,
+                                               std::size_t max_datagram_size,
+                                               QuicCoreDuration smoothed_rtt) {
+    if (max_datagram_size == 0) {
+        return 0;
+    }
+
+    const auto minimum = kQuinnPacingMinimumBurstPackets * max_datagram_size;
+    const auto maximum = kQuinnPacingMaximumBurstPackets * max_datagram_size;
+    if (congestion_window == 0 || smoothed_rtt.count() <= 0) {
+        return maximum;
+    }
+
+    const auto capacity = static_cast<double>(congestion_window) *
+                          std::chrono::duration<double>(kQuinnPacingBurstInterval).count() /
+                          std::chrono::duration<double>(smoothed_rtt).count();
+    return std::clamp(congestion_clamp_to_size_t(capacity), minimum, maximum);
 }
 
 } // namespace coquic::quic

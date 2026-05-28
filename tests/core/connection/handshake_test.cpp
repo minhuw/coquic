@@ -2566,6 +2566,61 @@ TEST(QuicCoreTest, AntiAmplificationAccountingIgnoresZeroByteDatagrams) {
     EXPECT_EQ(connection.anti_amplification_sent_bytes_, 15u);
 }
 
+TEST(QuicCoreTest, ConnectedServerWithoutValidatedPeerStillUsesInitialAmplificationBudget) {
+    auto connection = make_connected_server_connection();
+    connection.handshake_confirmed_ = false;
+    connection.peer_address_validated_ = false;
+    connection.anti_amplification_received_bytes_ = 1252;
+    connection.anti_amplification_sent_bytes_ = 2880;
+    connection.current_send_path_id_ = 0;
+    connection.ensure_path_state(0).validated = false;
+    connection.ensure_path_state(0).anti_amplification_received_bytes = 9000;
+
+    const auto remaining_budget = connection.outbound_datagram_size_limit();
+    EXPECT_EQ(remaining_budget, 876u);
+
+    connection.handshake_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x64});
+    connection.handshake_space_.send_crypto.append(
+        std::vector<std::byte>(static_cast<std::size_t>(1400), std::byte{0x31}));
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_LE(datagram.size(), remaining_budget);
+    EXPECT_EQ(connection.anti_amplification_sent_bytes_, 2880u + datagram.size());
+    EXPECT_EQ(connection.ensure_path_state(0).anti_amplification_sent_bytes, 0u);
+    EXPECT_EQ(connection.outbound_datagram_size_limit(), remaining_budget - datagram.size());
+    EXPECT_TRUE(connection.handshake_space_.send_crypto.has_pending_data());
+}
+
+TEST(QuicCoreTest, ConnectedServerWithoutValidatedPeerDoesNotArmPtoAtAmplificationLimit) {
+    auto connection = make_connected_server_connection();
+    connection.handshake_confirmed_ = false;
+    connection.peer_address_validated_ = false;
+    connection.anti_amplification_received_bytes_ = 1252;
+    connection.anti_amplification_sent_bytes_ = 3756;
+    connection.current_send_path_id_ = 0;
+    connection.ensure_path_state(0).validated = false;
+    connection.ensure_path_state(0).anti_amplification_received_bytes = 9000;
+    connection.track_sent_packet(connection.handshake_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 0,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .has_ping = true,
+                                     .bytes_in_flight = 100,
+                                 });
+
+    EXPECT_FALSE(connection.pto_deadline().has_value());
+
+    connection.on_timeout(coquic::quic::test::test_time(100000));
+
+    EXPECT_FALSE(connection.handshake_space_.pending_probe_packet.has_value());
+    EXPECT_EQ(connection.pto_count_, 0u);
+}
+
 TEST(QuicCoreTest, FirstServerInitialCanBeBlockedByAmplificationLimit) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;

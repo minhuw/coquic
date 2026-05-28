@@ -182,10 +182,18 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesPerfAckElicitingThreshold) {
     constexpr std::uint64_t kExpectedCopaBulkAckElicitingThreshold = 1;
     constexpr std::uint64_t kExpectedCopaInteractiveAckElicitingThreshold = 8;
 
-    const auto client =
+    const auto bulk_client =
         make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
-    const auto server =
+    const auto bulk_server =
         make_perf_server_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::server});
+    const auto rr_client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::rr,
+    });
+    const auto crr_server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .mode = QuicPerfMode::crr,
+    });
     const auto copa_client = make_perf_client_endpoint_config(QuicPerfConfig{
         .role = QuicPerfRole::client,
         .mode = QuicPerfMode::bulk,
@@ -207,8 +215,10 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesPerfAckElicitingThreshold) {
         .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::copa,
     });
 
-    EXPECT_EQ(client.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
-    EXPECT_EQ(server.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
+    EXPECT_EQ(bulk_client.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
+    EXPECT_EQ(bulk_server.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
+    EXPECT_EQ(rr_client.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
+    EXPECT_EQ(crr_server.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
     EXPECT_EQ(copa_client.transport.ack_eliciting_threshold,
               kExpectedCopaBulkAckElicitingThreshold);
     EXPECT_EQ(copa_server.transport.ack_eliciting_threshold,
@@ -217,6 +227,73 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesPerfAckElicitingThreshold) {
               kExpectedCopaInteractiveAckElicitingThreshold);
     EXPECT_EQ(copa_crr_server.transport.ack_eliciting_threshold,
               kExpectedCopaInteractiveAckElicitingThreshold);
+}
+
+TEST(QuicPerfConfigTest, EndpointConfigDisablesHyStartPlusPlusOnlyForBulkLossBasedControllers) {
+    const auto default_config = coquic::quic::QuicCoreEndpointConfig{};
+    EXPECT_TRUE(default_config.transport.enable_hystart_plus_plus);
+
+    const auto bulk_newreno_client =
+        make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
+    const auto bulk_newreno_server =
+        make_perf_server_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::server});
+    const auto bulk_cubic_client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::cubic,
+    });
+    const auto bulk_cubic_server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::cubic,
+    });
+    const auto rr_newreno_client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::rr,
+    });
+    const auto crr_cubic_server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .mode = QuicPerfMode::crr,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::cubic,
+    });
+    const auto bulk_bbr_client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
+    });
+    const auto bulk_copa_server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::copa,
+    });
+
+    EXPECT_FALSE(bulk_newreno_client.transport.enable_hystart_plus_plus);
+    EXPECT_FALSE(bulk_newreno_server.transport.enable_hystart_plus_plus);
+    EXPECT_FALSE(bulk_cubic_client.transport.enable_hystart_plus_plus);
+    EXPECT_FALSE(bulk_cubic_server.transport.enable_hystart_plus_plus);
+    EXPECT_TRUE(rr_newreno_client.transport.enable_hystart_plus_plus);
+    EXPECT_TRUE(crr_cubic_server.transport.enable_hystart_plus_plus);
+    EXPECT_TRUE(bulk_bbr_client.transport.enable_hystart_plus_plus);
+    EXPECT_TRUE(bulk_copa_server.transport.enable_hystart_plus_plus);
+}
+
+TEST(QuicPerfConfigTest, EndpointConfigUsesUnfairStreamSchedulingOnlyForBulk) {
+    const auto default_config = coquic::quic::QuicCoreEndpointConfig{};
+    EXPECT_TRUE(default_config.transport.send_stream_fairness);
+
+    const auto bulk_client =
+        make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
+    const auto bulk_server =
+        make_perf_server_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::server});
+    const auto rr_client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::rr,
+    });
+    const auto crr_server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .mode = QuicPerfMode::crr,
+    });
+
+    EXPECT_FALSE(bulk_client.transport.send_stream_fairness);
+    EXPECT_FALSE(bulk_server.transport.send_stream_fairness);
+    EXPECT_TRUE(rr_client.transport.send_stream_fairness);
+    EXPECT_TRUE(crr_server.transport.send_stream_fairness);
 }
 
 } // namespace

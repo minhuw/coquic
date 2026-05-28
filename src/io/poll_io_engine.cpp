@@ -32,6 +32,10 @@
 #define COQUIC_NO_PROFILE
 #endif
 
+#ifndef COQUIC_PROFILE_HOOKS
+#define COQUIC_PROFILE_HOOKS 1
+#endif
+
 namespace coquic::io {
 
 using quic::QuicCoreClock;
@@ -51,6 +55,7 @@ constexpr std::array<QuicEcnCodepoint, 4> kTrafficClassToEcn{
     QuicEcnCodepoint::ect0,
     QuicEcnCodepoint::ce,
 };
+constexpr bool kCoquicProfileHooksEnabled = COQUIC_PROFILE_HOOKS != 0;
 
 struct IoProfileCounters {
     std::uint64_t send_datagram_calls = 0;
@@ -88,6 +93,10 @@ struct ReceiveDatagramBatchResult {
 };
 
 COQUIC_NO_PROFILE bool io_profile_enabled() {
+    if constexpr (!kCoquicProfileHooksEnabled) {
+        return false;
+    }
+
     static const bool enabled = [] {
         const char *value = std::getenv("COQUIC_IO_PROFILE");
         return value != nullptr && value[0] != '\0' && std::string_view(value) != "0";
@@ -122,6 +131,10 @@ COQUIC_NO_PROFILE void print_io_profile() {
 }
 
 COQUIC_NO_PROFILE void register_io_profile_printer_once() {
+    if constexpr (!kCoquicProfileHooksEnabled) {
+        return;
+    }
+
     static const bool registered = [] {
         std::atexit(print_io_profile);
         return true;

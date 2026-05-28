@@ -553,6 +553,7 @@ class QuicConnection {
     std::vector<ConnectionId> active_local_connection_ids() const;
     std::vector<StatelessResetTokenRecord> active_local_stateless_reset_tokens() const;
     std::vector<StatelessResetTokenRecord> peer_stateless_reset_tokens() const;
+    std::uint64_t endpoint_route_generation() const;
     bool is_handshake_complete() const;
     bool has_processed_peer_packet() const;
     bool has_failed() const;
@@ -633,6 +634,17 @@ class QuicConnection {
         std::span<const ReceivedFrame> frames, QuicCoreTimePoint now,
         bool allow_preconnected_frames = false, QuicPathId path_id = 0,
         bool used_previous_application_read_secret = false);
+    CodecResult<bool>
+    process_inbound_received_application_stream(const ReceivedStreamFrame &stream_frame,
+                                                bool require_connected);
+    CodecResult<bool>
+    process_inbound_received_application_stream_packet(std::uint64_t packet_number, bool spin_bit,
+                                                       const ReceivedStreamFrame &stream_frame,
+                                                       QuicCoreTimePoint now, QuicEcnCodepoint ecn);
+    CodecResult<bool> process_inbound_received_application_ack_only(
+        std::uint64_t packet_number, bool spin_bit, const ReceivedAckFrame &ack,
+        QuicCoreTimePoint now, QuicEcnCodepoint ecn, QuicPathId path_id,
+        bool used_previous_application_read_secret = false);
     CodecResult<bool> process_inbound_ack(PacketSpaceState &packet_space, const AckFrame &ack,
                                           QuicCoreTimePoint now, std::uint64_t ack_delay_exponent,
                                           std::uint64_t max_ack_delay_ms, bool suppress_pto_reset,
@@ -652,6 +664,36 @@ class QuicConnection {
         bool suppress_pto_reset);
     void reset_recovery_for_new_path(QuicPathId path_id);
     void track_sent_packet(PacketSpaceState &packet_space, SentPacketRecord packet);
+    bool try_retire_simple_stream_acked_packet(
+        PacketSpaceState &packet_space, RecoveryPacketHandle handle,
+        std::vector<SentPacketRecord> &acked_packets,
+        std::vector<AckedStreamPacketSample> &simple_stream_ack_samples,
+        bool use_lightweight_sample);
+    bool try_ack_simple_congestion_batch(
+        std::span<const AckedStreamPacketSample> simple_stream_ack_samples,
+        std::span<const SentPacketRecord> acked_packets, QuicCoreTimePoint now,
+        const RecoveryRttState &rtt_state);
+    bool can_use_simple_stream_ack_fast_path(std::span<const SentPacketRecord> acked_packets,
+                                             bool has_late_acked_packets) const;
+    bool try_ack_simple_stream_fast_path(
+        PacketSpaceState &packet_space, const AckApplyResult &ack_result,
+        std::span<const AckedStreamPacketSample> simple_stream_ack_samples,
+        std::span<const SentPacketRecord> acked_packets, QuicCoreTimePoint now,
+        std::chrono::microseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
+        std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);
+    bool process_simple_stream_ack_ecn(
+        PacketSpaceState &packet_space,
+        std::span<const AckedStreamPacketSample> simple_stream_ack_samples,
+        const std::optional<AckEcnCounts> &ecn_counts,
+        std::optional<QuicCoreTimePoint> &latest_ecn_ce_sent_time);
+    bool process_single_path_simple_stream_ack_ecn(
+        PacketSpaceState &packet_space,
+        QuicPathId path_id, // NOLINT(bugprone-easily-swappable-parameters)
+        std::uint64_t newly_acked_ect0, std::uint64_t newly_acked_ect1,
+        QuicCoreTimePoint latest_marked_sent_time, const std::optional<AckEcnCounts> &ecn_counts,
+        std::optional<QuicCoreTimePoint> &latest_ecn_ce_sent_time);
+    bool try_ack_simple_congestion_batch(std::span<const SentPacketRecord> acked_packets,
+                                         QuicCoreTimePoint now, const RecoveryRttState &rtt_state);
     std::optional<SentPacketRecord> retire_acked_packet(PacketSpaceState &packet_space,
                                                         RecoveryPacketHandle handle);
     std::optional<SentPacketRecord>
@@ -681,6 +723,8 @@ class QuicConnection {
     CodecResult<bool> refresh_next_application_read_secret();
     CodecResult<bool> ensure_next_application_read_secret();
     void promote_next_application_read_secret();
+    CodecResult<DeserializeProtectionContext> make_current_short_header_deserialize_context();
+    void reset_current_short_header_deserialize_context_cache();
     std::optional<QuicCoreTimePoint> previous_application_read_secret_discard_deadline() const;
     void maybe_discard_previous_application_read_secret(QuicCoreTimePoint now);
     void synchronize_recovery_rtt_state();
@@ -754,7 +798,26 @@ class QuicConnection {
     std::optional<std::size_t> application_stream_pacing_deadline_bytes() const;
     std::optional<std::size_t> application_stream_pacing_deadline_bytes(
         std::optional<std::size_t> minimum_datagram_bytes) const;
+    std::uint64_t cached_total_queued_stream_bytes() const;
     std::uint64_t total_queued_stream_bytes() const;
+    std::uint64_t fresh_sendable_stream_bytes() const;
+    std::uint64_t cached_fresh_sendable_stream_bytes() const;
+    std::uint64_t streams_with_lost_send_data() const;
+    bool has_lost_application_stream_data() const;
+    void refresh_active_queued_stream_bytes();
+    void refresh_fresh_sendable_stream_bytes();
+    void refresh_stream_lost_send_data_count();
+    void refresh_stream_sendable_byte_caches();
+    void note_stream_send_bytes_queued(std::size_t bytes);
+    void note_stream_fresh_sendable_bytes_delta(std::uint64_t before, std::uint64_t after);
+    void note_stream_lost_send_data_changed(bool previous_has_lost_send_data,
+                                            const StreamState &stream);
+    void note_stream_send_state_changed(std::uint64_t previous_fresh_sendable_bytes,
+                                        const StreamState &stream);
+    void note_stream_send_state_changed(std::uint64_t previous_fresh_sendable_bytes,
+                                        bool previous_has_lost_send_data,
+                                        const StreamState &stream);
+    void forget_active_stream_queued_bytes(const StreamState &stream);
     void maybe_queue_connection_blocked_frame();
     void maybe_queue_stream_blocked_frame(StreamState &stream);
     void maybe_refresh_connection_receive_credit(bool force);
@@ -776,6 +839,7 @@ class QuicConnection {
     bool anti_amplification_applies(QuicPathId path_id) const;
     std::uint64_t anti_amplification_send_budget() const;
     std::uint64_t anti_amplification_send_budget(QuicPathId path_id) const;
+    std::uint64_t anti_amplification_remaining_send_budget() const;
     std::size_t outbound_datagram_size_limit(bool allow_pmtu_probe_size = true) const;
     std::size_t outbound_datagram_size_ceiling() const;
     std::size_t outbound_datagram_size_ceiling_for_path(std::optional<QuicPathId> path_id) const;
@@ -823,6 +887,7 @@ class QuicConnection {
     void mark_silent_close();
     void mark_failed();
     void queue_state_change(QuicCoreStateChange change);
+    void note_endpoint_route_state_changed();
 
     QuicCoreConfig config_;
     bool latency_spin_bit_disabled_ = true;
@@ -847,6 +912,7 @@ class QuicConnection {
     std::uint64_t largest_peer_retire_prior_to_ = 0;
     std::uint64_t active_local_connection_id_sequence_ = 0;
     std::uint64_t next_local_connection_id_sequence_ = 1;
+    std::uint64_t endpoint_route_generation_ = 1;
     std::uint64_t next_path_challenge_sequence_ = 1;
     std::uint64_t current_application_write_key_encrypted_packets_ = 0;
     std::uint64_t current_application_write_key_generation_ = 0;
@@ -889,8 +955,17 @@ class QuicConnection {
     std::optional<QuicCoreTimePoint> previous_application_read_secret_discard_deadline_;
     bool previous_application_read_key_phase_ = false;
     std::optional<TrafficSecret> next_application_read_secret_;
-    std::optional<TrafficSecretCacheInputs> next_application_read_secret_source_;
+    std::uint64_t application_read_secret_generation_ = 0;
+    std::optional<std::uint64_t> next_application_read_secret_source_generation_;
     bool next_application_read_key_phase_ = false;
+    struct ShortHeaderDeserializeContextCache {
+        const TrafficSecret *secret = nullptr;
+        std::uint64_t secret_generation = 0;
+        bool key_phase = false;
+        std::size_t destination_connection_id_length = 0;
+        bool secret_cache_primed = false;
+    };
+    std::optional<ShortHeaderDeserializeContextCache> current_short_header_deserialize_cache_;
     bool initial_packet_space_discarded_ = false;
     bool handshake_packet_space_discarded_ = false;
     bool handshake_confirmed_ = false;
@@ -932,9 +1007,18 @@ class QuicConnection {
     std::uint64_t next_packet_inspection_datagram_id_ = 1;
     std::uint64_t last_drained_packet_inspection_datagram_id_ = 0;
     QuicPathId last_inbound_path_id_ = 0;
+    std::uint64_t active_queued_stream_bytes_ = 0;
+    std::uint64_t fresh_sendable_stream_bytes_ = 0;
+    std::uint64_t streams_with_lost_send_data_ = 0;
     std::vector<PendingTrackedPacketScratch> pending_tracked_packet_scratch_;
     std::vector<StreamFrameSendFragment> application_stream_fragment_scratch_;
     std::vector<std::map<std::uint64_t, StreamState>::iterator> active_stream_iterator_scratch_;
+    std::vector<Frame> application_crypto_frame_scratch_;
+    std::vector<Frame> application_candidate_frame_scratch_;
+    std::vector<SentPacketRecord> acked_packet_scratch_;
+    std::vector<SentPacketRecord> late_acked_packet_scratch_;
+    std::vector<SentPacketRecord> newly_lost_packet_scratch_;
+    std::vector<AckedStreamPacketSample> simple_stream_ack_sample_scratch_;
 };
 
 } // namespace coquic::quic

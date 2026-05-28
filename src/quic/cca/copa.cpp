@@ -18,38 +18,6 @@ constexpr std::size_t kCopaProbeSegments = 10;
 constexpr QuicCoreDuration kCopaSendQuantumWindow{1000};
 constexpr std::size_t kCopaMaxSendQuantum = std::size_t{64} * 1024u;
 
-QuicCoreClock::duration pacing_delay_for_deficit(std::size_t deficit_bytes,
-                                                 double rate_bytes_per_second) {
-    if (deficit_bytes == 0 || rate_bytes_per_second <= 0.0) {
-        return QuicCoreClock::duration::zero();
-    }
-
-    constexpr double kClockTicksPerSecond =
-        static_cast<double>(QuicCoreClock::duration::period::den) /
-        static_cast<double>(QuicCoreClock::duration::period::num);
-    const auto delay_ticks = std::ceil(static_cast<double>(deficit_bytes) * kClockTicksPerSecond /
-                                       rate_bytes_per_second);
-    using TickRep = QuicCoreClock::duration::rep;
-    if (delay_ticks >= static_cast<double>(std::numeric_limits<TickRep>::max())) {
-        return QuicCoreClock::duration::max();
-    }
-    return QuicCoreClock::duration{static_cast<TickRep>(delay_ticks)};
-}
-
-std::size_t pacing_replenished_bytes(QuicCoreClock::duration elapsed,
-                                     double rate_bytes_per_second) {
-    if (elapsed <= QuicCoreClock::duration::zero() || rate_bytes_per_second <= 0.0) {
-        return 0;
-    }
-
-    constexpr double kClockTicksPerSecond =
-        static_cast<double>(QuicCoreClock::duration::period::den) /
-        static_cast<double>(QuicCoreClock::duration::period::num);
-    const auto replenished =
-        (static_cast<double>(elapsed.count()) * rate_bytes_per_second) / kClockTicksPerSecond;
-    return congestion_clamp_to_size_t(replenished);
-}
-
 QuicCoreDuration positive_rtt(QuicCoreDuration value) {
     return value.count() > 0 ? value : std::chrono::duration_cast<QuicCoreDuration>(kGranularity);
 }
@@ -188,7 +156,7 @@ std::optional<QuicCoreTimePoint> CopaCongestionController::next_send_time(std::s
     }
 
     return *pacing_budget_timestamp_ +
-           pacing_delay_for_deficit(bytes - budget, pacing_rate_bytes_per_second_);
+           congestion_pacing_delay_for_deficit(bytes - budget, pacing_rate_bytes_per_second_);
 }
 
 void CopaCongestionController::on_packet_sent(std::size_t bytes_sent, bool ack_eliciting) {
@@ -323,8 +291,8 @@ std::size_t CopaCongestionController::pacing_budget_at(QuicCoreTimePoint now) co
     }
 
     const auto missing_budget = cap - budget;
-    const auto replenished =
-        pacing_replenished_bytes(now - *pacing_budget_timestamp_, pacing_rate_bytes_per_second_);
+    const auto replenished = congestion_pacing_replenished_bytes(now - *pacing_budget_timestamp_,
+                                                                 pacing_rate_bytes_per_second_);
     if (replenished >= missing_budget) {
         return cap;
     }

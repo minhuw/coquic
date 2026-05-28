@@ -38,6 +38,7 @@ environment overrides:
   PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
   PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
   PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
+  PERF_DOCKER_ENV            space-separated NAME=value environment entries passed to both containers
 USAGE
 }
 
@@ -89,6 +90,14 @@ read -r -a congestion_control_list <<<"${congestion_controls}"
   echo 'at least one congestion-control algorithm is required' >&2
   exit 1
 }
+
+docker_env_args=()
+if [ -n "${PERF_DOCKER_ENV:-}" ]; then
+  read -r -a docker_env_entries <<<"${PERF_DOCKER_ENV}"
+  for env_entry in "${docker_env_entries[@]}"; do
+    docker_env_args+=(-e "${env_entry}")
+  done
+fi
 for congestion_control in "${congestion_control_list[@]}"; do
   case "${congestion_control}" in
     newreno|cubic|bbr|copa)
@@ -195,6 +204,7 @@ docker network create "${network_name}" >/dev/null
   echo "congestion_controls=${congestion_controls}"
   echo "client_impl=${client_impl}"
   echo "server_impl=${server_impl}"
+  echo "docker_env=${PERF_DOCKER_ENV:-}"
   echo
   docker version
   echo
@@ -287,6 +297,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
       --name "${server_name}" \
       --network "${network_name}" \
       --cpuset-cpus "${server_cpus}" \
+      "${docker_env_args[@]}" \
       -v "${repo_root}/tests/fixtures:/certs:ro" \
       "${server_entrypoint[@]}" \
       "${image_tag}" server \
@@ -383,6 +394,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
       --name "${client_name}" \
       --network "${network_name}" \
       --cpuset-cpus "${client_cpus}" \
+      "${docker_env_args[@]}" \
       -v "${results_root}:/results" \
       -v "${repo_root}/tests/fixtures:/certs:ro" \
       "${client_entrypoint[@]}" \

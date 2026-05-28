@@ -46,6 +46,43 @@
 
 namespace coquic::http09::test_support {
 
+inline bool sent_packet_has_stream_frames_for_tests(const coquic::quic::SentPacketRecord &packet) {
+    return coquic::quic::sent_packet_has_stream_frames(packet);
+}
+
+inline std::uint64_t
+first_stream_frame_offset_for_tests(const coquic::quic::SentPacketRecord &packet) {
+    if (!packet.stream_fragments.empty()) {
+        return packet.stream_fragments.front().offset;
+    }
+    if (packet.first_stream_frame_metadata.has_value()) {
+        return packet.first_stream_frame_metadata->offset;
+    }
+    if (!packet.stream_frame_metadata.empty()) {
+        return packet.stream_frame_metadata.front().offset;
+    }
+    std::abort();
+}
+
+inline bool
+sent_packet_has_stream_frame_offset_for_tests(const coquic::quic::SentPacketRecord &packet,
+                                              std::uint64_t offset) {
+    if (std::ranges::any_of(packet.stream_fragments,
+                            [&](const coquic::quic::StreamFrameSendFragment &fragment) {
+                                return fragment.offset == offset;
+                            })) {
+        return true;
+    }
+    if (packet.first_stream_frame_metadata.has_value() &&
+        packet.first_stream_frame_metadata->offset == offset) {
+        return true;
+    }
+    return std::ranges::any_of(packet.stream_frame_metadata,
+                               [&](const coquic::quic::StreamFrameSendMetadata &metadata) {
+                                   return metadata.offset == offset;
+                               });
+}
+
 class ScopedEnvVar {
   public:
     ScopedEnvVar(std::string name, std::optional<std::string> value) : name_(std::move(name)) {

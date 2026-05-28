@@ -107,6 +107,21 @@ std::size_t StreamFrameSendFragment::stream_frame_wire_size() const {
     return cached_stream_frame_header_length + bytes.size();
 }
 
+std::size_t StreamFrameSendMetadata::stream_frame_wire_size() const {
+    return std::size_t{1} + encoded_varint_size(stream_id) + encoded_varint_size(offset) +
+           encoded_varint_size(length) + length;
+}
+
+StreamFrameSendMetadata stream_frame_send_metadata(const StreamFrameSendFragment &fragment) {
+    return StreamFrameSendMetadata{
+        .stream_id = fragment.stream_id,
+        .offset = fragment.offset,
+        .length = fragment.bytes.size(),
+        .fin = fragment.fin,
+        .consumes_flow_control = fragment.consumes_flow_control,
+    };
+}
+
 StreamIdInfo classify_stream_id(std::uint64_t stream_id, EndpointRole local_role) {
     const auto initiator_bit = (stream_id & 0x01u);
     const auto direction_bit = (stream_id & 0x02u);
@@ -625,48 +640,64 @@ void StreamState::mark_stop_sending_frame_lost(const StopSendingFrame &frame) {
 }
 
 void StreamState::acknowledge_send_fragment(const StreamFrameSendFragment &fragment) {
+    acknowledge_send_metadata(stream_frame_send_metadata(fragment));
+}
+
+void StreamState::acknowledge_send_metadata(const StreamFrameSendMetadata &metadata) {
     if (reset_state != StreamControlFrameState::none) {
         return;
     }
-    send_buffer.acknowledge(fragment.offset, fragment.bytes.size());
-    if (fragment.fin) {
+    send_buffer.acknowledge(metadata.offset, metadata.length);
+    if (metadata.fin) {
         send_fin_state = StreamSendFinState::acknowledged;
     }
 }
 
 void StreamState::mark_send_fragment_sent(const StreamFrameSendFragment &fragment) {
+    mark_send_metadata_sent(stream_frame_send_metadata(fragment));
+}
+
+void StreamState::mark_send_metadata_sent(const StreamFrameSendMetadata &metadata) {
     if (reset_state != StreamControlFrameState::none) {
         return;
     }
 
-    send_buffer.mark_sent(fragment.offset, fragment.bytes.size());
-    if (fragment.fin && send_fin_state != StreamSendFinState::acknowledged) {
+    send_buffer.mark_sent(metadata.offset, metadata.length);
+    if (metadata.fin && send_fin_state != StreamSendFinState::acknowledged) {
         send_fin_state = StreamSendFinState::sent;
     }
 }
 
 void StreamState::mark_send_fragment_lost(const StreamFrameSendFragment &fragment) {
+    mark_send_metadata_lost(stream_frame_send_metadata(fragment));
+}
+
+void StreamState::mark_send_metadata_lost(const StreamFrameSendMetadata &metadata) {
     if (reset_state != StreamControlFrameState::none) {
         return;
     }
-    send_buffer.mark_lost(fragment.offset, fragment.bytes.size());
-    if (fragment.fin) {
+    send_buffer.mark_lost(metadata.offset, metadata.length);
+    if (metadata.fin) {
         send_fin_state = StreamSendFinState::pending;
     }
 }
 
 void StreamState::restore_send_fragment(const StreamFrameSendFragment &fragment) {
+    restore_send_metadata(stream_frame_send_metadata(fragment));
+}
+
+void StreamState::restore_send_metadata(const StreamFrameSendMetadata &metadata) {
     if (reset_state != StreamControlFrameState::none) {
         return;
     }
 
-    if (fragment.consumes_flow_control) {
-        flow_control.highest_sent -= static_cast<std::uint64_t>(fragment.bytes.size());
-        send_buffer.mark_unsent(fragment.offset, fragment.bytes.size());
+    if (metadata.consumes_flow_control) {
+        flow_control.highest_sent -= static_cast<std::uint64_t>(metadata.length);
+        send_buffer.mark_unsent(metadata.offset, metadata.length);
     } else {
-        send_buffer.mark_lost(fragment.offset, fragment.bytes.size());
+        send_buffer.mark_lost(metadata.offset, metadata.length);
     }
-    if (fragment.fin) {
+    if (metadata.fin) {
         send_fin_state = StreamSendFinState::pending;
     }
 }

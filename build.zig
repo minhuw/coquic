@@ -367,7 +367,11 @@ pub fn build(b: *std.Build) void {
     const spdlog_shared =
         b.option(bool, "spdlog_shared", "whether spdlog is linked as a shared library") orelse
         true;
-    const cpp_flags = &.{"-std=c++20"};
+    const profile_hooks =
+        b.option(bool, "profile_hooks", "enable runtime CoQUIC profile hooks") orelse true;
+    const cpp_flags = withExtraFlags(b, &.{"-std=c++20"}, &.{
+        if (profile_hooks) "-DCOQUIC_PROFILE_HOOKS=1" else "-DCOQUIC_PROFILE_HOOKS=0",
+    });
     const spdlog_cpp_flags = withSpdlogFlags(b, cpp_flags, spdlog_shared);
     const coverage_cpp_flags = withExtraFlags(b, cpp_flags, &.{
         "-fprofile-instr-generate",

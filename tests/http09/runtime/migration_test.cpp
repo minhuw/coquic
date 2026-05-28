@@ -218,8 +218,8 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesLiveLikeMigrationRetransm
     }
 
     const auto first_gap_packet = connection.application_space_.sent_packets.at(8372);
-    ASSERT_FALSE(first_gap_packet.stream_fragments.empty());
-    const auto tracked_gap_offset = first_gap_packet.stream_fragments.front().offset;
+    ASSERT_TRUE(sent_packet_has_stream_frames_for_tests(first_gap_packet));
+    const auto tracked_gap_offset = first_stream_frame_offset_for_tests(first_gap_packet);
 
     ASSERT_TRUE(connection
                     .process_inbound_application(
@@ -300,11 +300,9 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRoutesLiveLikeMigrationRetransm
     bool saw_retransmit_for_gap_offset = false;
     for (const auto &[packet_number, packet] : post_connection.application_space_.sent_packets) {
         static_cast<void>(packet_number);
-        for (const auto &fragment : packet.stream_fragments) {
-            if (fragment.offset == tracked_gap_offset) {
-                saw_retransmit_for_gap_offset = true;
-            }
-        }
+        saw_retransmit_for_gap_offset =
+            saw_retransmit_for_gap_offset ||
+            sent_packet_has_stream_frame_offset_for_tests(packet, tracked_gap_offset);
     }
 
     EXPECT_TRUE(saw_retransmit_for_gap_offset);

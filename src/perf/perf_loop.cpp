@@ -74,8 +74,7 @@ bool flush_send_effects(io::QuicIoBackend &backend, const quic::QuicCoreResult &
     return backend.send_many(datagrams);
 }
 
-bool PerfSendBuffer::append_or_flush(io::QuicIoBackend &backend,
-                                     const quic::QuicCoreResult &result) {
+bool PerfSendBuffer::append_or_flush(io::QuicIoBackend &backend, quic::QuicCoreResult &result) {
     if (!result_has_send_datagram(result)) {
         return true;
     }
@@ -83,14 +82,14 @@ bool PerfSendBuffer::append_or_flush(io::QuicIoBackend &backend,
         return false;
     }
     datagrams_.reserve(std::max(datagrams_.capacity(), datagrams_.size() + result.effects.size()));
-    for (const auto &effect : result.effects) {
-        if (const auto *send = std::get_if<quic::QuicCoreSendDatagram>(&effect)) {
+    for (auto &effect : result.effects) {
+        if (auto *send = std::get_if<quic::QuicCoreSendDatagram>(&effect)) {
             if (!send->route_handle.has_value()) {
                 return false;
             }
             datagrams_.push_back(io::QuicIoTxDatagram{
                 .route_handle = *send->route_handle,
-                .bytes = send->bytes,
+                .bytes = std::move(send->bytes),
                 .ecn = send->ecn,
                 .is_pmtu_probe = send->is_pmtu_probe,
             });

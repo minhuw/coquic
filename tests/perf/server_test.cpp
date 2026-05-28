@@ -248,7 +248,7 @@ TEST(QuicPerfServerTest, PerfSendBufferReportsBufferedDatagramCount) {
     EXPECT_EQ(backend.sent_datagrams.size(), 1u);
 }
 
-TEST(QuicPerfServerTest, FlushDrainsQueuedBackendEventsBeforeSendingBufferedDatagrams) {
+TEST(QuicPerfServerTest, FlushSendsBufferedDatagramsBeforeDrainingQueuedBackendEvents) {
     auto backend = std::make_unique<RecordingIoBackend>();
     auto *backend_ptr = backend.get();
     backend_ptr->pending_events.push_back(coquic::io::QuicIoEvent{
@@ -268,8 +268,8 @@ TEST(QuicPerfServerTest, FlushDrainsQueuedBackendEventsBeforeSendingBufferedData
     ASSERT_TRUE(server.flush_pending_sends());
 
     ASSERT_EQ(backend_ptr->operations.size(), 2u);
-    EXPECT_EQ(backend_ptr->operations[0], "wait");
-    EXPECT_EQ(backend_ptr->operations[1], "send");
+    EXPECT_EQ(backend_ptr->operations[0], "send");
+    EXPECT_EQ(backend_ptr->operations[1], "wait");
     EXPECT_TRUE(backend_ptr->pending_events.empty());
     EXPECT_EQ(backend_ptr->sent_datagrams.size(), 1u);
 }

@@ -83,7 +83,7 @@ class QuicCongestionController {
     };
 
     QuicCongestionController(QuicCongestionControlAlgorithm algorithm,
-                             std::size_t max_datagram_size);
+                             std::size_t max_datagram_size, bool enable_hystart_plus_plus = true);
     QuicCongestionController(const QuicCongestionController &other);
     QuicCongestionController &operator=(const QuicCongestionController &other);
     QuicCongestionController(QuicCongestionController &&other) noexcept;
@@ -98,6 +98,9 @@ class QuicCongestionController {
     void on_packet_sent(SentPacketRecord &packet);
     void on_packets_acked(std::span<const SentPacketRecord> packets, bool app_limited,
                           QuicCoreTimePoint now, const RecoveryRttState &rtt_state);
+    void on_simple_stream_packets_acked(std::span<const AckedStreamPacketSample> packets,
+                                        bool app_limited, QuicCoreTimePoint now,
+                                        const RecoveryRttState &rtt_state);
     void on_packets_discarded(std::span<const SentPacketRecord> packets);
     void on_packets_lost(std::span<const SentPacketRecord> packets);
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
@@ -119,6 +122,7 @@ class QuicCongestionController {
     std::variant<NewRenoCongestionController, CubicCongestionController, BbrCongestionController,
                  CopaCongestionController>
         storage_;
+    bool enable_hystart_plus_plus_ = true;
     TestMetricHandle congestion_window_{this, true};
     TestMetricHandle bytes_in_flight_{this, false};
 };

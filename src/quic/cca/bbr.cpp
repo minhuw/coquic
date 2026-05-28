@@ -37,38 +37,6 @@ constexpr std::size_t kBbrExtraAckedFilterLen = 10;
 constexpr std::size_t kBbrStartupFullLossCount = 6;
 constexpr std::uint64_t kBbrMaxProbeBwRounds = 63;
 
-QuicCoreClock::duration pacing_delay_for_deficit(std::size_t deficit_bytes,
-                                                 double rate_bytes_per_second) {
-    if (deficit_bytes == 0 || rate_bytes_per_second <= 0.0) {
-        return QuicCoreClock::duration::zero();
-    }
-
-    constexpr double kClockTicksPerSecond =
-        static_cast<double>(QuicCoreClock::duration::period::den) /
-        static_cast<double>(QuicCoreClock::duration::period::num);
-    const auto delay_ticks = std::ceil(static_cast<double>(deficit_bytes) * kClockTicksPerSecond /
-                                       rate_bytes_per_second);
-    using TickRep = QuicCoreClock::duration::rep;
-    if (delay_ticks >= static_cast<double>(std::numeric_limits<TickRep>::max())) {
-        return QuicCoreClock::duration::max();
-    }
-    return QuicCoreClock::duration{static_cast<TickRep>(delay_ticks)};
-}
-
-std::size_t pacing_replenished_bytes(QuicCoreClock::duration elapsed,
-                                     double rate_bytes_per_second) {
-    if (elapsed <= QuicCoreClock::duration::zero() || rate_bytes_per_second <= 0.0) {
-        return 0;
-    }
-
-    constexpr double kClockTicksPerSecond =
-        static_cast<double>(QuicCoreClock::duration::period::den) /
-        static_cast<double>(QuicCoreClock::duration::period::num);
-    const auto replenished =
-        (static_cast<double>(elapsed.count()) * rate_bytes_per_second) / kClockTicksPerSecond;
-    return congestion_clamp_to_size_t(replenished);
-}
-
 } // namespace
 
 BbrCongestionController::BbrCongestionController(std::size_t max_datagram_size)
@@ -110,7 +78,7 @@ std::optional<QuicCoreTimePoint> BbrCongestionController::next_send_time(std::si
         return std::nullopt;
     }
 
-    return *pacing_budget_timestamp_ + pacing_delay_for_deficit(bytes - budget, rate);
+    return *pacing_budget_timestamp_ + congestion_pacing_delay_for_deficit(bytes - budget, rate);
 }
 
 void BbrCongestionController::on_packet_sent(SentPacketRecord &packet) {
@@ -1126,7 +1094,8 @@ std::size_t BbrCongestionController::pacing_budget_at(QuicCoreTimePoint now) con
     }
 
     const auto missing_budget = cap - budget;
-    const auto replenished = pacing_replenished_bytes(now - *pacing_budget_timestamp_, rate);
+    const auto replenished =
+        congestion_pacing_replenished_bytes(now - *pacing_budget_timestamp_, rate);
     if (replenished >= missing_budget) {
         return cap;
     }

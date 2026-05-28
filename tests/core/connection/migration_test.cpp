@@ -52,6 +52,7 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::sent_packet_has_stream_frames_for_tests;
 using coquic::quic::test_support::tracked_packet_count;
 using coquic::quic::test_support::tracked_packet_or_null;
 using coquic::quic::test_support::tracked_packet_or_terminate;
@@ -777,7 +778,8 @@ TEST(QuicCoreTest, AckOnlyRebindDefersApplicationProbePayloadUntilPathValidated)
     connection.application_space_.pending_probe_packet =
         tracked_packet_or_terminate(connection.application_space_, largest_sent_packet);
     ASSERT_TRUE(connection.application_space_.pending_probe_packet.has_value());
-    ASSERT_FALSE(connection.application_space_.pending_probe_packet->stream_fragments.empty());
+    ASSERT_TRUE(sent_packet_has_stream_frames_for_tests(
+        *connection.application_space_.pending_probe_packet));
 
     ASSERT_TRUE(connection
                     .process_inbound_application(

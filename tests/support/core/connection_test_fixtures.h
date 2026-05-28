@@ -96,6 +96,68 @@ inline const SentPacketRecord &tracked_packet_or_terminate(const PacketSpaceStat
     return *packet;
 }
 
+inline bool sent_packet_has_stream_frames_for_tests(const SentPacketRecord &packet) {
+    return sent_packet_has_stream_frames(packet);
+}
+
+inline std::uint64_t first_stream_frame_offset_for_tests(const SentPacketRecord &packet) {
+    if (!packet.stream_fragments.empty()) {
+        return packet.stream_fragments.front().offset;
+    }
+    if (packet.first_stream_frame_metadata.has_value()) {
+        return packet.first_stream_frame_metadata->offset;
+    }
+    if (!packet.stream_frame_metadata.empty()) {
+        return packet.stream_frame_metadata.front().offset;
+    }
+    std::abort();
+}
+
+inline std::size_t first_stream_frame_length_for_tests(const SentPacketRecord &packet) {
+    if (!packet.stream_fragments.empty()) {
+        return packet.stream_fragments.front().bytes.size();
+    }
+    if (packet.first_stream_frame_metadata.has_value()) {
+        return packet.first_stream_frame_metadata->length;
+    }
+    if (!packet.stream_frame_metadata.empty()) {
+        return packet.stream_frame_metadata.front().length;
+    }
+    std::abort();
+}
+
+inline bool sent_packet_has_stream_frame_offset_for_tests(const SentPacketRecord &packet,
+                                                          std::uint64_t offset) {
+    if (std::ranges::any_of(packet.stream_fragments, [&](const StreamFrameSendFragment &fragment) {
+            return fragment.offset == offset;
+        })) {
+        return true;
+    }
+    if (packet.first_stream_frame_metadata.has_value() &&
+        packet.first_stream_frame_metadata->offset == offset) {
+        return true;
+    }
+    return std::ranges::any_of(
+        packet.stream_frame_metadata,
+        [&](const StreamFrameSendMetadata &metadata) { return metadata.offset == offset; });
+}
+
+inline bool
+sent_packet_stream_frames_consume_flow_control_for_tests(const SentPacketRecord &packet) {
+    for (const auto &fragment : packet.stream_fragments) {
+        if (fragment.consumes_flow_control) {
+            return true;
+        }
+    }
+    if (packet.first_stream_frame_metadata.has_value() &&
+        packet.first_stream_frame_metadata->consumes_flow_control) {
+        return true;
+    }
+    return std::ranges::any_of(
+        packet.stream_frame_metadata,
+        [](const StreamFrameSendMetadata &metadata) { return metadata.consumes_flow_control; });
+}
+
 inline const SentPacketRecord &first_tracked_packet(const PacketSpaceState &packet_space) {
     const auto handle = packet_space.recovery.oldest_tracked_packet();
     if (!handle.has_value()) {

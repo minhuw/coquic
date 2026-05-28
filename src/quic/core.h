@@ -56,6 +56,8 @@ struct QuicTransportConfig {
     std::uint64_t initial_max_streams_bidi = 16;
     std::uint64_t initial_max_streams_uni = 16;
     QuicCongestionControlAlgorithm congestion_control = QuicCongestionControlAlgorithm::newreno;
+    bool enable_hystart_plus_plus = true;
+    bool send_stream_fairness = true;
     bool enable_latency_spin_bit = false;
     bool grease_reserved_versions = false;
     bool enable_optimistic_ack_mitigation = false;
@@ -541,6 +543,7 @@ class QuicCore {
         std::vector<std::string> local_stateless_reset_connection_id_keys;
         std::vector<std::string> peer_stateless_reset_token_keys;
         std::optional<std::string> initial_destination_connection_id_key;
+        std::uint64_t endpoint_route_generation = 0;
         std::optional<QuicCoreTimePoint> send_continuation_wakeup;
         bool send_continuation_drain = false;
         std::vector<QuicRouteHandle> new_token_issued_routes;

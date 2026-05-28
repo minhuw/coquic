@@ -400,6 +400,11 @@ struct ReceivedFrameDecodeResult {
     std::size_t bytes_consumed = 0;
 };
 
+struct ReceivedAckFrameDecodeResult {
+    ReceivedAckFrame frame;
+    std::size_t bytes_consumed = 0;
+};
+
 CodecResult<std::vector<AckPacketNumberRange>> ack_frame_packet_number_ranges(const AckFrame &ack);
 CodecResult<AckRangeCursor> make_ack_range_cursor(const AckFrame &ack);
 CodecResult<AckRangeCursor> make_ack_range_cursor(AckFrame &&ack) = delete;
@@ -415,5 +420,6 @@ CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame);
 CodecResult<std::size_t> append_serialized_frame(std::vector<std::byte> &bytes, const Frame &frame);
 CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> bytes);
 CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(const SharedBytes &bytes);
+CodecResult<ReceivedAckFrameDecodeResult> deserialize_received_ack_frame(const SharedBytes &bytes);
 
 } // namespace coquic::quic

@@ -1103,6 +1103,7 @@ TEST(QuicCoreTest, ConnectionHelperMethodsCoverRemainingStreamOpenAndFlowControl
     blocked_stream.send_flow_control_committed = 6;
     blocked.connection_flow_control_.peer_max_data = 5;
     blocked.connection_flow_control_.highest_sent = 5;
+    blocked.refresh_stream_sendable_byte_caches();
     blocked.maybe_queue_connection_blocked_frame();
     ASSERT_TRUE(blocked.connection_flow_control_.pending_data_blocked_frame.has_value());
     if (blocked.connection_flow_control_.pending_data_blocked_frame.has_value()) {

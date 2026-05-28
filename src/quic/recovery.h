@@ -51,6 +51,8 @@ struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     std::vector<MaxStreamsFrame> max_streams_frames;
     std::optional<DataBlockedFrame> data_blocked_frame;
     std::vector<StreamDataBlockedFrame> stream_data_blocked_frames;
+    std::optional<StreamFrameSendMetadata> first_stream_frame_metadata;
+    std::vector<StreamFrameSendMetadata> stream_frame_metadata;
     std::vector<StreamFrameSendFragment> stream_fragments;
     std::shared_ptr<qlog::PacketSnapshot> qlog_packet_snapshot;
     bool qlog_pto_probe = false;
@@ -73,6 +75,20 @@ struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     bool lost_by_time_threshold = false;
     QuicCoreTimePoint time_threshold_loss_time{};
 };
+
+struct AckedStreamPacketSample {
+    std::uint64_t packet_number = 0;
+    QuicCoreTimePoint sent_time{};
+    std::uint64_t congestion_send_sequence = 0;
+    std::size_t bytes_in_flight = 0;
+    QuicPathId path_id = 0;
+    QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+};
+
+inline bool sent_packet_has_stream_frames(const SentPacketRecord &packet) {
+    return packet.first_stream_frame_metadata.has_value() ||
+           !packet.stream_frame_metadata.empty() || !packet.stream_fragments.empty();
+}
 
 struct RecoveryRttState {
     std::optional<QuicCoreDuration> latest_rtt;
@@ -268,6 +284,9 @@ class PacketSpaceRecovery {
     void on_packet_declared_lost(std::uint64_t packet_number);
     void retire_packet(RecoveryPacketHandle handle);
     void retire_packet(std::uint64_t packet_number);
+    bool retire_packet_if_present(RecoveryPacketHandle handle);
+    std::optional<SentPacketRecord> take_retired_packet(RecoveryPacketHandle handle);
+    std::optional<SentPacketRecord> take_retired_packet_if_present(RecoveryPacketHandle handle);
     AckApplyResult apply_ack_received(AckRangeCursor cursor, std::uint64_t largest_acknowledged,
                                       QuicCoreTimePoint now);
     AckProcessingResult on_ack_received(std::span<const AckPacketNumberRange> ack_ranges,

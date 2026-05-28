@@ -141,7 +141,7 @@ TEST(QuicPerfCrrTest, TimedWindowUsesMeasurementOnly) {
         .connections = 6,
         .requests_in_flight = 1,
         .warmup = std::chrono::milliseconds{100},
-        .duration = std::chrono::milliseconds{500},
+        .duration = std::chrono::milliseconds{1000},
         .json_out = json_path,
     };
 
@@ -175,8 +175,8 @@ TEST(QuicPerfCrrTest, TimedWindowUsesMeasurementOnly) {
 
     EXPECT_EQ(warmup_ms_value, 100u);
     EXPECT_EQ(connections_value, 6u);
-    EXPECT_GE(elapsed_ms_value, 450u);
-    EXPECT_LE(elapsed_ms_value, 750u);
+    EXPECT_GE(elapsed_ms_value, 900u);
+    EXPECT_LE(elapsed_ms_value, 1250u);
     EXPECT_GT(requests_completed_value, 0u);
     EXPECT_GT(server_bytes_sent_value, 0u);
     EXPECT_GT(server_bytes_received_value, 0u);

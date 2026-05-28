@@ -544,6 +544,66 @@ TEST(QuicCryptoStreamTest, PartialAcksRetireOnlyAcknowledgedSubrange) {
     EXPECT_EQ(unsent[0].bytes, bytes_from_string("ef"));
 }
 
+TEST(QuicCryptoStreamTest, LeadingSentAckUsesDirectEraseFastPath) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+
+    const auto sent = buffer.take_ranges(4);
+    ASSERT_EQ(sent.size(), 1u);
+
+    EXPECT_TRUE(buffer.acknowledge_leading_sent_range(0, 2));
+
+    ASSERT_EQ(buffer.segments_.size(), 2u);
+    auto it = buffer.segments_.begin();
+    EXPECT_EQ(it->first, 2u);
+    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::sent);
+    EXPECT_EQ(it->second.begin, 2u);
+    EXPECT_EQ(it->second.end, 4u);
+    ++it;
+    EXPECT_EQ(it->first, 4u);
+    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::unsent);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        1u);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              1u);
+
+    EXPECT_TRUE(buffer.acknowledge_leading_sent_range(2, 4));
+    ASSERT_EQ(buffer.segments_.size(), 1u);
+    EXPECT_EQ(buffer.segments_.begin()->first, 4u);
+    EXPECT_EQ(buffer.segments_.begin()->second.state, ReliableSendBuffer::SegmentState::unsent);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        0u);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              1u);
+}
+
+TEST(QuicCryptoStreamTest, LeadingSentAckFastPathRejectsNonLeadingOrOversizedRanges) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+
+    const auto sent = buffer.take_ranges(4);
+    ASSERT_EQ(sent.size(), 1u);
+
+    EXPECT_FALSE(buffer.acknowledge_leading_sent_range(1, 2));
+    EXPECT_FALSE(buffer.acknowledge_leading_sent_range(0, 5));
+
+    ASSERT_EQ(buffer.segments_.size(), 2u);
+    auto it = buffer.segments_.begin();
+    EXPECT_EQ(it->first, 0u);
+    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::sent);
+    EXPECT_EQ(it->second.begin, 0u);
+    EXPECT_EQ(it->second.end, 4u);
+    ++it;
+    EXPECT_EQ(it->first, 4u);
+    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::unsent);
+}
+
 TEST(QuicCryptoStreamTest, OutstandingRangeRequiresFullCoverageOfRequestedRange) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("abcdef"));
@@ -801,6 +861,50 @@ TEST(QuicCryptoStreamTest, ConsumeRangesCanSkipDifferentStateWithoutMaxOffset) {
     EXPECT_EQ(unsent_ranges.front().bytes, bytes_from_string("def"));
     EXPECT_EQ(remaining, 0u);
     EXPECT_TRUE(buffer.has_lost_data());
+}
+
+TEST(QuicCryptoStreamTest, ConsumeUnsentRangesExtendsAdjacentSentPrefixWithoutExtraSegment) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+    ASSERT_EQ(buffer.take_unsent_ranges(3).size(), 1u);
+
+    std::size_t remaining = 2;
+    std::vector<coquic::quic::ByteRange> unsent_ranges;
+    buffer.consume_unsent_ranges(remaining, std::nullopt, [&](coquic::quic::ByteRange range) {
+        unsent_ranges.push_back(std::move(range));
+    });
+
+    ASSERT_EQ(unsent_ranges.size(), 1u);
+    EXPECT_EQ(unsent_ranges.front().offset, 3u);
+    EXPECT_EQ(unsent_ranges.front().bytes, bytes_from_string("de"));
+    EXPECT_EQ(remaining, 0u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        1u);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              1u);
+    EXPECT_TRUE(buffer.has_outstanding_range(0, 5));
+    EXPECT_FALSE(buffer.has_outstanding_range(0, 6));
+
+    remaining = 1;
+    unsent_ranges.clear();
+    buffer.consume_unsent_ranges(remaining, std::nullopt, [&](coquic::quic::ByteRange range) {
+        unsent_ranges.push_back(std::move(range));
+    });
+
+    ASSERT_EQ(unsent_ranges.size(), 1u);
+    EXPECT_EQ(unsent_ranges.front().offset, 5u);
+    EXPECT_EQ(unsent_ranges.front().bytes, bytes_from_string("f"));
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        1u);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              0u);
+    EXPECT_TRUE(buffer.has_outstanding_range(0, 6));
 }
 
 TEST(QuicCryptoStreamTest, EmptyStateSpecificRangeReadsReturnNoOffsetsOrRanges) {

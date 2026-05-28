@@ -137,6 +137,26 @@ struct ReceivedProtectedOneRttPacket {
     ReceivedFrameList frames;
 };
 
+struct ReceivedProtectedOneRttAckOnlyPacket {
+    bool spin_bit = false;
+    bool key_phase = false;
+    ConnectionId destination_connection_id;
+    std::uint8_t packet_number_length = 1;
+    std::uint64_t packet_number = 0;
+    std::shared_ptr<std::vector<std::byte>> plaintext_storage;
+    ReceivedAckFrame ack;
+};
+
+struct ReceivedProtectedOneRttStreamPacket {
+    bool spin_bit = false;
+    bool key_phase = false;
+    ConnectionId destination_connection_id;
+    std::uint8_t packet_number_length = 1;
+    std::uint64_t packet_number = 0;
+    std::shared_ptr<std::vector<std::byte>> plaintext_storage;
+    ReceivedStreamFrame stream;
+};
+
 struct ProtectedOneRttPacketView {
     bool spin_bit = false;
     bool key_phase = false;
@@ -191,7 +211,8 @@ using ProtectedPacket = std::variant<ProtectedInitialPacket, ProtectedHandshakeP
                                      ProtectedZeroRttPacket, ProtectedOneRttPacket>;
 using ReceivedProtectedPacket =
     std::variant<ReceivedProtectedInitialPacket, ReceivedProtectedHandshakePacket,
-                 ReceivedProtectedZeroRttPacket, ReceivedProtectedOneRttPacket>;
+                 ReceivedProtectedZeroRttPacket, ReceivedProtectedOneRttPacket,
+                 ReceivedProtectedOneRttAckOnlyPacket, ReceivedProtectedOneRttStreamPacket>;
 
 struct SerializedProtectedPacketMetadata {
     std::size_t offset = 0;
@@ -243,6 +264,10 @@ CodecResult<ReceivedProtectedPacket>
 deserialize_received_protected_packet(const std::shared_ptr<std::vector<std::byte>> &storage,
                                       std::size_t begin, std::size_t end,
                                       const DeserializeProtectionContext &context);
+CodecResult<ReceivedProtectedPacket>
+deserialize_received_protected_packet_fast(const std::shared_ptr<std::vector<std::byte>> &storage,
+                                           std::size_t begin, std::size_t end,
+                                           const DeserializeProtectionContext &context);
 CodecResult<std::vector<ReceivedProtectedPacket>>
 deserialize_received_protected_datagram(std::span<const std::byte> bytes,
                                         const DeserializeProtectionContext &context);

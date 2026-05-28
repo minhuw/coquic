@@ -84,7 +84,7 @@ class QuicPerfClient {
                           bool counts_toward_measurement);
     bool maybe_close_bulk_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool benchmark_accepts_new_work() const;
-    bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now);
+    bool handle_result(quic::QuicCoreResult result, quic::QuicCoreTimePoint now);
     bool handle_stream_data(ConnectionState &connection,
                             const quic::QuicCoreReceiveStreamData &received,
                             quic::QuicCoreTimePoint now);
@@ -98,6 +98,7 @@ class QuicPerfClient {
     quic::QuicCoreClientConnectionConfig make_client_open_config(std::uint64_t index) const;
     bool maybe_open_crr_connections(quic::QuicCoreTimePoint now);
     bool flush_json_result() const;
+    bool drain_pending_backend_events();
     bool flush_pending_sends();
 
     QuicPerfConfig config_;

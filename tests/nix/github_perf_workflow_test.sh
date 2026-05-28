@@ -87,8 +87,8 @@ for marker in \
   'client_impl: coquic' \
   'server_impl: coquic' \
   'congestion_controls: newreno cubic bbr copa' \
-  'image_attr: perf-image-coquic-quictls-musl' \
-  'image_tag: coquic-perf-coquic:quictls-musl' \
+  'image_attr: perf-image-coquic-boringssl-musl' \
+  'image_tag: coquic-perf-coquic:boringssl-musl' \
   'label: quic-go' \
   'client_impl: quic-go' \
   'server_impl: quic-go' \

@@ -66,11 +66,14 @@ parse_congestion_control_algorithm(std::string_view value) {
 }
 
 QuicCongestionController::QuicCongestionController(QuicCongestionControlAlgorithm algorithm,
-                                                   std::size_t max_datagram_size)
-    : storage_(std::in_place_type<NewRenoCongestionController>, max_datagram_size),
-      congestion_window_(this, true), bytes_in_flight_(this, false) {
+                                                   std::size_t max_datagram_size,
+                                                   bool enable_hystart_plus_plus)
+    : storage_(std::in_place_type<NewRenoCongestionController>, max_datagram_size,
+               enable_hystart_plus_plus),
+      enable_hystart_plus_plus_(enable_hystart_plus_plus), congestion_window_(this, true),
+      bytes_in_flight_(this, false) {
     if (algorithm == QuicCongestionControlAlgorithm::cubic) {
-        storage_.emplace<CubicCongestionController>(max_datagram_size);
+        storage_.emplace<CubicCongestionController>(max_datagram_size, enable_hystart_plus_plus);
         return;
     }
     if (algorithm == QuicCongestionControlAlgorithm::bbr) {
@@ -83,19 +86,22 @@ QuicCongestionController::QuicCongestionController(QuicCongestionControlAlgorith
 }
 
 QuicCongestionController::QuicCongestionController(const QuicCongestionController &other)
-    : storage_(other.storage_), congestion_window_(this, true), bytes_in_flight_(this, false) {
+    : storage_(other.storage_), enable_hystart_plus_plus_(other.enable_hystart_plus_plus_),
+      congestion_window_(this, true), bytes_in_flight_(this, false) {
 }
 
 QuicCongestionController &
 QuicCongestionController::operator=(const QuicCongestionController &other) {
     if (this != &other) {
         storage_ = other.storage_;
+        enable_hystart_plus_plus_ = other.enable_hystart_plus_plus_;
     }
     return *this;
 }
 
 QuicCongestionController::QuicCongestionController(QuicCongestionController &&other) noexcept
-    : storage_(std::move(other.storage_)), congestion_window_(this, true),
+    : storage_(std::move(other.storage_)),
+      enable_hystart_plus_plus_(other.enable_hystart_plus_plus_), congestion_window_(this, true),
       bytes_in_flight_(this, false) {
 }
 
@@ -103,6 +109,7 @@ QuicCongestionController &
 QuicCongestionController::operator=(QuicCongestionController &&other) noexcept {
     if (this != &other) {
         storage_ = std::move(other.storage_);
+        enable_hystart_plus_plus_ = other.enable_hystart_plus_plus_;
     }
     return *this;
 }
@@ -138,7 +145,9 @@ std::size_t QuicCongestionController::pacing_send_quantum() const {
     return std::visit(
         [](const auto &controller) {
             using Controller = std::decay_t<decltype(controller)>;
-            if constexpr (std::is_same_v<Controller, BbrCongestionController> ||
+            if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
+                          std::is_same_v<Controller, CubicCongestionController> ||
+                          std::is_same_v<Controller, BbrCongestionController> ||
                           std::is_same_v<Controller, CopaCongestionController>) {
                 return controller.pacing_budget_cap();
             } else {
@@ -172,6 +181,25 @@ void QuicCongestionController::on_packets_acked(std::span<const SentPacketRecord
         storage_);
 }
 
+void QuicCongestionController::on_simple_stream_packets_acked(
+    std::span<const AckedStreamPacketSample> packets, bool app_limited, QuicCoreTimePoint now,
+    const RecoveryRttState &rtt_state) {
+    std::visit(
+        [&](auto &controller) {
+            using Controller = std::decay_t<decltype(controller)>;
+            if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
+                          std::is_same_v<Controller, CubicCongestionController>) {
+                controller.on_simple_stream_packets_acked(packets, app_limited, now, rtt_state);
+            } else {
+                static_cast<void>(packets);
+                static_cast<void>(app_limited);
+                static_cast<void>(now);
+                static_cast<void>(rtt_state);
+            }
+        },
+        storage_);
+}
+
 void QuicCongestionController::on_packets_discarded(std::span<const SentPacketRecord> packets) {
     std::visit([&](auto &controller) { controller.on_packets_discarded(packets); }, storage_);
 }
@@ -197,7 +225,8 @@ void QuicCongestionController::reset_for_new_path() {
     const auto algorithm_before_reset = algorithm();
     const auto max_datagram_size =
         std::visit([](const auto &controller) { return controller.max_datagram_size_; }, storage_);
-    *this = QuicCongestionController(algorithm_before_reset, max_datagram_size);
+    *this = QuicCongestionController(algorithm_before_reset, max_datagram_size,
+                                     enable_hystart_plus_plus_);
 }
 
 std::size_t QuicCongestionController::congestion_window() const {
@@ -224,7 +253,14 @@ QuicCongestionDebugMetrics QuicCongestionController::debug_metrics(QuicCoreTimeP
                 .send_quantum = controller.max_datagram_size_,
             };
 
-            if constexpr (std::is_same_v<Controller, BbrCongestionController>) {
+            if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
+                          std::is_same_v<Controller, CubicCongestionController>) {
+                metrics.pacing_rate_bps = double_to_u64(controller.pacing_rate_bytes_per_second_);
+                metrics.send_quantum = controller.pacing_budget_cap();
+                metrics.pacing_budget = controller.pacing_budget_at(now);
+                metrics.slow_start =
+                    controller.congestion_window_ < controller.slow_start_threshold_;
+            } else if constexpr (std::is_same_v<Controller, BbrCongestionController>) {
                 metrics.mode = static_cast<std::uint64_t>(controller.mode_);
                 metrics.bandwidth_bps = double_to_u64(controller.bandwidth_bytes_per_second_);
                 metrics.max_bandwidth_bps =

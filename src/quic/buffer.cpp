@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <cstdlib>
+#include <memory>
 
 #if defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
@@ -14,6 +15,73 @@
 namespace coquic::quic {
 
 namespace {
+
+constexpr std::size_t kDatagramByteStorageCacheMaxBytes = std::size_t{64} * 1024;
+constexpr std::size_t kDatagramByteStorageCacheSlots = 128;
+constexpr std::size_t kDatagramByteStorageCacheBucketBytes = std::size_t{4} * 1024;
+
+COQUIC_NO_PROFILE std::size_t datagram_byte_storage_allocation_count(std::size_t count) {
+    if (count < kDatagramByteStorageCacheBucketBytes || count > kDatagramByteStorageCacheMaxBytes) {
+        return count;
+    }
+
+    return ((count + kDatagramByteStorageCacheBucketBytes - 1) /
+            kDatagramByteStorageCacheBucketBytes) *
+           kDatagramByteStorageCacheBucketBytes;
+}
+
+struct DatagramByteStorageCache {
+    struct Entry {
+        std::byte *pointer = nullptr;
+        std::size_t count = 0;
+    };
+
+    ~DatagramByteStorageCache() {
+        for (std::size_t index = 0; index < used; ++index) {
+            auto &entry = entries[index];
+            if (entry.pointer != nullptr) {
+                std::allocator<std::byte>{}.deallocate(entry.pointer, entry.count);
+            }
+        }
+    }
+
+    std::optional<std::byte *> take(std::size_t count) {
+        for (std::size_t index = 0; index < used; ++index) {
+            if (entries[index].count != count) {
+                continue;
+            }
+
+            auto *pointer = entries[index].pointer;
+            --used;
+            entries[index] = entries[used];
+            entries[used] = Entry{};
+            return pointer;
+        }
+
+        return std::nullopt;
+    }
+
+    bool put(std::byte *pointer, std::size_t count) {
+        if (used == entries.size()) {
+            return false;
+        }
+
+        entries[used] = Entry{
+            .pointer = pointer,
+            .count = count,
+        };
+        ++used;
+        return true;
+    }
+
+    std::array<Entry, kDatagramByteStorageCacheSlots> entries{};
+    std::size_t used = 0;
+};
+
+COQUIC_NO_PROFILE DatagramByteStorageCache &datagram_byte_storage_cache() {
+    thread_local DatagramByteStorageCache cache;
+    return cache;
+}
 
 std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> output,
                                                        std::size_t *offset, std::uint64_t value) {
@@ -51,6 +119,39 @@ COQUIC_NO_PROFILE void abort_if(bool condition) {
 }
 
 } // namespace
+
+namespace detail {
+
+COQUIC_NO_PROFILE std::byte *allocate_datagram_byte_storage(std::size_t count) {
+    if (count == 0) {
+        return nullptr;
+    }
+
+    const auto allocation_count = datagram_byte_storage_allocation_count(count);
+    auto &cache = datagram_byte_storage_cache();
+    if (auto cached = cache.take(allocation_count)) {
+        return *cached;
+    }
+
+    return std::allocator<std::byte>{}.allocate(allocation_count);
+}
+
+COQUIC_NO_PROFILE void deallocate_datagram_byte_storage(std::byte *pointer,
+                                                        std::size_t count) noexcept {
+    if (pointer == nullptr || count == 0) {
+        return;
+    }
+
+    const auto allocation_count = datagram_byte_storage_allocation_count(count);
+    if (allocation_count <= kDatagramByteStorageCacheMaxBytes &&
+        datagram_byte_storage_cache().put(pointer, allocation_count)) {
+        return;
+    }
+
+    std::allocator<std::byte>{}.deallocate(pointer, allocation_count);
+}
+
+} // namespace detail
 
 DatagramBuffer::DatagramBuffer(std::initializer_list<std::byte> bytes) {
     append(std::span<const std::byte>(bytes.begin(), bytes.size()));
@@ -109,6 +210,16 @@ void DatagramBuffer::append(std::span<const std::byte> bytes) {
 
 std::span<std::byte> DatagramBuffer::append_uninitialized(std::size_t size) {
     const auto offset = bytes_.size();
+    bytes_.resize(offset + size);
+    return std::span<std::byte>(bytes_.data() + static_cast<std::ptrdiff_t>(offset), size);
+}
+
+std::span<std::byte> DatagramBuffer::append_uninitialized_exact(std::size_t size) {
+    const auto offset = bytes_.size();
+    if (bytes_.capacity() < offset + size) {
+        bytes_.reserve(offset + size);
+    }
+
     bytes_.resize(offset + size);
     return std::span<std::byte>(bytes_.data() + static_cast<std::ptrdiff_t>(offset), size);
 }

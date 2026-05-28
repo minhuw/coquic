@@ -34,6 +34,11 @@ CodecResult<ReceivedFrameDecodeResult> received_decode_failure(CodecErrorCode co
     return CodecResult<ReceivedFrameDecodeResult>::failure(code, offset);
 }
 
+CodecResult<ReceivedAckFrameDecodeResult> received_ack_decode_failure(CodecErrorCode code,
+                                                                      std::size_t offset) {
+    return CodecResult<ReceivedAckFrameDecodeResult>::failure(code, offset);
+}
+
 enum class FrameFaultPoint : std::uint8_t;
 enum class FrameFaultPoint : std::uint8_t {
     append_byte,
@@ -1689,6 +1694,37 @@ CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(const SharedBy
     return CodecResult<ReceivedFrameDecodeResult>::success(ReceivedFrameDecodeResult{
         .frame = to_received_frame(std::move(decoded.value().frame)),
         .bytes_consumed = decoded.value().bytes_consumed,
+    });
+}
+
+CodecResult<ReceivedAckFrameDecodeResult> deserialize_received_ack_frame(const SharedBytes &bytes) {
+    const auto span = bytes.span();
+    if (span.empty()) {
+        return received_ack_decode_failure(CodecErrorCode::truncated_input, 0);
+    }
+
+    BufferReader reader(span);
+    const auto frame_type_result = decode_varint(reader);
+    if (!frame_type_result.has_value()) {
+        return received_ack_decode_failure(frame_type_result.error().code,
+                                           frame_type_result.error().offset);
+    }
+
+    const auto frame_type = frame_type_result.value().value;
+    if (frame_type <= 0x1eu && frame_type_result.value().bytes_consumed != 1) {
+        return received_ack_decode_failure(CodecErrorCode::non_shortest_frame_type_encoding, 0);
+    }
+    if (frame_type != 0x02 && frame_type != 0x03) {
+        return received_ack_decode_failure(CodecErrorCode::unknown_frame_type, 0);
+    }
+
+    auto frame = decode_received_ack_frame(reader, frame_type == 0x03, bytes);
+    if (!frame.has_value()) {
+        return received_ack_decode_failure(frame.error().code, frame.error().offset);
+    }
+    return CodecResult<ReceivedAckFrameDecodeResult>::success(ReceivedAckFrameDecodeResult{
+        .frame = std::move(frame.value()),
+        .bytes_consumed = reader.offset(),
     });
 }
 

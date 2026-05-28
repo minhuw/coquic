@@ -65,6 +65,10 @@ class ReliableSendBuffer {
             return;
         }
 
+        if (!max_offset.has_value() && consume_ranges_by_extending_previous_sent(
+                                           SegmentState::lost, remaining_bytes, callback)) {
+            return;
+        }
         consume_ranges_by_state(SegmentState::lost, remaining_bytes, max_offset,
                                 std::forward<Callback>(callback));
         merge_adjacent_segments();
@@ -78,6 +82,10 @@ class ReliableSendBuffer {
             return;
         }
 
+        if (!max_offset.has_value() && consume_ranges_by_extending_previous_sent(
+                                           SegmentState::unsent, remaining_bytes, callback)) {
+            return;
+        }
         consume_ranges_by_state(SegmentState::unsent, remaining_bytes, max_offset,
                                 std::forward<Callback>(callback));
         merge_adjacent_segments();
@@ -86,6 +94,7 @@ class ReliableSendBuffer {
     void mark_lost(std::uint64_t offset, std::size_t length);
     void mark_unsent(std::uint64_t offset, std::size_t length);
     void mark_sent(std::uint64_t offset, std::size_t length);
+    std::optional<SharedBytes> bytes_for_range(std::uint64_t offset, std::size_t length) const;
     bool has_pending_data() const;
     bool has_outstanding_data() const;
     bool has_outstanding_range(std::uint64_t offset, std::size_t length) const;
@@ -118,6 +127,64 @@ class ReliableSendBuffer {
     take_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
                          std::optional<std::uint64_t> max_offset = std::nullopt);
     std::optional<std::uint64_t> first_offset_by_state(SegmentState state) const;
+    bool acknowledge_leading_sent_range(std::uint64_t offset, std::uint64_t end);
+    template <typename Callback>
+    COQUIC_NO_PROFILE bool consume_ranges_by_extending_previous_sent(SegmentState state,
+                                                                     std::size_t &remaining_bytes,
+                                                                     Callback &&callback) {
+        const auto segment_length = [](const Segment &segment) {
+            return segment.end - segment.begin;
+        };
+
+        for (auto it = segments_.begin(); it != segments_.end() && remaining_bytes > 0;) {
+            if (it->second.state != state) {
+                ++it;
+                continue;
+            }
+            if (it == segments_.begin()) {
+                return false;
+            }
+
+            auto previous = std::prev(it);
+            const auto previous_end_offset =
+                previous->first + static_cast<std::uint64_t>(segment_length(previous->second));
+            const bool can_extend_previous_sent = previous->second.state == SegmentState::sent &&
+                                                  previous_end_offset == it->first &&
+                                                  previous->second.storage == it->second.storage &&
+                                                  previous->second.end == it->second.begin;
+            if (!can_extend_previous_sent) {
+                return false;
+            }
+
+            const auto available_bytes = segment_length(it->second);
+            const auto chunk_size = std::min(remaining_bytes, available_bytes);
+            callback(ByteRange{
+                .offset = it->first,
+                .bytes =
+                    SharedBytes{
+                        it->second.storage,
+                        it->second.begin,
+                        it->second.begin + chunk_size,
+                    },
+            });
+
+            previous->second.end = it->second.begin + chunk_size;
+            remaining_bytes -= chunk_size;
+            if (chunk_size == available_bytes) {
+                note_segment_erased(it->second);
+                it = segments_.erase(it);
+                continue;
+            }
+
+            auto node = segments_.extract(it);
+            node.key() += static_cast<std::uint64_t>(chunk_size);
+            node.mapped().begin += chunk_size;
+            segments_.insert(std::move(node));
+            return true;
+        }
+
+        return true;
+    }
     template <typename Callback>
     COQUIC_NO_PROFILE void consume_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
                                                    std::optional<std::uint64_t> max_offset,

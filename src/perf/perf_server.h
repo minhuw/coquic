@@ -28,17 +28,20 @@ class QuicPerfServer {
         std::vector<std::byte> control_bytes;
         std::optional<QuicPerfSessionStart> start;
         bool ready_sent = false;
+        bool complete_sent = false;
         std::uint64_t bytes_sent = 0;
         std::uint64_t bytes_received = 0;
         std::uint64_t requests_completed = 0;
     };
 
-    bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now);
+    bool handle_result(quic::QuicCoreResult result, quic::QuicCoreTimePoint now);
     bool drain_pending_backend_events();
     bool flush_pending_sends();
     bool handle_stream_data(Session &session, const quic::QuicCoreReceiveStreamData &received,
                             quic::QuicCoreTimePoint now);
     bool should_exit_on_idle_empty() const;
+    bool should_exit_on_session_complete() const;
+    bool completed_sessions_drained_for_exit() const;
     quic::SharedBytes cached_download_payload(std::size_t bytes);
     bool send_control(Session &session, const QuicPerfControlMessage &message);
 
@@ -49,6 +52,7 @@ class QuicPerfServer {
     std::unordered_map<quic::QuicConnectionHandle, Session> sessions_;
     PerfSendBuffer send_buffer_;
     bool accepted_session_ = false;
+    bool completed_session_seen_ = false;
 };
 
 } // namespace coquic::perf

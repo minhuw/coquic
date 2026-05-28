@@ -31,4 +31,4 @@
 
 # CoQUIC
 
-CoQUIC is an experimental QUIC implementation exploring how far Codex, paired with GPT-5.4 and later models, can go in building a full-featured transport stack.
+CoQUIC is an experimental QUIC implementation exploring how far Codex, paired with GPT-5.4 and later models, can go in building a full-featured transport stack. The whole repo is generated entirely by LLM, with careful human prompt.

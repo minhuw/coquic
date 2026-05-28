@@ -7,6 +7,8 @@
 
 namespace coquic::perf {
 namespace {
+constexpr std::size_t kMaxPendingBackendEventsBeforeFlush = 64;
+
 std::vector<std::byte> make_payload(std::size_t bytes) {
     std::vector<std::byte> out(bytes, std::byte{0x5a});
     return out;
@@ -447,7 +449,7 @@ int QuicPerfClient::run() {
                 return fail("client missing rx datagram");
             }
             advance_benchmark_phase(event->now);
-            const auto inbound_result = core_.advance_endpoint(
+            auto inbound_result = core_.advance_endpoint(
                 quic::QuicCoreInboundDatagram{
                     .bytes = std::move(event->datagram->bytes),
                     .route_handle = event->datagram->route_handle,
@@ -459,7 +461,7 @@ int QuicPerfClient::run() {
                     .end = event->datagram->end,
                 },
                 event->now);
-            if (!handle_result(inbound_result, event_handling_time)) {
+            if (!handle_result(std::move(inbound_result), event_handling_time)) {
                 return fail("client inbound datagram failed");
             }
             continue;
@@ -470,20 +472,19 @@ int QuicPerfClient::run() {
 bool QuicPerfClient::open_initial_connection(quic::QuicCoreTimePoint now) {
     bool ok = true;
     for (std::size_t index = 0; index < initial_connection_target(config_); ++index) {
-        const auto result = core_.advance_endpoint(
+        auto result = core_.advance_endpoint(
             quic::QuicCoreOpenConnection{
                 .connection = make_client_open_config(index),
                 .initial_route_handle = primary_route_handle_,
                 .address_validation_identity = primary_address_validation_identity_,
             },
             now);
-        ok = ok && handle_result(result, now);
+        ok = ok && handle_result(std::move(result), now);
     }
     return ok;
 }
 
-bool QuicPerfClient::handle_result(const quic::QuicCoreResult &result,
-                                   quic::QuicCoreTimePoint now) {
+bool QuicPerfClient::handle_result(quic::QuicCoreResult result, quic::QuicCoreTimePoint now) {
     advance_benchmark_phase(now);
 
     if (result.local_error.has_value()) {
@@ -536,7 +537,7 @@ bool QuicPerfClient::handle_result(const quic::QuicCoreResult &result,
                 if (connection_it == connections_.end()) {
                     continue;
                 }
-                const auto command_result = core_.advance_endpoint(
+                auto command_result = core_.advance_endpoint(
                     quic::QuicCoreConnectionCommand{
                         .connection = state->connection,
                         .input =
@@ -578,10 +579,61 @@ bool QuicPerfClient::handle_result(const quic::QuicCoreResult &result,
 }
 
 bool QuicPerfClient::flush_pending_sends() {
+    if (!send_buffer_.empty() && !send_buffer_.flush(*backend_)) {
+        return false;
+    }
+    if (!drain_pending_backend_events()) {
+        return false;
+    }
     if (!send_buffer_.flush(*backend_)) {
         summary_.failure_reason = "client flush send effects failed";
         return false;
     }
+    return true;
+}
+
+bool QuicPerfClient::drain_pending_backend_events() {
+    if (backend_ == nullptr) {
+        return true;
+    }
+
+    for (std::size_t drained = 0;
+         drained < kMaxPendingBackendEventsBeforeFlush && backend_->has_pending_events();
+         ++drained) {
+        auto event = backend_->wait(std::nullopt);
+        if (!event.has_value()) {
+            summary_.failure_reason = "client wait failed while draining pending events";
+            return false;
+        }
+
+        const auto event_handling_time = quic::QuicCoreClock::now();
+        advance_benchmark_phase(event_handling_time);
+
+        switch (event->kind) {
+        case io::QuicIoEvent::Kind::idle_timeout:
+            return true;
+        case io::QuicIoEvent::Kind::shutdown:
+            summary_.failure_reason = "client backend shutdown while draining pending events";
+            return false;
+        case io::QuicIoEvent::Kind::timer_expired:
+            if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
+                               event_handling_time)) {
+                return false;
+            }
+            continue;
+        case io::QuicIoEvent::Kind::path_mtu_update:
+        case io::QuicIoEvent::Kind::rx_datagram:
+            break;
+        }
+
+        if (auto input = make_endpoint_input_from_io_event(*event); input.has_value()) {
+            if (!handle_result(core_.advance_endpoint(std::move(*input), event->now),
+                               event_handling_time)) {
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -689,7 +741,7 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
         if (!connection.close_requested) {
             connection.close_requested = true;
             closing_connections_.insert(connection.handle);
-            const auto close_result = core_.advance_endpoint(
+            auto close_result = core_.advance_endpoint(
                 quic::QuicCoreConnectionCommand{
                     .connection = connection.handle,
                     .input =
@@ -699,7 +751,7 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
                         },
                 },
                 now);
-            if (!handle_result(close_result, now)) {
+            if (!handle_result(std::move(close_result), now)) {
                 if (!summary_.failure_reason.has_value()) {
                     summary_.failure_reason = "client crr close handling failed";
                 }
@@ -781,7 +833,7 @@ bool QuicPerfClient::open_bulk_stream(ConnectionState &connection, quic::QuicCor
     const auto stream_id = connection.next_stream_id;
     connection.next_stream_id = next_client_perf_stream_id(stream_id);
     connection.active_bulk_streams.emplace(stream_id, counts_toward_measurement);
-    const auto send_result = core_.advance_endpoint(
+    auto send_result = core_.advance_endpoint(
         quic::QuicCoreConnectionCommand{
             .connection = connection.handle,
             .input =
@@ -834,7 +886,7 @@ bool QuicPerfClient::maybe_start_bulk_streams(ConnectionState &connection,
         connection.next_stream_id = next_client_perf_stream_id(stream_id);
         const auto target_bytes = per_stream + (index < remainder ? 1u : 0u);
 
-        const auto send_result = core_.advance_endpoint(
+        auto send_result = core_.advance_endpoint(
             quic::QuicCoreConnectionCommand{
                 .connection = connection.handle,
                 .input =
@@ -880,7 +932,7 @@ bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
             return false;
         }
 
-        const auto send_result = core_.advance_endpoint(
+        auto send_result = core_.advance_endpoint(
             quic::QuicCoreConnectionCommand{
                 .connection = connection.handle,
                 .input =
@@ -937,7 +989,7 @@ bool QuicPerfClient::maybe_issue_crr_request(ConnectionState &connection,
         return false;
     }
 
-    const auto send_result = core_.advance_endpoint(
+    auto send_result = core_.advance_endpoint(
         quic::QuicCoreConnectionCommand{
             .connection = connection.handle,
             .input =
@@ -976,7 +1028,7 @@ bool QuicPerfClient::maybe_close_rr_connection(ConnectionState &connection,
 
     connection.close_requested = true;
     closing_connections_.insert(connection.handle);
-    const auto close_result = core_.advance_endpoint(
+    auto close_result = core_.advance_endpoint(
         quic::QuicCoreConnectionCommand{
             .connection = connection.handle,
             .input =
@@ -986,7 +1038,7 @@ bool QuicPerfClient::maybe_close_rr_connection(ConnectionState &connection,
                 },
         },
         now);
-    return handle_result(close_result, now);
+    return handle_result(std::move(close_result), now);
 }
 
 bool QuicPerfClient::maybe_close_bulk_connection(ConnectionState &connection,
@@ -997,7 +1049,7 @@ bool QuicPerfClient::maybe_close_bulk_connection(ConnectionState &connection,
 
     connection.close_requested = true;
     closing_connections_.insert(connection.handle);
-    const auto close_result = core_.advance_endpoint(
+    auto close_result = core_.advance_endpoint(
         quic::QuicCoreConnectionCommand{
             .connection = connection.handle,
             .input =
@@ -1007,7 +1059,7 @@ bool QuicPerfClient::maybe_close_bulk_connection(ConnectionState &connection,
                 },
         },
         now);
-    return handle_result(close_result, now);
+    return handle_result(std::move(close_result), now);
 }
 
 bool QuicPerfClient::maybe_close_crr_connection(ConnectionState &connection,
@@ -1020,7 +1072,7 @@ bool QuicPerfClient::maybe_close_crr_connection(ConnectionState &connection,
 
     connection.close_requested = true;
     closing_connections_.insert(connection.handle);
-    const auto close_result = core_.advance_endpoint(
+    auto close_result = core_.advance_endpoint(
         quic::QuicCoreConnectionCommand{
             .connection = connection.handle,
             .input =
@@ -1030,7 +1082,7 @@ bool QuicPerfClient::maybe_close_crr_connection(ConnectionState &connection,
                 },
         },
         now);
-    return handle_result(close_result, now);
+    return handle_result(std::move(close_result), now);
 }
 
 quic::QuicCoreClientConnectionConfig
@@ -1045,7 +1097,7 @@ bool QuicPerfClient::maybe_open_crr_connections(quic::QuicCoreTimePoint now) {
 
     while (connections_.size() < config_.connections &&
            (!config_.requests.has_value() || crr_requests_opened_ < *config_.requests)) {
-        const auto result = core_.advance_endpoint(
+        auto result = core_.advance_endpoint(
             quic::QuicCoreOpenConnection{
                 .connection = make_client_open_config(next_connection_index_++),
                 .initial_route_handle = primary_route_handle_,
@@ -1053,7 +1105,7 @@ bool QuicPerfClient::maybe_open_crr_connections(quic::QuicCoreTimePoint now) {
             },
             now);
         ++crr_requests_opened_;
-        if (!handle_result(result, now)) {
+        if (!handle_result(std::move(result), now)) {
             return false;
         }
     }

@@ -1,5 +1,6 @@
 #include "src/perf/perf_server.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <span>
 #include <string_view>
@@ -86,6 +87,9 @@ int QuicPerfServer::run() {
             if (!flush_pending_sends()) {
                 return 1;
             }
+            if (should_exit_on_session_complete()) {
+                return 0;
+            }
             continue;
         }
 
@@ -99,7 +103,7 @@ int QuicPerfServer::run() {
             if (!flush_pending_sends()) {
                 return 1;
             }
-            if (should_exit_on_idle_empty()) {
+            if (should_exit_on_idle_empty() || should_exit_on_session_complete()) {
                 return 0;
             }
             continue;
@@ -110,12 +114,18 @@ int QuicPerfServer::run() {
             if (!flush_pending_sends()) {
                 return 1;
             }
+            if (should_exit_on_session_complete()) {
+                return 0;
+            }
             if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
                                event->now)) {
                 return 1;
             }
             if (!flush_pending_sends()) {
                 return 1;
+            }
+            if (should_exit_on_session_complete()) {
+                return 0;
             }
             continue;
         case io::QuicIoEvent::Kind::path_mtu_update:
@@ -131,11 +141,13 @@ int QuicPerfServer::run() {
         if (!flush_pending_sends()) {
             return 1;
         }
+        if (should_exit_on_session_complete()) {
+            return 0;
+        }
     }
 }
 
-bool QuicPerfServer::handle_result(const quic::QuicCoreResult &result,
-                                   quic::QuicCoreTimePoint now) {
+bool QuicPerfServer::handle_result(quic::QuicCoreResult result, quic::QuicCoreTimePoint now) {
     if (result.local_error.has_value()) {
         return false;
     }
@@ -209,6 +221,9 @@ bool QuicPerfServer::drain_pending_backend_events() {
 }
 
 bool QuicPerfServer::flush_pending_sends() {
+    if (!send_buffer_.empty() && !send_buffer_.flush(*backend_)) {
+        return false;
+    }
     if (!drain_pending_backend_events()) {
         return false;
     }
@@ -218,6 +233,28 @@ bool QuicPerfServer::flush_pending_sends() {
 bool QuicPerfServer::should_exit_on_idle_empty() const {
     return accepted_session_ && sessions_.empty() &&
            env_flag_enabled("COQUIC_PERF_SERVER_EXIT_ON_IDLE_EMPTY");
+}
+
+bool QuicPerfServer::should_exit_on_session_complete() const {
+    return accepted_session_ && completed_session_seen_ &&
+           env_flag_enabled("COQUIC_PERF_SERVER_EXIT_ON_SESSION_COMPLETE") &&
+           completed_sessions_drained_for_exit();
+}
+
+bool QuicPerfServer::completed_sessions_drained_for_exit() const {
+    if (!send_buffer_.empty() || core_.has_send_continuation_pending()) {
+        return false;
+    }
+    if (!std::all_of(sessions_.begin(), sessions_.end(),
+                     [](const auto &entry) { return entry.second.complete_sent; })) {
+        return false;
+    }
+
+    const auto diagnostics = core_.connection_diagnostics();
+    return std::none_of(diagnostics.begin(), diagnostics.end(), [](const auto &connection) {
+        return std::any_of(connection.streams.begin(), connection.streams.end(),
+                           [](const auto &stream) { return stream.pending_send; });
+    });
 }
 
 bool QuicPerfServer::handle_stream_data(Session &session,
@@ -237,7 +274,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             session.start->direction == QuicPerfDirection::download &&
             !session.start->total_bytes.has_value() && received.fin) {
             const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
-            const auto send_result = core_.advance_endpoint(
+            auto send_result = core_.advance_endpoint(
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
@@ -263,7 +300,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             const auto per_stream = total_bytes / session.start->streams;
             const auto remainder = total_bytes % session.start->streams;
             const auto target_bytes = per_stream + (stream_index < remainder ? 1u : 0u);
-            const auto send_result = core_.advance_endpoint(
+            auto send_result = core_.advance_endpoint(
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
@@ -280,6 +317,8 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             }
             session.bytes_sent += target_bytes;
             if (session.requests_completed >= session.start->streams) {
+                session.complete_sent = true;
+                completed_session_seen_ = true;
                 return send_control(session, QuicPerfSessionComplete{
                                                  .bytes_sent = session.bytes_sent,
                                                  .bytes_received = session.bytes_received,
@@ -292,6 +331,8 @@ bool QuicPerfServer::handle_stream_data(Session &session,
         if (session.start->mode == QuicPerfMode::bulk &&
             session.start->direction == QuicPerfDirection::upload &&
             session.requests_completed >= session.start->streams) {
+            session.complete_sent = true;
+            completed_session_seen_ = true;
             return send_control(session, QuicPerfSessionComplete{
                                              .bytes_sent = session.bytes_sent,
                                              .bytes_received = session.bytes_received,
@@ -302,7 +343,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
         if ((session.start->mode == QuicPerfMode::rr || session.start->mode == QuicPerfMode::crr) &&
             received.fin) {
             const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
-            const auto send_result = core_.advance_endpoint(
+            auto send_result = core_.advance_endpoint(
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
@@ -320,6 +361,8 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             session.bytes_sent += response_bytes;
             if (session.start->mode == QuicPerfMode::rr && session.start->requests.has_value() &&
                 session.requests_completed >= *session.start->requests) {
+                session.complete_sent = true;
+                completed_session_seen_ = true;
                 return send_control(session, QuicPerfSessionComplete{
                                                  .bytes_sent = session.bytes_sent,
                                                  .bytes_received = session.bytes_received,

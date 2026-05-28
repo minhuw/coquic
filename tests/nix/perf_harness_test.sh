@@ -432,6 +432,7 @@ grep -F -- 'perf-image-quictls-musl' "${flake}" >/dev/null || {
 
 for attr in \
   'perf-image-coquic-quictls-musl' \
+  'perf-image-coquic-boringssl-musl' \
   'perf-image-quic-go-quictls-musl' \
   'perf-image-quinn-quictls-musl' \
   'perf-image-picoquic-quictls-musl' \

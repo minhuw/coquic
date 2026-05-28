@@ -548,6 +548,8 @@ void PacketSpaceRecovery::reclaim_retired_packet_storage(SentPacketRecord &packe
     std::vector<MaxStreamsFrame>().swap(packet.max_streams_frames);
     packet.data_blocked_frame.reset();
     std::vector<StreamDataBlockedFrame>().swap(packet.stream_data_blocked_frames);
+    packet.first_stream_frame_metadata.reset();
+    std::vector<StreamFrameSendMetadata>().swap(packet.stream_frame_metadata);
     std::vector<StreamFrameSendFragment>().swap(packet.stream_fragments);
     packet.qlog_packet_snapshot.reset();
 }
@@ -1064,6 +1066,79 @@ void PacketSpaceRecovery::retire_packet(std::uint64_t packet_number) {
         return;
     }
     retire_packet(*handle);
+}
+
+bool PacketSpaceRecovery::retire_packet_if_present(RecoveryPacketHandle handle) {
+    if (handle.slot_index >= slots_.size()) {
+        return false;
+    }
+
+    auto &slot = slots_[handle.slot_index];
+    if (slot.packet.packet_number != handle.packet_number ||
+        (slot.state != LedgerSlotState::sent && slot.state != LedgerSlotState::declared_lost)) {
+        return false;
+    }
+
+    if (!slot.acknowledged) {
+        unlink_live_slot(handle.slot_index);
+    }
+
+    slot.packet.in_flight = false;
+    slot.packet.bytes_in_flight = 0;
+    reclaim_retired_packet_storage(slot.packet);
+    slot.state = LedgerSlotState::retired;
+    slot.acknowledged = true;
+    ++compatibility_version_;
+    return true;
+}
+
+std::optional<SentPacketRecord>
+PacketSpaceRecovery::take_retired_packet(RecoveryPacketHandle handle) {
+    auto current_handle = packet_for_handle(handle) != nullptr
+                              ? std::optional{handle}
+                              : handle_for_packet_number(handle.packet_number);
+    if (!current_handle.has_value()) {
+        return std::nullopt;
+    }
+
+    auto &slot = slots_[current_handle->slot_index];
+    if (!slot.acknowledged) {
+        unlink_live_slot(current_handle->slot_index);
+    }
+
+    auto packet = std::move(slot.packet);
+    slot.packet = SentPacketRecord{
+        .packet_number = packet.packet_number,
+    };
+    slot.state = LedgerSlotState::retired;
+    slot.acknowledged = true;
+    ++compatibility_version_;
+    return packet;
+}
+
+std::optional<SentPacketRecord>
+PacketSpaceRecovery::take_retired_packet_if_present(RecoveryPacketHandle handle) {
+    if (handle.slot_index >= slots_.size()) {
+        return std::nullopt;
+    }
+    auto &slot = slots_[handle.slot_index];
+    if (slot.packet.packet_number != handle.packet_number ||
+        (slot.state != LedgerSlotState::sent && slot.state != LedgerSlotState::declared_lost)) {
+        return std::nullopt;
+    }
+
+    if (!slot.acknowledged) {
+        unlink_live_slot(handle.slot_index);
+    }
+
+    auto packet = std::move(slot.packet);
+    slot.packet = SentPacketRecord{
+        .packet_number = packet.packet_number,
+    };
+    slot.state = LedgerSlotState::retired;
+    slot.acknowledged = true;
+    ++compatibility_version_;
+    return packet;
 }
 
 PacketSpaceRecovery::AckApplyState

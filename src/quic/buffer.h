@@ -14,6 +14,13 @@
 
 namespace coquic::quic {
 
+namespace detail {
+
+std::byte *allocate_datagram_byte_storage(std::size_t count);
+void deallocate_datagram_byte_storage(std::byte *pointer, std::size_t count) noexcept;
+
+} // namespace detail
+
 template <typename T> class UninitializedAllocator {
   public:
     using value_type = T;
@@ -25,10 +32,17 @@ template <typename T> class UninitializedAllocator {
     }
 
     [[nodiscard]] T *allocate(std::size_t count) {
+        if constexpr (std::is_same_v<T, std::byte>) {
+            return detail::allocate_datagram_byte_storage(count);
+        }
         return std::allocator<T>{}.allocate(count);
     }
 
     void deallocate(T *pointer, std::size_t count) noexcept {
+        if constexpr (std::is_same_v<T, std::byte>) {
+            detail::deallocate_datagram_byte_storage(pointer, count);
+            return;
+        }
         std::allocator<T>{}.deallocate(pointer, count);
     }
 
@@ -69,6 +83,7 @@ class DatagramBuffer {
     void push_back(std::byte value);
     void append(std::span<const std::byte> bytes);
     std::span<std::byte> append_uninitialized(std::size_t size);
+    std::span<std::byte> append_uninitialized_exact(std::size_t size);
     std::span<std::byte> span();
     std::span<const std::byte> span() const;
     std::byte *data();

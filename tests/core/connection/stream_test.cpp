@@ -36,6 +36,8 @@ using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
 using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
+using coquic::quic::test_support::first_stream_frame_length_for_tests;
+using coquic::quic::test_support::first_stream_frame_offset_for_tests;
 using coquic::quic::test_support::first_tracked_packet;
 using coquic::quic::test_support::invalid_cipher_suite;
 using coquic::quic::test_support::last_tracked_packet;
@@ -52,6 +54,7 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::sent_packet_has_stream_frames_for_tests;
 using coquic::quic::test_support::tracked_packet_count;
 using coquic::quic::test_support::tracked_packet_or_null;
 using coquic::quic::test_support::tracked_packet_or_terminate;
@@ -1073,16 +1076,15 @@ TEST(QuicCoreTest,
         const auto packet_number = last_tracked_packet(connection.application_space_).packet_number;
         const auto &sent_packet =
             tracked_packet_or_terminate(connection.application_space_, packet_number);
-        ASSERT_FALSE(sent_packet.stream_fragments.empty());
+        ASSERT_TRUE(sent_packet_has_stream_frames_for_tests(sent_packet));
         sent_stream_packets.push_back(SentStreamPacket{
             .packet_number = packet_number,
-            .first_stream_offset = sent_packet.stream_fragments.front().offset,
+            .first_stream_offset = first_stream_frame_offset_for_tests(sent_packet),
         });
-        for (const auto &fragment : sent_packet.stream_fragments) {
-            next_unsent_offset =
-                std::max(next_unsent_offset,
-                         fragment.offset + static_cast<std::uint64_t>(fragment.bytes.size()));
-        }
+        next_unsent_offset = std::max(
+            next_unsent_offset,
+            first_stream_frame_offset_for_tests(sent_packet) +
+                static_cast<std::uint64_t>(first_stream_frame_length_for_tests(sent_packet)));
     }
 
     ASSERT_GE(sent_stream_packets.size(), 2u);
@@ -1109,9 +1111,9 @@ TEST(QuicCoreTest,
 
     const auto &pending_probe_packet =
         optional_ref_or_terminate(connection.application_space_.pending_probe_packet);
-    ASSERT_FALSE(pending_probe_packet.stream_fragments.empty());
+    ASSERT_TRUE(sent_packet_has_stream_frames_for_tests(pending_probe_packet));
     EXPECT_EQ(pending_probe_packet.packet_number, probe_packet_number);
-    EXPECT_EQ(pending_probe_packet.stream_fragments.front().offset, probe_offset);
+    EXPECT_EQ(first_stream_frame_offset_for_tests(pending_probe_packet), probe_offset);
 
     const auto first_probe_datagram = connection.drain_outbound_datagram(timeout);
     ASSERT_FALSE(first_probe_datagram.empty());
@@ -1332,7 +1334,8 @@ TEST(QuicCoreTest, ApplicationSendClearsPendingProbeAfterSendingStreamData) {
     ASSERT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
     ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
-    EXPECT_FALSE(first_tracked_packet(connection.application_space_).stream_fragments.empty());
+    EXPECT_TRUE(sent_packet_has_stream_frames_for_tests(
+        first_tracked_packet(connection.application_space_)));
 }
 
 TEST(QuicCoreTest, ApplicationSendBudgetsManyFinOnlyStreamsWithinDatagramLimit) {
@@ -2160,8 +2163,8 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
     const auto first_gap_packet_number = gap_packet_numbers.front();
     const auto first_gap_packet =
         tracked_packet_or_terminate(connection.application_space_, first_gap_packet_number);
-    ASSERT_FALSE(first_gap_packet.stream_fragments.empty());
-    const auto tracked_gap_offset = first_gap_packet.stream_fragments.front().offset;
+    ASSERT_TRUE(sent_packet_has_stream_frames_for_tests(first_gap_packet));
+    const auto tracked_gap_offset = first_stream_frame_offset_for_tests(first_gap_packet);
 
     ASSERT_TRUE(connection
                     .process_inbound_application(
@@ -2226,8 +2229,8 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
         last_tracked_packet(connection.application_space_).packet_number;
     const auto retransmit_packet =
         tracked_packet_or_terminate(connection.application_space_, retransmit_packet_number);
-    ASSERT_FALSE(retransmit_packet.stream_fragments.empty());
-    EXPECT_EQ(retransmit_packet.stream_fragments.front().offset, tracked_gap_offset);
+    ASSERT_TRUE(sent_packet_has_stream_frames_for_tests(retransmit_packet));
+    EXPECT_EQ(first_stream_frame_offset_for_tests(retransmit_packet), tracked_gap_offset);
 }
 
 TEST(QuicCoreTest, InboundMigratedAckGapDatagramRetransmitsLostStreamData) {
@@ -2276,8 +2279,8 @@ TEST(QuicCoreTest, InboundMigratedAckGapDatagramRetransmitsLostStreamData) {
     const auto first_gap_packet_number = gap_packet_numbers.front();
     const auto first_gap_packet =
         tracked_packet_or_terminate(connection.application_space_, first_gap_packet_number);
-    ASSERT_FALSE(first_gap_packet.stream_fragments.empty());
-    const auto tracked_gap_offset = first_gap_packet.stream_fragments.front().offset;
+    ASSERT_TRUE(sent_packet_has_stream_frames_for_tests(first_gap_packet));
+    const auto tracked_gap_offset = first_stream_frame_offset_for_tests(first_gap_packet);
 
     ASSERT_TRUE(connection
                     .process_inbound_application(
@@ -2435,8 +2438,8 @@ TEST(QuicCoreTest, LiveLikeMigratedAckGapDatagramRetransmitsLostStreamData) {
     ASSERT_EQ(gap_packet_numbers.back(), 8393u);
 
     const auto first_gap_packet = tracked_packet_or_terminate(connection.application_space_, 8372);
-    ASSERT_FALSE(first_gap_packet.stream_fragments.empty());
-    const auto tracked_gap_offset = first_gap_packet.stream_fragments.front().offset;
+    ASSERT_TRUE(sent_packet_has_stream_frames_for_tests(first_gap_packet));
+    const auto tracked_gap_offset = first_stream_frame_offset_for_tests(first_gap_packet);
 
     ASSERT_TRUE(connection
                     .process_inbound_application(

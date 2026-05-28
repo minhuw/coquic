@@ -36,6 +36,8 @@ using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
 using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
+using coquic::quic::test_support::first_stream_frame_length_for_tests;
+using coquic::quic::test_support::first_stream_frame_offset_for_tests;
 using coquic::quic::test_support::first_tracked_packet;
 using coquic::quic::test_support::invalid_cipher_suite;
 using coquic::quic::test_support::last_tracked_packet;
@@ -52,6 +54,8 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::sent_packet_has_stream_frames_for_tests;
+using coquic::quic::test_support::sent_packet_stream_frames_consume_flow_control_for_tests;
 using coquic::quic::test_support::tracked_packet_count;
 using coquic::quic::test_support::tracked_packet_or_null;
 using coquic::quic::test_support::tracked_packet_or_terminate;
@@ -70,9 +74,9 @@ TEST(QuicCoreTest, KeyUpdatedMaxDataAndAckUnblockLostApplicationSend) {
 
     const auto first_packet = first_tracked_packet(connection.application_space_);
     const auto first_packet_number = first_packet.packet_number;
-    ASSERT_FALSE(first_packet.stream_fragments.empty());
-    EXPECT_EQ(first_packet.stream_fragments.front().offset, 0u);
-    const auto first_fragment_length = first_packet.stream_fragments.front().bytes.size();
+    ASSERT_TRUE(sent_packet_has_stream_frames_for_tests(first_packet));
+    EXPECT_EQ(first_stream_frame_offset_for_tests(first_packet), 0u);
+    const auto first_fragment_length = first_stream_frame_length_for_tests(first_packet);
     ASSERT_GT(first_fragment_length, 1000u);
     ASSERT_EQ(connection.connection_flow_control_.highest_sent, first_fragment_length);
 
@@ -137,7 +141,7 @@ TEST(QuicCoreTest, KeyUpdatedMaxDataAndAckUnblockLostApplicationSend) {
         last_tracked_packet(connection.application_space_).packet_number;
     const auto retransmit_packet =
         tracked_packet_or_terminate(connection.application_space_, retransmit_packet_number);
-    ASSERT_FALSE(retransmit_packet.stream_fragments.empty());
+    ASSERT_TRUE(sent_packet_has_stream_frames_for_tests(retransmit_packet));
     const auto retransmitted_packets = decode_sender_datagram(connection, retransmitted);
     ASSERT_EQ(retransmitted_packets.size(), 1u);
     const auto *retransmitted_application =
@@ -168,9 +172,7 @@ TEST(QuicCoreTest, KeyUpdatedMaxDataAndAckUnblockLostApplicationSend) {
     }
     EXPECT_TRUE(saw_ack);
     EXPECT_TRUE(saw_retransmitted_prefix);
-    for (const auto &fragment : retransmit_packet.stream_fragments) {
-        EXPECT_FALSE(fragment.consumes_flow_control);
-    }
+    EXPECT_FALSE(sent_packet_stream_frames_consume_flow_control_for_tests(retransmit_packet));
     EXPECT_FALSE(saw_fresh_stream_data);
     ASSERT_GT(retransmit_packet_number, first_packet_number);
 
@@ -1333,6 +1335,8 @@ TEST(QuicCoreTest, ApplicationAckTrimmingFailureFailsConnection) {
     connection.application_space_.received_packets.record_received(
         2, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
     connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(0);
+    ASSERT_TRUE(connection.queue_stream_send(0, std::vector<std::byte>{std::byte{0x53}}, false)
+                    .has_value());
     ASSERT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
 
     coquic::quic::test::
@@ -1353,6 +1357,8 @@ TEST(QuicCoreTest, ApplicationAckTrimmingSearchFailureFailsConnection) {
             packet_number, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
     }
     connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(0);
+    ASSERT_TRUE(connection.queue_stream_send(0, std::vector<std::byte>{std::byte{0x53}}, false)
+                    .has_value());
     ASSERT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
 
     coquic::quic::test::

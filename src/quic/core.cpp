@@ -159,7 +159,7 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
     std::size_t emitted = 0;
     bool last_drained_allows_send_continuation = false;
     for (; emitted < kMaxDatagramsPerDrain; ++emitted) {
-        if (!connection.has_sendable_datagram(now, continue_paced_burst)) {
+        if (!continue_paced_burst && !connection.has_sendable_datagram(now, continue_paced_burst)) {
             break;
         }
         auto datagram = connection.drain_outbound_datagram(now, continue_paced_burst);
@@ -1769,6 +1769,12 @@ COQUIC_NO_PROFILE void QuicCore::purge_expired_local_stateless_reset_tokens(Quic
 }
 
 COQUIC_NO_PROFILE void QuicCore::refresh_server_connection_routes(ConnectionEntry &entry) {
+    const auto current_generation = entry.connection->endpoint_route_generation();
+    if (entry.endpoint_route_generation == current_generation) {
+        return;
+    }
+    entry.endpoint_route_generation = current_generation;
+
     std::vector<std::string> active_connection_id_keys;
     for (const auto &connection_id : entry.connection->active_local_connection_ids()) {
         auto key = connection_id_key(connection_id);

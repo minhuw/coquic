@@ -178,6 +178,7 @@ TEST(QuicCongestionTest, CubicUsesRfcInitialWindowAndSlowStartGrowth) {
 
     EXPECT_EQ(controller.bytes_in_flight(), 0u);
     EXPECT_EQ(controller.congestion_window(), 13200u);
+    EXPECT_FALSE(controller.pacing_active());
 }
 
 TEST(QuicCongestionTest, HyStartPlusPlusIgnoresPacketsWithoutUsableRttSignal) {
@@ -265,23 +266,21 @@ TEST(QuicCongestionTest, HyStartPlusPlusCoversDisabledAndUnusableAckPaths) {
     EXPECT_FALSE(controller.hystart_.in_conservative_slow_start());
 }
 
-TEST(QuicCongestionTest, NewRenoUsesRfcSlowStartGrowthWithoutDelayExit) {
+TEST(QuicCongestionTest, NewRenoHyStartPlusPlusExitsSlowStartAfterCssRounds) {
     NewRenoCongestionController controller(/*max_datagram_size=*/1200);
     auto first_round = send_hystart_round(controller, /*first_packet_number=*/1);
     ack_hystart_round(controller, first_round, std::chrono::milliseconds{100});
-    ASSERT_FALSE(controller.hystart_.in_conservative_slow_start());
-    const auto after_first_round = controller.congestion_window();
-
     auto second_round = send_hystart_round(controller, /*first_packet_number=*/9);
     ack_hystart_round(controller, second_round, std::chrono::milliseconds{120});
-    EXPECT_FALSE(controller.hystart_.in_conservative_slow_start());
-    EXPECT_EQ(controller.congestion_window(), after_first_round + 8u * kTestDatagramSize);
+    ASSERT_TRUE(controller.hystart_.in_conservative_slow_start());
 
-    const auto after_second_round = controller.congestion_window();
-    auto third_round = send_hystart_round(controller, /*first_packet_number=*/17);
-    ack_hystart_round(controller, third_round, std::chrono::milliseconds{121});
+    for (std::uint64_t first_packet_number : {17u, 25u, 33u, 41u}) {
+        auto round = send_hystart_round(controller, first_packet_number);
+        ack_hystart_round(controller, round, std::chrono::milliseconds{121});
+    }
+
     EXPECT_FALSE(controller.hystart_.in_conservative_slow_start());
-    EXPECT_EQ(controller.congestion_window(), after_second_round + 8u * kTestDatagramSize);
+    EXPECT_EQ(controller.slow_start_threshold_, controller.congestion_window());
 }
 
 TEST(QuicCongestionTest, NewRenoSkipsApplicationLimitedAcksForWindowGrowth) {
@@ -320,6 +319,13 @@ TEST(QuicCongestionTest, CubicHyStartPlusPlusExitsSlowStartAfterCssRounds) {
 
     EXPECT_FALSE(controller.hystart_.in_conservative_slow_start());
     EXPECT_EQ(controller.slow_start_threshold_, controller.congestion_window());
+    EXPECT_DOUBLE_EQ(controller.w_max_segments_,
+                     static_cast<double>(controller.congestion_window()) /
+                         static_cast<double>(kTestDatagramSize));
+    EXPECT_DOUBLE_EQ(controller.cwnd_prior_segments_, controller.w_max_segments_);
+    EXPECT_DOUBLE_EQ(controller.w_est_segments_, controller.w_max_segments_);
+    EXPECT_TRUE(controller.epoch_start_time_.has_value());
+    EXPECT_DOUBLE_EQ(controller.k_seconds_, 0.0);
 }
 
 TEST(QuicCongestionTest, HyStartPlusPlusResumesStandardSlowStartWhenDelayFalls) {
@@ -371,7 +377,44 @@ TEST(QuicCongestionTest, HyStartPlusPlusHandlesAckLimitsAndDisabledMode) {
     EXPECT_EQ(controller.hystart_.growth_bytes(24u * kTestDatagramSize), 2u * kTestDatagramSize);
     controller.hystart_.disable();
     EXPECT_FALSE(controller.hystart_.in_conservative_slow_start());
-    EXPECT_EQ(controller.hystart_.growth_bytes(24u * kTestDatagramSize), 8u * kTestDatagramSize);
+    EXPECT_EQ(controller.hystart_.growth_bytes(24u * kTestDatagramSize), 24u * kTestDatagramSize);
+}
+
+TEST(QuicCongestionTest, DisabledHyStartPlusPlusDoesNotCapBatchedSlowStartGrowth) {
+    NewRenoCongestionController newreno(/*max_datagram_size=*/kTestDatagramSize,
+                                        /*enable_hystart_plus_plus=*/false);
+    CubicCongestionController cubic(/*max_datagram_size=*/kTestDatagramSize,
+                                    /*enable_hystart_plus_plus=*/false);
+    std::vector<SentPacketRecord> newreno_packets;
+    std::vector<SentPacketRecord> cubic_packets;
+
+    for (std::uint64_t packet_number = 1; packet_number <= 24; ++packet_number) {
+        auto newreno_packet = make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            /*in_flight=*/true,
+            /*bytes_in_flight=*/kTestDatagramSize,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+        auto cubic_packet = newreno_packet;
+        newreno.on_packet_sent(newreno_packet);
+        cubic.on_packet_sent(cubic_packet);
+        newreno_packets.push_back(newreno_packet);
+        cubic_packets.push_back(cubic_packet);
+    }
+
+    const auto initial_newreno_cwnd = newreno.congestion_window();
+    const auto initial_cubic_cwnd = cubic.congestion_window();
+    const auto ack_time = coquic::quic::test::test_time(200);
+    const auto rtt_state = coquic::quic::RecoveryRttState{
+        .latest_rtt = std::chrono::milliseconds{100},
+        .min_rtt = std::chrono::milliseconds{100},
+        .smoothed_rtt = std::chrono::milliseconds{100},
+    };
+
+    newreno.on_packets_acked(newreno_packets, /*app_limited=*/false, ack_time, rtt_state);
+    cubic.on_packets_acked(cubic_packets, /*app_limited=*/false, ack_time, rtt_state);
+
+    EXPECT_EQ(newreno.congestion_window(), initial_newreno_cwnd + 24u * kTestDatagramSize);
+    EXPECT_EQ(cubic.congestion_window(), initial_cubic_cwnd + 24u * kTestDatagramSize);
 }
 
 TEST(QuicCongestionTest, HyStartPlusPlusCoversRoundAndRttStateEdges) {
@@ -493,13 +536,31 @@ TEST(QuicCongestionTest, CubicAvoidanceUsesRenoFriendlyAndCubicRegions) {
                                     .smoothed_rtt = std::chrono::milliseconds{100},
                                 });
 
-    EXPECT_GT(controller.congestion_window(), 16800u);
+    EXPECT_EQ(controller.congestion_window(), 16800u);
     EXPECT_TRUE(controller.epoch_start_time_.has_value());
     EXPECT_GT(controller.w_est_segments_, 14.0);
-    const auto after_reno_friendly_ack = controller.congestion_window();
+    EXPECT_GT(controller.congestion_avoidance_credit_segments_, 0.0);
+    const auto reno_friendly_credit = controller.congestion_avoidance_credit_segments_;
+
+    for (std::uint64_t packet_number = 3; controller.congestion_window() == 16800u;
+         ++packet_number) {
+        auto packet = make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            /*in_flight=*/true, /*bytes_in_flight=*/1200,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number + 10)));
+        controller.bytes_in_flight_ = 1200;
+        controller.on_packets_acked(
+            std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number + 110)),
+            coquic::quic::RecoveryRttState{
+                .smoothed_rtt = std::chrono::milliseconds{100},
+            });
+    }
+    EXPECT_GT(controller.congestion_window(), 16800u);
 
     controller.w_est_segments_ = 10.0;
     controller.congestion_window_ = 16800;
+    controller.congestion_avoidance_credit_segments_ = 0.0;
     controller.bytes_in_flight_ = 1200;
     controller.epoch_start_time_ = coquic::quic::test::test_time(0);
     auto later_ack =
@@ -511,7 +572,47 @@ TEST(QuicCongestionTest, CubicAvoidanceUsesRenoFriendlyAndCubicRegions) {
                                     .smoothed_rtt = std::chrono::milliseconds{100},
                                 });
 
-    EXPECT_GT(controller.congestion_window(), after_reno_friendly_ack);
+    EXPECT_EQ(controller.congestion_window(), 16800u);
+    EXPECT_GT(controller.congestion_avoidance_credit_segments_, reno_friendly_credit);
+
+    auto next_later_ack =
+        make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true, /*in_flight=*/true,
+                         /*bytes_in_flight=*/1200, coquic::quic::test::test_time(112));
+    controller.bytes_in_flight_ = 1200;
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{next_later_ack},
+                                /*app_limited=*/false, coquic::quic::test::test_time(5001),
+                                coquic::quic::RecoveryRttState{
+                                    .smoothed_rtt = std::chrono::milliseconds{100},
+                                });
+    EXPECT_GT(controller.congestion_window(), 16800u);
+}
+
+TEST(QuicCongestionTest, CubicAvoidanceAccumulatesSubDatagramGrowthCredit) {
+    CubicCongestionController controller(/*max_datagram_size=*/1200);
+    controller.congestion_window_ = 120000;
+    controller.slow_start_threshold_ = 120000;
+    controller.w_max_segments_ = 120.0;
+    controller.cwnd_prior_segments_ = 120.0;
+    controller.w_est_segments_ = 100.0;
+    controller.epoch_start_time_ = coquic::quic::test::test_time(0);
+
+    for (std::uint64_t packet_number = 1; packet_number <= 100; ++packet_number) {
+        auto packet = make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            /*in_flight=*/true, /*bytes_in_flight=*/1200,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+        controller.bytes_in_flight_ = 1200;
+        controller.on_packets_acked(
+            std::array<SentPacketRecord, 1>{packet},
+            /*app_limited=*/false,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number + 1000)),
+            coquic::quic::RecoveryRttState{
+                .smoothed_rtt = std::chrono::milliseconds{100},
+            });
+    }
+
+    EXPECT_GT(controller.congestion_window(), 120000u);
+    EXPECT_LT(controller.congestion_avoidance_credit_segments_, 1.0);
 }
 
 TEST(QuicCongestionTest, CubicSuppressesAppLimitedGrowthAndPausesEpochClock) {
@@ -548,6 +649,23 @@ TEST(QuicCongestionTest, CubicSuppressesAppLimitedGrowthAndPausesEpochClock) {
 
     EXPECT_FALSE(controller.app_limited_start_time_.has_value());
     EXPECT_EQ(controller.app_limited_pause_, std::chrono::milliseconds{300});
+    EXPECT_EQ(controller.congestion_window(), 16800u);
+    EXPECT_GT(controller.congestion_avoidance_credit_segments_, 0.0);
+
+    for (std::uint64_t packet_number = 6; controller.congestion_window() == 16800u;
+         ++packet_number) {
+        auto packet = make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            /*in_flight=*/true, /*bytes_in_flight=*/1200,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number + 200)));
+        controller.bytes_in_flight_ = 1200;
+        controller.on_packets_acked(
+            std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number + 500)),
+            coquic::quic::RecoveryRttState{
+                .smoothed_rtt = std::chrono::milliseconds{100},
+            });
+    }
     EXPECT_GT(controller.congestion_window(), 16800u);
 }
 
@@ -2199,7 +2317,7 @@ TEST(QuicCongestionTest, CubicWrapperDispatchCoversAccessorsAndCopyMove) {
     EXPECT_EQ(wrapper.bytes_in_flight(), 1200u);
     EXPECT_TRUE(wrapper.can_send_ack_eliciting(1200));
     EXPECT_FALSE(wrapper.next_send_time(1200).has_value());
-    EXPECT_EQ(wrapper.pacing_send_quantum(), 1200u);
+    EXPECT_EQ(wrapper.pacing_send_quantum(), 12000u);
 
     wrapper.on_packets_acked(std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
                              coquic::quic::test::test_time(101),
@@ -2208,6 +2326,7 @@ TEST(QuicCongestionTest, CubicWrapperDispatchCoversAccessorsAndCopyMove) {
                              });
     EXPECT_EQ(wrapper.bytes_in_flight(), 0u);
     EXPECT_GT(wrapper.congestion_window(), 12000u);
+    EXPECT_FALSE(wrapper.next_send_time(1200).has_value());
 
     auto copied = wrapper;
     EXPECT_EQ(copied.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::cubic);
@@ -2253,6 +2372,48 @@ TEST(QuicCongestionTest, CubicWrapperDispatchCoversAccessorsAndCopyMove) {
     EXPECT_EQ(move_assigned.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::cubic);
     EXPECT_EQ(move_assigned.congestion_window(), 12000u);
     EXPECT_EQ(move_assigned.bytes_in_flight(), 0u);
+}
+
+TEST(QuicCongestionTest, CubicPacingBudgetProducesFutureSendDeadlineAfterBurst) {
+    CubicCongestionController controller(/*max_datagram_size=*/1200);
+    EXPECT_FALSE(controller.next_send_time(/*bytes=*/1200).has_value());
+
+    std::vector<SentPacketRecord> acked_packets;
+    acked_packets.reserve(28);
+    for (std::uint64_t packet_number = 1; packet_number <= 28; ++packet_number) {
+        auto packet = make_sent_packet(packet_number, /*ack_eliciting=*/true,
+                                       /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                       coquic::quic::test::test_time(0));
+        packet.stream_fragments.push_back(coquic::quic::StreamFrameSendFragment{
+            .stream_id = 0,
+            .bytes = coquic::quic::SharedBytes(std::vector<std::byte>(1)),
+        });
+        controller.on_packet_sent(packet);
+        acked_packets.push_back(std::move(packet));
+    }
+    controller.on_packets_acked(acked_packets, /*app_limited=*/false,
+                                coquic::quic::test::test_time(100),
+                                coquic::quic::RecoveryRttState{
+                                    .latest_rtt = std::chrono::milliseconds{100},
+                                    .min_rtt = std::chrono::milliseconds{100},
+                                    .smoothed_rtt = std::chrono::milliseconds{100},
+                                });
+    ASSERT_TRUE(controller.pacing_active());
+    EXPECT_EQ(controller.pacing_budget_cap(), 12000u);
+    EXPECT_EQ(static_cast<std::uint64_t>(controller.pacing_rate_bytes_per_second_), 912000u);
+    EXPECT_EQ(controller.next_send_time(/*bytes=*/1200),
+              std::optional{coquic::quic::test::test_time(100)});
+
+    for (std::uint64_t packet_number = 2; packet_number <= 11; ++packet_number) {
+        auto packet = make_sent_packet(packet_number, /*ack_eliciting=*/true,
+                                       /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                       coquic::quic::test::test_time(100));
+        controller.on_packet_sent(packet);
+    }
+
+    const auto deadline = controller.next_send_time(/*bytes=*/1200);
+    ASSERT_TRUE(deadline.has_value());
+    EXPECT_GT(optional_ref_or_terminate(deadline), coquic::quic::test::test_time(100));
 }
 
 TEST(QuicCongestionTest, InRecoveryReflectsRecoveryStartBoundary) {
@@ -2357,7 +2518,7 @@ TEST(QuicCongestionTest, AppLimitedAckSentDuringRecoveryStillExitsNewRenoRecover
 TEST(QuicCongestionTest, CongestionWrapperDetectsWindowUnderutilizationAfterSend) {
     coquic::quic::QuicCongestionController wrapper(
         coquic::quic::QuicCongestionControlAlgorithm::newreno, /*max_datagram_size=*/1200);
-    EXPECT_EQ(wrapper.pacing_send_quantum(), 1200u);
+    EXPECT_EQ(wrapper.pacing_send_quantum(), 12000u);
     wrapper.congestion_window_ = 12000;
     wrapper.bytes_in_flight_ = 10800;
 
@@ -2521,6 +2682,48 @@ TEST(QuicCongestionTest, AlgorithmFallbackAndNewRenoColdBranches) {
         },
         /*app_limited=*/false, coquic::quic::test::test_time(1), coquic::quic::RecoveryRttState{});
     EXPECT_EQ(controller.bytes_in_flight(), 0u);
+}
+
+TEST(QuicCongestionTest, NewRenoPacingBudgetProducesFutureSendDeadlineAfterBurst) {
+    NewRenoCongestionController controller(/*max_datagram_size=*/1200);
+    EXPECT_FALSE(controller.next_send_time(/*bytes=*/1200).has_value());
+
+    std::vector<SentPacketRecord> acked_packets;
+    acked_packets.reserve(28);
+    for (std::uint64_t packet_number = 1; packet_number <= 28; ++packet_number) {
+        auto packet = make_sent_packet(packet_number, /*ack_eliciting=*/true,
+                                       /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                       coquic::quic::test::test_time(0));
+        packet.stream_fragments.push_back(coquic::quic::StreamFrameSendFragment{
+            .stream_id = 0,
+            .bytes = coquic::quic::SharedBytes(std::vector<std::byte>(1)),
+        });
+        controller.on_packet_sent(packet);
+        acked_packets.push_back(std::move(packet));
+    }
+    controller.on_packets_acked(acked_packets, /*app_limited=*/false,
+                                coquic::quic::test::test_time(100),
+                                coquic::quic::RecoveryRttState{
+                                    .latest_rtt = std::chrono::milliseconds{100},
+                                    .min_rtt = std::chrono::milliseconds{100},
+                                    .smoothed_rtt = std::chrono::milliseconds{100},
+                                });
+    ASSERT_TRUE(controller.pacing_active());
+    EXPECT_EQ(controller.pacing_budget_cap(), 12000u);
+    EXPECT_EQ(static_cast<std::uint64_t>(controller.pacing_rate_bytes_per_second_), 912000u);
+    EXPECT_EQ(controller.next_send_time(/*bytes=*/1200),
+              std::optional{coquic::quic::test::test_time(100)});
+
+    for (std::uint64_t packet_number = 2; packet_number <= 11; ++packet_number) {
+        auto packet = make_sent_packet(packet_number, /*ack_eliciting=*/true,
+                                       /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                       coquic::quic::test::test_time(100));
+        controller.on_packet_sent(packet);
+    }
+
+    const auto deadline = controller.next_send_time(/*bytes=*/1200);
+    ASSERT_TRUE(deadline.has_value());
+    EXPECT_GT(optional_ref_or_terminate(deadline), coquic::quic::test::test_time(100));
 }
 
 TEST(QuicCongestionTest, BbrAckLossAndIdleColdBranches) {

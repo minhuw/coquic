@@ -208,6 +208,7 @@
           zigTarget ? null,
           spdlogShared ? true,
           pkgConfigAllStatic ? false,
+          profileHooks ? true,
         }:
         {
           inherit
@@ -222,6 +223,7 @@
             zigTarget
             spdlogShared
             pkgConfigAllStatic
+            profileHooks
             ;
           pkgConfigPath = lib.makeSearchPath "lib/pkgconfig" [
             spdlogPackage.dev
@@ -252,6 +254,10 @@
         spdlogShared = false;
         pkgConfigAllStatic = true;
       };
+      quictlsMuslPerfProfile = quictlsMuslProfile // {
+        name = "quictls-musl-perf";
+        profileHooks = false;
+      };
       boringsslProfile = mkProfile {
         name = "boringssl";
         tlsBackend = "boringssl";
@@ -273,6 +279,14 @@
         zigTarget = "x86_64-linux-musl";
         spdlogShared = false;
         pkgConfigAllStatic = true;
+      };
+      boringsslMuslPerfProfile = boringsslMuslProfile // {
+        name = "boringssl-musl-perf";
+        profileHooks = false;
+      };
+      boringsslMuslProfileHooksProfile = boringsslMuslProfile // {
+        name = "boringssl-musl-profile-hooks";
+        profileHooks = true;
       };
       mkCoquicEnv = profile: ''
         export GTEST_INCLUDE_DIR="${pkgs.gtest.dev}/include"
@@ -310,6 +324,7 @@
             "-Dtls_backend=${profile.tlsBackend}"
             "-Doptimize=ReleaseFast"
             "-Dspdlog_shared=${if profile.spdlogShared then "true" else "false"}"
+            "-Dprofile_hooks=${if profile.profileHooks then "true" else "false"}"
           ]
           ++ lib.optionals (profile.zigTarget != null) [
             "-Dtarget=${profile.zigTarget}"
@@ -504,8 +519,11 @@
       };
       quictlsPackage = mkCoquicPackage quictlsProfile;
       quictlsMuslPackage = mkCoquicPackage quictlsMuslProfile;
+      quictlsMuslPerfPackage = mkCoquicPackage quictlsMuslPerfProfile;
       boringsslPackage = mkCoquicPackage boringsslProfile;
       boringsslMuslPackage = mkCoquicPackage boringsslMuslProfile;
+      boringsslMuslPerfPackage = mkCoquicPackage boringsslMuslPerfProfile;
+      boringsslMuslProfileHooksPackage = mkCoquicPackage boringsslMuslProfileHooksProfile;
       quicgoPerfClient = pkgs.buildGoModule {
         pname = "quicgo-perf-client";
         version = "dev";
@@ -1238,7 +1256,7 @@ EOF
         contents = [
           (mkPerfEndpointOverlay {
             name = "coquic-perf-quictls-musl";
-            coquicPackage = quictlsMuslPackage;
+            coquicPackage = quictlsMuslPerfPackage;
             inherit quicgoPerfClient;
             inherit quinnPerfClient;
             inherit picoquicPerfClient;
@@ -1271,7 +1289,7 @@ EOF
             (mkPerfEndpointOverlay (
               {
                 name = "${name}-quictls-musl";
-                coquicPackage = quictlsMuslPackage;
+                coquicPackage = quictlsMuslPerfPackage;
               }
               // perfClients
             ))
@@ -1282,6 +1300,36 @@ EOF
           };
         };
       quictlsMuslCoquicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-coquic" { };
+      boringsslMuslCoquicPerfImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-perf-coquic";
+        tag = "boringssl-musl";
+        fromImage = simulatorEndpointBase;
+        contents = [
+          (mkPerfEndpointOverlay {
+            name = "coquic-perf-coquic-boringssl-musl";
+            coquicPackage = boringsslMuslPerfPackage;
+          })
+        ];
+        config = {
+          Entrypoint = [ "/usr/local/bin/coquic-perf" ];
+          WorkingDir = "/";
+        };
+      };
+      boringsslMuslCoquicProfileImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-perf-coquic-profile";
+        tag = "boringssl-musl";
+        fromImage = simulatorEndpointBase;
+        contents = [
+          (mkPerfEndpointOverlay {
+            name = "coquic-perf-coquic-profile-boringssl-musl";
+            coquicPackage = boringsslMuslProfileHooksPackage;
+          })
+        ];
+        config = {
+          Entrypoint = [ "/usr/local/bin/coquic-perf" ];
+          WorkingDir = "/";
+        };
+      };
       quictlsMuslQuicgoPerfImage = mkQuictlsMuslPerfImage "coquic-perf-quic-go" { inherit quicgoPerfClient; };
       quictlsMuslQuinnPerfImage = mkQuictlsMuslPerfImage "coquic-perf-quinn" { inherit quinnPerfClient; };
       quictlsMuslPicoquicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-picoquic" { inherit picoquicPerfClient; };
@@ -1436,6 +1484,8 @@ EOF
         perf-image-quictls-musl = quictlsMuslPerfImage;
         perf-image-stream-quictls-musl = quictlsMuslPerfImageStream;
         perf-image-coquic-quictls-musl = quictlsMuslCoquicPerfImage;
+        perf-image-coquic-boringssl-musl = boringsslMuslCoquicPerfImage;
+        perf-image-coquic-profile-boringssl-musl = boringsslMuslCoquicProfileImage;
         perf-image-quic-go-quictls-musl = quictlsMuslQuicgoPerfImage;
         perf-image-quinn-quictls-musl = quictlsMuslQuinnPerfImage;
         perf-image-picoquic-quictls-musl = quictlsMuslPicoquicPerfImage;

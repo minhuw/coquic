@@ -383,6 +383,18 @@ std::uint64_t perf_ack_eliciting_threshold(const QuicPerfConfig &config) {
     return kPerfAckElicitingThreshold;
 }
 
+bool perf_enable_hystart_plus_plus(const QuicPerfConfig &config) {
+    if (config.mode != QuicPerfMode::bulk) {
+        return true;
+    }
+    return config.congestion_control != quic::QuicCongestionControlAlgorithm::newreno &&
+           config.congestion_control != quic::QuicCongestionControlAlgorithm::cubic;
+}
+
+bool perf_send_stream_fairness(const QuicPerfConfig &config) {
+    return config.mode != QuicPerfMode::bulk;
+}
+
 int run_perf_runtime(const QuicPerfConfig &config) {
     if (config.role == QuicPerfRole::server) {
         return run_perf_server(config);
@@ -400,6 +412,8 @@ quic::QuicCoreEndpointConfig make_perf_client_endpoint_config(const QuicPerfConf
     };
     endpoint_config.emit_shared_receive_stream_data = true;
     endpoint_config.transport.congestion_control = config.congestion_control;
+    endpoint_config.transport.enable_hystart_plus_plus = perf_enable_hystart_plus_plus(config);
+    endpoint_config.transport.send_stream_fairness = perf_send_stream_fairness(config);
     endpoint_config.transport.ack_eliciting_threshold = perf_ack_eliciting_threshold(config);
     endpoint_config.transport.initial_max_data = kPerfTransferConnectionReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_local = kPerfTransferStreamReceiveWindow;
@@ -422,6 +436,8 @@ quic::QuicCoreEndpointConfig make_perf_server_endpoint_config(const QuicPerfConf
     endpoint_config.emit_shared_receive_stream_data = true;
     endpoint_config.max_outbound_datagram_size = kPerfMaxOutboundDatagramSize;
     endpoint_config.transport.congestion_control = config.congestion_control;
+    endpoint_config.transport.enable_hystart_plus_plus = perf_enable_hystart_plus_plus(config);
+    endpoint_config.transport.send_stream_fairness = perf_send_stream_fairness(config);
     endpoint_config.transport.ack_eliciting_threshold = perf_ack_eliciting_threshold(config);
     endpoint_config.transport.initial_max_data = kPerfTransferConnectionReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_local = kPerfTransferStreamReceiveWindow;

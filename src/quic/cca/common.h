@@ -18,11 +18,13 @@ class HyStartPlusPlus {
         congestion_avoidance,
     };
 
-    explicit HyStartPlusPlus(std::size_t max_datagram_size);
+    explicit HyStartPlusPlus(std::size_t max_datagram_size, bool enabled = true);
 
     void on_packet_sent(SentPacketRecord &packet);
     std::size_t growth_bytes(std::size_t newly_acked_bytes) const;
     void on_slow_start_ack(std::span<const SentPacketRecord> packets,
+                           const RecoveryRttState &rtt_state);
+    void on_slow_start_ack(std::span<const AckedStreamPacketSample> packets,
                            const RecoveryRttState &rtt_state);
     void disable();
 
@@ -35,6 +37,8 @@ class HyStartPlusPlus {
     void maybe_resume_standard_slow_start();
     void maybe_finish_round(std::uint64_t largest_acked_send_sequence);
     void start_new_round(std::uint64_t finished_round_end);
+    void on_slow_start_ack_sequence(std::optional<std::uint64_t> largest_acked_send_sequence,
+                                    const RecoveryRttState &rtt_state);
 
     std::size_t max_datagram_size_ = 1200;
     bool enabled_ = true;
@@ -60,5 +64,13 @@ double congestion_sample_bandwidth_bytes_per_second(const SentPacketRecord &pack
                                                     const std::optional<QuicCoreDuration> &min_rtt);
 std::size_t congestion_clamp_to_size_t(double value);
 std::size_t congestion_round_to_size_t(double value);
+QuicCoreClock::duration congestion_pacing_delay_for_deficit(std::size_t deficit_bytes,
+                                                            double rate_bytes_per_second);
+std::size_t congestion_pacing_replenished_bytes(QuicCoreClock::duration elapsed,
+                                                double rate_bytes_per_second);
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+std::size_t congestion_quinn_pacing_budget_cap(std::size_t congestion_window,
+                                               std::size_t max_datagram_size,
+                                               QuicCoreDuration smoothed_rtt);
 
 } // namespace coquic::quic

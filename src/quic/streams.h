@@ -103,6 +103,18 @@ struct StreamFrameSendFragment {
     std::size_t stream_frame_wire_size() const;
 };
 
+struct StreamFrameSendMetadata {
+    std::uint64_t stream_id = 0;
+    std::uint64_t offset = 0;
+    std::size_t length = 0;
+    bool fin = false;
+    bool consumes_flow_control = false;
+
+    std::size_t stream_frame_wire_size() const;
+};
+
+StreamFrameSendMetadata stream_frame_send_metadata(const StreamFrameSendFragment &fragment);
+
 struct StreamSendBudget {
     std::size_t packet_bytes = 0;
     std::uint64_t new_bytes = std::numeric_limits<std::uint64_t>::max();
@@ -213,9 +225,13 @@ struct StreamState {
     void acknowledge_stop_sending_frame(const StopSendingFrame &frame);
     void mark_stop_sending_frame_lost(const StopSendingFrame &frame);
     void acknowledge_send_fragment(const StreamFrameSendFragment &fragment);
+    void acknowledge_send_metadata(const StreamFrameSendMetadata &metadata);
     void mark_send_fragment_sent(const StreamFrameSendFragment &fragment);
+    void mark_send_metadata_sent(const StreamFrameSendMetadata &metadata);
     void mark_send_fragment_lost(const StreamFrameSendFragment &fragment);
+    void mark_send_metadata_lost(const StreamFrameSendMetadata &metadata);
     void restore_send_fragment(const StreamFrameSendFragment &fragment);
+    void restore_send_metadata(const StreamFrameSendMetadata &metadata);
 };
 
 StreamState make_implicit_stream_state(std::uint64_t stream_id, EndpointRole local_role);

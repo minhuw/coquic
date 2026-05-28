@@ -2,7 +2,7 @@
   description = "Development environment and CI tooling for coquic";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     git-hooks.url = "github:cachix/git-hooks.nix";
   };
 
@@ -20,6 +20,8 @@
       };
       lib = pkgs.lib;
       llvmPkgs = pkgs.llvmPackages_20;
+      zig = pkgs.zig_0_16;
+      ngtcp2TlsPackage = pkgs.openssl;
       staticPkgs = pkgs.pkgsStatic;
       staticLlvmPkgs = staticPkgs.llvmPackages_20;
       muslLibgccEh = pkgs.runCommand "musl-libgcc-eh" { } ''
@@ -129,7 +131,9 @@
           runHook postInstall
         '';
       };
-      boringssl = pkgs.boringssl;
+      boringssl = pkgs.boringssl.override {
+        withShared = false;
+      };
       fmt = (pkgs.fmt.override {
         stdenv = llvmPkgs.libcxxStdenv;
       }).overrideAttrs
@@ -310,6 +314,8 @@
         export SPDLOG_INCLUDE_DIR="${profile.spdlogPackage.dev}/include"
         export FMT_INCLUDE_DIR="${profile.fmtPackage.dev}/include"
         export LIBURING_INCLUDE_DIR="${profile.ioUringPackage.dev}/include"
+        # Keep the selected TLS backend ahead of OpenSSL headers propagated by shell tools.
+        export NIX_CFLAGS_COMPILE="-isystem ${profile.tlsPackage.dev}/include ''${NIX_CFLAGS_COMPILE:-}"
         export PKG_CONFIG_PATH="${profile.pkgConfigPath}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
         ${lib.optionalString profile.pkgConfigAllStatic ''
           export PKG_CONFIG_ALL_STATIC=1
@@ -340,7 +346,7 @@
             pkgs.bash
             pkgs.gtest
             pkgs.pkg-config
-            pkgs.zig
+            zig
             llvmPkgs.llvm
           ];
           buildInputs = [
@@ -379,7 +385,7 @@
             pkgs.bash
             pkgs.gtest
             pkgs.pkg-config
-            pkgs.zig
+            zig
             llvmPkgs.llvm
           ];
           buildInputs = [
@@ -494,11 +500,11 @@
         pkgs.mkShell {
           packages =
             [
-              pkgs.zig
+              zig
               pkgs.gtest
               pkgs.gawk
               pkgs.binutils
-              pkgs.curlHTTP3
+              pkgs.curl
               llvmPkgs.llvm
               profile.tlsPackage
               profile.spdlogPackage
@@ -571,7 +577,7 @@
           pkgs.brotli
           pkgs.libev
           pkgs.nghttp3
-          pkgs.quictls
+          ngtcp2TlsPackage
         ];
         cmakeFlags = [
           "-DENABLE_STATIC_LIB=FALSE"
@@ -592,19 +598,19 @@
             -I$src/lib/includes \
             -Ilib/includes \
             -I$src/crypto/includes \
-            -I${pkgs.quictls.dev}/include \
+            -I${ngtcp2TlsPackage.dev}/include \
             -o ngtcp2-perf \
             "$perfSource" \
             lib/libngtcp2.so \
             crypto/quictls/libngtcp2_crypto_quictls.so \
-            -L${pkgs.quictls.out}/lib \
+            -L${ngtcp2TlsPackage.out}/lib \
             -Wl,-rpath,$out/lib \
             -Wl,-rpath,${
               lib.makeLibraryPath [
                 pkgs.brotli.lib
                 pkgs.libev
                 pkgs.nghttp3
-                pkgs.quictls
+                ngtcp2TlsPackage
                 pkgs.glibc
                 pkgs.stdenv.cc.cc.lib
               ]
@@ -623,7 +629,7 @@
               pkgs.brotli.lib
               pkgs.libev
               pkgs.nghttp3
-              pkgs.quictls
+              ngtcp2TlsPackage
               pkgs.glibc
               pkgs.stdenv.cc.cc.lib
             ]
@@ -809,7 +815,7 @@ EOF
             }
         '';
       };
-      s2nQuicPerfClient = pkgs.rust_1_88.packages.stable.rustPlatform.buildRustPackage {
+      s2nQuicPerfClient = pkgs.rustPlatform.buildRustPackage {
         pname = "s2n-quic-perf-client";
         version = "dev";
         src = ./bench/s2n-quic-perf;
@@ -1064,7 +1070,7 @@ EOF
         rev = "0169abde20c6701c68b1ac5021c3e64702f20cfa";
         hash = "sha256-9jdkcYCvnYXMPDacEWSymPXDgq8gDs8uzP7XaCiF4HA=";
       };
-      tquicPerfClient = pkgs.rust_1_88.packages.stable.rustPlatform.buildRustPackage {
+      tquicPerfClient = pkgs.rustPlatform.buildRustPackage {
         pname = "tquic-perf-client";
         version = "dev";
         src = tquicSrc;
@@ -1478,7 +1484,7 @@ EOF
         coquic-quictls-musl = quictlsMuslPackage;
         coquic-boringssl = boringsslPackage;
         coquic-boringssl-musl = boringsslMuslPackage;
-        curl-http3 = pkgs.curlHTTP3;
+        curl-http3 = pkgs.curl;
         interop-image-quictls-musl = quictlsMuslImage;
         interop-image-boringssl-musl = boringsslMuslImage;
         perf-image-quictls-musl = quictlsMuslPerfImage;
@@ -1565,7 +1571,7 @@ EOF
         };
         curl-http3 = {
           type = "app";
-          program = "${pkgs.curlHTTP3}/bin/curl";
+          program = "${pkgs.curl}/bin/curl";
         };
       };
 

@@ -1,10 +1,57 @@
 const std = @import("std");
 
+const StringList = std.array_list.Managed([]const u8);
+
 fn requireEnv(b: *std.Build, name: []const u8) []const u8 {
-    return b.graph.env_map.get(name) orelse std.debug.panic(
+    return b.graph.environ_map.get(name) orelse std.debug.panic(
         "missing required environment variable {s}; run inside `nix develop`",
         .{name},
     );
+}
+
+fn rootModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    return b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn addIncludePath(compile: *std.Build.Step.Compile, path: std.Build.LazyPath) void {
+    compile.root_module.addIncludePath(path);
+}
+
+fn addCSourceFiles(
+    compile: *std.Build.Step.Compile,
+    options: std.Build.Module.AddCSourceFilesOptions,
+) void {
+    compile.root_module.addCSourceFiles(options);
+}
+
+fn addObjectFile(compile: *std.Build.Step.Compile, path: std.Build.LazyPath) void {
+    compile.root_module.addObjectFile(path);
+}
+
+fn linkLibrary(
+    compile: *std.Build.Step.Compile,
+    library: *std.Build.Step.Compile,
+) void {
+    compile.root_module.linkLibrary(library);
+}
+
+fn linkSystemLibrary(
+    compile: *std.Build.Step.Compile,
+    name: []const u8,
+    options: std.Build.Module.LinkSystemLibraryOptions,
+) void {
+    compile.root_module.linkSystemLibrary(name, options);
+}
+
+fn linkLibCpp(compile: *std.Build.Step.Compile) void {
+    compile.root_module.link_libcpp = true;
 }
 
 fn withExtraFlags(
@@ -12,7 +59,7 @@ fn withExtraFlags(
     base: []const []const u8,
     extra: []const []const u8,
 ) []const []const u8 {
-    var flags = std.ArrayList([]const u8).init(b.allocator);
+    var flags = StringList.init(b.allocator);
     flags.appendSlice(base) catch @panic("failed to append base flags");
     flags.appendSlice(extra) catch @panic("failed to append extra flags");
     return flags.toOwnedSlice() catch @panic("failed to allocate flags");
@@ -23,7 +70,7 @@ fn withSpdlogFlags(
     base: []const []const u8,
     spdlog_shared: bool,
 ) []const []const u8 {
-    var extra = std.ArrayList([]const u8).init(b.allocator);
+    var extra = StringList.init(b.allocator);
     if (spdlog_shared) {
         extra.append("-DSPDLOG_SHARED_LIB") catch @panic("failed to append spdlog flag");
     }
@@ -33,7 +80,7 @@ fn withSpdlogFlags(
     return withExtraFlags(b, base, extra.items);
 }
 
-fn appendTlsAdapterSource(files: *std.ArrayList([]const u8), tls_backend: []const u8) void {
+fn appendTlsAdapterSource(files: *StringList, tls_backend: []const u8) void {
     if (std.mem.eql(u8, tls_backend, "quictls")) {
         files.append("src/quic/tls_adapter_quictls.cpp") catch @panic("oom");
         return;
@@ -47,7 +94,7 @@ fn appendTlsAdapterSource(files: *std.ArrayList([]const u8), tls_backend: []cons
     std.debug.panic("unsupported tls_backend {s}", .{tls_backend});
 }
 
-fn appendPacketCryptoSource(files: *std.ArrayList([]const u8), tls_backend: []const u8) void {
+fn appendPacketCryptoSource(files: *StringList, tls_backend: []const u8) void {
     if (std.mem.eql(u8, tls_backend, "quictls")) {
         files.append("src/quic/packet_crypto_quictls.cpp") catch @panic("oom");
         return;
@@ -116,17 +163,17 @@ fn addProjectLibrary(
     fmt_include_dir: []const u8,
     liburing_include_dir: []const u8,
 ) *std.Build.Step.Compile {
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = name,
-        .target = target,
-        .optimize = optimize,
+        .linkage = .static,
+        .root_module = rootModule(b, target, optimize),
     });
-    lib.addIncludePath(b.path("."));
-    lib.addIncludePath(.{ .cwd_relative = tls_include_dir });
-    lib.addIncludePath(.{ .cwd_relative = spdlog_include_dir });
-    lib.addIncludePath(.{ .cwd_relative = fmt_include_dir });
-    lib.addIncludePath(.{ .cwd_relative = liburing_include_dir });
-    var files = std.ArrayList([]const u8).init(b.allocator);
+    addIncludePath(lib, b.path("."));
+    addIncludePath(lib, .{ .cwd_relative = tls_include_dir });
+    addIncludePath(lib, .{ .cwd_relative = spdlog_include_dir });
+    addIncludePath(lib, .{ .cwd_relative = fmt_include_dir });
+    addIncludePath(lib, .{ .cwd_relative = liburing_include_dir });
+    var files = StringList.init(b.allocator);
     files.appendSlice(&.{
         "src/quic/buffer.cpp",
         "src/quic/cca/bbr.cpp",
@@ -178,12 +225,12 @@ fn addProjectLibrary(
     }) catch @panic("oom");
     appendPacketCryptoSource(&files, tls_backend);
     appendTlsAdapterSource(&files, tls_backend);
-    lib.addCSourceFiles(.{
+    addCSourceFiles(lib, .{
         .root = b.path("."),
         .files = files.toOwnedSlice() catch @panic("oom"),
         .flags = project_cpp_flags,
     });
-    lib.linkLibCpp();
+    linkLibCpp(lib);
     return lib;
 }
 
@@ -260,27 +307,26 @@ fn addWasmQuic(
     });
     const wasm = b.addExecutable(.{
         .name = "coquic-wasm-quic",
-        .target = wasm_target,
-        .optimize = optimize,
+        .root_module = rootModule(b, wasm_target, optimize),
     });
     wasm.entry = .disabled;
     wasm.wasi_exec_model = .reactor;
     wasm.export_memory = true;
     wasm.root_module.export_symbol_names = wasmQuicExportNames();
-    wasm.addIncludePath(b.path("."));
-    wasm.addIncludePath(.{ .cwd_relative = boringssl_include_dir });
-    wasm.addCSourceFiles(.{
+    addIncludePath(wasm, b.path("."));
+    addIncludePath(wasm, .{ .cwd_relative = boringssl_include_dir });
+    addCSourceFiles(wasm, .{
         .root = b.path("."),
         .files = wasmQuicSourceFiles(),
         .flags = wasm_cpp_flags,
     });
-    wasm.addObjectFile(.{
+    addObjectFile(wasm, .{
         .cwd_relative = b.pathJoin(&.{ boringssl_lib_dir, "libssl.a" }),
     });
-    wasm.addObjectFile(.{
+    addObjectFile(wasm, .{
         .cwd_relative = b.pathJoin(&.{ boringssl_lib_dir, "libcrypto.a" }),
     });
-    wasm.linkLibCpp();
+    linkLibCpp(wasm);
     return wasm;
 }
 
@@ -299,22 +345,22 @@ fn linkTlsBackend(
         else
             "so";
 
-    compile.addObjectFile(.{
+    addObjectFile(compile, .{
         .cwd_relative = b.pathJoin(&.{ tls_lib_dir, b.fmt("libssl.{s}", .{lib_ext}) }),
     });
-    compile.addObjectFile(.{
+    addObjectFile(compile, .{
         .cwd_relative = b.pathJoin(&.{ tls_lib_dir, b.fmt("libcrypto.{s}", .{lib_ext}) }),
     });
 }
 
 fn linkSpdlog(compile: *std.Build.Step.Compile) void {
-    compile.linkSystemLibrary2("spdlog", .{
+    linkSystemLibrary(compile, "spdlog", .{
         .use_pkg_config = .force,
     });
 }
 
 fn linkLiburing(compile: *std.Build.Step.Compile) void {
-    compile.linkSystemLibrary2("liburing", .{
+    linkSystemLibrary(compile, "liburing", .{
         .use_pkg_config = .force,
     });
 }
@@ -326,6 +372,7 @@ fn addTestBinary(
     optimize: std.builtin.OptimizeMode,
     cpp_flags: []const []const u8,
     project_lib: *std.Build.Step.Compile,
+    tls_include_dir: []const u8,
     gtest_root: []const u8,
     test_files: []const []const u8,
 ) *std.Build.Step.Compile {
@@ -334,18 +381,18 @@ fn addTestBinary(
 
     const test_exe = b.addExecutable(.{
         .name = name,
-        .target = target,
-        .optimize = optimize,
+        .root_module = rootModule(b, target, optimize),
     });
-    test_exe.addIncludePath(b.path("."));
-    test_exe.addIncludePath(.{ .cwd_relative = gtest_include_dir });
-    test_exe.addIncludePath(.{ .cwd_relative = gtest_src_dir });
-    test_exe.addCSourceFiles(.{
+    addIncludePath(test_exe, b.path("."));
+    addIncludePath(test_exe, .{ .cwd_relative = tls_include_dir });
+    addIncludePath(test_exe, .{ .cwd_relative = gtest_include_dir });
+    addIncludePath(test_exe, .{ .cwd_relative = gtest_src_dir });
+    addCSourceFiles(test_exe, .{
         .root = b.path("."),
         .files = test_files,
         .flags = cpp_flags,
     });
-    test_exe.addCSourceFiles(.{
+    addCSourceFiles(test_exe, .{
         .root = .{ .cwd_relative = gtest_root },
         .files = &.{
             "googletest/src/gtest-all.cc",
@@ -353,9 +400,9 @@ fn addTestBinary(
         },
         .flags = cpp_flags,
     });
-    test_exe.linkLibrary(project_lib);
-    test_exe.linkSystemLibrary("pthread");
-    test_exe.linkLibCpp();
+    linkLibrary(test_exe, project_lib);
+    linkSystemLibrary(test_exe, "pthread", .{});
+    linkLibCpp(test_exe);
     return test_exe;
 }
 
@@ -390,11 +437,11 @@ pub fn build(b: *std.Build) void {
     const llvm_profile_rt = requireEnv(b, "LLVM_PROFILE_RT");
     const wasm_boringssl_include_dir =
         b.option([]const u8, "wasm_boringssl_include_dir", "BoringSSL wasm include directory") orelse
-        b.graph.env_map.get("WASM_BORINGSSL_INCLUDE_DIR") orelse
+        b.graph.environ_map.get("WASM_BORINGSSL_INCLUDE_DIR") orelse
         ".zig-cache/boringssl-wasm/src/include";
     const wasm_boringssl_lib_dir =
         b.option([]const u8, "wasm_boringssl_lib_dir", "BoringSSL wasm library directory") orelse
-        b.graph.env_map.get("WASM_BORINGSSL_LIB_DIR") orelse
+        b.graph.environ_map.get("WASM_BORINGSSL_LIB_DIR") orelse
         ".zig-cache/boringssl-wasm/build";
     const smoke_test_files = &.{
         "tests/smoke/smoke_test.cpp",
@@ -495,10 +542,9 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "coquic",
-        .target = target,
-        .optimize = optimize,
+        .root_module = rootModule(b, target, optimize),
     });
-    exe.addIncludePath(b.path("."));
+    addIncludePath(exe, b.path("."));
     const project_lib = addProjectLibrary(
         b,
         "coquic",
@@ -511,52 +557,50 @@ pub fn build(b: *std.Build) void {
         fmt_include_dir,
         liburing_include_dir,
     );
-    exe.addCSourceFiles(.{
+    addCSourceFiles(exe, .{
         .root = b.path("."),
         .files = &.{"src/main.cpp"},
         .flags = cpp_flags,
     });
-    exe.linkLibrary(project_lib);
+    linkLibrary(exe, project_lib);
     linkTlsBackend(b, exe, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(exe);
     linkLiburing(exe);
-    exe.linkLibCpp();
+    linkLibCpp(exe);
     b.installArtifact(exe);
 
     const h3_server_exe = b.addExecutable(.{
         .name = "h3-server",
-        .target = target,
-        .optimize = optimize,
+        .root_module = rootModule(b, target, optimize),
     });
-    h3_server_exe.addIncludePath(b.path("."));
-    h3_server_exe.addCSourceFiles(.{
+    addIncludePath(h3_server_exe, b.path("."));
+    addCSourceFiles(h3_server_exe, .{
         .root = b.path("."),
         .files = &.{"src/main_h3_server.cpp"},
         .flags = cpp_flags,
     });
-    h3_server_exe.linkLibrary(project_lib);
+    linkLibrary(h3_server_exe, project_lib);
     linkTlsBackend(b, h3_server_exe, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(h3_server_exe);
     linkLiburing(h3_server_exe);
-    h3_server_exe.linkLibCpp();
+    linkLibCpp(h3_server_exe);
     b.installArtifact(h3_server_exe);
 
     const perf_exe = b.addExecutable(.{
         .name = "coquic-perf",
-        .target = target,
-        .optimize = optimize,
+        .root_module = rootModule(b, target, optimize),
     });
-    perf_exe.addIncludePath(b.path("."));
-    perf_exe.addCSourceFiles(.{
+    addIncludePath(perf_exe, b.path("."));
+    addCSourceFiles(perf_exe, .{
         .root = b.path("."),
         .files = &.{"src/main_perf.cpp"},
         .flags = cpp_flags,
     });
-    perf_exe.linkLibrary(project_lib);
+    linkLibrary(perf_exe, project_lib);
     linkTlsBackend(b, perf_exe, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(perf_exe);
     linkLiburing(perf_exe);
-    perf_exe.linkLibCpp();
+    linkLibCpp(perf_exe);
     b.installArtifact(perf_exe);
 
     const run_exe = b.addRunArtifact(exe);
@@ -574,6 +618,7 @@ pub fn build(b: *std.Build) void {
         optimize,
         cpp_flags,
         project_lib,
+        tls_include_dir,
         gtest_root,
         smoke_test_files,
     );
@@ -584,6 +629,7 @@ pub fn build(b: *std.Build) void {
         optimize,
         cpp_flags,
         project_lib,
+        tls_include_dir,
         gtest_root,
         core_test_files,
     );
@@ -594,6 +640,7 @@ pub fn build(b: *std.Build) void {
         optimize,
         cpp_flags,
         project_lib,
+        tls_include_dir,
         gtest_root,
         http09_test_files,
     );
@@ -604,6 +651,7 @@ pub fn build(b: *std.Build) void {
         optimize,
         cpp_flags,
         project_lib,
+        tls_include_dir,
         gtest_root,
         http3_test_files,
     );
@@ -614,6 +662,7 @@ pub fn build(b: *std.Build) void {
         optimize,
         cpp_flags,
         project_lib,
+        tls_include_dir,
         gtest_root,
         qlog_test_files,
     );
@@ -624,6 +673,7 @@ pub fn build(b: *std.Build) void {
         optimize,
         cpp_flags,
         project_lib,
+        tls_include_dir,
         gtest_root,
         tls_test_files,
     );
@@ -634,6 +684,7 @@ pub fn build(b: *std.Build) void {
         optimize,
         cpp_flags,
         project_lib,
+        tls_include_dir,
         gtest_root,
         perf_test_files,
     );
@@ -708,7 +759,7 @@ pub fn build(b: *std.Build) void {
         fmt_include_dir,
         liburing_include_dir,
     );
-    var coverage_test_file_list = std.ArrayList([]const u8).init(b.allocator);
+    var coverage_test_file_list = StringList.init(b.allocator);
     coverage_test_file_list.appendSlice(smoke_test_files) catch @panic("oom");
     coverage_test_file_list.appendSlice(core_test_files) catch @panic("oom");
     coverage_test_file_list.appendSlice(http09_test_files) catch @panic("oom");
@@ -723,13 +774,14 @@ pub fn build(b: *std.Build) void {
         optimize,
         coverage_cpp_flags,
         coverage_lib,
+        tls_include_dir,
         gtest_root,
         coverage_test_file_list.toOwnedSlice() catch @panic("oom"),
     );
     linkTlsBackend(b, coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(coverage_tests);
     linkLiburing(coverage_tests);
-    coverage_tests.addObjectFile(.{ .cwd_relative = llvm_profile_rt });
+    addObjectFile(coverage_tests, .{ .cwd_relative = llvm_profile_rt });
     coverage_tests.forceUndefinedSymbol("__llvm_profile_runtime");
     const coverage_cmd = b.addSystemCommand(&.{"bash"});
     coverage_cmd.addFileArg(b.path("scripts/run-coverage.sh"));

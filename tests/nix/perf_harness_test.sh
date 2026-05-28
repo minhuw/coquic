@@ -597,7 +597,7 @@ grep -F -- 'ln -s ${googleQuichePerfClient}/bin/google-quiche-perf $out/usr/loca
   exit 1
 }
 
-grep -F -- 'tquicPerfClient = pkgs.rust_1_88.packages.stable.rustPlatform.buildRustPackage' "${flake}" >/dev/null || {
+grep -F -- 'tquicPerfClient = pkgs.rustPlatform.buildRustPackage' "${flake}" >/dev/null || {
   echo 'missing TQUIC perf client package in flake.nix' >&2
   exit 1
 }
@@ -617,7 +617,7 @@ grep -F -- 'ln -s ${mvfstPerfClient}/bin/mvfst-perf $out/usr/local/bin/mvfst-per
   exit 1
 }
 
-grep -F -- 's2nQuicPerfClient = pkgs.rust_1_88.packages.stable.rustPlatform.buildRustPackage' "${flake}" >/dev/null || {
+grep -F -- 's2nQuicPerfClient = pkgs.rustPlatform.buildRustPackage' "${flake}" >/dev/null || {
   echo 'missing s2n-quic perf client package in flake.nix' >&2
   exit 1
 }

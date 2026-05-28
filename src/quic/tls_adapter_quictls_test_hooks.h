@@ -11,8 +11,8 @@
 
 #include "src/quic/tls_adapter.h"
 
-#if !defined(OSSL_ENCRYPTION_LEVEL)
-typedef enum ssl_encryption_level_t OSSL_ENCRYPTION_LEVEL;
+#if defined(OPENSSL_IS_BORINGSSL) && !defined(OSSL_ENCRYPTION_LEVEL)
+using OSSL_ENCRYPTION_LEVEL = ssl_encryption_level_t;
 #endif
 
 namespace coquic::quic::test {

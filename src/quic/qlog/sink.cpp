@@ -27,6 +27,11 @@ bool QlogFileSeqSink::open() {
 }
 
 bool QlogFileSeqSink::write_record(std::string_view record) {
+#if defined(COQUIC_WASM_NO_FILESYSTEM)
+    static_cast<void>(record);
+    healthy_ = false;
+    return false;
+#else
     if (!healthy_) {
         return false;
     }
@@ -35,6 +40,7 @@ bool QlogFileSeqSink::write_record(std::string_view record) {
     output_.flush();
     healthy_ = output_.good();
     return healthy_;
+#endif
 }
 
 bool QlogFileSeqSink::healthy() const {

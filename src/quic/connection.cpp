@@ -1808,6 +1808,7 @@ void schedule_application_ack_deadline(PacketSpaceState &packet_space, QuicCoreT
     }
 }
 
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
 void note_ignored_application_received_packet(PacketSpaceState &packet_space,
                                               std::uint64_t packet_number, bool ack_eliciting,
                                               QuicCoreTimePoint now, QuicEcnCodepoint ecn,
@@ -1819,6 +1820,7 @@ void note_ignored_application_received_packet(PacketSpaceState &packet_space,
         schedule_application_ack_deadline(packet_space, now, max_ack_delay_ms, ecn);
     }
 }
+// NOLINTEND(bugprone-easily-swappable-parameters)
 
 template <typename FrameType>
 bool requires_connected_application_state_for_inbound_frame(const FrameType &frame) {
@@ -10463,14 +10465,28 @@ void QuicConnection::queue_peer_connection_id_retirement(std::uint64_t sequence_
 }
 
 void QuicConnection::refresh_peer_connection_id_sequences_after_retirement() {
-    for (auto &[path_id, path] : paths_) {
+    const auto refresh_path = [&](QuicPathId path_id, PathState &path) {
         const auto peer = peer_connection_ids_.find(path.peer_connection_id_sequence);
         if (peer != peer_connection_ids_.end() && !peer->second.locally_retired) {
-            continue;
+            return;
         }
+        path.destination_connection_id_override.reset();
         if (const auto replacement = select_unused_peer_connection_id_sequence_for_path(path_id)) {
             set_path_peer_connection_id_sequence(path, *replacement);
         }
+    };
+
+    if (current_send_path_id_.has_value()) {
+        if (auto current = paths_.find(*current_send_path_id_); current != paths_.end()) {
+            refresh_path(current->first, current->second);
+        }
+    }
+
+    for (auto &[path_id, path] : paths_) {
+        if (current_send_path_id_.has_value() && path_id == *current_send_path_id_) {
+            continue;
+        }
+        refresh_path(path_id, path);
     }
 }
 
@@ -12194,6 +12210,7 @@ void QuicConnection::set_path_peer_connection_id_sequence(PathState &path,
     }
 
     path.peer_connection_id_sequence = sequence_number;
+    path.destination_connection_id_override.reset();
     path.spin.value = false;
     path.spin.largest_peer_packet_number.reset();
 }

@@ -1558,6 +1558,67 @@ TEST(QuicCoreTest, PreferredAddressMigrationDefersOldCidRetirementUntilAfterPath
     }));
 }
 
+TEST(QuicCoreTest, PreferredAddressMigrationRefreshesRetiredPreferredCid) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+
+    connection.peer_transport_parameters_ = coquic::quic::TransportParameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 8,
+        .initial_source_connection_id = bytes_from_ints({0xaa, 0xab}),
+        .preferred_address =
+            coquic::quic::PreferredAddress{
+                .ipv4_address = {std::byte{127}, std::byte{0}, std::byte{0}, std::byte{2}},
+                .ipv4_port = 4444,
+                .connection_id = bytes_from_ints({0x41, 0x42}),
+            },
+    };
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+
+    const auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::preferred_address);
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.contains(7));
+    ASSERT_TRUE(connection.paths_.at(7).destination_connection_id_override.has_value());
+    const auto &preferred_cid_override = connection.paths_.at(7).destination_connection_id_override;
+    const auto &preferred_cid = optional_ref_or_terminate(preferred_cid_override);
+    EXPECT_EQ(preferred_cid, bytes_from_ints({0x41, 0x42}));
+
+    const auto replacement =
+        connection.process_new_connection_id_frame(coquic::quic::NewConnectionIdFrame{
+            .sequence_number = 2,
+            .retire_prior_to = 2,
+            .connection_id = bytes_from_ints({0x22, 0x23}),
+            .stateless_reset_token = {},
+        });
+
+    ASSERT_TRUE(replacement.has_value());
+    EXPECT_TRUE(connection.peer_connection_ids_.at(1).locally_retired);
+    EXPECT_EQ(connection.paths_.at(7).peer_connection_id_sequence, 2u);
+    EXPECT_FALSE(connection.paths_.at(7).destination_connection_id_override.has_value());
+    EXPECT_EQ(connection.outbound_destination_connection_id(7), bytes_from_ints({0x22, 0x23}));
+
+    const auto retire_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(retire_datagram.empty());
+    const auto destination_connection_ids = protected_datagram_destination_connection_ids(
+        retire_datagram, connection.config_.source_connection_id.size());
+    ASSERT_TRUE(destination_connection_ids.has_value());
+    const auto &destination_connection_ids_value =
+        optional_ref_or_terminate(destination_connection_ids);
+    ASSERT_EQ(destination_connection_ids_value.size(), 1u);
+    EXPECT_EQ(destination_connection_ids_value.front(), bytes_from_ints({0x22, 0x23}));
+}
+
 TEST(QuicCoreTest, DisableActiveMigrationRejectsGenericMigrationRequest) {
     auto connection = make_connected_client_connection();
     connection.peer_transport_parameters_ = coquic::quic::TransportParameters{

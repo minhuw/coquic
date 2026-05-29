@@ -16,8 +16,8 @@ grep -F 'show_runner_output_tail()' "${script}" >/dev/null || {
   exit 1
 }
 
-grep -F 'readonly interop_retry_testcases="${INTEROP_RETRY_TESTCASES:-amplificationlimit}"' "${script}" >/dev/null || {
-  echo "run-official must keep amplificationlimit isolated retry configurable" >&2
+grep -F 'readonly interop_retry_testcases="${INTEROP_RETRY_TESTCASES:-amplificationlimit,handshakeloss,handshakecorruption}"' "${script}" >/dev/null || {
+  echo "run-official must keep stochastic isolated retries configurable" >&2
   exit 1
 }
 

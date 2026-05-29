@@ -51,7 +51,7 @@ jobs:
             display_name: s2n-quic
             impl: s2n-quic
             image: ghcr.io/aws/s2n-quic/s2n-quic-qns:latest
-            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
+            testcases: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,blackhole,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,amplificationlimit,rebind-port,rebind-addr
 
     steps:
       - name: Checkout

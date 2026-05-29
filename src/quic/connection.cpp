@@ -2982,15 +2982,24 @@ COQUIC_NO_PROFILE bool client_handshake_keepalive_is_eligible(
 }
 
 COQUIC_NO_PROFILE bool client_receive_keepalive_is_eligible(
-    EndpointRole role, bool handshake_confirmed,
+    EndpointRole role, HandshakeStatus status, bool handshake_confirmed,
     const std::optional<QuicCoreTimePoint> &last_peer_activity_time, bool has_receive_interest,
     bool initial_discarded, const PacketSpaceState &initial_space, bool handshake_discarded,
-    const PacketSpaceState &handshake_space, const PacketSpaceState &application_space) {
-    return role == EndpointRole::client && handshake_confirmed &&
-           last_peer_activity_time.has_value() && has_receive_interest &&
-           client_keepalive_has_no_in_flight_packets(initial_discarded, initial_space,
-                                                     handshake_discarded, handshake_space,
-                                                     application_space);
+    const PacketSpaceState &handshake_space) {
+    return role == EndpointRole::client && status == HandshakeStatus::connected &&
+           handshake_confirmed && last_peer_activity_time.has_value() && has_receive_interest &&
+           packet_space_has_no_in_flight_ack_eliciting_packet(initial_discarded, initial_space) &&
+           packet_space_has_no_in_flight_ack_eliciting_packet(handshake_discarded, handshake_space);
+}
+
+COQUIC_NO_PROFILE std::optional<QuicCoreTimePoint> make_client_receive_keepalive_reference_time(
+    const std::optional<QuicCoreTimePoint> &last_peer_activity_time,
+    const std::optional<QuicCoreTimePoint> &last_probe_time) {
+    if (!last_peer_activity_time.has_value()) {
+        return std::nullopt;
+    }
+
+    return std::max(*last_peer_activity_time, last_probe_time.value_or(QuicCoreTimePoint::min()));
 }
 
 COQUIC_NO_PROFILE bool
@@ -5525,9 +5534,6 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
                      allow_application_pto
                          ? packet_space_pto_deadline(application_space_, application_max_ack_delay)
                          : std::nullopt});
-    if (regular_deadline.has_value()) {
-        return regular_deadline;
-    }
 
     const auto client_handshake_keepalive_reference_time =
         [this]() -> std::optional<QuicCoreTimePoint> {
@@ -5548,35 +5554,40 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
 
         return reference_time;
     }();
-    const bool client_handshake_keepalive_space_available = has_client_handshake_keepalive_space(
-        client_handshake_keepalive_reference_time, initial_packet_space_discarded_,
-        handshake_packet_space_discarded_, handshake_space_);
-    if (!client_handshake_keepalive_space_available) {
-        const auto client_receive_keepalive_reference_time =
-            [this]() -> std::optional<QuicCoreTimePoint> {
-            const bool has_receive_interest = std::ranges::any_of(
-                streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
-            const bool eligible = client_receive_keepalive_is_eligible(
-                config_.role, handshake_confirmed_, last_peer_activity_time_, has_receive_interest,
-                initial_packet_space_discarded_, initial_space_, handshake_packet_space_discarded_,
-                handshake_space_, application_space_);
-            if (!eligible) {
-                return std::nullopt;
-            }
+    auto client_handshake_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
+    if (has_client_handshake_keepalive_space(client_handshake_keepalive_reference_time,
+                                             initial_packet_space_discarded_,
+                                             handshake_packet_space_discarded_, handshake_space_)) {
+        client_handshake_keepalive_deadline =
+            compute_pto_deadline(shared_rtt_state, QuicCoreDuration{0},
+                                 optional_ref_or_abort(client_handshake_keepalive_reference_time),
+                                 std::min(pto_count_, 2u));
+    }
 
-            return last_peer_activity_time_;
-        }();
-        if (!client_receive_keepalive_reference_time.has_value()) {
+    const auto client_receive_keepalive_reference_time =
+        [this]() -> std::optional<QuicCoreTimePoint> {
+        const bool has_receive_interest = std::ranges::any_of(
+            streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
+        const bool eligible = client_receive_keepalive_is_eligible(
+            config_.role, status_, handshake_confirmed_, last_peer_activity_time_,
+            has_receive_interest, initial_packet_space_discarded_, initial_space_,
+            handshake_packet_space_discarded_, handshake_space_);
+        if (!eligible) {
             return std::nullopt;
         }
 
-        return compute_pto_deadline(shared_rtt_state, application_max_ack_delay,
-                                    *client_receive_keepalive_reference_time, pto_count_);
+        return make_client_receive_keepalive_reference_time(
+            last_peer_activity_time_, last_client_receive_keepalive_probe_time_);
+    }();
+    auto client_receive_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
+    if (client_receive_keepalive_reference_time.has_value()) {
+        client_receive_keepalive_deadline = compute_pto_deadline(
+            shared_rtt_state, application_max_ack_delay, *client_receive_keepalive_reference_time,
+            std::min(pto_count_, 2u));
     }
 
-    return compute_pto_deadline(shared_rtt_state, QuicCoreDuration{0},
-                                optional_ref_or_abort(client_handshake_keepalive_reference_time),
-                                std::min(pto_count_, 2u));
+    return earliest_of(
+        {regular_deadline, client_handshake_keepalive_deadline, client_receive_keepalive_deadline});
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::ack_deadline() const {
@@ -5806,18 +5817,16 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         [this]() -> std::optional<QuicCoreTimePoint> {
         const bool has_receive_interest = std::ranges::any_of(
             streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
-        const bool eligible = (config_.role == EndpointRole::client) & handshake_confirmed_ &
-                              last_peer_activity_time_.has_value() & has_receive_interest &
-                              (initial_packet_space_discarded_ ||
-                               !has_in_flight_ack_eliciting_packet(initial_space_)) &
-                              (handshake_packet_space_discarded_ ||
-                               !has_in_flight_ack_eliciting_packet(handshake_space_)) &
-                              !has_in_flight_ack_eliciting_packet(application_space_);
+        const bool eligible = client_receive_keepalive_is_eligible(
+            config_.role, status_, handshake_confirmed_, last_peer_activity_time_,
+            has_receive_interest, initial_packet_space_discarded_, initial_space_,
+            handshake_packet_space_discarded_, handshake_space_);
         if (!eligible) {
             return std::nullopt;
         }
 
-        return last_peer_activity_time_;
+        return make_client_receive_keepalive_reference_time(
+            last_peer_activity_time_, last_client_receive_keepalive_probe_time_);
     }();
     const bool client_receive_keepalive_eligible =
         client_receive_keepalive_reference_time.has_value();
@@ -5825,9 +5834,9 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         client_receive_keepalive_eligible ? &application_space_ : nullptr;
     auto client_receive_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
     if (client_receive_keepalive_reference_time.has_value()) {
-        client_receive_keepalive_deadline =
-            compute_pto_deadline(shared_rtt_state, application_max_ack_delay,
-                                 *client_receive_keepalive_reference_time, pto_count_);
+        client_receive_keepalive_deadline = compute_pto_deadline(
+            shared_rtt_state, application_max_ack_delay, *client_receive_keepalive_reference_time,
+            std::min(pto_count_, 2u));
     }
     const bool client_receive_keepalive_due =
         client_receive_keepalive_deadline.has_value() && now >= *client_receive_keepalive_deadline;
@@ -12125,6 +12134,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     const bool track_client_handshake_keepalive_probes = (config_.role == EndpointRole::client) &
                                                          (status_ == HandshakeStatus::in_progress) &
                                                          !handshake_confirmed_;
+    const bool track_client_receive_keepalive_probes =
+        (config_.role == EndpointRole::client) & (status_ == HandshakeStatus::connected);
     const auto clear_probe_packet_after_send =
         [&](std::optional<SentPacketRecord> &pending_probe_packet) {
             if (pending_probe_packet.has_value() && !preserve_pto_probe_packets) {
@@ -13106,7 +13117,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                            entry.second.challenge_pending;
                 });
             const bool eligible =
-                (config_.role == EndpointRole::client) & handshake_confirmed_ &
+                (config_.role == EndpointRole::client) & (status_ == HandshakeStatus::connected) &
                 base_ack_frame.has_value() & last_peer_activity_time_.has_value() &
                 has_receive_interest & !pending_application_send_after_blocked_queue &
                 !application_space_.pending_probe_packet.has_value() &
@@ -14726,6 +14737,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }
             if (preserve_pto_probe_packets) {
                 restore_unsent_path_validation_frames(path_validation_frames);
+            }
+            if (track_client_receive_keepalive_probes && probe_packet.force_ack &&
+                path_validation_frames.challenge.has_value()) {
+                last_client_receive_keepalive_probe_time_ = now;
             }
             clear_probe_packet_after_send(application_space_.pending_probe_packet);
         } else {

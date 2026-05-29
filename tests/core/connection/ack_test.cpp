@@ -7325,9 +7325,15 @@ TEST(QuicCoreTest, ClientReceiveKeepalivePtoDeadlineArmsProbeWithoutInflightPack
     connection.streams_.emplace(
         0, coquic::quic::make_implicit_stream_state(0, connection.config_.role));
 
+    const auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    const auto expected_deadline = coquic::quic::compute_pto_deadline(
+        connection.shared_recovery_rtt_state(),
+        std::chrono::milliseconds(peer_transport_parameters.max_ack_delay),
+        coquic::quic::test::test_time(4), 2);
     const auto deadline = connection.pto_deadline();
-    ASSERT_TRUE(deadline.has_value());
-    EXPECT_EQ(connection.next_wakeup(), deadline);
+    EXPECT_EQ(deadline, std::optional{expected_deadline});
+    EXPECT_EQ(connection.next_wakeup(), std::optional{expected_deadline});
 
     const auto deadline_value = optional_value_or_terminate(deadline);
     connection.arm_pto_probe(deadline_value);
@@ -7340,6 +7346,46 @@ TEST(QuicCoreTest, ClientReceiveKeepalivePtoDeadlineArmsProbeWithoutInflightPack
     const auto datagram = connection.drain_outbound_datagram(deadline_value);
     ASSERT_FALSE(datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), std::optional<coquic::quic::QuicPathId>{1});
+    EXPECT_EQ(connection.last_client_receive_keepalive_probe_time_, std::optional{deadline_value});
+
+    const auto next_expected_deadline = coquic::quic::compute_pto_deadline(
+        connection.shared_recovery_rtt_state(),
+        std::chrono::milliseconds(peer_transport_parameters.max_ack_delay), deadline_value, 2);
+    EXPECT_EQ(connection.pto_deadline(), std::optional{next_expected_deadline});
+}
+
+TEST(QuicCoreTest, ClientReceiveKeepalivePtoDeadlineArmsProbeWithApplicationInFlight) {
+    auto connection = make_connected_client_connection();
+    connection.streams_.emplace(
+        0, coquic::quic::make_implicit_stream_state(0, connection.config_.role));
+    connection.last_peer_activity_time_ = coquic::quic::test::test_time(1);
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 73,
+                                     .sent_time = coquic::quic::test::test_time(2000),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .has_ping = true,
+                                     .bytes_in_flight = 32,
+                                     .path_id = 0,
+                                 });
+
+    const auto deadline = connection.pto_deadline();
+    ASSERT_TRUE(deadline.has_value());
+    const auto regular_application_pto = coquic::quic::compute_pto_deadline(
+        connection.shared_recovery_rtt_state(), std::chrono::milliseconds(25),
+        coquic::quic::test::test_time(2000), 0);
+    EXPECT_TRUE(optional_value_or_terminate(deadline) < regular_application_pto);
+
+    connection.arm_pto_probe(optional_value_or_terminate(deadline));
+
+    ASSERT_TRUE(connection.application_space_.pending_probe_packet.has_value());
+    EXPECT_TRUE(
+        optional_value_or_terminate(connection.application_space_.pending_probe_packet).force_ack);
+
+    const auto datagram = connection.drain_outbound_datagram(optional_value_or_terminate(deadline));
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), std::optional<coquic::quic::QuicPathId>{0});
 }
 
 TEST(QuicCoreTest, ClientReceiveKeepaliveSkipsPathChallengeOnUnvalidatedCurrentPath) {

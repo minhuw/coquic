@@ -1000,6 +1000,7 @@ class QuicConnection {
     std::optional<QuicCoreTimePoint> idle_timeout_base_time_;
     bool ack_eliciting_sent_since_idle_reset_ = false;
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
+    std::optional<QuicCoreTimePoint> last_client_receive_keepalive_probe_time_;
     std::optional<QuicCoreTimePoint> server_zero_rtt_discard_deadline_;
     std::optional<QuicPathId> last_validated_path_id_;
     std::optional<QuicPathId> previous_path_id_;

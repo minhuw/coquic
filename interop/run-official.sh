@@ -11,6 +11,8 @@ readonly interop_peer_image="${INTEROP_PEER_IMAGE:-}"
 readonly simulator_image="${INTEROP_SIMULATOR_IMAGE:-martenseemann/quic-network-simulator@sha256:c23d82a55caffe681b1bdae65d4d30d23e1283141a414a7f02ee56cf15f9c6b9}"
 readonly iperf_image="${INTEROP_IPERF_IMAGE:-martenseemann/quic-interop-iperf-endpoint@sha256:cb50cc8019d45d9cad5faecbe46a3c21dd5e871949819a5175423755a9045106}"
 readonly interop_testcases="${INTEROP_TESTCASES:-handshake,transfer}"
+readonly interop_coquic_server_testcases="${INTEROP_COQUIC_SERVER_TESTCASES:-${interop_testcases}}"
+readonly interop_coquic_client_testcases="${INTEROP_COQUIC_CLIENT_TESTCASES:-${interop_testcases}}"
 readonly interop_directions="${INTEROP_DIRECTIONS:-both}"
 readonly interop_analysis_shell_package="${INTEROP_ANALYSIS_SHELL_PACKAGE:-nixpkgs#wireshark}"
 readonly interop_runner_output_tail_lines="${INTEROP_RUNNER_OUTPUT_TAIL_LINES:-200}"
@@ -211,6 +213,12 @@ echo "Using official ${interop_peer_impl} image: ${interop_peer_image}"
 echo "Using official simulator image: ${simulator_image}"
 echo "Using official iperf image: ${iperf_image}"
 echo "Running official testcases: ${interop_testcases}"
+if [ "${interop_coquic_server_testcases}" != "${interop_testcases}" ]; then
+  echo "Running coquic-server testcases: ${interop_coquic_server_testcases}"
+fi
+if [ "${interop_coquic_client_testcases}" != "${interop_testcases}" ]; then
+  echo "Running coquic-client testcases: ${interop_coquic_client_testcases}"
+fi
 if have_interop_analysis_tools; then
   echo "Using host packet analysis tools: tshark=$(command -v tshark) editcap=$(command -v editcap)"
 else
@@ -341,6 +349,7 @@ ensure_docker_image "${iperf_image}"
 run_direction() {
   local server=$1
   local client=$2
+  local requested_testcases=$3
   local direction_log_dir="${log_root}/${server}_${client}"
   local results_json="${direction_log_dir}/results.json"
   local runner_log_dir="${direction_log_dir}/runner"
@@ -359,7 +368,7 @@ run_direction() {
     save_files_args=(--save-files true)
   fi
 
-  echo "== official interop: server=${server} client=${client} testcases=${interop_testcases} =="
+  echo "== official interop: server=${server} client=${client} testcases=${requested_testcases} =="
   set +e
   if have_interop_analysis_tools; then
     (
@@ -367,7 +376,7 @@ run_direction() {
       python3 run.py \
         --server "${server}" \
         --client "${client}" \
-        --test "${interop_testcases}" \
+        --test "${requested_testcases}" \
         --log-dir "${runner_log_dir}" \
         --json "${results_json}" \
         "${save_files_args[@]}" \
@@ -380,7 +389,7 @@ run_direction() {
         python3 run.py \
           --server "${server}" \
           --client "${client}" \
-          --test "${interop_testcases}" \
+          --test "${requested_testcases}" \
           --log-dir "${runner_log_dir}" \
           --json "${results_json}" \
           "${save_files_args[@]}" \
@@ -401,11 +410,11 @@ run_direction() {
     return 1
   fi
 
-  if ! validate_official_results "${results_json}" "${server}" "${client}" "${interop_testcases}"; then
+  if ! validate_official_results "${results_json}" "${server}" "${client}" "${requested_testcases}"; then
     if [ "${interop_retry_failed_testcases}" = "1" ]; then
       mapfile -t retry_testcases < <(
         failed_retryable_official_testcases \
-          "${results_json}" "${interop_testcases}" "${interop_retry_testcases}"
+          "${results_json}" "${requested_testcases}" "${interop_retry_testcases}"
       )
       for testcase in "${retry_testcases[@]}"; do
         local retry_dir="${direction_log_dir}/retry-${testcase}"
@@ -463,7 +472,7 @@ run_direction() {
       fi
     fi
 
-    if ! validate_official_results "${results_json}" "${server}" "${client}" "${interop_testcases}"; then
+    if ! validate_official_results "${results_json}" "${server}" "${client}" "${requested_testcases}"; then
       show_runner_output_tail "${runner_output_log}"
       return 1
     fi
@@ -482,7 +491,7 @@ run_direction() {
     return "${status}"
   fi
 
-  for testcase in ${interop_testcases//,/ }; do
+  for testcase in ${requested_testcases//,/ }; do
     testcase_log_dir="${direction_log_dir}/${server}_${client}/${testcase}"
     if [ ! -d "${testcase_log_dir}" ]; then
       echo "official runner did not produce testcase logs for ${server}/${client}/${testcase}: ${testcase_log_dir}" >&2
@@ -503,8 +512,10 @@ run_both_directions() {
   local first_status=0
   local second_status=0
 
-  run_direction coquic "${interop_peer_impl}" || first_status=$?
-  run_direction "${interop_peer_impl}" coquic || second_status=$?
+  run_direction coquic "${interop_peer_impl}" "${interop_coquic_server_testcases}" ||
+    first_status=$?
+  run_direction "${interop_peer_impl}" coquic "${interop_coquic_client_testcases}" ||
+    second_status=$?
 
   if [ "${first_status}" -ne 0 ] || [ "${second_status}" -ne 0 ]; then
     echo "One or more official interop directions failed: " \
@@ -519,10 +530,10 @@ case "${interop_directions}" in
     run_both_directions
     ;;
   coquic-server)
-    run_direction coquic "${interop_peer_impl}"
+    run_direction coquic "${interop_peer_impl}" "${interop_coquic_server_testcases}"
     ;;
   coquic-client)
-    run_direction "${interop_peer_impl}" coquic
+    run_direction "${interop_peer_impl}" coquic "${interop_coquic_client_testcases}"
     ;;
   *)
     echo "INTEROP_DIRECTIONS must be one of: both, coquic-server, coquic-client" >&2

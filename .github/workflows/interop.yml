@@ -52,6 +52,9 @@ jobs:
             impl: s2n-quic
             image: ghcr.io/aws/s2n-quic/s2n-quic-qns:latest
             testcases: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,blackhole,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,amplificationlimit,rebind-port,rebind-addr
+            # s2n-quic's public QNS server uses its default transfer migration validator, which
+            # rejects rebind-addr when the simulator changes the peer UDP port scope mid-transfer.
+            coquic_client_testcases: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,blackhole,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,amplificationlimit,rebind-port
 
     steps:
       - name: Checkout
@@ -90,6 +93,8 @@ jobs:
         continue-on-error: true
         env:
           INTEROP_TESTCASES: ${{ matrix.testcases }}
+          INTEROP_COQUIC_SERVER_TESTCASES: ${{ matrix.coquic_server_testcases || matrix.testcases }}
+          INTEROP_COQUIC_CLIENT_TESTCASES: ${{ matrix.coquic_client_testcases || matrix.testcases }}
           INTEROP_PEER_IMPL: ${{ matrix.impl }}
           INTEROP_PEER_IMAGE: ${{ matrix.image }}
           COQUIC_CONGESTION_CONTROL: ${{ matrix.congestion_control || '' }}

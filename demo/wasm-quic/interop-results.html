@@ -116,22 +116,32 @@
         text-transform: uppercase;
       }
 
-      .compat-matrix th:nth-child(n + 3),
-      .compat-matrix td:nth-child(n + 3) {
+      .compat-matrix th:nth-child(n + 4),
+      .compat-matrix td:nth-child(n + 4) {
         width: 82px;
         min-width: 82px;
         max-width: 82px;
       }
 
-      .compat-matrix thead th:nth-child(n + 3) {
+      .compat-matrix thead th:nth-child(n + 4) {
         overflow: hidden;
         text-overflow: ellipsis;
+      }
+
+      .compat-matrix .row-status-column {
+        position: sticky;
+        left: 0;
+        z-index: 2;
+        background: var(--surface);
+        width: 82px;
+        min-width: 82px;
+        max-width: 82px;
       }
 
       .compat-matrix .corner,
       .compat-matrix .participant-name {
         position: sticky;
-        left: 0;
+        left: 82px;
         z-index: 2;
         background: var(--surface);
         text-align: left;
@@ -147,7 +157,7 @@
 
       .compat-matrix .server-column {
         position: sticky;
-        left: 154px;
+        left: 236px;
         z-index: 2;
         background: var(--surface);
         border-right: 2px solid var(--line-strong);
@@ -250,6 +260,10 @@
 
       .test-cell.unknown {
         color: var(--muted);
+      }
+
+      .test-cell.row-status {
+        min-width: 50px;
       }
 
       .empty-cell {

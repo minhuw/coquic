@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "implementations": {
+    "coquic": {
+      "library_version": "${GITHUB_SHA}"
+    },
+    "quic-go": {
+      "library_version": "v0.48.2"
+    },
+    "quinn": {
+      "library_version": "v0.11.9"
+    },
+    "picoquic": {
+      "library_version": "49c239b"
+    },
+    "msquic": {
+      "library_version": "v2.5.4"
+    },
+    "quiche": {
+      "library_version": "v0.28.0"
+    },
+    "quicly": {
+      "library_version": "c49ed0e"
+    },
+    "google-quiche": {
+      "library_version": "9164946"
+    },
+    "tquic": {
+      "library_version": "0169abd"
+    },
+    "mvfst": {
+      "library_version": "2026.01.19.00"
+    },
+    "s2n-quic": {
+      "library_version": "v1.80.0"
+    },
+    "xquic": {
+      "library_version": "64b8df3"
+    },
+    "aioquic": {
+      "library_version": "v1.3.0"
+    },
+    "ngtcp2": {
+      "library_version": "v1.22.1"
+    },
+    "lsquic": {
+      "library_version": "v4.7.0"
+    },
+    "neqo": {
+      "library_version": "v0.8.1"
+    }
+  }
+}

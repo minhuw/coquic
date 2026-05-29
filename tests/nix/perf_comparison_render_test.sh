@@ -30,6 +30,7 @@ make_manifest() {
   "preset": "ci",
   "client_impl": "${client_impl}",
   "server_impl": "${server_impl}",
+  "library_version": "${client_impl}-1.2.3",
   "runs": [
     {
       "status": "ok",
@@ -130,12 +131,12 @@ grep -F '### Best By Mode' "${output}" >/dev/null || {
   exit 1
 }
 
-grep -F '| Bulk Download | quinn | quinn -> quinn | default | Throughput MiB/s | 527.217 |' "${output}" >/dev/null || {
+grep -F '| Bulk Download | quinn | quinn-1.2.3 | quinn -> quinn | default | Throughput MiB/s | 527.217 |' "${output}" >/dev/null || {
   echo 'missing bulk leader row' >&2
   exit 1
 }
 
-grep -F '| Request/Response | quinn | quinn -> quinn | default | Requests/s | 33868.733 |' "${output}" >/dev/null || {
+grep -F '| Request/Response | quinn | quinn-1.2.3 | quinn -> quinn | default | Requests/s | 33868.733 |' "${output}" >/dev/null || {
   echo 'missing rr leader row' >&2
   exit 1
 }
@@ -155,7 +156,7 @@ grep -F '### Connection Request/Response' "${output}" >/dev/null || {
   exit 1
 }
 
-grep -F '| quic-go | quic-go -> quic-go | default | failed | 45000 | 0.200 | 0.002 | 404.622 | 202 | 1001 | 7 | quic-go/crr.json |' "${output}" >/dev/null || {
+grep -F '| quic-go | quic-go-1.2.3 | quic-go -> quic-go | default | failed | 45000 | 0.200 | 0.002 | 404.622 | 202 | 1001 | 7 | quic-go/crr.json |' "${output}" >/dev/null || {
   echo 'missing failed quic-go crr row' >&2
   exit 1
 }
@@ -192,6 +193,9 @@ if "generated_at" not in payload:
 sources = payload.get("sources")
 if not isinstance(sources, list) or len(sources) != 6:
     raise SystemExit("unexpected perf JSON sources")
+coquic_source = [source for source in sources if source.get("label") == "coquic"][0]
+if coquic_source.get("library_version") != "coquic-1.2.3":
+    raise SystemExit("missing source library version in perf JSON")
 rows = payload.get("rows")
 if not isinstance(rows, list) or len(rows) != 15:
     raise SystemExit("unexpected perf JSON rows")
@@ -209,6 +213,8 @@ if quic_go_crr.get("skipped_setup_errors") != 7:
     raise SystemExit("missing skipped setup errors in perf JSON")
 if quic_go_crr.get("pair") != "quic-go -> quic-go":
     raise SystemExit("missing implementation pair in perf JSON")
+if quic_go_crr.get("library_version") != "quic-go-1.2.3":
+    raise SystemExit("missing row library version in perf JSON")
 PY
 
 python3 "${script}" \
@@ -263,6 +269,9 @@ if labels != {"coquic", "quic-go"}:
 pairs = {row.get("pair") for row in rows}
 if not {"coquic -> coquic", "quic-go -> quic-go"}.issubset(pairs):
     raise SystemExit("merged perf snapshot rows lost implementation pairs")
+versions = {row.get("implementation"): row.get("library_version") for row in rows}
+if versions.get("coquic") != "coquic-1.2.3" or versions.get("quic-go") != "quic-go-1.2.3":
+    raise SystemExit("merged perf snapshot rows lost library versions")
 PY
 
 invalid_manifest="${tmpdir}/invalid.json"

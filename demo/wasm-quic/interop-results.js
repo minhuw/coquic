@@ -122,6 +122,19 @@ function resultClass(result) {
   return "unknown";
 }
 
+function rowResult(laneRows) {
+  if (!laneRows.length) {
+    return "unknown";
+  }
+  if (laneRows.some((row) => row.result === "failed")) {
+    return "failed";
+  }
+  if (laneRows.every((row) => row.result === "succeeded" || row.result === "unsupported")) {
+    return "succeeded";
+  }
+  return "unknown";
+}
+
 function renderParticipant(name) {
   const meta = implementationMeta[name] || { name, code: name.slice(0, 2).toUpperCase(), avatar: "" };
   const chip = document.createElement("span");
@@ -162,6 +175,13 @@ function renderMatrix() {
 
   const tests = [...new Set(rows.map((row) => row.name))].sort((left, right) => caseSortKey(left) - caseSortKey(right) || left.localeCompare(right));
   const rowByLaneAndTest = new Map(rows.map((row) => [`${sourceKey(row.server, row.client)}:${row.name}`, row]));
+  const rowsByLane = new Map();
+  for (const row of rows) {
+    const laneKey = sourceKey(row.server, row.client);
+    const laneRows = rowsByLane.get(laneKey) || [];
+    laneRows.push(row);
+    rowsByLane.set(laneKey, laneRows);
+  }
   const lanes = [...sources].sort((left, right) => {
     const leftKey = laneSortKey(left);
     const rightKey = laneSortKey(right);
@@ -169,6 +189,10 @@ function renderMatrix() {
   });
 
   const headRow = document.createElement("tr");
+  const rowHeader = document.createElement("th");
+  rowHeader.className = "row-status-column";
+  rowHeader.textContent = "Row";
+  headRow.append(rowHeader);
   const clientHeader = document.createElement("th");
   clientHeader.className = "corner";
   clientHeader.textContent = "Client";
@@ -189,7 +213,7 @@ function renderMatrix() {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
     td.className = "empty-cell";
-    td.colSpan = Math.max(tests.length + 1, 1);
+    td.colSpan = Math.max(tests.length + 3, 1);
     td.textContent = "No CoQUIC interop rows loaded.";
     tr.append(td);
     body.replaceChildren(tr);
@@ -198,7 +222,18 @@ function renderMatrix() {
 
   body.replaceChildren(
     ...lanes.map((source) => {
-    const tr = document.createElement("tr");
+      const tr = document.createElement("tr");
+      const laneKey = sourceKey(source.server, source.client);
+      const rowStatusCell = document.createElement("td");
+      rowStatusCell.className = "row-status-column";
+      const rowStatus = rowResult(rowsByLane.get(laneKey) || []);
+      const rowStatusPill = document.createElement("span");
+      rowStatusPill.className = `test-cell row-status ${resultClass(rowStatus)}`;
+      rowStatusPill.textContent = resultToken(rowStatus);
+      rowStatusPill.title = `${source.server} -> ${source.client}: row ${rowStatus}`;
+      rowStatusCell.append(rowStatusPill);
+      tr.append(rowStatusCell);
+
       const clientCell = document.createElement("th");
       clientCell.className = "participant-name";
       clientCell.scope = "row";
@@ -212,7 +247,7 @@ function renderMatrix() {
 
       for (const test of tests) {
         const td = document.createElement("td");
-        const row = rowByLaneAndTest.get(`${sourceKey(source.server, source.client)}:${test}`);
+        const row = rowByLaneAndTest.get(`${laneKey}:${test}`);
         const result = row ? row.result : "unknown";
         const cell = document.createElement("span");
         cell.className = `test-cell ${resultClass(result)}`;

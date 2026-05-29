@@ -134,6 +134,13 @@ def implementation_pair(manifest: dict) -> str:
     return f"{client} -> {server}"
 
 
+def library_version(manifest: dict) -> str:
+    value = manifest.get("library_version")
+    if value in (None, ""):
+        return "unknown"
+    return str(value)
+
+
 def result_display(manifest_path: Path, record: dict) -> str:
     result_file = record.get("result_file", "-")
     if result_file in (None, ""):
@@ -156,6 +163,7 @@ def row_from_run(label: str, manifest_path: Path, manifest: dict, record: dict) 
     return {
         "implementation": label,
         "pair": implementation_pair(manifest),
+        "library_version": library_version(manifest),
         "mode": str(record.get("mode", "-")),
         "status": str(record.get("status", "-")),
         "congestion_control": str(record.get("congestion_control", "newreno")),
@@ -184,15 +192,24 @@ def rows_from_snapshot(label: str, path: Path, snapshot: dict) -> tuple[list[dic
         source_copy = dict(source)
         if not source_copy.get("label"):
             source_copy["label"] = label
+        if not source_copy.get("library_version"):
+            source_copy["library_version"] = "unknown"
         if not source_copy.get("missing"):
             source_copy["path"] = str(path)
         normalized_sources.append(source_copy)
 
+    source_versions = {
+        str(source.get("label")): str(source.get("library_version") or "unknown")
+        for source in normalized_sources
+    }
     normalized_rows = []
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError(f"snapshot `{path}` row entries must be objects")
-        normalized_rows.append(dict(row))
+        row_copy = dict(row)
+        if not row_copy.get("library_version"):
+            row_copy["library_version"] = source_versions.get(str(row_copy.get("implementation")), "unknown")
+        normalized_rows.append(row_copy)
 
     return normalized_sources, normalized_rows
 
@@ -204,11 +221,12 @@ def primary_metric(row: dict) -> tuple[str, float, str]:
 
 
 def print_result_table(rows: list[dict]) -> None:
-    print("| Implementation | Pair | CC | Status | Elapsed ms | MiB/s | Gbit/s | Requests/s | P50 us | P99 us | Skipped Setup | Result |")
-    print("| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+    print("| Implementation | Version | Pair | CC | Status | Elapsed ms | MiB/s | Gbit/s | Requests/s | P50 us | P99 us | Skipped Setup | Result |")
+    print("| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
     for row in rows:
         print(
             f"| {markdown(row['implementation'])}"
+            f" | {markdown(row['library_version'])}"
             f" | {markdown(row['pair'])}"
             f" | {markdown(algorithm_display_name(row['congestion_control']))}"
             f" | {markdown(row['status'])}"
@@ -229,7 +247,7 @@ def build_payload(manifest_specs: list[str]) -> tuple[list[dict], list[dict]]:
     for spec in manifest_specs:
         label, path = parse_manifest_spec(spec)
         if not path.exists():
-            sources.append({"label": label, "path": str(path), "missing": True})
+            sources.append({"label": label, "path": str(path), "missing": True, "library_version": "unknown"})
             continue
         manifest = load_manifest(path)
         if "schema_version" in manifest and "sources" in manifest and "rows" in manifest:
@@ -245,6 +263,7 @@ def build_payload(manifest_specs: list[str]) -> tuple[list[dict], list[dict]]:
                 "path": str(path),
                 "missing": False,
                 "preset": manifest.get("preset", "unknown"),
+                "library_version": library_version(manifest),
                 "ok_runs": ok_count,
                 "total_runs": len(runs),
             }
@@ -291,6 +310,7 @@ def main() -> int:
             print(
                 f"- `{markdown(source['label'])}`: `{markdown(source['path'])}`"
                 f" ({source['ok_runs']}/{source['total_runs']} ok, preset `{markdown(source['preset'])}`)"
+                f", version `{markdown(source['library_version'])}`"
             )
         print()
 
@@ -300,8 +320,8 @@ def main() -> int:
 
         print("### Best By Mode")
         print()
-        print("| Mode | Leader | Pair | CC | Metric | Value |")
-        print("| --- | --- | --- | --- | --- | ---: |")
+        print("| Mode | Leader | Version | Pair | CC | Metric | Value |")
+        print("| --- | --- | --- | --- | --- | --- | ---: |")
         for mode in sorted({row["mode"] for row in rows}, key=mode_sort_key):
             ok_rows = [row for row in rows if row["mode"] == mode and row["status"] == "ok"]
             if not ok_rows:
@@ -311,6 +331,7 @@ def main() -> int:
             print(
                 f"| {markdown(mode_display_name(mode))}"
                 f" | {markdown(best['implementation'])}"
+                f" | {markdown(best['library_version'])}"
                 f" | {markdown(best['pair'])}"
                 f" | {markdown(algorithm_display_name(best['congestion_control']))}"
                 f" | {markdown(metric_name)}"

@@ -17,6 +17,8 @@ run_timeout_seconds="${PERF_RUN_TIMEOUT_SECONDS:-120}"
 congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr copa}"
 client_impl="${PERF_CLIENT_IMPL:-coquic}"
 server_impl="${PERF_SERVER_IMPL:-coquic}"
+implementations_manifest="${PERF_IMPLEMENTATIONS_JSON:-${repo_root}/bench/implementations.json}"
+library_version="${PERF_LIBRARY_VERSION:-}"
 preset="smoke"
 network_name=''
 server_name=''
@@ -38,6 +40,8 @@ environment overrides:
   PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
   PERF_CLIENT_IMPL           client implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
   PERF_SERVER_IMPL           server implementation to run, coquic, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
+  PERF_IMPLEMENTATIONS_JSON  implementation metadata JSON (default: bench/implementations.json)
+  PERF_LIBRARY_VERSION       explicit implementation library version override
   PERF_DOCKER_ENV            space-separated NAME=value environment entries passed to both containers
 USAGE
 }
@@ -136,6 +140,16 @@ case "${server_impl}" in
     ;;
 esac
 
+if [ -z "${library_version}" ]; then
+  library_version="$(
+    python3 "${repo_root}/scripts/resolve-bench-implementation-version.py" \
+      --manifest "${implementations_manifest}" \
+      --implementation "${client_impl}" \
+      --server-implementation "${server_impl}" \
+      --commit "${GITHUB_SHA:-}"
+  )"
+fi
+
 rm -f "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
   "${results_root}"/*.cid \
   "${environment_path}"
@@ -204,6 +218,8 @@ docker network create "${network_name}" >/dev/null
   echo "congestion_controls=${congestion_controls}"
   echo "client_impl=${client_impl}"
   echo "server_impl=${server_impl}"
+  echo "implementations_manifest=${implementations_manifest}"
+  echo "library_version=${library_version}"
   echo "docker_env=${PERF_DOCKER_ENV:-}"
   echo
   docker version
@@ -419,7 +435,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
   done
 done
 
-python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${image_attr}" "${image_tag}" "${congestion_controls}" "${client_impl}" "${server_impl}"
+python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${image_attr}" "${image_tag}" "${congestion_controls}" "${client_impl}" "${server_impl}" "${library_version}" "${implementations_manifest}"
 import json
 import pathlib
 import sys
@@ -432,6 +448,8 @@ image_tag = sys.argv[5]
 congestion_controls = sys.argv[6].split()
 client_impl = sys.argv[7]
 server_impl = sys.argv[8]
+library_version = sys.argv[9]
+implementations_manifest = sys.argv[10]
 
 runs = []
 for path in sorted(root.glob('*.json')):
@@ -452,6 +470,8 @@ manifest = {
     'congestion_controls': congestion_controls,
     'client_impl': client_impl,
     'server_impl': server_impl,
+    'implementations_manifest': implementations_manifest,
+    'library_version': library_version,
     'results_root': str(root),
     'runs': runs,
 }

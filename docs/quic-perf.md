@@ -63,6 +63,18 @@ set is `quic-go`, `quinn`, `picoquic`, `msquic`, `quiche`, `quicly`,
 `PERF_CONGESTION_CONTROLS=default` so each implementation keeps its own default
 congestion-control configuration.
 
+The library version displayed in perf summaries and on the demo dashboard comes
+from `bench/implementations.json`. When bumping a benchmark implementation,
+update the package pin and that JSON entry together, then run:
+
+```bash
+python3 scripts/check-bench-implementations.py
+```
+
+The harness writes the resolved value into `.bench-results/manifest.json` as
+`library_version`, and the comparison renderer carries it into
+`perf-results.json` for the demo.
+
 Useful environment overrides:
 
 - `PERF_RESULTS_ROOT` to choose a different output directory
@@ -73,6 +85,10 @@ Useful environment overrides:
 - `PERF_RUN_TIMEOUT_SECONDS` to adjust the per-client container timeout
 - `PERF_CONGESTION_CONTROLS` to choose algorithms, for example `bbr` or
   `newreno cubic bbr copa`
+- `PERF_IMPLEMENTATIONS_JSON` to point at a different implementation metadata
+  file
+- `PERF_LIBRARY_VERSION` to override the recorded library version for local
+  experiments
 - `PERF_MSQUIC_BULK_TOTAL_BYTES` to override the paired MSQUIC fixed bulk
   transfer size used when the CI bulk tuple otherwise requests an unbounded
   timed transfer (default: `134217728`)

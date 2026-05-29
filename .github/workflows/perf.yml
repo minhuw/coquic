@@ -193,6 +193,7 @@ jobs:
           PERF_RESULTS_ROOT: .bench-results/${{ matrix.label }}
           PERF_CLIENT_IMPL: ${{ matrix.client_impl }}
           PERF_SERVER_IMPL: ${{ matrix.server_impl }}
+          PERF_IMPLEMENTATIONS_JSON: bench/implementations.json
           PERF_CONGESTION_CONTROLS: ${{ matrix.congestion_controls }}
           PERF_IMAGE_ATTR: ${{ matrix.image_attr }}
           PERF_IMAGE_TAG: ${{ matrix.image_tag }}

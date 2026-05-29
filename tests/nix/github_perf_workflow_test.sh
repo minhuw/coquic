@@ -3,9 +3,21 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 workflow="${repo_root}/.github/workflows/perf.yml"
+implementations_json="${repo_root}/bench/implementations.json"
+implementation_checker="${repo_root}/scripts/check-bench-implementations.py"
 
 [ -f "${workflow}" ] || {
   echo "missing workflow: ${workflow}" >&2
+  exit 1
+}
+
+[ -f "${implementations_json}" ] || {
+  echo "missing implementation metadata: ${implementations_json}" >&2
+  exit 1
+}
+
+[ -x "${implementation_checker}" ] || {
+  echo "missing executable implementation metadata checker: ${implementation_checker}" >&2
   exit 1
 }
 
@@ -161,6 +173,7 @@ for marker in \
   'PERF_RESULTS_ROOT: .bench-results/${{ matrix.label }}' \
   'PERF_CLIENT_IMPL: ${{ matrix.client_impl }}' \
   'PERF_SERVER_IMPL: ${{ matrix.server_impl }}' \
+  'PERF_IMPLEMENTATIONS_JSON: bench/implementations.json' \
   'PERF_CONGESTION_CONTROLS: ${{ matrix.congestion_controls }}' \
   'PERF_IMAGE_ATTR: ${{ matrix.image_attr }}' \
   'PERF_IMAGE_TAG: ${{ matrix.image_tag }}' \
@@ -219,6 +232,13 @@ for marker in \
     exit 1
   fi
 done
+
+if grep -F 'library_version:' "${workflow}" >/dev/null; then
+  echo 'perf workflow should not duplicate implementation versions; use bench/implementations.json' >&2
+  exit 1
+fi
+
+python3 "${implementation_checker}" --repo-root "${repo_root}" --manifest "${implementations_json}" --workflow "${workflow}"
 
 for marker in \
   'Configure Demo SSH' \

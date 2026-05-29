@@ -3,6 +3,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd)"
 script="${repo_root}/bench/run-host-matrix.sh"
+implementations_json="${repo_root}/bench/implementations.json"
+version_resolver="${repo_root}/scripts/resolve-bench-implementation-version.py"
+implementation_checker="${repo_root}/scripts/check-bench-implementations.py"
 flake="${repo_root}/flake.nix"
 ignore_file="${repo_root}/.gitignore"
 msquic_perf="${repo_root}/bench/msquic-perf/src/main.rs"
@@ -16,6 +19,21 @@ neqo_perf="${repo_root}/bench/neqo-perf/neqo-perf.rs"
 
 [ -f "${script}" ] || {
   echo "missing harness script: ${script}" >&2
+  exit 1
+}
+
+[ -f "${implementations_json}" ] || {
+  echo "missing implementation metadata: ${implementations_json}" >&2
+  exit 1
+}
+
+[ -x "${version_resolver}" ] || {
+  echo "missing executable implementation version resolver: ${version_resolver}" >&2
+  exit 1
+}
+
+[ -x "${implementation_checker}" ] || {
+  echo "missing executable implementation metadata checker: ${implementation_checker}" >&2
   exit 1
 }
 
@@ -84,6 +102,16 @@ grep -F -- 'server_impl="${PERF_SERVER_IMPL:-coquic}"' "${script}" >/dev/null ||
   exit 1
 }
 
+grep -F -- 'implementations_manifest="${PERF_IMPLEMENTATIONS_JSON:-${repo_root}/bench/implementations.json}"' "${script}" >/dev/null || {
+  echo 'missing implementation metadata default in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'library_version="${PERF_LIBRARY_VERSION:-}"' "${script}" >/dev/null || {
+  echo 'missing library version override in harness script' >&2
+  exit 1
+}
+
 grep -F -- 'nix build --print-out-paths ".#${image_attr}"' "${script}" >/dev/null || {
   echo 'missing nix image build in harness script' >&2
   exit 1
@@ -111,6 +139,16 @@ grep -F -- 'client_impl=${client_impl}' "${script}" >/dev/null || {
 
 grep -F -- 'server_impl=${server_impl}' "${script}" >/dev/null || {
   echo 'missing server implementation environment marker in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'library_version=${library_version}' "${script}" >/dev/null || {
+  echo 'missing library version environment marker in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'implementations_manifest=${implementations_manifest}' "${script}" >/dev/null || {
+  echo 'missing implementation metadata environment marker in harness script' >&2
   exit 1
 }
 
@@ -218,6 +256,30 @@ grep -F -- "'server_impl': server_impl" "${script}" >/dev/null || {
   echo 'missing server implementation manifest field in harness script' >&2
   exit 1
 }
+
+grep -F -- "'library_version': library_version" "${script}" >/dev/null || {
+  echo 'missing library version manifest field in harness script' >&2
+  exit 1
+}
+
+grep -F -- "'implementations_manifest': implementations_manifest" "${script}" >/dev/null || {
+  echo 'missing implementation metadata manifest field in harness script' >&2
+  exit 1
+}
+
+python3 "${implementation_checker}" --repo-root "${repo_root}" --manifest "${implementations_json}" --workflow "${repo_root}/.github/workflows/perf.yml"
+
+resolver_output="$(GITHUB_SHA=0123456789abcdef python3 "${version_resolver}" --manifest "${implementations_json}" --implementation coquic)"
+if [[ "${resolver_output}" != "0123456789abcdef" ]]; then
+  echo "implementation version resolver did not substitute GITHUB_SHA: ${resolver_output}" >&2
+  exit 1
+fi
+
+resolver_output="$(python3 "${version_resolver}" --manifest "${implementations_json}" --implementation quic-go)"
+if [[ "${resolver_output}" != "v0.48.2" ]]; then
+  echo "implementation version resolver did not resolve quic-go: ${resolver_output}" >&2
+  exit 1
+fi
 
 grep -F -- 'handle_signal() {' "${script}" >/dev/null || {
   echo 'missing signal handler in harness script' >&2
@@ -978,6 +1040,8 @@ FAKE_PERF_LOG="${log_path}" \
 FAKE_PERF_IMAGE="${fake_image}" \
 FAKE_RESULTS_ROOT="${results_root}" \
 PERF_RESULTS_ROOT="${results_root}" \
+PERF_IMPLEMENTATIONS_JSON="${implementations_json}" \
+GITHUB_SHA=test-default-sha \
 bash "${script}" --preset smoke >/dev/null
 
 [ -f "${results_root}/environment.txt" ] || {
@@ -1088,7 +1152,7 @@ if grep -F -- '--network host' "${log_path}" >/dev/null; then
   exit 1
 fi
 
-python3 - "${results_root}/manifest.json" <<'PY'
+python3 - "${results_root}/manifest.json" "${implementations_json}" <<'PY'
 import json
 import pathlib
 import sys
@@ -1106,6 +1170,10 @@ if manifest.get("client_impl") != "coquic":
     raise SystemExit("manifest missing default client implementation")
 if manifest.get("server_impl") != "coquic":
     raise SystemExit("manifest missing default server implementation")
+if manifest.get("implementations_manifest") != sys.argv[2]:
+    raise SystemExit("manifest missing implementations metadata path")
+if manifest.get("library_version") != "test-default-sha":
+    raise SystemExit("manifest missing resolved default library version")
 if len(manifest.get("runs", [])) != 12:
     raise SystemExit("manifest missing per-algorithm smoke runs")
 seen = {run.get("congestion_control") for run in manifest.get("runs", [])}
@@ -1121,6 +1189,7 @@ FAKE_PERF_LOG="${log_path}" \
 FAKE_PERF_IMAGE="${fake_image}" \
 FAKE_RESULTS_ROOT="${results_root}" \
 PERF_RESULTS_ROOT="${results_root}" \
+PERF_LIBRARY_VERSION=v0.48.2 \
 PERF_CLIENT_IMPL=quic-go \
 PERF_SERVER_IMPL=quic-go \
 PERF_CONGESTION_CONTROLS=default \
@@ -1157,6 +1226,8 @@ if manifest.get("client_impl") != "quic-go":
     raise SystemExit("manifest missing quic-go client implementation")
 if manifest.get("server_impl") != "quic-go":
     raise SystemExit("manifest missing quic-go server implementation")
+if manifest.get("library_version") != "v0.48.2":
+    raise SystemExit("manifest missing quic-go library version")
 if manifest.get("congestion_controls") != ["default"]:
     raise SystemExit("manifest missing quic-go congestion-control subset")
 if len(manifest.get("runs", [])) != 3:

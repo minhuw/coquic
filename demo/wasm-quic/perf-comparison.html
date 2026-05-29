@@ -168,52 +168,12 @@
         background: rgba(36, 181, 166, 0.12);
       }
 
-      .snapshot-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 12px;
-        margin: 18px 0 14px;
-      }
-
-      .stat-card,
       .chart-panel,
-      .trend-panel,
-      .table-panel,
-      .source-panel {
+      .trend-panel {
         border: 1px solid rgba(145, 165, 173, 0.24);
         border-radius: var(--radius);
         background: rgba(15, 26, 33, 0.92);
         box-shadow: var(--shadow), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
-      }
-
-      .stat-card {
-        display: grid;
-        align-content: start;
-        gap: 8px;
-        min-height: 132px;
-        padding: 14px;
-      }
-
-      .stat-card span {
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-        font-weight: 700;
-        text-transform: uppercase;
-      }
-
-      .stat-card strong {
-        color: var(--ink);
-        font-family: var(--mono);
-        font-size: 22px;
-        line-height: 1.08;
-        font-variant-numeric: tabular-nums;
-      }
-
-      .stat-card small {
-        color: var(--soft);
-        font-size: 12px;
-        line-height: 1.45;
       }
 
       .comparison-shell {
@@ -224,9 +184,7 @@
       }
 
       .chart-panel,
-      .trend-panel,
-      .table-panel,
-      .source-panel {
+      .trend-panel {
         min-width: 0;
       }
 
@@ -544,11 +502,11 @@
 
       .bar-row {
         display: grid;
-        grid-template-columns: 34px 196px minmax(0, 1fr) minmax(112px, auto);
+        grid-template-columns: 34px 232px minmax(0, 1fr) minmax(112px, auto);
         align-items: center;
         gap: 10px;
-        min-height: 46px;
-        padding: 3px 6px;
+        min-height: 56px;
+        padding: 6px;
         border: 1px solid transparent;
         border-radius: 7px;
       }
@@ -634,11 +592,22 @@
       }
 
       .bar-label {
-        display: flex;
+        display: grid;
         align-items: center;
-        gap: 7px;
         min-width: 0;
         width: 100%;
+      }
+
+      .bar-version {
+        overflow: hidden;
+        max-width: 100%;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 10px;
+        font-weight: 800;
+        line-height: 1.25;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .identity-name {
@@ -683,11 +652,11 @@
         font-family: var(--mono);
         font-size: 12px;
         font-variant-numeric: tabular-nums;
+        line-height: 1;
         text-align: right;
       }
 
-      .empty-state,
-      .empty-cell {
+      .empty-state {
         color: var(--muted);
         font-family: var(--mono);
         font-size: 12px;
@@ -700,80 +669,6 @@
         border: 1px dashed rgba(145, 165, 173, 0.26);
         border-radius: 7px;
         background: rgba(5, 14, 18, 0.22);
-      }
-
-      .empty-cell {
-        padding: 18px 14px;
-        text-align: left;
-      }
-
-      .table-wrap {
-        overflow-x: auto;
-      }
-
-      table {
-        width: 100%;
-        min-width: 860px;
-        border-collapse: collapse;
-      }
-
-      th,
-      td {
-        padding: 11px 12px;
-        border-bottom: 1px solid rgba(145, 165, 173, 0.16);
-        text-align: left;
-        vertical-align: top;
-      }
-
-      th {
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-        font-weight: 800;
-        text-transform: uppercase;
-      }
-
-      td {
-        color: var(--soft);
-        font-size: 13px;
-      }
-
-      td.metric {
-        color: var(--ink);
-        font-family: var(--mono);
-        font-variant-numeric: tabular-nums;
-        text-align: right;
-      }
-
-      th.metric {
-        text-align: right;
-      }
-
-      tbody tr.own-impl {
-        background: rgba(36, 181, 166, 0.07);
-        box-shadow: inset 3px 0 0 rgba(36, 181, 166, 0.82);
-      }
-
-      .impl-cell {
-        display: grid;
-        gap: 4px;
-        min-width: 0;
-      }
-
-      .impl-cell span {
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-      }
-
-      .meta-cell {
-        overflow: hidden;
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        min-width: 168px;
       }
 
       .identity-group {
@@ -792,6 +687,57 @@
       .identity-group > .identity-name {
         min-width: 0;
         line-height: 22px;
+      }
+
+      .bar-identity {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 70px;
+        align-items: center;
+        column-gap: 8px;
+        min-width: 0;
+        width: 100%;
+        min-height: 44px;
+      }
+
+      .bar-identity-text {
+        display: grid;
+        align-content: center;
+        gap: 3px;
+        min-width: 0;
+      }
+
+      .bar-identity-text > .identity-name {
+        min-width: 0;
+        line-height: 1.15;
+      }
+
+      .bar-identity-icons {
+        display: grid;
+        grid-template-columns: repeat(2, 32px);
+        align-items: center;
+        justify-content: end;
+        gap: 6px;
+      }
+
+      .bar-identity .identity-icon {
+        width: 32px;
+        height: 32px;
+        border-radius: 7px;
+      }
+
+      .bar-identity .identity-icon img {
+        width: 22px;
+        height: 22px;
+      }
+
+      .bar-identity .identity-icon.vendor img {
+        width: 26px;
+        height: 26px;
+        border-radius: 5px;
+      }
+
+      .bar-identity .identity-fallback {
+        font-size: 12px;
       }
 
       .identity-separator {
@@ -854,36 +800,6 @@
         stroke-linejoin: round;
       }
 
-      .pill {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 24px;
-        padding: 0 8px;
-        border: 1px solid rgba(145, 165, 173, 0.24);
-        border-radius: 999px;
-        color: var(--soft);
-        font-family: var(--mono);
-        font-size: 11px;
-        font-weight: 800;
-      }
-
-      .pill.ok {
-        border-color: rgba(107, 224, 163, 0.42);
-        color: var(--ok);
-      }
-
-      .pill.warn {
-        border-color: rgba(245, 196, 81, 0.48);
-        color: var(--warning);
-      }
-
-      .status-cell {
-        display: grid;
-        justify-items: start;
-        gap: 6px;
-      }
-
       .status-detail {
         display: inline-flex;
         align-items: center;
@@ -908,40 +824,6 @@
         flex: 0 0 auto;
       }
 
-      .source-panel {
-        margin-top: 14px;
-      }
-
-      .source-list {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 10px;
-        padding: 14px;
-      }
-
-      .source-item {
-        display: grid;
-        gap: 7px;
-        min-height: 104px;
-        padding: 12px;
-        border: 1px solid rgba(145, 165, 173, 0.16);
-        border-radius: 7px;
-        background: rgba(5, 14, 18, 0.26);
-      }
-
-      .source-item strong {
-        color: var(--ink);
-        font-size: 13px;
-      }
-
-      .source-item span {
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-        line-height: 1.45;
-        overflow-wrap: anywhere;
-      }
-
       .adapter-note {
         padding: 0 14px 14px;
         color: var(--muted);
@@ -959,17 +841,12 @@
       }
 
       @media (max-width: 1080px) {
-        .snapshot-grid,
-        .source-list {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-
         .plot-grid {
           grid-template-columns: 150px minmax(0, 1fr);
         }
 
         .bar-row {
-          grid-template-columns: 34px 178px minmax(0, 1fr) minmax(106px, auto);
+          grid-template-columns: 34px 214px minmax(0, 1fr) minmax(106px, auto);
         }
       }
 
@@ -990,11 +867,6 @@
 
         .header-nav {
           justify-content: flex-start;
-        }
-
-        .snapshot-grid,
-        .source-list {
-          grid-template-columns: 1fr;
         }
 
         .plot-grid {
@@ -1020,18 +892,15 @@
 
         .bar-row {
           grid-template-columns: 34px minmax(0, 1fr);
-          align-items: start;
+          align-items: center;
           gap: 7px;
-          min-height: 72px;
+          min-height: 96px;
         }
 
+        .bar-label,
         .bar-track,
         .bar-value {
           grid-column: 2;
-        }
-
-        .bar-label {
-          max-width: 100%;
         }
 
         .bar-value {
@@ -1092,7 +961,6 @@
           <div class="trend-grid" id="trend-grid"></div>
         </div>
       </section>
-
     </main>
     <script src="./perf-comparison.js"></script>
   </body>

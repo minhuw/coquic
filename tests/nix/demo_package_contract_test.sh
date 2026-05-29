@@ -142,7 +142,8 @@ for marker in \
   "devicons/devicon@v2.17.0" \
   "identity-group" \
   "identity-icon" \
-  "setup skips" \
+  "library_version" \
+  "bar-version" \
   "quic-go" \
   "quinn" \
   "picoquic" \
@@ -172,6 +173,7 @@ for marker in \
   "participant-chip" \
   "participant-fallback" \
   "githubAvatar" \
+  "row-status-column" \
   "test-cell" \
   "quic-go" \
   "picoquic" \

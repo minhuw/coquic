@@ -132,7 +132,7 @@ function githubPage(owner, repo) {
 }
 
 const implementationMeta = {
-  coquic: { company: "CoQUIC", companyCode: "CQ", companyIcon: githubAvatar("minhuw"), companyUrl: githubPage("minhuw"), sourceUrl: githubPage("minhuw", "coquic"), language: "C++", languageCode: "C++" },
+  coquic: { company: "CoQUIC", companyCode: "CQ", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: githubPage("minhuw", "coquic"), language: "C++", languageCode: "C++" },
   "quic-go": { company: "quic-go", companyCode: "QG", companyIcon: githubAvatar("quic-go"), companyUrl: githubPage("quic-go"), sourceUrl: githubPage("quic-go", "quic-go"), language: "Go", languageCode: "Go" },
   quinn: { company: "Quinn", companyCode: "QN", companyIcon: githubAvatar("quinn-rs"), companyUrl: githubPage("quinn-rs"), sourceUrl: githubPage("quinn-rs", "quinn"), language: "Rust", languageCode: "Rs" },
   picoquic: { company: "Private Octopus", companyCode: "PO", companyIcon: githubAvatar("private-octopus"), companyUrl: githubPage("private-octopus"), sourceUrl: githubPage("private-octopus", "picoquic"), language: "C", languageCode: "C" },
@@ -166,7 +166,6 @@ const modeConfig = {
     metricDetail: "MiB/s",
     unit: "MiB/s",
     decimals: 3,
-    summaryLabel: "bulk leader",
   },
   rr: {
     title: "Request/Response",
@@ -175,7 +174,6 @@ const modeConfig = {
     metricDetail: "Reqs/s",
     unit: "req/s",
     decimals: 0,
-    summaryLabel: "rr leader",
   },
   crr: {
     title: "Connection Request/Response",
@@ -184,7 +182,6 @@ const modeConfig = {
     metricDetail: "Reqs/s",
     unit: "req/s",
     decimals: 0,
-    summaryLabel: "crr leader",
   },
 };
 
@@ -203,6 +200,28 @@ function formatNumber(value, decimals = 3) {
 
 function implementationInfo(implementation) {
   return implementationMeta[implementation] || { company: "unknown", companyCode: "?", companyIcon: "", companyUrl: "", sourceUrl: "", language: "unknown", languageCode: "?" };
+}
+
+function normalizeLibraryVersion(value) {
+  if (value === null || value === undefined || value === "") {
+    return "unknown";
+  }
+  return String(value);
+}
+
+function libraryVersionFor(rowOrImplementation) {
+  const implementation = typeof rowOrImplementation === "string" ? rowOrImplementation : rowOrImplementation.implementation;
+  const direct = typeof rowOrImplementation === "string" ? "" : rowOrImplementation.library_version;
+  if (direct) {
+    return normalizeLibraryVersion(direct);
+  }
+  const source = activeSnapshot.sources.find((candidate) => candidate.label === implementation);
+  return normalizeLibraryVersion(source?.library_version);
+}
+
+function libraryVersionLabel(rowOrImplementation) {
+  const version = libraryVersionFor(rowOrImplementation);
+  return version === "unknown" ? "version unknown" : version;
 }
 
 function decorateExternalLink(link, label) {
@@ -242,11 +261,7 @@ function renderIdentityIcon(kind, iconUrl, code, label, url) {
   return badge;
 }
 
-function renderImplementationIdentity(implementation, info) {
-  const group = document.createElement("span");
-  group.className = "identity-group";
-  group.setAttribute("aria-label", `${implementation}, ${info.company}, ${info.language}`);
-
+function renderImplementationName(implementation, info) {
   const name = document.createElement(info.sourceUrl ? "a" : "span");
   name.className = "identity-name";
   name.textContent = implementation;
@@ -256,6 +271,15 @@ function renderImplementationIdentity(implementation, info) {
   } else {
     name.title = implementation;
   }
+  return name;
+}
+
+function renderImplementationIdentity(implementation, info) {
+  const group = document.createElement("span");
+  group.className = "identity-group";
+  group.setAttribute("aria-label", `${implementation}, ${info.company}, ${info.language}`);
+
+  const name = renderImplementationName(implementation, info);
 
   const separatorA = document.createElement("span");
   separatorA.className = "identity-separator";
@@ -274,6 +298,30 @@ function renderImplementationIdentity(implementation, info) {
     separatorB,
     renderIdentityIcon("language", languageIconSources[info.language], info.languageCode, info.language),
   );
+
+  return group;
+}
+
+function renderBarImplementationIdentity(implementation, info, versionLabel) {
+  const group = document.createElement("span");
+  group.className = "bar-identity";
+  group.setAttribute("aria-label", `${implementation}, ${versionLabel}, ${info.company}, ${info.language}`);
+
+  const text = document.createElement("span");
+  text.className = "bar-identity-text";
+  const version = document.createElement("small");
+  version.className = "bar-version";
+  version.textContent = versionLabel;
+  text.append(renderImplementationName(implementation, info), version);
+
+  const icons = document.createElement("span");
+  icons.className = "bar-identity-icons";
+  icons.append(
+    renderIdentityIcon("vendor", info.companyIcon, info.companyCode, info.company, info.companyUrl),
+    renderIdentityIcon("language", languageIconSources[info.language], info.languageCode, info.language),
+  );
+
+  group.append(text, icons);
 
   return group;
 }
@@ -334,66 +382,6 @@ function leaderboardRows(mode) {
   return [...best.values()].sort((left, right) => Number(right[config.metric]) - Number(left[config.metric]));
 }
 
-function bestRow(mode) {
-  return leaderboardRows(mode)[0];
-}
-
-function emptyCard(label, detail) {
-  return {
-    label,
-    value: "-",
-    detail,
-  };
-}
-
-function renderSnapshot() {
-  const snapshotGrid = document.getElementById("snapshot-grid");
-  if (!snapshotGrid) {
-    return;
-  }
-  const cards = ["bulk", "rr", "crr"].map((mode) => {
-    const config = modeConfig[mode];
-    const row = bestRow(mode);
-    if (!row) {
-      return emptyCard(config.summaryLabel, "waiting for CI benchmark data");
-    }
-    return {
-      label: config.summaryLabel,
-      value: `${formatNumber(row[config.metric], config.decimals)} ${config.unit}`,
-      detail: row.implementation,
-    };
-  });
-
-  const coquicBulkRows = activeSnapshot.rows.filter((row) => row.mode === "bulk" && row.implementation === "coquic" && row.status === "ok");
-  if (coquicBulkRows.length) {
-    const bestCoquic = coquicBulkRows.reduce((best, row) => (Number(row.throughput_mib_per_s) > Number(best.throughput_mib_per_s) ? row : best), coquicBulkRows[0]);
-    cards.push({
-      label: "coquic best bulk",
-      value: `${formatNumber(bestCoquic.throughput_mib_per_s)} MiB/s`,
-      detail: "current CI snapshot",
-    });
-  } else {
-    cards.push(emptyCard("coquic best bulk", "waiting for CoQUIC rows"));
-  }
-
-  snapshotGrid.replaceChildren(
-    ...cards.map((card) => {
-      const element = document.createElement("article");
-      element.className = "stat-card";
-
-      const label = document.createElement("span");
-      label.textContent = card.label;
-      const value = document.createElement("strong");
-      value.textContent = card.value;
-      const detail = document.createElement("small");
-      detail.textContent = card.detail;
-
-      element.append(label, value, detail);
-      return element;
-    }),
-  );
-}
-
 function renderBarplot(mode) {
   const config = modeConfig[mode];
   const rows = leaderboardRows(mode);
@@ -433,7 +421,7 @@ function renderBarplot(mode) {
       label.className = "bar-label";
       const info = implementationInfo(row.implementation);
       const displayName = row.implementation === "coquic" && row.congestion_control ? `coquic[${row.congestion_control}]` : row.implementation;
-      label.append(renderImplementationIdentity(displayName, info));
+      label.append(renderBarImplementationIdentity(displayName, info, libraryVersionLabel(row)));
 
       const track = document.createElement("div");
       track.className = "bar-track";
@@ -746,7 +734,7 @@ function renderTrendChart(mode) {
       const text = document.createElement("b");
       text.textContent = implementation;
       const meta = document.createElement("small");
-      meta.textContent = `${info.company} · ${info.language}`;
+      meta.textContent = `${info.company} | ${info.language} | ${libraryVersionLabel(implementation)}`;
       item.append(swatch, text, meta);
       return item;
     }),
@@ -765,120 +753,9 @@ function renderTrends() {
   );
 }
 
-function renderTable() {
-  const comparisonBody = document.getElementById("comparison-body");
-  if (!comparisonBody) {
-    return;
-  }
-  const rows = [...activeSnapshot.rows].sort((left, right) => {
-    const modeOrder = { bulk: 0, rr: 1, crr: 2 };
-    const leftImpl = implementationOrder.indexOf(left.implementation);
-    const rightImpl = implementationOrder.indexOf(right.implementation);
-    return (
-      (leftImpl === -1 ? implementationOrder.length : leftImpl) - (rightImpl === -1 ? implementationOrder.length : rightImpl) ||
-      modeOrder[left.mode] - modeOrder[right.mode] ||
-      left.congestion_control.localeCompare(right.congestion_control)
-    );
-  });
-  if (!rows.length) {
-    const tr = document.createElement("tr");
-    const td = document.createElement("td");
-    td.className = "empty-cell";
-    td.colSpan = 8;
-    td.textContent = "No benchmark rows loaded. The dashboard will use perf-results.json when the perf workflow uploads it.";
-    tr.append(td);
-    comparisonBody.replaceChildren(tr);
-    return;
-  }
-  comparisonBody.replaceChildren(
-    ...rows.map((row) => {
-      const tr = document.createElement("tr");
-      if (row.implementation === "coquic") {
-        tr.className = "own-impl";
-      }
-      const setupSkips = Number(row.skipped_setup_errors || 0);
-      const statusClass = row.status === "ok" ? "ok" : "warn";
-
-      const implementation = document.createElement("td");
-      const implCell = document.createElement("div");
-      implCell.className = "impl-cell";
-      const info = implementationInfo(row.implementation);
-      const mode = document.createElement("span");
-      mode.textContent = row.mode;
-      implCell.append(renderImplementationIdentity(row.implementation, info), mode);
-      implementation.append(implCell);
-
-      const metadata = document.createElement("td");
-      const metadataCell = document.createElement("div");
-      metadataCell.className = "meta-cell";
-      metadataCell.textContent = `${info.company} / ${info.language}`;
-      metadata.append(metadataCell);
-
-      const pair = document.createElement("td");
-      pair.textContent = row.pair;
-
-      const status = document.createElement("td");
-      const statusCell = document.createElement("div");
-      statusCell.className = "status-cell";
-      const statusPill = document.createElement("span");
-      statusPill.className = `pill ${statusClass}`;
-      statusPill.textContent = row.status;
-      statusCell.append(statusPill);
-      if (setupSkips > 0) {
-        const setupDetail = document.createElement("span");
-        setupDetail.className = "status-detail";
-        setupDetail.title = "Individual timed CRR connection setup attempts skipped inside this completed benchmark run.";
-        setupDetail.append(makeIcon("warning"), document.createTextNode(`${setupSkips} setup skips`));
-        statusCell.append(setupDetail);
-      }
-      status.append(statusCell);
-
-      const bulkMib = document.createElement("td");
-      bulkMib.className = "metric";
-      bulkMib.textContent = formatNumber(row.throughput_mib_per_s);
-      const bulkGbit = document.createElement("td");
-      bulkGbit.className = "metric";
-      bulkGbit.textContent = formatNumber(row.throughput_gbit_per_s);
-      const rr = document.createElement("td");
-      rr.className = "metric";
-      rr.textContent = row.mode === "rr" ? formatNumber(row.requests_per_s, 0) : "-";
-      const crr = document.createElement("td");
-      crr.className = "metric";
-      crr.textContent = row.mode === "crr" ? formatNumber(row.requests_per_s, 0) : "-";
-
-      tr.append(implementation, metadata, pair, status, bulkMib, bulkGbit, rr, crr);
-      return tr;
-    }),
-  );
-}
-
-function renderSources() {
-  const sourceList = document.getElementById("source-list");
-  if (!sourceList) {
-    return;
-  }
-  sourceList.replaceChildren(
-    ...activeSnapshot.sources.map((source) => {
-      const element = document.createElement("div");
-      element.className = "source-item";
-      const name = document.createElement("strong");
-      name.textContent = source.label;
-      const pair = document.createElement("span");
-      pair.textContent = source.missing ? "missing manifest" : `${source.ok_runs}/${source.total_runs} ok, ${source.preset}`;
-      const sourcePath = document.createElement("span");
-      sourcePath.textContent = source.path;
-      element.append(name, pair, sourcePath);
-      return element;
-    }),
-  );
-}
-
 function renderAll() {
-  renderSnapshot();
   renderPlots();
   renderTrends();
-  renderTable();
-  renderSources();
 }
 
 async function loadLiveData() {

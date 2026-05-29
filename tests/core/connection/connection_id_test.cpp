@@ -641,6 +641,45 @@ TEST(QuicCoreTest, ClientSkipsSpareConnectionIdsWhenActiveMigrationIsDisabled) {
     EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
 }
 
+TEST(QuicCoreTest, RequestedLocalConnectionIdRetirementStillCountsTowardPeerLimit) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 2;
+    connection.local_connection_ids_[1] = coquic::quic::LocalConnectionIdRecord{
+        .sequence_number = 1,
+        .connection_id = bytes_from_ints({0x51}),
+        .stateless_reset_token = {},
+        .retirement_requested = true,
+    };
+    connection.pending_new_connection_id_frames_.clear();
+    connection.next_local_connection_id_sequence_ = 2;
+
+    connection.issue_spare_connection_ids();
+
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+}
+
+TEST(QuicCoreTest, RetiringRequestedLocalConnectionIdQueuesReplacement) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 2;
+    connection.local_connection_ids_[1] = coquic::quic::LocalConnectionIdRecord{
+        .sequence_number = 1,
+        .connection_id = bytes_from_ints({0x51}),
+        .stateless_reset_token = {},
+        .retirement_requested = true,
+    };
+    connection.pending_new_connection_id_frames_.clear();
+    connection.next_local_connection_id_sequence_ = 2;
+
+    const auto processed =
+        connection.process_retire_connection_id_frame(coquic::quic::RetireConnectionIdFrame{
+            .sequence_number = 1,
+        });
+
+    ASSERT_TRUE(processed.has_value());
+    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+    EXPECT_EQ(connection.pending_new_connection_id_frames_.front().sequence_number, 2u);
+}
+
 TEST(QuicCoreTest, PreferredAddressReservesSequenceOneInLocalConnectionIdInventory) {
     auto config = coquic::quic::test::make_server_core_config();
     config.transport.preferred_address = make_test_preferred_address();
@@ -737,6 +776,41 @@ TEST(QuicCoreTest, RetiredPeerInitialConnectionIdIsNotRecreatedFromSourceConnect
         std::ranges::count_if(connection.peer_connection_ids_,
                               [](const auto &entry) { return !entry.second.locally_retired; });
     EXPECT_EQ(active_count, 4);
+}
+
+TEST(QuicCoreTest, NewConnectionIdRetirePriorToRefreshesCurrentPathPeerConnectionId) {
+    auto connection = make_connected_client_connection();
+    connection.local_transport_parameters_.active_connection_id_limit = 8;
+    connection.paths_.clear();
+    connection.current_send_path_id_ = 4;
+    connection.last_validated_path_id_ = 4;
+    connection.ensure_path_state(4).validated = true;
+    connection.ensure_path_state(4).is_current_send_path = true;
+    connection.ensure_path_state(4).peer_connection_id_sequence = 8;
+
+    connection.peer_connection_ids_.clear();
+    connection.peer_connection_ids_[8] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 8,
+        .connection_id = bytes_from_ints({0x88}),
+    };
+    connection.active_peer_connection_id_sequence_ = 8;
+    connection.largest_peer_retire_prior_to_ = 7;
+
+    const auto processed =
+        connection.process_new_connection_id_frame(coquic::quic::NewConnectionIdFrame{
+            .sequence_number = 11,
+            .retire_prior_to = 9,
+            .connection_id = bytes_from_ints({0x11, 0x11}),
+            .stateless_reset_token = {},
+        });
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(connection.peer_connection_ids_.at(8).locally_retired);
+    EXPECT_EQ(connection.active_peer_connection_id_sequence_, 11u);
+    EXPECT_EQ(connection.paths_.at(4).peer_connection_id_sequence, 11u);
+    ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
+    EXPECT_EQ(connection.pending_retire_connection_id_frames_.front().sequence_number, 8u);
+    EXPECT_EQ(connection.outbound_destination_connection_id(4), bytes_from_ints({0x11, 0x11}));
 }
 
 TEST(QuicCoreTest, CorruptedOneRttRequestConnectionIdBitflipDoesNotBlockValidRetransmit) {

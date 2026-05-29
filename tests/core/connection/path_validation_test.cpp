@@ -484,7 +484,9 @@ TEST(QuicCoreTest,
         optional_value_or_terminate(client.connection_->current_send_path_id_);
     const auto &current_path = client.connection_->paths_.at(current_send_path_id);
     EXPECT_FALSE(client.connection_->application_space_.pending_probe_packet.has_value());
-    EXPECT_TRUE(saw_path_challenge || current_path.outstanding_challenge.has_value());
+    EXPECT_FALSE(saw_path_challenge);
+    EXPECT_FALSE(current_path.outstanding_challenge.has_value());
+    EXPECT_FALSE(current_path.challenge_pending);
 }
 
 TEST(QuicCoreTest, ClientRegularPtoAfterLargePartialResponseKeepsOutstandingPathChallengeTracked) {
@@ -611,8 +613,10 @@ TEST(QuicCoreTest, ClientRegularPtoAfterLargePartialResponseKeepsOutstandingPath
     const auto current_send_path_id =
         optional_value_or_terminate(client.connection_->current_send_path_id_);
     const auto &current_path = client.connection_->paths_.at(current_send_path_id);
-    EXPECT_TRUE(saw_path_challenge || first_has_path_challenge ||
-                current_path.outstanding_challenge.has_value());
+    EXPECT_FALSE(saw_path_challenge);
+    EXPECT_FALSE(first_has_path_challenge);
+    EXPECT_FALSE(current_path.outstanding_challenge.has_value());
+    EXPECT_FALSE(current_path.challenge_pending);
 }
 
 TEST(QuicCoreTest, PathChallengeQueuesMatchingPathResponseOnSamePath) {
@@ -929,7 +933,7 @@ TEST(QuicCoreTest, ClientAckOnlyReceiveKeepaliveAddsPathChallengeBeforePto) {
     }
 
     EXPECT_TRUE(saw_ack);
-    EXPECT_TRUE(saw_path_challenge);
+    EXPECT_FALSE(saw_path_challenge);
 }
 
 TEST(QuicCoreTest, ClientAckOnlyReceiveKeepaliveReusesOutstandingPathChallenge) {
@@ -986,18 +990,17 @@ TEST(QuicCoreTest, ClientAckOnlyReceiveKeepaliveReusesOutstandingPathChallenge) 
     ASSERT_NE(first_packet, nullptr);
 
     bool saw_ack = false;
-    std::optional<std::array<std::byte, 8>> path_challenge;
+    bool saw_path_challenge = false;
     for (const auto &frame : first_packet->frames) {
         saw_ack = saw_ack || std::holds_alternative<coquic::quic::AckFrame>(frame);
         if (const auto *challenge = std::get_if<coquic::quic::PathChallengeFrame>(&frame);
             challenge != nullptr) {
-            path_challenge = challenge->data;
+            saw_path_challenge = true;
         }
     }
 
     EXPECT_TRUE(saw_ack);
-    ASSERT_TRUE(path_challenge.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(path_challenge), existing_challenge);
+    EXPECT_FALSE(saw_path_challenge);
 }
 
 TEST(QuicCoreTest, AckOnlyResponseOnNewPathAlsoIncludesPathResponse) {

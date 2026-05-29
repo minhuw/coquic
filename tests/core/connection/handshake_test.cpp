@@ -1237,11 +1237,11 @@ TEST(QuicCoreTest, HandshakeTrimLoopStopsWhenAckStillOverflowsAfterAllCryptoIsRe
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-    EXPECT_TRUE(datagram.empty());
+    EXPECT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
-    EXPECT_TRUE(connection.handshake_space_.received_packets.has_ack_to_send());
-    EXPECT_TRUE(connection.handshake_space_.send_crypto.has_pending_data());
-    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
+    EXPECT_FALSE(connection.handshake_space_.received_packets.has_ack_to_send());
+    EXPECT_FALSE(connection.handshake_space_.send_crypto.has_pending_data());
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
 }
 
 TEST(QuicCoreTest, PendingApplicationCryptoDoesNotStarveQueuedServerResponse) {
@@ -4374,6 +4374,38 @@ TEST(QuicCoreTest, ReceivedInitialPacketResetsClientHandshakePeerStateOnSourceCo
     EXPECT_FALSE(connection.zero_rtt_space_.received_packets.has_ack_to_send());
 }
 
+TEST(QuicCoreTest, DuplicateReceivedInitialPacketDoesNotResetClientHandshakePeerState) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.peer_source_connection_id_ = bytes_from_ints({0x01});
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0x01}),
+    };
+    connection.initial_space_.received_packets.record_received(
+        4, true, coquic::quic::test::test_time(0), coquic::quic::QuicEcnCodepoint::unavailable);
+
+    const auto processed = connection.process_inbound_received_packet(
+        coquic::quic::ReceivedProtectedInitialPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id = bytes_from_ints({0x02}),
+            .packet_number_length = 1,
+            .packet_number = 4,
+            .plaintext_storage = std::make_shared<std::vector<std::byte>>(),
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_EQ(optional_value_or_terminate(connection.peer_source_connection_id_),
+              bytes_from_ints({0x01}));
+    EXPECT_EQ(connection.peer_connection_ids_.at(0).connection_id, bytes_from_ints({0x01}));
+    EXPECT_TRUE(connection.initial_space_.received_packets.has_ack_to_send());
+}
+
 TEST(
     QuicCoreTest,
     ReceivedHandshakePacketAdoptsVersionAndResetsClientHandshakePeerStateOnSourceConnectionIdChange) {
@@ -4428,6 +4460,40 @@ TEST(
     EXPECT_FALSE(connection.initial_space_.received_packets.has_ack_to_send());
     EXPECT_FALSE(connection.handshake_space_.received_packets.has_ack_to_send());
     EXPECT_FALSE(connection.zero_rtt_space_.received_packets.has_ack_to_send());
+}
+
+TEST(QuicCoreTest, DuplicateReceivedHandshakePacketDoesNotResetClientHandshakePeerState) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.current_version_ = coquic::quic::kQuicVersion1;
+    connection.peer_source_connection_id_ = bytes_from_ints({0x01});
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0x01}),
+    };
+    connection.handshake_space_.received_packets.record_received(
+        5, true, coquic::quic::test::test_time(0), coquic::quic::QuicEcnCodepoint::unavailable);
+
+    const auto processed = connection.process_inbound_received_packet(
+        coquic::quic::ReceivedProtectedHandshakePacket{
+            .version = coquic::quic::kQuicVersion2,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id = bytes_from_ints({0x02}),
+            .packet_number_length = 1,
+            .packet_number = 5,
+            .plaintext_storage = std::make_shared<std::vector<std::byte>>(),
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_EQ(connection.current_version_, coquic::quic::kQuicVersion2);
+    EXPECT_EQ(optional_value_or_terminate(connection.peer_source_connection_id_),
+              bytes_from_ints({0x01}));
+    EXPECT_EQ(connection.peer_connection_ids_.at(0).connection_id, bytes_from_ints({0x01}));
+    EXPECT_TRUE(connection.handshake_space_.received_packets.has_ack_to_send());
 }
 
 TEST(QuicCoreTest, ReceivedInitialPacketRejectsInvalidCryptoFrameAndDoesNotRecordPeerActivity) {

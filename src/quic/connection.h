@@ -433,7 +433,7 @@ inline bool operator==(const std::vector<std::byte> &lhs, const DeferredProtecte
 struct PeerConnectionIdRecord {
     std::uint64_t sequence_number = 0;
     ConnectionId connection_id;
-    std::array<std::byte, 16> stateless_reset_token{};
+    std::optional<std::array<std::byte, 16>> stateless_reset_token;
     bool locally_retired = false;
     bool retire_frame_in_flight = false;
 };
@@ -443,6 +443,7 @@ struct LocalConnectionIdRecord {
     ConnectionId connection_id;
     std::array<std::byte, 16> stateless_reset_token{};
     bool retired = false;
+    bool retirement_requested = false;
 };
 
 enum class QuicPathEcnState : std::uint8_t {
@@ -748,6 +749,7 @@ class QuicConnection {
     void start_path_validation(QuicPathId path_id, bool initiated_locally,
                                QuicCoreTimePoint now = QuicCoreClock::now());
     void queue_path_response(QuicPathId path_id, const std::array<std::byte, 8> &data);
+    void respond_to_path_challenge(QuicPathId path_id, const std::array<std::byte, 8> &data);
     bool path_validation_timed_out(QuicPathId path_id, QuicCoreTimePoint now) const;
     static bool
     should_skip_packet_number_for_optimistic_ack_detection(const PacketSpaceState &packet_space,
@@ -762,10 +764,15 @@ class QuicConnection {
     CodecResult<bool> process_retire_connection_id_frame(const RetireConnectionIdFrame &frame);
     CodecResult<bool> ensure_peer_preferred_address_connection_id();
     void queue_peer_connection_id_retirement(std::uint64_t sequence_number);
+    void refresh_peer_connection_id_sequences_after_retirement();
     void issue_spare_connection_ids();
+    void issue_path_probe_replacement_connection_id();
     std::array<std::byte, 8> next_path_challenge_data(QuicPathId path_id);
     std::optional<std::uint64_t>
     select_peer_connection_id_sequence_for_path(QuicPathId path_id) const;
+    std::optional<std::uint64_t>
+    select_unused_peer_connection_id_sequence_for_path(QuicPathId path_id) const;
+    bool rotate_peer_connection_id_for_path(QuicPathId path_id);
     ConnectionId active_peer_destination_connection_id() const;
     std::optional<NewConnectionIdFrame> take_pending_new_connection_id_frame();
     bool should_reset_client_handshake_peer_state(const ConnectionId &source_connection_id) const;

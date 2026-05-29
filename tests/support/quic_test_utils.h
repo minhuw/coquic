@@ -810,13 +810,18 @@ struct QuicConnectionTestPeer {
         connection.status_ = status;
     }
 
-    static bool inject_inbound_one_rtt_frames(QuicConnection &connection, std::vector<Frame> frames,
-                                              std::uint64_t packet_number = 0) {
+    static bool
+    inject_inbound_one_rtt_frames(QuicConnection &connection, std::vector<Frame> frames,
+                                  std::optional<std::uint64_t> packet_number = std::nullopt) {
+        const auto effective_packet_number = packet_number.value_or(
+            connection.application_space_.largest_authenticated_packet_number.value_or(
+                std::uint64_t{0}) +
+            1);
         const auto processed = connection.process_inbound_packet(
             ProtectedOneRttPacket{
                 .destination_connection_id = {},
                 .packet_number_length = 2,
-                .packet_number = packet_number,
+                .packet_number = effective_packet_number,
                 .frames = std::move(frames),
             },
             test_time());

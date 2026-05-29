@@ -173,7 +173,9 @@ for marker in \
   "participant-chip" \
   "participant-fallback" \
   "githubAvatar" \
+  "rowResultForTests" \
   "row-status-column" \
+  "Overall result across every testcase in this row" \
   "test-cell" \
   "quic-go" \
   "picoquic" \

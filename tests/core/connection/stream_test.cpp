@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <string_view>
 #include <type_traits>
 
 #include "src/quic/connection_test_hooks.h"
@@ -303,6 +304,84 @@ TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilG
     EXPECT_EQ(coquic::quic::test::string_from_bytes(received_value.bytes), "hello");
     EXPECT_TRUE(received_value.fin);
     EXPECT_TRUE(connection.streams_.at(0).receive_buffer.buffered_bytes_.empty());
+}
+
+TEST(QuicCoreTest, ProcessInboundDatagramIgnoresAckRangeTrimmedOneRttReplay) {
+    auto connection = make_connected_server_connection();
+    connection.config_.emit_shared_receive_stream_data = false;
+
+    const auto make_stream_datagram = [&](std::uint64_t packet_number, std::uint64_t stream_id,
+                                          std::string_view text) {
+        return coquic::quic::serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{
+                coquic::quic::ProtectedOneRttPacket{
+                    .destination_connection_id = connection.config_.source_connection_id,
+                    .packet_number_length = 2,
+                    .packet_number = packet_number,
+                    .frames =
+                        {
+                            coquic::quic::StreamFrame{
+                                .fin = false,
+                                .has_offset = true,
+                                .has_length = true,
+                                .stream_id = stream_id,
+                                .offset = 0,
+                                .stream_data = coquic::quic::test::bytes_from_string(text),
+                            },
+                        },
+                },
+            },
+            coquic::quic::SerializeProtectionContext{
+                .local_role = coquic::quic::EndpointRole::client,
+                .client_initial_destination_connection_id =
+                    connection.client_initial_destination_connection_id(),
+                .one_rtt_secret =
+                    optional_ref_or_terminate(connection.application_space_.read_secret),
+            });
+    };
+    const auto make_ping_datagram = [&](std::uint64_t packet_number) {
+        return coquic::quic::serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{
+                coquic::quic::ProtectedOneRttPacket{
+                    .destination_connection_id = connection.config_.source_connection_id,
+                    .packet_number_length = 2,
+                    .packet_number = packet_number,
+                    .frames = {coquic::quic::PingFrame{}},
+                },
+            },
+            coquic::quic::SerializeProtectionContext{
+                .local_role = coquic::quic::EndpointRole::client,
+                .client_initial_destination_connection_id =
+                    connection.client_initial_destination_connection_id(),
+                .one_rtt_secret =
+                    optional_ref_or_terminate(connection.application_space_.read_secret),
+            });
+    };
+
+    const auto replayed = make_stream_datagram(0, 0, "replay");
+    ASSERT_TRUE(replayed.has_value());
+    connection.process_inbound_datagram(replayed.value(), coquic::quic::test::test_time(1));
+    ASSERT_TRUE(connection.take_received_stream_data().has_value());
+
+    for (std::uint64_t packet_number = 2; packet_number <= coquic::quic::kMaxTrackedAckRanges * 2;
+         packet_number += 2) {
+        const auto datagram = make_ping_datagram(packet_number);
+        ASSERT_TRUE(datagram.has_value());
+        connection.process_inbound_datagram(
+            datagram.value(),
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number + 1)));
+        ASSERT_FALSE(connection.take_received_stream_data().has_value());
+    }
+    ASSERT_TRUE(connection.application_space_.received_packets.should_ignore(0));
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number,
+              coquic::quic::kMaxTrackedAckRanges * 2);
+
+    connection.process_inbound_datagram(replayed.value(), coquic::quic::test::test_time(200));
+
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number,
+              coquic::quic::kMaxTrackedAckRanges * 2);
+    EXPECT_FALSE(connection.has_failed());
 }
 
 TEST(

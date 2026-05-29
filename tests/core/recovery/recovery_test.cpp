@@ -22,6 +22,15 @@ struct ReceivedPacketHistoryTestPeer {
     static std::size_t range_count(const ReceivedPacketHistory &history) {
         return history.ranges_.size();
     }
+
+    static bool contains_range_start(const ReceivedPacketHistory &history,
+                                     std::uint64_t packet_number) {
+        return history.ranges_.contains(packet_number);
+    }
+
+    static std::uint64_t least_untracked_packet_number(const ReceivedPacketHistory &history) {
+        return history.least_untracked_packet_number_;
+    }
 };
 
 struct PacketSpaceRecoveryTestPeer {
@@ -639,6 +648,55 @@ TEST(QuicRecoveryTest, AckHistoryKeepsSeparatedRangesWhenPacketDoesNotExtendNext
                             coquic::quic::test::test_time(2));
 
     EXPECT_EQ(coquic::quic::test::ReceivedPacketHistoryTestPeer::range_count(history), 2u);
+}
+
+TEST(QuicRecoveryTest, AckHistoryCapsSparseTrackedRanges) {
+    ReceivedPacketHistory history;
+    for (std::uint64_t packet_number = 0; packet_number <= coquic::quic::kMaxTrackedAckRanges * 2;
+         packet_number += 2) {
+        history.record_received(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+    }
+
+    EXPECT_EQ(coquic::quic::test::ReceivedPacketHistoryTestPeer::range_count(history),
+              coquic::quic::kMaxTrackedAckRanges);
+    EXPECT_FALSE(
+        coquic::quic::test::ReceivedPacketHistoryTestPeer::contains_range_start(history, 0));
+    EXPECT_TRUE(coquic::quic::test::ReceivedPacketHistoryTestPeer::contains_range_start(
+        history, coquic::quic::kMaxTrackedAckRanges * 2 - 2));
+    EXPECT_EQ(
+        coquic::quic::test::ReceivedPacketHistoryTestPeer::least_untracked_packet_number(history),
+        1u);
+    EXPECT_TRUE(history.should_ignore(0));
+    EXPECT_TRUE(history.should_ignore(2));
+    EXPECT_FALSE(history.should_ignore(1));
+    EXPECT_FALSE(history.should_ignore(3));
+
+    const auto ack =
+        history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(200));
+    ASSERT_TRUE(ack.has_value());
+    EXPECT_EQ(ack->additional_ranges.size(), coquic::quic::kMaxTrackedAckRanges - 1);
+}
+
+TEST(QuicRecoveryTest, AckHistoryCapStillMergesRetainedBridgedRanges) {
+    ReceivedPacketHistory history;
+    for (std::uint64_t packet_number = 0; packet_number <= coquic::quic::kMaxTrackedAckRanges * 2;
+         packet_number += 2) {
+        history.record_received(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+    }
+
+    history.record_received(coquic::quic::kMaxTrackedAckRanges * 2 - 1,
+                            /*ack_eliciting=*/true, coquic::quic::test::test_time(200));
+
+    EXPECT_EQ(coquic::quic::test::ReceivedPacketHistoryTestPeer::range_count(history),
+              coquic::quic::kMaxTrackedAckRanges - 1);
+    const auto ack =
+        history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(201));
+    ASSERT_TRUE(ack.has_value());
+    EXPECT_EQ(ack->first_ack_range, 2u);
 }
 
 TEST(QuicRecoveryTest, AckHistoryMeasuresAckDelayFromLargestAcknowledgedPacket) {

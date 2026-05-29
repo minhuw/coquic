@@ -99,8 +99,8 @@ bool connection_additional_internal_coverage_for_tests() {
         ok &= has_probe_packet;
         ok &= has_probe_packet ? connection.application_space_.pending_probe_packet->force_ack
                                : false;
-        ok &= connection.paths_.at(7).challenge_pending;
-        ok &= connection.paths_.at(7).outstanding_challenge.has_value();
+        ok &= !connection.paths_.at(7).challenge_pending;
+        ok &= !connection.paths_.at(7).outstanding_challenge.has_value();
     }
 
     {
@@ -157,7 +157,7 @@ bool connection_additional_internal_coverage_for_tests() {
         ok &= has_probe_packet;
         ok &= has_probe_packet ? connection.application_space_.pending_probe_packet->force_ack
                                : false;
-        ok &= connection.paths_.at(7).challenge_pending;
+        ok &= !connection.paths_.at(7).challenge_pending;
         ok &= connection.paths_.at(7).outstanding_challenge.has_value();
         ok &= optional_ref_or_terminate(connection.paths_.at(7).outstanding_challenge) ==
               existing_challenge;
@@ -1141,6 +1141,175 @@ TEST(QuicCoreTest, ValidatedLocalMigrationRetiresPreviousPathPeerConnectionId) {
     EXPECT_TRUE(connection.peer_connection_ids_.at(0).locally_retired);
     ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
     EXPECT_EQ(connection.pending_retire_connection_id_frames_.front().sequence_number, 0u);
+}
+
+TEST(QuicCoreTest, ClientPathChallengeOnCurrentPathUsesSparePeerConnectionId) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.peer_connection_ids_[2] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 2,
+        .connection_id = bytes_from_ints({0x10, 0x11}),
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+
+    const auto inbound_challenge = std::array{
+        std::byte{0x20}, std::byte{0x21}, std::byte{0x22}, std::byte{0x23},
+        std::byte{0x24}, std::byte{0x25}, std::byte{0x26}, std::byte{0x27},
+    };
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 3, {coquic::quic::PathChallengeFrame{.data = inbound_challenge}}));
+
+    EXPECT_EQ(connection.paths_.at(3).peer_connection_id_sequence, 2u);
+    EXPECT_TRUE(connection.peer_connection_ids_.at(0).locally_retired);
+    ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
+    EXPECT_EQ(connection.pending_retire_connection_id_frames_.front().sequence_number, 0u);
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 3u);
+
+    const auto destination_connection_ids = protected_datagram_destination_connection_ids(
+        datagram, connection.config_.source_connection_id.size());
+    ASSERT_TRUE(destination_connection_ids.has_value());
+    const auto &destination_connection_ids_value =
+        optional_ref_or_terminate(destination_connection_ids);
+    ASSERT_EQ(destination_connection_ids_value.size(), 1u);
+    EXPECT_EQ(destination_connection_ids_value.front(), bytes_from_ints({0x10, 0x11}));
+
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(packet, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(packet->frames, [&](const auto &frame) {
+        const auto *response = std::get_if<coquic::quic::PathResponseFrame>(&frame);
+        return response != nullptr && response->data == inbound_challenge;
+    }));
+    EXPECT_FALSE(std::ranges::any_of(packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::RetireConnectionIdFrame>(frame);
+    }));
+
+    const auto retire_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(retire_datagram.empty());
+    const auto retire_packets = decode_sender_datagram(connection, retire_datagram);
+    ASSERT_EQ(retire_packets.size(), 1u);
+    const auto *retire_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&retire_packets.front());
+    ASSERT_NE(retire_packet, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(retire_packet->frames, [](const auto &frame) {
+        const auto *retire = std::get_if<coquic::quic::RetireConnectionIdFrame>(&frame);
+        return retire != nullptr && retire->sequence_number == 0;
+    }));
+}
+
+TEST(QuicCoreTest, ServerPathChallengeOnCurrentPathKeepsPeerConnectionId) {
+    auto connection = make_connected_server_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.peer_connection_ids_[2] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 2,
+        .connection_id = bytes_from_ints({0x10, 0x11}),
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+
+    const auto inbound_challenge = std::array{
+        std::byte{0x30}, std::byte{0x31}, std::byte{0x32}, std::byte{0x33},
+        std::byte{0x34}, std::byte{0x35}, std::byte{0x36}, std::byte{0x37},
+    };
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 3, {coquic::quic::PathChallengeFrame{.data = inbound_challenge}}));
+
+    EXPECT_EQ(connection.paths_.at(3).peer_connection_id_sequence, 0u);
+    EXPECT_FALSE(connection.peer_connection_ids_.at(0).locally_retired);
+    EXPECT_TRUE(connection.pending_retire_connection_id_frames_.empty());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+
+    const auto destination_connection_ids = protected_datagram_destination_connection_ids(
+        datagram, connection.config_.source_connection_id.size());
+    ASSERT_TRUE(destination_connection_ids.has_value());
+    const auto &destination_connection_ids_value =
+        optional_ref_or_terminate(destination_connection_ids);
+    ASSERT_EQ(destination_connection_ids_value.size(), 1u);
+    EXPECT_EQ(destination_connection_ids_value.front(), bytes_from_ints({0xaa, 0xab}));
+}
+
+TEST(QuicCoreTest, PathChallengeReplenishesLocalConnectionIdPool) {
+    auto connection = make_connected_server_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 8;
+    connection.pending_new_connection_id_frames_.clear();
+    connection.issue_spare_connection_ids();
+    connection.pending_new_connection_id_frames_.clear();
+    ASSERT_TRUE(connection.local_connection_ids_.contains(0));
+    ASSERT_TRUE(connection.local_connection_ids_.contains(1));
+    ASSERT_EQ(connection.next_local_connection_id_sequence_, 8u);
+
+    const auto inbound_challenge = std::array{
+        std::byte{0x40}, std::byte{0x41}, std::byte{0x42}, std::byte{0x43},
+        std::byte{0x44}, std::byte{0x45}, std::byte{0x46}, std::byte{0x47},
+    };
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 3, {coquic::quic::PathChallengeFrame{.data = inbound_challenge}}));
+
+    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+    const auto replacement = connection.pending_new_connection_id_frames_.front();
+    EXPECT_EQ(replacement.sequence_number, 8u);
+    EXPECT_EQ(replacement.retire_prior_to, 1u);
+    ASSERT_TRUE(connection.local_connection_ids_.contains(0));
+    EXPECT_FALSE(connection.local_connection_ids_.at(0).retired);
+    EXPECT_TRUE(connection.local_connection_ids_.at(0).retirement_requested);
+
+    bool saw_new_connection_id = false;
+    bool saw_path_response = false;
+    for (std::int64_t tick = 1; tick <= 3; ++tick) {
+        const auto datagram =
+            connection.drain_outbound_datagram(coquic::quic::test::test_time(tick));
+        if (datagram.empty()) {
+            continue;
+        }
+
+        const auto packets = decode_sender_datagram(connection, datagram);
+        ASSERT_EQ(packets.size(), 1u);
+        const auto *packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+        ASSERT_NE(packet, nullptr);
+        saw_new_connection_id |= std::ranges::any_of(packet->frames, [](const auto &frame) {
+            const auto *new_connection_id = std::get_if<coquic::quic::NewConnectionIdFrame>(&frame);
+            return new_connection_id != nullptr && new_connection_id->sequence_number == 8 &&
+                   new_connection_id->retire_prior_to == 1;
+        });
+        saw_path_response |= std::ranges::any_of(packet->frames, [&](const auto &frame) {
+            const auto *response = std::get_if<coquic::quic::PathResponseFrame>(&frame);
+            return response != nullptr && response->data == inbound_challenge;
+        });
+    }
+
+    EXPECT_TRUE(saw_new_connection_id);
+    EXPECT_TRUE(saw_path_response);
 }
 
 TEST(QuicCoreTest, PeerMigrationKeepsCurrentPeerConnectionIdOnNewPath) {

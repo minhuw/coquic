@@ -94,10 +94,14 @@ bool ReceivedPacketHistory::contains(std::uint64_t packet_number) const {
     return false;
 }
 
+bool ReceivedPacketHistory::should_ignore(std::uint64_t packet_number) const {
+    return packet_number < least_untracked_packet_number_ || contains(packet_number);
+}
+
 void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ack_eliciting,
                                             QuicCoreTimePoint received_time, QuicEcnCodepoint ecn,
                                             std::uint64_t ack_eliciting_threshold) {
-    const bool duplicate = contains(packet_number);
+    const bool duplicate = should_ignore(packet_number);
     const bool has_prior_ack_eliciting_packet =
         ack_eliciting && largest_received_ack_eliciting_packet_number_.has_value();
     const bool ack_eliciting_out_of_order =
@@ -147,6 +151,7 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
             .received_time = received_time,
         };
     }
+    trim_old_ack_ranges();
 
     if (ack_eliciting) {
         ++ack_eliciting_packets_since_last_ack_;
@@ -163,6 +168,14 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
         ecn_feedback_accessible_ = true;
     }
     note_received_ecn(ecn_counts_, ecn);
+}
+
+void ReceivedPacketHistory::trim_old_ack_ranges() {
+    while (ranges_.size() > kMaxTrackedAckRanges) {
+        least_untracked_packet_number_ = std::max(
+            least_untracked_packet_number_, ranges_.begin()->second.largest_packet_number + 1);
+        ranges_.erase(ranges_.begin());
+    }
 }
 
 bool ReceivedPacketHistory::has_ack_to_send() const {

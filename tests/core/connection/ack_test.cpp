@@ -2526,12 +2526,17 @@ TEST(QuicCoreTest, HandshakeOversizeFinalizesInitialPacketAtAmplificationBudget)
 
     ASSERT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
-    EXPECT_TRUE(connection.handshake_space_.received_packets.has_ack_to_send());
-    EXPECT_EQ(connection.handshake_space_.next_send_packet_number, 0u);
+    EXPECT_FALSE(connection.handshake_space_.received_packets.has_ack_to_send());
+    EXPECT_EQ(connection.handshake_space_.next_send_packet_number, 1u);
 
     const auto packets = decode_sender_datagram(connection, datagram);
-    ASSERT_EQ(packets.size(), 1u);
+    ASSERT_EQ(packets.size(), 2u);
     EXPECT_NE(std::get_if<coquic::quic::ProtectedInitialPacket>(&packets.front()), nullptr);
+    const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.back());
+    ASSERT_NE(handshake, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(handshake->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::AckFrame>(frame);
+    }));
 }
 
 TEST(QuicCoreTest, ArmPtoProbeCoalescesHandshakeProbeWhenInitialCryptoIsPending) {
@@ -4046,11 +4051,11 @@ TEST(QuicCoreTest, HandshakeProbeTrimLoopStopsWhenAckStillOverflowsAfterAllProbe
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-    EXPECT_TRUE(datagram.empty());
+    EXPECT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
-    EXPECT_TRUE(connection.handshake_space_.received_packets.has_ack_to_send());
-    EXPECT_TRUE(connection.handshake_space_.pending_probe_packet.has_value());
-    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
+    EXPECT_FALSE(connection.handshake_space_.received_packets.has_ack_to_send());
+    EXPECT_FALSE(connection.handshake_space_.pending_probe_packet.has_value());
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
 }
 
 TEST(QuicCoreTest, HandshakeSendPrefersFreshCryptoRangesOverStoredProbeSnapshot) {
@@ -7448,6 +7453,51 @@ TEST(QuicCoreTest, ClientReceiveKeepaliveSkipsPathChallengeOnUnvalidatedCurrentP
     }
 
     EXPECT_TRUE(saw_ack);
+    EXPECT_FALSE(saw_path_challenge);
+}
+
+TEST(QuicCoreTest, ClientReceiveKeepaliveSkipsPathChallengeOnValidatedCurrentPath) {
+    auto connection = make_connected_client_connection();
+    connection.current_send_path_id_ = 1;
+    connection.ensure_path_state(1).validated = true;
+    connection.ensure_path_state(1).is_current_send_path = true;
+    connection.last_validated_path_id_ = 1;
+    connection.last_peer_activity_time_ = coquic::quic::test::test_time(4);
+    connection.pto_count_ = 4;
+    connection.streams_.emplace(
+        0, coquic::quic::make_implicit_stream_state(0, connection.config_.role));
+
+    const auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    const auto deadline = coquic::quic::compute_pto_deadline(
+        connection.shared_recovery_rtt_state(),
+        std::chrono::milliseconds(peer_transport_parameters.max_ack_delay),
+        coquic::quic::test::test_time(4), 2);
+
+    connection.arm_pto_probe(deadline);
+
+    ASSERT_TRUE(connection.application_space_.pending_probe_packet.has_value());
+    EXPECT_FALSE(connection.ensure_path_state(1).challenge_pending);
+    EXPECT_FALSE(connection.ensure_path_state(1).outstanding_challenge.has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(deadline);
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_EQ(connection.last_client_receive_keepalive_probe_time_, std::optional{deadline});
+
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+
+    bool saw_ping = false;
+    bool saw_path_challenge = false;
+    for (const auto &frame : application->frames) {
+        saw_ping = saw_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
+        saw_path_challenge =
+            saw_path_challenge || std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_ping);
     EXPECT_FALSE(saw_path_challenge);
 }
 

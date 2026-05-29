@@ -122,17 +122,37 @@ function resultClass(result) {
   return "unknown";
 }
 
-function rowResult(laneRows) {
-  if (!laneRows.length) {
+function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
+  if (!tests.length) {
     return "unknown";
   }
-  if (laneRows.some((row) => row.result === "failed")) {
+  let sawFailed = false;
+  let sawUnknown = false;
+  let sawUnsupported = false;
+  let sawSucceeded = false;
+  for (const test of tests) {
+    const result = rowByLaneAndTest.get(`${laneKey}:${test}`)?.result || "unknown";
+    if (result === "failed") {
+      sawFailed = true;
+      continue;
+    }
+    if (result === "unsupported") {
+      sawUnsupported = true;
+      continue;
+    }
+    if (result === "succeeded") {
+      sawSucceeded = true;
+      continue;
+    }
+    sawUnknown = true;
+  }
+  if (sawFailed) {
     return "failed";
   }
-  if (laneRows.every((row) => row.result === "succeeded" || row.result === "unsupported")) {
-    return "succeeded";
+  if (sawUnknown || (sawSucceeded && sawUnsupported)) {
+    return "unknown";
   }
-  return "unknown";
+  return sawUnsupported ? "unsupported" : "succeeded";
 }
 
 function renderParticipant(name) {
@@ -175,13 +195,6 @@ function renderMatrix() {
 
   const tests = [...new Set(rows.map((row) => row.name))].sort((left, right) => caseSortKey(left) - caseSortKey(right) || left.localeCompare(right));
   const rowByLaneAndTest = new Map(rows.map((row) => [`${sourceKey(row.server, row.client)}:${row.name}`, row]));
-  const rowsByLane = new Map();
-  for (const row of rows) {
-    const laneKey = sourceKey(row.server, row.client);
-    const laneRows = rowsByLane.get(laneKey) || [];
-    laneRows.push(row);
-    rowsByLane.set(laneKey, laneRows);
-  }
   const lanes = [...sources].sort((left, right) => {
     const leftKey = laneSortKey(left);
     const rightKey = laneSortKey(right);
@@ -191,7 +204,8 @@ function renderMatrix() {
   const headRow = document.createElement("tr");
   const rowHeader = document.createElement("th");
   rowHeader.className = "row-status-column";
-  rowHeader.textContent = "Row";
+  rowHeader.title = "Overall result across every testcase in this row";
+  rowHeader.textContent = "All";
   headRow.append(rowHeader);
   const clientHeader = document.createElement("th");
   clientHeader.className = "corner";
@@ -226,7 +240,7 @@ function renderMatrix() {
       const laneKey = sourceKey(source.server, source.client);
       const rowStatusCell = document.createElement("td");
       rowStatusCell.className = "row-status-column";
-      const rowStatus = rowResult(rowsByLane.get(laneKey) || []);
+      const rowStatus = rowResultForTests(laneKey, tests, rowByLaneAndTest);
       const rowStatusPill = document.createElement("span");
       rowStatusPill.className = `test-cell row-status ${resultClass(rowStatus)}`;
       rowStatusPill.textContent = resultToken(rowStatus);

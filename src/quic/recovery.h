@@ -31,6 +31,7 @@ inline constexpr std::uint64_t kPacketThreshold = 3;
 inline constexpr double kTimeThreshold = 9.0 / 8.0;
 inline constexpr QuicCoreDuration kGranularity{1000};
 inline constexpr QuicCoreDuration kInitialRtt{333000};
+inline constexpr std::size_t kMaxTrackedAckRanges = 64;
 
 struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     std::uint64_t packet_number = 0;
@@ -115,6 +116,7 @@ struct DeadlineTrackedPacketLess {
 class ReceivedPacketHistory {
   public:
     bool contains(std::uint64_t packet_number) const;
+    bool should_ignore(std::uint64_t packet_number) const;
     void record_received(std::uint64_t packet_number, bool ack_eliciting,
                          QuicCoreTimePoint received_time,
                          QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable,
@@ -148,6 +150,8 @@ class ReceivedPacketHistory {
     };
 
     std::map<std::uint64_t, ReceivedPacketRange> ranges_;
+    void trim_old_ack_ranges();
+    std::uint64_t least_untracked_packet_number_ = 0;
     bool ack_pending_ = false;
     bool immediate_ack_requested_ = false;
     std::uint64_t ack_eliciting_packets_since_last_ack_ = 0;

@@ -81,12 +81,10 @@ TEST(QuicCoreTest, BlockedStreamResumesWhenPeerMaxStreamDataArrives) {
               (coquic::quic::test::StreamPayload{0, "abcd", false}));
 
     ASSERT_TRUE(coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
-        *client.connection_,
-        {coquic::quic::MaxStreamDataFrame{
-            .stream_id = 0,
-            .maximum_stream_data = 6,
-        }},
-        /*packet_number=*/1));
+        *client.connection_, {coquic::quic::MaxStreamDataFrame{
+                                 .stream_id = 0,
+                                 .maximum_stream_data = 6,
+                             }}));
 
     const auto resumed =
         client.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(3));
@@ -123,11 +121,9 @@ TEST(QuicCoreTest, BlockedConnectionResumesWhenPeerMaxDataArrives) {
               (coquic::quic::test::StreamPayload{0, "abcd", false}));
 
     ASSERT_TRUE(coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
-        *client.connection_,
-        {coquic::quic::MaxDataFrame{
-            .maximum_data = 6,
-        }},
-        /*packet_number=*/1));
+        *client.connection_, {coquic::quic::MaxDataFrame{
+                                 .maximum_data = 6,
+                             }}));
 
     const auto resumed =
         client.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(3));

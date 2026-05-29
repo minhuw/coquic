@@ -2349,15 +2349,11 @@ make_stream_frame_views(std::span<const StreamFrameSendFragment> fragments) {
 std::size_t application_stream_frame_budget(
     std::size_t max_datagram_size, // NOLINT(bugprone-easily-swappable-parameters)
     std::size_t destination_connection_id_size) {
-    if (max_datagram_size < kMinimumInitialDatagramSize) {
-        return max_datagram_size;
-    }
-
     const auto packet_overhead = std::size_t{1} + destination_connection_id_size +
                                  kDefaultInitialPacketNumberLength +
                                  kOneRttPacketProtectionTagLength;
     if (max_datagram_size <= packet_overhead) {
-        return max_datagram_size;
+        return 0;
     }
     return max_datagram_size - packet_overhead;
 }
@@ -5308,16 +5304,14 @@ bool QuicConnection::has_sendable_datagram(QuicCoreTimePoint now, bool continue_
         note_not_sendable(&SendProfileCounters::has_sendable_no_stream_minimum);
         return false;
     }
-    const auto max_datagram_size = outbound_datagram_size_limit();
-    if (!congestion_controller_.can_send_ack_eliciting(max_datagram_size)) {
+    const auto pacing_bytes = application_stream_pacing_deadline_bytes(minimum_datagram_bytes);
+    if (!pacing_bytes.has_value()) {
         note_not_sendable(&SendProfileCounters::has_sendable_congestion);
         return false;
     }
-    const auto pacing_bytes =
-        continue_paced_burst ? std::optional<std::size_t>{}
-                             : application_stream_pacing_deadline_bytes(minimum_datagram_bytes);
-    const auto pacing_deadline =
-        congestion_controller_.next_send_time(pacing_bytes.value_or(max_datagram_size));
+    const auto pacing_deadline = continue_paced_burst
+                                     ? std::optional<QuicCoreTimePoint>{}
+                                     : congestion_controller_.next_send_time(*pacing_bytes);
     if (pacing_deadline.has_value() && now < *pacing_deadline) {
         note_not_sendable(&SendProfileCounters::has_sendable_pacing);
         return false;
@@ -7770,6 +7764,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     const std::string &ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
     bool suppress_pto_reset) {
     packet_space.recovery.rtt_state() = shared_recovery_rtt_state();
+    maybe_update_rtt_before_ack_loss_detection(packet_space, cursor, largest_acknowledged, now,
+                                               decoded_ack_delay, max_ack_delay_ms);
     auto ack_result = packet_space.recovery.apply_ack_received(cursor, largest_acknowledged, now);
     if (send_profile_enabled()) {
         ++send_profile_counters().ack_frames;
@@ -7942,33 +7938,10 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     }
 
     if (try_ack_simple_stream_fast_path(packet_space, ack_result, simple_stream_ack_sample_span,
-                                        acked_packet_span, now, decoded_ack_delay, ecn_counts,
-                                        max_ack_delay_ms, suppress_pto_reset)) {
+                                        acked_packet_span, now, ecn_counts, suppress_pto_reset)) {
         return CodecResult<bool>::success(true);
     }
 
-    if (ack_result.largest_acknowledged_was_newly_acked &&
-        ack_result.has_newly_acked_ack_eliciting) {
-        const auto largest_newly_acked_sent_time =
-            ack_result.largest_newly_acked_packet.has_value()
-                ? ack_result.largest_newly_acked_packet->sent_time
-                : now;
-        update_rtt(packet_space.recovery.rtt_state(), now,
-                   SentPacketRecord{.sent_time = largest_newly_acked_sent_time}, decoded_ack_delay,
-                   transport_parameter_milliseconds(max_ack_delay_ms));
-        recovery_rtt_state_ = packet_space.recovery.rtt_state();
-        synchronize_recovery_rtt_state();
-        if (send_profile_enabled()) {
-            auto &profile = send_profile_counters();
-            const auto &rtt = shared_recovery_rtt_state();
-            ++profile.rtt_samples;
-            record_latest_rtt_sample_for_profile(rtt, profile);
-            profile.smoothed_rtt_us_last = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(rtt.smoothed_rtt).count());
-            profile.rttvar_us_last = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(rtt.rttvar).count());
-        }
-    }
     const bool has_any_acked_packets = !acked_packets.empty() || !late_acked_packets.empty();
     for (const auto &packet : acked_packets) {
         note_pmtu_probe_acked(packet, now);
@@ -8069,6 +8042,35 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     }
     maybe_emit_qlog_recovery_metrics(now);
     return CodecResult<bool>::success(true);
+}
+
+void QuicConnection::maybe_update_rtt_before_ack_loss_detection(
+    PacketSpaceState &packet_space, AckRangeCursor cursor, std::uint64_t largest_acknowledged,
+    QuicCoreTimePoint now, std::chrono::microseconds decoded_ack_delay,
+    std::uint64_t max_ack_delay_ms) {
+    const auto *largest_packet =
+        packet_space.recovery.find_newly_ackable_packet(largest_acknowledged);
+    if (largest_packet == nullptr) {
+        return;
+    }
+    if (!packet_space.recovery.ack_ranges_include_newly_ackable_ack_eliciting_packet(cursor)) {
+        return;
+    }
+
+    update_rtt(packet_space.recovery.rtt_state(), now, *largest_packet, decoded_ack_delay,
+               transport_parameter_milliseconds(max_ack_delay_ms));
+    recovery_rtt_state_ = packet_space.recovery.rtt_state();
+    synchronize_recovery_rtt_state();
+    if (send_profile_enabled()) {
+        auto &profile = send_profile_counters();
+        const auto &rtt = shared_recovery_rtt_state();
+        ++profile.rtt_samples;
+        record_latest_rtt_sample_for_profile(rtt, profile);
+        profile.smoothed_rtt_us_last = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(rtt.smoothed_rtt).count());
+        profile.rttvar_us_last = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(rtt.rttvar).count());
+    }
 }
 
 void QuicConnection::track_sent_packet(PacketSpaceState &packet_space, SentPacketRecord packet) {
@@ -8397,8 +8399,7 @@ bool QuicConnection::try_ack_simple_stream_fast_path(
     PacketSpaceState &packet_space, const AckApplyResult &ack_result,
     std::span<const AckedStreamPacketSample> simple_stream_ack_samples,
     std::span<const SentPacketRecord> acked_packets, QuicCoreTimePoint now,
-    std::chrono::microseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
-    std::uint64_t max_ack_delay_ms, bool suppress_pto_reset) {
+    const std::optional<AckEcnCounts> &ecn_counts, bool suppress_pto_reset) {
     if (!can_use_simple_stream_ack_fast_path(acked_packets,
                                              !ack_result.late_acked_packets.empty()) ||
         simple_stream_ack_samples.empty() || !ack_result.lost_packets.empty()) {
@@ -8410,29 +8411,6 @@ bool QuicConnection::try_ack_simple_stream_fast_path(
         !process_simple_stream_ack_ecn(packet_space, simple_stream_ack_samples, ecn_counts,
                                        latest_ecn_ce_sent_time)) {
         return false;
-    }
-
-    if (ack_result.largest_acknowledged_was_newly_acked &&
-        ack_result.has_newly_acked_ack_eliciting) {
-        const auto largest_newly_acked_sent_time =
-            ack_result.largest_newly_acked_packet.has_value()
-                ? ack_result.largest_newly_acked_packet->sent_time
-                : now;
-        update_rtt(packet_space.recovery.rtt_state(), now,
-                   SentPacketRecord{.sent_time = largest_newly_acked_sent_time}, decoded_ack_delay,
-                   transport_parameter_milliseconds(max_ack_delay_ms));
-        recovery_rtt_state_ = packet_space.recovery.rtt_state();
-        synchronize_recovery_rtt_state();
-        if (send_profile_enabled()) {
-            auto &profile = send_profile_counters();
-            const auto &rtt = shared_recovery_rtt_state();
-            ++profile.rtt_samples;
-            record_latest_rtt_sample_for_profile(rtt, profile);
-            profile.smoothed_rtt_us_last = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(rtt.smoothed_rtt).count());
-            profile.rttvar_us_last = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(rtt.rttvar).count());
-        }
     }
 
     const auto &shared_rtt_state = shared_recovery_rtt_state();
@@ -11275,19 +11253,26 @@ std::optional<std::size_t> QuicConnection::application_stream_pacing_deadline_by
     }
 
     const auto max_datagram_size = outbound_datagram_size_limit();
-    if (max_datagram_size == 0 ||
-        !congestion_controller_.can_send_ack_eliciting(max_datagram_size)) {
+    if (max_datagram_size == 0) {
         return std::nullopt;
     }
 
-    const auto congestion_window = congestion_controller_.congestion_window();
+    const auto congestion_window = congestion_controller_.send_window();
     const auto bytes_in_flight = congestion_controller_.bytes_in_flight();
     if (bytes_in_flight >= congestion_window) {
         return std::nullopt;
     }
     const auto congestion_window_available = congestion_window - bytes_in_flight;
-    if (congestion_window_available < max_datagram_size) {
+    if (congestion_window_available < *minimum_datagram_bytes) {
         return std::nullopt;
+    }
+    const auto congestion_limited_datagram_size =
+        std::min(max_datagram_size, congestion_window_available);
+    if (!congestion_controller_.can_send_ack_eliciting(congestion_limited_datagram_size)) {
+        return std::nullopt;
+    }
+    if (congestion_limited_datagram_size < max_datagram_size) {
+        return congestion_limited_datagram_size;
     }
 
     const auto send_quantum = congestion_controller_.pacing_send_quantum();
@@ -14823,19 +14808,24 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     return fail_datagram_send(!pending_tracked_packets.empty());
                 }
                 maybe_queue_ack_only_path_validation_packet(path_validation_frames, [&] {
+                    const bool path_validation_ack_eliciting =
+                        path_validation_frames.response.has_value() ||
+                        path_validation_frames.challenge.has_value();
                     queue_tracked_packet(
                         application_space_,
                         SentPacketRecord{
                             .packet_number = *packet_number,
                             .sent_time = now,
-                            .ack_eliciting = true,
-                            .in_flight = true,
+                            .ack_eliciting = path_validation_ack_eliciting,
+                            .in_flight = path_validation_ack_eliciting,
                             .bytes_in_flight = ack_only_datagram.value().bytes.size(),
                             .path_id = selected_send_path_id.value_or(0),
                             .ecn = outbound_ecn_codepoint_for_path(selected_send_path_id),
                         },
                         ack_only_datagram.value().packet_metadata.back().length);
-                    note_idle_ack_eliciting_send(now);
+                    if (path_validation_ack_eliciting) {
+                        note_idle_ack_eliciting_send(now);
+                    }
                 });
                 application_space_.received_packets.on_ack_sent();
                 application_space_.pending_ack_deadline = std::nullopt;
@@ -14882,7 +14872,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     send_application_close_only) {
                     return max_outbound_datagram_size;
                 }
-                const auto cwnd = congestion_controller_.congestion_window();
+                const auto cwnd = congestion_controller_.send_window();
                 const auto bytes_in_flight = congestion_controller_.bytes_in_flight();
                 if (bytes_in_flight >= cwnd) {
                     return std::size_t{0};
@@ -15244,6 +15234,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 [&](const std::optional<OutboundAckHeader> &ack_frame,
                     CodecResult<SerializedProtectedDatagram> &datagram,
                     std::vector<StreamFrameSendFragment> &fragments) -> bool {
+                if (!datagram.has_value()) {
+                    return false;
+                }
                 while (datagram.value().bytes.size() > max_outbound_datagram_size &&
                        !fragments.empty()) {
                     candidate_matches_admitted_preflight = false;
@@ -16509,9 +16502,11 @@ bool connection_helper_edge_cases_for_tests() {
                                                  /*wire_budget=*/32) > 0;
     const bool application_stream_budget_handles_small_and_oversized_connection_ids =
         application_stream_frame_budget(/*max_datagram_size=*/1199,
-                                        /*destination_connection_id_size=*/8) == 1199 &&
+                                        /*destination_connection_id_size=*/8) == 1172 &&
         application_stream_frame_budget(/*max_datagram_size=*/1200,
-                                        /*destination_connection_id_size=*/1200) == 1200 &&
+                                        /*destination_connection_id_size=*/1200) == 0 &&
+        application_stream_frame_budget(/*max_datagram_size=*/26,
+                                        /*destination_connection_id_size=*/8) == 0 &&
         application_stream_frame_budget(/*max_datagram_size=*/1400,
                                         /*destination_connection_id_size=*/8) == 1373;
 

@@ -110,6 +110,7 @@ class QuicCongestionController {
     void reset_for_new_path();
 
     std::size_t congestion_window() const;
+    std::size_t send_window() const;
     std::size_t bytes_in_flight() const;
     std::size_t minimum_window() const;
     bool would_underutilize_congestion_window(std::size_t bytes_sent) const;

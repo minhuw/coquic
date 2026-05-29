@@ -912,6 +912,35 @@ const SentPacketRecord *PacketSpaceRecovery::find_packet(std::uint64_t packet_nu
     return slot == nullptr ? nullptr : &slot->packet;
 }
 
+const SentPacketRecord *
+PacketSpaceRecovery::find_newly_ackable_packet(std::uint64_t packet_number) const {
+    const auto *slot = outstanding_slot_for_packet_number(packet_number);
+    if (slot == nullptr || slot->state != LedgerSlotState::sent) {
+        return nullptr;
+    }
+    return &slot->packet;
+}
+
+bool PacketSpaceRecovery::ack_ranges_include_newly_ackable_ack_eliciting_packet(
+    AckRangeCursor cursor) const {
+    while (const auto range = next_ack_range(cursor)) {
+        auto current_live_slot = newest_live_slot_at_or_below(range->largest);
+        while (current_live_slot != kInvalidLedgerSlotIndex) {
+            const auto &slot = slots_[current_live_slot];
+            if (slot.packet.packet_number < range->smallest) {
+                break;
+            }
+            if (slot.packet.packet_number <= range->largest &&
+                slot.state == LedgerSlotState::sent && !slot.acknowledged &&
+                slot.packet.ack_eliciting) {
+                return true;
+            }
+            current_live_slot = previous_live_slot(current_live_slot);
+        }
+    }
+    return false;
+}
+
 std::vector<RecoveryPacketHandle> PacketSpaceRecovery::tracked_packets() const {
     std::vector<RecoveryPacketHandle> packets;
     packets.reserve(tracked_packet_count());

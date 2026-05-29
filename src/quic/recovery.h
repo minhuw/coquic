@@ -299,6 +299,8 @@ class PacketSpaceRecovery {
     const SentPacketRecord *packet_for_handle(RecoveryPacketHandle handle) const;
     SentPacketRecord *find_packet(std::uint64_t packet_number);
     const SentPacketRecord *find_packet(std::uint64_t packet_number) const;
+    const SentPacketRecord *find_newly_ackable_packet(std::uint64_t packet_number) const;
+    bool ack_ranges_include_newly_ackable_ack_eliciting_packet(AckRangeCursor cursor) const;
     std::vector<RecoveryPacketHandle> tracked_packets() const;
     std::size_t tracked_packet_count() const;
     std::optional<RecoveryPacketHandle> oldest_tracked_packet() const;

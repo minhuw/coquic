@@ -233,6 +233,19 @@ std::size_t QuicCongestionController::congestion_window() const {
     return test_metric(/*congestion_window=*/true);
 }
 
+std::size_t QuicCongestionController::send_window() const {
+    return std::visit(
+        [](const auto &controller) {
+            using Controller = std::decay_t<decltype(controller)>;
+            if constexpr (std::is_same_v<Controller, NewRenoCongestionController>) {
+                return controller.send_window();
+            } else {
+                return controller.congestion_window_;
+            }
+        },
+        storage_);
+}
+
 std::size_t QuicCongestionController::bytes_in_flight() const {
     return test_metric(/*congestion_window=*/false);
 }

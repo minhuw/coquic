@@ -662,6 +662,12 @@ class QuicConnection {
         std::chrono::microseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
         const std::string &ack_ranges, QuicCoreTimePoint now, std::uint64_t max_ack_delay_ms,
         bool suppress_pto_reset);
+    void maybe_update_rtt_before_ack_loss_detection(PacketSpaceState &packet_space,
+                                                    AckRangeCursor cursor,
+                                                    std::uint64_t largest_acknowledged,
+                                                    QuicCoreTimePoint now,
+                                                    std::chrono::microseconds decoded_ack_delay,
+                                                    std::uint64_t max_ack_delay_ms);
     void reset_recovery_for_new_path(QuicPathId path_id);
     void track_sent_packet(PacketSpaceState &packet_space, SentPacketRecord packet);
     bool try_retire_simple_stream_acked_packet(
@@ -679,8 +685,7 @@ class QuicConnection {
         PacketSpaceState &packet_space, const AckApplyResult &ack_result,
         std::span<const AckedStreamPacketSample> simple_stream_ack_samples,
         std::span<const SentPacketRecord> acked_packets, QuicCoreTimePoint now,
-        std::chrono::microseconds decoded_ack_delay, const std::optional<AckEcnCounts> &ecn_counts,
-        std::uint64_t max_ack_delay_ms, bool suppress_pto_reset);
+        const std::optional<AckEcnCounts> &ecn_counts, bool suppress_pto_reset);
     bool process_simple_stream_ack_ecn(
         PacketSpaceState &packet_space,
         std::span<const AckedStreamPacketSample> simple_stream_ack_samples,

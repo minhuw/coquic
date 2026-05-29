@@ -18,7 +18,6 @@ constexpr QuicCoreDuration kHyStartMinRttThreshold{4000};
 constexpr QuicCoreDuration kHyStartMaxRttThreshold{16000};
 constexpr std::uint8_t kHyStartMinRttDivisor = 8;
 constexpr QuicCoreDuration kQuinnPacingBurstInterval{2000};
-constexpr std::size_t kQuinnPacingMinimumBurstPackets = 10;
 constexpr std::size_t kQuinnPacingMaximumBurstPackets = 256;
 
 } // namespace
@@ -122,6 +121,10 @@ bool HyStartPlusPlus::should_exit_slow_start() const {
 
 bool HyStartPlusPlus::in_conservative_slow_start() const {
     return enabled_ && mode_ == Mode::conservative_slow_start;
+}
+
+std::optional<std::uint64_t> HyStartPlusPlus::latest_sent_sequence() const {
+    return latest_sent_sequence_;
 }
 
 void HyStartPlusPlus::ensure_round_started(std::uint64_t largest_acked_send_sequence) {
@@ -306,12 +309,16 @@ std::size_t congestion_pacing_replenished_bytes(QuicCoreClock::duration elapsed,
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 std::size_t congestion_quinn_pacing_budget_cap(std::size_t congestion_window,
                                                std::size_t max_datagram_size,
-                                               QuicCoreDuration smoothed_rtt) {
+                                               QuicCoreDuration smoothed_rtt,
+                                               std::size_t minimum_burst_packets) {
     if (max_datagram_size == 0) {
         return 0;
     }
 
-    const auto minimum = kQuinnPacingMinimumBurstPackets * max_datagram_size;
+    const auto minimum =
+        minimum_burst_packets > std::numeric_limits<std::size_t>::max() / max_datagram_size
+            ? std::numeric_limits<std::size_t>::max()
+            : minimum_burst_packets * max_datagram_size;
     const auto maximum = kQuinnPacingMaximumBurstPackets * max_datagram_size;
     if (congestion_window == 0 || smoothed_rtt.count() <= 0) {
         return maximum;

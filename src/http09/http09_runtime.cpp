@@ -345,26 +345,6 @@ constexpr QuicHttp09Testcase transfer_semantics_testcase(QuicHttp09Testcase test
     return testcase;
 }
 
-bool http09_enable_hystart_plus_plus(const Http09RuntimeConfig &config) {
-    if (transfer_semantics_testcase(config.testcase) != QuicHttp09Testcase::transfer) {
-        return true;
-    }
-    if (!config.congestion_control_explicit) {
-        return true;
-    }
-    return config.congestion_control != quic::QuicCongestionControlAlgorithm::newreno &&
-           config.congestion_control != quic::QuicCongestionControlAlgorithm::cubic;
-}
-
-quic::QuicCongestionControlAlgorithm
-http09_congestion_control_algorithm(const Http09RuntimeConfig &config) {
-    if (!config.congestion_control_explicit &&
-        transfer_semantics_testcase(config.testcase) == QuicHttp09Testcase::transfer) {
-        return quic::QuicCongestionControlAlgorithm::bbr;
-    }
-    return config.congestion_control;
-}
-
 bool apply_testcase_name(Http09RuntimeConfig &config, std::string_view value) {
     if (value == "retry") {
         config.testcase = QuicHttp09Testcase::handshake;
@@ -669,8 +649,7 @@ QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeC
     if (config.qlog_directory.has_value()) {
         core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
     }
-    core.transport.congestion_control = http09_congestion_control_algorithm(config);
-    core.transport.enable_hystart_plus_plus = http09_enable_hystart_plus_plus(config);
+    core.transport.congestion_control = config.congestion_control;
     configure_runtime_datagram_profile(core.transport);
     core.tls_keylog_path = config.tls_keylog_path;
     core.transport.preferred_address = runtime_preferred_address_for_server(config);
@@ -10203,7 +10182,6 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
             return std::nullopt;
         }
         config.congestion_control = *parsed;
-        config.congestion_control_explicit = true;
     }
     if (env_flag_enabled("RETRY")) {
         config.retry_enabled = true;
@@ -10284,7 +10262,6 @@ std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **ar
                 return std::nullopt;
             }
             config.congestion_control = *parsed;
-            config.congestion_control_explicit = true;
             continue;
         }
         if (arg == "--testcase") {
@@ -10356,8 +10333,7 @@ QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config)
     if (config.qlog_directory.has_value()) {
         core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
     }
-    core.transport.congestion_control = http09_congestion_control_algorithm(config);
-    core.transport.enable_hystart_plus_plus = http09_enable_hystart_plus_plus(config);
+    core.transport.congestion_control = config.congestion_control;
     configure_runtime_datagram_profile(core.transport);
     core.tls_keylog_path = config.tls_keylog_path;
     return core;

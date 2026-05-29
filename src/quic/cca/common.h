@@ -30,6 +30,7 @@ class HyStartPlusPlus {
 
     bool should_exit_slow_start() const;
     bool in_conservative_slow_start() const;
+    std::optional<std::uint64_t> latest_sent_sequence() const;
 
   private:
     void ensure_round_started(std::uint64_t largest_acked_send_sequence);
@@ -71,6 +72,7 @@ std::size_t congestion_pacing_replenished_bytes(QuicCoreClock::duration elapsed,
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 std::size_t congestion_quinn_pacing_budget_cap(std::size_t congestion_window,
                                                std::size_t max_datagram_size,
-                                               QuicCoreDuration smoothed_rtt);
+                                               QuicCoreDuration smoothed_rtt,
+                                               std::size_t minimum_burst_packets = 10);
 
 } // namespace coquic::quic

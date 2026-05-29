@@ -36,6 +36,7 @@ std::unique_ptr<IoUringBackend> IoUringBackend::create(QuicUdpBackendConfig conf
     if (engine == nullptr) {
         return nullptr;
     }
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks)
     return std::unique_ptr<IoUringBackend>(
         new IoUringBackend(std::move(config), std::move(engine)));
 }

@@ -123,6 +123,7 @@ IoUringIoEngine::~IoUringIoEngine() {
 }
 
 std::unique_ptr<IoUringIoEngine> IoUringIoEngine::create() {
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks)
     auto engine = std::unique_ptr<IoUringIoEngine>(new IoUringIoEngine());
     if (!engine->initialize()) {
         return nullptr;

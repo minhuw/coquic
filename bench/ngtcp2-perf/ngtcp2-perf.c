@@ -140,6 +140,7 @@ struct perf_conn {
     socklen_t remote_addrlen;
     SSL_CTX *ssl_ctx;
     SSL *ssl;
+    ngtcp2_crypto_ossl_ctx *ssl_native_ctx;
     ngtcp2_conn *conn;
     ngtcp2_crypto_conn_ref conn_ref;
     ngtcp2_ccerr last_error;
@@ -837,6 +838,10 @@ static int init_client_quic(perf_conn_t *pc) {
     pc->conn_ref.get_conn = get_conn_from_ref;
     pc->conn_ref.user_data = pc;
     SSL_set_app_data(pc->ssl, &pc->conn_ref);
+    if (ngtcp2_crypto_ossl_ctx_new(&pc->ssl_native_ctx, pc->ssl) != 0) {
+        set_failure(pc, "ngtcp2_crypto_ossl_ctx_new failed");
+        return -1;
+    }
     if (ngtcp2_crypto_ossl_configure_client_session(pc->ssl) != 0) {
         set_failure(pc, "ngtcp2_crypto_ossl_configure_client_session failed");
         return -1;
@@ -877,7 +882,7 @@ static int init_client_quic(perf_conn_t *pc) {
         set_failure_liberr(pc, "ngtcp2_conn_client_new", rv);
         return -1;
     }
-    ngtcp2_conn_set_tls_native_handle(pc->conn, pc->ssl);
+    ngtcp2_conn_set_tls_native_handle(pc->conn, pc->ssl_native_ctx);
     return 0;
 }
 
@@ -895,6 +900,10 @@ static int init_server_conn(perf_conn_t *pc, SSL_CTX *ssl_ctx, const ngtcp2_pkt_
     pc->conn_ref.get_conn = get_conn_from_ref;
     pc->conn_ref.user_data = pc;
     SSL_set_app_data(pc->ssl, &pc->conn_ref);
+    if (ngtcp2_crypto_ossl_ctx_new(&pc->ssl_native_ctx, pc->ssl) != 0) {
+        set_failure(pc, "ngtcp2_crypto_ossl_ctx_new failed");
+        return -1;
+    }
     if (ngtcp2_crypto_ossl_configure_server_session(pc->ssl) != 0) {
         set_failure(pc, "ngtcp2_crypto_ossl_configure_server_session failed");
         return -1;
@@ -939,7 +948,7 @@ static int init_server_conn(perf_conn_t *pc, SSL_CTX *ssl_ctx, const ngtcp2_pkt_
         set_failure_liberr(pc, "ngtcp2_conn_server_new", rv);
         return -1;
     }
-    ngtcp2_conn_set_tls_native_handle(pc->conn, pc->ssl);
+    ngtcp2_conn_set_tls_native_handle(pc->conn, pc->ssl_native_ctx);
     return 0;
 }
 
@@ -959,7 +968,11 @@ static void free_conn(perf_conn_t *pc, int free_ssl_ctx) {
         ngtcp2_conn_del(pc->conn);
     }
     if (pc->ssl) {
+        SSL_set_app_data(pc->ssl, NULL);
         SSL_free(pc->ssl);
+    }
+    if (pc->ssl_native_ctx) {
+        ngtcp2_crypto_ossl_ctx_del(pc->ssl_native_ctx);
     }
     if (free_ssl_ctx && pc->ssl_ctx) {
         SSL_CTX_free(pc->ssl_ctx);

@@ -592,17 +592,18 @@
         ];
         buildPhase = ''
           runHook preBuild
-          cmake --build . --target ngtcp2 ngtcp2_crypto_quictls
+          source_root="$(pwd)/.."
+          cmake --build . --target ngtcp2 ngtcp2_crypto_ossl
           $CC \
             -O2 \
-            -I$src/lib/includes \
+            -I"$source_root/lib/includes" \
             -Ilib/includes \
-            -I$src/crypto/includes \
+            -I"$source_root/crypto/includes" \
             -I${ngtcp2TlsPackage.dev}/include \
             -o ngtcp2-perf \
             "$perfSource" \
             lib/libngtcp2.so \
-            crypto/quictls/libngtcp2_crypto_quictls.so \
+            crypto/ossl/libngtcp2_crypto_ossl.so \
             -L${ngtcp2TlsPackage.out}/lib \
             -Wl,-rpath,$out/lib \
             -Wl,-rpath,${
@@ -623,7 +624,7 @@
         installPhase = ''
           runHook preInstall
           mkdir -p $out/bin $out/lib
-          cp lib/libngtcp2.so* crypto/quictls/libngtcp2_crypto_quictls.so* $out/lib/
+          cp lib/libngtcp2.so* crypto/ossl/libngtcp2_crypto_ossl.so* $out/lib/
           ngtcp2_rpath="${
             lib.makeLibraryPath [
               pkgs.brotli.lib
@@ -660,7 +661,7 @@
           pkgs.perl
         ];
         buildInputs = [
-          pkgs.boringssl
+          boringssl
           pkgs.libevent
           pkgs.zlib
         ];
@@ -669,10 +670,10 @@
           "-DLSQUIC_LIBSSL=BORINGSSL"
           "-DLSQUIC_BIN=ON"
           "-DLSQUIC_TESTS=OFF"
-          "-DLIBSSL_DIR=${pkgs.boringssl}"
-          "-DSSLLIB_INCLUDE=${pkgs.boringssl.dev}/include"
-          "-DLIBSSL_LIB_ssl=${pkgs.boringssl}/lib/libssl.a"
-          "-DLIBSSL_LIB_crypto=${pkgs.boringssl}/lib/libcrypto.a"
+          "-DLIBSSL_DIR=${boringssl}"
+          "-DSSLLIB_INCLUDE=${boringssl.dev}/include"
+          "-DLIBSSL_LIB_ssl=${boringssl}/lib/libssl.a"
+          "-DLIBSSL_LIB_crypto=${boringssl}/lib/libcrypto.a"
           "-DZLIB_INCLUDE_DIR=${pkgs.zlib.dev}/include"
           "-DZLIB_LIB=${pkgs.zlib.static}/lib/libz.a"
           "-DEVENT_INCLUDE_DIR=${pkgs.libevent.dev}/include"
@@ -694,8 +695,8 @@
             "$src/bin/test_cert.c" \
             -o lsquic-perf \
             src/liblsquic/liblsquic.a \
-            ${pkgs.boringssl}/lib/libssl.a \
-            ${pkgs.boringssl}/lib/libcrypto.a \
+            ${boringssl}/lib/libssl.a \
+            ${boringssl}/lib/libcrypto.a \
             ${pkgs.zlib.static}/lib/libz.a \
             ${pkgs.libevent}/lib/libevent.so \
             -lstdc++ -lpthread -lm
@@ -720,7 +721,10 @@
         pname = "neqo-perf-client";
         version = "0.8.1";
         src = neqoSrc;
-        cargoLock.lockFile = ./bench/neqo-perf/Cargo.lock;
+        cargoHash = "sha256-kQXdySfcSqy92Y8hI8jnnJm0m5qT4or4tozNd+qqSLE=";
+        depsExtraArgs.postPatch = ''
+          cp ${./bench/neqo-perf/Cargo.lock} Cargo.lock
+        '';
         buildAndTestSubdir = "neqo-bin";
         perfSource = ./bench/neqo-perf/neqo-perf.rs;
         nativeBuildInputs = [
@@ -852,11 +856,17 @@ EOF
           libmsquicForMsquicPerf
         ];
         postPatch = ''
-          substituteInPlace "$cargoDepsCopy/msquic-async-0.4.1/Cargo.toml" \
+          msquic_async_toml="$(find "$cargoDepsCopy" -path '*/msquic-async-0.4.1/Cargo.toml' -print -quit)"
+          msquic_build_rs="$(find "$cargoDepsCopy" -path '*/msquic-2.5.1-beta/scripts/build.rs' -print -quit)"
+          if [ -z "$msquic_async_toml" ] || [ -z "$msquic_build_rs" ]; then
+            echo "unable to locate vendored msquic crates under $cargoDepsCopy" >&2
+            exit 1
+          fi
+          substituteInPlace "$msquic_async_toml" \
             --replace-fail 'msquic-2-5-static = ["msquic-v2-5/static"]' 'msquic-2-5-static = ["msquic-v2-5"]' \
             --replace-fail 'features = ["preview-api"]' 'features = ["preview-api", "find"]' \
             --replace-fail 'version = "2.5.1-beta"' $'version = "2.5.1-beta"\ndefault-features = false'
-          substituteInPlace "$cargoDepsCopy/msquic-2.5.1-beta/scripts/build.rs" \
+          substituteInPlace "$msquic_build_rs" \
             --replace-fail 'let installed_dir = "/usr/lib/x86_64-linux-gnu";' 'let installed_dir = "${libmsquicForMsquicPerf}/lib";'
         '';
       };
@@ -994,7 +1004,7 @@ EOF
           "//quiche:google_quiche_perf"
         ];
         fetchAttrs = {
-          hash = "sha256-2p2vy5FHFg8rRw+2ctOBZOmGicC3Bi5l2frfEuA/FRM=";
+          hash = "sha256-mtmpOCIKjgNRVC+GPMRBc0iGG/U/aNQWsou1TrpLSb4=";
           postPatch = ''
             substituteInPlace .bazelversion --replace-fail '8.2.1' '7.6.0'
             echo "common --repository_cache=\"$bazelOut/external/repository_cache\"" >> .bazelrc
@@ -1075,7 +1085,10 @@ EOF
         version = "dev";
         src = tquicSrc;
         buildAndTestSubdir = "tools";
-        cargoLock.lockFile = ./bench/tquic-perf/Cargo.lock;
+        cargoHash = "sha256-e/qD3z69GzAYGkD5SZwExU828cwaQJuZbXTN5ApkD9I=";
+        depsExtraArgs.postPatch = ''
+          cp ${./bench/tquic-perf/Cargo.lock} Cargo.lock
+        '';
         perfSource = ./bench/tquic-perf/tquic-perf.rs;
         nativeBuildInputs = [
           pkgs.cmake
@@ -1084,9 +1097,9 @@ EOF
           pkgs.perl
         ];
         buildInputs = [
-          pkgs.boringssl
+          boringssl
         ];
-        BORINGSSL_LIB_DIR = "${pkgs.boringssl}/lib";
+        BORINGSSL_LIB_DIR = "${boringssl}/lib";
         RUSTFLAGS = "-C link-arg=-lstdc++";
         dontUseNinjaBuild = true;
         dontUseNinjaInstall = true;
@@ -1119,14 +1132,14 @@ EOF
           pkgs.pkg-config
         ];
         buildInputs = [
-          pkgs.boringssl
+          boringssl
         ];
         CFLAGS = "-Wno-error=dangling-pointer";
         cmakeFlags = [
           "-DSSL_TYPE=boringssl"
-          "-DSSL_PATH=${pkgs.boringssl.dev}"
-          "-DSSL_INC_PATH=${pkgs.boringssl.dev}/include"
-          "-DSSL_LIB_PATH=${pkgs.boringssl.out}/lib/libssl.a;${pkgs.boringssl.out}/lib/libcrypto.a"
+          "-DSSL_PATH=${boringssl.dev}"
+          "-DSSL_INC_PATH=${boringssl.dev}/include"
+          "-DSSL_LIB_PATH=${boringssl.out}/lib/libssl.a;${boringssl.out}/lib/libcrypto.a"
           "-DXQC_ENABLE_RENO=ON"
           "-DXQC_ENABLE_COPA=ON"
         ];
@@ -1137,8 +1150,8 @@ EOF
             -I$src/include \
             -o xquic-perf \
             libxquic-static.a \
-            ${pkgs.boringssl.out}/lib/libssl.a \
-            ${pkgs.boringssl.out}/lib/libcrypto.a \
+            ${boringssl.out}/lib/libssl.a \
+            ${boringssl.out}/lib/libcrypto.a \
             -ldl -lpthread -lm
           runHook postBuild
         '';

@@ -32,6 +32,7 @@
 #include <fizz/client/FizzClientContext.h>
 #include <fizz/protocol/CertificateVerifier.h>
 #include <fizz/server/CertManager.h>
+#include <fizz/server/DefaultCertManager.h>
 #include <fizz/server/FizzServerContext.h>
 #include <folly/FileUtil.h>
 #include <folly/io/IOBuf.h>
@@ -308,7 +309,7 @@ std::shared_ptr<fizz::server::FizzServerContext> makeServerCtx(const Config &cfg
         throw std::runtime_error("failed to read private key");
     }
     auto cert = fizz::openssl::CertUtils::makeSelfCert(certData, keyData);
-    auto certManager = std::make_shared<fizz::server::CertManager>();
+    auto certManager = std::make_shared<fizz::server::DefaultCertManager>();
     certManager->addCertAndSetDefault(std::move(cert));
     auto serverCtx = std::make_shared<fizz::server::FizzServerContext>();
     serverCtx->setFactory(std::make_shared<quic::QuicFizzFactory>());
@@ -549,7 +550,7 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
                 return;
             }
             auto &state = streams_[id];
-            quic::Buf data = std::move(readData->first);
+            quic::BufPtr data = std::move(readData->first);
             bool eof = readData->second;
             if (data) {
                 auto range = data->coalesce();
@@ -575,7 +576,7 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
             if (eof) {
                 state.requestFin = true;
                 writeResponse(id, state);
-                auto cb = sock_->setReadCallback(id, nullptr, quic::none);
+                auto cb = sock_->setReadCallback(id, nullptr);
                 if (cb.hasError()) {
                     std::cerr << "mvfst server unset read callback failed\n";
                 }
@@ -781,7 +782,7 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
             client->setConnectionSetupCallback(nullptr);
             client->setConnectionCallback(nullptr);
             for (auto id : streams) {
-                client->setReadCallback(id, nullptr, quic::none);
+                client->setReadCallback(id, nullptr);
                 client->unregisterStreamWriteCallback(id);
             }
             client->closeNow(quic::Optional<quic::QuicError>());
@@ -886,7 +887,7 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
             if (readData.hasError()) {
                 return;
             }
-            quic::Buf data = std::move(readData->first);
+            quic::BufPtr data = std::move(readData->first);
             bool eof = readData->second;
             CompletedStream completed;
             bool done = false;
@@ -914,7 +915,7 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                 }
             }
             if (done) {
-                auto cb = client_->setReadCallback(id, nullptr, quic::none);
+                auto cb = client_->setReadCallback(id, nullptr);
                 if (cb.hasError()) {
                     setError("mvfst unset read callback failed");
                 }

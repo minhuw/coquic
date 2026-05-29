@@ -22,7 +22,7 @@
 
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
-#include <ngtcp2/ngtcp2_crypto_quictls.h>
+#include <ngtcp2/ngtcp2_crypto_ossl.h>
 
 #define APPLICATION_PROTOCOL "coquic-perf/1"
 #define APPLICATION_PROTOCOL_WIRE "\x0d" APPLICATION_PROTOCOL
@@ -594,10 +594,6 @@ static SSL_CTX *make_client_ssl_ctx(const config_t *cfg) {
     if (!ctx) {
         return NULL;
     }
-    if (ngtcp2_crypto_quictls_configure_client_context(ctx) != 0) {
-        SSL_CTX_free(ctx);
-        return NULL;
-    }
     if (cfg->verify_peer) {
         SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
         SSL_CTX_load_verify_locations(ctx, cfg->certificate_chain, NULL);
@@ -610,10 +606,6 @@ static SSL_CTX *make_client_ssl_ctx(const config_t *cfg) {
 static SSL_CTX *make_server_ssl_ctx(const config_t *cfg) {
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx) {
-        return NULL;
-    }
-    if (ngtcp2_crypto_quictls_configure_server_context(ctx) != 0) {
-        SSL_CTX_free(ctx);
         return NULL;
     }
     if (SSL_CTX_use_PrivateKey_file(ctx, cfg->private_key, SSL_FILETYPE_PEM) != 1 ||
@@ -845,6 +837,10 @@ static int init_client_quic(perf_conn_t *pc) {
     pc->conn_ref.get_conn = get_conn_from_ref;
     pc->conn_ref.user_data = pc;
     SSL_set_app_data(pc->ssl, &pc->conn_ref);
+    if (ngtcp2_crypto_ossl_configure_client_session(pc->ssl) != 0) {
+        set_failure(pc, "ngtcp2_crypto_ossl_configure_client_session failed");
+        return -1;
+    }
     SSL_set_connect_state(pc->ssl);
     SSL_set_alpn_protos(pc->ssl, (const unsigned char *)APPLICATION_PROTOCOL_WIRE,
                         sizeof(APPLICATION_PROTOCOL_WIRE) - 1);
@@ -899,6 +895,10 @@ static int init_server_conn(perf_conn_t *pc, SSL_CTX *ssl_ctx, const ngtcp2_pkt_
     pc->conn_ref.get_conn = get_conn_from_ref;
     pc->conn_ref.user_data = pc;
     SSL_set_app_data(pc->ssl, &pc->conn_ref);
+    if (ngtcp2_crypto_ossl_configure_server_session(pc->ssl) != 0) {
+        set_failure(pc, "ngtcp2_crypto_ossl_configure_server_session failed");
+        return -1;
+    }
     SSL_set_accept_state(pc->ssl);
 
     memcpy(&pc->local_addr, local_addr, local_addrlen);
@@ -1660,8 +1660,8 @@ int main(int argc, char **argv) {
     parse_args(&cfg, argc, argv);
     validate_config(&cfg);
 
-    if (ngtcp2_crypto_quictls_init() != 0) {
-        fprintf(stderr, "ngtcp2_crypto_quictls_init failed\n");
+    if (ngtcp2_crypto_ossl_init() != 0) {
+        fprintf(stderr, "ngtcp2_crypto_ossl_init failed\n");
         return 1;
     }
 

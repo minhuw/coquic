@@ -657,7 +657,7 @@ grep -F -- 'perfSource = ./bench/ngtcp2-perf/ngtcp2-perf.c;' "${flake}" >/dev/nu
   exit 1
 }
 
-grep -F -- 'cmake --build . --target ngtcp2 ngtcp2_crypto_quictls' "${flake}" >/dev/null || {
+grep -F -- 'cmake --build . --target ngtcp2 ngtcp2_crypto_ossl' "${flake}" >/dev/null || {
   echo 'ngtcp2 perf client package must build ngtcp2 libraries' >&2
   exit 1
 }

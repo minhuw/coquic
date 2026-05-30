@@ -112,6 +112,21 @@ grep -F -- 'library_version="${PERF_LIBRARY_VERSION:-}"' "${script}" >/dev/null 
   exit 1
 }
 
+grep -F -- 'nix_build_attempts="${PERF_NIX_BUILD_ATTEMPTS:-3}"' "${script}" >/dev/null || {
+  echo 'missing Nix image build retry attempts default in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'nix_build_retry_delay_seconds="${PERF_NIX_BUILD_RETRY_DELAY_SECONDS:-10}"' "${script}" >/dev/null || {
+  echo 'missing Nix image build retry delay default in harness script' >&2
+  exit 1
+}
+
+grep -F -- 'build_perf_image()' "${script}" >/dev/null || {
+  echo 'missing perf image Nix build retry wrapper in harness script' >&2
+  exit 1
+}
+
 grep -F -- 'nix build --print-out-paths ".#${image_attr}"' "${script}" >/dev/null || {
   echo 'missing nix image build in harness script' >&2
   exit 1
@@ -877,6 +892,18 @@ set -euo pipefail
 log_path="${FAKE_PERF_LOG:?}"
 printf 'nix\t%s\n' "$*" >>"${log_path}"
 if [ "$1" = 'build' ] && [ "$2" = '--print-out-paths' ] && [ "$3" = '.#perf-image-quictls-musl' ]; then
+  if [ "${FAKE_NIX_FAIL_FIRST_IMAGE_BUILD:-0}" = 1 ]; then
+    counter_path="${FAKE_NIX_FAIL_COUNTER:?}"
+    counter=0
+    if [ -f "${counter_path}" ]; then
+      counter="$(cat "${counter_path}")"
+    fi
+    if [ "${counter}" -eq 0 ]; then
+      echo 1 >"${counter_path}"
+      echo 'fake transient nix image build failure' >&2
+      exit 42
+    fi
+  fi
   printf '%s\n' "${FAKE_PERF_IMAGE:?}"
   exit 0
 fi
@@ -1039,8 +1066,11 @@ PATH="${fake_bin_dir}:$PATH" \
 FAKE_PERF_LOG="${log_path}" \
 FAKE_PERF_IMAGE="${fake_image}" \
 FAKE_RESULTS_ROOT="${results_root}" \
+FAKE_NIX_FAIL_FIRST_IMAGE_BUILD=1 \
+FAKE_NIX_FAIL_COUNTER="${tmp_dir}/nix-fail-counter" \
 PERF_RESULTS_ROOT="${results_root}" \
 PERF_IMPLEMENTATIONS_JSON="${implementations_json}" \
+PERF_NIX_BUILD_RETRY_DELAY_SECONDS=0 \
 GITHUB_SHA=test-default-sha \
 bash "${script}" --preset smoke >/dev/null
 
@@ -1086,6 +1116,11 @@ grep -F -- $'nix\tbuild --print-out-paths .#perf-image-quictls-musl' "${log_path
   echo 'behavioral harness test did not use image nix build path' >&2
   exit 1
 }
+
+if [ "$(grep -Fc -- $'nix\tbuild --print-out-paths .#perf-image-quictls-musl' "${log_path}")" -ne 2 ]; then
+  echo 'behavioral harness test did not retry a transient image nix build failure' >&2
+  exit 1
+fi
 
 grep -F -- $'docker\tload -i '"${fake_image}" "${log_path}" >/dev/null || {
   echo 'behavioral harness test did not load Docker image' >&2

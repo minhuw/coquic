@@ -19,6 +19,8 @@ client_impl="${PERF_CLIENT_IMPL:-coquic}"
 server_impl="${PERF_SERVER_IMPL:-coquic}"
 implementations_manifest="${PERF_IMPLEMENTATIONS_JSON:-${repo_root}/bench/implementations.json}"
 library_version="${PERF_LIBRARY_VERSION:-}"
+nix_build_attempts="${PERF_NIX_BUILD_ATTEMPTS:-3}"
+nix_build_retry_delay_seconds="${PERF_NIX_BUILD_RETRY_DELAY_SECONDS:-10}"
 preset="smoke"
 network_name=''
 server_name=''
@@ -43,7 +45,25 @@ environment overrides:
   PERF_IMPLEMENTATIONS_JSON  implementation metadata JSON (default: bench/implementations.json)
   PERF_LIBRARY_VERSION       explicit implementation library version override
   PERF_DOCKER_ENV            space-separated NAME=value environment entries passed to both containers
+  PERF_NIX_BUILD_ATTEMPTS    attempts for the perf image nix build (default: 3)
+  PERF_NIX_BUILD_RETRY_DELAY_SECONDS
+                             delay before retrying a failed image build (default: 10)
 USAGE
+}
+
+build_perf_image() {
+  local attempt=1
+  while :; do
+    if nix build --print-out-paths ".#${image_attr}"; then
+      return 0
+    fi
+    if [ "${attempt}" -ge "${nix_build_attempts}" ]; then
+      return 1
+    fi
+    echo "nix build for .#${image_attr} failed; retrying in ${nix_build_retry_delay_seconds}s (${attempt}/${nix_build_attempts})" >&2
+    sleep "${nix_build_retry_delay_seconds}"
+    attempt=$((attempt + 1))
+  done
 }
 
 while [ $# -gt 0 ]; do
@@ -199,7 +219,7 @@ command -v nix >/dev/null || {
   exit 1
 }
 
-image_path="$(nix build --print-out-paths ".#${image_attr}")"
+image_path="$(build_perf_image)"
 docker load -i "${image_path}" >/dev/null
 docker image inspect "${image_tag}" >/dev/null
 

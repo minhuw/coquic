@@ -9,6 +9,6 @@ find_package(Fizz CONFIG REQUIRED)
 
 add_executable(mvfst-perf mvfst-perf.cpp)
 target_compile_features(mvfst-perf PRIVATE cxx_std_20)
-target_link_libraries(mvfst-perf PRIVATE ${mvfst_LIBRARIES} fizz::fizz Folly::folly)
+target_link_libraries(mvfst-perf PRIVATE mvfst::mvfst fizz::fizz Folly::folly)
 
 install(TARGETS mvfst-perf RUNTIME DESTINATION bin)

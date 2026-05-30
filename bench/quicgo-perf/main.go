@@ -194,8 +194,8 @@ type measuredCounters struct {
 }
 
 type connectionState struct {
-	conn    quic.Connection
-	control quic.Stream
+	conn    *quic.Conn
+	control *quic.Stream
 }
 
 type clientDialer struct {
@@ -217,9 +217,9 @@ type rrStreamResult struct {
 }
 
 type serverSession struct {
-	conn quic.Connection
+	conn *quic.Conn
 
-	control quic.Stream
+	control *quic.Stream
 	start   sessionStart
 
 	bytesSent         atomic.Uint64
@@ -384,7 +384,7 @@ func runServer(cfg config) error {
 	}
 }
 
-func handleServerConnection(conn quic.Connection) {
+func handleServerConnection(conn *quic.Conn) {
 	control, err := conn.AcceptStream(context.Background())
 	if err != nil {
 		_ = conn.CloseWithError(1, "control stream accept failed")
@@ -418,7 +418,7 @@ func handleServerConnection(conn quic.Connection) {
 	}
 }
 
-func handleServerDataStream(session *serverSession, stream quic.Stream) {
+func handleServerDataStream(session *serverSession, stream *quic.Stream) {
 	received, err := copyAndCount(io.Discard, stream)
 	if err != nil {
 		return
@@ -475,7 +475,7 @@ func shouldSendSessionComplete(session *serverSession, requestsCompleted uint64)
 		requestsCompleted >= session.start.requests.value
 }
 
-func sendControlMessage(stream quic.Stream, data []byte, fin bool) error {
+func sendControlMessage(stream *quic.Stream, data []byte, fin bool) error {
 	if _, err := stream.Write(data); err != nil {
 		return err
 	}
@@ -660,7 +660,7 @@ func openConnections(ctx context.Context, dialer *clientDialer, cfg config, star
 	return connections, nil
 }
 
-func (d *clientDialer) dialConnection(ctx context.Context, cfg config) (quic.Connection, error) {
+func (d *clientDialer) dialConnection(ctx context.Context, cfg config) (*quic.Conn, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return d.transport.Dial(dialCtx, d.remote, &tls.Config{
@@ -686,7 +686,7 @@ func closeConnections(connections []connectionState) {
 	}
 }
 
-func waitForReady(control quic.Stream) error {
+func waitForReady(control *quic.Stream) error {
 	if err := control.SetReadDeadline(time.Now().Add(serverReadyTimeout)); err != nil {
 		return err
 	}
@@ -754,7 +754,7 @@ func runTimedBulkDownload(cfg config, connections []connectionState, counters *m
 	return nil
 }
 
-func runBulkDownloadStream(ctx context.Context, conn quic.Connection) (uint64, error) {
+func runBulkDownloadStream(ctx context.Context, conn *quic.Conn) (uint64, error) {
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		return 0, err
@@ -803,7 +803,7 @@ func runFixedBulk(cfg config, connections []connectionState, counters *measuredC
 	return errors.New("fixed bulk requires --total-bytes for quic-go client")
 }
 
-func runFixedBulkStream(conn quic.Connection, direction string, targetBytes uint64) (uint64, uint64, error) {
+func runFixedBulkStream(conn *quic.Conn, direction string, targetBytes uint64) (uint64, uint64, error) {
 	stream, err := conn.OpenStreamSync(context.Background())
 	if err != nil {
 		return 0, 0, err
@@ -835,7 +835,7 @@ func runRR(cfg config, connections []connectionState, counters *measuredCounters
 	active := uint64(0)
 	started := uint64(0)
 	nextConnection := uint64(0)
-	openNext := func(conn quic.Connection, counts bool) {
+	openNext := func(conn *quic.Conn, counts bool) {
 		atomic.AddUint64(&active, 1)
 		atomic.AddUint64(&started, 1)
 		go func() {
@@ -979,7 +979,7 @@ func isDeadlineExceeded(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-func runRequestResponseStream(ctx context.Context, conn quic.Connection, requestBytes uint64) (time.Duration, uint64, error) {
+func runRequestResponseStream(ctx context.Context, conn *quic.Conn, requestBytes uint64) (time.Duration, uint64, error) {
 	start := time.Now()
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {

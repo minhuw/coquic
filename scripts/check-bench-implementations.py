@@ -120,6 +120,14 @@ def msquic_version(flake: Path) -> str:
     return match.group(1)
 
 
+def facebook_quic_version(flake: Path) -> str:
+    content = read_text(flake)
+    match = re.search(r'facebookQuicVersion\s*=\s*"([^"]+)";', content)
+    if not match:
+        raise ValueError("Nix facebookQuicVersion was not found")
+    return match.group(1)
+
+
 def require_exact(versions: dict[str, str], label: str, expected: str) -> None:
     actual = versions[label]
     if actual != expected:
@@ -170,6 +178,7 @@ def validate(args: argparse.Namespace) -> None:
     require_semver(versions, "s2n-quic", cargo_lock_package_version(repo_root / "bench/s2n-quic-perf/Cargo.lock", "s2n-quic"))
     require_semver(versions, "neqo", cargo_lock_package_version(repo_root / "bench/neqo-perf/Cargo.lock", "neqo-bin"))
     require_semver(versions, "msquic", msquic_version(flake))
+    require_exact(versions, "mvfst", facebook_quic_version(flake))
 
     for label, binding in {
         "picoquic": "picoquicSrc",
@@ -189,7 +198,6 @@ def validate(args: argparse.Namespace) -> None:
     for label, marker in {
         "aioquic": "ps.aioquic",
         "ngtcp2": "version = pkgs.ngtcp2.version;",
-        "mvfst": "pkgs.mvfst",
     }.items():
         require_marker(flake, marker, label)
 

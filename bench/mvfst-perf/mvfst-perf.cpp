@@ -151,21 +151,6 @@ struct CompletedStream {
     Duration latency{Duration::zero()};
 };
 
-class AcceptAllVerifier : public fizz::CertificateVerifier {
-  public:
-    std::shared_ptr<const folly::AsyncTransportCertificate>
-    verify(const std::vector<std::shared_ptr<const fizz::PeerCert>> &certs) const override {
-        if (certs.empty()) {
-            throw std::runtime_error("mvfst server sent no certificate");
-        }
-        return certs.front();
-    }
-
-    std::vector<fizz::Extension> getCertificateRequestExtensions() const override {
-        return {};
-    }
-};
-
 uint64_t htonll(uint64_t value) {
     static_assert(sizeof(uint64_t) == 8);
     uint32_t high = htonl(static_cast<uint32_t>(value >> 32));
@@ -308,7 +293,12 @@ std::shared_ptr<fizz::server::FizzServerContext> makeServerCtx(const Config &cfg
     if (!folly::readFile(cfg.privateKey.c_str(), keyData)) {
         throw std::runtime_error("failed to read private key");
     }
-    auto cert = fizz::openssl::CertUtils::makeSelfCert(certData, keyData);
+    std::unique_ptr<fizz::SelfCert> cert;
+    fizz::Error certError;
+    if (fizz::openssl::CertUtils::makeSelfCert(cert, certError, certData, keyData) !=
+        fizz::Status::Success) {
+        throw std::runtime_error("failed to parse certificate chain/private key");
+    }
     auto certManager = std::make_shared<fizz::server::DefaultCertManager>();
     certManager->addCertAndSetDefault(std::move(cert));
     auto serverCtx = std::make_shared<fizz::server::FizzServerContext>();
@@ -327,7 +317,8 @@ std::shared_ptr<quic::ClientHandshakeFactory> makeClientHandshakeCtx() {
     clientCtx->setClock(std::make_shared<fizz::SystemClock>());
     clientCtx->setSupportedAlpns({std::string(kApplicationProtocol)});
     return quic::FizzClientQuicHandshakeContext::Builder()
-        .setCertificateVerifier(std::make_shared<AcceptAllVerifier>())
+        .setCertificateVerifier(
+            std::make_shared<fizz::InsecureCertificateVerifier>(fizz::VerificationContext::Client))
         .setFizzClientContext(std::move(clientCtx))
         .build();
 }

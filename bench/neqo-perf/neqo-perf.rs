@@ -11,13 +11,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use neqo_common::{event::Provider, Datagram, IpTos};
-use neqo_crypto::{init, init_db, AllowZeroRtt, AntiReplay, AuthenticationStatus};
+use neqo_common::{event::Provider, Datagram, Tos};
+use neqo_transport::CongestionControl;
 use neqo_transport::{
-    server::Server, CongestionControlAlgorithm, Connection, ConnectionEvent, ConnectionIdGenerator,
-    ConnectionParameters, EmptyConnectionIdGenerator, Output, RandomConnectionIdGenerator, State,
-    StreamId, StreamType, Version,
+    server::Server, Connection, ConnectionEvent, ConnectionIdGenerator, ConnectionParameters,
+    EmptyConnectionIdGenerator, Output, RandomConnectionIdGenerator, State, StreamId, StreamType,
+    Version,
 };
+use nss::{init, init_db, AllowZeroRtt, AntiReplay, AuthenticationStatus};
 use tokio::{net::UdpSocket, time};
 
 const APPLICATION_PROTOCOL: &str = "coquic-perf/1";
@@ -233,7 +234,9 @@ impl ClientBatch {
                 | ConnectionEvent::ResumptionToken(_)
                 | ConnectionEvent::Datagram(_)
                 | ConnectionEvent::OutgoingDatagramOutcome { .. }
-                | ConnectionEvent::IncomingDatagramDropped => {}
+                | ConnectionEvent::IncomingDatagramDropped
+                | ConnectionEvent::SconeUpdated(_)
+                | ConnectionEvent::PathMigrated { .. } => {}
             }
         }
         if conn.state().connected() {
@@ -268,7 +271,7 @@ impl ClientBatch {
                     self.started_requests += 1;
                     self.write_stream(conn, stream_id)?;
                 }
-                Err(neqo_transport::Error::StreamLimitError)
+                Err(neqo_transport::Error::StreamLimit)
                 | Err(neqo_transport::Error::ConnectionState) => break,
                 Err(err) => {
                     return Err(format!("neqo stream_create failed: {err}"));
@@ -413,7 +416,7 @@ impl PerfServer {
         })
     }
 
-    fn process(&mut self, dgram: Option<&Datagram>, now: Instant) -> Output {
+    fn process(&mut self, dgram: Option<Datagram>, now: Instant) -> Output {
         self.server.process(dgram, now)
     }
 
@@ -453,7 +456,9 @@ impl PerfServer {
                     | ConnectionEvent::OutgoingDatagramOutcome { .. }
                     | ConnectionEvent::IncomingDatagramDropped
                     | ConnectionEvent::AuthenticationNeeded
-                    | ConnectionEvent::EchFallbackAuthenticationNeeded { .. } => {}
+                    | ConnectionEvent::EchFallbackAuthenticationNeeded { .. }
+                    | ConnectionEvent::SconeUpdated(_)
+                    | ConnectionEvent::PathMigrated { .. } => {}
                 }
             }
         }
@@ -705,10 +710,10 @@ fn validate_config(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-fn neqo_cc(label: &str) -> CongestionControlAlgorithm {
+fn neqo_cc(label: &str) -> CongestionControl {
     match label {
-        "cubic" => CongestionControlAlgorithm::Cubic,
-        _ => CongestionControlAlgorithm::NewReno,
+        "cubic" => CongestionControl::Cubic,
+        _ => CongestionControl::NewReno,
     }
 }
 
@@ -722,7 +727,7 @@ fn connection_params(cfg: &Config) -> ConnectionParameters {
         .max_streams(StreamType::BiDi, TRANSFER_MAX_STREAMS)
         .max_streams(StreamType::UniDi, 0)
         .idle_timeout(Duration::from_secs(30))
-        .cc_algorithm(neqo_cc(&cfg.congestion_control))
+        .congestion_control(neqo_cc(&cfg.congestion_control))
         .pmtud(!cfg.disable_pmtud)
 }
 
@@ -764,7 +769,7 @@ async fn drain_client_output(
     socket: &UdpSocket,
 ) -> Result<Option<Duration>, AnyError> {
     loop {
-        match conn.process(None, Instant::now()) {
+        match conn.process(None::<Datagram>, Instant::now()) {
             Output::Datagram(dgram) => send_output(socket, dgram).await?,
             Output::Callback(timeout) => return Ok(Some(timeout)),
             Output::None => return Ok(None),
@@ -810,9 +815,9 @@ async fn drain_client_socket(
         match socket.try_recv_from(&mut buf) {
             Ok((read, remote)) => {
                 let dgram =
-                    Datagram::new(remote, local_addr, IpTos::default(), buf[..read].to_vec());
+                    Datagram::new(remote, local_addr, Tos::default(), buf[..read].to_vec());
                 if let Some(timeout) =
-                    handle_process_output(socket, conn.process(Some(&dgram), Instant::now()))
+                    handle_process_output(socket, conn.process(Some(dgram), Instant::now()))
                         .await?
                 {
                     next_timeout = Some(timeout);
@@ -835,9 +840,9 @@ async fn drain_server_socket(
         match socket.try_recv_from(&mut buf) {
             Ok((read, remote)) => {
                 let dgram =
-                    Datagram::new(remote, local_addr, IpTos::default(), buf[..read].to_vec());
+                    Datagram::new(remote, local_addr, Tos::default(), buf[..read].to_vec());
                 if let Some(timeout) =
-                    handle_process_output(socket, server.process(Some(&dgram), Instant::now()))
+                    handle_process_output(socket, server.process(Some(dgram), Instant::now()))
                         .await?
                 {
                     next_timeout = Some(timeout);

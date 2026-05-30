@@ -534,7 +534,7 @@
         pname = "quicgo-perf-client";
         version = "dev";
         src = ./bench/quicgo-perf;
-        vendorHash = "sha256-yXErKYCgQLSlmivNBjgqG3NzKQ9KvsvV+8fdFoCJks8=";
+        vendorHash = "sha256-lqos9WjFCedcUHa1Y6lWVxaggTrS4fwlbn352OqLTfw=";
         env.CGO_ENABLED = "0";
       };
       quinnPerfClient = pkgs.rustPlatform.buildRustPackage {
@@ -647,13 +647,13 @@
       lsquicSrc = pkgs.fetchFromGitHub {
         owner = "litespeedtech";
         repo = "lsquic";
-        rev = "v4.7.0";
+        rev = "v4.7.1";
         fetchSubmodules = true;
-        hash = "sha256-42U9ZkS1mEajZrsXqYFDJX7Mr6Mr8+r8SjczzVQtTPY=";
+        hash = "sha256-Krz718ndMTMODTNRBTlAW093adKksVjV4xLskFwrOow=";
       };
       lsquicPerfClient = pkgs.stdenv.mkDerivation {
         pname = "lsquic-perf-client";
-        version = "4.7.0";
+        version = "4.7.1";
         src = lsquicSrc;
         perfSource = ./bench/lsquic-perf/lsquic-perf.c;
         nativeBuildInputs = [
@@ -714,14 +714,15 @@
       neqoSrc = pkgs.fetchFromGitHub {
         owner = "mozilla";
         repo = "neqo";
-        rev = "v0.8.1";
-        hash = "sha256-zt4zizNhbk2a9fn1r3mq9dwOz6EOOD+MlTIiIZ6ibfM=";
+        rev = "v0.28.1";
+        hash = "sha256-/H3bvSuoX0tChLLlf65xMc0nUZBipRL2u8YuMql41Cg=";
       };
+      nssForNeqoPerf = pkgs.nss_latest;
       neqoPerfClient = pkgs.rustPlatform.buildRustPackage {
         pname = "neqo-perf-client";
-        version = "0.8.1";
+        version = "0.28.1";
         src = neqoSrc;
-        cargoHash = "sha256-kQXdySfcSqy92Y8hI8jnnJm0m5qT4or4tozNd+qqSLE=";
+        cargoHash = "sha256-xRjNfIckWKhW0EqNYmsKI8bT66jRl0xWh/4Ckr27VPk=";
         depsExtraArgs.postPatch = ''
           cp ${./bench/neqo-perf/Cargo.lock} Cargo.lock
         '';
@@ -734,7 +735,7 @@
         ];
         buildInputs = [
           pkgs.nspr
-          pkgs.nss
+          nssForNeqoPerf
         ];
         cargoBuildFlags = [
           "--bin"
@@ -757,7 +758,7 @@ EOF
           cp -R $src/test-fixture/db $out/libexec/neqo-perf/db
           wrapProgram $out/bin/neqo-perf \
             --set NEQO_PERF_DB "$out/libexec/neqo-perf/db" \
-            --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath [ pkgs.nspr pkgs.nss pkgs.sqlite pkgs.zlib pkgs.stdenv.cc.cc.lib ]}"
+            --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath [ pkgs.nspr nssForNeqoPerf pkgs.sqlite pkgs.zlib pkgs.stdenv.cc.cc.lib ]}"
         '';
       };
       sodiumCmakeModule = pkgs.writeTextDir "share/cmake/Modules/FindSodium.cmake" ''
@@ -768,9 +769,93 @@ EOF
         endif()
         set(Sodium_FOUND TRUE)
       '';
+      facebookQuicVersion = "2026.05.25.00";
+      follyForMvfstPerf = pkgs.folly.overrideAttrs (
+        finalAttrs: previousAttrs: {
+          version = facebookQuicVersion;
+          src = pkgs.fetchFromGitHub {
+            owner = "facebook";
+            repo = "folly";
+            tag = "v${finalAttrs.version}";
+            hash = "sha256-27TVY8xcePU7LK8aWswREnHNvx9v+ST5QUc8JW2fBQY=";
+          };
+          patches = [ ];
+          cmakeFlags =
+            lib.filter (
+              flag:
+              !(lib.hasPrefix "-DBUILD_TESTS" flag) && !(lib.hasPrefix "-DBUILD_EXAMPLES" flag)
+            ) (previousAttrs.cmakeFlags or [ ])
+            ++ [
+              "-DBUILD_TESTS:BOOL=FALSE"
+              "-DBUILD_EXAMPLES:BOOL=FALSE"
+            ];
+          doCheck = false;
+        }
+      );
+      fizzForMvfstPerf = pkgs.fizz.overrideAttrs (
+        finalAttrs: previousAttrs: {
+          version = facebookQuicVersion;
+          src = pkgs.fetchFromGitHub {
+            owner = "facebookincubator";
+            repo = "fizz";
+            tag = "v${finalAttrs.version}";
+            hash = "sha256-pBWcv+aRUFvkEOgXmOAe+ZZHTX509uWbNqxcQX8RZOA=";
+          };
+          patches = [ ];
+          cmakeFlags =
+            lib.filter (
+              flag:
+              !(lib.hasPrefix "-DBUILD_TESTS" flag) && !(lib.hasPrefix "-DBUILD_EXAMPLES" flag)
+            ) (previousAttrs.cmakeFlags or [ ])
+            ++ [
+              "-DBUILD_TESTS:BOOL=FALSE"
+              "-DBUILD_EXAMPLES:BOOL=FALSE"
+            ];
+          doCheck = false;
+          postInstall = (previousAttrs.postInstall or "") + ''
+            mkdir -p "$bin"
+          '';
+          propagatedBuildInputs = [
+            follyForMvfstPerf
+            pkgs.libsodium
+            pkgs.zlib
+          ];
+        }
+      );
+      mvfstForMvfstPerf = pkgs.mvfst.overrideAttrs (
+        finalAttrs: previousAttrs: {
+          version = facebookQuicVersion;
+          src = pkgs.fetchFromGitHub {
+            owner = "facebook";
+            repo = "mvfst";
+            tag = "v${finalAttrs.version}";
+            hash = "sha256-UQeRXs70wdX/xxycedFrRoXEiQ+/kash7D5EMgWogjU=";
+          };
+          patches = [ ];
+          cmakeFlags =
+            lib.filter (flag: !(lib.hasPrefix "-DBUILD_TESTS" flag)) (previousAttrs.cmakeFlags or [ ])
+            ++ [
+              "-DBUILD_TESTS:BOOL=FALSE"
+            ];
+          doCheck = false;
+          postInstall = (previousAttrs.postInstall or "") + ''
+            mkdir -p "$bin"
+          '';
+          buildInputs = [
+            follyForMvfstPerf
+            pkgs.gflags
+            pkgs.glog
+            pkgs.fmt
+            pkgs.openssl
+          ];
+          propagatedBuildInputs = [
+            fizzForMvfstPerf
+          ];
+        }
+      );
       mvfstPerfClient = pkgs.stdenv.mkDerivation {
         pname = "mvfst-perf-client";
-        version = "dev";
+        version = facebookQuicVersion;
         src = ./bench/mvfst-perf;
         nativeBuildInputs = [
           pkgs.cmake
@@ -779,9 +864,9 @@ EOF
           pkgs.pkg-config
         ];
         buildInputs = [
-          pkgs.mvfst
-          pkgs.folly
-          pkgs.fizz
+          mvfstForMvfstPerf
+          follyForMvfstPerf
+          fizzForMvfstPerf
           pkgs.boost
           pkgs.gflags
           pkgs.glog
@@ -797,9 +882,9 @@ EOF
           wrapProgram "$out/bin/mvfst-perf" \
             --prefix LD_LIBRARY_PATH : ${
               lib.makeLibraryPath [
-                pkgs.mvfst
-                pkgs.folly
-                pkgs.fizz
+                mvfstForMvfstPerf
+                follyForMvfstPerf
+                fizzForMvfstPerf
                 pkgs.boost
                 pkgs.gflags
                 pkgs.glog
@@ -823,7 +908,7 @@ EOF
         pname = "s2n-quic-perf-client";
         version = "dev";
         src = ./bench/s2n-quic-perf;
-        cargoHash = "sha256-cGC5UYgVifuln5xb3cCLs+RgRRKItBhw2SlQOfZPXs8=";
+        cargoHash = "sha256-k1DA7O55DTDRdTIWYhUEZBlH3+p9NcgzHI/qgagqrq8=";
         nativeBuildInputs = [
           pkgs.cmake
           pkgs.pkg-config
@@ -831,12 +916,12 @@ EOF
       };
       libmsquicForMsquicPerf = pkgs.libmsquic.overrideAttrs (
         finalAttrs: _previousAttrs: {
-          version = "2.5.4";
+          version = "2.5.8";
           src = pkgs.fetchFromGitHub {
             owner = "microsoft";
             repo = "msquic";
             tag = "v${finalAttrs.version}";
-            hash = "sha256-si9g67j/A6sbsCWWxs2YhZpXhx34GpxWNOFnWtaqnEQ=";
+            hash = "sha256-IOPKIjJVZUBU13YkL7C7c9Y6cA9L62FYRKvFiXWTeLE=";
             fetchSubmodules = true;
           };
           buildInputs = [
@@ -874,8 +959,9 @@ EOF
         pname = "quiche-perf-client";
         version = "dev";
         src = ./bench/quiche-perf;
-        cargoHash = "sha256-cBSmg8lqYTkGR71SyIxHFo3fXRxffwjv/L/LUNdPLIE=";
+        cargoHash = "sha256-5m+oup7YJJ8xDk2zfZjnkcZvlsp9j42whzNnMO3RZkc=";
         nativeBuildInputs = [
+          pkgs.git
           llvmPkgs.clang
           llvmPkgs.libclang
           pkgs.pkg-config
@@ -895,9 +981,9 @@ EOF
       quiclySrc = pkgs.fetchFromGitHub {
         owner = "h2o";
         repo = "quicly";
-        rev = "c49ed0e53bebba42d03e51c7e546fc01be504314";
+        rev = "61ae24151f65a6a1b06f4d766530c95dcb7b88aa";
         fetchSubmodules = true;
-        hash = "sha256-iE5ayIIdZptR/O5y3kq5/OZQEYvQJDADzX8aU3GlQcY=";
+        hash = "sha256-2CfTKQlyiw6vzfo+RcIvxmSIfev0O8WdO0I1mJO+Adw=";
       };
       quiclyPerfClient = pkgs.stdenv.mkDerivation {
         pname = "quicly-perf-client";
@@ -949,8 +1035,8 @@ EOF
       googleQuicheSrc = pkgs.fetchFromGitHub {
         owner = "google";
         repo = "quiche";
-        rev = "9164946d4091960f1c4b52998a588e581953fdb7";
-        hash = "sha256-WcO0VUMsT5gxxN3Sx85drcPafUBcUbKr/82TsFpJm0I=";
+        rev = "e05dcf9143b7827bc39a1a4fab61af7703eb444c";
+        hash = "sha256-K4f5P+JO26Xr5HPCfvgDQps8wGXEfRWbraSexr8sbuM=";
       };
       googleQuicheBazelCentralRegistry = pkgs.fetchFromGitHub {
         owner = "bazelbuild";
@@ -1004,7 +1090,7 @@ EOF
           "//quiche:google_quiche_perf"
         ];
         fetchAttrs = {
-          hash = "sha256-mtmpOCIKjgNRVC+GPMRBc0iGG/U/aNQWsou1TrpLSb4=";
+          hash = "sha256-0ap9eH2Mt9K4f2XbupSQMN/5KTrfZN6BY0nVXFiTSdA=";
           postPatch = ''
             substituteInPlace .bazelversion --replace-fail '8.2.1' '7.6.0'
             echo "common --repository_cache=\"$bazelOut/external/repository_cache\"" >> .bazelrc
@@ -1077,17 +1163,18 @@ EOF
       tquicSrc = pkgs.fetchFromGitHub {
         owner = "Tencent";
         repo = "tquic";
-        rev = "0169abde20c6701c68b1ac5021c3e64702f20cfa";
-        hash = "sha256-9jdkcYCvnYXMPDacEWSymPXDgq8gDs8uzP7XaCiF4HA=";
+        rev = "d87a9a072475e381e64bfeb5732f2f505c2c28b7";
+        hash = "sha256-c0f5rPMhuOBq0xMHr5LthZoAi/ryLHphw0sbd8fc7YE=";
       };
       tquicPerfClient = pkgs.rustPlatform.buildRustPackage {
         pname = "tquic-perf-client";
         version = "dev";
         src = tquicSrc;
         buildAndTestSubdir = "tools";
-        cargoHash = "sha256-e/qD3z69GzAYGkD5SZwExU828cwaQJuZbXTN5ApkD9I=";
+        cargoHash = "sha256-QzfLW+5eOrPilBEl0C25Mkj411lWZPGAqjW320rTjuU=";
         depsExtraArgs.postPatch = ''
           cp ${./bench/tquic-perf/Cargo.lock} Cargo.lock
+          substituteInPlace tools/Cargo.toml --replace-fail 'tquic = { path = "..", version = "1.5.0"}' 'tquic = { path = "..", version = "1.6.0"}'
         '';
         perfSource = ./bench/tquic-perf/tquic-perf.rs;
         nativeBuildInputs = [
@@ -1106,6 +1193,7 @@ EOF
         doCheck = false;
         postPatch = ''
           cp ${./bench/tquic-perf/Cargo.lock} Cargo.lock
+          substituteInPlace tools/Cargo.toml --replace-fail 'tquic = { path = "..", version = "1.5.0"}' 'tquic = { path = "..", version = "1.6.0"}'
           cp "$perfSource" tools/src/bin/tquic-perf.rs
         '';
         cargoBuildFlags = [
@@ -1119,8 +1207,8 @@ EOF
       xquicSrc = pkgs.fetchFromGitHub {
         owner = "alibaba";
         repo = "xquic";
-        rev = "64b8df3ac3f64111eb9e00be1a952ba5b07144bb";
-        hash = "sha256-jKmJqRslYw216iVXHlL1X1rNp1edKYHmTp2oRAG3YG8=";
+        rev = "e5f7fe9555f6dfb87581deddd24e86fb86dfe2de";
+        hash = "sha256-kwxqmxAs43bmiVVclv/T0z6sMSFJT4sY3iorX/qxA0U=";
       };
       xquicPerfClient = pkgs.stdenv.mkDerivation {
         pname = "xquic-perf-client";
@@ -1172,8 +1260,8 @@ EOF
       picoquicSrc = pkgs.fetchFromGitHub {
         owner = "private-octopus";
         repo = "picoquic";
-        rev = "49c239b54a4e724dba07ba1cc55c78e2b277ead9";
-        hash = "sha256-oR+AIvyRMGsLJC6igro+CtFQN1J2Ey53EBc4Z6+EG/c=";
+        rev = "d4c442531c7696ce9fcdf5eafa58ff21869b8589";
+        hash = "sha256-XqPH0Dx65G+vAzuj19K+PyDj1c0fwDAO/DsBOmUjLZY=";
       };
       picotlsPackage = pkgs.stdenv.mkDerivation {
         pname = "picotls-for-picoquic";

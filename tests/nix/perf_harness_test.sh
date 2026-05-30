@@ -291,7 +291,7 @@ if [[ "${resolver_output}" != "0123456789abcdef" ]]; then
 fi
 
 resolver_output="$(python3 "${version_resolver}" --manifest "${implementations_json}" --implementation quic-go)"
-if [[ "${resolver_output}" != "v0.48.2" ]]; then
+if [[ "${resolver_output}" != "v0.59.1" ]]; then
   echo "implementation version resolver did not resolve quic-go: ${resolver_output}" >&2
   exit 1
 fi
@@ -839,12 +839,12 @@ grep -F -- 'stream_create(StreamType::BiDi)' "${neqo_perf}" >/dev/null || {
   exit 1
 }
 
-grep -F -- 'handle_process_output(socket, server.process(Some(&dgram), Instant::now()))' "${neqo_perf}" >/dev/null || {
+grep -F -- 'handle_process_output(socket, server.process(Some(dgram), Instant::now()))' "${neqo_perf}" >/dev/null || {
   echo 'Neqo perf server must send immediate output produced by socket input' >&2
   exit 1
 }
 
-grep -F -- 'handle_process_output(socket, conn.process(Some(&dgram), Instant::now()))' "${neqo_perf}" >/dev/null || {
+grep -F -- 'handle_process_output(socket, conn.process(Some(dgram), Instant::now()))' "${neqo_perf}" >/dev/null || {
   echo 'Neqo perf client must send immediate output produced by socket input' >&2
   exit 1
 }

@@ -657,6 +657,34 @@ bool socket_io_backend_internal_coverage_hook_exercises_remaining_branches_for_t
     return ok;
 }
 
+bool socket_io_backend_has_pending_event_guard_branches_for_tests() {
+    SocketIoBackend backend(QuicUdpBackendConfig{});
+    const bool idle = backend.has_pending_events();
+    class PendingEventEngine final : public QuicIoEngine {
+      public:
+        bool register_socket(int) override {
+            return true;
+        }
+        bool send(int, const sockaddr_storage &, socklen_t, std::span<const std::byte>,
+                  std::string_view, quic::QuicEcnCodepoint, bool) override {
+            return true;
+        }
+        std::optional<QuicIoEngineEvent> wait(std::span<const int>, int,
+                                              std::optional<quic::QuicCoreTimePoint>,
+                                              std::string_view) override {
+            return std::nullopt;
+        }
+        bool has_pending_events() const override {
+            return true;
+        }
+    };
+    backend.core_ = std::make_unique<SharedUdpBackendCore>(QuicUdpBackendConfig{},
+                                                           std::make_unique<PendingEventEngine>());
+    const bool pending = backend.has_pending_events();
+    backend.core_.reset();
+    return !idle && pending && !backend.has_pending_events();
+}
+
 bool io_backend_route_handles_are_stable_for_tests(QuicIoBackendKind kind) {
     switch (kind) {
     case QuicIoBackendKind::socket:

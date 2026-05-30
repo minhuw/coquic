@@ -2514,6 +2514,9 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
             entry->path_id_by_route_handle.clear();
             entry->route_handle_by_path_id.clear();
             entry->route_handle_by_path_id.emplace(7, 44);
+            COQUIC_CORE_HOOK_RECORD(
+                legacy.route_handle_for_path(*entry, std::optional<QuicPathId>{8}) ==
+                std::optional<QuicRouteHandle>{99u});
             COQUIC_CORE_HOOK_RECORD(seed_legacy_route_handle_path_for_tests(legacy, 44, 7));
             COQUIC_CORE_HOOK_RECORD(entry->default_route_handle ==
                                     std::optional<QuicRouteHandle>{99u});
@@ -2535,6 +2538,20 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
                                     std::optional<QuicRouteHandle>{99u});
             COQUIC_CORE_HOOK_RECORD(!entry->path_id_by_route_handle.contains(11));
         }
+    }
+
+    {
+        QuicCore endpoint(make_client_endpoint_config_for_core_coverage());
+        QuicCore::ConnectionEntry entry;
+        const auto first_identity = make_bytes_for_core_coverage({0x01});
+        const auto second_identity = make_bytes_for_core_coverage({0x02});
+        endpoint.remember_address_validation_identity(entry, 5, first_identity);
+        endpoint.remember_address_validation_identity(entry, 5, second_identity);
+        COQUIC_CORE_HOOK_RECORD(entry.address_validation_identity_by_path_id[5] == second_identity);
+        COQUIC_CORE_HOOK_RECORD(!endpoint.route_handle_for_path(entry, std::nullopt).has_value());
+        entry.default_route_handle = 77;
+        COQUIC_CORE_HOOK_RECORD(endpoint.route_handle_for_path(entry, std::nullopt) ==
+                                std::optional<QuicRouteHandle>{77});
     }
 
     {
@@ -3037,6 +3054,117 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
             },
             QuicCoreTimePoint{} + std::chrono::milliseconds(1));
         COQUIC_CORE_HOOK_RECORD(result.local_error.has_value());
+    }
+
+    {
+        QuicCore endpoint(make_client_endpoint_config_for_core_coverage());
+        const std::array<QuicCoreInput, 1> inputs{
+            QuicCoreSendStreamData{
+                .stream_id = 0,
+                .bytes = make_bytes_for_core_coverage({0x61}),
+                .fin = false,
+            },
+        };
+        const auto result = endpoint.advance(inputs, QuicCoreTimePoint{} + std::chrono::seconds(1));
+        COQUIC_CORE_HOOK_RECORD(result.local_error.has_value());
+        if (result.local_error.has_value()) {
+            COQUIC_CORE_HOOK_RECORD(result.local_error->code ==
+                                    QuicCoreLocalErrorCode::unsupported_operation);
+        }
+    }
+
+    {
+        QuicCore legacy(make_client_core_config_for_core_coverage(0x26, 0x66));
+        auto *entry = legacy.ensure_legacy_entry();
+        COQUIC_CORE_HOOK_RECORD(entry != nullptr);
+        if (entry != nullptr) {
+            entry->connection.reset();
+            const std::array<QuicCoreInput, 1> inputs{
+                QuicCoreSendStreamData{
+                    .stream_id = 0,
+                    .bytes = make_bytes_for_core_coverage({0x62}),
+                    .fin = false,
+                },
+            };
+            const auto result =
+                legacy.advance(inputs, QuicCoreTimePoint{} + std::chrono::seconds(2));
+            COQUIC_CORE_HOOK_RECORD(!result.local_error.has_value());
+        }
+    }
+
+    {
+        QuicCore legacy(make_client_core_config_for_core_coverage(0x27, 0x67));
+        const std::array<QuicCoreInput, 1> inputs{
+            QuicCoreSendSharedStreamData{
+                .stream_id = 0,
+                .bytes = SharedBytes(make_bytes_for_core_coverage({0x63})),
+                .fin = false,
+            },
+        };
+        const auto result = legacy.advance(inputs, QuicCoreTimePoint{} + std::chrono::seconds(3));
+        COQUIC_CORE_HOOK_RECORD(result.local_error.has_value());
+        if (result.local_error.has_value()) {
+            COQUIC_CORE_HOOK_RECORD(result.local_error->code ==
+                                    QuicCoreLocalErrorCode::invalid_stream_id);
+        }
+    }
+
+    {
+        QuicCore legacy(make_client_core_config_for_core_coverage(0x28, 0x68));
+        auto *entry = legacy.ensure_legacy_entry();
+        COQUIC_CORE_HOOK_RECORD(entry != nullptr);
+        if (entry != nullptr) {
+            entry->default_route_handle = 88;
+            entry->route_handle_by_path_id[0] = 88;
+            entry->connection->started_ = true;
+            entry->connection->status_ = HandshakeStatus::connected;
+            entry->connection->handshake_confirmed_ = true;
+            entry->connection->peer_address_validated_ = true;
+            entry->connection->peer_source_connection_id_ =
+                make_connection_id_for_core_coverage({0xa1, 0xb2});
+            entry->connection->client_initial_destination_connection_id_ =
+                entry->connection->config_.initial_destination_connection_id;
+            entry->connection->application_space_.write_secret = TrafficSecret{
+                .cipher_suite = CipherSuite::tls_aes_128_gcm_sha256,
+                .secret = std::vector<std::byte>(32, std::byte{0x28}),
+            };
+            entry->connection->peer_transport_parameters_ = TransportParameters{
+                .max_udp_payload_size = entry->connection->config_.transport.max_udp_payload_size,
+                .active_connection_id_limit = 2,
+                .ack_delay_exponent = entry->connection->config_.transport.ack_delay_exponent,
+                .max_ack_delay = entry->connection->config_.transport.max_ack_delay,
+                .initial_max_data = entry->connection->config_.transport.initial_max_data,
+                .initial_max_stream_data_bidi_local =
+                    entry->connection->config_.transport.initial_max_stream_data_bidi_local,
+                .initial_max_stream_data_bidi_remote =
+                    entry->connection->config_.transport.initial_max_stream_data_bidi_remote,
+                .initial_max_stream_data_uni =
+                    entry->connection->config_.transport.initial_max_stream_data_uni,
+                .initial_max_streams_bidi =
+                    entry->connection->config_.transport.initial_max_streams_bidi,
+                .initial_max_streams_uni =
+                    entry->connection->config_.transport.initial_max_streams_uni,
+                .initial_source_connection_id = entry->connection->peer_source_connection_id_,
+            };
+            entry->connection->peer_transport_parameters_validated_ = true;
+            entry->connection->initialize_peer_flow_control_from_transport_parameters();
+            entry->connection->last_validated_path_id_ = 0;
+            entry->connection->current_send_path_id_ = 0;
+            auto &path = entry->connection->ensure_path_state(0);
+            path.validated = true;
+            path.is_current_send_path = true;
+            const std::array<QuicCoreInput, 2> inputs{
+                QuicCoreSendSharedStreamData{
+                    .stream_id = 0,
+                    .bytes = SharedBytes(make_bytes_for_core_coverage({0x64})),
+                    .fin = false,
+                },
+                QuicCoreTimerExpired{},
+            };
+            const auto result =
+                legacy.advance(inputs, QuicCoreTimePoint{} + std::chrono::seconds(4));
+            COQUIC_CORE_HOOK_RECORD(!result.local_error.has_value());
+        }
     }
 
     {
@@ -3945,7 +4073,7 @@ QuicCoreResult QuicCore::advance(std::span<const QuicCoreInput> inputs, QuicCore
 
         QuicCoreResult result;
         auto *entry = ensure_legacy_entry();
-        if (entry == nullptr || entry->connection == nullptr) {
+        if (entry->connection == nullptr) {
             result = finalize_legacy_result(std::move(result), now);
             append_sequential_result(combined, std::move(result));
             ++index;
@@ -3969,7 +4097,7 @@ QuicCoreResult QuicCore::advance(std::span<const QuicCoreInput> inputs, QuicCore
                             result.local_error = stream_state_error_to_local_error(queued.error());
                         }
                     },
-                    [&](const auto &) {},
+                    [](const auto &) COQUIC_NO_PROFILE {},
                 },
                 inputs[run_end]);
             if (result.local_error.has_value()) {

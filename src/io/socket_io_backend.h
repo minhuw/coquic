@@ -14,6 +14,10 @@ using SocketIoBackendConfig = QuicUdpBackendConfig;
 
 class SharedUdpBackendCore;
 
+namespace test {
+bool socket_io_backend_has_pending_event_guard_branches_for_tests();
+}
+
 class SocketIoBackend final : public QuicIoBackend {
   public:
     explicit SocketIoBackend(QuicUdpBackendConfig config);
@@ -32,6 +36,8 @@ class SocketIoBackend final : public QuicIoBackend {
     bool send_many(std::span<const QuicIoTxDatagram> datagrams) override;
 
   private:
+    friend bool test::socket_io_backend_has_pending_event_guard_branches_for_tests();
+
     std::unique_ptr<SharedUdpBackendCore> core_;
 };
 

@@ -51,6 +51,9 @@ using coquic::quic::PathChallengeFrame;
 using coquic::quic::PathResponseFrame;
 using coquic::quic::PingFrame;
 using coquic::quic::ReceivedAckFrame;
+using coquic::quic::ReceivedFrame;
+using coquic::quic::ReceivedFrameList;
+using coquic::quic::ReceivedStreamFrame;
 using coquic::quic::ResetStreamFrame;
 using coquic::quic::RetireConnectionIdFrame;
 using coquic::quic::SharedBytes;
@@ -85,6 +88,12 @@ void expect_received_decode_matches_decode_error(std::span<const std::byte> byte
 
     EXPECT_EQ(received.error().code, decoded.error().code);
     EXPECT_EQ(received.error().offset, decoded.error().offset);
+}
+
+void expect_received_ack_decode_error(const SharedBytes &bytes, CodecErrorCode code) {
+    const auto decoded = coquic::quic::deserialize_received_ack_frame(bytes);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, code);
 }
 
 void expect_serialize_error(const Frame &frame, CodecErrorCode code) {
@@ -991,6 +1000,28 @@ TEST(QuicFrameTest, RejectsNonShortestReceivedFrameTypeEncoding) {
         coquic::quic::deserialize_received_frame(SharedBytes{std::byte{0x40}, std::byte{0x01}});
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, CodecErrorCode::non_shortest_frame_type_encoding);
+}
+
+TEST(QuicFrameTest, DirectReceivedAckDecoderRejectsHeaderEdges) {
+    expect_received_ack_decode_error(SharedBytes{}, CodecErrorCode::truncated_input);
+    expect_received_ack_decode_error(SharedBytes{std::byte{0x40}}, CodecErrorCode::truncated_input);
+    expect_received_ack_decode_error(SharedBytes{std::byte{0x40}, std::byte{0x02}},
+                                     CodecErrorCode::non_shortest_frame_type_encoding);
+    expect_received_ack_decode_error(SharedBytes{std::byte{0x01}},
+                                     CodecErrorCode::unknown_frame_type);
+    expect_received_ack_decode_error(SharedBytes{std::byte{0x40}, std::byte{0x20}},
+                                     CodecErrorCode::unknown_frame_type);
+
+    const auto decoded = coquic::quic::deserialize_received_ack_frame(SharedBytes{
+        std::byte{0x02},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+    });
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().frame.largest_acknowledged, 0u);
+    EXPECT_EQ(decoded.value().bytes_consumed, 5u);
 }
 
 TEST(QuicFrameTest, RoundTripsResetAndStopSendingFrames) {
@@ -1982,6 +2013,80 @@ TEST(QuicFrameTest, OutboundAckFrameWireHelpersMatchMaterializedAckFrame) {
 
     ASSERT_TRUE(written.has_value());
     EXPECT_EQ(output, encoded_materialized.value());
+}
+
+TEST(QuicFrameTest, ReceivedFrameListCoversVectorAndMutableAccessors) {
+    ReceivedFrameList empty_from_vector(std::vector<ReceivedFrame>{});
+    EXPECT_TRUE(empty_from_vector.empty());
+
+    std::vector<ReceivedFrame> single_vector{
+        ReceivedFrame{PingFrame{}},
+    };
+    ReceivedFrameList single_from_vector(single_vector);
+    ASSERT_EQ(single_from_vector.size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<PingFrame>(single_from_vector.front()));
+
+    std::vector<ReceivedFrame> many_vector{
+        ReceivedFrame{PingFrame{}},
+        ReceivedFrame{PaddingFrame{.length = 3}},
+    };
+    ReceivedFrameList many_from_vector(std::move(many_vector));
+    ASSERT_EQ(many_from_vector.size(), 2u);
+    EXPECT_TRUE(std::holds_alternative<PingFrame>(many_from_vector[0]));
+    EXPECT_EQ(std::get<PaddingFrame>(many_from_vector[1]).length, 3u);
+    EXPECT_EQ(many_from_vector.begin(), many_from_vector.data());
+    EXPECT_EQ(many_from_vector.end(), many_from_vector.data() + many_from_vector.size());
+    EXPECT_EQ(many_from_vector.cbegin(), many_from_vector.begin());
+    EXPECT_EQ(many_from_vector.cend(), many_from_vector.end());
+    EXPECT_EQ(many_from_vector.span().size(), 2u);
+
+    ReceivedFrameList assigned;
+    assigned = std::initializer_list<ReceivedFrame>{};
+    EXPECT_TRUE(assigned.empty());
+    assigned = std::initializer_list<ReceivedFrame>{ReceivedFrame{PingFrame{}},
+                                                    ReceivedFrame{PaddingFrame{.length = 4}}};
+    ASSERT_EQ(assigned.size(), 2u);
+    EXPECT_EQ(std::get<PaddingFrame>(assigned[1]).length, 4u);
+
+    assigned = single_vector;
+    ASSERT_EQ(assigned.size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<PingFrame>(assigned.front()));
+    const std::vector<ReceivedFrame> copied_empty_vector;
+    assigned = copied_empty_vector;
+    EXPECT_TRUE(assigned.empty());
+    const std::vector<ReceivedFrame> copied_many_vector{
+        ReceivedFrame{PingFrame{}},
+        ReceivedFrame{PaddingFrame{.length = 5}},
+    };
+    assigned = copied_many_vector;
+    ASSERT_EQ(assigned.size(), 2u);
+    EXPECT_EQ(std::get<PaddingFrame>(assigned[1]).length, 5u);
+
+    assigned.clear();
+    assigned.reserve(3);
+    ReceivedFrame lvalue_frame = PaddingFrame{.length = 9};
+    assigned.push_back(lvalue_frame);
+    assigned.emplace_back(ReceivedFrame{PingFrame{}});
+    ASSERT_EQ(assigned.size(), 2u);
+    EXPECT_EQ(std::get<PaddingFrame>(assigned.front()).length, 9u);
+
+    ReceivedFrameList emplaced_variants;
+    emplaced_variants.emplace_back(PingFrame{});
+    emplaced_variants.emplace_back(PaddingFrame{.length = 6});
+    ASSERT_EQ(emplaced_variants.size(), 2u);
+    EXPECT_EQ(std::get<PaddingFrame>(emplaced_variants[1]).length, 6u);
+
+    ReceivedFrameList stream_overflow;
+    stream_overflow.emplace_back(ReceivedStreamFrame{
+        .stream_id = 1,
+        .stream_data = SharedBytes{std::byte{0xaa}},
+    });
+    stream_overflow.emplace_back(ReceivedStreamFrame{
+        .stream_id = 2,
+        .stream_data = SharedBytes{std::byte{0xbb}},
+    });
+    ASSERT_EQ(stream_overflow.size(), 2u);
+    EXPECT_EQ(std::get<ReceivedStreamFrame>(stream_overflow[1]).stream_id, 2u);
 }
 
 TEST(QuicFrameTest, ToReceivedVariantCoverageMaskIncludesColdAlternatives) {

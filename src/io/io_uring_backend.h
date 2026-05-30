@@ -12,6 +12,10 @@ namespace coquic::io {
 class QuicIoEngine;
 class SharedUdpBackendCore;
 
+namespace test {
+bool io_uring_backend_has_pending_event_guard_branches_for_tests();
+}
+
 class IoUringBackend final : public QuicIoBackend {
   public:
     ~IoUringBackend() override;
@@ -31,6 +35,8 @@ class IoUringBackend final : public QuicIoBackend {
     bool send_many(std::span<const QuicIoTxDatagram> datagrams) override;
 
   private:
+    friend bool test::io_uring_backend_has_pending_event_guard_branches_for_tests();
+
     IoUringBackend(QuicUdpBackendConfig config, std::unique_ptr<QuicIoEngine> engine);
 
     std::unique_ptr<SharedUdpBackendCore> core_;

@@ -37,6 +37,7 @@ for test_binary in "$@"; do
     run_profiled_tests "${profile_raw}" "${test_binary}" \
         -u COQUIC_DESERIALIZE_PROFILE \
         -u COQUIC_IO_PROFILE \
+        -u COQUIC_SERIALIZE_PROFILE \
         -u COQUIC_SEND_PROFILE
     profraws+=("${profile_raw}")
     index=$((index + 1))
@@ -45,6 +46,7 @@ for test_binary in "$@"; do
     run_profiled_tests "${profile_raw}" "${test_binary}" \
         COQUIC_DESERIALIZE_PROFILE= \
         COQUIC_IO_PROFILE= \
+        COQUIC_SERIALIZE_PROFILE= \
         COQUIC_SEND_PROFILE=
     profraws+=("${profile_raw}")
     index=$((index + 1))
@@ -53,6 +55,7 @@ for test_binary in "$@"; do
     run_profiled_tests "${profile_raw}" "${test_binary}" \
         COQUIC_DESERIALIZE_PROFILE=0 \
         COQUIC_IO_PROFILE=0 \
+        COQUIC_SERIALIZE_PROFILE=0 \
         COQUIC_SEND_PROFILE=0
     profraws+=("${profile_raw}")
     index=$((index + 1))
@@ -61,6 +64,7 @@ for test_binary in "$@"; do
     run_profiled_tests "${profile_raw}" "${test_binary}" \
         COQUIC_DESERIALIZE_PROFILE=1 \
         COQUIC_IO_PROFILE=1 \
+        COQUIC_SERIALIZE_PROFILE=1 \
         COQUIC_SEND_PROFILE=1
     profraws+=("${profile_raw}")
     index=$((index + 1))

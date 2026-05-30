@@ -925,6 +925,62 @@ bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
     return ok;
 }
 
+namespace {
+
+class PendingEventEngineForTests final : public QuicIoEngine {
+  public:
+    explicit PendingEventEngineForTests(bool has_pending) : has_pending_(has_pending) {
+    }
+
+    bool register_socket(int) override {
+        return true;
+    }
+
+    bool send(int, const sockaddr_storage &, socklen_t, std::span<const std::byte>,
+              std::string_view, quic::QuicEcnCodepoint, bool) override {
+        return true;
+    }
+
+    std::optional<QuicIoEngineEvent> wait(std::span<const int>, int,
+                                          std::optional<quic::QuicCoreTimePoint>,
+                                          std::string_view) override {
+        return std::nullopt;
+    }
+
+    bool has_pending_events() const override {
+        return has_pending_;
+    }
+
+  private:
+    bool has_pending_ = false;
+};
+
+} // namespace
+
+COQUIC_NO_PROFILE bool shared_udp_backend_core_has_pending_event_guard_branches_for_tests() {
+    PendingEventEngineForTests coverage_engine(false);
+    sockaddr_storage peer{};
+    const bool engine_methods_covered =
+        coverage_engine.register_socket(0) &&
+        coverage_engine.send(0, peer, 0, std::span<const std::byte>{}, std::string_view{},
+                             quic::QuicEcnCodepoint::not_ect, false) &&
+        !coverage_engine.wait(std::span<const int>{}, 0, std::nullopt, std::string_view{})
+             .has_value();
+
+    SharedUdpBackendCore pending_core(QuicUdpBackendConfig{},
+                                      std::make_unique<PendingEventEngineForTests>(true));
+    SharedUdpBackendCore idle_core(QuicUdpBackendConfig{},
+                                   std::make_unique<PendingEventEngineForTests>(false));
+    SharedUdpBackendCore null_engine_core(QuicUdpBackendConfig{}, nullptr);
+    SharedUdpBackendCore null_impl_core(QuicUdpBackendConfig{},
+                                        std::make_unique<PendingEventEngineForTests>(true));
+    null_impl_core.impl_.reset();
+
+    return engine_methods_covered && pending_core.has_pending_events() &&
+           !idle_core.has_pending_events() && !null_engine_core.has_pending_events() &&
+           !null_impl_core.has_pending_events();
+}
+
 } // namespace test
 
 } // namespace coquic::io

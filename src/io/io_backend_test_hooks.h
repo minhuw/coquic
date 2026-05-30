@@ -152,6 +152,8 @@ bool poll_io_engine_pmtud_coverage_for_tests();
 bool poll_io_engine_ignores_non_pmtu_errqueue_for_tests();
 bool poll_io_engine_descriptor_cache_guard_branches_for_tests();
 bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests();
+bool socket_io_backend_has_pending_event_guard_branches_for_tests();
+bool shared_udp_backend_core_has_pending_event_guard_branches_for_tests();
 
 bool io_uring_backend_rearms_receive_after_completion_for_tests();
 bool io_uring_backend_completion_error_is_fatal_for_tests();
@@ -163,6 +165,7 @@ bool io_uring_backend_send_uses_route_handle_for_tests();
 bool io_uring_backend_wait_returns_second_route_datagram_for_tests();
 bool io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests();
 bool io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_tests();
+bool io_uring_backend_has_pending_event_guard_branches_for_tests();
 
 bool io_backend_route_handles_are_stable_for_tests(QuicIoBackendKind kind);
 bool io_backend_send_uses_route_handle_for_tests(QuicIoBackendKind kind);

@@ -1,5 +1,6 @@
 #include <array>
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -11,6 +12,13 @@
 namespace {
 
 bool buffer_internal_coverage_for_tests();
+template <typename T> [[gnu::noinline]] void sink_pointer_for_tests(T *pointer) {
+#if defined(__GNUC__)
+    asm volatile("" : : "g"(pointer) : "memory");
+#else
+    static_cast<void>(pointer);
+#endif
+}
 
 bool buffer_internal_coverage_for_tests() {
     const std::array<std::byte, 3> source{
@@ -24,6 +32,7 @@ bool buffer_internal_coverage_for_tests() {
     }
 
     datagram.truncate(1);
+    datagram.reserve(8);
     datagram.push_back(std::byte{0xdd});
     if (datagram.to_vector() != std::vector<std::byte>{std::byte{0xaa}, std::byte{0xdd}}) {
         return false;
@@ -39,8 +48,26 @@ bool buffer_internal_coverage_for_tests() {
     coquic::quic::SpanBufferWriter writer{std::span<std::byte>(storage)};
     writer.offset_ = 3;
     const auto error = writer.write_varint(1);
-    return error.has_value() && error->code == coquic::quic::CodecErrorCode::truncated_input &&
-           error->offset == 3;
+    if (!error.has_value() || error->code != coquic::quic::CodecErrorCode::truncated_input ||
+        error->offset != 3) {
+        return false;
+    }
+
+    coquic::quic::UninitializedAllocator<int> int_allocator;
+    volatile std::size_t count = 1;
+    int *ints = int_allocator.allocate(count);
+    int_allocator.construct(ints, 42);
+    sink_pointer_for_tests(ints);
+    const bool int_allocator_ok = *ints == 42;
+    int_allocator.deallocate(ints, count);
+
+    std::vector<int, coquic::quic::UninitializedAllocator<int>> values;
+    values.reserve(2);
+    values.push_back(7);
+    values.push_back(11);
+
+    return int_allocator_ok && values.size() == 2u && values.front() == 7 && values.back() == 11 &&
+           coquic::quic::detail::datagram_byte_storage_cache_coverage_for_tests();
 }
 
 TEST(QuicBufferTest, SpanBufferWriterWritesBytesAndVarintsIntoFixedSpan) {

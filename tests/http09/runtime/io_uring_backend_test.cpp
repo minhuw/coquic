@@ -500,6 +500,7 @@ TEST(IoUringBackendTest, BackendSendManyDelegatesRouteMappedDatagramsToEngine) {
         .role_name = "client",
     });
     ASSERT_NE(backend, nullptr);
+    EXPECT_FALSE(backend->has_pending_events());
 
     const auto first_peer = make_ipv4_loopback_peer(17444);
     const auto second_peer = make_ipv4_loopback_peer(17445);
@@ -1346,6 +1347,10 @@ TEST(IoUringBackendTest, InternalCoverageHookExercisesIoUringBackendResidualBran
     EXPECT_TRUE(
         coquic::io::test::
             io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_tests());
+}
+
+TEST(IoUringBackendTest, PendingEventGuardBranchesAreCovered) {
+    EXPECT_TRUE(coquic::io::test::io_uring_backend_has_pending_event_guard_branches_for_tests());
 }
 
 } // namespace

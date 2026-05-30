@@ -6435,6 +6435,10 @@ TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverAckDeadlineAndStreamUtilities)
     EXPECT_TRUE(coquic::quic::test::connection_ack_deadline_and_stream_utilities_for_tests());
 }
 
+TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverInstrumentedPrivateUtilities) {
+    EXPECT_TRUE(coquic::quic::test::connection_instrumented_helper_coverage_for_tests());
+}
+
 TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverHeaderPacketSpaceUtilities) {
     EXPECT_TRUE(coquic::quic::test::connection_header_packet_space_coverage_for_tests());
 }

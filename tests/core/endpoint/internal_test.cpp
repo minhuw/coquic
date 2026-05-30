@@ -201,6 +201,21 @@ TEST(QuicCoreEndpointInternalTest, ReceiveStreamDataPayloadPrefersSharedBytes) {
               bytes_from_ints({0xbb, 0xcc}));
 }
 
+TEST(QuicCoreEndpointInternalTest, InboundDatagramMaterializeClampsSharedPayload) {
+    const auto storage =
+        std::make_shared<std::vector<std::byte>>(bytes_from_ints({0xaa, 0xbb, 0xcc}));
+    QuicCoreInboundDatagram shared{
+        .bytes = bytes_from_ints({0x01}),
+        .shared_bytes = storage,
+        .begin = 1,
+        .end = 99,
+    };
+    EXPECT_EQ(shared.materialize(), bytes_from_ints({0xbb, 0xcc}));
+
+    shared.shared_bytes.reset();
+    EXPECT_EQ(shared.materialize(), bytes_from_ints({0x01}));
+}
+
 TEST(QuicCoreEndpointInternalTest, ParseEndpointDatagramRejectsMalformedInputs) {
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(std::span<const std::byte>{}).has_value());
 

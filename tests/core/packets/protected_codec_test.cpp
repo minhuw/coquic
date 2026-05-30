@@ -323,6 +323,77 @@ coquic::quic::ProtectedOneRttPacketFragmentView make_one_rtt_packet_fragment_vie
     };
 }
 
+template <typename AppendSimpleAck>
+void exercise_simple_ack_append_fault_paths(AppendSimpleAck append_simple_ack) {
+    const auto valid_header = coquic::quic::OutboundAckHeader{
+        .largest_acknowledged = 11,
+        .ack_delay = 2,
+        .first_ack_range = 3,
+    };
+    const auto invalid_range_header = coquic::quic::OutboundAckHeader{
+        .largest_acknowledged = 0,
+        .first_ack_range = 0,
+        .additional_ranges =
+            {
+                coquic::quic::AckRange{.gap = 0, .range_length = 0},
+            },
+    };
+
+    {
+        std::vector<std::byte> datagram;
+        const auto appended = append_simple_ack(datagram, 101, invalid_range_header);
+        ASSERT_FALSE(appended.has_value());
+        EXPECT_EQ(appended.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+        EXPECT_TRUE(datagram.empty());
+    }
+    {
+        const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+            coquic::quic::test::ProtectedCodecFaultPoint::simple_ack_payload_write_failure};
+        std::vector<std::byte> datagram;
+        const auto appended = append_simple_ack(datagram, 102, valid_header);
+        ASSERT_FALSE(appended.has_value());
+        EXPECT_EQ(appended.error().code, coquic::quic::CodecErrorCode::truncated_input);
+        EXPECT_TRUE(datagram.empty());
+    }
+    {
+        const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+            coquic::quic::test::ProtectedCodecFaultPoint::simple_ack_payload_size_mismatch};
+        std::vector<std::byte> datagram;
+        const auto appended = append_simple_ack(datagram, 103, valid_header);
+        ASSERT_FALSE(appended.has_value());
+        EXPECT_EQ(appended.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
+        EXPECT_TRUE(datagram.empty());
+    }
+    {
+        const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+            coquic::quic::test::ProtectedCodecFaultPoint::simple_ack_force_padding_fill};
+        std::vector<std::byte> datagram;
+        const auto appended = append_simple_ack(datagram, 104, valid_header);
+        ASSERT_TRUE(appended.has_value());
+        EXPECT_EQ(appended.value(), datagram.size());
+        EXPECT_FALSE(datagram.empty());
+    }
+    {
+        const coquic::quic::test::ScopedPacketCryptoFaultInjector injector{
+            coquic::quic::test::PacketCryptoFaultPoint::seal_context_new};
+        std::vector<std::byte> datagram;
+        const auto appended = append_simple_ack(datagram, 105, valid_header);
+        ASSERT_FALSE(appended.has_value());
+        EXPECT_EQ(appended.error().code,
+                  coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+        EXPECT_TRUE(datagram.empty());
+    }
+    {
+        const coquic::quic::test::ScopedPacketCryptoFaultInjector injector{
+            coquic::quic::test::PacketCryptoFaultPoint::header_protection_context_new};
+        std::vector<std::byte> datagram;
+        const auto appended = append_simple_ack(datagram, 106, valid_header);
+        ASSERT_FALSE(appended.has_value());
+        EXPECT_EQ(appended.error().code, coquic::quic::CodecErrorCode::header_protection_failed);
+        EXPECT_TRUE(datagram.empty());
+    }
+}
+
 coquic::quic::SerializeProtectionContext
 make_one_rtt_serialize_context(coquic::quic::CipherSuite cipher_suite, std::size_t secret_size,
                                bool key_phase = false) {
@@ -3699,6 +3770,145 @@ TEST(QuicProtectedCodecTest, SimpleOutboundAckEcnFrameSerializesLikeMaterialized
     ASSERT_TRUE(encoded_outbound.has_value());
     ASSERT_TRUE(encoded_materialized.has_value());
     EXPECT_EQ(encoded_outbound.value(), encoded_materialized.value());
+}
+
+TEST(QuicProtectedCodecTest, AppendsSimpleOutboundAckViewThroughFastPath) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames = {
+        coquic::quic::Frame{coquic::quic::OutboundAckFrame{
+            .header =
+                coquic::quic::OutboundAckHeader{
+                    .largest_acknowledged = 11,
+                    .ack_delay = 2,
+                    .first_ack_range = 3,
+                },
+        }},
+    };
+
+    const auto context =
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+    std::vector<std::byte> datagram;
+    const auto appended = coquic::quic::append_protected_one_rtt_packet_to_datagram(
+        datagram, make_one_rtt_packet_view(packet), context);
+
+    ASSERT_TRUE(appended.has_value());
+    ASSERT_EQ(appended.value(), datagram.size());
+
+    auto storage = std::make_shared<std::vector<std::byte>>(datagram);
+    const auto decoded = coquic::quic::deserialize_received_protected_packet_fast(
+        storage, 0, storage->size(),
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
+    ASSERT_TRUE(decoded.has_value());
+    const auto *ack_only =
+        std::get_if<coquic::quic::ReceivedProtectedOneRttAckOnlyPacket>(&decoded.value());
+    ASSERT_NE(ack_only, nullptr);
+    EXPECT_EQ(ack_only->ack.largest_acknowledged, 11u);
+    EXPECT_EQ(ack_only->ack.ack_delay, 2u);
+    EXPECT_EQ(ack_only->ack.first_ack_range, 3u);
+}
+
+TEST(QuicProtectedCodecTest, AppendsSimpleOutboundAckViewThroughFastPathFaultBranches) {
+    auto context =
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+
+    auto append_view = [&](std::vector<std::byte> &datagram, std::uint64_t packet_number,
+                           const coquic::quic::OutboundAckHeader &header) {
+        auto packet = make_minimal_one_rtt_packet();
+        packet.packet_number = packet_number;
+        packet.frames = {coquic::quic::Frame{coquic::quic::OutboundAckFrame{.header = header}}};
+        const auto view = make_one_rtt_packet_view(packet);
+        return coquic::quic::append_protected_one_rtt_packet_to_datagram(datagram, view, context);
+    };
+
+    {
+        auto cached_secret = context.one_rtt_secret.value();
+        ASSERT_TRUE(coquic::quic::expand_traffic_secret_cached(cached_secret).has_value());
+        auto cached_context = context;
+        cached_context.one_rtt_secret = std::nullopt;
+        cached_context.one_rtt_secret_ref = &cached_secret;
+        cached_context.one_rtt_secret_cache_primed = true;
+
+        auto packet = make_minimal_one_rtt_packet();
+        packet.packet_number = 100;
+        packet.frames = {coquic::quic::Frame{coquic::quic::OutboundAckFrame{
+            .header =
+                coquic::quic::OutboundAckHeader{
+                    .largest_acknowledged = 9,
+                    .first_ack_range = 1,
+                },
+        }}};
+        const auto view = make_one_rtt_packet_view(packet);
+        std::vector<std::byte> datagram;
+        const auto appended = coquic::quic::append_protected_one_rtt_packet_to_datagram(
+            datagram, view, cached_context);
+        ASSERT_TRUE(appended.has_value());
+        EXPECT_EQ(appended.value(), datagram.size());
+    }
+
+    exercise_simple_ack_append_fault_paths(append_view);
+}
+
+TEST(QuicProtectedCodecTest, AppendsSimpleOutboundAckFragmentViewThroughFastPathFaultBranches) {
+    const auto context =
+        make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32);
+
+    auto append_fragment_view = [&](std::vector<std::byte> &datagram, std::uint64_t packet_number,
+                                    const coquic::quic::OutboundAckHeader &header) {
+        auto packet = make_minimal_one_rtt_packet();
+        packet.packet_number = packet_number;
+        packet.frames = {coquic::quic::Frame{coquic::quic::OutboundAckFrame{.header = header}}};
+        const auto fragment_view = make_one_rtt_packet_fragment_view(
+            packet, std::span<const coquic::quic::StreamFrameSendFragment>{});
+        return coquic::quic::append_protected_one_rtt_packet_to_datagram(datagram, fragment_view,
+                                                                         context);
+    };
+
+    {
+        std::vector<std::byte> datagram;
+        const auto appended = append_fragment_view(datagram, 110,
+                                                   coquic::quic::OutboundAckHeader{
+                                                       .largest_acknowledged = 12,
+                                                       .ack_delay = 1,
+                                                       .first_ack_range = 2,
+                                                   });
+        ASSERT_TRUE(appended.has_value());
+        EXPECT_EQ(appended.value(), datagram.size());
+        EXPECT_FALSE(datagram.empty());
+    }
+
+    exercise_simple_ack_append_fault_paths(append_fragment_view);
+}
+
+TEST(QuicProtectedCodecTest, FastSharedStorageWrapperHandlesInvalidRangesAndLongHeaders) {
+    auto storage = std::make_shared<std::vector<std::byte>>(
+        std::vector<std::byte>{std::byte{0x40}, std::byte{0x00}});
+
+    const auto null_storage =
+        coquic::quic::deserialize_received_protected_packet_fast(nullptr, 0, 1, {});
+    ASSERT_FALSE(null_storage.has_value());
+    EXPECT_EQ(null_storage.error().code, coquic::quic::CodecErrorCode::truncated_input);
+
+    const auto empty_range =
+        coquic::quic::deserialize_received_protected_packet_fast(storage, 1, 1, {});
+    ASSERT_FALSE(empty_range.has_value());
+    EXPECT_EQ(empty_range.error().code, coquic::quic::CodecErrorCode::truncated_input);
+
+    const auto past_end = coquic::quic::deserialize_received_protected_packet_fast(
+        storage, 0, storage->size() + 1, {});
+    ASSERT_FALSE(past_end.has_value());
+    EXPECT_EQ(past_end.error().code, coquic::quic::CodecErrorCode::truncated_input);
+
+    const std::vector<coquic::quic::ProtectedPacket> packets{make_rfc9001_client_initial_packet()};
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        packets, make_rfc9001_client_initial_serialize_context());
+    ASSERT_TRUE(encoded.has_value());
+
+    auto initial_storage = std::make_shared<std::vector<std::byte>>(encoded.value());
+    const auto decoded = coquic::quic::deserialize_received_protected_packet_fast(
+        initial_storage, 0, initial_storage->size(),
+        make_rfc9001_client_initial_deserialize_context());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_NE(std::get_if<coquic::quic::ReceivedProtectedInitialPacket>(&decoded.value()), nullptr);
 }
 
 TEST(QuicProtectedCodecTest, RejectsEmptyReceivedProtectedDatagram) {

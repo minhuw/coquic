@@ -9,6 +9,10 @@
 
 namespace coquic::io {
 
+namespace test {
+bool shared_udp_backend_core_has_pending_event_guard_branches_for_tests();
+}
+
 class SharedUdpBackendCore {
   public:
     SharedUdpBackendCore(QuicUdpBackendConfig config, std::unique_ptr<QuicIoEngine> engine);
@@ -23,6 +27,8 @@ class SharedUdpBackendCore {
     bool send_many(std::span<const QuicIoTxDatagram> datagrams);
 
   private:
+    friend bool test::shared_udp_backend_core_has_pending_event_guard_branches_for_tests();
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

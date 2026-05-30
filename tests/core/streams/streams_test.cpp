@@ -355,6 +355,23 @@ TEST(QuicStreamsTest, NextSendOffsetFallsBackToFreshDataWhenNoLostRangesExist) {
     state.send_flow_control_committed = 3;
 
     EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/false), 0u);
+
+    const auto fragments = state.take_send_fragments(/*max_bytes=*/3);
+    ASSERT_EQ(fragments.size(), 1u);
+    EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/false),
+              state.flow_control.highest_sent);
+}
+
+TEST(QuicStreamsTest, StreamFrameSendMetadataReportsWireSize) {
+    const coquic::quic::StreamFrameSendMetadata metadata{
+        .stream_id = 3,
+        .offset = 0,
+        .length = 3,
+        .fin = true,
+        .consumes_flow_control = true,
+    };
+
+    EXPECT_EQ(metadata.stream_frame_wire_size(), 7u);
 }
 
 TEST(QuicStreamsTest, RestoreRetransmittedFragmentKeepsLostStateWhenCreditWasAlreadyConsumed) {

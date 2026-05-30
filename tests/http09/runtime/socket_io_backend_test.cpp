@@ -190,10 +190,35 @@ TEST(SocketIoBackendTest, PublicShellTypesCompileAndConstruct) {
     QuicIoRemote remote{};
     remote.family = AF_INET;
 
+    auto shared_rx_bytes = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+    });
     QuicIoRxDatagram rx{
         .route_handle = 7,
         .bytes = {std::byte{0x01}},
+        .shared_bytes = shared_rx_bytes,
+        .begin = 1,
+        .end = 9,
     };
+    const auto rx_payload = rx.payload();
+    ASSERT_EQ(rx_payload.size(), 2u);
+    EXPECT_EQ(rx_payload[0], std::byte{0xbb});
+    EXPECT_EQ(rx_payload[1], std::byte{0xcc});
+    rx.shared_bytes.reset();
+    ASSERT_EQ(rx.payload().size(), 1u);
+
+    QuicIoEngineRxCompletion completion{
+        .bytes = {std::byte{0x02}},
+        .shared_bytes = shared_rx_bytes,
+        .begin = 0,
+        .end = 2,
+    };
+    ASSERT_EQ(completion.payload().size(), 2u);
+    completion.shared_bytes.reset();
+    ASSERT_EQ(completion.payload().size(), 1u);
+
     QuicIoEvent event{
         .kind = QuicIoEvent::Kind::rx_datagram,
         .now = coquic::quic::test::test_time(0),
@@ -210,10 +235,14 @@ TEST(SocketIoBackendTest, PublicShellTypesCompileAndConstruct) {
     ASSERT_NE(backend, nullptr);
     EXPECT_FALSE(backend->ensure_route(remote).has_value());
     EXPECT_FALSE(backend->wait(std::nullopt).has_value());
+    EXPECT_FALSE(backend->has_pending_events());
     EXPECT_FALSE(backend->send(QuicIoTxDatagram{
         .route_handle = 7,
         .bytes = {std::byte{0x02}},
     }));
+
+    ScriptedIoEngine engine;
+    EXPECT_FALSE(engine.has_pending_events());
 }
 
 TEST(SocketIoBackendTest, BaseIoBackendSendManyFallsBackToSend) {
@@ -233,10 +262,12 @@ TEST(SocketIoBackendTest, BaseIoBackendSendManyFallsBackToSend) {
     };
 
     ScriptedIoBackend success_backend;
+    EXPECT_FALSE(success_backend.has_pending_events());
     EXPECT_TRUE(success_backend.send_many(datagrams));
     EXPECT_EQ(success_backend.send_calls, datagrams.size());
 
     ScriptedIoBackend failing_backend;
+    EXPECT_FALSE(failing_backend.has_pending_events());
     failing_backend.send_result = false;
     EXPECT_FALSE(failing_backend.send_many(datagrams));
     EXPECT_EQ(failing_backend.send_calls, 1u);
@@ -864,6 +895,17 @@ TEST(SocketIoBackendTest, PollIoEngineDescriptorCacheGuardBranchesAreCovered) {
 TEST(SocketIoBackendTest, DuplicateRouteLookupGuardBranchesAreCovered) {
     EXPECT_TRUE(
         coquic::io::test::socket_io_backend_duplicate_route_lookup_guard_branches_for_tests());
+}
+
+TEST(SocketIoBackendTest, PendingEventGuardBranchesAreCovered) {
+    EXPECT_TRUE(coquic::io::test::socket_io_backend_has_pending_event_guard_branches_for_tests());
+    EXPECT_TRUE(
+        coquic::io::test::shared_udp_backend_core_has_pending_event_guard_branches_for_tests());
+}
+
+TEST(SocketIoBackendTest, HasPendingEventsChecksLiveBackendCore) {
+    coquic::io::SocketIoBackend backend(coquic::io::QuicUdpBackendConfig{});
+    EXPECT_FALSE(backend.has_pending_events());
 }
 
 } // namespace

@@ -2134,10 +2134,10 @@ bool poll_io_engine_restamps_queued_receive_events_for_tests() {
         .rx =
             QuicIoEngineRxCompletion{
                 .socket_fd = 78,
+                .now = queued_time,
                 .shared_bytes = shared,
                 .begin = 0,
                 .end = shared->size(),
-                .now = queued_time,
             },
     });
     engine.queued_events_.push_back(QuicIoEngineEvent{
@@ -2174,6 +2174,7 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     const auto saved_poll_trace = g_poll_engine_coverage_trace;
     const auto saved_udp_gso_disabled = internal::udp_gso_disabled();
     const auto reset_for_case = [] {
+        errno = 0;
         g_recorded_sendmsg_for_tests = {};
         g_recorded_recvmsg_for_tests = {};
         g_retry_readable_poll_for_tests = {};
@@ -2452,6 +2453,34 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
            "recvmsg ecn handles traffic-class ancillary data with no payload");
 
 #if defined(__linux__) && defined(UDP_GRO)
+    recv_message = {};
+    recv_message.msg_flags = MSG_CTRUNC;
+    record(internal::recvmsg_udp_gro_segment_size_from_control(recv_message) == 0,
+           "recvmsg UDP GRO parser ignores truncated control data");
+
+    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> ignored_gro_control{};
+    recv_message = {};
+    recv_message.msg_control = ignored_gro_control.data();
+    recv_message.msg_controllen = ignored_gro_control.size();
+    auto *ignored_gro_header = reinterpret_cast<cmsghdr *>(ignored_gro_control.data());
+    ignored_gro_header->cmsg_level = SOL_UDP;
+    ignored_gro_header->cmsg_type = SCM_RIGHTS;
+    ignored_gro_header->cmsg_len = CMSG_LEN(sizeof(int));
+    record(internal::recvmsg_udp_gro_segment_size_from_control(recv_message) == 0,
+           "recvmsg UDP GRO parser skips unrelated ancillary headers");
+
+    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(std::uint16_t))>
+        empty_gro_payload_control{};
+    recv_message = {};
+    recv_message.msg_control = empty_gro_payload_control.data();
+    recv_message.msg_controllen = empty_gro_payload_control.size();
+    auto *empty_gro_header = reinterpret_cast<cmsghdr *>(empty_gro_payload_control.data());
+    empty_gro_header->cmsg_level = SOL_UDP;
+    empty_gro_header->cmsg_type = UDP_GRO;
+    empty_gro_header->cmsg_len = CMSG_LEN(0);
+    record(internal::recvmsg_udp_gro_segment_size_from_control(recv_message) == 0,
+           "recvmsg UDP GRO parser handles empty segment-size payloads");
+
     alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(std::uint16_t))> gro_control{};
     recv_message = {};
     recv_message.msg_control = gro_control.data();
@@ -2488,6 +2517,106 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
                gro_split[0].ecn == QuicEcnCodepoint::ect0,
            }),
            "receive GRO split preserves datagram-sized shared slices");
+
+    internal::ReceiveDatagramResult gro_unsplit{
+        .status = internal::ReceiveDatagramStatus::ok,
+        .bytes = {std::byte{0x01}, std::byte{0x02}},
+        .source = gro_source,
+        .source_len = static_cast<socklen_t>(sizeof(sockaddr_in)),
+        .input_time = internal::now(),
+        .udp_gro_segment_size = 0,
+    };
+    std::vector<internal::ReceiveDatagramResult> gro_unsplit_out;
+    internal::append_received_datagram_segments(gro_unsplit_out, std::move(gro_unsplit));
+    record(gro_unsplit_out.size() == 1 && gro_unsplit_out.front().payload().size() == 2,
+           "receive GRO split keeps unsplit datagrams when segment size is zero");
+
+    internal::ReceiveDatagramResult gro_segment_larger_than_payload{
+        .status = internal::ReceiveDatagramStatus::ok,
+        .bytes = {std::byte{0x01}, std::byte{0x02}},
+        .source = gro_source,
+        .source_len = static_cast<socklen_t>(sizeof(sockaddr_in)),
+        .input_time = internal::now(),
+        .udp_gro_segment_size = 4,
+    };
+    std::vector<internal::ReceiveDatagramResult> gro_large_segment_out;
+    internal::append_received_datagram_segments(gro_large_segment_out,
+                                                std::move(gro_segment_larger_than_payload));
+    record(gro_large_segment_out.size() == 1 && gro_large_segment_out.front().payload().size() == 2,
+           "receive GRO split keeps datagrams when segment size covers payload");
+
+    auto shared_gro_bytes = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
+        std::byte{0x01},
+        std::byte{0x02},
+        std::byte{0x03},
+        std::byte{0x04},
+        std::byte{0x05},
+    });
+    internal::ReceiveDatagramResult shared_gro_received{
+        .status = internal::ReceiveDatagramStatus::ok,
+        .source = gro_source,
+        .source_len = static_cast<socklen_t>(sizeof(sockaddr_in)),
+        .input_time = internal::now(),
+        .shared_bytes = shared_gro_bytes,
+        .begin = 0,
+        .end = shared_gro_bytes->size(),
+        .udp_gro_segment_size = gro_segment_size,
+    };
+    std::vector<internal::ReceiveDatagramResult> shared_gro_split;
+    internal::append_received_datagram_segments(shared_gro_split, std::move(shared_gro_received));
+    record(all_true({
+               shared_gro_split.size() == 3,
+               shared_gro_split[0].shared_bytes == shared_gro_bytes,
+               shared_gro_split[1].payload().size() == 2,
+               shared_gro_split[2].payload().size() == 1,
+           }),
+           "receive GRO split reuses pre-shared datagram storage");
+
+    reset_for_case();
+    {
+        const ScopedSocketIoBackendOpsOverride runtime_ops{
+            SocketIoBackendOpsOverride{
+                .recvmsg_fn = [](int, msghdr *message, int) -> ssize_t {
+                    if (message == nullptr || message->msg_iov == nullptr ||
+                        message->msg_iovlen == 0) {
+                        errno = EINVAL;
+                        return -1;
+                    }
+                    constexpr std::array<std::byte, 5> kPayload{
+                        std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                        std::byte{0x04}, std::byte{0x05},
+                    };
+                    std::memcpy(message->msg_iov[0].iov_base, kPayload.data(), kPayload.size());
+                    if (message->msg_name != nullptr &&
+                        message->msg_namelen >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
+                        auto *source = static_cast<sockaddr_in *>(message->msg_name);
+                        source->sin_family = AF_INET;
+                        source->sin_port = htons(9445);
+                        source->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                        message->msg_namelen = sizeof(sockaddr_in);
+                    }
+                    if (message->msg_control != nullptr &&
+                        message->msg_controllen >= CMSG_SPACE(sizeof(std::uint16_t))) {
+                        auto *header = static_cast<cmsghdr *>(message->msg_control);
+                        header->cmsg_level = SOL_UDP;
+                        header->cmsg_type = UDP_GRO;
+                        header->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
+                        const std::uint16_t segment_size = 2;
+                        std::memcpy(CMSG_DATA(header), &segment_size, sizeof(segment_size));
+                        message->msg_controllen = header->cmsg_len;
+                    }
+                    return static_cast<ssize_t>(kPayload.size());
+                },
+            },
+        };
+        const auto gro_received = internal::receive_datagram(61, "client", 0);
+        record(all_true({
+                   gro_received.status == internal::ReceiveDatagramStatus::ok,
+                   gro_received.bytes.size() == 5,
+                   gro_received.udp_gro_segment_size == 2,
+               }),
+               "receive_datagram returns direct UDP GRO receive metadata");
+    }
 #endif
 
     sock_extended_err pmtu_error{};
@@ -2619,6 +2748,22 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     record(positive_poll_without_revents_for_tests(nullptr, 0, 0) == 0,
            "positive poll helper handles empty descriptor list");
 
+    {
+        QuicIoEngineEvent timer_event{
+            .kind = QuicIoEngineEvent::Kind::timer_expired,
+            .now = internal::now(),
+        };
+        refresh_queued_receive_event_time(timer_event);
+        QuicIoEngineEvent rx_without_payload{
+            .kind = QuicIoEngineEvent::Kind::rx_datagram,
+            .now = internal::now(),
+        };
+        refresh_queued_receive_event_time(rx_without_payload);
+        record(timer_event.kind == QuicIoEngineEvent::Kind::timer_expired &&
+                   !rx_without_payload.rx.has_value(),
+               "queued receive timestamp refresh ignores non-receive and incomplete events");
+    }
+
     reset_for_case();
     {
         const ScopedSocketIoBackendOpsOverride runtime_ops{
@@ -2711,6 +2856,42 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
         constexpr std::array<int, 1> kSockets = {55};
         record(!engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server").has_value(),
                "poll wait returns nullopt when queued receive draining reports a hard error");
+    }
+
+    reset_for_case();
+    {
+        const ScopedSocketIoBackendOpsOverride runtime_ops{
+            SocketIoBackendOpsOverride{
+                .poll_fn = &readable_poll_for_tests,
+                .recvmmsg_fn =
+                    [](int, mmsghdr *messages, unsigned int message_count, int, timespec *) {
+                        g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls += 1;
+                        if (g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls > 1) {
+                            errno = EAGAIN;
+                            return -1;
+                        }
+                        for (unsigned int index = 0; index < message_count; ++index) {
+                            auto &message = messages[index].msg_hdr;
+                            if (message.msg_iov != nullptr && message.msg_iovlen > 0 &&
+                                message.msg_iov[0].iov_len > 0) {
+                                auto *byte = static_cast<std::byte *>(message.msg_iov[0].iov_base);
+                                *byte = static_cast<std::byte>(index & 0xffu);
+                                messages[index].msg_len = 1;
+                            }
+                        }
+                        return static_cast<int>(message_count);
+                    },
+            },
+        };
+        PollIoEngine engine;
+        constexpr std::array<int, 1> kSockets = {62};
+        const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+        record(all_true({
+                   event.has_value(),
+                   event->kind == QuicIoEngineEvent::Kind::rx_datagram,
+                   g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls == 2,
+               }),
+               "poll wait stops extra receive draining when recvmmsg would block");
     }
 
     reset_for_case();

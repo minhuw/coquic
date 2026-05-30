@@ -102,6 +102,16 @@ struct PacketSpaceRecoveryTestPeer {
                                                       now);
     }
 
+    static void clear_live_slot_bit(PacketSpaceRecovery &recovery, std::size_t slot_index) {
+        recovery.clear_live_slot_bit(slot_index);
+    }
+
+    static bool
+    ack_ranges_include_newly_ackable_ack_eliciting_packet(const PacketSpaceRecovery &recovery,
+                                                          AckRangeCursor cursor) {
+        return recovery.ack_ranges_include_newly_ackable_ack_eliciting_packet(cursor);
+    }
+
     static AckApplyResult apply_ack_received_descending_reference(
         PacketSpaceRecovery &recovery, std::span<const AckPacketNumberRange> ack_ranges_descending,
         std::uint64_t largest_acknowledged, QuicCoreTimePoint now) {
@@ -218,6 +228,12 @@ struct PacketSpaceRecoveryTestPeer {
         recovery.slots_.at(slot_index).state = PacketSpaceRecovery::LedgerSlotState::declared_lost;
     }
 
+    static AckApplyResult apply_ack_received(PacketSpaceRecovery &recovery, AckRangeCursor cursor,
+                                             std::uint64_t largest_acknowledged,
+                                             QuicCoreTimePoint now) {
+        return recovery.apply_ack_received(cursor, largest_acknowledged, now);
+    }
+
     static void set_largest_acked_packet_number(PacketSpaceRecovery &recovery,
                                                 std::optional<std::uint64_t> packet_number) {
         recovery.largest_acked_packet_number_ = packet_number;
@@ -271,6 +287,45 @@ struct PacketSpaceRecoveryTestPeer {
     static bool is_valid_eligible_loss_tracked(const PacketSpaceRecovery &recovery,
                                                DeadlineTrackedPacket packet) {
         return recovery.is_valid_eligible_loss_tracked_packet(packet);
+    }
+
+    static std::size_t newest_live_slot_at_or_below(const PacketSpaceRecovery &recovery,
+                                                    std::uint64_t packet_number) {
+        return recovery.newest_live_slot_at_or_below(packet_number);
+    }
+
+    static std::size_t invalid_live_slot_index() {
+        return PacketSpaceRecovery::kInvalidLedgerSlotIndex;
+    }
+
+    static bool link_live_slot_tail_guard_branch_for_tests() {
+        PacketSpaceRecovery recovery;
+        recovery.slots_.resize(8);
+        recovery.first_live_slot_ = 2;
+        recovery.last_live_slot_ = 7;
+        recovery.live_links_.resize(8);
+        recovery.live_links_[2] = PacketSpaceRecovery::LiveSlotLink{
+            .prev = PacketSpaceRecovery::kInvalidLedgerSlotIndex,
+            .next = PacketSpaceRecovery::kInvalidLedgerSlotIndex,
+        };
+
+        recovery.link_live_slot(5);
+        return recovery.last_live_slot_ == 5 && recovery.live_links_[5].prev == 7 &&
+               recovery.live_links_[7].next == 5;
+    }
+
+    static bool newest_live_slot_bitset_guard_branches_for_tests() {
+        PacketSpaceRecovery no_words;
+        no_words.slots_.resize(64);
+        const bool missing_word_ok = no_words.newest_live_slot_at_or_below(63) ==
+                                     PacketSpaceRecovery::kInvalidLedgerSlotIndex;
+
+        PacketSpaceRecovery previous_word;
+        previous_word.slots_.resize(130);
+        previous_word.live_slot_words_.resize(2);
+        previous_word.live_slot_words_[0] = std::uint64_t{1} << 7;
+
+        return missing_word_ok && previous_word.newest_live_slot_at_or_below(64) == 7u;
     }
 };
 
@@ -1783,6 +1838,27 @@ TEST(QuicRecoveryTest, TrackedPacketsPreservePacketNumberOrderAcrossLateLosses) 
     EXPECT_EQ(newest.value().packet_number, 7u);
 }
 
+TEST(QuicRecoveryTest, RecoveryLiveSlotHelpersCoverTailAndBitsetFallbacks) {
+    EXPECT_TRUE(coquic::quic::test::PacketSpaceRecoveryTestPeer::
+                    link_live_slot_tail_guard_branch_for_tests());
+    EXPECT_TRUE(coquic::quic::test::PacketSpaceRecoveryTestPeer::
+                    newest_live_slot_bitset_guard_branches_for_tests());
+
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/130, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+
+    EXPECT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::newest_live_slot_at_or_below(
+                  recovery, 129),
+              coquic::quic::test::PacketSpaceRecoveryTestPeer::invalid_live_slot_index());
+    EXPECT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::newest_live_slot_at_or_below(
+                  recovery, 130),
+              130u);
+    EXPECT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::newest_live_slot_at_or_below(
+                  recovery, 140),
+              130u);
+}
+
 TEST(QuicRecoveryTest, TimeThresholdLossScansLedgerWithoutSentPacketMap) {
     PacketSpaceRecovery recovery;
     recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
@@ -1806,6 +1882,42 @@ TEST(QuicRecoveryTest, TimeThresholdLossScansLedgerWithoutSentPacketMap) {
     EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.collect_time_threshold_losses(
                                                         coquic::quic::test::test_time(20))),
               (std::vector<std::uint64_t>{3}));
+}
+
+TEST(QuicRecoveryTest, UnsortedAckRangesAreSortedBeforeApply) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(3)));
+
+    std::array ranges = {
+        AckPacketNumberRange{.smallest = 1, .largest = 1},
+        AckPacketNumberRange{.smallest = 3, .largest = 3},
+    };
+    const auto result = recovery.on_ack_received(ranges, /*largest_acknowledged=*/3,
+                                                 coquic::quic::test::test_time(10));
+
+    EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{1, 3}));
+}
+
+TEST(QuicRecoveryTest, AckRangeSortBreaksTiesBySmallestDescending) {
+    PacketSpaceRecovery recovery;
+    for (std::uint64_t packet_number = 2; packet_number <= 3; ++packet_number) {
+        recovery.on_packet_sent(make_sent_packet(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number))));
+    }
+
+    std::array ranges = {
+        AckPacketNumberRange{.smallest = 2, .largest = 3},
+        AckPacketNumberRange{.smallest = 3, .largest = 3},
+    };
+
+    const auto result = recovery.on_ack_received(ranges, /*largest_acknowledged=*/3,
+                                                 coquic::quic::test::test_time(10));
+
+    EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{2, 3}));
 }
 
 TEST(QuicRecoveryTest, PmtuProbeDeadlineHelpersSelectEarliestProbeAndCollectExpiredProbes) {
@@ -1909,6 +2021,25 @@ TEST(QuicRecoveryTest, StaleAckStillDeclaresNewTimeThresholdLosses) {
         recovery.on_ack_received(make_ack_frame(/*largest=*/2), coquic::quic::test::test_time(40));
     EXPECT_TRUE(stale_ack.acked_packets.empty());
     EXPECT_EQ(packet_numbers_from(stale_ack.lost_packets), (std::vector<std::uint64_t>{1}));
+}
+
+TEST(QuicRecoveryTest, TimeThresholdLossesSortMultipleExpiredCandidates) {
+    PacketSpaceRecovery recovery;
+    recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().min_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().smoothed_rtt = std::chrono::milliseconds(10);
+    recovery.rtt_state().rttvar = std::chrono::milliseconds(5);
+
+    for (std::uint64_t packet_number = 0; packet_number <= 3; ++packet_number) {
+        recovery.on_packet_sent(make_sent_packet(packet_number, /*ack_eliciting=*/true,
+                                                 coquic::quic::test::test_time(0)));
+    }
+
+    const auto result =
+        recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(40));
+
+    EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{3}));
+    EXPECT_EQ(packet_numbers_from(result.lost_packets), (std::vector<std::uint64_t>{0, 1, 2}));
 }
 
 TEST(QuicRecoveryTest, RecoveryTracksLatestInflightAckElicitingPacketIncrementally) {
@@ -2411,6 +2542,21 @@ TEST(QuicRecoveryTest, HandleContainersSupportBackPostfixAndOptionalErrors) {
     EXPECT_EQ(maybe_handle->packet_number, 7u);
 }
 
+TEST(QuicRecoveryTest, SmallHandleListAccessorsExposeInlineAndHeapStorage) {
+    AckApplyResult result;
+    for (std::uint64_t packet_number = 0; packet_number != 6; ++packet_number) {
+        result.acked_packets.push_back(RecoveryPacketHandle{
+            .packet_number = packet_number,
+            .slot_index = static_cast<std::size_t>(packet_number),
+        });
+    }
+
+    ASSERT_FALSE(result.acked_packets.empty());
+    EXPECT_EQ(result.acked_packets.front().packet_number, 0u);
+    ASSERT_EQ(result.acked_packets.handles().size(), 6u);
+    EXPECT_EQ(result.acked_packets.handles()[5].packet_number, 5u);
+}
+
 TEST(QuicRecoveryTest, SentPacketsViewHandlesDetachedAndAcknowledgedPackets) {
     EXPECT_FALSE(
         coquic::quic::test::PacketSpaceRecoveryTestPeer::detached_sent_packets_contains(9));
@@ -2492,6 +2638,82 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
     EXPECT_FALSE(coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_exists(recovery, 1));
     EXPECT_FALSE(recovery.handle_for_packet_number(1).has_value());
     EXPECT_EQ(recovery.find_packet(1), nullptr);
+
+    PacketSpaceRecovery mismatched_handle;
+    mismatched_handle.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                                      coquic::quic::test::test_time(2)));
+    const auto mismatched = mismatched_handle.handle_for_packet_number(2);
+    ASSERT_TRUE(mismatched.has_value());
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(mismatched_handle, 2,
+                                                                            9);
+    EXPECT_FALSE(mismatched_handle.retire_packet_if_present(*mismatched));
+
+    PacketSpaceRecovery lost_handle;
+    lost_handle.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                                coquic::quic::test::test_time(2)));
+    const auto lost = lost_handle.handle_for_packet_number(2);
+    ASSERT_TRUE(lost.has_value());
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_state_declared_lost(lost_handle, 2);
+    EXPECT_TRUE(lost_handle.retire_packet_if_present(*lost));
+
+    PacketSpaceRecovery mismatched_take;
+    mismatched_take.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                                    coquic::quic::test::test_time(2)));
+    const auto mismatched_take_handle = mismatched_take.handle_for_packet_number(2);
+    ASSERT_TRUE(mismatched_take_handle.has_value());
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(mismatched_take, 2, 9);
+    EXPECT_FALSE(
+        mismatched_take.take_retired_packet_if_present(*mismatched_take_handle).has_value());
+}
+
+TEST(QuicRecoveryTest, RetireAndTakeRetiredPacketHelpersCoverHandleEdges) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(1)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(3)));
+
+    const auto handles = recovery.tracked_packets();
+    ASSERT_EQ(handles.size(), 2u);
+
+    EXPECT_FALSE(recovery.retire_packet_if_present(RecoveryPacketHandle{
+        .packet_number = 99,
+        .slot_index = 99,
+    }));
+    EXPECT_TRUE(recovery.retire_packet_if_present(handles.front()));
+    EXPECT_FALSE(recovery.retire_packet_if_present(handles.front()));
+
+    const auto taken = recovery.take_retired_packet(handles.back());
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(taken->packet_number, 3u);
+
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(7)));
+    const auto handle = recovery.handle_for_packet_number(7);
+    ASSERT_TRUE(handle.has_value());
+    const auto moved = recovery.take_retired_packet_if_present(*handle);
+    ASSERT_TRUE(moved.has_value());
+    EXPECT_EQ(moved->packet_number, 7u);
+    EXPECT_FALSE(recovery.take_retired_packet_if_present(*handle).has_value());
+    EXPECT_FALSE(recovery
+                     .take_retired_packet(RecoveryPacketHandle{
+                         .packet_number = 123,
+                         .slot_index = 0,
+                     })
+                     .has_value());
+
+    PacketSpaceRecovery already_acknowledged_take;
+    already_acknowledged_take.on_packet_sent(make_sent_packet(/*packet_number=*/0,
+                                                              /*ack_eliciting=*/true,
+                                                              coquic::quic::test::test_time(0)));
+    const auto acknowledged_handle = already_acknowledged_take.handle_for_packet_number(0);
+    ASSERT_TRUE(acknowledged_handle.has_value());
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_acknowledged(
+        already_acknowledged_take, 0, true);
+    const auto already_acknowledged_packet =
+        already_acknowledged_take.take_retired_packet(*acknowledged_handle);
+    ASSERT_TRUE(already_acknowledged_packet.has_value());
+    EXPECT_EQ(already_acknowledged_packet->packet_number, 0u);
 }
 
 TEST(QuicRecoveryTest, LossCandidateHelpersSkipDeclaredLostPacketsAndAcknowledgedSlots) {
@@ -2621,6 +2843,68 @@ TEST(QuicRecoveryTest, AckProcessingTracksLargestPacketAcrossOutOfOrderLiveSlots
     EXPECT_TRUE(no_op_result.late_acked_packets.empty());
     EXPECT_TRUE(no_op_result.lost_packets.empty());
     EXPECT_EQ(no_op_recovery.compatibility_version(), version_before);
+}
+
+TEST(QuicRecoveryTest, DirectRecoveryColdBranchEdgesUsePeerHooks) {
+    using Peer = coquic::quic::test::PacketSpaceRecoveryTestPeer;
+
+    PacketSpaceRecovery empty;
+    Peer::clear_live_slot_bit(empty, 64);
+
+    PacketSpaceRecovery ackable;
+    ackable.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                            coquic::quic::test::test_time(0)));
+    const auto ack = make_ack_frame(/*largest=*/1);
+    auto cursor = coquic::quic::make_ack_range_cursor(ack);
+    ASSERT_TRUE(cursor.has_value());
+    EXPECT_FALSE(
+        Peer::ack_ranges_include_newly_ackable_ack_eliciting_packet(ackable, cursor.value()));
+
+    PacketSpaceRecovery packet_number_above_range;
+    packet_number_above_range.on_packet_sent(make_sent_packet(/*packet_number=*/0,
+                                                              /*ack_eliciting=*/true,
+                                                              coquic::quic::test::test_time(0)));
+    Peer::set_slot_packet_number(packet_number_above_range, 0, 2);
+    const auto low_ack = make_ack_frame(/*largest=*/0);
+    auto low_cursor = coquic::quic::make_ack_range_cursor(low_ack);
+    ASSERT_TRUE(low_cursor.has_value());
+    EXPECT_FALSE(Peer::ack_ranges_include_newly_ackable_ack_eliciting_packet(
+        packet_number_above_range, low_cursor.value()));
+
+    PacketSpaceRecovery state_edges;
+    state_edges.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                                coquic::quic::test::test_time(0)));
+    Peer::set_slot_state_retired(state_edges, 0);
+    const auto state_ack = make_ack_frame(/*largest=*/0);
+    auto state_cursor = coquic::quic::make_ack_range_cursor(state_ack);
+    ASSERT_TRUE(state_cursor.has_value());
+    EXPECT_FALSE(Peer::ack_ranges_include_newly_ackable_ack_eliciting_packet(state_edges,
+                                                                             state_cursor.value()));
+
+    PacketSpaceRecovery acknowledged_edges;
+    acknowledged_edges.on_packet_sent(make_sent_packet(/*packet_number=*/0,
+                                                       /*ack_eliciting=*/true,
+                                                       coquic::quic::test::test_time(0)));
+    Peer::set_slot_acknowledged(acknowledged_edges, 0, true);
+    const auto acked_ack = make_ack_frame(/*largest=*/0);
+    auto acked_cursor = coquic::quic::make_ack_range_cursor(acked_ack);
+    ASSERT_TRUE(acked_cursor.has_value());
+    EXPECT_FALSE(Peer::ack_ranges_include_newly_ackable_ack_eliciting_packet(acknowledged_edges,
+                                                                             acked_cursor.value()));
+
+    PacketSpaceRecovery no_pending_range;
+    no_pending_range.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
+                                                     coquic::quic::test::test_time(0)));
+    const auto no_pending_ack = make_ack_frame(/*largest=*/0);
+    auto no_pending_cursor = coquic::quic::make_ack_range_cursor(no_pending_ack);
+    ASSERT_TRUE(no_pending_cursor.has_value());
+    auto no_pending_cursor_value = no_pending_cursor.value();
+    no_pending_cursor_value.first_range_pending = false;
+    no_pending_cursor_value.next_additional_index =
+        no_pending_cursor_value.additional_ranges.size();
+    const auto result = Peer::apply_ack_received(no_pending_range, no_pending_cursor_value, 0,
+                                                 coquic::quic::test::test_time(1));
+    EXPECT_TRUE(result.acked_packets.empty());
 }
 
 TEST(QuicRecoveryTest,
@@ -2828,6 +3112,24 @@ TEST(QuicRecoveryTest, SubsequentRttSamplesHandleMissingMinRttDefensively) {
               std::optional{std::chrono::microseconds(45000)});
     EXPECT_EQ(rtt.min_rtt_sample, std::optional{std::chrono::microseconds(50000)});
     EXPECT_EQ(rtt.smoothed_rtt, std::chrono::microseconds(41250));
+}
+
+TEST(QuicRecoveryTest, SubsequentRttSampleCanUpdateWithoutMinRttSample) {
+    RecoveryRttState rtt;
+    rtt.latest_rtt = std::chrono::milliseconds(40);
+    rtt.smoothed_rtt = std::chrono::milliseconds(40);
+    rtt.rttvar = std::chrono::milliseconds(20);
+    rtt.min_rtt = std::chrono::milliseconds(30);
+    const auto sent = make_sent_packet(/*packet_number=*/10, /*ack_eliciting=*/true,
+                                       coquic::quic::test::test_time(10));
+
+    coquic::quic::update_rtt(rtt, coquic::quic::test::test_time(50), sent,
+                             /*ack_delay=*/std::chrono::milliseconds(5),
+                             /*max_ack_delay=*/std::chrono::milliseconds(25));
+
+    EXPECT_EQ(rtt.latest_rtt, std::optional{std::chrono::milliseconds(40)});
+    EXPECT_EQ(rtt.latest_adjusted_rtt, std::optional{std::chrono::milliseconds(35)});
+    EXPECT_EQ(rtt.latest_adjusted_rtt_sample, std::optional{std::chrono::microseconds(35000)});
 }
 
 TEST(QuicRecoveryTest, TimeThresholdLossUsesRttWindow) {

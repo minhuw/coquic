@@ -615,6 +615,24 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_TRUE(pending_work_core_inputs_are_drained_before_wait.terminal_success);
     EXPECT_FALSE(pending_work_core_inputs_are_drained_before_wait.terminal_failure);
     EXPECT_EQ(pending_work_core_inputs_are_drained_before_wait.wait_calls, 0U);
+
+    const auto pending_work_followup_timer_drive_failure =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
+                pending_work_followup_timer_drive_failure);
+    EXPECT_EQ(pending_work_followup_timer_drive_failure.exit_code, 1);
+    EXPECT_FALSE(pending_work_followup_timer_drive_failure.terminal_success);
+    EXPECT_TRUE(pending_work_followup_timer_drive_failure.terminal_failure);
+    EXPECT_EQ(pending_work_followup_timer_drive_failure.wait_calls, 0U);
+
+    const auto pending_work_followup_timer_continue_then_terminal_success =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
+                pending_work_followup_timer_continue_then_terminal_success);
+    EXPECT_EQ(pending_work_followup_timer_continue_then_terminal_success.exit_code, 0);
+    EXPECT_TRUE(pending_work_followup_timer_continue_then_terminal_success.terminal_success);
+    EXPECT_FALSE(pending_work_followup_timer_continue_then_terminal_success.terminal_failure);
+    EXPECT_EQ(pending_work_followup_timer_continue_then_terminal_success.wait_calls, 0U);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanupAndLoopCases) {

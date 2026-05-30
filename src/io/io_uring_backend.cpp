@@ -1074,6 +1074,62 @@ bool io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_te
     return ok;
 }
 
+namespace {
+
+class IoUringPendingEventEngineForTests final : public QuicIoEngine {
+  public:
+    explicit IoUringPendingEventEngineForTests(bool has_pending) : has_pending_(has_pending) {
+    }
+
+    bool register_socket(int) override {
+        return true;
+    }
+
+    bool send(int, const sockaddr_storage &, socklen_t, std::span<const std::byte>,
+              std::string_view, quic::QuicEcnCodepoint, bool) override {
+        return true;
+    }
+
+    std::optional<QuicIoEngineEvent> wait(std::span<const int>, int,
+                                          std::optional<quic::QuicCoreTimePoint>,
+                                          std::string_view) override {
+        return std::nullopt;
+    }
+
+    bool has_pending_events() const override {
+        return has_pending_;
+    }
+
+  private:
+    bool has_pending_ = false;
+};
+
+} // namespace
+
+COQUIC_NO_PROFILE bool io_uring_backend_has_pending_event_guard_branches_for_tests() {
+    IoUringPendingEventEngineForTests coverage_engine(false);
+    sockaddr_storage peer{};
+    const bool engine_methods_covered =
+        coverage_engine.register_socket(0) &&
+        coverage_engine.send(0, peer, 0, std::span<const std::byte>{}, std::string_view{},
+                             quic::QuicEcnCodepoint::not_ect, false) &&
+        !coverage_engine.wait(std::span<const int>{}, 0, std::nullopt, std::string_view{})
+             .has_value();
+
+    IoUringBackend pending_backend(QuicUdpBackendConfig{},
+                                   std::make_unique<IoUringPendingEventEngineForTests>(true));
+    IoUringBackend idle_backend(QuicUdpBackendConfig{},
+                                std::make_unique<IoUringPendingEventEngineForTests>(false));
+    IoUringBackend null_engine_backend(QuicUdpBackendConfig{}, nullptr);
+    IoUringBackend null_core_backend(QuicUdpBackendConfig{},
+                                     std::make_unique<IoUringPendingEventEngineForTests>(true));
+    null_core_backend.core_.reset();
+
+    return engine_methods_covered && pending_backend.has_pending_events() &&
+           !idle_backend.has_pending_events() && !null_engine_backend.has_pending_events() &&
+           !null_core_backend.has_pending_events();
+}
+
 } // namespace test
 
 } // namespace coquic::io

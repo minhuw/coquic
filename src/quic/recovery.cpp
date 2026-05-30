@@ -1670,8 +1670,7 @@ void update_rtt(RecoveryRttState &rtt, QuicCoreTimePoint ack_receive_time,
     rtt.latest_adjusted_rtt = adjusted_rtt;
 
     auto adjusted_rtt_us = latest_sample;
-    if (rtt.min_rtt_sample.has_value() &&
-        latest_sample >= *rtt.min_rtt_sample + bounded_ack_delay) {
+    if (latest_sample >= *rtt.min_rtt_sample + bounded_ack_delay) {
         adjusted_rtt_us = latest_sample - bounded_ack_delay;
     }
     rtt.latest_adjusted_rtt_sample = adjusted_rtt_us;

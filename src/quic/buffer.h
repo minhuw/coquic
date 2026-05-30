@@ -18,6 +18,7 @@ namespace detail {
 
 std::byte *allocate_datagram_byte_storage(std::size_t count);
 void deallocate_datagram_byte_storage(std::byte *pointer, std::size_t count) noexcept;
+bool datagram_byte_storage_cache_coverage_for_tests();
 
 } // namespace detail
 
@@ -34,16 +35,17 @@ template <typename T> class UninitializedAllocator {
     [[nodiscard]] T *allocate(std::size_t count) {
         if constexpr (std::is_same_v<T, std::byte>) {
             return detail::allocate_datagram_byte_storage(count);
+        } else {
+            return std::allocator<T>{}.allocate(count);
         }
-        return std::allocator<T>{}.allocate(count);
     }
 
     void deallocate(T *pointer, std::size_t count) noexcept {
         if constexpr (std::is_same_v<T, std::byte>) {
             detail::deallocate_datagram_byte_storage(pointer, count);
-            return;
+        } else {
+            std::allocator<T>{}.deallocate(pointer, count);
         }
-        std::allocator<T>{}.deallocate(pointer, count);
     }
 
     template <typename U, typename... Args> void construct(U *pointer, Args &&...args) {

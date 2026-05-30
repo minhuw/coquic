@@ -169,6 +169,17 @@ COQUIC_NO_PROFILE void deallocate_datagram_byte_storage(std::byte *pointer,
     std::allocator<std::byte>{}.deallocate(pointer, allocation_count);
 }
 
+bool datagram_byte_storage_cache_coverage_for_tests() {
+#if COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE == 0
+    DatagramByteStorageCache cache;
+    cache.used = 1;
+    cache.entries[0] = DatagramByteStorageCache::Entry{};
+    return cache.take(kDatagramByteStorageCacheBucketBytes) == std::nullopt;
+#else
+    return true;
+#endif
+}
+
 } // namespace detail
 
 DatagramBuffer::DatagramBuffer(std::initializer_list<std::byte> bytes) {

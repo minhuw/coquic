@@ -340,18 +340,8 @@ void ReliableSendBuffer::acknowledge(std::uint64_t offset, std::size_t length) {
         }
 
         const auto segment_end = range_end(segment_offset, segment_length(it->second));
-        if (segment_end <= offset) {
-            ++it;
-            continue;
-        }
-
         const auto ack_start = std::max(offset, segment_offset);
         const auto ack_end = std::min(end, segment_end);
-        if (ack_start >= ack_end) {
-            ++it;
-            continue;
-        }
-
         const auto remove_prefix = ack_start == segment_offset;
         const auto remove_suffix = ack_end == segment_end;
 
@@ -479,10 +469,6 @@ std::optional<SharedBytes> ReliableSendBuffer::bytes_for_range(std::uint64_t off
 
         const auto read_start = std::max(covered_until, segment_offset);
         const auto read_end = std::min(end, segment_end);
-        if (read_start >= read_end) {
-            continue;
-        }
-
         const auto begin = it->second.begin + static_cast<std::size_t>(read_start - segment_offset);
         const auto finish = it->second.begin + static_cast<std::size_t>(read_end - segment_offset);
         SharedBytes chunk{it->second.storage, begin, finish};

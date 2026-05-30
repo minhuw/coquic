@@ -19,6 +19,9 @@ enum class ProtectedCodecFaultPoint : std::uint8_t {
     deserialize_plaintext_packet,
     long_header_frame_payload_varint_overflow,
     long_header_payload_length_varint_overflow,
+    simple_ack_payload_write_failure,
+    simple_ack_payload_size_mismatch,
+    simple_ack_force_padding_fill,
 };
 
 class ScopedProtectedCodecFaultInjector {

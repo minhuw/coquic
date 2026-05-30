@@ -413,7 +413,7 @@ void CopaCongestionController::grow_slow_start(std::size_t acked_bytes, const Co
     set_congestion_window_segments(congestion_window_segments_ +
                                    static_cast<double>(acked_bytes) /
                                        static_cast<double>(max_datagram_size_));
-    if (startup_probe_complete_ && target.finite && congestion_window_ >= target.window) {
+    if (target.finite && congestion_window_ >= target.window) {
         slow_start_ = false;
         reset_velocity();
     }

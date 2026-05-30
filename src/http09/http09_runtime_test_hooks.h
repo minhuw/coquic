@@ -100,6 +100,8 @@ enum class ClientConnectionBackendLoopCaseForTests : std::uint8_t {
     outer_pump_terminal_success,
     peer_input_then_outer_pump_terminal_success,
     pending_work_core_inputs_are_drained_before_wait,
+    pending_work_followup_timer_drive_failure,
+    pending_work_followup_timer_continue_then_terminal_success,
 };
 
 struct ClientConnectionLoopResultForTests {

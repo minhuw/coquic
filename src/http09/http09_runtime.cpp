@@ -3868,14 +3868,22 @@ namespace {
 struct ScriptedEndpointForTests {
     std::vector<QuicHttp09EndpointUpdate> on_core_result_updates;
     std::vector<QuicHttp09EndpointUpdate> poll_updates;
+    std::vector<std::optional<QuicCoreTimePoint>> next_wakeup_overrides;
+    EndpointDriveState *state = nullptr;
     std::size_t next_on_core_result_index = 0;
     std::size_t next_poll_index = 0;
 
     QuicHttp09EndpointUpdate on_core_result(const QuicCoreResult &, QuicCoreTimePoint) {
+        const auto update_index = next_on_core_result_index;
         if (next_on_core_result_index >= on_core_result_updates.size()) {
             return {};
         }
-        return on_core_result_updates[next_on_core_result_index++];
+        auto update = on_core_result_updates[next_on_core_result_index++];
+        if (state != nullptr && update_index < next_wakeup_overrides.size() &&
+            next_wakeup_overrides[update_index].has_value()) {
+            state->next_wakeup = next_wakeup_overrides[update_index];
+        }
+        return update;
     }
 
     QuicHttp09EndpointUpdate poll(QuicCoreTimePoint) {
@@ -5561,6 +5569,7 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
     };
     QuicCoreResult start_result;
     const auto event_time = now();
+    endpoint.state = &state;
 
     switch (case_id) {
     case ClientConnectionBackendLoopCaseForTests::initial_terminal_success:
@@ -5809,6 +5818,56 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
         });
         break;
     case ClientConnectionBackendLoopCaseForTests::pending_work_core_inputs_are_drained_before_wait:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .core_inputs =
+                {
+                    QuicCoreTimerExpired{},
+                },
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::pending_work_followup_timer_drive_failure:
+        start_result.next_wakeup = event_time + std::chrono::seconds(60);
+        endpoint.next_wakeup_overrides = {
+            std::nullopt,
+            event_time,
+        };
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_failure = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .core_inputs =
+                {
+                    QuicCoreTimerExpired{},
+                },
+            .has_pending_work = true,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::
+        pending_work_followup_timer_continue_then_terminal_success:
+        start_result.next_wakeup = event_time + std::chrono::seconds(60);
+        endpoint.next_wakeup_overrides = {
+            std::nullopt,
+            event_time,
+        };
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
         endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
             .has_pending_work = true,
         });

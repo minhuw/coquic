@@ -885,7 +885,7 @@ TEST(QuicCoreTest, CorruptedOneRttRequestConnectionIdBitflipDoesNotBlockValidRet
     EXPECT_TRUE(received_value.fin);
 }
 
-TEST(QuicCoreTest, InitialRetransmissionsKeepOriginalDestinationConnectionId) {
+TEST(QuicCoreTest, ClientInitialRetransmissionsUseServerSourceConnectionIdAfterServerInitial) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.peer_source_connection_id_ = {
         std::byte{0xf1},
@@ -914,8 +914,9 @@ TEST(QuicCoreTest, InitialRetransmissionsKeepOriginalDestinationConnectionId) {
     const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets[0]);
     ASSERT_NE(initial, nullptr);
     EXPECT_EQ(initial->destination_connection_id,
+              optional_value_or_terminate(connection.peer_source_connection_id_));
+    EXPECT_NE(initial->destination_connection_id,
               connection.client_initial_destination_connection_id());
-    EXPECT_EQ(initial->destination_connection_id.size(), 8u);
 }
 
 TEST(QuicCoreTest, ServerInitialPacketsUsePeerSourceConnectionIdAsDestination) {

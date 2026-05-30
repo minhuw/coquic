@@ -14,10 +14,61 @@ def is_project_file(path: pathlib.Path, repo_root: pathlib.Path) -> bool:
     return bool(relative.parts) and relative.parts[0] in {"src", "tests"}
 
 
+def strip_output_arguments(argv: list[str]) -> list[str]:
+    stripped: list[str] = []
+    skip_next = False
+    value_flags = {
+        "-MF",
+        "-MJ",
+        "-MQ",
+        "-MT",
+        "-o",
+        "--serialize-diagnostics",
+        "-serialize-diagnostics",
+    }
+    joined_prefixes = (
+        "-MF",
+        "-MJ",
+        "-MQ",
+        "-MT",
+        "-o",
+        "--serialize-diagnostics=",
+        "-serialize-diagnostics=",
+    )
+    dependency_flags = {
+        "-M",
+        "-MD",
+        "-MG",
+        "-MM",
+        "-MMD",
+        "-MP",
+        "-MV",
+    }
+
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+            continue
+
+        if arg in value_flags:
+            skip_next = True
+            continue
+
+        if arg in dependency_flags:
+            continue
+
+        if any(arg.startswith(prefix) and arg != prefix for prefix in joined_prefixes):
+            continue
+
+        stripped.append(arg)
+
+    return stripped
+
+
 def normalize_arguments(argv: list[str], source_idx: int) -> list[str]:
     source_path = pathlib.Path(argv[source_idx])
     driver = "clang" if source_path.suffix == ".c" else "clang++"
-    return [driver] + argv[source_idx:]
+    return [driver] + strip_output_arguments(argv[source_idx:])
 
 
 def find_zig_clang_source_index(argv: list[str]) -> int | None:

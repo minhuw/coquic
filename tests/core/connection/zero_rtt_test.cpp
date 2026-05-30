@@ -366,6 +366,8 @@ TEST(QuicCoreTest, ResumedClientDefersHandshakeCryptoWhenSharedCwndIsFull) {
     const auto queued = client.connection_->queue_stream_send(
         0, std::vector<std::byte>(512, std::byte{0x62}), /*fin=*/true);
     ASSERT_TRUE(queued.has_value());
+    client.connection_->congestion_controller_.bytes_in_flight_ =
+        client.connection_->congestion_controller_.congestion_window();
 
     const auto first_reply =
         client.connection_->drain_outbound_datagram(coquic::quic::test::test_time(103));
@@ -377,9 +379,6 @@ TEST(QuicCoreTest, ResumedClientDefersHandshakeCryptoWhenSharedCwndIsFull) {
     const auto &first_kinds = *first_packet_kinds;
     ASSERT_EQ(first_kinds.size(), 1u);
     EXPECT_EQ(first_kinds[0], ProtectedPacketKind::initial);
-
-    client.connection_->congestion_controller_.bytes_in_flight_ =
-        client.connection_->congestion_controller_.congestion_window();
 
     const auto second_reply =
         client.connection_->drain_outbound_datagram(coquic::quic::test::test_time(103));

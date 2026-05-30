@@ -12361,9 +12361,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     const auto application_destination_connection_id = [&]() {
         return outbound_destination_connection_id(selected_send_path_id);
     };
-    const auto initial_destination_connection_id = config_.role == EndpointRole::client
-                                                       ? client_initial_destination_connection_id()
-                                                       : destination_connection_id;
     const bool duplicate_first_compatible_server_initial_crypto =
         !initial_packet_space_discarded_ & (config_.role == EndpointRole::server) &
         (original_version_ != current_version_) & (initial_space_.next_send_packet_number == 0) &
@@ -12834,7 +12831,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                          }}
                        : ProtectedPacket{ProtectedInitialPacket{
                              .version = initial_packet_version,
-                             .destination_connection_id = initial_destination_connection_id,
+                             .destination_connection_id = destination_connection_id,
                              .source_connection_id = config_.source_connection_id,
                              .token = initial_token,
                              .packet_number_length = kDefaultInitialPacketNumberLength,
@@ -12968,7 +12965,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             auto candidate_packets = packets;
             candidate_packets.emplace_back(ProtectedInitialPacket{
                 .version = initial_packet_version,
-                .destination_connection_id = initial_destination_connection_id,
+                .destination_connection_id = destination_connection_id,
                 .source_connection_id = config_.source_connection_id,
                 .token = initial_token,
                 .packet_number_length = kDefaultInitialPacketNumberLength,
@@ -13011,7 +13008,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             initial_packet_number = reserve_packet_number(initial_space_);
             packets.emplace_back(ProtectedInitialPacket{
                 .version = initial_packet_version,
-                .destination_connection_id = initial_destination_connection_id,
+                .destination_connection_id = destination_connection_id,
                 .source_connection_id = config_.source_connection_id,
                 .token = initial_token,
                 .packet_number_length = kDefaultInitialPacketNumberLength,
@@ -13061,7 +13058,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 auto duplicate_candidate_packets = packets;
                 duplicate_candidate_packets.emplace_back(ProtectedInitialPacket{
                     .version = initial_packet_version,
-                    .destination_connection_id = initial_destination_connection_id,
+                    .destination_connection_id = destination_connection_id,
                     .source_connection_id = config_.source_connection_id,
                     .token = initial_token,
                     .packet_number_length = kDefaultInitialPacketNumberLength,
@@ -13086,7 +13083,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     const auto duplicate_packet_number = reserve_packet_number(initial_space_);
                     duplicate_candidate_packets.back() = ProtectedInitialPacket{
                         .version = initial_packet_version,
-                        .destination_connection_id = initial_destination_connection_id,
+                        .destination_connection_id = destination_connection_id,
                         .source_connection_id = config_.source_connection_id,
                         .token = initial_token,
                         .packet_number_length = kDefaultInitialPacketNumberLength,
@@ -13110,11 +13107,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     note_idle_ack_eliciting_send(now);
                 }
             }
-        }
-
-        if (config_.role == EndpointRole::client &&
-            initial_destination_connection_id != destination_connection_id) {
-            return finalize_datagram(packets);
         }
     }
 
@@ -19915,6 +19907,49 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.handshake_space_.pending_probe_packet.has_value() &&
             connection.handshake_space_.pending_probe_packet->force_ack);
+    }
+
+    {
+        QuicConnection connection(make_client_core_config_for_connection_coverage());
+        const auto original_initial_destination_connection_id =
+            connection.config_.initial_destination_connection_id;
+        const auto server_source_connection_id =
+            bytes_from_ints_for_tests({0x02, 0x2c, 0x6e, 0x63, 0x26, 0xa1, 0xf4, 0x8e});
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::in_progress;
+        connection.client_initial_destination_connection_id_ =
+            original_initial_destination_connection_id;
+        connection.peer_source_connection_id_ = server_source_connection_id;
+        connection.peer_connection_ids_[0] = PeerConnectionIdRecord{
+            .sequence_number = 0,
+            .connection_id = server_source_connection_id,
+        };
+        connection.active_peer_connection_id_sequence_ = 0;
+        connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
+
+        const auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
+        const auto decoded = deserialize_protected_datagram(
+            datagram, DeserializeProtectionContext{
+                          .peer_role = EndpointRole::client,
+                          .client_initial_destination_connection_id =
+                              original_initial_destination_connection_id,
+                      });
+
+        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(decoded.has_value());
+        if (decoded.has_value()) {
+            COQUIC_CONNECTION_HOOK_RECORD(decoded.value().size() == 1);
+            const auto *initial = std::get_if<ProtectedInitialPacket>(&decoded.value().front());
+            COQUIC_CONNECTION_HOOK_RECORD(initial != nullptr);
+            if (initial != nullptr) {
+                COQUIC_CONNECTION_HOOK_RECORD(initial->destination_connection_id ==
+                                              server_source_connection_id);
+                COQUIC_CONNECTION_HOOK_RECORD(initial->destination_connection_id !=
+                                              original_initial_destination_connection_id);
+                COQUIC_CONNECTION_HOOK_RECORD(initial->source_connection_id ==
+                                              connection.config_.source_connection_id);
+            }
+        }
     }
 
     for (const auto secret_level :

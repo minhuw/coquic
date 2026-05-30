@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <span>
@@ -81,6 +82,13 @@ constexpr std::uint64_t kOneRttLargestAuthenticatedPacketNumber = 0xa82f30eaULL;
 constexpr std::uint64_t kOneRttPacketNumber = 0xa82f9b32ULL;
 constexpr std::uint8_t kOneRttPacketNumberLength = 2;
 constexpr std::size_t kOneRttDestinationConnectionIdLength = 4;
+
+template <typename T> const T &optional_ref_or_terminate(const std::optional<T> &value) {
+    if (!value.has_value()) {
+        std::abort();
+    }
+    return value.value();
+}
 
 std::vector<std::byte> hex_bytes(std::string_view hex) {
     std::vector<std::byte> bytes;
@@ -3821,7 +3829,7 @@ TEST(QuicProtectedCodecTest, AppendsSimpleOutboundAckViewThroughFastPathFaultBra
     };
 
     {
-        auto cached_secret = context.one_rtt_secret.value();
+        auto cached_secret = optional_ref_or_terminate(context.one_rtt_secret);
         ASSERT_TRUE(coquic::quic::expand_traffic_secret_cached(cached_secret).has_value());
         auto cached_context = context;
         cached_context.one_rtt_secret = std::nullopt;

@@ -2886,9 +2886,12 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
         PollIoEngine engine;
         constexpr std::array<int, 1> kSockets = {62};
         const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+        bool received_datagram = false;
+        if (event.has_value()) {
+            received_datagram = event->kind == QuicIoEngineEvent::Kind::rx_datagram;
+        }
         record(all_true({
-                   event.has_value(),
-                   event->kind == QuicIoEngineEvent::Kind::rx_datagram,
+                   received_datagram,
                    g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls == 2,
                }),
                "poll wait stops extra receive draining when recvmmsg would block");

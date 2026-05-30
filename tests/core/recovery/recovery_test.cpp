@@ -731,7 +731,8 @@ TEST(QuicRecoveryTest, AckHistoryCapsSparseTrackedRanges) {
     const auto ack =
         history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(200));
     ASSERT_TRUE(ack.has_value());
-    EXPECT_EQ(ack->additional_ranges.size(), coquic::quic::kMaxTrackedAckRanges - 1);
+    const auto ack_value = optional_value_or_terminate(ack);
+    EXPECT_EQ(ack_value.additional_ranges.size(), coquic::quic::kMaxTrackedAckRanges - 1);
 }
 
 TEST(QuicRecoveryTest, AckHistoryCapStillMergesRetainedBridgedRanges) {
@@ -751,7 +752,8 @@ TEST(QuicRecoveryTest, AckHistoryCapStillMergesRetainedBridgedRanges) {
     const auto ack =
         history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(201));
     ASSERT_TRUE(ack.has_value());
-    EXPECT_EQ(ack->first_ack_range, 2u);
+    const auto ack_value = optional_value_or_terminate(ack);
+    EXPECT_EQ(ack_value.first_ack_range, 2u);
 }
 
 TEST(QuicRecoveryTest, AckHistoryMeasuresAckDelayFromLargestAcknowledgedPacket) {
@@ -2646,7 +2648,8 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
     ASSERT_TRUE(mismatched.has_value());
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(mismatched_handle, 2,
                                                                             9);
-    EXPECT_FALSE(mismatched_handle.retire_packet_if_present(*mismatched));
+    EXPECT_FALSE(
+        mismatched_handle.retire_packet_if_present(optional_value_or_terminate(mismatched)));
 
     PacketSpaceRecovery lost_handle;
     lost_handle.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
@@ -2654,7 +2657,7 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
     const auto lost = lost_handle.handle_for_packet_number(2);
     ASSERT_TRUE(lost.has_value());
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_state_declared_lost(lost_handle, 2);
-    EXPECT_TRUE(lost_handle.retire_packet_if_present(*lost));
+    EXPECT_TRUE(lost_handle.retire_packet_if_present(optional_value_or_terminate(lost)));
 
     PacketSpaceRecovery mismatched_take;
     mismatched_take.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
@@ -2663,7 +2666,9 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
     ASSERT_TRUE(mismatched_take_handle.has_value());
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(mismatched_take, 2, 9);
     EXPECT_FALSE(
-        mismatched_take.take_retired_packet_if_present(*mismatched_take_handle).has_value());
+        mismatched_take
+            .take_retired_packet_if_present(optional_value_or_terminate(mismatched_take_handle))
+            .has_value());
 }
 
 TEST(QuicRecoveryTest, RetireAndTakeRetiredPacketHelpersCoverHandleEdges) {
@@ -2685,16 +2690,19 @@ TEST(QuicRecoveryTest, RetireAndTakeRetiredPacketHelpersCoverHandleEdges) {
 
     const auto taken = recovery.take_retired_packet(handles.back());
     ASSERT_TRUE(taken.has_value());
-    EXPECT_EQ(taken->packet_number, 3u);
+    const auto taken_value = optional_value_or_terminate(taken);
+    EXPECT_EQ(taken_value.packet_number, 3u);
 
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(7)));
     const auto handle = recovery.handle_for_packet_number(7);
     ASSERT_TRUE(handle.has_value());
-    const auto moved = recovery.take_retired_packet_if_present(*handle);
+    const auto handle_value = optional_value_or_terminate(handle);
+    const auto moved = recovery.take_retired_packet_if_present(handle_value);
     ASSERT_TRUE(moved.has_value());
-    EXPECT_EQ(moved->packet_number, 7u);
-    EXPECT_FALSE(recovery.take_retired_packet_if_present(*handle).has_value());
+    const auto moved_value = optional_value_or_terminate(moved);
+    EXPECT_EQ(moved_value.packet_number, 7u);
+    EXPECT_FALSE(recovery.take_retired_packet_if_present(handle_value).has_value());
     EXPECT_FALSE(recovery
                      .take_retired_packet(RecoveryPacketHandle{
                          .packet_number = 123,
@@ -2710,10 +2718,12 @@ TEST(QuicRecoveryTest, RetireAndTakeRetiredPacketHelpersCoverHandleEdges) {
     ASSERT_TRUE(acknowledged_handle.has_value());
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_acknowledged(
         already_acknowledged_take, 0, true);
-    const auto already_acknowledged_packet =
-        already_acknowledged_take.take_retired_packet(*acknowledged_handle);
+    const auto already_acknowledged_packet = already_acknowledged_take.take_retired_packet(
+        optional_value_or_terminate(acknowledged_handle));
     ASSERT_TRUE(already_acknowledged_packet.has_value());
-    EXPECT_EQ(already_acknowledged_packet->packet_number, 0u);
+    const auto already_acknowledged_packet_value =
+        optional_value_or_terminate(already_acknowledged_packet);
+    EXPECT_EQ(already_acknowledged_packet_value.packet_number, 0u);
 }
 
 TEST(QuicRecoveryTest, LossCandidateHelpersSkipDeclaredLostPacketsAndAcknowledgedSlots) {

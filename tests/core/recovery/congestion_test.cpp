@@ -23,6 +23,7 @@ using coquic::quic::NewRenoCongestionController;
 using coquic::quic::SentPacketRecord;
 
 constexpr std::size_t kTestDatagramSize = 1200;
+constexpr std::size_t kLargePacingBytes = std::size_t{32} * 1024u;
 
 template <typename T> const T &optional_ref_or_terminate(const std::optional<T> &value) {
     if (!value.has_value()) {
@@ -482,7 +483,8 @@ TEST(QuicCongestionTest, CubicColdPacingAndSuppressedGrowthBranches) {
     const std::array large_stream_packet{
         [&] {
             auto packet = make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
-                                           /*in_flight=*/true, /*bytes_in_flight=*/32u * 1024u,
+                                           /*in_flight=*/true,
+                                           /*bytes_in_flight=*/kLargePacingBytes,
                                            coquic::quic::test::test_time(31));
             packet.stream_fragments.push_back(coquic::quic::StreamFrameSendFragment{
                 .stream_id = 0,
@@ -545,7 +547,7 @@ TEST(QuicCongestionTest, NewRenoColdBranchEdgesUseDirectState) {
 
     const std::array large_non_stream_packet{
         make_sent_packet(/*packet_number=*/12, /*ack_eliciting=*/true, /*in_flight=*/true,
-                         /*bytes_in_flight=*/32u * 1024u, coquic::quic::test::test_time(12)),
+                         /*bytes_in_flight=*/kLargePacingBytes, coquic::quic::test::test_time(12)),
     };
     controller.acked_stream_bytes_for_pacing_ = 0;
     EXPECT_FALSE(controller.should_start_pacing(large_non_stream_packet));
@@ -553,7 +555,7 @@ TEST(QuicCongestionTest, NewRenoColdBranchEdgesUseDirectState) {
 
 TEST(QuicCongestionTest, NewRenoPacingStartGuardFalseBranches) {
     NewRenoCongestionController default_now(/*max_datagram_size=*/1200);
-    default_now.acked_stream_bytes_for_pacing_ = 32u * 1024u;
+    default_now.acked_stream_bytes_for_pacing_ = kLargePacingBytes;
     auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
                                    /*bytes_in_flight=*/1200, coquic::quic::test::test_time(1));
     default_now.on_packet_sent(packet);
@@ -565,7 +567,7 @@ TEST(QuicCongestionTest, NewRenoPacingStartGuardFalseBranches) {
     EXPECT_FALSE(default_now.pacing_budget_timestamp_.has_value());
 
     NewRenoCongestionController zero_rate(/*max_datagram_size=*/1200);
-    zero_rate.acked_stream_bytes_for_pacing_ = 32u * 1024u;
+    zero_rate.acked_stream_bytes_for_pacing_ = kLargePacingBytes;
     zero_rate.pacing_smoothed_rtt_ = coquic::quic::QuicCoreDuration::zero();
     auto zero_rate_packet =
         make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true, /*in_flight=*/true,
@@ -579,7 +581,7 @@ TEST(QuicCongestionTest, NewRenoPacingStartGuardFalseBranches) {
     EXPECT_FALSE(zero_rate.pacing_budget_timestamp_.has_value());
 
     NewRenoCongestionController simple_default_now(/*max_datagram_size=*/1200);
-    simple_default_now.acked_stream_bytes_for_pacing_ = 32u * 1024u;
+    simple_default_now.acked_stream_bytes_for_pacing_ = kLargePacingBytes;
     const std::array<coquic::quic::AckedStreamPacketSample, 1> stream_sample{
         coquic::quic::AckedStreamPacketSample{
             .packet_number = 3,
@@ -595,7 +597,7 @@ TEST(QuicCongestionTest, NewRenoPacingStartGuardFalseBranches) {
     EXPECT_FALSE(simple_default_now.pacing_budget_timestamp_.has_value());
 
     NewRenoCongestionController simple_zero_rate(/*max_datagram_size=*/1200);
-    simple_zero_rate.acked_stream_bytes_for_pacing_ = 32u * 1024u;
+    simple_zero_rate.acked_stream_bytes_for_pacing_ = kLargePacingBytes;
     simple_zero_rate.pacing_smoothed_rtt_ = coquic::quic::QuicCoreDuration::zero();
     simple_zero_rate.bytes_in_flight_ = 1200;
     simple_zero_rate.on_simple_stream_packets_acked(
@@ -606,7 +608,7 @@ TEST(QuicCongestionTest, NewRenoPacingStartGuardFalseBranches) {
 
 TEST(QuicCongestionTest, CubicPacingStartGuardFalseBranches) {
     CubicCongestionController default_now(/*max_datagram_size=*/1200);
-    default_now.acked_stream_bytes_for_pacing_ = 32u * 1024u;
+    default_now.acked_stream_bytes_for_pacing_ = kLargePacingBytes;
     auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true, /*in_flight=*/true,
                                    /*bytes_in_flight=*/1200, coquic::quic::test::test_time(1));
     default_now.on_packet_sent(packet);
@@ -618,7 +620,7 @@ TEST(QuicCongestionTest, CubicPacingStartGuardFalseBranches) {
     EXPECT_FALSE(default_now.pacing_budget_timestamp_.has_value());
 
     CubicCongestionController zero_rate(/*max_datagram_size=*/1200);
-    zero_rate.acked_stream_bytes_for_pacing_ = 32u * 1024u;
+    zero_rate.acked_stream_bytes_for_pacing_ = kLargePacingBytes;
     zero_rate.pacing_smoothed_rtt_ = coquic::quic::QuicCoreDuration::zero();
     auto zero_rate_packet =
         make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true, /*in_flight=*/true,
@@ -632,7 +634,7 @@ TEST(QuicCongestionTest, CubicPacingStartGuardFalseBranches) {
     EXPECT_FALSE(zero_rate.pacing_budget_timestamp_.has_value());
 
     CubicCongestionController simple_default_now(/*max_datagram_size=*/1200);
-    simple_default_now.acked_stream_bytes_for_pacing_ = 32u * 1024u;
+    simple_default_now.acked_stream_bytes_for_pacing_ = kLargePacingBytes;
     const std::array<coquic::quic::AckedStreamPacketSample, 1> stream_sample{
         coquic::quic::AckedStreamPacketSample{
             .packet_number = 3,
@@ -648,7 +650,7 @@ TEST(QuicCongestionTest, CubicPacingStartGuardFalseBranches) {
     EXPECT_FALSE(simple_default_now.pacing_budget_timestamp_.has_value());
 
     CubicCongestionController simple_zero_rate(/*max_datagram_size=*/1200);
-    simple_zero_rate.acked_stream_bytes_for_pacing_ = 32u * 1024u;
+    simple_zero_rate.acked_stream_bytes_for_pacing_ = kLargePacingBytes;
     simple_zero_rate.pacing_smoothed_rtt_ = coquic::quic::QuicCoreDuration::zero();
     simple_zero_rate.bytes_in_flight_ = 1200;
     simple_zero_rate.on_simple_stream_packets_acked(
@@ -658,14 +660,14 @@ TEST(QuicCongestionTest, CubicPacingStartGuardFalseBranches) {
 
     const std::array large_non_stream_packet{
         make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true, /*in_flight=*/true,
-                         /*bytes_in_flight=*/32u * 1024u, coquic::quic::test::test_time(4)),
+                         /*bytes_in_flight=*/kLargePacingBytes, coquic::quic::test::test_time(4)),
     };
     CubicCongestionController pacing_probe(/*max_datagram_size=*/1200);
     EXPECT_FALSE(pacing_probe.should_start_pacing(large_non_stream_packet));
 
     CubicCongestionController already_pacing(/*max_datagram_size=*/1200);
     already_pacing.pacing_budget_timestamp_ = coquic::quic::test::test_time(1);
-    already_pacing.acked_stream_bytes_for_pacing_ = 32u * 1024u;
+    already_pacing.acked_stream_bytes_for_pacing_ = kLargePacingBytes;
     already_pacing.on_packets_acked(std::array<SentPacketRecord, 1>{packet},
                                     /*app_limited=*/false, coquic::quic::test::test_time(5),
                                     coquic::quic::RecoveryRttState{
@@ -742,7 +744,7 @@ TEST(QuicCongestionTest, CopaColdBranchEdgesUseDirectState) {
 
     CopaCongestionController no_exit(/*max_datagram_size=*/1200);
     no_exit.startup_probe_complete_ = true;
-    no_exit.slow_start_probe_segments_acked_ = 2 * 10;
+    no_exit.slow_start_probe_segments_acked_ = std::size_t{2} * 10u;
     no_exit.congestion_window_ = 12000;
     no_exit.congestion_window_segments_ = 10.0;
     no_exit.grow_slow_start(/*acked_bytes=*/1200,
@@ -751,7 +753,7 @@ TEST(QuicCongestionTest, CopaColdBranchEdgesUseDirectState) {
 
     CopaCongestionController below_target(/*max_datagram_size=*/1200);
     below_target.startup_probe_complete_ = true;
-    below_target.slow_start_probe_segments_acked_ = 2 * 10;
+    below_target.slow_start_probe_segments_acked_ = std::size_t{2} * 10u;
     below_target.congestion_window_ = 12000;
     below_target.congestion_window_segments_ = 10.0;
     below_target.grow_slow_start(/*acked_bytes=*/1200, CopaCongestionController::CopaTarget{
@@ -3760,7 +3762,8 @@ TEST(QuicCongestionTest, NewRenoColdPacingPrimitivesAndBoundaryHelpers) {
     const std::array large_stream_packet{
         [&] {
             auto packet = make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,
-                                           /*in_flight=*/true, /*bytes_in_flight=*/32u * 1024u,
+                                           /*in_flight=*/true,
+                                           /*bytes_in_flight=*/kLargePacingBytes,
                                            coquic::quic::test::test_time(30));
             packet.stream_fragments.push_back(coquic::quic::StreamFrameSendFragment{
                 .stream_id = 0,

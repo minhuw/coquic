@@ -6047,7 +6047,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                       !simple_ack_datagram.empty());
         }
         {
-            auto cached_secret = one_rtt_secret;
+            const auto &cached_secret = one_rtt_secret;
             const auto cached_keys = expand_traffic_secret_cached(cached_secret);
             auto cached_context = one_rtt_context;
             cached_context.one_rtt_secret = std::nullopt;

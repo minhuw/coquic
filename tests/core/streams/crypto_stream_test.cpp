@@ -1,5 +1,7 @@
+#include <cstdlib>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -16,6 +18,13 @@ using coquic::quic::CryptoSendBuffer;
 using coquic::quic::ReliableReceiveBuffer;
 using coquic::quic::ReliableSendBuffer;
 using coquic::quic::SharedBytes;
+
+template <typename T> const T &optional_ref_or_terminate(const std::optional<T> &value) {
+    if (!value.has_value()) {
+        std::abort();
+    }
+    return value.value();
+}
 
 std::vector<std::byte> bytes_from_string(std::string_view text) {
     std::vector<std::byte> bytes;
@@ -426,8 +435,9 @@ TEST(QuicCryptoStreamTest, BytesForRangeCoversSharedOwnedAndMissingRanges) {
 
     const auto first_slice = buffer.bytes_for_range(0, 4);
     ASSERT_TRUE(first_slice.has_value());
-    EXPECT_EQ(first_slice->storage().get(), first.get());
-    EXPECT_EQ(first_slice->to_vector(), bytes_from_string("abcd"));
+    const auto &first_slice_value = optional_ref_or_terminate(first_slice);
+    EXPECT_EQ(first_slice_value.storage().get(), first.get());
+    EXPECT_EQ(first_slice_value.to_vector(), bytes_from_string("abcd"));
 
     buffer.append(SharedBytes(second, 0, 4));
     EXPECT_FALSE(buffer.bytes_for_range(0, 8).has_value());
@@ -435,12 +445,15 @@ TEST(QuicCryptoStreamTest, BytesForRangeCoversSharedOwnedAndMissingRanges) {
 
     const auto joined = buffer.bytes_for_range(0, 8);
     ASSERT_TRUE(joined.has_value());
-    EXPECT_NE(joined->storage().get(), first.get());
-    EXPECT_NE(joined->storage().get(), second.get());
-    EXPECT_EQ(joined->to_vector(), bytes_from_string("abcdefgh"));
+    const auto &joined_value = optional_ref_or_terminate(joined);
+    EXPECT_NE(joined_value.storage().get(), first.get());
+    EXPECT_NE(joined_value.storage().get(), second.get());
+    EXPECT_EQ(joined_value.to_vector(), bytes_from_string("abcdefgh"));
 
-    ASSERT_TRUE(buffer.bytes_for_range(0, 0).has_value());
-    EXPECT_TRUE(buffer.bytes_for_range(0, 0)->empty());
+    const auto empty_slice = buffer.bytes_for_range(0, 0);
+    ASSERT_TRUE(empty_slice.has_value());
+    const auto &empty_slice_value = optional_ref_or_terminate(empty_slice);
+    EXPECT_TRUE(empty_slice_value.empty());
     EXPECT_FALSE(buffer.bytes_for_range(10, 1).has_value());
 
     ReliableSendBuffer pending;
@@ -473,10 +486,11 @@ TEST(QuicCryptoStreamTest, BytesForRangeCoalescesAdjacentSharedSegmentsAndReject
 
     const auto coalesced = coalesced_buffer.bytes_for_range(0, 4);
     ASSERT_TRUE(coalesced.has_value());
-    EXPECT_EQ(coalesced->storage().get(), storage.get());
-    EXPECT_EQ(coalesced->begin_offset(), 0u);
-    EXPECT_EQ(coalesced->end_offset(), 4u);
-    EXPECT_EQ(coalesced->to_vector(), bytes_from_string("abcd"));
+    const auto &coalesced_value = optional_ref_or_terminate(coalesced);
+    EXPECT_EQ(coalesced_value.storage().get(), storage.get());
+    EXPECT_EQ(coalesced_value.begin_offset(), 0u);
+    EXPECT_EQ(coalesced_value.end_offset(), 4u);
+    EXPECT_EQ(coalesced_value.to_vector(), bytes_from_string("abcd"));
 
     ReliableSendBuffer gapped_buffer;
     auto [left_it, left_inserted] =
@@ -656,7 +670,8 @@ TEST(QuicCryptoStreamTest, SendBufferColdBranchEdgesUseDirectSegments) {
     non_adjacent_storage_offsets.note_segment_inserted(right_slice_it->second);
     const auto discontiguous = non_adjacent_storage_offsets.bytes_for_range(0, 4);
     ASSERT_TRUE(discontiguous.has_value());
-    EXPECT_EQ(discontiguous->to_vector(), bytes_from_string("abde"));
+    const auto &discontiguous_value = optional_ref_or_terminate(discontiguous);
+    EXPECT_EQ(discontiguous_value.to_vector(), bytes_from_string("abde"));
 
     ReliableSendBuffer owned_already;
     auto other_storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("gh"));
@@ -690,7 +705,8 @@ TEST(QuicCryptoStreamTest, SendBufferColdBranchEdgesUseDirectSegments) {
     owned_already.note_segment_inserted(owned_third_it->second);
     const auto owned = owned_already.bytes_for_range(0, 6);
     ASSERT_TRUE(owned.has_value());
-    EXPECT_EQ(owned->to_vector(), bytes_from_string("abghij"));
+    const auto &owned_value = optional_ref_or_terminate(owned);
+    EXPECT_EQ(owned_value.to_vector(), bytes_from_string("abghij"));
 }
 
 TEST(QuicCryptoStreamTest, SharedAppendReusesCallerStorageWithoutCloning) {

@@ -128,8 +128,8 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   }
   let sawFailed = false;
   let sawUnknown = false;
-  let sawUnsupported = false;
   let sawSucceeded = false;
+  let sawUnsupported = false;
   for (const test of tests) {
     const result = rowByLaneAndTest.get(`${laneKey}:${test}`)?.result || "unknown";
     if (result === "failed") {
@@ -149,10 +149,13 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   if (sawFailed) {
     return "failed";
   }
-  if (sawUnknown || (sawSucceeded && sawUnsupported)) {
+  if (sawUnknown) {
     return "unknown";
   }
-  return sawUnsupported ? "unsupported" : "succeeded";
+  if (sawSucceeded) {
+    return "succeeded";
+  }
+  return sawUnsupported ? "unsupported" : "unknown";
 }
 
 function renderParticipant(name) {

@@ -21,6 +21,9 @@ This document covers the remote continuous deployment flow for the public
   perf runs.
 - `.github/workflows/interop.yml` uploads the latest `interop-results.json`
   snapshot into the live demo site after `main` branch interop runs.
+- `.github/workflows/test.yml` uploads the latest `coverage-results.json`
+  summary and the full LLVM coverage HTML report into the live demo site after
+  `main` branch test runs.
 
 The current workflow builds the wasm demo first, then packages
 `zig-out/share/wasm-quic/`. The deploy script accepts any prepared document-root
@@ -59,11 +62,19 @@ The interop workflow reuses the same secret to upload
 
 - `/opt/coquic-demo/current/site/interop-results.json`
 
-Those files are read by the public performance and interop dashboards. The
-performance dashboard uses `perf-results.json` for the latest snapshot and
-`perf-history.json` for daily trends. The perf and interop workflows run daily
-or via manual `workflow_dispatch`; only runs on the `main` branch publish
-snapshots to the demo machine.
+The test workflow reuses the same secret to upload `coverage/coverage-results.json`
+and `coverage/html/` to:
+
+- `/opt/coquic-demo/current/site/coverage-results.json`
+- `/opt/coquic-demo/current/site/coverage/`
+
+Those files are read by the public performance, interop, and coverage
+dashboards. The performance dashboard uses `perf-results.json` for the latest
+snapshot and `perf-history.json` for daily trends. The coverage dashboard links
+to the full LLVM report at `/coverage/index.html`. The perf and interop
+workflows run daily or via manual `workflow_dispatch`; the test workflow runs
+on pushes and pull requests and can also be dispatched manually. Only runs on
+the `main` branch publish snapshots to the demo machine.
 
 ## Remote Host Requirements
 

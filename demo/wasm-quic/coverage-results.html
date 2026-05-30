@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="coquic-coverage-marker" content="coquic-coverage-results-v1">
+    <title>coquic coverage results</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-width: 320px;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      .coverage-main {
+        width: min(100%, 1340px);
+        margin: 0 auto;
+      }
+
+      .coverage-hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 18px;
+        align-items: end;
+        padding: 28px 0 18px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .coverage-hero p {
+        margin-top: 8px;
+        max-width: 760px;
+        color: var(--soft);
+        font-size: 15px;
+        line-height: 1.55;
+      }
+
+      .coverage-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .coverage-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        padding: 0 12px;
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 600;
+        text-decoration: none;
+      }
+
+      .coverage-action:hover,
+      .coverage-action:focus-visible {
+        border-color: transparent;
+        background: var(--surface-3);
+        color: var(--ink);
+        outline: none;
+      }
+
+      .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 20px;
+      }
+
+      .metric-card,
+      .component-panel,
+      .file-panel {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+      }
+
+      .metric-card {
+        display: grid;
+        gap: 10px;
+        min-height: 154px;
+        padding: 16px;
+      }
+
+      .metric-card span,
+      .component-panel p,
+      .file-panel p,
+      .source-line {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      .metric-card strong {
+        color: var(--ink);
+        font-size: clamp(34px, 6vw, 58px);
+        font-weight: 500;
+        line-height: 0.95;
+      }
+
+      .metric-bar {
+        position: relative;
+        height: 10px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: var(--surface-3);
+      }
+
+      .metric-bar i {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: var(--coverage-width, 0%);
+        border-radius: inherit;
+        background: var(--primary);
+      }
+
+      .coverage-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+        gap: 14px;
+        margin-top: 14px;
+        align-items: start;
+      }
+
+      .panel-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 15px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .component-list,
+      .file-list {
+        display: grid;
+      }
+
+      .component-row,
+      .file-row {
+        display: grid;
+        gap: 8px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .component-row:last-child,
+      .file-row:last-child {
+        border-bottom: 0;
+      }
+
+      .row-top {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .row-top strong {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--ink);
+        font-size: 14px;
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .row-top span {
+        flex: 0 0 auto;
+        color: var(--primary);
+        font-family: var(--mono);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .row-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .row-meta span {
+        display: inline-flex;
+        min-height: 24px;
+        align-items: center;
+        padding: 0 8px;
+        border-radius: 999px;
+        background: var(--surface-2);
+        color: var(--soft);
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+
+      .empty-state {
+        padding: 18px 16px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      @media (max-width: 860px) {
+        .coverage-hero,
+        .coverage-grid,
+        .summary-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .coverage-actions {
+          justify-content: flex-start;
+        }
+      }
+    </style>
+    <link rel="icon" href="./coquic-logo.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="./demo-theme.css">
+  </head>
+  <body>
+    <main class="coverage-main">
+      <nav class="top-nav" aria-label="Demo views">
+        <a class="top-nav-home" href="./index.html" aria-label="Home">
+          <img src="./coquic-logo.svg" alt="" aria-hidden="true">
+        </a>
+        <span class="top-nav-links">
+          <a href="./workbench.html">Workbench</a>
+          <a href="./perf-comparison.html">Performance</a>
+          <a href="./interop-results.html">Interop</a>
+          <a href="./coverage-results.html" aria-current="page">Coverage</a>
+          <a class="repo-link" href="https://github.com/minhuw/coquic" target="_blank" rel="noopener noreferrer" aria-label="CoQUIC on GitHub">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M12 .5C5.73.5.96 5.27.96 11.54c0 4.88 3.17 9.01 7.57 10.46.55.1.75-.24.75-.53v-1.87c-3.08.67-3.73-1.33-3.73-1.33-.5-1.28-1.23-1.62-1.23-1.62-1.01-.69.08-.68.08-.68 1.11.08 1.7 1.14 1.7 1.14.99 1.69 2.59 1.2 3.22.92.1-.72.39-1.2.7-1.48-2.46-.28-5.04-1.23-5.04-5.48 0-1.21.43-2.2 1.14-2.98-.11-.28-.49-1.41.11-2.94 0 0 .93-.3 3.04 1.14.88-.24 1.83-.37 2.77-.37s1.89.13 2.77.37c2.11-1.44 3.04-1.14 3.04-1.14.6 1.53.22 2.66.11 2.94.71.78 1.14 1.77 1.14 2.98 0 4.26-2.59 5.19-5.05 5.47.4.34.75 1.01.75 2.04v3.02c0 .29.2.64.76.53 4.39-1.45 7.56-5.58 7.56-10.46C23.04 5.27 18.27.5 12 .5Z"></path>
+            </svg>
+          </a>
+        </span>
+      </nav>
+
+      <section class="coverage-hero">
+        <div>
+          <span class="eyebrow">LLVM source coverage</span>
+          <h1>CoQUIC Coverage Report</h1>
+          <p id="coverage-source-label">waiting for coverage-results.json</p>
+        </div>
+        <div class="coverage-actions">
+          <a class="coverage-action" href="./coverage/index.html">Open LLVM HTML</a>
+          <a class="coverage-action" href="./coverage-results.json">Download JSON</a>
+        </div>
+      </section>
+
+      <section class="summary-grid" id="summary-grid" aria-label="Coverage totals"></section>
+
+      <section class="coverage-grid" aria-label="Coverage details">
+        <div class="component-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Components</h2>
+              <p>Line coverage by source area</p>
+            </div>
+          </div>
+          <div class="component-list" id="component-list"></div>
+        </div>
+
+        <div class="file-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Lowest Files</h2>
+              <p>Files sorted by line coverage</p>
+            </div>
+          </div>
+          <div class="file-list" id="file-list"></div>
+        </div>
+      </section>
+    </main>
+    <script src="./coverage-results.js"></script>
+  </body>
+</html>

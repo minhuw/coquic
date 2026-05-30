@@ -17,3 +17,5 @@ compile_commands.json
 bench/*/target/
 demo/wasm-quic/perf-results.json
 demo/wasm-quic/perf-history.json
+demo/wasm-quic/coverage-results.json
+coverage-html.tar.gz

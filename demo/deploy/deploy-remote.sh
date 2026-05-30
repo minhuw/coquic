@@ -416,6 +416,14 @@ if sudo test -f /opt/coquic-demo/current/site/interop-results.json &&
    ! sudo test -f "${remote_release_dir}/site/interop-results.json"; then
   sudo install -m 644 /opt/coquic-demo/current/site/interop-results.json "${remote_release_dir}/site/interop-results.json"
 fi
+if sudo test -f /opt/coquic-demo/current/site/coverage-results.json &&
+   ! sudo test -f "${remote_release_dir}/site/coverage-results.json"; then
+  sudo install -m 644 /opt/coquic-demo/current/site/coverage-results.json "${remote_release_dir}/site/coverage-results.json"
+fi
+if sudo test -d /opt/coquic-demo/current/site/coverage &&
+   ! sudo test -d "${remote_release_dir}/site/coverage"; then
+  sudo cp -a /opt/coquic-demo/current/site/coverage "${remote_release_dir}/site/coverage"
+fi
 
 sudo install -m 644 "${remote_upload_dir}/coquic-demo.service" /etc/systemd/system/coquic-demo.service
 sudo install -m 644 "${remote_upload_dir}/fullchain.pem" /etc/coquic-demo/tls/fullchain.pem

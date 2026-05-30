@@ -178,6 +178,8 @@ same_release_backup_restore_markers = [
     "/opt/coquic-demo/current/site/perf-results.json",
     "/opt/coquic-demo/current/site/perf-history.json",
     "/opt/coquic-demo/current/site/interop-results.json",
+    "/opt/coquic-demo/current/site/coverage-results.json",
+    "/opt/coquic-demo/current/site/coverage",
 ]
 for marker in same_release_backup_restore_markers:
     if marker not in deploy_script:

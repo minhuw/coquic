@@ -29,7 +29,7 @@ if [[ -e demo/site/index.html ]]; then
   exit 1
 fi
 
-for packaged_file in index.html workbench.html demo-theme.css coquic-logo.svg quic-demo.js perf-comparison.html perf-comparison.js interop-results.html interop-results.js coquic-wasm-quic.wasm; do
+for packaged_file in index.html workbench.html demo-theme.css coquic-logo.svg quic-demo.js perf-comparison.html perf-comparison.js interop-results.html interop-results.js coverage-results.html coverage-results.js coquic-wasm-quic.wasm; do
   if [[ ! -f "${output_dir}/${packaged_file}" ]]; then
     echo "missing packaged wasm demo file: ${packaged_file}" >&2
     exit 1
@@ -78,7 +78,8 @@ for marker in \
   "demo-theme.css" \
   "workbench.html" \
   "perf-comparison.html" \
-  "interop-results.html"; do
+  "interop-results.html" \
+  "coverage-results.html"; do
   if ! grep -Fq -- "${marker}" "${output_dir}/index.html"; then
     echo "packaged demo homepage missing marker: ${marker}" >&2
     exit 1
@@ -96,6 +97,7 @@ for marker in \
   "demo-theme.css" \
   "perf-comparison.html" \
   "interop-results.html" \
+  "coverage-results.html" \
   "global-timer" \
   "module-state" \
   "start-label" \
@@ -182,6 +184,27 @@ for marker in \
   "quinn"; do
   if ! grep -Fq -- "${marker}" "${output_dir}/interop-results.html" "${output_dir}/interop-results.js"; then
     echo "packaged interop result assets missing marker: ${marker}" >&2
+    exit 1
+  fi
+done
+
+for marker in \
+  "coquic-coverage-results-v1" \
+  "coquic coverage results" \
+  "coquic-logo.svg" \
+  "demo-theme.css" \
+  "coverage-results.json" \
+  "coverage/index.html" \
+  "CoQUIC Coverage Report" \
+  "LLVM source coverage" \
+  "Function Coverage" \
+  "Line Coverage" \
+  "Branch Coverage" \
+  "least_covered_files" \
+  "component-list" \
+  "file-list"; do
+  if ! grep -Fq -- "${marker}" "${output_dir}/coverage-results.html" "${output_dir}/coverage-results.js"; then
+    echo "packaged coverage result assets missing marker: ${marker}" >&2
     exit 1
   fi
 done

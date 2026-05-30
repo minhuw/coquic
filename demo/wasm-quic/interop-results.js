@@ -109,17 +109,24 @@ function resultToken(result) {
   if (result === "failed") {
     return "fail";
   }
-  if (result === "unsupported") {
+  if (isSkippedResult(result)) {
     return "skip";
   }
   return "-";
 }
 
 function resultClass(result) {
-  if (result === "succeeded" || result === "failed" || result === "unsupported") {
+  if (isSkippedResult(result)) {
+    return "unsupported";
+  }
+  if (result === "succeeded" || result === "failed") {
     return result;
   }
   return "unknown";
+}
+
+function isSkippedResult(result) {
+  return result === "unsupported" || result === "skipped";
 }
 
 function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
@@ -131,12 +138,16 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   let sawSucceeded = false;
   let sawUnsupported = false;
   for (const test of tests) {
-    const result = rowByLaneAndTest.get(`${laneKey}:${test}`)?.result || "unknown";
+    const row = rowByLaneAndTest.get(`${laneKey}:${test}`);
+    if (!row) {
+      continue;
+    }
+    const result = row.result || "unknown";
     if (result === "failed") {
       sawFailed = true;
       continue;
     }
-    if (result === "unsupported") {
+    if (isSkippedResult(result)) {
       sawUnsupported = true;
       continue;
     }

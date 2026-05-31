@@ -1059,6 +1059,26 @@ bool runtime_internal_check(bool condition, std::string_view hook, std::string_v
     return condition;
 }
 
+bool runtime_misc_internal_coverage_check(bool &ok, bool condition, std::string_view label) {
+    ok &= runtime_internal_check(condition, "runtime_misc_internal_coverage_for_test", label);
+    return condition;
+}
+
+bool runtime_loop_internal_coverage_check(bool &ok, bool condition, std::string_view label) {
+    ok &= runtime_internal_check(condition, "runtime_loop_internal_coverage_for_test", label);
+    return condition;
+}
+
+bool runtime_additional_internal_coverage_check(bool &ok, bool condition, std::string_view label) {
+    ok &= runtime_internal_check(condition, "runtime_additional_internal_coverage_for_test", label);
+    return condition;
+}
+
+bool runtime_tail_internal_coverage_check(bool &ok, bool condition, std::string_view label) {
+    ok &= runtime_internal_check(condition, "runtime_tail_internal_coverage_for_test", label);
+    return condition;
+}
+
 constexpr std::uint64_t kRuntimeLoopMaskEnsureRoute = 1ull << 0;
 constexpr std::uint64_t kRuntimeLoopMaskServerIdleTimeout = 1ull << 1;
 constexpr std::uint64_t kRuntimeLoopMaskServerShutdown = 1ull << 2;
@@ -1545,16 +1565,15 @@ bool runtime_make_client_transfer_plans_for_test(const Http3RuntimeConfig &confi
 
 bool runtime_misc_internal_coverage_for_test() {
     bool ok = true;
-    const auto check = [&](bool condition, std::string_view label) {
-        ok &= runtime_internal_check(condition, "runtime_misc_internal_coverage_for_test", label);
-    };
 
     std::string escaped;
     append_json_escaped(escaped, "\"\\\b\f\n\r\t");
-    check(escaped == "\"\\\"\\\\\\b\\f\\n\\r\\t\"", "append_json_escaped escapes control chars");
+    runtime_misc_internal_coverage_check(ok, escaped == "\"\\\"\\\\\\b\\f\\n\\r\\t\"",
+                                         "append_json_escaped escapes control chars");
     std::string escaped_control;
     append_json_escaped(escaped_control, std::string_view("\x01", 1));
-    check(escaped_control == "\"\\u0001\"", "append_json_escaped hex-encodes other control bytes");
+    runtime_misc_internal_coverage_check(ok, escaped_control == "\"\\u0001\"",
+                                         "append_json_escaped hex-encodes other control bytes");
 
     const auto inspect_body = inspect_json_body(Http3Request{
         .head =
@@ -1570,120 +1589,163 @@ bool runtime_misc_internal_coverage_for_test() {
     });
     const std::string inspect_text(reinterpret_cast<const char *>(inspect_body.data()),
                                    inspect_body.size());
-    check(inspect_text.find(",{\"name\":\"second\"") != std::string::npos,
-          "inspect_json_body serializes trailer separators");
-    check(inspect_text.find("\"content_length\":5") != std::string::npos,
-          "inspect_json_body serializes content length values");
+    runtime_misc_internal_coverage_check(
+        ok, inspect_text.find(",{\"name\":\"second\"") != std::string::npos,
+        "inspect_json_body serializes trailer separators");
+    runtime_misc_internal_coverage_check(
+        ok, inspect_text.find("\"content_length\":5") != std::string::npos,
+        "inspect_json_body serializes content length values");
 
     RuntimeScopedTempDir document_root;
-    check(document_root.write_file("payload.txt", "payload"),
-          "write temp payload for runtime_server_response");
+    runtime_misc_internal_coverage_check(ok, document_root.write_file("payload.txt", "payload"),
+                                         "write temp payload for runtime_server_response");
     const auto document_root_config = Http3RuntimeConfig{
         .document_root = document_root.path(),
     };
-    check(!document_root.write_file(".", "x"),
-          "temp runtime directory rejects writes targeting directories");
-    check(!read_binary_file(document_root.path() / "missing.bin").has_value(),
-          "read_binary_file rejects missing files");
-    check(!write_binary_file(document_root.path(), bytes_from_string("x")),
-          "write_binary_file rejects directory targets");
-    check(!runtime_internal_check(false, "runtime_misc_internal_coverage_for_test",
-                                  "forced false branch"),
-          "runtime_internal_check reports failures");
-    check(runtime_result_uint64_or(Http3Result<std::uint64_t>::failure(Http3Error{
-                                       .detail = "fallback",
-                                   }),
-                                   42) == 42,
-          "runtime_result_value_or returns fallback values for error results");
-    check(runtime_result_uint64_or(
-              Http3Result<std::uint64_t>{
-                  .storage = std::variant<std::uint64_t, Http3Error>{std::uint64_t{7}},
-              },
-              42) == 7,
-          "runtime_result_value_or preserves success values");
+    runtime_misc_internal_coverage_check(
+        ok, !document_root.write_file(".", "x"),
+        "temp runtime directory rejects writes targeting directories");
+    runtime_misc_internal_coverage_check(
+        ok, !read_binary_file(document_root.path() / "missing.bin").has_value(),
+        "read_binary_file rejects missing files");
+    runtime_misc_internal_coverage_check(
+        ok, !write_binary_file(document_root.path(), bytes_from_string("x")),
+        "write_binary_file rejects directory targets");
+    runtime_misc_internal_coverage_check(
+        ok,
+        !runtime_internal_check(false, "runtime_misc_internal_coverage_for_test",
+                                "forced false branch"),
+        "runtime_internal_check reports failures");
+    runtime_misc_internal_coverage_check(
+        ok,
+        runtime_result_uint64_or(Http3Result<std::uint64_t>::failure(Http3Error{
+                                     .detail = "fallback",
+                                 }),
+                                 42) == 42,
+        "runtime_result_value_or returns fallback values for error results");
+    runtime_misc_internal_coverage_check(
+        ok,
+        runtime_result_uint64_or(
+            Http3Result<std::uint64_t>{
+                .storage = std::variant<std::uint64_t, Http3Error>{std::uint64_t{7}},
+            },
+            42) == 7,
+        "runtime_result_value_or preserves success values");
     {
         const auto no_parent_path = std::filesystem::path("coquic-runtime-no-parent.bin");
         std::error_code ignored;
         std::filesystem::remove(no_parent_path, ignored);
-        check(write_binary_file(no_parent_path, bytes_from_string("np")),
-              "write_binary_file accepts relative paths without parent components");
-        check(read_binary_file(no_parent_path).value_or(std::vector<std::byte>{}) ==
-                  bytes_from_string("np"),
-              "write_binary_file persists data for relative paths without parents");
+        runtime_misc_internal_coverage_check(
+            ok, write_binary_file(no_parent_path, bytes_from_string("np")),
+            "write_binary_file accepts relative paths without parent components");
+        runtime_misc_internal_coverage_check(
+            ok,
+            read_binary_file(no_parent_path).value_or(std::vector<std::byte>{}) ==
+                bytes_from_string("np"),
+            "write_binary_file persists data for relative paths without parents");
         std::filesystem::remove(no_parent_path, ignored);
     }
 
     {
         const auto parsed = parse_header_arg(" X-Test : value \t");
         const auto parsed_header = parsed.value_or(Http3RuntimeHeader{});
-        check(parsed.has_value(), "parse_header_arg accepts trimmed header input");
-        check(parsed_header.name == "x-test", "parse_header_arg lowercases header names");
-        check(parsed_header.value == "value", "parse_header_arg trims header values");
+        runtime_misc_internal_coverage_check(ok, parsed.has_value(),
+                                             "parse_header_arg accepts trimmed header input");
+        runtime_misc_internal_coverage_check(ok, parsed_header.name == "x-test",
+                                             "parse_header_arg lowercases header names");
+        runtime_misc_internal_coverage_check(ok, parsed_header.value == "value",
+                                             "parse_header_arg trims header values");
     }
-    check(parse_io_backend_arg("socket") ==
-              std::optional<io::QuicIoBackendKind>{io::QuicIoBackendKind::socket},
-          "parse_io_backend_arg accepts socket");
-    check(parse_io_backend_arg("io_uring") ==
-              std::optional<io::QuicIoBackendKind>{io::QuicIoBackendKind::io_uring},
-          "parse_io_backend_arg accepts io_uring");
-    check(!parse_http3_authority("").has_value(), "parse_http3_authority rejects empty authority");
+    runtime_misc_internal_coverage_check(
+        ok,
+        parse_io_backend_arg("socket") ==
+            std::optional<io::QuicIoBackendKind>{io::QuicIoBackendKind::socket},
+        "parse_io_backend_arg accepts socket");
+    runtime_misc_internal_coverage_check(
+        ok,
+        parse_io_backend_arg("io_uring") ==
+            std::optional<io::QuicIoBackendKind>{io::QuicIoBackendKind::io_uring},
+        "parse_io_backend_arg accepts io_uring");
+    runtime_misc_internal_coverage_check(ok, !parse_http3_authority("").has_value(),
+                                         "parse_http3_authority rejects empty authority");
     {
         const auto authority = parse_http3_authority("[::1]");
         const auto parsed_authority = authority.value_or(ParsedHttp3Authority{});
-        check(authority.has_value(), "parse_http3_authority accepts bracketed IPv6 authorities");
-        check(parsed_authority.host == "::1",
-              "parse_http3_authority preserves bracketed IPv6 hosts");
-        check(!parsed_authority.port.has_value(),
-              "parse_http3_authority leaves IPv6 ports unset when omitted");
+        runtime_misc_internal_coverage_check(
+            ok, authority.has_value(), "parse_http3_authority accepts bracketed IPv6 authorities");
+        runtime_misc_internal_coverage_check(
+            ok, parsed_authority.host == "::1",
+            "parse_http3_authority preserves bracketed IPv6 hosts");
+        runtime_misc_internal_coverage_check(
+            ok, !parsed_authority.port.has_value(),
+            "parse_http3_authority leaves IPv6 ports unset when omitted");
     }
-    check(!parse_http3_authority("[::1]suffix").has_value(),
-          "parse_http3_authority rejects IPv6 suffixes without port separators");
-    check(!parse_http3_authority("[::1]:99999").has_value(),
-          "parse_http3_authority rejects oversized IPv6 ports");
-    check(!parse_http3_authority("[::1]:abc").has_value(),
-          "parse_http3_authority rejects invalid IPv6 port text");
-    check(!parse_http3_authority("localhost:").has_value(),
-          "parse_http3_authority rejects empty port suffixes");
+    runtime_misc_internal_coverage_check(
+        ok, !parse_http3_authority("[::1]suffix").has_value(),
+        "parse_http3_authority rejects IPv6 suffixes without port separators");
+    runtime_misc_internal_coverage_check(ok, !parse_http3_authority("[::1]:99999").has_value(),
+                                         "parse_http3_authority rejects oversized IPv6 ports");
+    runtime_misc_internal_coverage_check(ok, !parse_http3_authority("[::1]:abc").has_value(),
+                                         "parse_http3_authority rejects invalid IPv6 port text");
+    runtime_misc_internal_coverage_check(ok, !parse_http3_authority("localhost:").has_value(),
+                                         "parse_http3_authority rejects empty port suffixes");
     {
         const auto bare_ipv6 = parse_http3_authority("2001:db8::1");
-        check(bare_ipv6.has_value(), "parse_http3_authority accepts bare IPv6 literals");
-        check(bare_ipv6.value_or(ParsedHttp3Authority{}).host == "2001:db8::1",
-              "parse_http3_authority preserves bare IPv6 literal text");
+        runtime_misc_internal_coverage_check(ok, bare_ipv6.has_value(),
+                                             "parse_http3_authority accepts bare IPv6 literals");
+        runtime_misc_internal_coverage_check(
+            ok, bare_ipv6.value_or(ParsedHttp3Authority{}).host == "2001:db8::1",
+            "parse_http3_authority preserves bare IPv6 literal text");
     }
-    check(!parse_http3_authority(":443").has_value(),
-          "parse_http3_authority rejects empty hosts before port separators");
-    check(!parse_http3_authority("localhost:99999").has_value(),
-          "parse_http3_authority rejects oversized non-IPv6 ports");
+    runtime_misc_internal_coverage_check(
+        ok, !parse_http3_authority(":443").has_value(),
+        "parse_http3_authority rejects empty hosts before port separators");
+    runtime_misc_internal_coverage_check(ok, !parse_http3_authority("localhost:99999").has_value(),
+                                         "parse_http3_authority rejects oversized non-IPv6 ports");
     {
         const auto url = parse_https_url("https://localhost?x=1");
         const auto parsed_url = url.value_or(ParsedHttpsUrl{});
-        check(url.has_value(), "parse_https_url accepts query-only targets");
-        check(parsed_url.host == "localhost", "parse_https_url preserves the parsed host");
-        check(parsed_url.port == 443, "parse_https_url defaults ports to 443");
-        check(parsed_url.path == "/?x=1",
-              "parse_https_url keeps query-only targets rooted at slash");
+        runtime_misc_internal_coverage_check(ok, url.has_value(),
+                                             "parse_https_url accepts query-only targets");
+        runtime_misc_internal_coverage_check(ok, parsed_url.host == "localhost",
+                                             "parse_https_url preserves the parsed host");
+        runtime_misc_internal_coverage_check(ok, parsed_url.port == 443,
+                                             "parse_https_url defaults ports to 443");
+        runtime_misc_internal_coverage_check(
+            ok, parsed_url.path == "/?x=1",
+            "parse_https_url keeps query-only targets rooted at slash");
     }
-    check(!parse_https_url("https://").has_value(), "parse_https_url rejects empty authorities");
+    runtime_misc_internal_coverage_check(ok, !parse_https_url("https://").has_value(),
+                                         "parse_https_url rejects empty authorities");
     {
         const auto fragment_url = parse_https_url("https://localhost#frag");
-        check(fragment_url.has_value(), "parse_https_url accepts fragment-only targets");
-        check(fragment_url.value_or(ParsedHttpsUrl{}).path == "/",
-              "parse_https_url leaves fragment-only targets rooted at slash");
+        runtime_misc_internal_coverage_check(ok, fragment_url.has_value(),
+                                             "parse_https_url accepts fragment-only targets");
+        runtime_misc_internal_coverage_check(
+            ok, fragment_url.value_or(ParsedHttpsUrl{}).path == "/",
+            "parse_https_url leaves fragment-only targets rooted at slash");
     }
-    check(!path_has_prefix(document_root.path() / "other", document_root.path() / "payload.txt"),
-          "path_has_prefix detects mismatched prefixes");
-    check(!path_has_prefix(document_root.path(), document_root.path() / "payload.txt"),
-          "path_has_prefix rejects prefixes that extend beyond the candidate path");
-    check(!resolve_runtime_path_under_root(document_root.path(), "payload.txt").has_value(),
-          "resolve_runtime_path_under_root rejects non-absolute request paths");
-    check(!resolve_runtime_path_under_root(document_root.path(), "").has_value(),
-          "resolve_runtime_path_under_root rejects empty request paths");
-    check(!resolve_runtime_path_under_root(document_root.path(), "/./payload.txt").has_value(),
-          "resolve_runtime_path_under_root rejects raw dot path segments");
-    check(content_type_for_path("page.htm") == "text/html; charset=utf-8",
-          "content_type_for_path treats .htm files as HTML");
-    check(content_type_for_path("module.wasm") == "application/wasm",
-          "content_type_for_path serves wasm with the WebAssembly MIME type");
+    runtime_misc_internal_coverage_check(
+        ok, !path_has_prefix(document_root.path() / "other", document_root.path() / "payload.txt"),
+        "path_has_prefix detects mismatched prefixes");
+    runtime_misc_internal_coverage_check(
+        ok, !path_has_prefix(document_root.path(), document_root.path() / "payload.txt"),
+        "path_has_prefix rejects prefixes that extend beyond the candidate path");
+    runtime_misc_internal_coverage_check(
+        ok, !resolve_runtime_path_under_root(document_root.path(), "payload.txt").has_value(),
+        "resolve_runtime_path_under_root rejects non-absolute request paths");
+    runtime_misc_internal_coverage_check(
+        ok, !resolve_runtime_path_under_root(document_root.path(), "").has_value(),
+        "resolve_runtime_path_under_root rejects empty request paths");
+    runtime_misc_internal_coverage_check(
+        ok, !resolve_runtime_path_under_root(document_root.path(), "/./payload.txt").has_value(),
+        "resolve_runtime_path_under_root rejects raw dot path segments");
+    runtime_misc_internal_coverage_check(
+        ok, content_type_for_path("page.htm") == "text/html; charset=utf-8",
+        "content_type_for_path treats .htm files as HTML");
+    runtime_misc_internal_coverage_check(
+        ok, content_type_for_path("module.wasm") == "application/wasm",
+        "content_type_for_path serves wasm with the WebAssembly MIME type");
 
     const auto method_not_allowed =
         runtime_server_response(document_root_config, Http3Request{
@@ -1693,15 +1755,17 @@ bool runtime_misc_internal_coverage_for_test() {
                                                                   .path = "/payload.txt",
                                                               },
                                                       });
-    check(method_not_allowed.head.status == 405, "runtime_server_response rejects POST");
+    runtime_misc_internal_coverage_check(ok, method_not_allowed.head.status == 405,
+                                         "runtime_server_response rejects POST");
     const auto allow_header_count =
         std::count_if(method_not_allowed.head.headers.begin(),
                       method_not_allowed.head.headers.end(), [](const Http3Field &header) {
                           return (header.name == "allow") & (header.value == "GET, HEAD");
                       });
-    check(method_not_allowed.head.headers.size() == 1,
-          "runtime_server_response emits a single allow header");
-    check(allow_header_count == 1, "runtime_server_response advertises GET/HEAD allow header");
+    runtime_misc_internal_coverage_check(ok, method_not_allowed.head.headers.size() == 1,
+                                         "runtime_server_response emits a single allow header");
+    runtime_misc_internal_coverage_check(
+        ok, allow_header_count == 1, "runtime_server_response advertises GET/HEAD allow header");
 
     forced_file_size_failure_path_for_test() =
         (document_root.path() / "payload.txt").lexically_normal();
@@ -1714,8 +1778,8 @@ bool runtime_misc_internal_coverage_for_test() {
                                                               },
                                                       });
     forced_file_size_failure_path_for_test().reset();
-    check(file_size_failure.head.status == 500,
-          "runtime_server_response surfaces file_size failure");
+    runtime_misc_internal_coverage_check(ok, file_size_failure.head.status == 500,
+                                         "runtime_server_response surfaces file_size failure");
     forced_read_failure_path_for_test() = (document_root.path() / "other.bin").lexically_normal();
     const auto unaffected_read =
         runtime_server_response(document_root_config, Http3Request{
@@ -1726,8 +1790,9 @@ bool runtime_misc_internal_coverage_for_test() {
                                                               },
                                                       });
     forced_read_failure_path_for_test().reset();
-    check(unaffected_read.head.status == 200,
-          "runtime_server_response ignores forced read failures for unrelated paths");
+    runtime_misc_internal_coverage_check(
+        ok, unaffected_read.head.status == 200,
+        "runtime_server_response ignores forced read failures for unrelated paths");
     forced_file_size_failure_path_for_test() =
         (document_root.path() / "other.bin").lexically_normal();
     const auto unaffected_file_size =
@@ -1739,8 +1804,9 @@ bool runtime_misc_internal_coverage_for_test() {
                                                               },
                                                       });
     forced_file_size_failure_path_for_test().reset();
-    check(unaffected_file_size.head.status == 200,
-          "runtime_server_response ignores forced file-size failures for unrelated paths");
+    runtime_misc_internal_coverage_check(
+        ok, unaffected_file_size.head.status == 200,
+        "runtime_server_response ignores forced file-size failures for unrelated paths");
     {
         std::error_code ignored;
         std::filesystem::create_directory(document_root.path() / "assets", ignored);
@@ -1752,8 +1818,9 @@ bool runtime_misc_internal_coverage_for_test() {
                                                                       .path = "/assets",
                                                                   },
                                                           });
-        check(directory_request.head.status == 404,
-              "runtime_server_response rejects directory targets as non-regular files");
+        runtime_misc_internal_coverage_check(
+            ok, directory_request.head.status == 404,
+            "runtime_server_response rejects directory targets as non-regular files");
     }
 
     {
@@ -1764,8 +1831,10 @@ bool runtime_misc_internal_coverage_for_test() {
             std::count_if(inputs.begin(), inputs.end(), [](const auto &input) {
                 return std::holds_alternative<quic::QuicCoreTimerExpired>(input);
             });
-        check(inputs.size() == 1, "timer events produce exactly one core input");
-        check(timer_expired_count == 1, "timer events become timer core inputs");
+        runtime_misc_internal_coverage_check(ok, inputs.size() == 1,
+                                             "timer events produce exactly one core input");
+        runtime_misc_internal_coverage_check(ok, timer_expired_count == 1,
+                                             "timer events become timer core inputs");
     }
     {
         const auto inputs = make_endpoint_inputs_from_io_event(io::QuicIoEvent{
@@ -1779,31 +1848,41 @@ bool runtime_misc_internal_coverage_for_test() {
         const auto pmtu_count = std::count_if(inputs.begin(), inputs.end(), [](const auto &input) {
             return std::holds_alternative<quic::QuicCorePathMtuUpdate>(input);
         });
-        check(inputs.size() == 1, "path MTU events produce exactly one core input");
-        check(pmtu_count == 1, "path MTU events become path MTU core inputs");
+        runtime_misc_internal_coverage_check(ok, inputs.size() == 1,
+                                             "path MTU events produce exactly one core input");
+        runtime_misc_internal_coverage_check(ok, pmtu_count == 1,
+                                             "path MTU events become path MTU core inputs");
     }
-    check(make_endpoint_inputs_from_io_event(io::QuicIoEvent{
-                                                 .kind = io::QuicIoEvent::Kind::path_mtu_update,
-                                             })
-              .empty(),
-          "path MTU events without payloads produce no core inputs");
-    check(make_endpoint_inputs_from_io_event(io::QuicIoEvent{
-                                                 .kind = io::QuicIoEvent::Kind::idle_timeout,
-                                             })
-              .empty(),
-          "idle timeout produces no core inputs");
-    check(make_endpoint_inputs_from_io_event(io::QuicIoEvent{
-                                                 .kind = io::QuicIoEvent::Kind::shutdown,
-                                             })
-              .empty(),
-          "shutdown produces no core inputs");
+    runtime_misc_internal_coverage_check(
+        ok,
+        make_endpoint_inputs_from_io_event(io::QuicIoEvent{
+                                               .kind = io::QuicIoEvent::Kind::path_mtu_update,
+                                           })
+            .empty(),
+        "path MTU events without payloads produce no core inputs");
+    runtime_misc_internal_coverage_check(
+        ok,
+        make_endpoint_inputs_from_io_event(io::QuicIoEvent{
+                                               .kind = io::QuicIoEvent::Kind::idle_timeout,
+                                           })
+            .empty(),
+        "idle timeout produces no core inputs");
+    runtime_misc_internal_coverage_check(
+        ok,
+        make_endpoint_inputs_from_io_event(io::QuicIoEvent{
+                                               .kind = io::QuicIoEvent::Kind::shutdown,
+                                           })
+            .empty(),
+        "shutdown produces no core inputs");
 
     {
         RuntimeTestBackend backend;
         const auto waited = backend.wait(std::nullopt);
-        check(!waited.has_value(),
-              "runtime test backend returns nullopt after scripted waits are exhausted");
-        check(backend.wait_calls == 1, "runtime test backend records wait calls");
+        runtime_misc_internal_coverage_check(
+            ok, !waited.has_value(),
+            "runtime test backend returns nullopt after scripted waits are exhausted");
+        runtime_misc_internal_coverage_check(ok, backend.wait_calls == 1,
+                                             "runtime test backend records wait calls");
     }
 
     {
@@ -1815,7 +1894,8 @@ bool runtime_misc_internal_coverage_for_test() {
                 .bytes = bytes_from_string("x"),
             },
         });
-        check(!flush_send_effects(backend, result), "flush_send_effects rejects missing route");
+        runtime_misc_internal_coverage_check(ok, !flush_send_effects(backend, result),
+                                             "flush_send_effects rejects missing route");
     }
 
     {
@@ -1829,7 +1909,8 @@ bool runtime_misc_internal_coverage_for_test() {
                 .bytes = bytes_from_string("x"),
             },
         });
-        check(!flush_send_effects(backend, result), "flush_send_effects propagates send failure");
+        runtime_misc_internal_coverage_check(ok, !flush_send_effects(backend, result),
+                                             "flush_send_effects propagates send failure");
     }
 
     {
@@ -1849,12 +1930,15 @@ bool runtime_misc_internal_coverage_for_test() {
                 .ecn = quic::QuicEcnCodepoint::ect0,
             },
         });
-        check(flush_send_effects(backend, result), "flush_send_effects sends datagrams");
+        runtime_misc_internal_coverage_check(ok, flush_send_effects(backend, result),
+                                             "flush_send_effects sends datagrams");
         const auto route_handle_count =
             std::count_if(backend.sends.begin(), backend.sends.end(),
                           [](const auto &send) { return send.route_handle == 9; });
-        check(backend.sends.size() == 1, "flush_send_effects emits a single datagram");
-        check(route_handle_count == 1, "flush_send_effects preserves route handles");
+        runtime_misc_internal_coverage_check(ok, backend.sends.size() == 1,
+                                             "flush_send_effects emits a single datagram");
+        runtime_misc_internal_coverage_check(ok, route_handle_count == 1,
+                                             "flush_send_effects preserves route handles");
     }
 
     {
@@ -1862,14 +1946,18 @@ bool runtime_misc_internal_coverage_for_test() {
             quic::QuicCoreEffect{quic::QuicCorePeerPreferredAddressAvailable{
                 .connection = 5,
             }});
-        check(handle == 5, "connection_handle_of_effect handles preferred address events");
+        runtime_misc_internal_coverage_check(
+            ok, handle == 5, "connection_handle_of_effect handles preferred address events");
     }
-    check(!effect_is_endpoint_relevant(
-              quic::QuicCoreEffect{quic::QuicCoreResumptionStateAvailable{.connection = 6}}),
-          "resumption effects are not endpoint relevant");
-    check(effect_is_endpoint_relevant(
-              quic::QuicCoreEffect{quic::QuicCoreReceiveStreamData{.connection = 7}}),
-          "receive stream effects are endpoint relevant");
+    runtime_misc_internal_coverage_check(
+        ok,
+        !effect_is_endpoint_relevant(
+            quic::QuicCoreEffect{quic::QuicCoreResumptionStateAvailable{.connection = 6}}),
+        "resumption effects are not endpoint relevant");
+    runtime_misc_internal_coverage_check(ok,
+                                         effect_is_endpoint_relevant(quic::QuicCoreEffect{
+                                             quic::QuicCoreReceiveStreamData{.connection = 7}}),
+                                         "receive stream effects are endpoint relevant");
 
     {
         quic::QuicCoreResult result;
@@ -1895,53 +1983,65 @@ bool runtime_misc_internal_coverage_for_test() {
         });
 
         const auto affected = affected_connections(result);
-        check(affected == std::vector<quic::QuicConnectionHandle>{3, 4, 5},
-              "affected_connections deduplicates connections in encounter order");
-        check(affected_connections(
-                  quic::QuicCoreResult{
-                      .local_error =
-                          quic::QuicCoreLocalError{
-                              .code = quic::QuicCoreLocalErrorCode::unsupported_operation,
-                          },
-                  })
-                  .empty(),
-              "affected_connections ignores endpoint-local errors without connection handles");
+        runtime_misc_internal_coverage_check(
+            ok, affected == std::vector<quic::QuicConnectionHandle>{3, 4, 5},
+            "affected_connections deduplicates connections in encounter order");
+        runtime_misc_internal_coverage_check(
+            ok,
+            affected_connections(
+                quic::QuicCoreResult{
+                    .local_error =
+                        quic::QuicCoreLocalError{
+                            .code = quic::QuicCoreLocalErrorCode::unsupported_operation,
+                        },
+                })
+                .empty(),
+            "affected_connections ignores endpoint-local errors without connection handles");
 
         const auto filtered = filter_result_for_connection(result, 4);
-        check(!filtered.local_error.has_value(),
-              "filter_result_for_connection drops local_error for other connections");
-        check(filtered.effects.size() == 2,
-              "filter_result_for_connection keeps endpoint-relevant matching effects");
+        runtime_misc_internal_coverage_check(
+            ok, !filtered.local_error.has_value(),
+            "filter_result_for_connection drops local_error for other connections");
+        runtime_misc_internal_coverage_check(
+            ok, filtered.effects.size() == 2,
+            "filter_result_for_connection keeps endpoint-relevant matching effects");
     }
 
-    check(make_connection_command(9,
-                                  quic::QuicCoreResetStream{
-                                      .stream_id = 1,
-                                  })
-              .has_value(),
-          "make_connection_command supports reset stream");
-    check(make_connection_command(9,
-                                  quic::QuicCoreStopSending{
-                                      .stream_id = 1,
-                                  })
-              .has_value(),
-          "make_connection_command supports stop sending");
-    check(make_connection_command(9,
-                                  quic::QuicCoreCloseConnection{
-                                      .application_error_code = 1,
-                                  })
-              .has_value(),
-          "make_connection_command supports close connection");
-    check(make_connection_command(9, quic::QuicCoreRequestKeyUpdate{}).has_value(),
-          "make_connection_command supports key update");
-    check(make_connection_command(9,
-                                  quic::QuicCoreRequestConnectionMigration{
-                                      .route_handle = 4,
-                                  })
-              .has_value(),
-          "make_connection_command supports migration");
-    check(!make_connection_command(9, quic::QuicCoreTimerExpired{}).has_value(),
-          "make_connection_command rejects endpoint-only inputs");
+    runtime_misc_internal_coverage_check(ok,
+                                         make_connection_command(9,
+                                                                 quic::QuicCoreResetStream{
+                                                                     .stream_id = 1,
+                                                                 })
+                                             .has_value(),
+                                         "make_connection_command supports reset stream");
+    runtime_misc_internal_coverage_check(ok,
+                                         make_connection_command(9,
+                                                                 quic::QuicCoreStopSending{
+                                                                     .stream_id = 1,
+                                                                 })
+                                             .has_value(),
+                                         "make_connection_command supports stop sending");
+    runtime_misc_internal_coverage_check(ok,
+                                         make_connection_command(9,
+                                                                 quic::QuicCoreCloseConnection{
+                                                                     .application_error_code = 1,
+                                                                 })
+                                             .has_value(),
+                                         "make_connection_command supports close connection");
+    runtime_misc_internal_coverage_check(
+        ok, make_connection_command(9, quic::QuicCoreRequestKeyUpdate{}).has_value(),
+        "make_connection_command supports key update");
+    runtime_misc_internal_coverage_check(
+        ok,
+        make_connection_command(9,
+                                quic::QuicCoreRequestConnectionMigration{
+                                    .route_handle = 4,
+                                })
+            .has_value(),
+        "make_connection_command supports migration");
+    runtime_misc_internal_coverage_check(
+        ok, !make_connection_command(9, quic::QuicCoreTimerExpired{}).has_value(),
+        "make_connection_command rejects endpoint-only inputs");
 
     {
         const auto config = Http3RuntimeConfig{
@@ -1953,13 +2053,17 @@ bool runtime_misc_internal_coverage_for_test() {
             .private_key_path = "key.pem",
         };
         const auto bootstrap = make_http3_bootstrap_config(config);
-        check(bootstrap.port == 443, "make_http3_bootstrap_config uses the runtime port");
-        check(bootstrap.h3_port == 443,
-              "make_http3_bootstrap_config mirrors the runtime port for h3");
-        check(bootstrap.alt_svc_max_age == 60,
-              "make_http3_bootstrap_config propagates Alt-Svc max age");
-        check(bootstrap.document_root == "site",
-              "make_http3_bootstrap_config propagates the document root");
+        runtime_misc_internal_coverage_check(ok, bootstrap.port == 443,
+                                             "make_http3_bootstrap_config uses the runtime port");
+        runtime_misc_internal_coverage_check(
+            ok, bootstrap.h3_port == 443,
+            "make_http3_bootstrap_config mirrors the runtime port for h3");
+        runtime_misc_internal_coverage_check(
+            ok, bootstrap.alt_svc_max_age == 60,
+            "make_http3_bootstrap_config propagates Alt-Svc max age");
+        runtime_misc_internal_coverage_check(
+            ok, bootstrap.document_root == "site",
+            "make_http3_bootstrap_config propagates the document root");
     }
     {
         auto config = Http3RuntimeConfig{
@@ -1967,27 +2071,35 @@ bool runtime_misc_internal_coverage_for_test() {
             .port = 443,
             .bootstrap_port = 8443,
         };
-        check(make_http3_bootstrap_config(config).port == 8443,
-              "make_http3_bootstrap_config prefers explicit bootstrap port");
+        runtime_misc_internal_coverage_check(
+            ok, make_http3_bootstrap_config(config).port == 8443,
+            "make_http3_bootstrap_config prefers explicit bootstrap port");
     }
 
     force_bootstrap_guard_failure_for_test() = true;
-    check(run_http3_bootstrap_server_guarded(Http3BootstrapConfig{}, nullptr) == 1,
-          "run_http3_bootstrap_server_guarded converts exceptions into failures");
+    runtime_misc_internal_coverage_check(
+        ok, run_http3_bootstrap_server_guarded(Http3BootstrapConfig{}, nullptr) == 1,
+        "run_http3_bootstrap_server_guarded converts exceptions into failures");
     force_bootstrap_guard_failure_for_test() = false;
 
-    check(!server_update_has_immediate_work(Http3ServerEndpointUpdate{}),
-          "server_update_has_immediate_work handles idle update");
-    check(server_update_has_immediate_work(Http3ServerEndpointUpdate{
-              .request_cancelled_events = {Http3ServerRequestCancelledEvent{}},
-          }),
-          "server_update_has_immediate_work sees cancellation events");
-    check(!client_update_has_immediate_work(Http3ClientEndpointUpdate{}),
-          "client_update_has_immediate_work handles idle update");
-    check(client_update_has_immediate_work(Http3ClientEndpointUpdate{
-              .request_error_events = {Http3ClientRequestErrorEvent{}},
-          }),
-          "client_update_has_immediate_work sees request errors");
+    runtime_misc_internal_coverage_check(
+        ok, !server_update_has_immediate_work(Http3ServerEndpointUpdate{}),
+        "server_update_has_immediate_work handles idle update");
+    runtime_misc_internal_coverage_check(
+        ok,
+        server_update_has_immediate_work(Http3ServerEndpointUpdate{
+            .request_cancelled_events = {Http3ServerRequestCancelledEvent{}},
+        }),
+        "server_update_has_immediate_work sees cancellation events");
+    runtime_misc_internal_coverage_check(
+        ok, !client_update_has_immediate_work(Http3ClientEndpointUpdate{}),
+        "client_update_has_immediate_work handles idle update");
+    runtime_misc_internal_coverage_check(
+        ok,
+        client_update_has_immediate_work(Http3ClientEndpointUpdate{
+            .request_error_events = {Http3ClientRequestErrorEvent{}},
+        }),
+        "client_update_has_immediate_work sees request errors");
 
     return ok;
 }
@@ -2264,12 +2376,10 @@ std::uint64_t runtime_loop_internal_coverage_mask_for_test() {
 
 bool runtime_loop_internal_coverage_for_test() {
     bool ok = true;
-    const auto check = [&](bool condition, std::string_view label) {
-        ok &= runtime_internal_check(condition, "runtime_loop_internal_coverage_for_test", label);
-    };
 
-    check(runtime_loop_internal_coverage_mask_for_test() == kRuntimeLoopExpectedCoverageMask,
-          "runtime loop mask covers scripted event branches");
+    runtime_loop_internal_coverage_check(
+        ok, runtime_loop_internal_coverage_mask_for_test() == kRuntimeLoopExpectedCoverageMask,
+        "runtime loop mask covers scripted event branches");
 
     const auto now = quic::QuicCoreClock::now();
 
@@ -2279,15 +2389,16 @@ bool runtime_loop_internal_coverage_for_test() {
         const auto config = make_runtime_server_config_for_test(std::filesystem::current_path());
         const auto endpoint = make_http3_server_endpoint_config(config);
         const auto endpoint_config = endpoint.value_or(quic::QuicCoreEndpointConfig{});
-        check(endpoint.has_value(), "server endpoint config loads fixture identity");
+        runtime_loop_internal_coverage_check(ok, endpoint.has_value(),
+                                             "server endpoint config loads fixture identity");
         Http3ServerRuntime runtime(config, endpoint_config, std::move(backend));
 
         quic::QuicCoreResult fatal_result;
         fatal_result.local_error = quic::QuicCoreLocalError{
             .code = quic::QuicCoreLocalErrorCode::unsupported_operation,
         };
-        check(!runtime.handle_result(fatal_result, now),
-              "server runtime rejects endpoint-local fatal errors");
+        runtime_loop_internal_coverage_check(ok, !runtime.handle_result(fatal_result, now),
+                                             "server runtime rejects endpoint-local fatal errors");
 
         quic::QuicCoreResult accepted_result;
         accepted_result.effects.push_back(quic::QuicCoreEffect{
@@ -2303,10 +2414,12 @@ bool runtime_loop_internal_coverage_for_test() {
                 .bytes = bytes_from_string("server"),
             },
         });
-        check(runtime.handle_result(accepted_result, now),
-              "server runtime accepts lifecycle+send results");
-        check(backend_ptr->sends.size() == 1, "server runtime emits a single accepted datagram");
-        check(runtime.endpoints_.contains(11), "server runtime tracks accepted connections");
+        runtime_loop_internal_coverage_check(ok, runtime.handle_result(accepted_result, now),
+                                             "server runtime accepts lifecycle+send results");
+        runtime_loop_internal_coverage_check(ok, backend_ptr->sends.size() == 1,
+                                             "server runtime emits a single accepted datagram");
+        runtime_loop_internal_coverage_check(ok, runtime.endpoints_.contains(11),
+                                             "server runtime tracks accepted connections");
 
         quic::QuicCoreResult closed_result;
         closed_result.effects.push_back(quic::QuicCoreEffect{
@@ -2315,8 +2428,10 @@ bool runtime_loop_internal_coverage_for_test() {
                 .event = quic::QuicCoreConnectionLifecycle::closed,
             },
         });
-        check(runtime.handle_result(closed_result, now), "server runtime handles closed lifecycle");
-        check(!runtime.endpoints_.contains(11), "server runtime erases closed connections");
+        runtime_loop_internal_coverage_check(ok, runtime.handle_result(closed_result, now),
+                                             "server runtime handles closed lifecycle");
+        runtime_loop_internal_coverage_check(ok, !runtime.endpoints_.contains(11),
+                                             "server runtime erases closed connections");
 
         runtime.endpoints_.emplace(12, Http3ServerEndpoint{});
         quic::QuicCoreResult connection_error;
@@ -2324,37 +2439,45 @@ bool runtime_loop_internal_coverage_for_test() {
             .connection = 12,
             .code = quic::QuicCoreLocalErrorCode::unsupported_operation,
         };
-        check(runtime.handle_result(connection_error, now),
-              "server runtime handles connection-scoped local errors");
-        check(!runtime.endpoints_.contains(12),
-              "server runtime erases endpoints after connection-scoped errors");
+        runtime_loop_internal_coverage_check(
+            ok, runtime.handle_result(connection_error, now),
+            "server runtime handles connection-scoped local errors");
+        runtime_loop_internal_coverage_check(
+            ok, !runtime.endpoints_.contains(12),
+            "server runtime erases endpoints after connection-scoped errors");
 
-        check(!runtime.drain_endpoint(19,
-                                      Http3ServerEndpointUpdate{
-                                          .core_inputs = {quic::QuicCoreTimerExpired{}},
-                                      },
-                                      now),
-              "server runtime rejects non-command endpoint inputs");
+        runtime_loop_internal_coverage_check(
+            ok,
+            !runtime.drain_endpoint(19,
+                                    Http3ServerEndpointUpdate{
+                                        .core_inputs = {quic::QuicCoreTimerExpired{}},
+                                    },
+                                    now),
+            "server runtime rejects non-command endpoint inputs");
 
         runtime.endpoints_.emplace(21, Http3ServerEndpoint{});
-        check(runtime.drain_endpoint(21,
-                                     Http3ServerEndpointUpdate{
-                                         .terminal_failure = true,
-                                     },
-                                     now),
-              "server runtime handles terminal endpoint failure");
-        check(!runtime.endpoints_.contains(21),
-              "server runtime erases failed endpoint immediately");
+        runtime_loop_internal_coverage_check(ok,
+                                             runtime.drain_endpoint(21,
+                                                                    Http3ServerEndpointUpdate{
+                                                                        .terminal_failure = true,
+                                                                    },
+                                                                    now),
+                                             "server runtime handles terminal endpoint failure");
+        runtime_loop_internal_coverage_check(ok, !runtime.endpoints_.contains(21),
+                                             "server runtime erases failed endpoint immediately");
 
         runtime.endpoints_.emplace(22, Http3ServerEndpoint{});
-        check(runtime.drain_endpoint(22,
-                                     Http3ServerEndpointUpdate{
-                                         .has_pending_work = true,
-                                     },
-                                     now),
-              "server runtime polls while endpoint reports pending work");
-        check(runtime.endpoints_.contains(22),
-              "server runtime keeps healthy endpoints after no-op poll");
+        runtime_loop_internal_coverage_check(
+            ok,
+            runtime.drain_endpoint(22,
+                                   Http3ServerEndpointUpdate{
+                                       .has_pending_work = true,
+                                   },
+                                   now),
+            "server runtime polls while endpoint reports pending work");
+        runtime_loop_internal_coverage_check(
+            ok, runtime.endpoints_.contains(22),
+            "server runtime keeps healthy endpoints after no-op poll");
 
         Http3ServerEndpoint failed_endpoint;
         static_cast<void>(failed_endpoint.on_core_result(
@@ -2366,19 +2489,21 @@ bool runtime_loop_internal_coverage_for_test() {
             },
             now));
         runtime.endpoints_.insert_or_assign(23, std::move(failed_endpoint));
-        check(runtime.drain_endpoint(23,
-                                     Http3ServerEndpointUpdate{
-                                         .has_pending_work = true,
-                                     },
-                                     now),
-              "server runtime consumes terminal poll updates");
-        check(!runtime.endpoints_.contains(23),
-              "server runtime erases endpoints after terminal poll");
+        runtime_loop_internal_coverage_check(ok,
+                                             runtime.drain_endpoint(23,
+                                                                    Http3ServerEndpointUpdate{
+                                                                        .has_pending_work = true,
+                                                                    },
+                                                                    now),
+                                             "server runtime consumes terminal poll updates");
+        runtime_loop_internal_coverage_check(ok, !runtime.endpoints_.contains(23),
+                                             "server runtime erases endpoints after terminal poll");
 
         auto wait_backend = std::make_unique<RuntimeTestBackend>();
         wait_backend->wait_results.push_back(std::nullopt);
         Http3ServerRuntime wait_runtime(config, endpoint_config, std::move(wait_backend));
-        check(wait_runtime.run() == 1, "server runtime exits on backend wait failure");
+        runtime_loop_internal_coverage_check(ok, wait_runtime.run() == 1,
+                                             "server runtime exits on backend wait failure");
     }
 
     {
@@ -2386,7 +2511,8 @@ bool runtime_loop_internal_coverage_for_test() {
         const auto config = make_runtime_client_config_for_test();
         auto plan = make_client_execution_plan(config);
         const auto client_plan = plan.value_or(Http3ClientExecutionPlan{});
-        check(plan.has_value(), "client execution plan builds for loop coverage");
+        runtime_loop_internal_coverage_check(ok, plan.has_value(),
+                                             "client execution plan builds for loop coverage");
         const std::vector<Http3ClientTransferPlan> transfers{
             Http3ClientTransferPlan{
                 .execution = client_plan,
@@ -2397,7 +2523,8 @@ bool runtime_loop_internal_coverage_for_test() {
         {
             auto backend = std::make_unique<RuntimeTestBackend>();
             Http3ClientRuntime empty_runtime(config, {}, 1, {}, std::move(backend));
-            check(empty_runtime.run() == 1, "client runtime rejects empty transfer set");
+            runtime_loop_internal_coverage_check(ok, empty_runtime.run() == 1,
+                                                 "client runtime rejects empty transfer set");
         }
 
         auto backend = std::make_unique<RuntimeTestBackend>();
@@ -2408,9 +2535,11 @@ bool runtime_loop_internal_coverage_for_test() {
             .connection = 7,
             .code = quic::QuicCoreLocalErrorCode::unsupported_operation,
         };
-        check(!runtime.handle_result(local_error, now), "client runtime rejects local errors");
-        check(runtime.handle_result(quic::QuicCoreResult{}, now),
-              "client runtime ignores empty results before connection creation");
+        runtime_loop_internal_coverage_check(ok, !runtime.handle_result(local_error, now),
+                                             "client runtime rejects local errors");
+        runtime_loop_internal_coverage_check(
+            ok, runtime.handle_result(quic::QuicCoreResult{}, now),
+            "client runtime ignores empty results before connection creation");
 
         quic::QuicCoreResult created;
         created.effects.push_back(quic::QuicCoreEffect{
@@ -2419,91 +2548,104 @@ bool runtime_loop_internal_coverage_for_test() {
                 .event = quic::QuicCoreConnectionLifecycle::created,
             },
         });
-        check(runtime.handle_result(created, now), "client runtime accepts created lifecycle");
-        check(runtime.connection_ == std::optional<quic::QuicConnectionHandle>{7},
-              "client runtime remembers created connection");
+        runtime_loop_internal_coverage_check(ok, runtime.handle_result(created, now),
+                                             "client runtime accepts created lifecycle");
+        runtime_loop_internal_coverage_check(
+            ok, runtime.connection_ == std::optional<quic::QuicConnectionHandle>{7},
+            "client runtime remembers created connection");
 
         runtime.expected_responses_ = 1;
-        check(!runtime.handle_result(
-                  quic::QuicCoreResult{
-                      .effects =
-                          {
-                              quic::QuicCoreEffect{
-                                  quic::QuicCoreConnectionLifecycleEvent{
-                                      .connection = 7,
-                                      .event = quic::QuicCoreConnectionLifecycle::closed,
-                                  },
-                              },
-                          },
-                  },
-                  now),
-              "client runtime fails when connection closes before all responses arrive");
+        runtime_loop_internal_coverage_check(
+            ok,
+            !runtime.handle_result(
+                quic::QuicCoreResult{
+                    .effects =
+                        {
+                            quic::QuicCoreEffect{
+                                quic::QuicCoreConnectionLifecycleEvent{
+                                    .connection = 7,
+                                    .event = quic::QuicCoreConnectionLifecycle::closed,
+                                },
+                            },
+                        },
+                },
+                now),
+            "client runtime fails when connection closes before all responses arrive");
 
-        check(!runtime.drain_endpoint(
-                  Http3ClientEndpointUpdate{
-                      .events =
-                          {
-                              Http3ClientResponseEvent{
-                                  .stream_id = 99,
-                              },
-                          },
-                  },
-                  now),
-              "client runtime rejects responses for unknown outputs");
+        runtime_loop_internal_coverage_check(
+            ok,
+            !runtime.drain_endpoint(
+                Http3ClientEndpointUpdate{
+                    .events =
+                        {
+                            Http3ClientResponseEvent{
+                                .stream_id = 99,
+                            },
+                        },
+                },
+                now),
+            "client runtime rejects responses for unknown outputs");
 
         runtime.pending_outputs_.insert_or_assign(0, output_root.path() / "response.bin");
         runtime.expected_responses_ = 1;
         runtime.completed_responses_ = 0;
-        check(runtime.drain_endpoint(
-                  Http3ClientEndpointUpdate{
-                      .events =
-                          {
-                              Http3ClientResponseEvent{
-                                  .stream_id = 0,
-                                  .response =
-                                      Http3Response{
-                                          .head =
-                                              {
-                                                  .status = 200,
-                                              },
-                                          .body = bytes_from_string("ok"),
-                                      },
-                              },
-                          },
-                      .terminal_failure = true,
-                  },
-                  now),
-              "client runtime writes completed responses before terminal failure");
+        runtime_loop_internal_coverage_check(
+            ok,
+            runtime.drain_endpoint(
+                Http3ClientEndpointUpdate{
+                    .events =
+                        {
+                            Http3ClientResponseEvent{
+                                .stream_id = 0,
+                                .response =
+                                    Http3Response{
+                                        .head =
+                                            {
+                                                .status = 200,
+                                            },
+                                        .body = bytes_from_string("ok"),
+                                    },
+                            },
+                        },
+                    .terminal_failure = true,
+                },
+                now),
+            "client runtime writes completed responses before terminal failure");
         const auto written = read_binary_file(output_root.path() / "response.bin");
-        check(written.has_value(), "client runtime writes response bodies to output files");
-        check(written.value_or(std::vector<std::byte>{}) == bytes_from_string("ok"),
-              "client runtime persists the expected response body");
+        runtime_loop_internal_coverage_check(
+            ok, written.has_value(), "client runtime writes response bodies to output files");
+        runtime_loop_internal_coverage_check(
+            ok, written.value_or(std::vector<std::byte>{}) == bytes_from_string("ok"),
+            "client runtime persists the expected response body");
 
         runtime.connection_.reset();
-        check(!runtime.drain_endpoint(
-                  Http3ClientEndpointUpdate{
-                      .core_inputs =
-                          {
-                              quic::QuicCoreSendStreamData{
-                                  .stream_id = 0,
-                                  .bytes = bytes_from_string("payload"),
-                              },
-                          },
-                  },
-                  now),
-              "client runtime rejects endpoint commands before connection creation");
+        runtime_loop_internal_coverage_check(
+            ok,
+            !runtime.drain_endpoint(
+                Http3ClientEndpointUpdate{
+                    .core_inputs =
+                        {
+                            quic::QuicCoreSendStreamData{
+                                .stream_id = 0,
+                                .bytes = bytes_from_string("payload"),
+                            },
+                        },
+                },
+                now),
+            "client runtime rejects endpoint commands before connection creation");
 
-        check(!runtime.drain_endpoint(
-                  Http3ClientEndpointUpdate{
-                      .request_error_events =
-                          {
-                              Http3ClientRequestErrorEvent{
-                                  .stream_id = 0,
-                              },
-                          },
-                  },
-                  now),
-              "client runtime rejects request error events");
+        runtime_loop_internal_coverage_check(ok,
+                                             !runtime.drain_endpoint(
+                                                 Http3ClientEndpointUpdate{
+                                                     .request_error_events =
+                                                         {
+                                                             Http3ClientRequestErrorEvent{
+                                                                 .stream_id = 0,
+                                                             },
+                                                         },
+                                                 },
+                                                 now),
+                                             "client runtime rejects request error events");
     }
 
     return ok;
@@ -2511,26 +2653,25 @@ bool runtime_loop_internal_coverage_for_test() {
 
 bool runtime_additional_internal_coverage_for_test() {
     bool ok = true;
-    const auto check = [&](bool condition, std::string_view label) {
-        ok &= runtime_internal_check(condition, "runtime_additional_internal_coverage_for_test",
-                                     label);
-    };
 
     const auto now = quic::QuicCoreClock::now();
     RuntimeScopedTempDir document_root;
-    check(document_root.write_file("index.html", "ok"), "write runtime_additional index fixture");
+    runtime_additional_internal_coverage_check(ok, document_root.write_file("index.html", "ok"),
+                                               "write runtime_additional index fixture");
 
     const auto nested_path = document_root.path() / "assets" / "index.html";
     const auto nested_prefix = document_root.path() / "assets";
-    check(path_has_prefix(nested_path, nested_prefix), "path_has_prefix accepts matching prefixes");
+    runtime_additional_internal_coverage_check(ok, path_has_prefix(nested_path, nested_prefix),
+                                               "path_has_prefix accepts matching prefixes");
 
     {
         const auto invalid_client = Http3RuntimeConfig{
             .mode = Http3RuntimeMode::client,
             .url = "https:///missing-host",
         };
-        check(!make_live_initial_rx_event(invalid_client, now).has_value(),
-              "live initial rx helper rejects invalid client plans");
+        runtime_additional_internal_coverage_check(
+            ok, !make_live_initial_rx_event(invalid_client, now).has_value(),
+            "live initial rx helper rejects invalid client plans");
     }
 
     {
@@ -2540,8 +2681,9 @@ bool runtime_additional_internal_coverage_for_test() {
                 .change = quic::QuicCoreStateChange::handshake_ready,
             },
         });
-        check(!first_send_datagram_as_rx_event(no_send_result, now).has_value(),
-              "first_send_datagram_as_rx_event skips non-datagram effects");
+        runtime_additional_internal_coverage_check(
+            ok, !first_send_datagram_as_rx_event(no_send_result, now).has_value(),
+            "first_send_datagram_as_rx_event skips non-datagram effects");
 
         quic::QuicCoreResult missing_route_send_result;
         missing_route_send_result.effects.push_back(quic::QuicCoreEffect{
@@ -2550,20 +2692,23 @@ bool runtime_additional_internal_coverage_for_test() {
                 .bytes = bytes_from_string("x"),
             },
         });
-        check(!first_send_datagram_as_rx_event(missing_route_send_result, now).has_value(),
-              "first_send_datagram_as_rx_event rejects datagrams without route handles");
+        runtime_additional_internal_coverage_check(
+            ok, !first_send_datagram_as_rx_event(missing_route_send_result, now).has_value(),
+            "first_send_datagram_as_rx_event rejects datagrams without route handles");
     }
 
     const auto server_config = make_runtime_server_config_for_test(document_root.path());
     const auto server_endpoint = make_http3_server_endpoint_config(server_config);
     const auto server_endpoint_config = server_endpoint.value_or(quic::QuicCoreEndpointConfig{});
-    check(server_endpoint.has_value(), "server endpoint config loads for additional coverage");
+    runtime_additional_internal_coverage_check(
+        ok, server_endpoint.has_value(), "server endpoint config loads for additional coverage");
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         force_server_due_timer_count_for_test() = 1;
         force_server_handle_result_failure_after_calls_for_test() = 0;
         Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
-        check(runtime.run() == 1, "server runtime fails when forced due timer handling fails");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.run() == 1, "server runtime fails when forced due timer handling fails");
     }
 
     {
@@ -2574,14 +2719,16 @@ bool runtime_additional_internal_coverage_for_test() {
         });
         force_server_handle_result_failure_after_calls_for_test() = 0;
         Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
-        check(runtime.run() == 1,
-              "server runtime fails when timer events trigger handle_result failures");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.run() == 1,
+            "server runtime fails when timer events trigger handle_result failures");
     }
 
     {
         const auto live_rx_event =
             make_live_initial_rx_event(make_runtime_client_config_for_test(), now);
-        check(live_rx_event.has_value(), "live initial rx helper builds a server datagram");
+        runtime_additional_internal_coverage_check(
+            ok, live_rx_event.has_value(), "live initial rx helper builds a server datagram");
         auto backend = std::make_unique<RuntimeTestBackend>();
         backend->wait_results.push_back(live_rx_event.value_or(io::QuicIoEvent{
             .kind = io::QuicIoEvent::Kind::rx_datagram,
@@ -2589,8 +2736,9 @@ bool runtime_additional_internal_coverage_for_test() {
         }));
         force_server_handle_result_failure_after_calls_for_test() = 0;
         Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
-        check(runtime.run() == 1,
-              "server runtime fails when rx events trigger handle_result failures");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.run() == 1,
+            "server runtime fails when rx events trigger handle_result failures");
     }
 
     {
@@ -2605,8 +2753,9 @@ bool runtime_additional_internal_coverage_for_test() {
                 .bytes = bytes_from_string("server-send"),
             },
         });
-        check(!runtime.handle_result(send_failure, now),
-              "server runtime propagates backend send failures from handle_result");
+        runtime_additional_internal_coverage_check(
+            ok, !runtime.handle_result(send_failure, now),
+            "server runtime propagates backend send failures from handle_result");
     }
 
     {
@@ -2618,8 +2767,9 @@ bool runtime_additional_internal_coverage_for_test() {
                 .connection = 77,
             },
         });
-        check(runtime.handle_result(unknown_connection, now),
-              "server runtime ignores affected connections without endpoints");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.handle_result(unknown_connection, now),
+            "server runtime ignores affected connections without endpoints");
     }
 
     {
@@ -2632,10 +2782,12 @@ bool runtime_additional_internal_coverage_for_test() {
                 .event = quic::QuicCoreConnectionLifecycle::accepted,
             },
         });
-        check(runtime.handle_result(accepted, now),
-              "server runtime accepts connections for additional coverage");
-        check(runtime.endpoints_.contains(11),
-              "server runtime retains the accepted endpoint for synthetic request handling");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.handle_result(accepted, now),
+            "server runtime accepts connections for additional coverage");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.endpoints_.contains(11),
+            "server runtime retains the accepted endpoint for synthetic request handling");
         auto &accepted_endpoint = runtime.endpoints_[11];
         auto handshake_ready = quic::QuicCoreResult{};
         handshake_ready.effects.push_back(quic::QuicCoreEffect{
@@ -2644,8 +2796,9 @@ bool runtime_additional_internal_coverage_for_test() {
             },
         });
         const auto handshake_update = accepted_endpoint.on_core_result(handshake_ready, now);
-        check(!handshake_update.terminal_failure,
-              "accepted endpoint primes its transport before synthetic request handling");
+        runtime_additional_internal_coverage_check(
+            ok, !handshake_update.terminal_failure,
+            "accepted endpoint primes its transport before synthetic request handling");
         std::array<Http3Field, 4> request_fields{
             Http3Field{":method", "GET"},
             Http3Field{":scheme", "https"},
@@ -2654,23 +2807,30 @@ bool runtime_additional_internal_coverage_for_test() {
         };
         Http3QpackEncoderContext encoder;
         const auto encoded = encode_http3_field_section(encoder, 0, request_fields);
-        check(encoded.has_value(), "accepted endpoint encodes a synthetic request field section");
+        runtime_additional_internal_coverage_check(
+            ok, encoded.has_value(), "accepted endpoint encodes a synthetic request field section");
         const auto encoded_section = runtime_result_field_section_or_empty(encoded);
-        check(runtime_result_field_section_or_empty(
-                  Http3Result<Http3EncodedFieldSection>::success(encoded_section))
-                      .prefix == encoded_section.prefix,
-              "accepted endpoint field-section helper preserves success values");
-        check(runtime_result_field_section_or_empty(
-                  Http3Result<Http3EncodedFieldSection>::failure(Http3Error{
-                      .detail = "missing field section",
-                  }))
-                  .payload.empty(),
-              "accepted endpoint field-section helper returns empty payloads on failure");
-        check(runtime_result_field_section_or_empty(
-                  quic::CodecResult<Http3EncodedFieldSection>::failure(
-                      quic::CodecErrorCode::http3_parse_error, 0))
-                  .payload.empty(),
-              "accepted endpoint field-section helper returns empty payloads on codec failures");
+        runtime_additional_internal_coverage_check(
+            ok,
+            runtime_result_field_section_or_empty(
+                Http3Result<Http3EncodedFieldSection>::success(encoded_section))
+                    .prefix == encoded_section.prefix,
+            "accepted endpoint field-section helper preserves success values");
+        runtime_additional_internal_coverage_check(
+            ok,
+            runtime_result_field_section_or_empty(
+                Http3Result<Http3EncodedFieldSection>::failure(Http3Error{
+                    .detail = "missing field section",
+                }))
+                .payload.empty(),
+            "accepted endpoint field-section helper returns empty payloads on failure");
+        runtime_additional_internal_coverage_check(
+            ok,
+            runtime_result_field_section_or_empty(
+                quic::CodecResult<Http3EncodedFieldSection>::failure(
+                    quic::CodecErrorCode::http3_parse_error, 0))
+                .payload.empty(),
+            "accepted endpoint field-section helper returns empty payloads on codec failures");
         auto field_section = encoded_section.prefix;
         field_section.insert(field_section.end(), encoded_section.payload.begin(),
                              encoded_section.payload.end());
@@ -2679,20 +2839,28 @@ bool runtime_additional_internal_coverage_for_test() {
                 .field_section = std::move(field_section),
             },
         });
-        check(frame.has_value(), "accepted endpoint serializes a synthetic request headers frame");
+        runtime_additional_internal_coverage_check(
+            ok, frame.has_value(),
+            "accepted endpoint serializes a synthetic request headers frame");
         const auto frame_bytes = runtime_result_bytes_or_empty(frame);
-        check(runtime_result_bytes_or_empty(
-                  Http3Result<std::vector<std::byte>>::success(frame_bytes)) == frame_bytes,
-              "accepted endpoint frame helper preserves success buffers");
-        check(runtime_result_bytes_or_empty(Http3Result<std::vector<std::byte>>::failure(Http3Error{
-                                                .detail = "missing frame bytes",
-                                            }))
-                  .empty(),
-              "accepted endpoint frame helper returns empty buffers on failure");
-        check(runtime_result_bytes_or_empty(quic::CodecResult<std::vector<std::byte>>::failure(
-                                                quic::CodecErrorCode::http3_parse_error, 0))
-                  .empty(),
-              "accepted endpoint frame helper returns empty buffers on codec failures");
+        runtime_additional_internal_coverage_check(
+            ok,
+            runtime_result_bytes_or_empty(
+                Http3Result<std::vector<std::byte>>::success(frame_bytes)) == frame_bytes,
+            "accepted endpoint frame helper preserves success buffers");
+        runtime_additional_internal_coverage_check(
+            ok,
+            runtime_result_bytes_or_empty(Http3Result<std::vector<std::byte>>::failure(Http3Error{
+                                              .detail = "missing frame bytes",
+                                          }))
+                .empty(),
+            "accepted endpoint frame helper returns empty buffers on failure");
+        runtime_additional_internal_coverage_check(
+            ok,
+            runtime_result_bytes_or_empty(quic::CodecResult<std::vector<std::byte>>::failure(
+                                              quic::CodecErrorCode::http3_parse_error, 0))
+                .empty(),
+            "accepted endpoint frame helper returns empty buffers on codec failures");
         quic::QuicCoreResult request_result;
         request_result.effects.push_back(quic::QuicCoreEffect{
             quic::QuicCoreReceiveStreamData{
@@ -2702,37 +2870,44 @@ bool runtime_additional_internal_coverage_for_test() {
             },
         });
         const auto update = accepted_endpoint.on_core_result(request_result, now);
-        check(!update.terminal_failure,
-              "accepted endpoint handles synthetic request frames without failing");
-        check(!update.core_inputs.empty(),
-              "server runtime invokes the accepted endpoint request handler");
-        check(runtime.drain_endpoint(11, update, now),
-              "server runtime drains synthetic request updates without failing");
+        runtime_additional_internal_coverage_check(
+            ok, !update.terminal_failure,
+            "accepted endpoint handles synthetic request frames without failing");
+        runtime_additional_internal_coverage_check(
+            ok, !update.core_inputs.empty(),
+            "server runtime invokes the accepted endpoint request handler");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.drain_endpoint(11, update, now),
+            "server runtime drains synthetic request updates without failing");
     }
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
         force_server_handle_result_failure_after_calls_for_test() = 0;
-        check(!runtime.submit_endpoint_commands(19,
-                                                {
-                                                    quic::QuicCoreCloseConnection{
-                                                        .application_error_code = 1,
-                                                    },
-                                                },
-                                                now),
-              "server submit_endpoint_commands propagates handle_result failures");
+        runtime_additional_internal_coverage_check(
+            ok,
+            !runtime.submit_endpoint_commands(19,
+                                              {
+                                                  quic::QuicCoreCloseConnection{
+                                                      .application_error_code = 1,
+                                                  },
+                                              },
+                                              now),
+            "server submit_endpoint_commands propagates handle_result failures");
     }
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
-        check(runtime.drain_endpoint(99,
-                                     Http3ServerEndpointUpdate{
-                                         .has_pending_work = true,
-                                     },
-                                     now),
-              "server drain_endpoint exits cleanly when the endpoint is already gone");
+        runtime_additional_internal_coverage_check(
+            ok,
+            runtime.drain_endpoint(99,
+                                   Http3ServerEndpointUpdate{
+                                       .has_pending_work = true,
+                                   },
+                                   now),
+            "server drain_endpoint exits cleanly when the endpoint is already gone");
     }
 
     {
@@ -2749,12 +2924,14 @@ bool runtime_additional_internal_coverage_for_test() {
             now));
         runtime.endpoints_.insert_or_assign(12, std::move(failed_endpoint));
         force_server_polled_submit_failure_count_for_test() = 1;
-        check(!runtime.drain_endpoint(12,
-                                      Http3ServerEndpointUpdate{
-                                          .has_pending_work = true,
-                                      },
-                                      now),
-              "server drain_endpoint fails when a polled update forces submission failure");
+        runtime_additional_internal_coverage_check(
+            ok,
+            !runtime.drain_endpoint(12,
+                                    Http3ServerEndpointUpdate{
+                                        .has_pending_work = true,
+                                    },
+                                    now),
+            "server drain_endpoint fails when a polled update forces submission failure");
     }
 
     {
@@ -2768,18 +2945,21 @@ bool runtime_additional_internal_coverage_for_test() {
                 .connection = 13,
             },
         });
-        check(!runtime.handle_result(filtered_result, now),
-              "server handle_result fails when draining a filtered endpoint update fails");
+        runtime_additional_internal_coverage_check(
+            ok, !runtime.handle_result(filtered_result, now),
+            "server handle_result fails when draining a filtered endpoint update fails");
     }
 
-    check(runtime_server_local_error_without_connection_coverage_for_test(),
-          "server handle_result rejects local errors without connection ids");
+    runtime_additional_internal_coverage_check(
+        ok, runtime_server_local_error_without_connection_coverage_for_test(),
+        "server handle_result rejects local errors without connection ids");
 
     RuntimeScopedTempDir output_root;
     const auto client_config = make_runtime_client_config_for_test();
     const auto plan = make_client_execution_plan(client_config);
     const auto client_plan = plan.value_or(Http3ClientExecutionPlan{});
-    check(plan.has_value(), "client execution plan loads for additional coverage");
+    runtime_additional_internal_coverage_check(
+        ok, plan.has_value(), "client execution plan loads for additional coverage");
     const std::vector<Http3ClientTransferPlan> transfers{
         Http3ClientTransferPlan{
             .execution = client_plan,
@@ -2791,16 +2971,18 @@ bool runtime_additional_internal_coverage_for_test() {
         auto backend = std::make_unique<RuntimeTestBackend>();
         force_client_initial_submit_failure_count_for_test() = 1;
         Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
-        check(runtime.run() == 1,
-              "client runtime fails when the initial request submission is forced to fail");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.run() == 1,
+            "client runtime fails when the initial request submission is forced to fail");
     }
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         force_client_handle_result_failure_after_calls_for_test() = 0;
         Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
-        check(runtime.run() == 1,
-              "client runtime fails when opening the connection triggers handle_result failure");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.run() == 1,
+            "client runtime fails when opening the connection triggers handle_result failure");
     }
 
     {
@@ -2808,8 +2990,9 @@ bool runtime_additional_internal_coverage_for_test() {
         backend->wait_results.push_back(std::nullopt);
         force_client_due_timer_count_for_test() = 1;
         Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
-        check(runtime.run() == 1,
-              "client runtime continues after a forced due timer before backend wait failure");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.run() == 1,
+            "client runtime continues after a forced due timer before backend wait failure");
     }
 
     {
@@ -2817,8 +3000,9 @@ bool runtime_additional_internal_coverage_for_test() {
         force_client_due_timer_count_for_test() = 1;
         force_client_handle_result_failure_after_calls_for_test() = 1;
         Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
-        check(runtime.run() == 1,
-              "client runtime fails when a forced due timer triggers handle_result failure");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.run() == 1,
+            "client runtime fails when a forced due timer triggers handle_result failure");
     }
 
     {
@@ -2829,8 +3013,9 @@ bool runtime_additional_internal_coverage_for_test() {
         });
         force_client_handle_result_failure_after_calls_for_test() = 1;
         Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
-        check(runtime.run() == 1,
-              "client runtime fails when timer events trigger handle_result failures");
+        runtime_additional_internal_coverage_check(
+            ok, runtime.run() == 1,
+            "client runtime fails when timer events trigger handle_result failures");
     }
 
     {
@@ -2845,20 +3030,23 @@ bool runtime_additional_internal_coverage_for_test() {
                 .bytes = bytes_from_string("client-send"),
             },
         });
-        check(!runtime.handle_result(send_failure, now),
-              "client runtime propagates backend send failures from handle_result");
+        runtime_additional_internal_coverage_check(
+            ok, !runtime.handle_result(send_failure, now),
+            "client runtime propagates backend send failures from handle_result");
     }
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         runtime.connection_ = 7;
-        check(!runtime.submit_endpoint_commands(
-                  {
-                      quic::QuicCoreTimerExpired{},
-                  },
-                  now),
-              "client submit_endpoint_commands rejects endpoint-only inputs");
+        runtime_additional_internal_coverage_check(
+            ok,
+            !runtime.submit_endpoint_commands(
+                {
+                    quic::QuicCoreTimerExpired{},
+                },
+                now),
+            "client submit_endpoint_commands rejects endpoint-only inputs");
     }
 
     {
@@ -2866,14 +3054,16 @@ bool runtime_additional_internal_coverage_for_test() {
         Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
         runtime.connection_ = 7;
         force_client_handle_result_failure_after_calls_for_test() = 0;
-        check(!runtime.submit_endpoint_commands(
-                  {
-                      quic::QuicCoreCloseConnection{
-                          .application_error_code = 1,
-                      },
-                  },
-                  now),
-              "client submit_endpoint_commands propagates handle_result failures");
+        runtime_additional_internal_coverage_check(
+            ok,
+            !runtime.submit_endpoint_commands(
+                {
+                    quic::QuicCoreCloseConnection{
+                        .application_error_code = 1,
+                    },
+                },
+                now),
+            "client submit_endpoint_commands propagates handle_result failures");
     }
 
     {
@@ -2895,12 +3085,15 @@ bool runtime_additional_internal_coverage_for_test() {
         const auto submitted =
             runtime.endpoint_.submit_request(transfers.front().execution.request);
         const auto submitted_stream_id = runtime_result_uint64_or(submitted, 0);
-        check(submitted.has_value(), "client endpoint submits synthetic request for poll tests");
-        check(runtime_result_uint64_or(Http3Result<std::uint64_t>::failure(Http3Error{
-                                           .detail = "missing stream id for poll tests",
-                                       }),
-                                       0) == 0,
-              "client poll-test stream-id helper returns zero on failure");
+        runtime_additional_internal_coverage_check(
+            ok, submitted.has_value(), "client endpoint submits synthetic request for poll tests");
+        runtime_additional_internal_coverage_check(
+            ok,
+            runtime_result_uint64_or(Http3Result<std::uint64_t>::failure(Http3Error{
+                                         .detail = "missing stream id for poll tests",
+                                     }),
+                                     0) == 0,
+            "client poll-test stream-id helper returns zero on failure");
         auto &connection = Http3ClientEndpointTestAccess::connection(runtime.endpoint_);
         Http3ConnectionTestAccess::queue_event(connection, Http3PeerResponseHeadEvent{
                                                                .stream_id = submitted_stream_id,
@@ -2918,12 +3111,14 @@ bool runtime_additional_internal_coverage_for_test() {
                                                            });
         runtime.expected_responses_ = 1;
         runtime.completed_responses_ = 0;
-        check(!runtime.drain_endpoint(
-                  Http3ClientEndpointUpdate{
-                      .has_pending_work = true,
-                  },
-                  now),
-              "client drain_endpoint rejects polled responses without matching outputs");
+        runtime_additional_internal_coverage_check(
+            ok,
+            !runtime.drain_endpoint(
+                Http3ClientEndpointUpdate{
+                    .has_pending_work = true,
+                },
+                now),
+            "client drain_endpoint rejects polled responses without matching outputs");
     }
 
     {
@@ -2945,13 +3140,16 @@ bool runtime_additional_internal_coverage_for_test() {
         const auto submitted =
             runtime.endpoint_.submit_request(transfers.front().execution.request);
         const auto submitted_stream_id = runtime_result_uint64_or(submitted, 0);
-        check(submitted.has_value(),
-              "client endpoint submits synthetic request for polled write failures");
-        check(runtime_result_uint64_or(Http3Result<std::uint64_t>::failure(Http3Error{
-                                           .detail = "missing stream id for write failures",
-                                       }),
-                                       0) == 0,
-              "client write-failure stream-id helper returns zero on failure");
+        runtime_additional_internal_coverage_check(
+            ok, submitted.has_value(),
+            "client endpoint submits synthetic request for polled write failures");
+        runtime_additional_internal_coverage_check(
+            ok,
+            runtime_result_uint64_or(Http3Result<std::uint64_t>::failure(Http3Error{
+                                         .detail = "missing stream id for write failures",
+                                     }),
+                                     0) == 0,
+            "client write-failure stream-id helper returns zero on failure");
         auto &connection = Http3ClientEndpointTestAccess::connection(runtime.endpoint_);
         Http3ConnectionTestAccess::queue_event(connection, Http3PeerResponseHeadEvent{
                                                                .stream_id = submitted_stream_id,
@@ -2970,12 +3168,14 @@ bool runtime_additional_internal_coverage_for_test() {
         runtime.pending_outputs_.insert_or_assign(submitted_stream_id, output_root.path());
         runtime.expected_responses_ = 1;
         runtime.completed_responses_ = 0;
-        check(!runtime.drain_endpoint(
-                  Http3ClientEndpointUpdate{
-                      .has_pending_work = true,
-                  },
-                  now),
-              "client drain_endpoint propagates polled file write failures");
+        runtime_additional_internal_coverage_check(
+            ok,
+            !runtime.drain_endpoint(
+                Http3ClientEndpointUpdate{
+                    .has_pending_work = true,
+                },
+                now),
+            "client drain_endpoint propagates polled file write failures");
     }
 
     {
@@ -2997,13 +3197,16 @@ bool runtime_additional_internal_coverage_for_test() {
         const auto submitted =
             runtime.endpoint_.submit_request(transfers.front().execution.request);
         const auto submitted_stream_id = runtime_result_uint64_or(submitted, 0);
-        check(submitted.has_value(),
-              "client endpoint submits synthetic request for poll reset coverage");
-        check(runtime_result_uint64_or(Http3Result<std::uint64_t>::failure(Http3Error{
-                                           .detail = "missing stream id for reset coverage",
-                                       }),
-                                       0) == 0,
-              "client reset stream-id helper returns zero on failure");
+        runtime_additional_internal_coverage_check(
+            ok, submitted.has_value(),
+            "client endpoint submits synthetic request for poll reset coverage");
+        runtime_additional_internal_coverage_check(
+            ok,
+            runtime_result_uint64_or(Http3Result<std::uint64_t>::failure(Http3Error{
+                                         .detail = "missing stream id for reset coverage",
+                                     }),
+                                     0) == 0,
+            "client reset stream-id helper returns zero on failure");
         auto &connection = Http3ClientEndpointTestAccess::connection(runtime.endpoint_);
         Http3ConnectionTestAccess::queue_event(connection, Http3PeerResponseResetEvent{
                                                                .stream_id = submitted_stream_id,
@@ -3011,12 +3214,14 @@ bool runtime_additional_internal_coverage_for_test() {
                                                            });
         runtime.expected_responses_ = 1;
         runtime.completed_responses_ = 0;
-        check(!runtime.drain_endpoint(
-                  Http3ClientEndpointUpdate{
-                      .has_pending_work = true,
-                  },
-                  now),
-              "client drain_endpoint rejects polled request error events");
+        runtime_additional_internal_coverage_check(
+            ok,
+            !runtime.drain_endpoint(
+                Http3ClientEndpointUpdate{
+                    .has_pending_work = true,
+                },
+                now),
+            "client drain_endpoint rejects polled request error events");
     }
 
     {
@@ -3037,17 +3242,20 @@ bool runtime_additional_internal_coverage_for_test() {
             now));
         const auto submitted =
             runtime.endpoint_.submit_request(transfers.front().execution.request);
-        check(submitted.has_value(),
-              "client endpoint submits synthetic request for poll submission failures");
+        runtime_additional_internal_coverage_check(
+            ok, submitted.has_value(),
+            "client endpoint submits synthetic request for poll submission failures");
         runtime.expected_responses_ = 1;
         runtime.completed_responses_ = 0;
         force_client_handle_result_failure_after_calls_for_test() = 0;
-        check(!runtime.drain_endpoint(
-                  Http3ClientEndpointUpdate{
-                      .has_pending_work = true,
-                  },
-                  now),
-              "client drain_endpoint propagates polled command submission failures");
+        runtime_additional_internal_coverage_check(
+            ok,
+            !runtime.drain_endpoint(
+                Http3ClientEndpointUpdate{
+                    .has_pending_work = true,
+                },
+                now),
+            "client drain_endpoint propagates polled command submission failures");
     }
 
     {
@@ -3065,36 +3273,45 @@ bool runtime_additional_internal_coverage_for_test() {
                     },
             },
             now));
-        check(!runtime.drain_endpoint(
-                  Http3ClientEndpointUpdate{
-                      .has_pending_work = true,
-                  },
-                  now),
-              "client drain_endpoint returns the poll terminal failure comparison result");
+        runtime_additional_internal_coverage_check(
+            ok,
+            !runtime.drain_endpoint(
+                Http3ClientEndpointUpdate{
+                    .has_pending_work = true,
+                },
+                now),
+            "client drain_endpoint returns the poll terminal failure comparison result");
     }
 
     auto bootstrap_backend = std::make_unique<RuntimeTestBackend>();
     bootstrap_backend->wait_results.push_back(std::nullopt);
-    check(run_http3_server_runtime_with_backend(server_config, server_endpoint_config,
-                                                std::move(bootstrap_backend)) == 1,
-          "run_http3_server_runtime_with_backend drives the runtime helper");
+    runtime_additional_internal_coverage_check(
+        ok,
+        run_http3_server_runtime_with_backend(server_config, server_endpoint_config,
+                                              std::move(bootstrap_backend)) == 1,
+        "run_http3_server_runtime_with_backend drives the runtime helper");
 
     std::packaged_task<int()> bootstrap_task([] { return 7; });
     std::optional<std::future<int>> bootstrap_result(bootstrap_task.get_future());
     std::optional<std::thread> bootstrap_thread(std::move(bootstrap_task));
     std::atomic<bool> bootstrap_stop_requested = false;
-    check(finish_http3_server_run(0, bootstrap_result, bootstrap_thread,
-                                  bootstrap_stop_requested) == 7,
-          "finish_http3_server_run returns bootstrap exit codes after successful runtimes");
-    check(bootstrap_stop_requested.load(std::memory_order_relaxed),
-          "finish_http3_server_run requests bootstrap shutdown before join");
+    runtime_additional_internal_coverage_check(
+        ok,
+        finish_http3_server_run(0, bootstrap_result, bootstrap_thread, bootstrap_stop_requested) ==
+            7,
+        "finish_http3_server_run returns bootstrap exit codes after successful runtimes");
+    runtime_additional_internal_coverage_check(
+        ok, bootstrap_stop_requested.load(std::memory_order_relaxed),
+        "finish_http3_server_run requests bootstrap shutdown before join");
     {
         std::optional<std::future<int>> empty_result;
         std::optional<std::thread> empty_thread;
         std::atomic<bool> bootstrap_stop_requested_for_runtime = false;
-        check(finish_http3_server_run(3, empty_result, empty_thread,
-                                      bootstrap_stop_requested_for_runtime) == 3,
-              "finish_http3_server_run returns runtime failures when bootstrap is absent");
+        runtime_additional_internal_coverage_check(
+            ok,
+            finish_http3_server_run(3, empty_result, empty_thread,
+                                    bootstrap_stop_requested_for_runtime) == 3,
+            "finish_http3_server_run returns runtime failures when bootstrap is absent");
     }
     {
         std::packaged_task<int()> bootstrap_task_for_failure([] { return 9; });
@@ -3103,9 +3320,11 @@ bool runtime_additional_internal_coverage_for_test() {
         std::optional<std::thread> bootstrap_thread_for_failure(
             std::move(bootstrap_task_for_failure));
         std::atomic<bool> bootstrap_stop_requested_for_failure = false;
-        check(finish_http3_server_run(5, bootstrap_result_for_failure, bootstrap_thread_for_failure,
-                                      bootstrap_stop_requested_for_failure) == 5,
-              "finish_http3_server_run preserves runtime failures when bootstrap also exits");
+        runtime_additional_internal_coverage_check(
+            ok,
+            finish_http3_server_run(5, bootstrap_result_for_failure, bootstrap_thread_for_failure,
+                                    bootstrap_stop_requested_for_failure) == 5,
+            "finish_http3_server_run preserves runtime failures when bootstrap also exits");
     }
     {
         auto bootstrap_passthrough = server_config;
@@ -3120,8 +3339,9 @@ bool runtime_additional_internal_coverage_for_test() {
                     return backend;
                 }(),
         };
-        check(run_http3_server(bootstrap_passthrough) == 1,
-              "run_http3_server continues into runtime when bootstrap stays live");
+        runtime_additional_internal_coverage_check(
+            ok, run_http3_server(bootstrap_passthrough) == 1,
+            "run_http3_server continues into runtime when bootstrap stays live");
     }
 
     {
@@ -3136,8 +3356,9 @@ bool runtime_additional_internal_coverage_for_test() {
                     return backend;
                 }(),
         };
-        check(run_http3_server(forced_config) == 1,
-              "run_http3_server executes its in-process success tail with forced bootstrap");
+        runtime_additional_internal_coverage_check(
+            ok, run_http3_server(forced_config) == 1,
+            "run_http3_server executes its in-process success tail with forced bootstrap");
     }
 
     return ok;
@@ -3165,17 +3386,16 @@ bool runtime_server_local_error_without_connection_coverage_for_test() {
 
 bool runtime_tail_internal_coverage_for_test() {
     bool ok = true;
-    const auto check = [&](bool condition, std::string_view label) {
-        ok &= runtime_internal_check(condition, "runtime_tail_internal_coverage_for_test", label);
-    };
 
     const auto now = quic::QuicCoreClock::now();
     RuntimeScopedTempDir document_root;
-    check(document_root.write_file("index.html", "ok"), "write runtime_tail index fixture");
+    runtime_tail_internal_coverage_check(ok, document_root.write_file("index.html", "ok"),
+                                         "write runtime_tail index fixture");
     const auto server_config = make_runtime_server_config_for_test(document_root.path());
     const auto server_endpoint = make_http3_server_endpoint_config(server_config);
     const auto server_endpoint_config = server_endpoint.value_or(quic::QuicCoreEndpointConfig{});
-    check(server_endpoint.has_value(), "server endpoint config loads for tail coverage");
+    runtime_tail_internal_coverage_check(ok, server_endpoint.has_value(),
+                                         "server endpoint config loads for tail coverage");
 
     {
         quic::QuicCoreResult different_connection;
@@ -3186,8 +3406,9 @@ bool runtime_tail_internal_coverage_for_test() {
             },
         });
         const auto filtered = filter_result_for_connection(different_connection, 12);
-        check(filtered.effects.empty(),
-              "filter_result_for_connection drops endpoint-relevant effects for other connections");
+        runtime_tail_internal_coverage_check(
+            ok, filtered.effects.empty(),
+            "filter_result_for_connection drops endpoint-relevant effects for other connections");
     }
 
     {
@@ -3198,12 +3419,14 @@ bool runtime_tail_internal_coverage_for_test() {
             Http3ServerEndpointTestAccess::connection(endpoint), quic::QuicCoreCloseConnection{
                                                                      .application_error_code = 7,
                                                                  });
-        check(runtime.drain_endpoint(31,
-                                     Http3ServerEndpointUpdate{
-                                         .has_pending_work = true,
-                                     },
-                                     now),
-              "server drain_endpoint continues after successful polled command submission");
+        runtime_tail_internal_coverage_check(
+            ok,
+            runtime.drain_endpoint(31,
+                                   Http3ServerEndpointUpdate{
+                                       .has_pending_work = true,
+                                   },
+                                   now),
+            "server drain_endpoint continues after successful polled command submission");
     }
 
     {
@@ -3215,12 +3438,14 @@ bool runtime_tail_internal_coverage_for_test() {
                                                                      .application_error_code = 9,
                                                                  });
         force_server_handle_result_failure_after_calls_for_test() = 0;
-        check(!runtime.drain_endpoint(32,
-                                      Http3ServerEndpointUpdate{
-                                          .has_pending_work = true,
-                                      },
-                                      now),
-              "server drain_endpoint propagates polled command submission failures");
+        runtime_tail_internal_coverage_check(
+            ok,
+            !runtime.drain_endpoint(32,
+                                    Http3ServerEndpointUpdate{
+                                        .has_pending_work = true,
+                                    },
+                                    now),
+            "server drain_endpoint propagates polled command submission failures");
     }
 
     return ok;

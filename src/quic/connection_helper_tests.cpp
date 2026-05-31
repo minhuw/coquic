@@ -6,22 +6,19 @@ namespace coquic::quic::test {
 
 bool connection_helper_edge_cases_for_tests() {
     bool ok = true;
-    const auto check = [&](const char *label, bool condition) {
-        return connection_coverage_check(ok, label, condition);
-    };
 
     constexpr std::array supported_versions = {kQuicVersion2, kQuicVersion1};
     const auto retry_source_connection_id = ConnectionId{std::byte{0x53}, std::byte{0x00}};
-    check("retry_same_version_omits_version_information",
-          !version_information_for_handshake(supported_versions, kQuicVersion1,
-                                             retry_source_connection_id, kQuicVersion1,
-                                             kQuicVersion1)
-               .has_value());
-    check("retry_version_change_keeps_version_information",
-          version_information_for_handshake(supported_versions, kQuicVersion2,
-                                            retry_source_connection_id, kQuicVersion1,
-                                            kQuicVersion2)
-              .has_value());
+    connection_coverage_check(ok, "retry_same_version_omits_version_information",
+                              !version_information_for_handshake(supported_versions, kQuicVersion1,
+                                                                 retry_source_connection_id,
+                                                                 kQuicVersion1, kQuicVersion1)
+                                   .has_value());
+    connection_coverage_check(ok, "retry_version_change_keeps_version_information",
+                              version_information_for_handshake(supported_versions, kQuicVersion2,
+                                                                retry_source_connection_id,
+                                                                kQuicVersion1, kQuicVersion2)
+                                  .has_value());
 
     const auto failed_datagram =
         CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
@@ -38,36 +35,41 @@ bool connection_helper_edge_cases_for_tests() {
         DatagramBuffer{std::byte{0x03}, std::byte{0x04}, std::byte{0x05}};
     const auto successful_serialized_datagram = CodecResult<SerializedProtectedDatagram>::success(
         std::move(successful_serialized_datagram_value));
-    check("failed_datagram_reports_zero_size", datagram_size_or_zero(failed_datagram) == 0);
-    check("successful_datagram_reports_size", datagram_size_or_zero(successful_datagram) == 2);
-    check("failed_serialized_datagram_reports_zero_size",
-          datagram_size_or_zero(failed_serialized_datagram) == 0);
-    check("successful_serialized_datagram_reports_size",
-          datagram_size_or_zero(successful_serialized_datagram) == 3);
-    check("empty_packet_payload_error_reported",
-          is_empty_packet_payload_error(empty_packet_payload_datagram));
-    check("successful_datagram_not_reported", !is_empty_packet_payload_error(successful_datagram));
-    check("non_empty_packet_payload_error_not_reported",
-          !is_empty_packet_payload_error(failed_datagram));
-    check("empty_packet_payload_serialized_error_reported",
-          is_empty_packet_payload_error(empty_packet_payload_serialized_datagram));
-    check("non_empty_packet_payload_serialized_error_not_reported",
-          !is_empty_packet_payload_error(failed_serialized_datagram));
+    connection_coverage_check(ok, "failed_datagram_reports_zero_size",
+                              datagram_size_or_zero(failed_datagram) == 0);
+    connection_coverage_check(ok, "successful_datagram_reports_size",
+                              datagram_size_or_zero(successful_datagram) == 2);
+    connection_coverage_check(ok, "failed_serialized_datagram_reports_zero_size",
+                              datagram_size_or_zero(failed_serialized_datagram) == 0);
+    connection_coverage_check(ok, "successful_serialized_datagram_reports_size",
+                              datagram_size_or_zero(successful_serialized_datagram) == 3);
+    connection_coverage_check(ok, "empty_packet_payload_error_reported",
+                              is_empty_packet_payload_error(empty_packet_payload_datagram));
+    connection_coverage_check(ok, "successful_datagram_not_reported",
+                              !is_empty_packet_payload_error(successful_datagram));
+    connection_coverage_check(ok, "non_empty_packet_payload_error_not_reported",
+                              !is_empty_packet_payload_error(failed_datagram));
+    connection_coverage_check(
+        ok, "empty_packet_payload_serialized_error_reported",
+        is_empty_packet_payload_error(empty_packet_payload_serialized_datagram));
+    connection_coverage_check(ok, "non_empty_packet_payload_serialized_error_not_reported",
+                              !is_empty_packet_payload_error(failed_serialized_datagram));
 
     TransportParameters invalid_transport_parameters;
     invalid_transport_parameters.max_udp_payload_size = std::numeric_limits<std::uint64_t>::max();
-    check(
-        "encode_failure_returns_empty",
+    connection_coverage_check(
+        ok, "encode_failure_returns_empty",
         encode_resumption_state({}, kQuicVersion1, "h3", invalid_transport_parameters, {}).empty());
 
     constexpr std::array wrong_magic_bytes = {std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
                                               std::byte{0x00}, std::byte{0x00}};
-    check("wrong_magic_rejected", !decode_resumption_state(wrong_magic_bytes).has_value());
+    connection_coverage_check(ok, "wrong_magic_rejected",
+                              !decode_resumption_state(wrong_magic_bytes).has_value());
 
     std::vector<std::byte> truncated_tls_state = {std::byte{0x01}};
     append_u32_be(truncated_tls_state, kQuicVersion1);
-    check("truncated_tls_state_rejected",
-          !decode_resumption_state(truncated_tls_state).has_value());
+    connection_coverage_check(ok, "truncated_tls_state_rejected",
+                              !decode_resumption_state(truncated_tls_state).has_value());
 
     const TransportParameters resumption_transport_parameters{
         .max_udp_payload_size = 1200,
@@ -82,40 +84,42 @@ bool connection_helper_edge_cases_for_tests() {
     append_length_prefixed_bytes(missing_application_context, {});
     append_length_prefixed_text(missing_application_context, "h3");
     append_length_prefixed_bytes(missing_application_context, transport_parameters);
-    check("missing_application_context_rejected",
-          !decode_resumption_state(missing_application_context).has_value());
+    connection_coverage_check(ok, "missing_application_context_rejected",
+                              !decode_resumption_state(missing_application_context).has_value());
 
     std::vector<std::byte> missing_application_protocol = {std::byte{0x01}};
     append_u32_be(missing_application_protocol, kQuicVersion1);
     append_length_prefixed_bytes(missing_application_protocol, {});
-    check("missing_application_protocol_rejected",
-          !decode_resumption_state(missing_application_protocol).has_value());
+    connection_coverage_check(ok, "missing_application_protocol_rejected",
+                              !decode_resumption_state(missing_application_protocol).has_value());
 
     std::vector<std::byte> missing_transport_parameters = {std::byte{0x01}};
     append_u32_be(missing_transport_parameters, kQuicVersion1);
     append_length_prefixed_bytes(missing_transport_parameters, {});
     append_length_prefixed_text(missing_transport_parameters, "h3");
-    check("missing_transport_parameters_rejected",
-          !decode_resumption_state(missing_transport_parameters).has_value());
+    connection_coverage_check(ok, "missing_transport_parameters_rejected",
+                              !decode_resumption_state(missing_transport_parameters).has_value());
 
     auto trailing_resumption_state =
         encode_resumption_state({}, kQuicVersion1, "h3", resumption_transport_parameters, {});
     trailing_resumption_state.push_back(std::byte{0xff});
-    check("trailing_bytes_rejected",
-          !decode_resumption_state(trailing_resumption_state).has_value());
+    connection_coverage_check(ok, "trailing_bytes_rejected",
+                              !decode_resumption_state(trailing_resumption_state).has_value());
 
     auto fin_sendable_stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
     fin_sendable_stream.send_final_size = 1;
     fin_sendable_stream.send_fin_state = StreamSendFinState::pending;
     fin_sendable_stream.flow_control.peer_max_stream_data = 1;
-    check("pending_fin_without_buffer_is_sendable", stream_fin_sendable(fin_sendable_stream));
+    connection_coverage_check(ok, "pending_fin_without_buffer_is_sendable",
+                              stream_fin_sendable(fin_sendable_stream));
 
     auto fin_blocked_by_credit_stream =
         make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
     fin_blocked_by_credit_stream.send_final_size = 2;
     fin_blocked_by_credit_stream.send_fin_state = StreamSendFinState::pending;
     fin_blocked_by_credit_stream.flow_control.peer_max_stream_data = 1;
-    check("pending_fin_blocked_by_credit", !stream_fin_sendable(fin_blocked_by_credit_stream));
+    connection_coverage_check(ok, "pending_fin_blocked_by_credit",
+                              !stream_fin_sendable(fin_blocked_by_credit_stream));
 
     auto stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
     stream.send_final_size = 1;
@@ -123,25 +127,29 @@ bool connection_helper_edge_cases_for_tests() {
     stream.flow_control.peer_max_stream_data = 1;
     const std::array pending_data = {std::byte{0x78}};
     stream.send_buffer.append(pending_data);
-    check("pending_data_blocks_fin", !stream_fin_sendable(stream));
+    connection_coverage_check(ok, "pending_data_blocks_fin", !stream_fin_sendable(stream));
 
     LocalStreamLimitState stream_limits;
     stream_limits.max_streams_bidi_state = StreamControlFrameState::pending;
     stream_limits.max_streams_uni_state = StreamControlFrameState::pending;
     const auto max_streams_frames = stream_limits.take_max_streams_frames();
-    check("missing_pending_frames_preserve_state",
-          max_streams_frames.empty() &
-              (stream_limits.max_streams_bidi_state == StreamControlFrameState::pending) &
-              (stream_limits.max_streams_uni_state == StreamControlFrameState::pending));
+    connection_coverage_check(
+        ok, "missing_pending_frames_preserve_state",
+        max_streams_frames.empty() &
+            (stream_limits.max_streams_bidi_state == StreamControlFrameState::pending) &
+            (stream_limits.max_streams_uni_state == StreamControlFrameState::pending));
 
     constexpr std::array short_header_packet = {std::byte{0x40}};
-    check("short_header_is_bufferable", packet_is_bufferable(short_header_packet));
+    connection_coverage_check(ok, "short_header_is_bufferable",
+                              packet_is_bufferable(short_header_packet));
     constexpr std::array truncated_long_header = {std::byte{0xc0}, std::byte{0x00}, std::byte{0x00},
                                                   std::byte{0x00}};
-    check("truncated_long_header_is_not_bufferable", !packet_is_bufferable(truncated_long_header));
+    connection_coverage_check(ok, "truncated_long_header_is_not_bufferable",
+                              !packet_is_bufferable(truncated_long_header));
     constexpr std::array handshake_long_header = {std::byte{0xe0}, std::byte{0x00}, std::byte{0x00},
                                                   std::byte{0x00}, std::byte{0x01}};
-    check("handshake_long_header_is_bufferable", packet_is_bufferable(handshake_long_header));
+    connection_coverage_check(ok, "handshake_long_header_is_bufferable",
+                              packet_is_bufferable(handshake_long_header));
 
     const ProtectedOneRttPacket connected_state_frame{
         .frames =
@@ -159,12 +167,14 @@ bool connection_helper_edge_cases_for_tests() {
                 AckFrame{},
             },
     };
-    check("server_protected_one_rtt_packet_deferred",
-          should_defer_protected_one_rtt_packet(ack_only_frame, EndpointRole::server,
-                                                HandshakeStatus::in_progress));
-    check("client_connected_state_protected_one_rtt_packet_deferred",
-          should_defer_protected_one_rtt_packet(connected_state_frame, EndpointRole::client,
-                                                HandshakeStatus::in_progress));
+    connection_coverage_check(ok, "server_protected_one_rtt_packet_deferred",
+                              should_defer_protected_one_rtt_packet(ack_only_frame,
+                                                                    EndpointRole::server,
+                                                                    HandshakeStatus::in_progress));
+    connection_coverage_check(ok, "client_connected_state_protected_one_rtt_packet_deferred",
+                              should_defer_protected_one_rtt_packet(connected_state_frame,
+                                                                    EndpointRole::client,
+                                                                    HandshakeStatus::in_progress));
     const ReceivedProtectedOneRttPacket received_ack_only_frame{
         .frames =
             {
@@ -181,12 +191,14 @@ bool connection_helper_edge_cases_for_tests() {
                 },
             },
     };
-    check("server_received_one_rtt_packet_deferred",
-          should_defer_protected_one_rtt_packet(received_ack_only_frame, EndpointRole::server,
-                                                HandshakeStatus::in_progress));
-    check("client_connected_state_received_one_rtt_packet_deferred",
-          should_defer_protected_one_rtt_packet(
-              received_connected_state_frame, EndpointRole::client, HandshakeStatus::in_progress));
+    connection_coverage_check(ok, "server_received_one_rtt_packet_deferred",
+                              should_defer_protected_one_rtt_packet(received_ack_only_frame,
+                                                                    EndpointRole::server,
+                                                                    HandshakeStatus::in_progress));
+    connection_coverage_check(ok, "client_connected_state_received_one_rtt_packet_deferred",
+                              should_defer_protected_one_rtt_packet(received_connected_state_frame,
+                                                                    EndpointRole::client,
+                                                                    HandshakeStatus::in_progress));
     const ReceivedProtectedOneRttAckOnlyPacket received_ack_only_fast_packet{
         .packet_number = 42,
         .ack = ReceivedAckFrame{},
@@ -199,70 +211,77 @@ bool connection_helper_edge_cases_for_tests() {
                 .stream_data = SharedBytes(bytes_from_ints_for_tests({0xaa})),
             },
     };
-    check("received_ack_only_fast_packet_deferred",
-          should_defer_protected_one_rtt_packet(
-              ReceivedProtectedPacket{received_ack_only_fast_packet}, EndpointRole::server,
-              HandshakeStatus::in_progress));
-    check(
-        "received_stream_fast_packet_deferred",
+    connection_coverage_check(ok, "received_ack_only_fast_packet_deferred",
+                              should_defer_protected_one_rtt_packet(
+                                  ReceivedProtectedPacket{received_ack_only_fast_packet},
+                                  EndpointRole::server, HandshakeStatus::in_progress));
+    connection_coverage_check(
+        ok, "received_stream_fast_packet_deferred",
         should_defer_protected_one_rtt_packet(ReceivedProtectedPacket{received_stream_fast_packet},
                                               EndpointRole::server, HandshakeStatus::in_progress));
-    check(
-        "connected_received_stream_fast_packet_not_deferred",
+    connection_coverage_check(
+        ok, "connected_received_stream_fast_packet_not_deferred",
         !should_defer_protected_one_rtt_packet(ReceivedProtectedPacket{received_stream_fast_packet},
                                                EndpointRole::server, HandshakeStatus::connected));
-    check("received_fast_packet_numbers_for_trace",
-          protected_one_rtt_packet_number_for_trace(
-              ReceivedProtectedPacket{received_ack_only_fast_packet}) == 42u &&
-              protected_one_rtt_packet_number_for_trace(
-                  ReceivedProtectedPacket{received_stream_fast_packet}) == 43u);
-    check("connected_protected_one_rtt_packet_not_deferred",
-          !should_defer_protected_one_rtt_packet(connected_state_frame, EndpointRole::server,
-                                                 HandshakeStatus::connected));
-    check("chacha_limits_match_expected",
-          !confidentiality_limit_for_cipher_suite(CipherSuite::tls_chacha20_poly1305_sha256)
-                  .has_value() &&
-              integrity_limit_for_cipher_suite(CipherSuite::tls_chacha20_poly1305_sha256) ==
-                  kChaCha20Poly1305IntegrityLimit);
-    check("aes_gcm_limits_match_expected",
-          confidentiality_limit_for_cipher_suite(CipherSuite::tls_aes_128_gcm_sha256) ==
-                  kAesGcmConfidentialityLimit &&
-              confidentiality_limit_for_cipher_suite(CipherSuite::tls_aes_256_gcm_sha384) ==
-                  kAesGcmConfidentialityLimit &&
-              integrity_limit_for_cipher_suite(CipherSuite::tls_aes_128_gcm_sha256) ==
-                  kAesGcmIntegrityLimit &&
-              integrity_limit_for_cipher_suite(CipherSuite::tls_aes_256_gcm_sha384) ==
-                  kAesGcmIntegrityLimit);
-    check("invalid_cipher_limits_are_empty",
-          !confidentiality_limit_for_cipher_suite(invalid_cipher_suite_for_tests()).has_value() &&
-              !integrity_limit_for_cipher_suite(invalid_cipher_suite_for_tests()).has_value());
-    check("saturating_add_handles_overflow_and_sum",
-          saturating_add(std::numeric_limits<std::uint64_t>::max() - 1u, 8u) ==
-                  std::numeric_limits<std::uint64_t>::max() &&
-              saturating_add(3u, 4u) == 7u);
-    check("protected_zero_rtt_crypto_can_advance_tls",
-          packet_can_advance_tls_state(ProtectedPacket{ProtectedZeroRttPacket{
-              .frames =
-                  {
-                      CryptoFrame{
-                          .offset = 0,
-                          .crypto_data = std::vector<std::byte>{std::byte{0x01}},
-                      },
-                  },
-          }}));
-    check("protected_one_rtt_ack_cannot_advance_tls",
-          !packet_can_advance_tls_state(ProtectedPacket{ProtectedOneRttPacket{
-              .frames =
-                  {
-                      AckFrame{},
-                  },
-          }}));
-    check("corrupted_long_header_discarded",
-          should_discard_corrupted_long_header_packet(false, CodecErrorCode::invalid_fixed_bit) &
-              should_discard_corrupted_long_header_packet(false,
-                                                          CodecErrorCode::unsupported_packet_type));
-    check("short_header_not_discarded_as_corrupted_long_header",
-          !should_discard_corrupted_long_header_packet(true, CodecErrorCode::invalid_fixed_bit));
+    connection_coverage_check(ok, "received_fast_packet_numbers_for_trace",
+                              protected_one_rtt_packet_number_for_trace(
+                                  ReceivedProtectedPacket{received_ack_only_fast_packet}) == 42u &&
+                                  protected_one_rtt_packet_number_for_trace(
+                                      ReceivedProtectedPacket{received_stream_fast_packet}) == 43u);
+    connection_coverage_check(ok, "connected_protected_one_rtt_packet_not_deferred",
+                              !should_defer_protected_one_rtt_packet(connected_state_frame,
+                                                                     EndpointRole::server,
+                                                                     HandshakeStatus::connected));
+    connection_coverage_check(
+        ok, "chacha_limits_match_expected",
+        !confidentiality_limit_for_cipher_suite(CipherSuite::tls_chacha20_poly1305_sha256)
+                .has_value() &&
+            integrity_limit_for_cipher_suite(CipherSuite::tls_chacha20_poly1305_sha256) ==
+                kChaCha20Poly1305IntegrityLimit);
+    connection_coverage_check(
+        ok, "aes_gcm_limits_match_expected",
+        confidentiality_limit_for_cipher_suite(CipherSuite::tls_aes_128_gcm_sha256) ==
+                kAesGcmConfidentialityLimit &&
+            confidentiality_limit_for_cipher_suite(CipherSuite::tls_aes_256_gcm_sha384) ==
+                kAesGcmConfidentialityLimit &&
+            integrity_limit_for_cipher_suite(CipherSuite::tls_aes_128_gcm_sha256) ==
+                kAesGcmIntegrityLimit &&
+            integrity_limit_for_cipher_suite(CipherSuite::tls_aes_256_gcm_sha384) ==
+                kAesGcmIntegrityLimit);
+    connection_coverage_check(
+        ok, "invalid_cipher_limits_are_empty",
+        !confidentiality_limit_for_cipher_suite(invalid_cipher_suite_for_tests()).has_value() &&
+            !integrity_limit_for_cipher_suite(invalid_cipher_suite_for_tests()).has_value());
+    connection_coverage_check(ok, "saturating_add_handles_overflow_and_sum",
+                              saturating_add(std::numeric_limits<std::uint64_t>::max() - 1u, 8u) ==
+                                      std::numeric_limits<std::uint64_t>::max() &&
+                                  saturating_add(3u, 4u) == 7u);
+    connection_coverage_check(
+        ok, "protected_zero_rtt_crypto_can_advance_tls",
+        packet_can_advance_tls_state(ProtectedPacket{ProtectedZeroRttPacket{
+            .frames =
+                {
+                    CryptoFrame{
+                        .offset = 0,
+                        .crypto_data = std::vector<std::byte>{std::byte{0x01}},
+                    },
+                },
+        }}));
+    connection_coverage_check(ok, "protected_one_rtt_ack_cannot_advance_tls",
+                              !packet_can_advance_tls_state(ProtectedPacket{ProtectedOneRttPacket{
+                                  .frames =
+                                      {
+                                          AckFrame{},
+                                      },
+                              }}));
+    connection_coverage_check(
+        ok, "corrupted_long_header_discarded",
+        should_discard_corrupted_long_header_packet(false, CodecErrorCode::invalid_fixed_bit) &
+            should_discard_corrupted_long_header_packet(false,
+                                                        CodecErrorCode::unsupported_packet_type));
+    connection_coverage_check(
+        ok, "short_header_not_discarded_as_corrupted_long_header",
+        !should_discard_corrupted_long_header_packet(true, CodecErrorCode::invalid_fixed_bit));
 
     const auto bytes_from_ints = [](std::initializer_list<std::uint8_t> values) {
         std::vector<std::byte> bytes;
@@ -273,11 +292,12 @@ bool connection_helper_edge_cases_for_tests() {
         return bytes;
     };
 
-    check("empty_connection_id_formats_empty", format_connection_id_hex({}).empty());
-    check("connection_id_formats_lower_hex",
-          format_connection_id_hex(retry_source_connection_id) == "5300");
-    check("empty_issued_connection_id_remains_empty",
-          make_issued_connection_id({}, /*sequence_number=*/7).empty());
+    connection_coverage_check(ok, "empty_connection_id_formats_empty",
+                              format_connection_id_hex({}).empty());
+    connection_coverage_check(ok, "connection_id_formats_lower_hex",
+                              format_connection_id_hex(retry_source_connection_id) == "5300");
+    connection_coverage_check(ok, "empty_issued_connection_id_remains_empty",
+                              make_issued_connection_id({}, /*sequence_number=*/7).empty());
     bool quic_core_secret_fallback_has_bytes = false;
     bool issued_connection_id_rand_fallback_has_bytes = false;
     bool issued_connection_id_fallback_has_bytes = false;
@@ -394,46 +414,51 @@ bool connection_helper_edge_cases_for_tests() {
             &ConnectionDrainTestHooks::force_random_one_in_sixteen_result, true);
         forced_random_one_in_sixteen_true = random_one_in_sixteen();
     }
-    check("random_one_in_sixteen_openssl_returns_bool", [] {
+    connection_coverage_check(ok, "random_one_in_sixteen_openssl_returns_bool", [] {
         const bool value = random_one_in_sixteen();
         return value || !value;
     }());
-    check("stream_state_error_helpers_cover_all_codes",
-          stream_transport_error_for_state_error(StreamStateErrorCode::invalid_stream_id) ==
-                  QuicTransportErrorCode::stream_limit_error &&
-              stream_transport_error_for_state_error(
-                  StreamStateErrorCode::invalid_stream_direction) ==
-                  QuicTransportErrorCode::stream_state_error &&
-              stream_transport_error_for_state_error(StreamStateErrorCode::send_side_closed) ==
-                  QuicTransportErrorCode::stream_state_error &&
-              stream_transport_error_for_state_error(StreamStateErrorCode::receive_side_closed) ==
-                  QuicTransportErrorCode::stream_state_error &&
-              stream_transport_error_for_state_error(StreamStateErrorCode::final_size_conflict) ==
-                  QuicTransportErrorCode::final_size_error);
+    connection_coverage_check(
+        ok, "stream_state_error_helpers_cover_all_codes",
+        stream_transport_error_for_state_error(StreamStateErrorCode::invalid_stream_id) ==
+                QuicTransportErrorCode::stream_limit_error &&
+            stream_transport_error_for_state_error(
+                StreamStateErrorCode::invalid_stream_direction) ==
+                QuicTransportErrorCode::stream_state_error &&
+            stream_transport_error_for_state_error(StreamStateErrorCode::send_side_closed) ==
+                QuicTransportErrorCode::stream_state_error &&
+            stream_transport_error_for_state_error(StreamStateErrorCode::receive_side_closed) ==
+                QuicTransportErrorCode::stream_state_error &&
+            stream_transport_error_for_state_error(StreamStateErrorCode::final_size_conflict) ==
+                QuicTransportErrorCode::final_size_error);
     const auto stream_codec_without_transport = stream_state_codec_error(
         CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0}, kFrameTypeStreamBase);
-    check("stream_state_codec_error_adds_transport_code",
-          stream_codec_without_transport.has_transport_error_code &&
-              stream_codec_without_transport.transport_error_code ==
-                  transport_error_code_value(QuicTransportErrorCode::stream_state_error));
-    check("stream_limit_frame_type_helpers_cover_uni",
-          frame_type_for_max_streams(StreamLimitType::unidirectional) == kFrameTypeMaxStreamsUni &&
-              frame_type_for_streams_blocked(StreamLimitType::unidirectional) ==
-                  kFrameTypeStreamsBlockedUni);
-    check("transport_error_for_codec_error_covers_residual_codes",
-          transport_error_for_codec_error(CodecErrorCode::invalid_reserved_bits) ==
-                  QuicTransportErrorCode::protocol_violation &&
-              transport_error_for_codec_error(CodecErrorCode::invalid_fixed_bit) ==
-                  QuicTransportErrorCode::internal_error &&
-              transport_error_for_codec_error(CodecErrorCode::missing_crypto_context) ==
-                  QuicTransportErrorCode::internal_error &&
-              transport_error_for_codec_error(CodecErrorCode::http09_parse_error) ==
-                  QuicTransportErrorCode::application_error &&
-              transport_error_for_codec_error(CodecErrorCode::http3_parse_error) ==
-                  QuicTransportErrorCode::application_error);
+    connection_coverage_check(
+        ok, "stream_state_codec_error_adds_transport_code",
+        stream_codec_without_transport.has_transport_error_code &&
+            stream_codec_without_transport.transport_error_code ==
+                transport_error_code_value(QuicTransportErrorCode::stream_state_error));
+    connection_coverage_check(ok, "stream_limit_frame_type_helpers_cover_uni",
+                              frame_type_for_max_streams(StreamLimitType::unidirectional) ==
+                                      kFrameTypeMaxStreamsUni &&
+                                  frame_type_for_streams_blocked(StreamLimitType::unidirectional) ==
+                                      kFrameTypeStreamsBlockedUni);
+    connection_coverage_check(
+        ok, "transport_error_for_codec_error_covers_residual_codes",
+        transport_error_for_codec_error(CodecErrorCode::invalid_reserved_bits) ==
+                QuicTransportErrorCode::protocol_violation &&
+            transport_error_for_codec_error(CodecErrorCode::invalid_fixed_bit) ==
+                QuicTransportErrorCode::internal_error &&
+            transport_error_for_codec_error(CodecErrorCode::missing_crypto_context) ==
+                QuicTransportErrorCode::internal_error &&
+            transport_error_for_codec_error(CodecErrorCode::http09_parse_error) ==
+                QuicTransportErrorCode::application_error &&
+            transport_error_for_codec_error(CodecErrorCode::http3_parse_error) ==
+                QuicTransportErrorCode::application_error);
     const DeferredProtectedDatagram deferred_packet(bytes_from_ints({0x01, 0x02, 0x03}),
                                                     /*id=*/9);
-    check("vector_equals_deferred_packet", bytes_from_ints({0x01, 0x02, 0x03}) == deferred_packet);
+    connection_coverage_check(ok, "vector_equals_deferred_packet",
+                              bytes_from_ints({0x01, 0x02, 0x03}) == deferred_packet);
 
     PathState traced_path{
         .id = 7,
@@ -452,62 +477,72 @@ bool connection_helper_edge_cases_for_tests() {
     std::map<QuicPathId, PathState> traced_paths{
         {traced_path.id, traced_path},
     };
-    check("optional_path_none_formats_dash", format_optional_path_id(std::nullopt) == "-");
-    check("optional_path_value_formats_decimal", format_optional_path_id(traced_path.id) == "7");
-    check("missing_optional_path_returns_null",
-          find_path_state(traced_paths, std::nullopt) == nullptr);
-    check("unknown_path_returns_null", find_path_state(traced_paths, 99) == nullptr);
-    check("existing_path_is_found", find_path_state(traced_paths, traced_path.id) != nullptr);
-    check("null_path_summary_formats_dash", format_path_state_summary(nullptr) == "-");
+    connection_coverage_check(ok, "optional_path_none_formats_dash",
+                              format_optional_path_id(std::nullopt) == "-");
+    connection_coverage_check(ok, "optional_path_value_formats_decimal",
+                              format_optional_path_id(traced_path.id) == "7");
+    connection_coverage_check(ok, "missing_optional_path_returns_null",
+                              find_path_state(traced_paths, std::nullopt) == nullptr);
+    connection_coverage_check(ok, "unknown_path_returns_null",
+                              find_path_state(traced_paths, 99) == nullptr);
+    connection_coverage_check(ok, "existing_path_is_found",
+                              find_path_state(traced_paths, traced_path.id) != nullptr);
+    connection_coverage_check(ok, "null_path_summary_formats_dash",
+                              format_path_state_summary(nullptr) == "-");
     const std::string traced_path_summary = format_path_state_summary(&traced_path);
-    check("traced_path_summary_mentions_path_state",
-          (traced_path_summary.find("id=7") != std::string::npos) &
-              (traced_path_summary.find("val=1") != std::string::npos) &
-              (traced_path_summary.find("cur=1") != std::string::npos) &
-              (traced_path_summary.find("chal=1") != std::string::npos) &
-              (traced_path_summary.find("out=1") != std::string::npos) &
-              (traced_path_summary.find("resp=1") != std::string::npos) &
-              (traced_path_summary.find("recv=11") != std::string::npos) &
-              (traced_path_summary.find("sent=7") != std::string::npos));
-    check("invalid_ack_first_range_formats_invalid", format_ack_ranges(AckFrame{
-                                                         .largest_acknowledged = 1,
-                                                         .first_ack_range = 2,
-                                                     }) == "[invalid]");
-    check("invalid_ack_gap_formats_invalid", format_ack_ranges(AckFrame{
-                                                 .largest_acknowledged = 10,
-                                                 .first_ack_range = 0,
-                                                 .additional_ranges =
-                                                     {
-                                                         AckRange{.gap = 9, .range_length = 0},
-                                                     },
-                                             }) == "[10-10,invalid]");
-    check("invalid_ack_range_length_formats_invalid",
-          format_ack_ranges(AckFrame{
-              .largest_acknowledged = 10,
-              .first_ack_range = 2,
-              .additional_ranges =
-                  {
-                      AckRange{.gap = 0, .range_length = 7},
-                  },
-          }) == "[8-10,invalid]");
-    check("valid_ack_ranges_format_expected", format_ack_ranges(AckFrame{
-                                                  .largest_acknowledged = 10,
-                                                  .first_ack_range = 1,
-                                                  .additional_ranges =
-                                                      {
-                                                          AckRange{.gap = 0, .range_length = 1},
-                                                      },
-                                              }) == "[9-10,6-7]");
-    check("invalid_received_ack_formats_invalid", format_ack_ranges(ReceivedAckFrame{
-                                                      .largest_acknowledged = 10,
-                                                      .first_ack_range = 1,
-                                                      .additional_range_count = 1,
-                                                      .additional_range_bytes =
-                                                          SharedBytes{
-                                                              std::byte{0x40},
-                                                          },
-                                                  }) == "[invalid]");
-    check("empty_packet_summary_reports_zero", summarize_packets({}) == "count=0");
+    connection_coverage_check(ok, "traced_path_summary_mentions_path_state",
+                              (traced_path_summary.find("id=7") != std::string::npos) &
+                                  (traced_path_summary.find("val=1") != std::string::npos) &
+                                  (traced_path_summary.find("cur=1") != std::string::npos) &
+                                  (traced_path_summary.find("chal=1") != std::string::npos) &
+                                  (traced_path_summary.find("out=1") != std::string::npos) &
+                                  (traced_path_summary.find("resp=1") != std::string::npos) &
+                                  (traced_path_summary.find("recv=11") != std::string::npos) &
+                                  (traced_path_summary.find("sent=7") != std::string::npos));
+    connection_coverage_check(ok, "invalid_ack_first_range_formats_invalid",
+                              format_ack_ranges(AckFrame{
+                                  .largest_acknowledged = 1,
+                                  .first_ack_range = 2,
+                              }) == "[invalid]");
+    connection_coverage_check(ok, "invalid_ack_gap_formats_invalid",
+                              format_ack_ranges(AckFrame{
+                                  .largest_acknowledged = 10,
+                                  .first_ack_range = 0,
+                                  .additional_ranges =
+                                      {
+                                          AckRange{.gap = 9, .range_length = 0},
+                                      },
+                              }) == "[10-10,invalid]");
+    connection_coverage_check(ok, "invalid_ack_range_length_formats_invalid",
+                              format_ack_ranges(AckFrame{
+                                  .largest_acknowledged = 10,
+                                  .first_ack_range = 2,
+                                  .additional_ranges =
+                                      {
+                                          AckRange{.gap = 0, .range_length = 7},
+                                      },
+                              }) == "[8-10,invalid]");
+    connection_coverage_check(ok, "valid_ack_ranges_format_expected",
+                              format_ack_ranges(AckFrame{
+                                  .largest_acknowledged = 10,
+                                  .first_ack_range = 1,
+                                  .additional_ranges =
+                                      {
+                                          AckRange{.gap = 0, .range_length = 1},
+                                      },
+                              }) == "[9-10,6-7]");
+    connection_coverage_check(ok, "invalid_received_ack_formats_invalid",
+                              format_ack_ranges(ReceivedAckFrame{
+                                  .largest_acknowledged = 10,
+                                  .first_ack_range = 1,
+                                  .additional_range_count = 1,
+                                  .additional_range_bytes =
+                                      SharedBytes{
+                                          std::byte{0x40},
+                                      },
+                              }) == "[invalid]");
+    connection_coverage_check(ok, "empty_packet_summary_reports_zero",
+                              summarize_packets({}) == "count=0");
     const std::array sent_packets = {
         SentPacketRecord{
             .packet_number = 5,
@@ -527,11 +562,12 @@ bool connection_helper_edge_cases_for_tests() {
         },
     };
     const std::string packet_summary = summarize_packets(sent_packets);
-    check("packet_summary_mentions_counts",
-          (packet_summary.find("count=2") != std::string::npos) &
-              (packet_summary.find("pn=5-9") != std::string::npos) &
-              (packet_summary.find("stream_fragments=1") != std::string::npos) &
-              (packet_summary.find("first_stream_offset=4") != std::string::npos));
+    connection_coverage_check(
+        ok, "packet_summary_mentions_counts",
+        (packet_summary.find("count=2") != std::string::npos) &
+            (packet_summary.find("pn=5-9") != std::string::npos) &
+            (packet_summary.find("stream_fragments=1") != std::string::npos) &
+            (packet_summary.find("first_stream_offset=4") != std::string::npos));
     const std::array no_stream_packets = {
         SentPacketRecord{
             .packet_number = 6,
@@ -541,11 +577,12 @@ bool connection_helper_edge_cases_for_tests() {
         },
     };
     const std::string no_stream_packet_summary = summarize_packets(no_stream_packets);
-    check("packet_summary_without_stream_offset_omits_offset",
-          (no_stream_packet_summary.find("count=2") != std::string::npos) &
-              (no_stream_packet_summary.find("pn=6-8") != std::string::npos) &
-              (no_stream_packet_summary.find("stream_fragments=0") != std::string::npos) &
-              (no_stream_packet_summary.find("first_stream_offset=") == std::string::npos));
+    connection_coverage_check(
+        ok, "packet_summary_without_stream_offset_omits_offset",
+        (no_stream_packet_summary.find("count=2") != std::string::npos) &
+            (no_stream_packet_summary.find("pn=6-8") != std::string::npos) &
+            (no_stream_packet_summary.find("stream_fragments=0") != std::string::npos) &
+            (no_stream_packet_summary.find("first_stream_offset=") == std::string::npos));
     const SentPacketRecord metadata_packet{
         .first_stream_frame_metadata =
             StreamFrameSendMetadata{
@@ -576,10 +613,11 @@ bool connection_helper_edge_cases_for_tests() {
                 },
             },
     };
-    check("packet_stream_metadata_helpers_cover_count_bytes_and_first_offset",
-          packet_stream_frame_count(metadata_packet) == 3 &&
-              packet_stream_frame_bytes(metadata_packet) == 10 &&
-              packet_first_stream_frame_offset(metadata_packet) == 2u);
+    connection_coverage_check(ok,
+                              "packet_stream_metadata_helpers_cover_count_bytes_and_first_offset",
+                              packet_stream_frame_count(metadata_packet) == 3 &&
+                                  packet_stream_frame_bytes(metadata_packet) == 10 &&
+                                  packet_first_stream_frame_offset(metadata_packet) == 2u);
     const SentPacketRecord vector_only_metadata_packet{
         .stream_frame_metadata =
             {
@@ -604,10 +642,11 @@ bool connection_helper_edge_cases_for_tests() {
                 },
             },
     };
-    check("packet_first_stream_frame_offset_covers_vector_fragment_and_empty",
-          packet_first_stream_frame_offset(vector_only_metadata_packet) == 33u &&
-              packet_first_stream_frame_offset(fragment_only_metadata_packet) == 44u &&
-              !packet_first_stream_frame_offset(SentPacketRecord{}).has_value());
+    connection_coverage_check(
+        ok, "packet_first_stream_frame_offset_covers_vector_fragment_and_empty",
+        packet_first_stream_frame_offset(vector_only_metadata_packet) == 33u &&
+            packet_first_stream_frame_offset(fragment_only_metadata_packet) == 44u &&
+            !packet_first_stream_frame_offset(SentPacketRecord{}).has_value());
     bool for_each_stream_frame_metadata_visits_vector_metadata = false;
     bool for_each_stream_frame_metadata_visits_first_metadata = false;
     const auto note_stream_frame_metadata_visit = [&](const StreamFrameSendMetadata &metadata) {
@@ -893,16 +932,18 @@ bool connection_helper_edge_cases_for_tests() {
                                                  /*wire_budget=*/1) == 0 &&
         max_stream_frame_payload_for_wire_budget(/*stream_id=*/0, /*offset=*/0,
                                                  /*wire_budget=*/32) > 0;
-    check("stream_frame_payload_budget_handles_edges", stream_frame_payload_budget_handles_edges);
-    check("application_stream_budget_handles_small_and_oversized_connection_ids",
-          application_stream_frame_budget(/*max_datagram_size=*/1199,
-                                          /*destination_connection_id_size=*/8) == 1172 &&
-              application_stream_frame_budget(/*max_datagram_size=*/1200,
-                                              /*destination_connection_id_size=*/1200) == 0 &&
-              application_stream_frame_budget(/*max_datagram_size=*/26,
-                                              /*destination_connection_id_size=*/8) == 0 &&
-              application_stream_frame_budget(/*max_datagram_size=*/1400,
-                                              /*destination_connection_id_size=*/8) == 1373);
+    connection_coverage_check(ok, "stream_frame_payload_budget_handles_edges",
+                              stream_frame_payload_budget_handles_edges);
+    connection_coverage_check(
+        ok, "application_stream_budget_handles_small_and_oversized_connection_ids",
+        application_stream_frame_budget(/*max_datagram_size=*/1199,
+                                        /*destination_connection_id_size=*/8) == 1172 &&
+            application_stream_frame_budget(/*max_datagram_size=*/1200,
+                                            /*destination_connection_id_size=*/1200) == 0 &&
+            application_stream_frame_budget(/*max_datagram_size=*/26,
+                                            /*destination_connection_id_size=*/8) == 0 &&
+            application_stream_frame_budget(/*max_datagram_size=*/1400,
+                                            /*destination_connection_id_size=*/8) == 1373);
 
     const std::array<Frame, 2> non_terminal_lengthless_stream_frame{
         Frame{StreamFrame{
@@ -918,11 +959,12 @@ bool connection_helper_edge_cases_for_tests() {
             .packet_number_length = 2,
             .frames = non_terminal_lengthless_stream_frame,
         });
-    check("one_rtt_fragment_size_rejects_non_terminal_lengthless_stream_frames",
-          !non_terminal_lengthless_stream_size.has_value() &&
-              non_terminal_lengthless_stream_size.error().code ==
-                  CodecErrorCode::packet_length_mismatch &&
-              non_terminal_lengthless_stream_size.error().offset == 0);
+    connection_coverage_check(ok,
+                              "one_rtt_fragment_size_rejects_non_terminal_lengthless_stream_frames",
+                              !non_terminal_lengthless_stream_size.has_value() &&
+                                  non_terminal_lengthless_stream_size.error().code ==
+                                      CodecErrorCode::packet_length_mismatch &&
+                                  non_terminal_lengthless_stream_size.error().offset == 0);
 
     const std::array<Frame, 1> invalid_padding_frame{
         Frame{PaddingFrame{.length = 0}},
@@ -933,10 +975,11 @@ bool connection_helper_edge_cases_for_tests() {
             .packet_number_length = 2,
             .frames = invalid_padding_frame,
         });
-    check("one_rtt_fragment_size_propagates_frame_size_errors",
-          !invalid_frame_size.has_value() &&
-              invalid_frame_size.error().code == CodecErrorCode::invalid_varint &&
-              invalid_frame_size.error().offset == 0);
+    connection_coverage_check(ok, "one_rtt_fragment_size_propagates_frame_size_errors",
+                              !invalid_frame_size.has_value() &&
+                                  invalid_frame_size.error().code ==
+                                      CodecErrorCode::invalid_varint &&
+                                  invalid_frame_size.error().offset == 0);
 
     const std::array<Frame, 0> no_frames{};
     const auto empty_fragment_packet_size =
@@ -945,9 +988,10 @@ bool connection_helper_edge_cases_for_tests() {
             .packet_number_length = 2,
             .frames = no_frames,
         });
-    check("one_rtt_fragment_size_rejects_empty_payloads",
-          !empty_fragment_packet_size.has_value() &&
-              empty_fragment_packet_size.error().code == CodecErrorCode::empty_packet_payload);
+    connection_coverage_check(ok, "one_rtt_fragment_size_rejects_empty_payloads",
+                              !empty_fragment_packet_size.has_value() &&
+                                  empty_fragment_packet_size.error().code ==
+                                      CodecErrorCode::empty_packet_payload);
 
     const auto fragment_storage =
         std::make_shared<std::vector<std::byte>>(bytes_from_ints({0xaa, 0xbb, 0xcc}));
@@ -974,12 +1018,13 @@ bool connection_helper_edge_cases_for_tests() {
             .frames = no_frames,
             .stream_fragments = fragments,
         });
-    check("one_rtt_fragment_helpers_count_stream_fragment_bytes",
-          stream_fragment_bytes(fragments) == 3 && stream_fragment_wire_bytes(fragments) > 3 &&
-              fragment_packet_size.has_value() &&
-              fragment_packet_size.value() > retry_source_connection_id.size() +
-                                                 kDefaultInitialPacketNumberLength +
-                                                 kOneRttPacketProtectionTagLength);
+    connection_coverage_check(
+        ok, "one_rtt_fragment_helpers_count_stream_fragment_bytes",
+        stream_fragment_bytes(fragments) == 3 && stream_fragment_wire_bytes(fragments) > 3 &&
+            fragment_packet_size.has_value() &&
+            fragment_packet_size.value() > retry_source_connection_id.size() +
+                                               kDefaultInitialPacketNumberLength +
+                                               kOneRttPacketProtectionTagLength);
 
     const std::array<StreamFrameSendFragment, 1> overflowing_fragments{
         StreamFrameSendFragment{
@@ -995,10 +1040,11 @@ bool connection_helper_edge_cases_for_tests() {
             .frames = no_frames,
             .stream_fragments = overflowing_fragments,
         });
-    check("one_rtt_fragment_size_rejects_overflowing_fragment_offsets",
-          !overflowing_fragment_packet_size.has_value() &&
-              overflowing_fragment_packet_size.error().code == CodecErrorCode::invalid_varint &&
-              overflowing_fragment_packet_size.error().offset == 0);
+    connection_coverage_check(ok, "one_rtt_fragment_size_rejects_overflowing_fragment_offsets",
+                              !overflowing_fragment_packet_size.has_value() &&
+                                  overflowing_fragment_packet_size.error().code ==
+                                      CodecErrorCode::invalid_varint &&
+                                  overflowing_fragment_packet_size.error().offset == 0);
 
     bool trace_unset_disabled = false;
     bool trace_empty_disabled = false;
@@ -1058,68 +1104,74 @@ bool connection_helper_edge_cases_for_tests() {
         }
     }
 
-    check("empty_long_header_rejected",
-          !peek_discardable_long_header_packet_length({}).has_value());
-    check("short_header_rejected",
-          !peek_discardable_long_header_packet_length(bytes_from_ints({0x40})).has_value());
-    check("truncated_version_rejected",
-          !peek_discardable_long_header_packet_length(bytes_from_ints({0xc0, 0x00, 0x00, 0x00}))
-               .has_value());
-    check("unsupported_version_rejected", !peek_discardable_long_header_packet_length(
-                                               bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x00}))
-                                               .has_value());
-    check(
-        "missing_destination_connection_id_length_rejected",
+    connection_coverage_check(ok, "empty_long_header_rejected",
+                              !peek_discardable_long_header_packet_length({}).has_value());
+    connection_coverage_check(
+        ok, "short_header_rejected",
+        !peek_discardable_long_header_packet_length(bytes_from_ints({0x40})).has_value());
+    connection_coverage_check(
+        ok, "truncated_version_rejected",
+        !peek_discardable_long_header_packet_length(bytes_from_ints({0xc0, 0x00, 0x00, 0x00}))
+             .has_value());
+    connection_coverage_check(
+        ok, "unsupported_version_rejected",
+        !peek_discardable_long_header_packet_length(bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x00}))
+             .has_value());
+    connection_coverage_check(
+        ok, "missing_destination_connection_id_length_rejected",
         !peek_discardable_long_header_packet_length(bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01}))
              .has_value());
-    check("oversized_destination_connection_id_length_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x15}))
-               .has_value());
-    check("truncated_destination_connection_id_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01}))
-               .has_value());
-    check("missing_source_connection_id_length_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00}))
-               .has_value());
-    check("oversized_source_connection_id_length_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x15}))
-               .has_value());
-    check("truncated_source_connection_id_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01}))
-               .has_value());
-    check("missing_initial_token_length_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
-               .has_value());
-    check("oversized_initial_token_length_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01}))
-               .has_value());
-    check("unsupported_retry_packet_type_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xf0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
-               .has_value());
-    check("missing_payload_length_after_initial_token_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00}))
-               .has_value());
-    check("missing_payload_length_for_handshake_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xe0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
-               .has_value());
-    check("missing_payload_length_for_zero_rtt_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xd0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
-               .has_value());
-    check("oversized_payload_length_rejected",
-          !peek_discardable_long_header_packet_length(
-               bytes_from_ints({0xe0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01}))
-               .has_value());
+    connection_coverage_check(ok, "oversized_destination_connection_id_length_rejected",
+                              !peek_discardable_long_header_packet_length(
+                                   bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x15}))
+                                   .has_value());
+    connection_coverage_check(ok, "truncated_destination_connection_id_rejected",
+                              !peek_discardable_long_header_packet_length(
+                                   bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01}))
+                                   .has_value());
+    connection_coverage_check(ok, "missing_source_connection_id_length_rejected",
+                              !peek_discardable_long_header_packet_length(
+                                   bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00}))
+                                   .has_value());
+    connection_coverage_check(ok, "oversized_source_connection_id_length_rejected",
+                              !peek_discardable_long_header_packet_length(
+                                   bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x15}))
+                                   .has_value());
+    connection_coverage_check(ok, "truncated_source_connection_id_rejected",
+                              !peek_discardable_long_header_packet_length(
+                                   bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01}))
+                                   .has_value());
+    connection_coverage_check(ok, "missing_initial_token_length_rejected",
+                              !peek_discardable_long_header_packet_length(
+                                   bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
+                                   .has_value());
+    connection_coverage_check(
+        ok, "oversized_initial_token_length_rejected",
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01}))
+             .has_value());
+    connection_coverage_check(ok, "unsupported_retry_packet_type_rejected",
+                              !peek_discardable_long_header_packet_length(
+                                   bytes_from_ints({0xf0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
+                                   .has_value());
+    connection_coverage_check(
+        ok, "missing_payload_length_after_initial_token_rejected",
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00}))
+             .has_value());
+    connection_coverage_check(ok, "missing_payload_length_for_handshake_rejected",
+                              !peek_discardable_long_header_packet_length(
+                                   bytes_from_ints({0xe0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
+                                   .has_value());
+    connection_coverage_check(ok, "missing_payload_length_for_zero_rtt_rejected",
+                              !peek_discardable_long_header_packet_length(
+                                   bytes_from_ints({0xd0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}))
+                                   .has_value());
+    connection_coverage_check(
+        ok, "oversized_payload_length_rejected",
+        !peek_discardable_long_header_packet_length(
+             bytes_from_ints({0xe0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01}))
+             .has_value());
     bool discardable_deferred_replay_packet_does_not_block_current_packet = false;
     {
         auto connection = make_connected_client_connection_for_connection_coverage();

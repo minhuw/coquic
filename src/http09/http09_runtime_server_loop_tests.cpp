@@ -8,6 +8,11 @@ namespace coquic::http09 {
 
 namespace test {
 
+bool server_loop_coverage_check(bool &ok, std::string_view, bool condition) {
+    ok &= condition;
+    return condition;
+}
+
 void reset_runtime_logging_state_for_tests() {
     runtime_logging_ready_flag() = false;
 }
@@ -22,10 +27,6 @@ bool runtime_openssl_available_for_tests() {
 
 bool runtime_server_loop_and_trace_coverage_for_tests() {
     bool ok = true;
-    const auto check = [&](std::string_view, bool condition) {
-        ok &= condition;
-        return condition;
-    };
     const auto make_loopback_peer = [](std::uint16_t port) {
         sockaddr_storage loopback_peer{};
         auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&loopback_peer);
@@ -75,9 +76,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         const auto retry_result = maybe_send_retry_for_supported_initial(
             /*retry_enabled=*/true, /*socket_fd=*/17, supported_initial, peer, sizeof(sockaddr_in),
             retry_tokens, next_connection_index);
-        check("retry helper traces and sends tokenless initials",
-              retry_result.has_value() & retry_result.value_or(false) &
-                  g_recorded_sendto_for_tests.calls == 1 & next_connection_index == 10);
+        server_loop_coverage_check(ok, "retry helper traces and sends tokenless initials",
+                                   retry_result.has_value() & retry_result.value_or(false) &
+                                       g_recorded_sendto_for_tests.calls == 1 &
+                                       next_connection_index == 10);
     }
 
     {
@@ -86,21 +88,21 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         ParsedServerDatagram invalid_retry = supported_initial;
         invalid_retry.token = make_runtime_retry_token(0x0102030405060708ull);
         invalid_retry.destination_connection_id = make_runtime_connection_id(std::byte{0x72}, 4);
-        check("invalid retry tokens hit the traced rejection path",
-              !populate_retry_context_if_required(/*retry_enabled=*/true, invalid_retry, peer,
-                                                  sizeof(sockaddr_in), retry_tokens,
-                                                  retry_context) &
-                  !retry_context.has_value());
+        server_loop_coverage_check(
+            ok, "invalid retry tokens hit the traced rejection path",
+            !populate_retry_context_if_required(/*retry_enabled=*/true, invalid_retry, peer,
+                                                sizeof(sockaddr_in), retry_tokens, retry_context) &
+                !retry_context.has_value());
     }
 
     {
         RetryTokenStore retry_tokens;
         ParsedServerDatagram invalid_retry_version = supported_initial;
         invalid_retry_version.version = kVersionNegotiationVersion;
-        check("retry send covers retry integrity-tag failures",
-              !send_retry_for_initial(/*fd=*/18, invalid_retry_version, peer, sizeof(sockaddr_in),
-                                      retry_tokens,
-                                      /*connection_index=*/1));
+        server_loop_coverage_check(ok, "retry send covers retry integrity-tag failures",
+                                   !send_retry_for_initial(/*fd=*/18, invalid_retry_version, peer,
+                                                           sizeof(sockaddr_in), retry_tokens,
+                                                           /*connection_index=*/1));
     }
 
     {
@@ -146,7 +148,8 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .truncated_packet_number = 1,
             .frames = {PaddingFrame{}},
         });
-        check("trace coverage can serialize a public server Initial", server_initial.has_value());
+        server_loop_coverage_check(ok, "trace coverage can serialize a public server Initial",
+                                   server_initial.has_value());
         auto initial_bytes = server_initial.value();
         initial_bytes.resize(1200, std::byte{0x00});
         QuicCore accepting_core(make_http09_server_core_config(Http09RuntimeConfig{
@@ -162,30 +165,31 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
     }
 
     {
-        check("connection command translation covers remaining supported commands",
-              to_connection_command_input(QuicCoreSendStreamData{
-                                              .stream_id = 3,
-                                              .bytes = bytes_from_string_for_runtime_tests("body"),
-                                              .fin = true,
-                                          })
-                      .has_value() &
-                  to_connection_command_input(QuicCoreResetStream{
-                                                  .stream_id = 4,
-                                                  .application_error_code = 9,
-                                              })
-                      .has_value() &
-                  to_connection_command_input(QuicCoreStopSending{
-                                                  .stream_id = 5,
-                                                  .application_error_code = 10,
-                                              })
-                      .has_value() &
-                  to_connection_command_input(QuicCoreRequestKeyUpdate{}).has_value() &
-                  !to_connection_command_input(QuicCoreSendSharedStreamData{
-                                                   .stream_id = 6,
-                                                   .bytes = quic::SharedBytes{std::byte{0x01}},
-                                                   .fin = true,
-                                               })
-                       .has_value());
+        server_loop_coverage_check(
+            ok, "connection command translation covers remaining supported commands",
+            to_connection_command_input(QuicCoreSendStreamData{
+                                            .stream_id = 3,
+                                            .bytes = bytes_from_string_for_runtime_tests("body"),
+                                            .fin = true,
+                                        })
+                    .has_value() &
+                to_connection_command_input(QuicCoreResetStream{
+                                                .stream_id = 4,
+                                                .application_error_code = 9,
+                                            })
+                    .has_value() &
+                to_connection_command_input(QuicCoreStopSending{
+                                                .stream_id = 5,
+                                                .application_error_code = 10,
+                                            })
+                    .has_value() &
+                to_connection_command_input(QuicCoreRequestKeyUpdate{}).has_value() &
+                !to_connection_command_input(QuicCoreSendSharedStreamData{
+                                                 .stream_id = 6,
+                                                 .bytes = quic::SharedBytes{std::byte{0x01}},
+                                                 .fin = true,
+                                             })
+                     .has_value());
     }
 
     {
@@ -259,15 +263,16 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .change = QuicCoreStateChange::handshake_ready,
         });
         const auto transport_handles = result_connection_handles(transport_error_result);
-        check(
-            "result connection helpers cover the remaining effect variants",
+        server_loop_coverage_check(
+            ok, "result connection helpers cover the remaining effect variants",
             contains(1) & contains(2) & contains(3) & contains(4) & contains(5) & contains(6) &
                 contains(7) & contains(8) & contains(9) & contains(10) & contains(12) &
                 sliced.effects.size() == 1 &
                 std::holds_alternative<QuicCorePeerStopSending>(sliced.effects.at(0)) &
                 !result_has_connection_lifecycle(result, 4, QuicCoreConnectionLifecycle::accepted));
-        check("result connection helpers ignore transport-wide local errors without connections",
-              transport_handles == std::vector<QuicConnectionHandle>{11});
+        server_loop_coverage_check(
+            ok, "result connection helpers ignore transport-wide local errors without connections",
+            transport_handles == std::vector<QuicConnectionHandle>{11});
     }
 
     {
@@ -281,17 +286,19 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .connection = 13,
             .change = QuicCoreStateChange::handshake_ready,
         });
-        check("handshake-ready observation treats repeated ready events as already observed",
-              result_observes_new_handshake_ready(state, duplicate_ready) &
-                  !result_observes_new_handshake_ready(state, duplicate_ready));
+        server_loop_coverage_check(
+            ok, "handshake-ready observation treats repeated ready events as already observed",
+            result_observes_new_handshake_ready(state, duplicate_ready) &
+                !result_observes_new_handshake_ready(state, duplicate_ready));
 
         std::optional<QuicCoreTimePoint> defer_output_until;
         const auto defer_base_time = now();
         note_server_early_stream_data_deferral(defer_output_until, defer_base_time);
-        check("server early-data deferral records a grace deadline",
-              defer_output_until ==
-                  std::optional<QuicCoreTimePoint>{
-                      defer_base_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs)});
+        server_loop_coverage_check(
+            ok, "server early-data deferral records a grace deadline",
+            defer_output_until ==
+                std::optional<QuicCoreTimePoint>{
+                    defer_base_time + std::chrono::milliseconds(kServerZeroRttDrainGraceMs)});
     }
 
     {
@@ -308,7 +315,8 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         });
         ensure_server_connection_endpoints_for_accepts(endpoints, accept_result,
                                                        std::filesystem::path("."));
-        check("accept handling keeps pre-existing endpoint entries stable", endpoints.size() == 1);
+        server_loop_coverage_check(ok, "accept handling keeps pre-existing endpoint entries stable",
+                                   endpoints.size() == 1);
     }
 
     {
@@ -321,33 +329,36 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .code = QuicCoreLocalErrorCode::unsupported_operation,
             .stream_id = std::nullopt,
         };
-        check("server endpoint processing rejects transport-wide local errors",
-              !process_server_endpoint_core_result(
-                  core, transport_state, endpoints, std::filesystem::path("."),
-                  transport_error_result,
-                  /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)));
+        server_loop_coverage_check(
+            ok, "server endpoint processing rejects transport-wide local errors",
+            !process_server_endpoint_core_result(core, transport_state, endpoints,
+                                                 std::filesystem::path("."), transport_error_result,
+                                                 /*fallback_socket_fd=*/77, &peer,
+                                                 sizeof(sockaddr_in)));
 
         QuicCoreResult send_failure_result;
         send_failure_result.effects.emplace_back(QuicCoreSendDatagram{
             .bytes = {std::byte{0x01}},
         });
-        check("server endpoint processing rejects missing fallback routes",
-              !process_server_endpoint_core_result(core, transport_state, endpoints,
-                                                   std::filesystem::path("."), send_failure_result,
-                                                   /*fallback_socket_fd=*/-1,
-                                                   /*fallback_peer=*/nullptr,
-                                                   /*fallback_peer_len=*/0));
+        server_loop_coverage_check(
+            ok, "server endpoint processing rejects missing fallback routes",
+            !process_server_endpoint_core_result(core, transport_state, endpoints,
+                                                 std::filesystem::path("."), send_failure_result,
+                                                 /*fallback_socket_fd=*/-1,
+                                                 /*fallback_peer=*/nullptr,
+                                                 /*fallback_peer_len=*/0));
 
         QuicCoreResult missing_endpoint_result;
         missing_endpoint_result.effects.emplace_back(QuicCoreStateEvent{
             .connection = 19,
             .change = QuicCoreStateChange::handshake_ready,
         });
-        check("server endpoint processing tolerates missing connection endpoints",
-              process_server_endpoint_core_result(
-                  core, transport_state, endpoints, std::filesystem::path("."),
-                  missing_endpoint_result,
-                  /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)));
+        server_loop_coverage_check(
+            ok, "server endpoint processing tolerates missing connection endpoints",
+            process_server_endpoint_core_result(core, transport_state, endpoints,
+                                                std::filesystem::path("."), missing_endpoint_result,
+                                                /*fallback_socket_fd=*/77, &peer,
+                                                sizeof(sockaddr_in)));
     }
 
     {
@@ -435,17 +446,19 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
 
         const auto top_level_failed =
             run_server_loop_script({}, /*include_preferred_socket=*/false, {true});
-        check("server loop exits immediately when the driver has already failed",
-              top_level_failed.exit_code == 1 & top_level_failed.receive_calls == 0 &
-                  top_level_failed.wait_calls == 0);
+        server_loop_coverage_check(
+            ok, "server loop exits immediately when the driver has already failed",
+            top_level_failed.exit_code == 1 & top_level_failed.receive_calls == 0 &
+                top_level_failed.wait_calls == 0);
 
         ScriptedServerLoopCaseForTests inner_timer_failure_case;
         inner_timer_failure_case.processed_timers_results = {false};
         const auto inner_timer_failed = run_server_loop_script(
             inner_timer_failure_case, /*include_preferred_socket=*/false, {false, true});
-        check("server loop exits when timer processing marks the driver failed",
-              inner_timer_failed.exit_code == 1 & inner_timer_failed.process_expired_calls == 1 &
-                  inner_timer_failed.receive_calls == 0);
+        server_loop_coverage_check(
+            ok, "server loop exits when timer processing marks the driver failed",
+            inner_timer_failed.exit_code == 1 & inner_timer_failed.process_expired_calls == 1 &
+                inner_timer_failed.receive_calls == 0);
 
         ScriptedServerLoopCaseForTests preferred_socket_case;
         preferred_socket_case.receive_results = {
@@ -457,10 +470,11 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         preferred_socket_case.processed_timers_results = {false, false};
         const auto preferred_socket_result = run_server_loop_script(
             preferred_socket_case, /*include_preferred_socket=*/true, {false});
-        check("server loop covers preferred-socket short-circuiting after a ready datagram",
-              preferred_socket_result.exit_code == 1 &
-                  preferred_socket_result.process_datagram_calls == 1 &
-                  preferred_socket_result.receive_calls == 2);
+        server_loop_coverage_check(
+            ok, "server loop covers preferred-socket short-circuiting after a ready datagram",
+            preferred_socket_result.exit_code == 1 &
+                preferred_socket_result.process_datagram_calls == 1 &
+                preferred_socket_result.receive_calls == 2);
 
         ScriptedServerLoopCaseForTests inner_pump_failure_case;
         inner_pump_failure_case.receive_results = {
@@ -471,9 +485,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         inner_pump_failure_case.pump_made_progress = {false};
         const auto inner_pump_failed = run_server_loop_script(
             inner_pump_failure_case, /*include_preferred_socket=*/false, {false, false, true});
-        check("server loop exits when pumping pending work marks the driver failed",
-              inner_pump_failed.exit_code == 1 & inner_pump_failed.pump_calls == 1 &
-                  inner_pump_failed.wait_calls == 0);
+        server_loop_coverage_check(
+            ok, "server loop exits when pumping pending work marks the driver failed",
+            inner_pump_failed.exit_code == 1 & inner_pump_failed.pump_calls == 1 &
+                inner_pump_failed.wait_calls == 0);
 
         ScriptedServerLoopCaseForTests outer_failure_case;
         outer_failure_case.receive_results = {
@@ -484,15 +499,17 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         outer_failure_case.pump_made_progress = {false, false};
         const auto outer_timer_failed = run_server_loop_script(
             outer_failure_case, /*include_preferred_socket=*/false, {false, false, false, true});
-        check("server loop exits when the outer timer pass marks the driver failed",
-              outer_timer_failed.exit_code == 1 & outer_timer_failed.process_expired_calls == 2 &
-                  outer_timer_failed.pump_calls == 1);
+        server_loop_coverage_check(
+            ok, "server loop exits when the outer timer pass marks the driver failed",
+            outer_timer_failed.exit_code == 1 & outer_timer_failed.process_expired_calls == 2 &
+                outer_timer_failed.pump_calls == 1);
         const auto outer_pump_failed =
             run_server_loop_script(outer_failure_case, /*include_preferred_socket=*/false,
                                    {false, false, false, false, true});
-        check("server loop exits when the outer pump marks the driver failed",
-              outer_pump_failed.exit_code == 1 & outer_pump_failed.process_expired_calls == 2 &
-                  outer_pump_failed.pump_calls == 2);
+        server_loop_coverage_check(
+            ok, "server loop exits when the outer pump marks the driver failed",
+            outer_pump_failed.exit_code == 1 & outer_pump_failed.process_expired_calls == 2 &
+                outer_pump_failed.pump_calls == 2);
 
         ScriptedServerLoopCaseForTests idle_timeout_case;
         idle_timeout_case.receive_results = {
@@ -507,9 +524,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         idle_timeout_case.pump_made_progress = {false};
         const auto idle_timeout_result =
             run_server_loop_script(idle_timeout_case, /*include_preferred_socket=*/false, {false});
-        check("server loop continues after idle timeout steps",
-              idle_timeout_result.exit_code == 1 & idle_timeout_result.wait_calls == 1 &
-                  idle_timeout_result.receive_calls == 2);
+        server_loop_coverage_check(ok, "server loop continues after idle timeout steps",
+                                   idle_timeout_result.exit_code == 1 &
+                                       idle_timeout_result.wait_calls == 1 &
+                                       idle_timeout_result.receive_calls == 2);
 
         ScriptedServerLoopCaseForTests wait_datagram_failure_case;
         wait_datagram_failure_case.receive_results = {
@@ -526,9 +544,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         wait_datagram_failure_case.process_datagram_result = false;
         const auto wait_datagram_failure = run_server_loop_script(
             wait_datagram_failure_case, /*include_preferred_socket=*/false, {false});
-        check("server loop propagates failures from datagrams returned by blocking waits",
-              wait_datagram_failure.exit_code == 1 & wait_datagram_failure.wait_calls == 1 &
-                  wait_datagram_failure.process_datagram_calls == 1);
+        server_loop_coverage_check(
+            ok, "server loop propagates failures from datagrams returned by blocking waits",
+            wait_datagram_failure.exit_code == 1 & wait_datagram_failure.wait_calls == 1 &
+                wait_datagram_failure.process_datagram_calls == 1);
     }
 
     {
@@ -614,8 +633,9 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .next_wakeup_results = {base_time},
             .wait_results = {std::nullopt},
         });
-        check("backend loop covers top-due wait failures and null event tracing",
-              wait_failure.exit_code == 1 & wait_failure.wait_calls == 1);
+        server_loop_coverage_check(
+            ok, "backend loop covers top-due wait failures and null event tracing",
+            wait_failure.exit_code == 1 & wait_failure.wait_calls == 1);
 
         const auto top_due_missing_datagram = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time},
@@ -628,10 +648,11 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                     },
                 },
         });
-        check("backend loop covers top-due datagrams that arrive without payloads",
-              top_due_missing_datagram.exit_code == 1 &
-                  top_due_missing_datagram.process_datagram_calls == 0 &
-                  top_due_missing_datagram.wait_calls == 1);
+        server_loop_coverage_check(
+            ok, "backend loop covers top-due datagrams that arrive without payloads",
+            top_due_missing_datagram.exit_code == 1 &
+                top_due_missing_datagram.process_datagram_calls == 0 &
+                top_due_missing_datagram.wait_calls == 1);
 
         const auto top_due_successful_datagram = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -653,10 +674,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {false},
             .pump_made_progress = {false},
         });
-        check("backend loop covers successful top-due datagrams",
-              top_due_successful_datagram.exit_code == 1 &
-                  top_due_successful_datagram.process_datagram_calls == 1 &
-                  top_due_successful_datagram.wait_calls == 2);
+        server_loop_coverage_check(ok, "backend loop covers successful top-due datagrams",
+                                   top_due_successful_datagram.exit_code == 1 &
+                                       top_due_successful_datagram.process_datagram_calls == 1 &
+                                       top_due_successful_datagram.wait_calls == 2);
 
         const auto top_due_missing_path_mtu = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time},
@@ -669,10 +690,11 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                     },
                 },
         });
-        check("backend loop covers top-due path MTU events without payloads",
-              top_due_missing_path_mtu.exit_code == 1 &
-                  top_due_missing_path_mtu.process_path_mtu_calls == 0 &
-                  top_due_missing_path_mtu.wait_calls == 1);
+        server_loop_coverage_check(ok,
+                                   "backend loop covers top-due path MTU events without payloads",
+                                   top_due_missing_path_mtu.exit_code == 1 &
+                                       top_due_missing_path_mtu.process_path_mtu_calls == 0 &
+                                       top_due_missing_path_mtu.wait_calls == 1);
 
         const auto top_due_path_mtu_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time},
@@ -691,10 +713,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                 },
             .process_path_mtu_result = false,
         });
-        check("backend loop propagates top-due path MTU update failures",
-              top_due_path_mtu_failure.exit_code == 1 &
-                  top_due_path_mtu_failure.process_path_mtu_calls == 1 &
-                  top_due_path_mtu_failure.wait_calls == 1);
+        server_loop_coverage_check(ok, "backend loop propagates top-due path MTU update failures",
+                                   top_due_path_mtu_failure.exit_code == 1 &
+                                       top_due_path_mtu_failure.process_path_mtu_calls == 1 &
+                                       top_due_path_mtu_failure.wait_calls == 1);
 
         const auto top_due_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -708,9 +730,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                 },
             .process_wait_timer_results = {false},
         });
-        check("backend loop covers due timer events that fail while tracing",
-              top_due_timer_failure.exit_code == 1 &
-                  top_due_timer_failure.process_expired_calls == 1);
+        server_loop_coverage_check(ok,
+                                   "backend loop covers due timer events that fail while tracing",
+                                   top_due_timer_failure.exit_code == 1 &
+                                       top_due_timer_failure.process_expired_calls == 1);
 
         const auto top_due_timer_success = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -728,10 +751,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pump_made_progress = {false},
             .process_wait_timer_results = {true},
         });
-        check("backend loop covers successful top-due timer handling",
-              top_due_timer_success.exit_code == 1 &
-                  top_due_timer_success.process_expired_calls == 1 &
-                  top_due_timer_success.wait_calls == 2);
+        server_loop_coverage_check(ok, "backend loop covers successful top-due timer handling",
+                                   top_due_timer_success.exit_code == 1 &
+                                       top_due_timer_success.process_expired_calls == 1 &
+                                       top_due_timer_success.wait_calls == 2);
 
         const auto buffered_shutdown = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -747,9 +770,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {false},
             .pump_made_progress = {false},
         });
-        check("backend loop buffers top-due shutdown events before consuming them",
-              buffered_shutdown.exit_code == 1 & buffered_shutdown.wait_calls == 1 &
-                  buffered_shutdown.pump_calls == 1);
+        server_loop_coverage_check(
+            ok, "backend loop buffers top-due shutdown events before consuming them",
+            buffered_shutdown.exit_code == 1 & buffered_shutdown.wait_calls == 1 &
+                buffered_shutdown.pump_calls == 1);
 
         const auto buffered_idle_timeout = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time, base_time},
@@ -766,9 +790,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {false},
             .pump_made_progress = {false},
         });
-        check("backend loop buffers top-due idle timeouts before consuming them",
-              buffered_idle_timeout.exit_code == 1 & buffered_idle_timeout.wait_calls == 2 &
-                  buffered_idle_timeout.pump_calls == 2);
+        server_loop_coverage_check(
+            ok, "backend loop buffers top-due idle timeouts before consuming them",
+            buffered_idle_timeout.exit_code == 1 & buffered_idle_timeout.wait_calls == 2 &
+                buffered_idle_timeout.pump_calls == 2);
 
         const auto pump_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -777,8 +802,8 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {false},
             .pump_made_progress = {false},
         });
-        check("backend loop exits after pending-work pump failures",
-              pump_failure.exit_code == 1 & pump_failure.pump_calls == 1);
+        server_loop_coverage_check(ok, "backend loop exits after pending-work pump failures",
+                                   pump_failure.exit_code == 1 & pump_failure.pump_calls == 1);
 
         const auto ready_probe_wait_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -792,9 +817,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {true},
             .pump_made_progress = {true},
         });
-        check("backend loop covers ready-probe wait failures",
-              ready_probe_wait_failure.exit_code == 1 & ready_probe_wait_failure.wait_calls == 1 &
-                  ready_probe_wait_failure.pump_calls == 1);
+        server_loop_coverage_check(ok, "backend loop covers ready-probe wait failures",
+                                   ready_probe_wait_failure.exit_code == 1 &
+                                       ready_probe_wait_failure.wait_calls == 1 &
+                                       ready_probe_wait_failure.pump_calls == 1);
 
         const auto ready_probe_missing_datagram = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -814,10 +840,11 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {true},
             .pump_made_progress = {true},
         });
-        check("backend loop covers ready-probe datagrams that arrive without payloads",
-              ready_probe_missing_datagram.exit_code == 1 &
-                  ready_probe_missing_datagram.process_datagram_calls == 0 &
-                  ready_probe_missing_datagram.wait_calls == 1);
+        server_loop_coverage_check(
+            ok, "backend loop covers ready-probe datagrams that arrive without payloads",
+            ready_probe_missing_datagram.exit_code == 1 &
+                ready_probe_missing_datagram.process_datagram_calls == 0 &
+                ready_probe_missing_datagram.wait_calls == 1);
 
         const auto ready_probe_missing_path_mtu = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -837,10 +864,11 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {true},
             .pump_made_progress = {true},
         });
-        check("backend loop covers ready-probe path MTU events without payloads",
-              ready_probe_missing_path_mtu.exit_code == 1 &
-                  ready_probe_missing_path_mtu.process_path_mtu_calls == 0 &
-                  ready_probe_missing_path_mtu.wait_calls == 1);
+        server_loop_coverage_check(
+            ok, "backend loop covers ready-probe path MTU events without payloads",
+            ready_probe_missing_path_mtu.exit_code == 1 &
+                ready_probe_missing_path_mtu.process_path_mtu_calls == 0 &
+                ready_probe_missing_path_mtu.wait_calls == 1);
 
         const auto ready_probe_path_mtu_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -866,10 +894,11 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pump_made_progress = {true},
             .process_path_mtu_result = false,
         });
-        check("backend loop propagates ready-probe path MTU update failures",
-              ready_probe_path_mtu_failure.exit_code == 1 &
-                  ready_probe_path_mtu_failure.process_path_mtu_calls == 1 &
-                  ready_probe_path_mtu_failure.wait_calls == 1);
+        server_loop_coverage_check(ok,
+                                   "backend loop propagates ready-probe path MTU update failures",
+                                   ready_probe_path_mtu_failure.exit_code == 1 &
+                                       ready_probe_path_mtu_failure.process_path_mtu_calls == 1 &
+                                       ready_probe_path_mtu_failure.wait_calls == 1);
 
         const auto ready_probe_idle_timeout = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time, base_time},
@@ -891,9 +920,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {true, false},
             .pump_made_progress = {true, false},
         });
-        check("backend loop covers ready-probe idle timeouts",
-              ready_probe_idle_timeout.exit_code == 1 & ready_probe_idle_timeout.wait_calls == 2 &
-                  ready_probe_idle_timeout.pump_calls == 2);
+        server_loop_coverage_check(ok, "backend loop covers ready-probe idle timeouts",
+                                   ready_probe_idle_timeout.exit_code == 1 &
+                                       ready_probe_idle_timeout.wait_calls == 2 &
+                                       ready_probe_idle_timeout.pump_calls == 2);
 
         const auto ready_probe_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time, base_time},
@@ -910,10 +940,11 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pump_made_progress = {true},
             .process_wait_timer_results = {false},
         });
-        check("backend loop covers ready-probe timer failures when wakeups are already due",
-              ready_probe_timer_failure.exit_code == 1 &
-                  ready_probe_timer_failure.process_expired_calls == 1 &
-                  ready_probe_timer_failure.wait_calls == 1);
+        server_loop_coverage_check(
+            ok, "backend loop covers ready-probe timer failures when wakeups are already due",
+            ready_probe_timer_failure.exit_code == 1 &
+                ready_probe_timer_failure.process_expired_calls == 1 &
+                ready_probe_timer_failure.wait_calls == 1);
 
         const auto ready_probe_timer_not_due = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time, base_time},
@@ -935,11 +966,13 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {true, false},
             .pump_made_progress = {true, false},
         });
-        check("backend loop ignores ready-probe timer events when wakeups are still in the future",
-              ready_probe_timer_not_due.exit_code == 1 &
-                  ready_probe_timer_not_due.process_expired_calls == 0 &
-                  ready_probe_timer_not_due.wait_calls == 2 &
-                  ready_probe_timer_not_due.pump_calls == 2);
+        server_loop_coverage_check(
+            ok,
+            "backend loop ignores ready-probe timer events when wakeups are still in the future",
+            ready_probe_timer_not_due.exit_code == 1 &
+                ready_probe_timer_not_due.process_expired_calls == 0 &
+                ready_probe_timer_not_due.wait_calls == 2 &
+                ready_probe_timer_not_due.pump_calls == 2);
 
         const auto ready_probe_shutdown = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time},
@@ -959,8 +992,9 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {true},
             .pump_made_progress = {true},
         });
-        check("backend loop covers ready-probe shutdown handling",
-              ready_probe_shutdown.exit_code == 1 & ready_probe_shutdown.wait_calls == 1);
+        server_loop_coverage_check(ok, "backend loop covers ready-probe shutdown handling",
+                                   ready_probe_shutdown.exit_code == 1 &
+                                       ready_probe_shutdown.wait_calls == 1);
 
         const auto main_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time, base_time},
@@ -977,9 +1011,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pump_made_progress = {false},
             .process_wait_timer_results = {false},
         });
-        check("backend loop covers main-wait timer failures",
-              main_timer_failure.exit_code == 1 & main_timer_failure.process_expired_calls == 1 &
-                  main_timer_failure.wait_calls == 1);
+        server_loop_coverage_check(ok, "backend loop covers main-wait timer failures",
+                                   main_timer_failure.exit_code == 1 &
+                                       main_timer_failure.process_expired_calls == 1 &
+                                       main_timer_failure.wait_calls == 1);
 
         const auto main_datagram_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time, base_time},
@@ -1001,10 +1036,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pump_made_progress = {false},
             .process_datagram_result = false,
         });
-        check("backend loop covers main-wait datagram failures",
-              main_datagram_failure.exit_code == 1 &
-                  main_datagram_failure.process_datagram_calls == 1 &
-                  main_datagram_failure.wait_calls == 1);
+        server_loop_coverage_check(ok, "backend loop covers main-wait datagram failures",
+                                   main_datagram_failure.exit_code == 1 &
+                                       main_datagram_failure.process_datagram_calls == 1 &
+                                       main_datagram_failure.wait_calls == 1);
 
         const auto main_missing_path_mtu = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time, base_time},
@@ -1020,10 +1055,11 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pending_work_after_pump = {false},
             .pump_made_progress = {false},
         });
-        check("backend loop covers main-wait path MTU events without payloads",
-              main_missing_path_mtu.exit_code == 1 &
-                  main_missing_path_mtu.process_path_mtu_calls == 0 &
-                  main_missing_path_mtu.wait_calls == 1);
+        server_loop_coverage_check(ok,
+                                   "backend loop covers main-wait path MTU events without payloads",
+                                   main_missing_path_mtu.exit_code == 1 &
+                                       main_missing_path_mtu.process_path_mtu_calls == 0 &
+                                       main_missing_path_mtu.wait_calls == 1);
 
         const auto main_path_mtu_failure = run_backend_loop_script(BackendLoopScriptForTests{
             .current_times = {base_time, base_time, base_time},
@@ -1045,19 +1081,19 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .pump_made_progress = {false},
             .process_path_mtu_result = false,
         });
-        check("backend loop propagates main-wait path MTU update failures",
-              main_path_mtu_failure.exit_code == 1 &
-                  main_path_mtu_failure.process_path_mtu_calls == 1 &
-                  main_path_mtu_failure.wait_calls == 1);
+        server_loop_coverage_check(ok, "backend loop propagates main-wait path MTU update failures",
+                                   main_path_mtu_failure.exit_code == 1 &
+                                       main_path_mtu_failure.process_path_mtu_calls == 1 &
+                                       main_path_mtu_failure.wait_calls == 1);
 
         const auto default_no_pending_work = [] { return false; };
         const auto default_accept_timer = [](QuicCoreTimePoint) { return true; };
         const auto default_accept_datagram = [](const QuicIoRxDatagram &, QuicCoreTimePoint) {
             return true;
         };
-        check("backend loop shared default callbacks remain callable",
-              !default_no_pending_work() & default_accept_timer(base_time) &
-                  default_accept_datagram(QuicIoRxDatagram{}, base_time));
+        server_loop_coverage_check(ok, "backend loop shared default callbacks remain callable",
+                                   !default_no_pending_work() & default_accept_timer(base_time) &
+                                       default_accept_datagram(QuicIoRxDatagram{}, base_time));
 
         {
             std::size_t wait_calls = 0;
@@ -1089,9 +1125,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                 .process_wait_timer = default_accept_timer,
                 .process_datagram = default_accept_datagram,
             };
-            check("backend loop default path MTU callback accepts updates",
-                  run_server_backend_loop_with_driver(default_path_mtu_driver) == 1 &
-                      wait_calls == 2);
+            server_loop_coverage_check(
+                ok, "backend loop default path MTU callback accepts updates",
+                run_server_backend_loop_with_driver(default_path_mtu_driver) == 1 &
+                    wait_calls == 2);
         }
 
         {
@@ -1143,9 +1180,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                         return true;
                     },
             };
-            check("backend loop default callbacks accept timer and datagram events",
-                  run_server_backend_loop_with_driver(default_path_mtu_driver) == 1 &
-                      wait_calls == 3 & timer_calls == 1 & datagram_calls == 1);
+            server_loop_coverage_check(
+                ok, "backend loop default callbacks accept timer and datagram events",
+                run_server_backend_loop_with_driver(default_path_mtu_driver) == 1 &
+                    wait_calls == 3 & timer_calls == 1 & datagram_calls == 1);
         }
     }
 
@@ -1158,13 +1196,14 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         state.next_wakeup = now() - std::chrono::milliseconds(1);
         ClientRuntimePolicyState policy;
         ScriptedEndpointForTests endpoint;
-        check("client backend loop covers expired-timer failures before waiting",
-              run_http09_client_connection_backend_loop(
-                  Http09RuntimeConfig{
-                      .mode = Http09RuntimeMode::client,
-                  },
-                  make_endpoint_driver(endpoint), core, io_context, state, policy,
-                  QuicCoreResult{}) == 1);
+        server_loop_coverage_check(
+            ok, "client backend loop covers expired-timer failures before waiting",
+            run_http09_client_connection_backend_loop(
+                Http09RuntimeConfig{
+                    .mode = Http09RuntimeMode::client,
+                },
+                make_endpoint_driver(endpoint), core, io_context, state, policy,
+                QuicCoreResult{}) == 1);
     }
 
     {
@@ -1183,13 +1222,14 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .kind = QuicIoEvent::Kind::timer_expired,
             .now = now(),
         });
-        check("server backend runtime loop executes timer-expired callbacks on live cores",
-              run_http09_server_backend_loop(
-                  Http09RuntimeConfig{
-                      .mode = Http09RuntimeMode::server,
-                      .document_root = document_root.path(),
-                  },
-                  core, transport_state, endpoints, backend) == 1);
+        server_loop_coverage_check(
+            ok, "server backend runtime loop executes timer-expired callbacks on live cores",
+            run_http09_server_backend_loop(
+                Http09RuntimeConfig{
+                    .mode = Http09RuntimeMode::server,
+                    .document_root = document_root.path(),
+                },
+                core, transport_state, endpoints, backend) == 1);
     }
 
     {
@@ -1214,14 +1254,15 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
                 .document_root = document_root.path(),
             },
             make_identity()));
-        check("server backend runtime loop applies path MTU callbacks on live cores",
-              run_http09_server_backend_loop(
-                  Http09RuntimeConfig{
-                      .mode = Http09RuntimeMode::server,
-                      .document_root = document_root.path(),
-                  },
-                  core, transport_state, endpoints, backend) == 1 &
-                  backend.wait_requests.size() == 2);
+        server_loop_coverage_check(
+            ok, "server backend runtime loop applies path MTU callbacks on live cores",
+            run_http09_server_backend_loop(
+                Http09RuntimeConfig{
+                    .mode = Http09RuntimeMode::server,
+                    .document_root = document_root.path(),
+                },
+                core, transport_state, endpoints, backend) == 1 &
+                backend.wait_requests.size() == 2);
     }
 
     ::unsetenv("COQUIC_RUNTIME_TRACE");
@@ -1230,10 +1271,6 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
 
 bool runtime_server_endpoint_driver_coverage_for_tests() {
     bool ok = true;
-    const auto check = [&](std::string_view, bool condition) {
-        ok &= condition;
-        return condition;
-    };
     const auto make_loopback_peer = [](std::uint16_t port) {
         sockaddr_storage peer{};
         auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
@@ -1250,7 +1287,7 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
     };
     const auto accepted_connection_or_default =
         [&](std::string_view label, const std::optional<QuicConnectionHandle> &accepted) {
-            check(label, accepted.has_value());
+            server_loop_coverage_check(ok, label, accepted.has_value());
             return accepted.value_or(QuicConnectionHandle{});
         };
     class FailingSendBackendForTests final : public QuicIoBackend {
@@ -1270,50 +1307,52 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
 
     {
         FailingSendBackendForTests backend;
-        check("failing send backend helpers return fixed route null waits and failed sends",
-              backend.ensure_route(io::QuicIoRemote{
-                                       .family = AF_INET,
-                                   })
-                      .has_value() &
-                  !backend.wait(std::nullopt).has_value() &
-                  !backend.send(io::QuicIoTxDatagram{
-                      .route_handle = 17,
-                      .bytes = {},
-                  }));
+        server_loop_coverage_check(
+            ok, "failing send backend helpers return fixed route null waits and failed sends",
+            backend.ensure_route(io::QuicIoRemote{
+                                     .family = AF_INET,
+                                 })
+                    .has_value() &
+                !backend.wait(std::nullopt).has_value() &
+                !backend.send(io::QuicIoTxDatagram{
+                    .route_handle = 17,
+                    .bytes = {},
+                }));
     }
 
-    check("to_connection_command_input rejects inbound datagrams",
-          !to_connection_command_input(QuicCoreInboundDatagram{
-                                           .bytes =
-                                               {
-                                                   std::byte{0x01},
-                                               },
-                                       })
-               .has_value());
-    check("to_connection_command_input rejects shared stream payloads",
-          !to_connection_command_input(QuicCoreSendSharedStreamData{
-                                           .stream_id = 3,
-                                           .bytes =
-                                               quic::SharedBytes{
-                                                   std::byte{0x02},
-                                               },
-                                           .fin = true,
-                                       })
-               .has_value());
-    check("to_connection_command_input rejects timer inputs",
-          !to_connection_command_input(QuicCoreTimerExpired{}).has_value());
-    check("to_connection_command_input preserves close commands",
-          to_connection_command_input(QuicCoreCloseConnection{
-                                          .application_error_code = 9,
-                                          .reason_phrase = "bye",
-                                      })
-              .has_value());
-    check("to_connection_command_input preserves migration requests",
-          to_connection_command_input(QuicCoreRequestConnectionMigration{
-                                          .route_handle = 77,
-                                          .reason = QuicMigrationRequestReason::preferred_address,
-                                      })
-              .has_value());
+    server_loop_coverage_check(ok, "to_connection_command_input rejects inbound datagrams",
+                               !to_connection_command_input(QuicCoreInboundDatagram{
+                                                                .bytes =
+                                                                    {
+                                                                        std::byte{0x01},
+                                                                    },
+                                                            })
+                                    .has_value());
+    server_loop_coverage_check(ok, "to_connection_command_input rejects shared stream payloads",
+                               !to_connection_command_input(QuicCoreSendSharedStreamData{
+                                                                .stream_id = 3,
+                                                                .bytes =
+                                                                    quic::SharedBytes{
+                                                                        std::byte{0x02},
+                                                                    },
+                                                                .fin = true,
+                                                            })
+                                    .has_value());
+    server_loop_coverage_check(ok, "to_connection_command_input rejects timer inputs",
+                               !to_connection_command_input(QuicCoreTimerExpired{}).has_value());
+    server_loop_coverage_check(ok, "to_connection_command_input preserves close commands",
+                               to_connection_command_input(QuicCoreCloseConnection{
+                                                               .application_error_code = 9,
+                                                               .reason_phrase = "bye",
+                                                           })
+                                   .has_value());
+    server_loop_coverage_check(
+        ok, "to_connection_command_input preserves migration requests",
+        to_connection_command_input(QuicCoreRequestConnectionMigration{
+                                        .route_handle = 77,
+                                        .reason = QuicMigrationRequestReason::preferred_address,
+                                    })
+            .has_value());
 
     {
         QuicCore core = make_failing_server_core_for_tests();
@@ -1332,10 +1371,10 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
             .code = QuicCoreLocalErrorCode::unsupported_operation,
             .stream_id = std::nullopt,
         });
-        check("advance_endpoint_connection_inputs reports unsupported endpoint-level inputs",
-              result.local_error.has_value() &
-                  (local_error.connection == QuicConnectionHandle{41}) &
-                  (local_error.code == QuicCoreLocalErrorCode::unsupported_operation));
+        server_loop_coverage_check(
+            ok, "advance_endpoint_connection_inputs reports unsupported endpoint-level inputs",
+            result.local_error.has_value() & (local_error.connection == QuicConnectionHandle{41}) &
+                (local_error.code == QuicCoreLocalErrorCode::unsupported_operation));
     }
 
     {
@@ -1361,8 +1400,9 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
         };
         const auto close_result =
             advance_endpoint_connection_inputs(core, connection, close_inputs, now());
-        check("advance_endpoint_connection_inputs stops after connection close effects",
-              result_has_send_effects(close_result) & close_result.next_wakeup.has_value());
+        server_loop_coverage_check(
+            ok, "advance_endpoint_connection_inputs stops after connection close effects",
+            result_has_send_effects(close_result) & close_result.next_wakeup.has_value());
     }
 
     {
@@ -1404,12 +1444,12 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .change = QuicCoreStateChange::handshake_ready,
             });
             bool observed_send_effects = true;
-            check("process_server_endpoint_core_result ignores non-stream effects",
-                  process_server_endpoint_core_result(core, transport_state, endpoints,
-                                                      document_root.path(), state_only_result,
-                                                      /*fallback_socket_fd=*/77, &peer,
-                                                      sizeof(sockaddr_in), &observed_send_effects) &
-                      endpoints.contains(connection) & !observed_send_effects);
+            server_loop_coverage_check(
+                ok, "process_server_endpoint_core_result ignores non-stream effects",
+                process_server_endpoint_core_result(
+                    core, transport_state, endpoints, document_root.path(), state_only_result,
+                    /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in), &observed_send_effects) &
+                    endpoints.contains(connection) & !observed_send_effects);
         }
 
         {
@@ -1427,7 +1467,8 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .code = QuicCoreLocalErrorCode::unsupported_operation,
                 .stream_id = std::nullopt,
             };
-            check(
+            server_loop_coverage_check(
+                ok,
                 "process_server_endpoint_core_result erases endpoints for connection-local errors",
                 process_server_endpoint_core_result(
                     core, transport_state, endpoints, document_root.path(), local_error_result,
@@ -1449,11 +1490,12 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .connection = connection,
                 .event = QuicCoreConnectionLifecycle::closed,
             });
-            check("process_server_endpoint_core_result drops closed endpoints",
-                  process_server_endpoint_core_result(
-                      core, transport_state, endpoints, document_root.path(), closed_result,
-                      /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)) &
-                      !endpoints.contains(connection));
+            server_loop_coverage_check(
+                ok, "process_server_endpoint_core_result drops closed endpoints",
+                process_server_endpoint_core_result(
+                    core, transport_state, endpoints, document_root.path(), closed_result,
+                    /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)) &
+                    !endpoints.contains(connection));
         }
 
         {
@@ -1480,14 +1522,14 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .fin = true,
             });
             bool observed_send_effects = false;
-            check("process_server_endpoint_core_result advances endpoint-generated stream sends",
-                  process_server_endpoint_core_result(core, transport_state, endpoints,
-                                                      document_root.path(), request_result,
-                                                      /*fallback_socket_fd=*/77, &peer,
-                                                      sizeof(sockaddr_in), &observed_send_effects) &
-                      observed_send_effects &
-                      (g_recorded_sendto_for_tests.calls > 0 |
-                       g_recorded_sendmsg_for_tests.calls > 0));
+            server_loop_coverage_check(
+                ok, "process_server_endpoint_core_result advances endpoint-generated stream sends",
+                process_server_endpoint_core_result(
+                    core, transport_state, endpoints, document_root.path(), request_result,
+                    /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in), &observed_send_effects) &
+                    observed_send_effects &
+                    (g_recorded_sendto_for_tests.calls > 0 |
+                     g_recorded_sendmsg_for_tests.calls > 0));
         }
 
         {
@@ -1511,12 +1553,12 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .bytes = {},
                 .fin = true,
             });
-            check("process_server_endpoint_core_result closes failed endpoints",
-                  process_server_endpoint_core_result(core, transport_state, endpoints,
-                                                      document_root.path(), invalid_request_result,
-                                                      /*fallback_socket_fd=*/77, &peer,
-                                                      sizeof(sockaddr_in)) &
-                      !endpoints.contains(connection));
+            server_loop_coverage_check(
+                ok, "process_server_endpoint_core_result closes failed endpoints",
+                process_server_endpoint_core_result(
+                    core, transport_state, endpoints, document_root.path(), invalid_request_result,
+                    /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)) &
+                    !endpoints.contains(connection));
         }
     }
 
@@ -1548,11 +1590,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .code = QuicCoreLocalErrorCode::unsupported_operation,
                 .stream_id = std::nullopt,
             };
-            check("process_server_endpoint_core_result_with_backend rejects transport-wide local "
-                  "errors",
-                  !process_server_endpoint_core_result_with_backend(
-                      core, transport_state, endpoints, document_root.path(), local_error_result,
-                      kRouteHandle, backend));
+            server_loop_coverage_check(
+                ok,
+                "process_server_endpoint_core_result_with_backend rejects transport-wide local "
+                "errors",
+                !process_server_endpoint_core_result_with_backend(
+                    core, transport_state, endpoints, document_root.path(), local_error_result,
+                    kRouteHandle, backend));
         }
 
         {
@@ -1562,10 +1606,11 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .connection = connection,
                 .change = QuicCoreStateChange::handshake_ready,
             });
-            check("process_server_endpoint_core_result_with_backend tolerates missing endpoints",
-                  process_server_endpoint_core_result_with_backend(
-                      core, transport_state, endpoints, document_root.path(),
-                      missing_endpoint_result, kRouteHandle, backend));
+            server_loop_coverage_check(
+                ok, "process_server_endpoint_core_result_with_backend tolerates missing endpoints",
+                process_server_endpoint_core_result_with_backend(
+                    core, transport_state, endpoints, document_root.path(), missing_endpoint_result,
+                    kRouteHandle, backend));
         }
 
         {
@@ -1582,11 +1627,12 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .connection = connection,
                 .event = QuicCoreConnectionLifecycle::closed,
             });
-            check("process_server_endpoint_core_result_with_backend removes closed endpoints",
-                  process_server_endpoint_core_result_with_backend(
-                      core, transport_state, endpoints, document_root.path(), closed_result,
-                      kRouteHandle, backend) &
-                      !endpoints.contains(connection));
+            server_loop_coverage_check(
+                ok, "process_server_endpoint_core_result_with_backend removes closed endpoints",
+                process_server_endpoint_core_result_with_backend(
+                    core, transport_state, endpoints, document_root.path(), closed_result,
+                    kRouteHandle, backend) &
+                    !endpoints.contains(connection));
         }
 
         {
@@ -1605,12 +1651,14 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .bytes = bytes_from_string_for_runtime_tests("GET /small.txt\r\n"),
                 .fin = true,
             });
-            check("process_server_endpoint_core_result_with_backend routes generated sends through "
-                  "the backend",
-                  process_server_endpoint_core_result_with_backend(
-                      core, transport_state, endpoints, document_root.path(), request_result,
-                      kRouteHandle, backend) &
-                      !backend.sent_datagrams.empty());
+            server_loop_coverage_check(
+                ok,
+                "process_server_endpoint_core_result_with_backend routes generated sends through "
+                "the backend",
+                process_server_endpoint_core_result_with_backend(
+                    core, transport_state, endpoints, document_root.path(), request_result,
+                    kRouteHandle, backend) &
+                    !backend.sent_datagrams.empty());
         }
 
         {
@@ -1628,11 +1676,12 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .bytes = {},
                 .fin = true,
             });
-            check("process_server_endpoint_core_result_with_backend closes failed endpoints",
-                  process_server_endpoint_core_result_with_backend(
-                      core, transport_state, endpoints, document_root.path(),
-                      invalid_request_result, kRouteHandle, backend) &
-                      !endpoints.contains(connection));
+            server_loop_coverage_check(
+                ok, "process_server_endpoint_core_result_with_backend closes failed endpoints",
+                process_server_endpoint_core_result_with_backend(
+                    core, transport_state, endpoints, document_root.path(), invalid_request_result,
+                    kRouteHandle, backend) &
+                    !endpoints.contains(connection));
         }
     }
 
@@ -1672,11 +1721,12 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                   .has_pending_work = true,
                               });
             bool made_progress = true;
-            check("pump_shared_server_endpoint_work clears stale pending flags without work",
-                  pump_shared_server_endpoint_work(core, transport_state, endpoints,
-                                                   document_root.path(), made_progress) &
-                      !made_progress & endpoints.contains(connection) &
-                      !endpoints.at(connection).has_pending_work);
+            server_loop_coverage_check(
+                ok, "pump_shared_server_endpoint_work clears stale pending flags without work",
+                pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                 document_root.path(), made_progress) &
+                    !made_progress & endpoints.contains(connection) &
+                    !endpoints.at(connection).has_pending_work);
         }
 
         {
@@ -1689,10 +1739,11 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                   .has_pending_work = false,
                               });
             bool made_progress = true;
-            check("pump_shared_server_endpoint_work ignores endpoints without pending work",
-                  pump_shared_server_endpoint_work(core, transport_state, endpoints,
-                                                   document_root.path(), made_progress) &
-                      !made_progress & endpoints.contains(connection));
+            server_loop_coverage_check(
+                ok, "pump_shared_server_endpoint_work ignores endpoints without pending work",
+                pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                 document_root.path(), made_progress) &
+                    !made_progress & endpoints.contains(connection));
         }
 
         {
@@ -1715,12 +1766,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                               .has_pending_work = initial_update.has_pending_work,
                                           });
             bool made_progress = false;
-            check("pump_shared_server_endpoint_work advances queued response chunks",
-                  pump_shared_server_endpoint_work(core, transport_state, endpoints,
-                                                   document_root.path(), made_progress) &
-                      made_progress &
-                      (g_recorded_sendto_for_tests.calls > 0 |
-                       g_recorded_sendmsg_for_tests.calls > 0));
+            server_loop_coverage_check(
+                ok, "pump_shared_server_endpoint_work advances queued response chunks",
+                pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                 document_root.path(), made_progress) &
+                    made_progress &
+                    (g_recorded_sendto_for_tests.calls > 0 |
+                     g_recorded_sendmsg_for_tests.calls > 0));
         }
 
         {
@@ -1741,10 +1793,11 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                               .has_pending_work = true,
                                           });
             bool made_progress = false;
-            check("pump_shared_server_endpoint_work closes endpoints whose polls fail",
-                  pump_shared_server_endpoint_work(core, transport_state, endpoints,
-                                                   document_root.path(), made_progress) &
-                      !endpoints.contains(connection));
+            server_loop_coverage_check(
+                ok, "pump_shared_server_endpoint_work closes endpoints whose polls fail",
+                pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                                 document_root.path(), made_progress) &
+                    !endpoints.contains(connection));
         }
     }
 
@@ -1779,13 +1832,15 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                   .has_pending_work = true,
                               });
             bool made_progress = true;
-            check("pump_shared_server_endpoint_work_with_backend clears stale pending flags "
-                  "without work",
-                  pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
-                                                                document_root.path(), backend,
-                                                                made_progress) &
-                      !made_progress & endpoints.contains(connection) &
-                      !endpoints.at(connection).has_pending_work);
+            server_loop_coverage_check(
+                ok,
+                "pump_shared_server_endpoint_work_with_backend clears stale pending flags "
+                "without work",
+                pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
+                                                              document_root.path(), backend,
+                                                              made_progress) &
+                    !made_progress & endpoints.contains(connection) &
+                    !endpoints.at(connection).has_pending_work);
         }
 
         {
@@ -1801,11 +1856,12 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                               .has_pending_work = initial_update.has_pending_work,
                                           });
             bool made_progress = false;
-            check("pump_shared_server_endpoint_work_with_backend advances queued response chunks",
-                  pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
-                                                                document_root.path(), backend,
-                                                                made_progress) &
-                      made_progress & !backend.sent_datagrams.empty());
+            server_loop_coverage_check(
+                ok, "pump_shared_server_endpoint_work_with_backend advances queued response chunks",
+                pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
+                                                              document_root.path(), backend,
+                                                              made_progress) &
+                    made_progress & !backend.sent_datagrams.empty());
         }
 
         {
@@ -1820,11 +1876,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                               .has_pending_work = true,
                                           });
             bool made_progress = false;
-            check("pump_shared_server_endpoint_work_with_backend closes endpoints whose polls fail",
-                  pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
-                                                                document_root.path(), backend,
-                                                                made_progress) &
-                      !endpoints.contains(connection));
+            server_loop_coverage_check(
+                ok,
+                "pump_shared_server_endpoint_work_with_backend closes endpoints whose polls fail",
+                pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
+                                                              document_root.path(), backend,
+                                                              made_progress) &
+                    !endpoints.contains(connection));
         }
     }
 
@@ -1858,10 +1916,12 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                       });
         EndpointDriveState transport_state;
         bool made_progress = false;
-        check("pump_shared_server_endpoint_work fails when pending connection inputs cannot be "
-              "routed",
-              !pump_shared_server_endpoint_work(core, transport_state, endpoints,
-                                                document_root.path(), made_progress));
+        server_loop_coverage_check(
+            ok,
+            "pump_shared_server_endpoint_work fails when pending connection inputs cannot be "
+            "routed",
+            !pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                              document_root.path(), made_progress));
     }
 
     {
@@ -1894,10 +1954,12 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                       });
         EndpointDriveState transport_state;
         bool made_progress = false;
-        check("pump_shared_server_endpoint_work fails when close effects cannot be routed after "
-              "poll failure",
-              !pump_shared_server_endpoint_work(core, transport_state, endpoints,
-                                                document_root.path(), made_progress));
+        server_loop_coverage_check(
+            ok,
+            "pump_shared_server_endpoint_work fails when close effects cannot be routed after "
+            "poll failure",
+            !pump_shared_server_endpoint_work(core, transport_state, endpoints,
+                                              document_root.path(), made_progress));
     }
 
     {
@@ -1931,11 +1993,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                       });
         EndpointDriveState transport_state;
         bool made_progress = false;
-        check("pump_shared_server_endpoint_work_with_backend fails when the backend rejects queued "
-              "response sends",
-              !pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
-                                                             document_root.path(), failing_backend,
-                                                             made_progress));
+        server_loop_coverage_check(
+            ok,
+            "pump_shared_server_endpoint_work_with_backend fails when the backend rejects queued "
+            "response sends",
+            !pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
+                                                           document_root.path(), failing_backend,
+                                                           made_progress));
     }
 
     {
@@ -1969,11 +2033,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                       });
         EndpointDriveState transport_state;
         bool made_progress = false;
-        check("pump_shared_server_endpoint_work_with_backend fails when the backend rejects close "
-              "sends after poll failure",
-              !pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
-                                                             document_root.path(), failing_backend,
-                                                             made_progress));
+        server_loop_coverage_check(
+            ok,
+            "pump_shared_server_endpoint_work_with_backend fails when the backend rejects close "
+            "sends after poll failure",
+            !pump_shared_server_endpoint_work_with_backend(core, transport_state, endpoints,
+                                                           document_root.path(), failing_backend,
+                                                           made_progress));
     }
 
     {
@@ -2005,12 +2071,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
         const auto &inbound = std::get<QuicCoreInboundDatagram>(receive_input);
         const auto wait_step = wait.value_or(RuntimeWaitStep{});
         const auto wait_input = wait_step.input.value_or(QuicCoreInput{QuicCoreInboundDatagram{}});
-        check("make_runtime_server_loop_io forwards to runtime wait and receive helpers",
-              (current.time_since_epoch().count() > 0) &
-                  (receive.status == ReceiveDatagramStatus::ok) &
-                  (inbound.bytes == g_recorded_recvmsg_for_tests.bytes) & wait.has_value() &
-                  wait_step.input.has_value() &
-                  std::holds_alternative<QuicCoreTimerExpired>(wait_input));
+        server_loop_coverage_check(
+            ok, "make_runtime_server_loop_io forwards to runtime wait and receive helpers",
+            (current.time_since_epoch().count() > 0) &
+                (receive.status == ReceiveDatagramStatus::ok) &
+                (inbound.bytes == g_recorded_recvmsg_for_tests.bytes) & wait.has_value() &
+                wait_step.input.has_value() &
+                std::holds_alternative<QuicCoreTimerExpired>(wait_input));
     }
 
     return ok;

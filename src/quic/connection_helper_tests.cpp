@@ -273,6 +273,116 @@ SentPacketRecord fragment_only_metadata_packet_for_tests() {
     };
 }
 
+bool stream_frame_payload_budget_handles_edges_for_tests() {
+    return max_stream_frame_payload_for_wire_budget(/*stream_id=*/0, kMaxQuicVarInt + 1u,
+                                                    /*wire_budget=*/1200) == 0 &&
+           max_stream_frame_payload_for_wire_budget(/*stream_id=*/0, /*offset=*/0,
+                                                    /*wire_budget=*/1) == 0 &&
+           max_stream_frame_payload_for_wire_budget(/*stream_id=*/0, /*offset=*/0,
+                                                    /*wire_budget=*/32) > 0;
+}
+
+bool one_rtt_fragment_size_rejects_non_terminal_lengthless_stream_for_tests(
+    const ConnectionId &destination_connection_id) {
+    const std::array<Frame, 2> frames{
+        Frame{StreamFrame{
+            .has_length = false,
+            .stream_id = 0,
+            .stream_data = bytes_from_ints_for_tests({0xaa}),
+        }},
+        Frame{PingFrame{}},
+    };
+    const auto size = one_rtt_packet_fragment_view_wire_size(ProtectedOneRttPacketFragmentView{
+        .destination_connection_id = destination_connection_id,
+        .packet_number_length = 2,
+        .frames = frames,
+    });
+    return !size.has_value() && size.error().code == CodecErrorCode::packet_length_mismatch &&
+           size.error().offset == 0;
+}
+
+bool one_rtt_fragment_size_propagates_frame_size_errors_for_tests(
+    const ConnectionId &destination_connection_id) {
+    const std::array<Frame, 1> frames{
+        Frame{PaddingFrame{.length = 0}},
+    };
+    const auto size = one_rtt_packet_fragment_view_wire_size(ProtectedOneRttPacketFragmentView{
+        .destination_connection_id = destination_connection_id,
+        .packet_number_length = 2,
+        .frames = frames,
+    });
+    return !size.has_value() && size.error().code == CodecErrorCode::invalid_varint &&
+           size.error().offset == 0;
+}
+
+bool one_rtt_fragment_size_rejects_empty_payloads_for_tests(
+    const ConnectionId &destination_connection_id) {
+    const std::array<Frame, 0> frames{};
+    const auto size = one_rtt_packet_fragment_view_wire_size(ProtectedOneRttPacketFragmentView{
+        .destination_connection_id = destination_connection_id,
+        .packet_number_length = 2,
+        .frames = frames,
+    });
+    return !size.has_value() && size.error().code == CodecErrorCode::empty_packet_payload;
+}
+
+std::array<StreamFrameSendFragment, 2> stream_fragments_for_wire_size_tests() {
+    const auto storage =
+        std::make_shared<std::vector<std::byte>>(bytes_from_ints_for_tests({0xaa, 0xbb, 0xcc}));
+    return {
+        StreamFrameSendFragment{
+            .stream_id = 0,
+            .offset = 0,
+            .bytes = SharedBytes(storage, 0, 2),
+            .fin = false,
+            .consumes_flow_control = true,
+        },
+        StreamFrameSendFragment{
+            .stream_id = 4,
+            .offset = 2,
+            .bytes = SharedBytes(storage, 2, 3),
+            .fin = true,
+            .consumes_flow_control = true,
+        },
+    };
+}
+
+bool one_rtt_fragment_helpers_count_stream_fragment_bytes_for_tests(
+    const ConnectionId &destination_connection_id) {
+    const std::array<Frame, 0> frames{};
+    const auto fragments = stream_fragments_for_wire_size_tests();
+    const auto size = one_rtt_packet_fragment_view_wire_size(ProtectedOneRttPacketFragmentView{
+        .destination_connection_id = destination_connection_id,
+        .packet_number_length = 2,
+        .frames = frames,
+        .stream_fragments = fragments,
+    });
+    return stream_fragment_bytes(fragments) == 3 && stream_fragment_wire_bytes(fragments) > 3 &&
+           size.has_value() &&
+           size.value() > destination_connection_id.size() + kDefaultInitialPacketNumberLength +
+                              kOneRttPacketProtectionTagLength;
+}
+
+bool one_rtt_fragment_size_rejects_overflowing_fragment_offsets_for_tests(
+    const ConnectionId &destination_connection_id) {
+    const std::array<Frame, 0> frames{};
+    const std::array<StreamFrameSendFragment, 1> fragments{
+        StreamFrameSendFragment{
+            .stream_id = 0,
+            .offset = kMaxQuicVarInt,
+            .bytes = SharedBytes(bytes_from_ints_for_tests({0xdd, 0xee})),
+        },
+    };
+    const auto size = one_rtt_packet_fragment_view_wire_size(ProtectedOneRttPacketFragmentView{
+        .destination_connection_id = destination_connection_id,
+        .packet_number_length = 2,
+        .frames = frames,
+        .stream_fragments = fragments,
+    });
+    return !size.has_value() && size.error().code == CodecErrorCode::invalid_varint &&
+           size.error().offset == 0;
+}
+
 bool connection_helper_edge_cases_for_tests() {
     bool ok = true;
 
@@ -1009,15 +1119,8 @@ bool connection_helper_edge_cases_for_tests() {
             connection.paths_.at(32).ecn.state == QuicPathEcnState::capable &&
             latest_ecn_ce_sent_time == QuicCoreTimePoint{} + std::chrono::milliseconds(32);
     }
-    const bool stream_frame_payload_budget_handles_edges =
-        max_stream_frame_payload_for_wire_budget(/*stream_id=*/0, kMaxQuicVarInt + 1u,
-                                                 /*wire_budget=*/1200) == 0 &&
-        max_stream_frame_payload_for_wire_budget(/*stream_id=*/0, /*offset=*/0,
-                                                 /*wire_budget=*/1) == 0 &&
-        max_stream_frame_payload_for_wire_budget(/*stream_id=*/0, /*offset=*/0,
-                                                 /*wire_budget=*/32) > 0;
     connection_coverage_check(ok, "stream_frame_payload_budget_handles_edges",
-                              stream_frame_payload_budget_handles_edges);
+                              stream_frame_payload_budget_handles_edges_for_tests());
     connection_coverage_check(
         ok, "application_stream_budget_handles_small_and_oversized_connection_ids",
         application_stream_frame_budget(/*max_datagram_size=*/1199,
@@ -1029,106 +1132,26 @@ bool connection_helper_edge_cases_for_tests() {
             application_stream_frame_budget(/*max_datagram_size=*/1400,
                                             /*destination_connection_id_size=*/8) == 1373);
 
-    const std::array<Frame, 2> non_terminal_lengthless_stream_frame{
-        Frame{StreamFrame{
-            .has_length = false,
-            .stream_id = 0,
-            .stream_data = bytes_from_ints({0xaa}),
-        }},
-        Frame{PingFrame{}},
-    };
-    const auto non_terminal_lengthless_stream_size =
-        one_rtt_packet_fragment_view_wire_size(ProtectedOneRttPacketFragmentView{
-            .destination_connection_id = retry_source_connection_id,
-            .packet_number_length = 2,
-            .frames = non_terminal_lengthless_stream_frame,
-        });
-    connection_coverage_check(ok,
-                              "one_rtt_fragment_size_rejects_non_terminal_lengthless_stream_frames",
-                              !non_terminal_lengthless_stream_size.has_value() &&
-                                  non_terminal_lengthless_stream_size.error().code ==
-                                      CodecErrorCode::packet_length_mismatch &&
-                                  non_terminal_lengthless_stream_size.error().offset == 0);
+    connection_coverage_check(
+        ok, "one_rtt_fragment_size_rejects_non_terminal_lengthless_stream_frames",
+        one_rtt_fragment_size_rejects_non_terminal_lengthless_stream_for_tests(
+            retry_source_connection_id));
 
-    const std::array<Frame, 1> invalid_padding_frame{
-        Frame{PaddingFrame{.length = 0}},
-    };
-    const auto invalid_frame_size =
-        one_rtt_packet_fragment_view_wire_size(ProtectedOneRttPacketFragmentView{
-            .destination_connection_id = retry_source_connection_id,
-            .packet_number_length = 2,
-            .frames = invalid_padding_frame,
-        });
-    connection_coverage_check(ok, "one_rtt_fragment_size_propagates_frame_size_errors",
-                              !invalid_frame_size.has_value() &&
-                                  invalid_frame_size.error().code ==
-                                      CodecErrorCode::invalid_varint &&
-                                  invalid_frame_size.error().offset == 0);
+    connection_coverage_check(
+        ok, "one_rtt_fragment_size_propagates_frame_size_errors",
+        one_rtt_fragment_size_propagates_frame_size_errors_for_tests(retry_source_connection_id));
 
-    const std::array<Frame, 0> no_frames{};
-    const auto empty_fragment_packet_size =
-        one_rtt_packet_fragment_view_wire_size(ProtectedOneRttPacketFragmentView{
-            .destination_connection_id = retry_source_connection_id,
-            .packet_number_length = 2,
-            .frames = no_frames,
-        });
-    connection_coverage_check(ok, "one_rtt_fragment_size_rejects_empty_payloads",
-                              !empty_fragment_packet_size.has_value() &&
-                                  empty_fragment_packet_size.error().code ==
-                                      CodecErrorCode::empty_packet_payload);
+    connection_coverage_check(
+        ok, "one_rtt_fragment_size_rejects_empty_payloads",
+        one_rtt_fragment_size_rejects_empty_payloads_for_tests(retry_source_connection_id));
 
-    const auto fragment_storage =
-        std::make_shared<std::vector<std::byte>>(bytes_from_ints({0xaa, 0xbb, 0xcc}));
-    const std::array<StreamFrameSendFragment, 2> fragments{
-        StreamFrameSendFragment{
-            .stream_id = 0,
-            .offset = 0,
-            .bytes = SharedBytes(fragment_storage, 0, 2),
-            .fin = false,
-            .consumes_flow_control = true,
-        },
-        StreamFrameSendFragment{
-            .stream_id = 4,
-            .offset = 2,
-            .bytes = SharedBytes(fragment_storage, 2, 3),
-            .fin = true,
-            .consumes_flow_control = true,
-        },
-    };
-    const auto fragment_packet_size =
-        one_rtt_packet_fragment_view_wire_size(ProtectedOneRttPacketFragmentView{
-            .destination_connection_id = retry_source_connection_id,
-            .packet_number_length = 2,
-            .frames = no_frames,
-            .stream_fragments = fragments,
-        });
     connection_coverage_check(
         ok, "one_rtt_fragment_helpers_count_stream_fragment_bytes",
-        stream_fragment_bytes(fragments) == 3 && stream_fragment_wire_bytes(fragments) > 3 &&
-            fragment_packet_size.has_value() &&
-            fragment_packet_size.value() > retry_source_connection_id.size() +
-                                               kDefaultInitialPacketNumberLength +
-                                               kOneRttPacketProtectionTagLength);
+        one_rtt_fragment_helpers_count_stream_fragment_bytes_for_tests(retry_source_connection_id));
 
-    const std::array<StreamFrameSendFragment, 1> overflowing_fragments{
-        StreamFrameSendFragment{
-            .stream_id = 0,
-            .offset = kMaxQuicVarInt,
-            .bytes = SharedBytes(bytes_from_ints({0xdd, 0xee})),
-        },
-    };
-    const auto overflowing_fragment_packet_size =
-        one_rtt_packet_fragment_view_wire_size(ProtectedOneRttPacketFragmentView{
-            .destination_connection_id = retry_source_connection_id,
-            .packet_number_length = 2,
-            .frames = no_frames,
-            .stream_fragments = overflowing_fragments,
-        });
     connection_coverage_check(ok, "one_rtt_fragment_size_rejects_overflowing_fragment_offsets",
-                              !overflowing_fragment_packet_size.has_value() &&
-                                  overflowing_fragment_packet_size.error().code ==
-                                      CodecErrorCode::invalid_varint &&
-                                  overflowing_fragment_packet_size.error().offset == 0);
+                              one_rtt_fragment_size_rejects_overflowing_fragment_offsets_for_tests(
+                                  retry_source_connection_id));
 
     bool trace_unset_disabled = false;
     bool trace_empty_disabled = false;
@@ -1663,9 +1686,9 @@ bool connection_header_packet_space_coverage_for_tests() {
         record(view.begin() == view.end());
         record(view.rbegin() == view.rend());
         record(!view.contains(1));
-        const auto [it, inserted] = view.emplace(1, SentPacketRecord{});
-        record(!inserted);
-        record(it == view.end());
+        const auto emplace_result = view.emplace(1, SentPacketRecord{});
+        record(!emplace_result.second);
+        record(emplace_result.first == view.end());
         record(view.erase(1) == 0);
     }
 
@@ -1681,9 +1704,9 @@ bool connection_header_packet_space_coverage_for_tests() {
             .bytes_in_flight = 1200,
         };
 
-        const auto [outstanding_it, outstanding_inserted] = outstanding.emplace(7, packet);
-        record(outstanding_inserted);
-        record(outstanding_it != outstanding.end());
+        const auto outstanding_result = outstanding.emplace(7, packet);
+        record(outstanding_result.second);
+        record(outstanding_result.first != outstanding.end());
         record(!outstanding.empty());
         record(outstanding.size() == 1);
         record(outstanding.size() == 1);
@@ -1691,9 +1714,9 @@ bool connection_header_packet_space_coverage_for_tests() {
         record(outstanding.at(7).packet_number == 7);
         record(outstanding.rbegin() != outstanding.rend());
 
-        const auto [duplicate_it, duplicate_inserted] = outstanding.emplace(7, packet);
-        record(!duplicate_inserted);
-        record(duplicate_it != outstanding.end());
+        const auto duplicate_result = outstanding.emplace(7, packet);
+        record(!duplicate_result.second);
+        record(duplicate_result.first != outstanding.end());
         record(outstanding.erase(99) == 0);
 
         const auto declared_lost_result = declared_lost.emplace(9, packet);

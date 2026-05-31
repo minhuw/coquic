@@ -273,13 +273,11 @@ bool connection_helper_edge_cases_for_tests() {
         return bytes;
     };
 
-    const std::string empty_connection_id_hex = format_connection_id_hex({});
-    const std::string retry_source_connection_id_hex =
-        format_connection_id_hex(retry_source_connection_id);
-    const bool empty_connection_id_formats_empty = empty_connection_id_hex.empty();
-    const bool connection_id_formats_lower_hex = retry_source_connection_id_hex == "5300";
-    const bool empty_issued_connection_id_remains_empty =
-        make_issued_connection_id({}, /*sequence_number=*/7).empty();
+    check("empty_connection_id_formats_empty", format_connection_id_hex({}).empty());
+    check("connection_id_formats_lower_hex",
+          format_connection_id_hex(retry_source_connection_id) == "5300");
+    check("empty_issued_connection_id_remains_empty",
+          make_issued_connection_id({}, /*sequence_number=*/7).empty());
     bool quic_core_secret_fallback_has_bytes = false;
     bool issued_connection_id_rand_fallback_has_bytes = false;
     bool issued_connection_id_fallback_has_bytes = false;
@@ -396,46 +394,46 @@ bool connection_helper_edge_cases_for_tests() {
             &ConnectionDrainTestHooks::force_random_one_in_sixteen_result, true);
         forced_random_one_in_sixteen_true = random_one_in_sixteen();
     }
-    const bool random_one_in_sixteen_openssl_returns_bool = [] {
+    check("random_one_in_sixteen_openssl_returns_bool", [] {
         const bool value = random_one_in_sixteen();
         return value || !value;
-    }();
-    const bool stream_state_error_helpers_cover_all_codes =
-        stream_transport_error_for_state_error(StreamStateErrorCode::invalid_stream_id) ==
-            QuicTransportErrorCode::stream_limit_error &&
-        stream_transport_error_for_state_error(StreamStateErrorCode::invalid_stream_direction) ==
-            QuicTransportErrorCode::stream_state_error &&
-        stream_transport_error_for_state_error(StreamStateErrorCode::send_side_closed) ==
-            QuicTransportErrorCode::stream_state_error &&
-        stream_transport_error_for_state_error(StreamStateErrorCode::receive_side_closed) ==
-            QuicTransportErrorCode::stream_state_error &&
-        stream_transport_error_for_state_error(StreamStateErrorCode::final_size_conflict) ==
-            QuicTransportErrorCode::final_size_error;
+    }());
+    check("stream_state_error_helpers_cover_all_codes",
+          stream_transport_error_for_state_error(StreamStateErrorCode::invalid_stream_id) ==
+                  QuicTransportErrorCode::stream_limit_error &&
+              stream_transport_error_for_state_error(
+                  StreamStateErrorCode::invalid_stream_direction) ==
+                  QuicTransportErrorCode::stream_state_error &&
+              stream_transport_error_for_state_error(StreamStateErrorCode::send_side_closed) ==
+                  QuicTransportErrorCode::stream_state_error &&
+              stream_transport_error_for_state_error(StreamStateErrorCode::receive_side_closed) ==
+                  QuicTransportErrorCode::stream_state_error &&
+              stream_transport_error_for_state_error(StreamStateErrorCode::final_size_conflict) ==
+                  QuicTransportErrorCode::final_size_error);
     const auto stream_codec_without_transport = stream_state_codec_error(
         CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0}, kFrameTypeStreamBase);
-    const bool stream_state_codec_error_adds_transport_code =
-        stream_codec_without_transport.has_transport_error_code &&
-        stream_codec_without_transport.transport_error_code ==
-            transport_error_code_value(QuicTransportErrorCode::stream_state_error);
-    const bool stream_limit_frame_type_helpers_cover_uni =
-        frame_type_for_max_streams(StreamLimitType::unidirectional) == kFrameTypeMaxStreamsUni &&
-        frame_type_for_streams_blocked(StreamLimitType::unidirectional) ==
-            kFrameTypeStreamsBlockedUni;
-    const bool transport_error_for_codec_error_covers_residual_codes =
-        transport_error_for_codec_error(CodecErrorCode::invalid_reserved_bits) ==
-            QuicTransportErrorCode::protocol_violation &&
-        transport_error_for_codec_error(CodecErrorCode::invalid_fixed_bit) ==
-            QuicTransportErrorCode::internal_error &&
-        transport_error_for_codec_error(CodecErrorCode::missing_crypto_context) ==
-            QuicTransportErrorCode::internal_error &&
-        transport_error_for_codec_error(CodecErrorCode::http09_parse_error) ==
-            QuicTransportErrorCode::application_error &&
-        transport_error_for_codec_error(CodecErrorCode::http3_parse_error) ==
-            QuicTransportErrorCode::application_error;
+    check("stream_state_codec_error_adds_transport_code",
+          stream_codec_without_transport.has_transport_error_code &&
+              stream_codec_without_transport.transport_error_code ==
+                  transport_error_code_value(QuicTransportErrorCode::stream_state_error));
+    check("stream_limit_frame_type_helpers_cover_uni",
+          frame_type_for_max_streams(StreamLimitType::unidirectional) == kFrameTypeMaxStreamsUni &&
+              frame_type_for_streams_blocked(StreamLimitType::unidirectional) ==
+                  kFrameTypeStreamsBlockedUni);
+    check("transport_error_for_codec_error_covers_residual_codes",
+          transport_error_for_codec_error(CodecErrorCode::invalid_reserved_bits) ==
+                  QuicTransportErrorCode::protocol_violation &&
+              transport_error_for_codec_error(CodecErrorCode::invalid_fixed_bit) ==
+                  QuicTransportErrorCode::internal_error &&
+              transport_error_for_codec_error(CodecErrorCode::missing_crypto_context) ==
+                  QuicTransportErrorCode::internal_error &&
+              transport_error_for_codec_error(CodecErrorCode::http09_parse_error) ==
+                  QuicTransportErrorCode::application_error &&
+              transport_error_for_codec_error(CodecErrorCode::http3_parse_error) ==
+                  QuicTransportErrorCode::application_error);
     const DeferredProtectedDatagram deferred_packet(bytes_from_ints({0x01, 0x02, 0x03}),
                                                     /*id=*/9);
-    const bool vector_equals_deferred_packet =
-        bytes_from_ints({0x01, 0x02, 0x03}) == deferred_packet;
+    check("vector_equals_deferred_packet", bytes_from_ints({0x01, 0x02, 0x03}) == deferred_packet);
 
     PathState traced_path{
         .id = 7,
@@ -454,62 +452,62 @@ bool connection_helper_edge_cases_for_tests() {
     std::map<QuicPathId, PathState> traced_paths{
         {traced_path.id, traced_path},
     };
-    const bool optional_path_none_formats_dash = format_optional_path_id(std::nullopt) == "-";
-    const bool optional_path_value_formats_decimal = format_optional_path_id(traced_path.id) == "7";
-    const bool missing_optional_path_returns_null =
-        find_path_state(traced_paths, std::nullopt) == nullptr;
-    const bool unknown_path_returns_null = find_path_state(traced_paths, 99) == nullptr;
-    const bool existing_path_is_found = find_path_state(traced_paths, traced_path.id) != nullptr;
-    const bool null_path_summary_formats_dash = format_path_state_summary(nullptr) == "-";
+    check("optional_path_none_formats_dash", format_optional_path_id(std::nullopt) == "-");
+    check("optional_path_value_formats_decimal", format_optional_path_id(traced_path.id) == "7");
+    check("missing_optional_path_returns_null",
+          find_path_state(traced_paths, std::nullopt) == nullptr);
+    check("unknown_path_returns_null", find_path_state(traced_paths, 99) == nullptr);
+    check("existing_path_is_found", find_path_state(traced_paths, traced_path.id) != nullptr);
+    check("null_path_summary_formats_dash", format_path_state_summary(nullptr) == "-");
     const std::string traced_path_summary = format_path_state_summary(&traced_path);
-    const bool traced_path_summary_mentions_path_state =
-        (traced_path_summary.find("id=7") != std::string::npos) &
-        (traced_path_summary.find("val=1") != std::string::npos) &
-        (traced_path_summary.find("cur=1") != std::string::npos) &
-        (traced_path_summary.find("chal=1") != std::string::npos) &
-        (traced_path_summary.find("out=1") != std::string::npos) &
-        (traced_path_summary.find("resp=1") != std::string::npos) &
-        (traced_path_summary.find("recv=11") != std::string::npos) &
-        (traced_path_summary.find("sent=7") != std::string::npos);
-    const bool invalid_ack_first_range_formats_invalid = format_ack_ranges(AckFrame{
-                                                             .largest_acknowledged = 1,
-                                                             .first_ack_range = 2,
-                                                         }) == "[invalid]";
-    const bool invalid_ack_gap_formats_invalid = format_ack_ranges(AckFrame{
-                                                     .largest_acknowledged = 10,
-                                                     .first_ack_range = 0,
-                                                     .additional_ranges =
-                                                         {
-                                                             AckRange{.gap = 9, .range_length = 0},
-                                                         },
-                                                 }) == "[10-10,invalid]";
-    const bool invalid_ack_range_length_formats_invalid =
-        format_ack_ranges(AckFrame{
-            .largest_acknowledged = 10,
-            .first_ack_range = 2,
-            .additional_ranges =
-                {
-                    AckRange{.gap = 0, .range_length = 7},
-                },
-        }) == "[8-10,invalid]";
-    const bool valid_ack_ranges_format_expected = format_ack_ranges(AckFrame{
+    check("traced_path_summary_mentions_path_state",
+          (traced_path_summary.find("id=7") != std::string::npos) &
+              (traced_path_summary.find("val=1") != std::string::npos) &
+              (traced_path_summary.find("cur=1") != std::string::npos) &
+              (traced_path_summary.find("chal=1") != std::string::npos) &
+              (traced_path_summary.find("out=1") != std::string::npos) &
+              (traced_path_summary.find("resp=1") != std::string::npos) &
+              (traced_path_summary.find("recv=11") != std::string::npos) &
+              (traced_path_summary.find("sent=7") != std::string::npos));
+    check("invalid_ack_first_range_formats_invalid", format_ack_ranges(AckFrame{
+                                                         .largest_acknowledged = 1,
+                                                         .first_ack_range = 2,
+                                                     }) == "[invalid]");
+    check("invalid_ack_gap_formats_invalid", format_ack_ranges(AckFrame{
+                                                 .largest_acknowledged = 10,
+                                                 .first_ack_range = 0,
+                                                 .additional_ranges =
+                                                     {
+                                                         AckRange{.gap = 9, .range_length = 0},
+                                                     },
+                                             }) == "[10-10,invalid]");
+    check("invalid_ack_range_length_formats_invalid",
+          format_ack_ranges(AckFrame{
+              .largest_acknowledged = 10,
+              .first_ack_range = 2,
+              .additional_ranges =
+                  {
+                      AckRange{.gap = 0, .range_length = 7},
+                  },
+          }) == "[8-10,invalid]");
+    check("valid_ack_ranges_format_expected", format_ack_ranges(AckFrame{
+                                                  .largest_acknowledged = 10,
+                                                  .first_ack_range = 1,
+                                                  .additional_ranges =
+                                                      {
+                                                          AckRange{.gap = 0, .range_length = 1},
+                                                      },
+                                              }) == "[9-10,6-7]");
+    check("invalid_received_ack_formats_invalid", format_ack_ranges(ReceivedAckFrame{
                                                       .largest_acknowledged = 10,
                                                       .first_ack_range = 1,
-                                                      .additional_ranges =
-                                                          {
-                                                              AckRange{.gap = 0, .range_length = 1},
+                                                      .additional_range_count = 1,
+                                                      .additional_range_bytes =
+                                                          SharedBytes{
+                                                              std::byte{0x40},
                                                           },
-                                                  }) == "[9-10,6-7]";
-    const bool invalid_received_ack_formats_invalid = format_ack_ranges(ReceivedAckFrame{
-                                                          .largest_acknowledged = 10,
-                                                          .first_ack_range = 1,
-                                                          .additional_range_count = 1,
-                                                          .additional_range_bytes =
-                                                              SharedBytes{
-                                                                  std::byte{0x40},
-                                                              },
-                                                      }) == "[invalid]";
-    const bool empty_packet_summary_reports_zero = summarize_packets({}) == "count=0";
+                                                  }) == "[invalid]");
+    check("empty_packet_summary_reports_zero", summarize_packets({}) == "count=0");
     const std::array sent_packets = {
         SentPacketRecord{
             .packet_number = 5,
@@ -529,11 +527,11 @@ bool connection_helper_edge_cases_for_tests() {
         },
     };
     const std::string packet_summary = summarize_packets(sent_packets);
-    const bool packet_summary_mentions_counts =
-        (packet_summary.find("count=2") != std::string::npos) &
-        (packet_summary.find("pn=5-9") != std::string::npos) &
-        (packet_summary.find("stream_fragments=1") != std::string::npos) &
-        (packet_summary.find("first_stream_offset=4") != std::string::npos);
+    check("packet_summary_mentions_counts",
+          (packet_summary.find("count=2") != std::string::npos) &
+              (packet_summary.find("pn=5-9") != std::string::npos) &
+              (packet_summary.find("stream_fragments=1") != std::string::npos) &
+              (packet_summary.find("first_stream_offset=4") != std::string::npos));
     const std::array no_stream_packets = {
         SentPacketRecord{
             .packet_number = 6,
@@ -543,11 +541,11 @@ bool connection_helper_edge_cases_for_tests() {
         },
     };
     const std::string no_stream_packet_summary = summarize_packets(no_stream_packets);
-    const bool packet_summary_without_stream_offset_omits_offset =
-        (no_stream_packet_summary.find("count=2") != std::string::npos) &
-        (no_stream_packet_summary.find("pn=6-8") != std::string::npos) &
-        (no_stream_packet_summary.find("stream_fragments=0") != std::string::npos) &
-        (no_stream_packet_summary.find("first_stream_offset=") == std::string::npos);
+    check("packet_summary_without_stream_offset_omits_offset",
+          (no_stream_packet_summary.find("count=2") != std::string::npos) &
+              (no_stream_packet_summary.find("pn=6-8") != std::string::npos) &
+              (no_stream_packet_summary.find("stream_fragments=0") != std::string::npos) &
+              (no_stream_packet_summary.find("first_stream_offset=") == std::string::npos));
     const SentPacketRecord metadata_packet{
         .first_stream_frame_metadata =
             StreamFrameSendMetadata{
@@ -578,10 +576,10 @@ bool connection_helper_edge_cases_for_tests() {
                 },
             },
     };
-    const bool packet_stream_metadata_helpers_cover_count_bytes_and_first_offset =
-        packet_stream_frame_count(metadata_packet) == 3 &&
-        packet_stream_frame_bytes(metadata_packet) == 10 &&
-        packet_first_stream_frame_offset(metadata_packet) == 2u;
+    check("packet_stream_metadata_helpers_cover_count_bytes_and_first_offset",
+          packet_stream_frame_count(metadata_packet) == 3 &&
+              packet_stream_frame_bytes(metadata_packet) == 10 &&
+              packet_first_stream_frame_offset(metadata_packet) == 2u);
     const SentPacketRecord vector_only_metadata_packet{
         .stream_frame_metadata =
             {
@@ -606,10 +604,10 @@ bool connection_helper_edge_cases_for_tests() {
                 },
             },
     };
-    const bool packet_first_stream_frame_offset_covers_vector_fragment_and_empty =
-        packet_first_stream_frame_offset(vector_only_metadata_packet) == 33u &&
-        packet_first_stream_frame_offset(fragment_only_metadata_packet) == 44u &&
-        !packet_first_stream_frame_offset(SentPacketRecord{}).has_value();
+    check("packet_first_stream_frame_offset_covers_vector_fragment_and_empty",
+          packet_first_stream_frame_offset(vector_only_metadata_packet) == 33u &&
+              packet_first_stream_frame_offset(fragment_only_metadata_packet) == 44u &&
+              !packet_first_stream_frame_offset(SentPacketRecord{}).has_value());
     bool for_each_stream_frame_metadata_visits_vector_metadata = false;
     bool for_each_stream_frame_metadata_visits_first_metadata = false;
     const auto note_stream_frame_metadata_visit = [&](const StreamFrameSendMetadata &metadata) {
@@ -1045,7 +1043,8 @@ bool connection_helper_edge_cases_for_tests() {
 
         {
             ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
-            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", retry_source_connection_id_hex);
+            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID",
+                                        format_connection_id_hex(retry_source_connection_id));
             trace_matches_with_exact_filter =
                 packet_trace_matches_connection(retry_source_connection_id);
         }
@@ -1274,12 +1273,6 @@ bool connection_helper_edge_cases_for_tests() {
         }
     }
 
-    connection_coverage_check(ok, "empty_connection_id_formats_empty",
-                              static_cast<bool>(empty_connection_id_formats_empty));
-    connection_coverage_check(ok, "connection_id_formats_lower_hex",
-                              static_cast<bool>(connection_id_formats_lower_hex));
-    connection_coverage_check(ok, "empty_issued_connection_id_remains_empty",
-                              static_cast<bool>(empty_issued_connection_id_remains_empty));
     connection_coverage_check(ok, "quic_core_secret_fallback_has_bytes",
                               static_cast<bool>(quic_core_secret_fallback_has_bytes));
     connection_coverage_check(ok, "issued_connection_id_rand_fallback_has_bytes",
@@ -1312,55 +1305,6 @@ bool connection_helper_edge_cases_for_tests() {
                               static_cast<bool>(forced_random_one_in_sixteen_false));
     connection_coverage_check(ok, "forced_random_one_in_sixteen_true",
                               static_cast<bool>(forced_random_one_in_sixteen_true));
-    connection_coverage_check(ok, "random_one_in_sixteen_openssl_returns_bool",
-                              static_cast<bool>(random_one_in_sixteen_openssl_returns_bool));
-    connection_coverage_check(ok, "stream_state_error_helpers_cover_all_codes",
-                              static_cast<bool>(stream_state_error_helpers_cover_all_codes));
-    connection_coverage_check(ok, "stream_state_codec_error_adds_transport_code",
-                              static_cast<bool>(stream_state_codec_error_adds_transport_code));
-    connection_coverage_check(ok, "stream_limit_frame_type_helpers_cover_uni",
-                              static_cast<bool>(stream_limit_frame_type_helpers_cover_uni));
-    connection_coverage_check(
-        ok, "transport_error_for_codec_error_covers_residual_codes",
-        static_cast<bool>(transport_error_for_codec_error_covers_residual_codes));
-    connection_coverage_check(ok, "vector_equals_deferred_packet",
-                              static_cast<bool>(vector_equals_deferred_packet));
-    connection_coverage_check(ok, "optional_path_none_formats_dash",
-                              static_cast<bool>(optional_path_none_formats_dash));
-    connection_coverage_check(ok, "optional_path_value_formats_decimal",
-                              static_cast<bool>(optional_path_value_formats_decimal));
-    connection_coverage_check(ok, "missing_optional_path_returns_null",
-                              static_cast<bool>(missing_optional_path_returns_null));
-    connection_coverage_check(ok, "unknown_path_returns_null",
-                              static_cast<bool>(unknown_path_returns_null));
-    connection_coverage_check(ok, "existing_path_is_found",
-                              static_cast<bool>(existing_path_is_found));
-    connection_coverage_check(ok, "null_path_summary_formats_dash",
-                              static_cast<bool>(null_path_summary_formats_dash));
-    connection_coverage_check(ok, "traced_path_summary_mentions_path_state",
-                              static_cast<bool>(traced_path_summary_mentions_path_state));
-    connection_coverage_check(ok, "invalid_ack_first_range_formats_invalid",
-                              static_cast<bool>(invalid_ack_first_range_formats_invalid));
-    connection_coverage_check(ok, "invalid_ack_gap_formats_invalid",
-                              static_cast<bool>(invalid_ack_gap_formats_invalid));
-    connection_coverage_check(ok, "invalid_ack_range_length_formats_invalid",
-                              static_cast<bool>(invalid_ack_range_length_formats_invalid));
-    connection_coverage_check(ok, "valid_ack_ranges_format_expected",
-                              static_cast<bool>(valid_ack_ranges_format_expected));
-    connection_coverage_check(ok, "invalid_received_ack_formats_invalid",
-                              static_cast<bool>(invalid_received_ack_formats_invalid));
-    connection_coverage_check(ok, "empty_packet_summary_reports_zero",
-                              static_cast<bool>(empty_packet_summary_reports_zero));
-    connection_coverage_check(ok, "packet_summary_mentions_counts",
-                              static_cast<bool>(packet_summary_mentions_counts));
-    connection_coverage_check(ok, "packet_summary_without_stream_offset_omits_offset",
-                              static_cast<bool>(packet_summary_without_stream_offset_omits_offset));
-    connection_coverage_check(
-        ok, "packet_stream_metadata_helpers_cover_count_bytes_and_first_offset",
-        static_cast<bool>(packet_stream_metadata_helpers_cover_count_bytes_and_first_offset));
-    connection_coverage_check(
-        ok, "packet_first_stream_frame_offset_covers_vector_fragment_and_empty",
-        static_cast<bool>(packet_first_stream_frame_offset_covers_vector_fragment_and_empty));
     connection_coverage_check(
         ok, "for_each_stream_frame_metadata_visits_first_metadata",
         static_cast<bool>(for_each_stream_frame_metadata_visits_first_metadata));

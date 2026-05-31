@@ -15,7 +15,5 @@
 !zig-out/bin/
 !zig-out/bin/h3-server
 !zig-out/share/
-!zig-out/share/wasm-quic/
-!zig-out/share/wasm-quic/**
 !zig-out/demo-site/
 !zig-out/demo-site/**

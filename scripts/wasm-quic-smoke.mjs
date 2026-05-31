@@ -5,7 +5,7 @@ import { webcrypto } from "node:crypto";
 
 globalThis.crypto ??= webcrypto;
 
-const wasmPath = process.argv[2] ?? "zig-out/bin/coquic-wasm-quic.wasm";
+const wasmPath = process.argv[2] ?? "zig-out/share/wasm-quic/coquic-wasm-quic.wasm";
 const bytes = fs.readFileSync(wasmPath);
 const debug = process.env.COQUIC_WASM_SMOKE_DEBUG === "1";
 

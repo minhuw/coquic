@@ -16,11 +16,6 @@ tools/rag/**/*.egg-info/
 compile_commands.json
 .bench-results/
 bench/*/target/
-demo/wasm-quic/perf-results.json
-demo/wasm-quic/perf-history.json
-demo/wasm-quic/coverage-results.json
-demo/wasm-quic/interop-results.json
-demo/wasm-quic/*.wasm
 coverage-html.tar.gz
 demo/next/.next/
 demo/next/out/
@@ -29,3 +24,4 @@ demo/next/public/perf-results.json
 demo/next/public/perf-history.json
 demo/next/public/coverage-results.json
 demo/next/public/interop-results.json
+demo/next/public/coquic-wasm-quic.wasm

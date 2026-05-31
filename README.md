@@ -33,4 +33,6 @@
 
 # CoQUIC
 
+[![Codacy Badge](https://api.codacy.com/project/badge/Grade/a274ad27ead946d8bdbb2d39cd10bf65)](https://app.codacy.com/gh/minhuw/coquic?utm_source=github.com&utm_medium=referral&utm_content=minhuw/coquic&utm_campaign=Badge_Grade)
+
 CoQUIC is an experimental QUIC implementation exploring how far Codex, paired with GPT-5.4 and later models, can go in building a full-featured transport stack. The whole repo is generated entirely by LLM, with careful human prompt.

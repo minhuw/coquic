@@ -69,6 +69,7 @@
 ## Repo Conventions
 
 - If worktrees are needed, keep them under `.worktrees/` inside the repo.
+- Use the Conventional Commits guideline when writing git commit messages.
 - Do not commit generated local state such as `.rag/`.
 - Do not commit downloaded remote CI state such as `.remote-ci/`.
 - When answering QUIC protocol questions, prefer grounded citations from the

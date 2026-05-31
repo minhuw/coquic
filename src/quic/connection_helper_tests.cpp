@@ -570,6 +570,525 @@ bool stream_metadata_probe_worthy_acked_fin_rejected_for_tests() {
                                                                 });
 }
 
+struct SimpleStreamAckSampleCaseForTests {
+    std::uint64_t packet_number = 0;
+    QuicPathId path_id = 0;
+    QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+    std::chrono::milliseconds sent_offset{};
+};
+
+AckedStreamPacketSample
+make_simple_stream_ack_sample_for_tests(SimpleStreamAckSampleCaseForTests test_case) {
+    return AckedStreamPacketSample{
+        .packet_number = test_case.packet_number,
+        .sent_time = QuicCoreTimePoint{} + test_case.sent_offset,
+        .congestion_send_sequence = test_case.packet_number,
+        .bytes_in_flight = 1200,
+        .path_id = test_case.path_id,
+        .ecn = test_case.ecn,
+    };
+}
+
+bool single_path_simple_stream_ack_ecn_ignores_failed_path_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    auto &path = ConnectionCoverageTestPeer::ensure_path_state(connection, 17);
+    path.ecn.state = QuicPathEcnState::failed;
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    const std::array samples{make_simple_stream_ack_sample_for_tests({
+        .packet_number = 17,
+        .path_id = 17,
+        .ecn = QuicEcnCodepoint::ect0,
+        .sent_offset = std::chrono::milliseconds(17),
+    })};
+    return ConnectionCoverageTestPeer::process_single_path_simple_stream_ack_ecn(
+               connection, 17, /*newly_acked_ect0=*/1,
+               /*newly_acked_ect1=*/0, samples.front().sent_time, AckEcnCounts{.ect0 = 1},
+               latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(17).ecn.state ==
+               QuicPathEcnState::failed;
+}
+
+bool single_path_simple_stream_ack_ecn_missing_counts_disable_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    auto &path = ConnectionCoverageTestPeer::ensure_path_state(connection, 18);
+    path.ecn.total_sent_ect0 = 4;
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    const std::array samples{make_simple_stream_ack_sample_for_tests({
+        .packet_number = 18,
+        .path_id = 18,
+        .ecn = QuicEcnCodepoint::ect0,
+        .sent_offset = std::chrono::milliseconds(18),
+    })};
+    return ConnectionCoverageTestPeer::process_simple_stream_ack_ecn(
+               connection, samples, std::nullopt, latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(18).ecn.state ==
+               QuicPathEcnState::failed &&
+           !latest_ecn_ce_sent_time.has_value();
+}
+
+bool single_path_simple_stream_ack_ecn_decreased_counts_disable_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    auto &path = ConnectionCoverageTestPeer::ensure_path_state(connection, 19);
+    path.ecn.total_sent_ect0 = 8;
+    path.ecn.last_peer_counts[2] = AckEcnCounts{.ect0 = 4};
+    path.ecn.has_last_peer_counts[2] = true;
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    return ConnectionCoverageTestPeer::process_single_path_simple_stream_ack_ecn(
+               connection, 19, /*newly_acked_ect0=*/1,
+               /*newly_acked_ect1=*/0, QuicCoreTimePoint{} + std::chrono::milliseconds(19),
+               AckEcnCounts{.ect0 = 3}, latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(19).ecn.state ==
+               QuicPathEcnState::failed;
+}
+
+bool single_path_simple_stream_ack_ecn_counts_ect1_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    auto &path = ConnectionCoverageTestPeer::ensure_path_state(connection, 33);
+    path.ecn.total_sent_ect1 = 4;
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    const std::array samples{make_simple_stream_ack_sample_for_tests({
+        .packet_number = 33,
+        .path_id = 33,
+        .ecn = QuicEcnCodepoint::ect1,
+        .sent_offset = std::chrono::milliseconds(33),
+    })};
+    return ConnectionCoverageTestPeer::process_simple_stream_ack_ecn(
+               connection, samples, AckEcnCounts{.ect1 = 1}, latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(33).ecn.state ==
+               QuicPathEcnState::capable &&
+           ConnectionCoverageTestPeer::paths(connection).at(33).ecn.probing_packets_acked == 1;
+}
+
+bool single_path_simple_stream_ack_ecn_missing_feedback_disables_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    auto &path = ConnectionCoverageTestPeer::ensure_path_state(connection, 20);
+    path.ecn.total_sent_ect0 = 8;
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    return ConnectionCoverageTestPeer::process_single_path_simple_stream_ack_ecn(
+               connection, 20, /*newly_acked_ect0=*/2,
+               /*newly_acked_ect1=*/0, QuicCoreTimePoint{} + std::chrono::milliseconds(20),
+               AckEcnCounts{.ect0 = 1}, latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(20).ecn.state ==
+               QuicPathEcnState::failed;
+}
+
+bool single_path_simple_stream_ack_ecn_success_tracks_ce_time_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    auto &path = ConnectionCoverageTestPeer::ensure_path_state(connection, 21);
+    path.ecn.total_sent_ect0 = 4;
+    path.ecn.total_sent_ect1 = 4;
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    const auto marked_time = QuicCoreTimePoint{} + std::chrono::milliseconds(21);
+    return ConnectionCoverageTestPeer::process_single_path_simple_stream_ack_ecn(
+               connection, 21, /*newly_acked_ect0=*/0,
+               /*newly_acked_ect1=*/1, marked_time, AckEcnCounts{.ect1 = 0, .ecn_ce = 1},
+               latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(21).ecn.state ==
+               QuicPathEcnState::capable &&
+           ConnectionCoverageTestPeer::paths(connection).at(21).ecn.probing_packets_acked == 1 &&
+           latest_ecn_ce_sent_time == marked_time;
+}
+
+bool simple_stream_ack_ecn_non_ect_samples_are_ignored_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    const std::array samples{make_simple_stream_ack_sample_for_tests({
+        .packet_number = 22,
+        .path_id = 22,
+        .ecn = QuicEcnCodepoint::not_ect,
+        .sent_offset = std::chrono::milliseconds(22),
+    })};
+    return ConnectionCoverageTestPeer::process_simple_stream_ack_ecn(
+               connection, samples, std::nullopt, latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).find(22) ==
+               ConnectionCoverageTestPeer::paths(connection).end() &&
+           !latest_ecn_ce_sent_time.has_value();
+}
+
+bool multi_path_simple_stream_ack_ecn_ignores_failed_path_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    ConnectionCoverageTestPeer::ensure_path_state(connection, 23).ecn.state =
+        QuicPathEcnState::failed;
+    auto &second_path = ConnectionCoverageTestPeer::ensure_path_state(connection, 24);
+    second_path.ecn.total_sent_ect0 = 4;
+    second_path.ecn.total_sent_ect1 = 4;
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    const std::array samples{
+        make_simple_stream_ack_sample_for_tests({
+            .packet_number = 23,
+            .path_id = 23,
+            .ecn = QuicEcnCodepoint::ect0,
+            .sent_offset = std::chrono::milliseconds(23),
+        }),
+        make_simple_stream_ack_sample_for_tests({
+            .packet_number = 24,
+            .path_id = 24,
+            .ecn = QuicEcnCodepoint::ect1,
+            .sent_offset = std::chrono::milliseconds(24),
+        }),
+    };
+    return ConnectionCoverageTestPeer::process_simple_stream_ack_ecn(
+               connection, samples, AckEcnCounts{.ect0 = 1, .ect1 = 1}, latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(23).ecn.state ==
+               QuicPathEcnState::failed &&
+           ConnectionCoverageTestPeer::paths(connection).at(24).ecn.state ==
+               QuicPathEcnState::capable;
+}
+
+bool multi_path_simple_stream_ack_ecn_missing_counts_disable_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    ConnectionCoverageTestPeer::ensure_path_state(connection, 25).ecn.total_sent_ect0 = 4;
+    ConnectionCoverageTestPeer::ensure_path_state(connection, 26).ecn.total_sent_ect1 = 4;
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    const std::array samples{
+        make_simple_stream_ack_sample_for_tests({
+            .packet_number = 25,
+            .path_id = 25,
+            .ecn = QuicEcnCodepoint::ect0,
+            .sent_offset = std::chrono::milliseconds(25),
+        }),
+        make_simple_stream_ack_sample_for_tests({
+            .packet_number = 26,
+            .path_id = 26,
+            .ecn = QuicEcnCodepoint::ect1,
+            .sent_offset = std::chrono::milliseconds(26),
+        }),
+    };
+    return ConnectionCoverageTestPeer::process_simple_stream_ack_ecn(
+               connection, samples, std::nullopt, latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(25).ecn.state ==
+               QuicPathEcnState::failed &&
+           ConnectionCoverageTestPeer::paths(connection).at(26).ecn.state ==
+               QuicPathEcnState::failed;
+}
+
+bool multi_path_simple_stream_ack_ecn_decreased_counts_disable_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    for (const auto path_id : {QuicPathId{27}, QuicPathId{28}}) {
+        auto &path = ConnectionCoverageTestPeer::ensure_path_state(connection, path_id);
+        path.ecn.total_sent_ect0 = 8;
+        path.ecn.total_sent_ect1 = 8;
+        path.ecn.last_peer_counts[2] = AckEcnCounts{.ect0 = 4, .ect1 = 4};
+        path.ecn.has_last_peer_counts[2] = true;
+    }
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    const std::array samples{
+        make_simple_stream_ack_sample_for_tests({
+            .packet_number = 27,
+            .path_id = 27,
+            .ecn = QuicEcnCodepoint::ect0,
+            .sent_offset = std::chrono::milliseconds(27),
+        }),
+        make_simple_stream_ack_sample_for_tests({
+            .packet_number = 28,
+            .path_id = 28,
+            .ecn = QuicEcnCodepoint::ect1,
+            .sent_offset = std::chrono::milliseconds(28),
+        }),
+    };
+    return ConnectionCoverageTestPeer::process_simple_stream_ack_ecn(
+               connection, samples, AckEcnCounts{.ect0 = 3, .ect1 = 4}, latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(27).ecn.state ==
+               QuicPathEcnState::failed &&
+           ConnectionCoverageTestPeer::paths(connection).at(28).ecn.state ==
+               QuicPathEcnState::failed;
+}
+
+bool multi_path_simple_stream_ack_ecn_missing_feedback_disables_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    ConnectionCoverageTestPeer::ensure_path_state(connection, 29).ecn.total_sent_ect0 = 8;
+    ConnectionCoverageTestPeer::ensure_path_state(connection, 30).ecn.total_sent_ect1 = 8;
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    const std::array samples{
+        make_simple_stream_ack_sample_for_tests({
+            .packet_number = 29,
+            .path_id = 29,
+            .ecn = QuicEcnCodepoint::ect0,
+            .sent_offset = std::chrono::milliseconds(29),
+        }),
+        make_simple_stream_ack_sample_for_tests({
+            .packet_number = 30,
+            .path_id = 30,
+            .ecn = QuicEcnCodepoint::ect1,
+            .sent_offset = std::chrono::milliseconds(30),
+        }),
+    };
+    return ConnectionCoverageTestPeer::process_simple_stream_ack_ecn(
+               connection, samples, AckEcnCounts{.ect0 = 0, .ect1 = 1}, latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(29).ecn.state ==
+               QuicPathEcnState::failed &&
+           ConnectionCoverageTestPeer::paths(connection).at(30).ecn.state ==
+               QuicPathEcnState::capable;
+}
+
+bool multi_path_simple_stream_ack_ecn_success_tracks_ce_time_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    for (const auto path_id : {QuicPathId{31}, QuicPathId{32}}) {
+        auto &path = ConnectionCoverageTestPeer::ensure_path_state(connection, path_id);
+        path.ecn.total_sent_ect0 = 8;
+        path.ecn.total_sent_ect1 = 8;
+    }
+    std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
+    const std::array samples{
+        make_simple_stream_ack_sample_for_tests({
+            .packet_number = 31,
+            .path_id = 31,
+            .ecn = QuicEcnCodepoint::ect0,
+            .sent_offset = std::chrono::milliseconds(31),
+        }),
+        make_simple_stream_ack_sample_for_tests({
+            .packet_number = 32,
+            .path_id = 32,
+            .ecn = QuicEcnCodepoint::ect1,
+            .sent_offset = std::chrono::milliseconds(32),
+        }),
+    };
+    return ConnectionCoverageTestPeer::process_simple_stream_ack_ecn(
+               connection, samples, AckEcnCounts{.ect0 = 1, .ect1 = 1, .ecn_ce = 1},
+               latest_ecn_ce_sent_time) &&
+           ConnectionCoverageTestPeer::paths(connection).at(31).ecn.state ==
+               QuicPathEcnState::capable &&
+           ConnectionCoverageTestPeer::paths(connection).at(32).ecn.state ==
+               QuicPathEcnState::capable &&
+           latest_ecn_ce_sent_time == QuicCoreTimePoint{} + std::chrono::milliseconds(32);
+}
+
+bool trace_unset_disabled_for_tests(const ConnectionId &retry_source_connection_id) {
+    ScopedEnvVarForTests original_trace("COQUIC_PACKET_TRACE", "seed");
+    ScopedEnvVarForTests original_filter("COQUIC_PACKET_TRACE_SCID", "seed");
+    ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", std::nullopt);
+    ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", std::nullopt);
+    return !packet_trace_enabled() & !packet_trace_matches_connection(retry_source_connection_id);
+}
+
+bool trace_empty_disabled_for_tests() {
+    ScopedEnvVarForTests original_trace("COQUIC_PACKET_TRACE", "seed");
+    ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "");
+    return !packet_trace_enabled();
+}
+
+bool trace_zero_disabled_for_tests() {
+    ScopedEnvVarForTests original_trace("COQUIC_PACKET_TRACE", "seed");
+    ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "0");
+    return !packet_trace_enabled();
+}
+
+bool trace_matches_without_filter_for_tests(const ConnectionId &retry_source_connection_id) {
+    ScopedEnvVarForTests original_trace("COQUIC_PACKET_TRACE", "seed");
+    ScopedEnvVarForTests original_filter("COQUIC_PACKET_TRACE_SCID", "seed");
+    ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
+    ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", std::nullopt);
+    return packet_trace_enabled() & packet_trace_matches_connection(retry_source_connection_id);
+}
+
+bool trace_matches_with_empty_filter_for_tests(const ConnectionId &retry_source_connection_id) {
+    ScopedEnvVarForTests original_trace("COQUIC_PACKET_TRACE", "seed");
+    ScopedEnvVarForTests original_filter("COQUIC_PACKET_TRACE_SCID", "seed");
+    ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
+    ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", "");
+    return packet_trace_matches_connection(retry_source_connection_id);
+}
+
+bool trace_matches_with_exact_filter_for_tests(const ConnectionId &retry_source_connection_id) {
+    ScopedEnvVarForTests original_trace("COQUIC_PACKET_TRACE", "seed");
+    ScopedEnvVarForTests original_filter("COQUIC_PACKET_TRACE_SCID", "seed");
+    ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
+    ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID",
+                                format_connection_id_hex(retry_source_connection_id));
+    return packet_trace_matches_connection(retry_source_connection_id);
+}
+
+bool trace_rejects_mismatched_filter_for_tests(const ConnectionId &retry_source_connection_id) {
+    ScopedEnvVarForTests original_trace("COQUIC_PACKET_TRACE", "seed");
+    ScopedEnvVarForTests original_filter("COQUIC_PACKET_TRACE_SCID", "seed");
+    ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
+    ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", "deadbeef");
+    return !packet_trace_matches_connection(retry_source_connection_id);
+}
+
+void process_fast_path_datagram_for_tests(QuicConnection &connection,
+                                          const std::vector<std::byte> &datagram,
+                                          QuicCoreTimePoint now = QuicCoreTimePoint{}) {
+    ConnectionCoverageTestPeer::mark_resumption_state_emitted(connection);
+    auto storage = std::make_shared<std::vector<std::byte>>(datagram);
+    ConnectionCoverageTestPeer::process_inbound_datagram(
+        connection, storage, /*begin=*/0, /*end=*/storage->size(), now, /*path_id=*/0,
+        QuicEcnCodepoint::ect0, std::nullopt, /*replay_trigger=*/false,
+        /*count_inbound_bytes=*/true, /*allow_in_place_receive_decode=*/true);
+}
+
+bool discardable_deferred_replay_packet_does_not_block_current_packet_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    const std::array frames{Frame{PingFrame{}}};
+    auto current =
+        serialize_one_rtt_packet_for_connection_coverage(connection, /*packet_number=*/291, frames);
+    auto deferred =
+        serialize_one_rtt_packet_for_connection_coverage(connection, /*packet_number=*/292, frames);
+    if (current.empty() || deferred.empty()) {
+        return false;
+    }
+    deferred.back() = static_cast<std::byte>(std::to_integer<unsigned>(deferred.back()) ^ 0x01u);
+    ConnectionCoverageTestPeer::push_deferred_protected_datagram(connection,
+                                                                 DeferredProtectedDatagram{
+                                                                     std::move(deferred),
+                                                                 });
+    connection.process_inbound_datagram(current, QuicCoreTimePoint{});
+    return !connection.has_failed() &&
+           ConnectionCoverageTestPeer::deferred_protected_packets_empty(connection) &&
+           ConnectionCoverageTestPeer::application_largest_authenticated_packet_number(
+               connection) == 291u;
+}
+
+bool in_place_receive_storage_guard_for_tests(bool ConnectionDrainTestHooks::*hook_field) {
+    const std::array frames{Frame{PingFrame{}}};
+    const auto datagram = serialize_one_rtt_packet_for_connection_coverage(
+        make_connected_client_connection_for_connection_coverage(), /*packet_number=*/300, frames);
+    if (datagram.empty()) {
+        return false;
+    }
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    auto storage = std::make_shared<std::vector<std::byte>>(datagram);
+    const ScopedConnectionDrainTestHook hook(hook_field);
+    ConnectionCoverageTestPeer::process_inbound_datagram(
+        connection, storage, /*begin=*/0, /*end=*/storage->size(), QuicCoreTimePoint{},
+        /*path_id=*/0, QuicEcnCodepoint::unavailable, std::nullopt, /*replay_trigger=*/false,
+        /*count_inbound_bytes=*/true, /*allow_in_place_receive_decode=*/true);
+    return !connection.has_failed();
+}
+
+bool replay_failure_before_current_packet_is_non_fatal_for_tests() {
+    const std::array frames{Frame{PingFrame{}}};
+    auto datagram = serialize_one_rtt_packet_for_connection_coverage(
+        make_connected_client_connection_for_connection_coverage(), /*packet_number=*/301, frames);
+    if (datagram.empty()) {
+        return false;
+    }
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    const ScopedConnectionDrainCountdownTestHook hook(
+        &ConnectionDrainTestHooks::force_replay_deferred_packets_failure_countdown, 0);
+    connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
+    return !connection.has_failed();
+}
+
+bool replay_failure_after_current_packet_is_non_fatal_for_tests() {
+    const std::array frames{Frame{PingFrame{}}};
+    auto datagram = serialize_one_rtt_packet_for_connection_coverage(
+        make_connected_client_connection_for_connection_coverage(), /*packet_number=*/302, frames);
+    if (datagram.empty()) {
+        return false;
+    }
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    const ScopedConnectionDrainCountdownTestHook hook(
+        &ConnectionDrainTestHooks::force_replay_deferred_packets_failure_countdown, 1);
+    connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
+    return !connection.has_failed() &&
+           ConnectionCoverageTestPeer::application_largest_authenticated_packet_number(
+               connection) == 302u;
+}
+
+bool fast_path_ack_only_packet_processed_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    ConnectionCoverageTestPeer::track_application_sent_packet(
+        connection, SentPacketRecord{
+                        .packet_number = 0,
+                        .sent_time = QuicCoreTimePoint{} - std::chrono::seconds(1),
+                        .ack_eliciting = true,
+                        .in_flight = true,
+                        .bytes_in_flight = 1200,
+                        .path_id = 0,
+                        .ecn = QuicEcnCodepoint::ect0,
+                    });
+    const std::array frames{Frame{AckFrame{
+        .largest_acknowledged = 0,
+        .first_ack_range = 0,
+    }}};
+    const auto datagram =
+        serialize_one_rtt_packet_for_connection_coverage(connection, /*packet_number=*/401, frames);
+    if (datagram.empty()) {
+        return false;
+    }
+    process_fast_path_datagram_for_tests(connection, datagram);
+    return !connection.has_failed() &&
+           ConnectionCoverageTestPeer::application_received_packets_contains(connection, 401);
+}
+
+bool fast_path_duplicate_ack_only_packet_ignored_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    ConnectionCoverageTestPeer::track_application_sent_packet(
+        connection, SentPacketRecord{
+                        .packet_number = 0,
+                        .sent_time = QuicCoreTimePoint{} - std::chrono::seconds(1),
+                        .ack_eliciting = true,
+                        .in_flight = true,
+                        .bytes_in_flight = 1200,
+                        .path_id = 0,
+                        .ecn = QuicEcnCodepoint::ect0,
+                    });
+    const std::array frames{Frame{AckFrame{
+        .largest_acknowledged = 0,
+        .first_ack_range = 0,
+    }}};
+    const auto datagram =
+        serialize_one_rtt_packet_for_connection_coverage(connection, /*packet_number=*/401, frames);
+    if (datagram.empty()) {
+        return false;
+    }
+    process_fast_path_datagram_for_tests(connection, datagram);
+    process_fast_path_datagram_for_tests(connection, datagram);
+    return !connection.has_failed() &&
+           ConnectionCoverageTestPeer::application_received_packets_contains(connection, 401);
+}
+
+bool fast_path_stream_packet_processed_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    const std::array frames{Frame{StreamFrame{
+        .has_length = true,
+        .stream_id = 1,
+        .stream_data = bytes_from_ints_for_tests({0x41, 0x42}),
+    }}};
+    const auto datagram =
+        serialize_one_rtt_packet_for_connection_coverage(connection, /*packet_number=*/402, frames);
+    if (datagram.empty()) {
+        return false;
+    }
+    process_fast_path_datagram_for_tests(connection, datagram);
+    return !connection.has_failed() &&
+           ConnectionCoverageTestPeer::application_received_packets_contains(connection, 402) &&
+           !ConnectionCoverageTestPeer::pending_stream_receive_effects_empty(connection);
+}
+
+bool fast_path_duplicate_stream_packet_ignored_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    const std::array frames{Frame{StreamFrame{
+        .has_length = true,
+        .stream_id = 1,
+        .stream_data = bytes_from_ints_for_tests({0x41, 0x42}),
+    }}};
+    const auto datagram =
+        serialize_one_rtt_packet_for_connection_coverage(connection, /*packet_number=*/402, frames);
+    if (datagram.empty()) {
+        return false;
+    }
+    process_fast_path_datagram_for_tests(connection, datagram);
+    process_fast_path_datagram_for_tests(connection, datagram);
+    return !connection.has_failed() &&
+           ConnectionCoverageTestPeer::application_received_packets_contains(connection, 402);
+}
+
+bool fast_path_corrupted_packet_discarded_for_tests() {
+    auto connection = make_connected_client_connection_for_connection_coverage();
+    const std::array frames{Frame{PingFrame{}}};
+    auto datagram =
+        serialize_one_rtt_packet_for_connection_coverage(connection, /*packet_number=*/403, frames);
+    if (datagram.empty()) {
+        return false;
+    }
+    datagram.back() = static_cast<std::byte>(std::to_integer<unsigned>(datagram.back()) ^ 0x01u);
+    process_fast_path_datagram_for_tests(connection, datagram);
+    return !connection.has_failed() &&
+           !ConnectionCoverageTestPeer::application_received_packets_contains(connection, 403);
+}
+
 bool connection_helper_edge_cases_for_tests() {
     bool ok = true;
 
@@ -909,224 +1428,6 @@ bool connection_helper_edge_cases_for_tests() {
         packet_first_stream_frame_offset(vector_only_metadata_packet_for_tests()) == 33u &&
             packet_first_stream_frame_offset(fragment_only_metadata_packet_for_tests()) == 44u &&
             !packet_first_stream_frame_offset(SentPacketRecord{}).has_value());
-    const auto make_simple_stream_ack_sample = [](std::uint64_t packet_number, QuicPathId path_id,
-                                                  QuicEcnCodepoint ecn,
-                                                  std::chrono::milliseconds sent_offset) {
-        return AckedStreamPacketSample{
-            .packet_number = packet_number,
-            .sent_time = QuicCoreTimePoint{} + sent_offset,
-            .congestion_send_sequence = packet_number,
-            .bytes_in_flight = 1200,
-            .path_id = path_id,
-            .ecn = ecn,
-        };
-    };
-    bool single_path_simple_stream_ack_ecn_ignores_failed_path = false;
-    bool single_path_simple_stream_ack_ecn_missing_counts_disable = false;
-    bool single_path_simple_stream_ack_ecn_decreased_counts_disable = false;
-    bool single_path_simple_stream_ack_ecn_counts_ect1 = false;
-    bool single_path_simple_stream_ack_ecn_missing_feedback_disables = false;
-    bool single_path_simple_stream_ack_ecn_success_tracks_ce_time = false;
-    bool simple_stream_ack_ecn_non_ect_samples_are_ignored = false;
-    bool multi_path_simple_stream_ack_ecn_ignores_failed_path = false;
-    bool multi_path_simple_stream_ack_ecn_missing_counts_disable = false;
-    bool multi_path_simple_stream_ack_ecn_decreased_counts_disable = false;
-    bool multi_path_simple_stream_ack_ecn_missing_feedback_disables = false;
-    bool multi_path_simple_stream_ack_ecn_success_tracks_ce_time = false;
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        auto &path = connection.ensure_path_state(17);
-        path.ecn.state = QuicPathEcnState::failed;
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        const std::array samples{make_simple_stream_ack_sample(17, 17, QuicEcnCodepoint::ect0,
-                                                               std::chrono::milliseconds(17))};
-        single_path_simple_stream_ack_ecn_ignores_failed_path =
-            connection.process_single_path_simple_stream_ack_ecn(
-                connection.application_space_, 17, /*newly_acked_ect0=*/1,
-                /*newly_acked_ect1=*/0, samples.front().sent_time, AckEcnCounts{.ect0 = 1},
-                latest_ecn_ce_sent_time) &&
-            connection.paths_.at(17).ecn.state == QuicPathEcnState::failed;
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        auto &path = connection.ensure_path_state(18);
-        path.ecn.total_sent_ect0 = 4;
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        const std::array samples{make_simple_stream_ack_sample(18, 18, QuicEcnCodepoint::ect0,
-                                                               std::chrono::milliseconds(18))};
-        single_path_simple_stream_ack_ecn_missing_counts_disable =
-            connection.process_simple_stream_ack_ecn(connection.application_space_, samples,
-                                                     std::nullopt, latest_ecn_ce_sent_time) &&
-            connection.paths_.at(18).ecn.state == QuicPathEcnState::failed &&
-            !latest_ecn_ce_sent_time.has_value();
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        auto &path = connection.ensure_path_state(19);
-        path.ecn.total_sent_ect0 = 8;
-        path.ecn.last_peer_counts[2] = AckEcnCounts{.ect0 = 4};
-        path.ecn.has_last_peer_counts[2] = true;
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        single_path_simple_stream_ack_ecn_decreased_counts_disable =
-            connection.process_single_path_simple_stream_ack_ecn(
-                connection.application_space_, 19, /*newly_acked_ect0=*/1,
-                /*newly_acked_ect1=*/0, QuicCoreTimePoint{} + std::chrono::milliseconds(19),
-                AckEcnCounts{.ect0 = 3}, latest_ecn_ce_sent_time) &&
-            connection.paths_.at(19).ecn.state == QuicPathEcnState::failed;
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        auto &path = connection.ensure_path_state(33);
-        path.ecn.total_sent_ect1 = 4;
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        const std::array samples{make_simple_stream_ack_sample(33, 33, QuicEcnCodepoint::ect1,
-                                                               std::chrono::milliseconds(33))};
-        single_path_simple_stream_ack_ecn_counts_ect1 =
-            connection.process_simple_stream_ack_ecn(connection.application_space_, samples,
-                                                     AckEcnCounts{.ect1 = 1},
-                                                     latest_ecn_ce_sent_time) &&
-            connection.paths_.at(33).ecn.state == QuicPathEcnState::capable &&
-            connection.paths_.at(33).ecn.probing_packets_acked == 1;
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        auto &path = connection.ensure_path_state(20);
-        path.ecn.total_sent_ect0 = 8;
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        single_path_simple_stream_ack_ecn_missing_feedback_disables =
-            connection.process_single_path_simple_stream_ack_ecn(
-                connection.application_space_, 20, /*newly_acked_ect0=*/2,
-                /*newly_acked_ect1=*/0, QuicCoreTimePoint{} + std::chrono::milliseconds(20),
-                AckEcnCounts{.ect0 = 1}, latest_ecn_ce_sent_time) &&
-            connection.paths_.at(20).ecn.state == QuicPathEcnState::failed;
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        auto &path = connection.ensure_path_state(21);
-        path.ecn.total_sent_ect0 = 4;
-        path.ecn.total_sent_ect1 = 4;
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        const auto marked_time = QuicCoreTimePoint{} + std::chrono::milliseconds(21);
-        single_path_simple_stream_ack_ecn_success_tracks_ce_time =
-            connection.process_single_path_simple_stream_ack_ecn(
-                connection.application_space_, 21, /*newly_acked_ect0=*/0,
-                /*newly_acked_ect1=*/1, marked_time, AckEcnCounts{.ect1 = 0, .ecn_ce = 1},
-                latest_ecn_ce_sent_time) &&
-            connection.paths_.at(21).ecn.state == QuicPathEcnState::capable &&
-            connection.paths_.at(21).ecn.probing_packets_acked == 1 &&
-            latest_ecn_ce_sent_time == marked_time;
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        const std::array samples{make_simple_stream_ack_sample(22, 22, QuicEcnCodepoint::not_ect,
-                                                               std::chrono::milliseconds(22))};
-        simple_stream_ack_ecn_non_ect_samples_are_ignored =
-            connection.process_simple_stream_ack_ecn(connection.application_space_, samples,
-                                                     std::nullopt, latest_ecn_ce_sent_time) &&
-            connection.paths_.find(22) == connection.paths_.end() &&
-            !latest_ecn_ce_sent_time.has_value();
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        connection.ensure_path_state(23).ecn.state = QuicPathEcnState::failed;
-        auto &second_path = connection.ensure_path_state(24);
-        second_path.ecn.total_sent_ect0 = 4;
-        second_path.ecn.total_sent_ect1 = 4;
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        const std::array samples{
-            make_simple_stream_ack_sample(23, 23, QuicEcnCodepoint::ect0,
-                                          std::chrono::milliseconds(23)),
-            make_simple_stream_ack_sample(24, 24, QuicEcnCodepoint::ect1,
-                                          std::chrono::milliseconds(24)),
-        };
-        multi_path_simple_stream_ack_ecn_ignores_failed_path =
-            connection.process_simple_stream_ack_ecn(connection.application_space_, samples,
-                                                     AckEcnCounts{.ect0 = 1, .ect1 = 1},
-                                                     latest_ecn_ce_sent_time) &&
-            connection.paths_.at(23).ecn.state == QuicPathEcnState::failed &&
-            connection.paths_.at(24).ecn.state == QuicPathEcnState::capable;
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        connection.ensure_path_state(25).ecn.total_sent_ect0 = 4;
-        connection.ensure_path_state(26).ecn.total_sent_ect1 = 4;
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        const std::array samples{
-            make_simple_stream_ack_sample(25, 25, QuicEcnCodepoint::ect0,
-                                          std::chrono::milliseconds(25)),
-            make_simple_stream_ack_sample(26, 26, QuicEcnCodepoint::ect1,
-                                          std::chrono::milliseconds(26)),
-        };
-        multi_path_simple_stream_ack_ecn_missing_counts_disable =
-            connection.process_simple_stream_ack_ecn(connection.application_space_, samples,
-                                                     std::nullopt, latest_ecn_ce_sent_time) &&
-            connection.paths_.at(25).ecn.state == QuicPathEcnState::failed &&
-            connection.paths_.at(26).ecn.state == QuicPathEcnState::failed;
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        for (const auto path_id : {QuicPathId{27}, QuicPathId{28}}) {
-            auto &path = connection.ensure_path_state(path_id);
-            path.ecn.total_sent_ect0 = 8;
-            path.ecn.total_sent_ect1 = 8;
-            path.ecn.last_peer_counts[2] = AckEcnCounts{.ect0 = 4, .ect1 = 4};
-            path.ecn.has_last_peer_counts[2] = true;
-        }
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        const std::array samples{
-            make_simple_stream_ack_sample(27, 27, QuicEcnCodepoint::ect0,
-                                          std::chrono::milliseconds(27)),
-            make_simple_stream_ack_sample(28, 28, QuicEcnCodepoint::ect1,
-                                          std::chrono::milliseconds(28)),
-        };
-        multi_path_simple_stream_ack_ecn_decreased_counts_disable =
-            connection.process_simple_stream_ack_ecn(connection.application_space_, samples,
-                                                     AckEcnCounts{.ect0 = 3, .ect1 = 4},
-                                                     latest_ecn_ce_sent_time) &&
-            connection.paths_.at(27).ecn.state == QuicPathEcnState::failed &&
-            connection.paths_.at(28).ecn.state == QuicPathEcnState::failed;
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        connection.ensure_path_state(29).ecn.total_sent_ect0 = 8;
-        connection.ensure_path_state(30).ecn.total_sent_ect1 = 8;
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        const std::array samples{
-            make_simple_stream_ack_sample(29, 29, QuicEcnCodepoint::ect0,
-                                          std::chrono::milliseconds(29)),
-            make_simple_stream_ack_sample(30, 30, QuicEcnCodepoint::ect1,
-                                          std::chrono::milliseconds(30)),
-        };
-        multi_path_simple_stream_ack_ecn_missing_feedback_disables =
-            connection.process_simple_stream_ack_ecn(connection.application_space_, samples,
-                                                     AckEcnCounts{.ect0 = 0, .ect1 = 1},
-                                                     latest_ecn_ce_sent_time) &&
-            connection.paths_.at(29).ecn.state == QuicPathEcnState::failed &&
-            connection.paths_.at(30).ecn.state == QuicPathEcnState::capable;
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        for (const auto path_id : {QuicPathId{31}, QuicPathId{32}}) {
-            auto &path = connection.ensure_path_state(path_id);
-            path.ecn.total_sent_ect0 = 8;
-            path.ecn.total_sent_ect1 = 8;
-        }
-        std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-        const std::array samples{
-            make_simple_stream_ack_sample(31, 31, QuicEcnCodepoint::ect0,
-                                          std::chrono::milliseconds(31)),
-            make_simple_stream_ack_sample(32, 32, QuicEcnCodepoint::ect1,
-                                          std::chrono::milliseconds(32)),
-        };
-        multi_path_simple_stream_ack_ecn_success_tracks_ce_time =
-            connection.process_simple_stream_ack_ecn(
-                connection.application_space_, samples,
-                AckEcnCounts{.ect0 = 1, .ect1 = 1, .ecn_ce = 1}, latest_ecn_ce_sent_time) &&
-            connection.paths_.at(31).ecn.state == QuicPathEcnState::capable &&
-            connection.paths_.at(32).ecn.state == QuicPathEcnState::capable &&
-            latest_ecn_ce_sent_time == QuicCoreTimePoint{} + std::chrono::milliseconds(32);
-    }
     connection_coverage_check(ok, "stream_frame_payload_budget_handles_edges",
                               stream_frame_payload_budget_handles_edges_for_tests());
     connection_coverage_check(
@@ -1160,64 +1461,6 @@ bool connection_helper_edge_cases_for_tests() {
     connection_coverage_check(ok, "one_rtt_fragment_size_rejects_overflowing_fragment_offsets",
                               one_rtt_fragment_size_rejects_overflowing_fragment_offsets_for_tests(
                                   retry_source_connection_id));
-
-    bool trace_unset_disabled = false;
-    bool trace_empty_disabled = false;
-    bool trace_zero_disabled = false;
-    bool trace_matches_without_filter = false;
-    bool trace_matches_with_empty_filter = false;
-    bool trace_matches_with_exact_filter = false;
-    bool trace_rejects_mismatched_filter = false;
-    {
-        ScopedEnvVarForTests original_trace("COQUIC_PACKET_TRACE", "seed");
-        ScopedEnvVarForTests original_filter("COQUIC_PACKET_TRACE_SCID", "seed");
-
-        {
-            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", std::nullopt);
-            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", std::nullopt);
-            trace_unset_disabled = !packet_trace_enabled() &
-                                   !packet_trace_matches_connection(retry_source_connection_id);
-        }
-
-        {
-            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "");
-            trace_empty_disabled = !packet_trace_enabled();
-        }
-
-        {
-            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "0");
-            trace_zero_disabled = !packet_trace_enabled();
-        }
-
-        {
-            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
-            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", std::nullopt);
-            trace_matches_without_filter = packet_trace_enabled() & packet_trace_matches_connection(
-                                                                        retry_source_connection_id);
-        }
-
-        {
-            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
-            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", "");
-            trace_matches_with_empty_filter =
-                packet_trace_matches_connection(retry_source_connection_id);
-        }
-
-        {
-            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
-            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID",
-                                        format_connection_id_hex(retry_source_connection_id));
-            trace_matches_with_exact_filter =
-                packet_trace_matches_connection(retry_source_connection_id);
-        }
-
-        {
-            ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
-            ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", "deadbeef");
-            trace_rejects_mismatched_filter =
-                !packet_trace_matches_connection(retry_source_connection_id);
-        }
-    }
 
     connection_coverage_check(ok, "empty_long_header_rejected",
                               !peek_discardable_long_header_packet_length({}).has_value());
@@ -1287,161 +1530,6 @@ bool connection_helper_edge_cases_for_tests() {
         !peek_discardable_long_header_packet_length(
              bytes_from_ints({0xe0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01}))
              .has_value());
-    bool discardable_deferred_replay_packet_does_not_block_current_packet = false;
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        const std::array frames{Frame{PingFrame{}}};
-        auto current = serialize_one_rtt_packet_for_connection_coverage(
-            connection, /*packet_number=*/291, frames);
-        auto deferred = serialize_one_rtt_packet_for_connection_coverage(
-            connection, /*packet_number=*/292, frames);
-        if (!current.empty() && !deferred.empty()) {
-            deferred.back() =
-                static_cast<std::byte>(std::to_integer<unsigned>(deferred.back()) ^ 0x01u);
-            connection.deferred_protected_packets_.push_back(DeferredProtectedDatagram{
-                std::move(deferred),
-            });
-            connection.process_inbound_datagram(current, QuicCoreTimePoint{});
-            discardable_deferred_replay_packet_does_not_block_current_packet =
-                !connection.has_failed() && connection.deferred_protected_packets_.empty() &&
-                connection.application_space_.largest_authenticated_packet_number == 291u;
-        }
-    }
-    bool in_place_receive_storage_before_begin_guard = false;
-    bool in_place_receive_storage_overflow_guard = false;
-    bool replay_failure_before_current_packet_is_non_fatal = false;
-    bool replay_failure_after_current_packet_is_non_fatal = false;
-    bool fast_path_ack_only_packet_processed = false;
-    bool fast_path_duplicate_ack_only_packet_ignored = false;
-    bool fast_path_stream_packet_processed = false;
-    bool fast_path_duplicate_stream_packet_ignored = false;
-    bool fast_path_corrupted_packet_discarded = false;
-    {
-        const std::array frames{Frame{PingFrame{}}};
-        const auto datagram = serialize_one_rtt_packet_for_connection_coverage(
-            make_connected_client_connection_for_connection_coverage(), /*packet_number=*/300,
-            frames);
-        if (!datagram.empty()) {
-            const auto exercise_guard = [&](bool ConnectionDrainTestHooks::*hook_field) {
-                auto connection = make_connected_client_connection_for_connection_coverage();
-                auto storage = std::make_shared<std::vector<std::byte>>(datagram);
-                const ScopedConnectionDrainTestHook hook(hook_field);
-                connection.process_inbound_datagram(
-                    storage, /*begin=*/0, /*end=*/storage->size(), QuicCoreTimePoint{},
-                    /*path_id=*/0, QuicEcnCodepoint::unavailable, std::nullopt,
-                    /*replay_trigger=*/false, /*count_inbound_bytes=*/true,
-                    /*allow_in_place_receive_decode=*/true);
-                return !connection.has_failed();
-            };
-            in_place_receive_storage_before_begin_guard =
-                exercise_guard(&ConnectionDrainTestHooks::force_storage_range_before_storage);
-            in_place_receive_storage_overflow_guard =
-                exercise_guard(&ConnectionDrainTestHooks::force_storage_range_overflow);
-        }
-    }
-    {
-        const std::array frames{Frame{PingFrame{}}};
-        auto datagram = serialize_one_rtt_packet_for_connection_coverage(
-            make_connected_client_connection_for_connection_coverage(), /*packet_number=*/301,
-            frames);
-        if (!datagram.empty()) {
-            auto connection = make_connected_client_connection_for_connection_coverage();
-            const ScopedConnectionDrainCountdownTestHook hook(
-                &ConnectionDrainTestHooks::force_replay_deferred_packets_failure_countdown, 0);
-            connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
-            replay_failure_before_current_packet_is_non_fatal = !connection.has_failed();
-        }
-    }
-    {
-        const std::array frames{Frame{PingFrame{}}};
-        auto datagram = serialize_one_rtt_packet_for_connection_coverage(
-            make_connected_client_connection_for_connection_coverage(), /*packet_number=*/302,
-            frames);
-        if (!datagram.empty()) {
-            auto connection = make_connected_client_connection_for_connection_coverage();
-            const ScopedConnectionDrainCountdownTestHook hook(
-                &ConnectionDrainTestHooks::force_replay_deferred_packets_failure_countdown, 1);
-            connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
-            replay_failure_after_current_packet_is_non_fatal =
-                !connection.has_failed() &&
-                connection.application_space_.largest_authenticated_packet_number == 302u;
-        }
-    }
-    const auto process_fast_path_datagram = [](QuicConnection &connection,
-                                               const std::vector<std::byte> &datagram,
-                                               QuicCoreTimePoint now = QuicCoreTimePoint{}) {
-        connection.resumption_state_emitted_ = true;
-        auto storage = std::make_shared<std::vector<std::byte>>(datagram);
-        connection.process_inbound_datagram(
-            storage, /*begin=*/0, /*end=*/storage->size(), now, /*path_id=*/0,
-            QuicEcnCodepoint::ect0, std::nullopt, /*replay_trigger=*/false,
-            /*count_inbound_bytes=*/true, /*allow_in_place_receive_decode=*/true);
-    };
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        connection.track_sent_packet(connection.application_space_,
-                                     SentPacketRecord{
-                                         .packet_number = 0,
-                                         .sent_time = QuicCoreTimePoint{} - std::chrono::seconds(1),
-                                         .ack_eliciting = true,
-                                         .in_flight = true,
-                                         .bytes_in_flight = 1200,
-                                         .path_id = 0,
-                                         .ecn = QuicEcnCodepoint::ect0,
-                                     });
-        const std::array frames{Frame{AckFrame{
-            .largest_acknowledged = 0,
-            .first_ack_range = 0,
-        }}};
-        const auto datagram = serialize_one_rtt_packet_for_connection_coverage(
-            connection, /*packet_number=*/401, frames);
-        if (!datagram.empty()) {
-            process_fast_path_datagram(connection, datagram);
-            fast_path_ack_only_packet_processed =
-                !connection.has_failed() &&
-                connection.application_space_.received_packets.contains(401);
-            process_fast_path_datagram(connection, datagram);
-            fast_path_duplicate_ack_only_packet_ignored =
-                !connection.has_failed() &&
-                connection.application_space_.received_packets.contains(401);
-        }
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        const std::array frames{Frame{StreamFrame{
-            .has_length = true,
-            .stream_id = 1,
-            .stream_data = bytes_from_ints_for_tests({0x41, 0x42}),
-        }}};
-        const auto datagram = serialize_one_rtt_packet_for_connection_coverage(
-            connection, /*packet_number=*/402, frames);
-        if (!datagram.empty()) {
-            process_fast_path_datagram(connection, datagram);
-            fast_path_stream_packet_processed =
-                !connection.has_failed() &&
-                connection.application_space_.received_packets.contains(402) &&
-                !connection.pending_stream_receive_effects_.empty();
-            process_fast_path_datagram(connection, datagram);
-            fast_path_duplicate_stream_packet_ignored =
-                !connection.has_failed() &&
-                connection.application_space_.received_packets.contains(402);
-        }
-    }
-    {
-        auto connection = make_connected_client_connection_for_connection_coverage();
-        const std::array frames{Frame{PingFrame{}}};
-        auto datagram = serialize_one_rtt_packet_for_connection_coverage(
-            connection, /*packet_number=*/403, frames);
-        if (!datagram.empty()) {
-            datagram.back() =
-                static_cast<std::byte>(std::to_integer<unsigned>(datagram.back()) ^ 0x01u);
-            process_fast_path_datagram(connection, datagram);
-            fast_path_corrupted_packet_discarded =
-                !connection.has_failed() &&
-                !connection.application_space_.received_packets.contains(403);
-        }
-    }
-
     connection_coverage_check(ok, "quic_core_secret_fallback_has_bytes",
                               quic_core_secret_fallback_has_bytes_for_tests());
     connection_coverage_check(
@@ -1491,72 +1579,72 @@ bool connection_helper_edge_cases_for_tests() {
                               stream_metadata_probe_worthy_missing_fin_rejected_for_tests());
     connection_coverage_check(ok, "stream_metadata_probe_worthy_acked_fin_rejected",
                               stream_metadata_probe_worthy_acked_fin_rejected_for_tests());
-    connection_coverage_check(
-        ok, "single_path_simple_stream_ack_ecn_ignores_failed_path",
-        static_cast<bool>(single_path_simple_stream_ack_ecn_ignores_failed_path));
-    connection_coverage_check(
-        ok, "single_path_simple_stream_ack_ecn_missing_counts_disable",
-        static_cast<bool>(single_path_simple_stream_ack_ecn_missing_counts_disable));
+    connection_coverage_check(ok, "single_path_simple_stream_ack_ecn_ignores_failed_path",
+                              single_path_simple_stream_ack_ecn_ignores_failed_path_for_tests());
+    connection_coverage_check(ok, "single_path_simple_stream_ack_ecn_missing_counts_disable",
+                              single_path_simple_stream_ack_ecn_missing_counts_disable_for_tests());
     connection_coverage_check(
         ok, "single_path_simple_stream_ack_ecn_decreased_counts_disable",
-        static_cast<bool>(single_path_simple_stream_ack_ecn_decreased_counts_disable));
+        single_path_simple_stream_ack_ecn_decreased_counts_disable_for_tests());
     connection_coverage_check(ok, "single_path_simple_stream_ack_ecn_counts_ect1",
-                              static_cast<bool>(single_path_simple_stream_ack_ecn_counts_ect1));
+                              single_path_simple_stream_ack_ecn_counts_ect1_for_tests());
     connection_coverage_check(
         ok, "single_path_simple_stream_ack_ecn_missing_feedback_disables",
-        static_cast<bool>(single_path_simple_stream_ack_ecn_missing_feedback_disables));
-    connection_coverage_check(
-        ok, "single_path_simple_stream_ack_ecn_success_tracks_ce_time",
-        static_cast<bool>(single_path_simple_stream_ack_ecn_success_tracks_ce_time));
+        single_path_simple_stream_ack_ecn_missing_feedback_disables_for_tests());
+    connection_coverage_check(ok, "single_path_simple_stream_ack_ecn_success_tracks_ce_time",
+                              single_path_simple_stream_ack_ecn_success_tracks_ce_time_for_tests());
     connection_coverage_check(ok, "simple_stream_ack_ecn_non_ect_samples_are_ignored",
-                              static_cast<bool>(simple_stream_ack_ecn_non_ect_samples_are_ignored));
-    connection_coverage_check(
-        ok, "multi_path_simple_stream_ack_ecn_ignores_failed_path",
-        static_cast<bool>(multi_path_simple_stream_ack_ecn_ignores_failed_path));
-    connection_coverage_check(
-        ok, "multi_path_simple_stream_ack_ecn_missing_counts_disable",
-        static_cast<bool>(multi_path_simple_stream_ack_ecn_missing_counts_disable));
+                              simple_stream_ack_ecn_non_ect_samples_are_ignored_for_tests());
+    connection_coverage_check(ok, "multi_path_simple_stream_ack_ecn_ignores_failed_path",
+                              multi_path_simple_stream_ack_ecn_ignores_failed_path_for_tests());
+    connection_coverage_check(ok, "multi_path_simple_stream_ack_ecn_missing_counts_disable",
+                              multi_path_simple_stream_ack_ecn_missing_counts_disable_for_tests());
     connection_coverage_check(
         ok, "multi_path_simple_stream_ack_ecn_decreased_counts_disable",
-        static_cast<bool>(multi_path_simple_stream_ack_ecn_decreased_counts_disable));
+        multi_path_simple_stream_ack_ecn_decreased_counts_disable_for_tests());
     connection_coverage_check(
         ok, "multi_path_simple_stream_ack_ecn_missing_feedback_disables",
-        static_cast<bool>(multi_path_simple_stream_ack_ecn_missing_feedback_disables));
-    connection_coverage_check(
-        ok, "multi_path_simple_stream_ack_ecn_success_tracks_ce_time",
-        static_cast<bool>(multi_path_simple_stream_ack_ecn_success_tracks_ce_time));
-    connection_coverage_check(ok, "trace_unset_disabled", static_cast<bool>(trace_unset_disabled));
-    connection_coverage_check(ok, "trace_empty_disabled", static_cast<bool>(trace_empty_disabled));
-    connection_coverage_check(ok, "trace_zero_disabled", static_cast<bool>(trace_zero_disabled));
+        multi_path_simple_stream_ack_ecn_missing_feedback_disables_for_tests());
+    connection_coverage_check(ok, "multi_path_simple_stream_ack_ecn_success_tracks_ce_time",
+                              multi_path_simple_stream_ack_ecn_success_tracks_ce_time_for_tests());
+    connection_coverage_check(ok, "trace_unset_disabled",
+                              trace_unset_disabled_for_tests(retry_source_connection_id));
+    connection_coverage_check(ok, "trace_empty_disabled", trace_empty_disabled_for_tests());
+    connection_coverage_check(ok, "trace_zero_disabled", trace_zero_disabled_for_tests());
     connection_coverage_check(ok, "trace_matches_without_filter",
-                              static_cast<bool>(trace_matches_without_filter));
-    connection_coverage_check(ok, "trace_matches_with_empty_filter",
-                              static_cast<bool>(trace_matches_with_empty_filter));
-    connection_coverage_check(ok, "trace_matches_with_exact_filter",
-                              static_cast<bool>(trace_matches_with_exact_filter));
-    connection_coverage_check(ok, "trace_rejects_mismatched_filter",
-                              static_cast<bool>(trace_rejects_mismatched_filter));
+                              trace_matches_without_filter_for_tests(retry_source_connection_id));
+    connection_coverage_check(
+        ok, "trace_matches_with_empty_filter",
+        trace_matches_with_empty_filter_for_tests(retry_source_connection_id));
+    connection_coverage_check(
+        ok, "trace_matches_with_exact_filter",
+        trace_matches_with_exact_filter_for_tests(retry_source_connection_id));
+    connection_coverage_check(
+        ok, "trace_rejects_mismatched_filter",
+        trace_rejects_mismatched_filter_for_tests(retry_source_connection_id));
     connection_coverage_check(
         ok, "discardable_deferred_replay_packet_does_not_block_current_packet",
-        static_cast<bool>(discardable_deferred_replay_packet_does_not_block_current_packet));
+        discardable_deferred_replay_packet_does_not_block_current_packet_for_tests());
     connection_coverage_check(ok, "in_place_receive_storage_before_begin_guard",
-                              static_cast<bool>(in_place_receive_storage_before_begin_guard));
+                              in_place_receive_storage_guard_for_tests(
+                                  &ConnectionDrainTestHooks::force_storage_range_before_storage));
     connection_coverage_check(ok, "in_place_receive_storage_overflow_guard",
-                              static_cast<bool>(in_place_receive_storage_overflow_guard));
+                              in_place_receive_storage_guard_for_tests(
+                                  &ConnectionDrainTestHooks::force_storage_range_overflow));
     connection_coverage_check(ok, "replay_failure_before_current_packet_is_non_fatal",
-                              static_cast<bool>(replay_failure_before_current_packet_is_non_fatal));
+                              replay_failure_before_current_packet_is_non_fatal_for_tests());
     connection_coverage_check(ok, "replay_failure_after_current_packet_is_non_fatal",
-                              static_cast<bool>(replay_failure_after_current_packet_is_non_fatal));
+                              replay_failure_after_current_packet_is_non_fatal_for_tests());
     connection_coverage_check(ok, "fast_path_ack_only_packet_processed",
-                              static_cast<bool>(fast_path_ack_only_packet_processed));
+                              fast_path_ack_only_packet_processed_for_tests());
     connection_coverage_check(ok, "fast_path_duplicate_ack_only_packet_ignored",
-                              static_cast<bool>(fast_path_duplicate_ack_only_packet_ignored));
+                              fast_path_duplicate_ack_only_packet_ignored_for_tests());
     connection_coverage_check(ok, "fast_path_stream_packet_processed",
-                              static_cast<bool>(fast_path_stream_packet_processed));
+                              fast_path_stream_packet_processed_for_tests());
     connection_coverage_check(ok, "fast_path_duplicate_stream_packet_ignored",
-                              static_cast<bool>(fast_path_duplicate_stream_packet_ignored));
+                              fast_path_duplicate_stream_packet_ignored_for_tests());
     connection_coverage_check(ok, "fast_path_corrupted_packet_discarded",
-                              static_cast<bool>(fast_path_corrupted_packet_discarded));
+                              fast_path_corrupted_packet_discarded_for_tests());
 
     return ok;
 }

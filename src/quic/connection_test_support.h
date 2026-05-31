@@ -97,6 +97,81 @@ struct ConnectionCoverageTestPeer {
         return encoded.value();
     }
 
+    static PacketSpaceState &application_space(QuicConnection &connection) {
+        return connection.application_space_;
+    }
+
+    static PathState &ensure_path_state(QuicConnection &connection, QuicPathId path_id) {
+        return connection.ensure_path_state(path_id);
+    }
+
+    static std::map<QuicPathId, PathState> &paths(QuicConnection &connection) {
+        return connection.paths_;
+    }
+
+    static void push_deferred_protected_datagram(QuicConnection &connection,
+                                                 DeferredProtectedDatagram datagram) {
+        connection.deferred_protected_packets_.push_back(std::move(datagram));
+    }
+
+    static bool deferred_protected_packets_empty(const QuicConnection &connection) {
+        return connection.deferred_protected_packets_.empty();
+    }
+
+    static std::optional<std::uint64_t>
+    application_largest_authenticated_packet_number(const QuicConnection &connection) {
+        return connection.application_space_.largest_authenticated_packet_number;
+    }
+
+    static bool application_received_packets_contains(const QuicConnection &connection,
+                                                      std::uint64_t packet_number) {
+        return connection.application_space_.received_packets.contains(packet_number);
+    }
+
+    static bool pending_stream_receive_effects_empty(const QuicConnection &connection) {
+        return connection.pending_stream_receive_effects_.empty();
+    }
+
+    static void mark_resumption_state_emitted(QuicConnection &connection) {
+        connection.resumption_state_emitted_ = true;
+    }
+
+    static void process_inbound_datagram(QuicConnection &connection,
+                                         std::shared_ptr<std::vector<std::byte>> storage,
+                                         std::size_t begin, std::size_t end, QuicCoreTimePoint now,
+                                         QuicPathId path_id, QuicEcnCodepoint ecn,
+                                         std::optional<std::uint32_t> inbound_datagram_id,
+                                         bool replay_trigger, bool count_inbound_bytes,
+                                         bool allow_in_place_receive_decode) {
+        connection.process_inbound_datagram(std::move(storage), begin, end, now, path_id, ecn,
+                                            inbound_datagram_id, replay_trigger,
+                                            count_inbound_bytes, allow_in_place_receive_decode);
+    }
+
+    static void track_application_sent_packet(QuicConnection &connection, SentPacketRecord packet) {
+        connection.track_sent_packet(connection.application_space_, std::move(packet));
+    }
+
+    static bool
+    process_simple_stream_ack_ecn(QuicConnection &connection,
+                                  std::span<const AckedStreamPacketSample> samples,
+                                  const std::optional<AckEcnCounts> &ecn_counts,
+                                  std::optional<QuicCoreTimePoint> &latest_ecn_ce_sent_time) {
+        return connection.process_simple_stream_ack_ecn(connection.application_space_, samples,
+                                                        ecn_counts, latest_ecn_ce_sent_time);
+    }
+
+    static bool process_single_path_simple_stream_ack_ecn(
+        QuicConnection &connection,
+        QuicPathId path_id, // NOLINT(bugprone-easily-swappable-parameters)
+        std::uint64_t newly_acked_ect0, std::uint64_t newly_acked_ect1,
+        QuicCoreTimePoint latest_marked_sent_time, const std::optional<AckEcnCounts> &ecn_counts,
+        std::optional<QuicCoreTimePoint> &latest_ecn_ce_sent_time) {
+        return connection.process_single_path_simple_stream_ack_ecn(
+            connection.application_space_, path_id, newly_acked_ect0, newly_acked_ect1,
+            latest_marked_sent_time, ecn_counts, latest_ecn_ce_sent_time);
+    }
+
   private:
     static TrafficSecret make_traffic_secret(CipherSuite cipher_suite, std::byte fill) {
         const std::size_t secret_size =

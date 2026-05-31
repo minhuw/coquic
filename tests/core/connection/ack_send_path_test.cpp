@@ -51,7 +51,8 @@ TEST(QuicCoreTest, CorruptedOneRttRequestWithPendingPostHandshakeDataDoesNotBrea
     connection.process_inbound_datagram(request_datagram, coquic::quic::test::test_time(2));
     EXPECT_FALSE(connection.has_failed());
 
-    const auto received_value = optional_value_or_terminate(connection.take_received_stream_data());
+    const coquic::quic::QuicCoreReceiveStreamData received_value =
+        optional_value_or_terminate(connection.take_received_stream_data());
     if (received_value.stream_id != 0u) {
         ADD_FAILURE() << "unexpected received stream id";
     }
@@ -212,14 +213,15 @@ TEST(QuicCoreTest, AckGapsRetransmitLostOffsetsBeforeFreshData) {
     ASSERT_TRUE(connection.streams_.contains(0));
     EXPECT_TRUE(connection.streams_.at(0).send_buffer.has_lost_data());
 
-    const auto repaired_datagram =
+    const std::vector<std::byte> repaired_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
     if (repaired_datagram.empty()) {
         ADD_FAILURE() << "missing repaired stream datagram";
         return;
     }
 
-    const auto repaired_packets = decode_sender_datagram(connection, repaired_datagram);
+    const std::vector<coquic::quic::ProtectedPacket> repaired_packets =
+        decode_sender_datagram(connection, repaired_datagram);
     if (repaired_packets.size() != 1u) {
         ADD_FAILURE() << "unexpected repaired packet count";
         return;
@@ -313,13 +315,14 @@ TEST(QuicCoreTest, ApplicationSendRemainsContiguousAfterAcknowledgingInitialFlig
                                          /*suppress_pto_reset=*/false)
                     .has_value());
 
-    const auto resumed_datagram =
+    const std::vector<std::byte> resumed_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
     if (resumed_datagram.empty()) {
         ADD_FAILURE() << "missing resumed stream datagram";
         return;
     }
-    const auto resumed_packets = decode_sender_datagram(connection, resumed_datagram);
+    const std::vector<coquic::quic::ProtectedPacket> resumed_packets =
+        decode_sender_datagram(connection, resumed_datagram);
     if (resumed_packets.size() != 1u) {
         ADD_FAILURE() << "unexpected resumed packet count";
         return;

@@ -383,6 +383,193 @@ bool one_rtt_fragment_size_rejects_overflowing_fragment_offsets_for_tests(
            size.error().offset == 0;
 }
 
+template <typename Bytes> bool any_nonzero_byte_for_tests(const Bytes &bytes) {
+    return std::ranges::any_of(bytes, [](std::byte byte) { return byte != std::byte{0}; });
+}
+
+bool quic_core_secret_fallback_has_bytes_for_tests() {
+    const ScopedConnectionDrainTestHook hook(
+        &ConnectionDrainTestHooks::force_quic_core_secret_rand_failure);
+    return any_nonzero_byte_for_tests(make_quic_core_secret());
+}
+
+bool issued_connection_id_rand_fallback_has_bytes_for_tests(
+    const ConnectionId &retry_source_connection_id) {
+    {
+        const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_prf_failure);
+        const auto connection_id = make_issued_connection_id(retry_source_connection_id, 7);
+        if (connection_id.size() != retry_source_connection_id.size() ||
+            !any_nonzero_byte_for_tests(connection_id)) {
+            return false;
+        }
+    }
+    {
+        const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_short_prf_output);
+        const auto connection_id = make_issued_connection_id(retry_source_connection_id, 13);
+        return connection_id.size() == retry_source_connection_id.size() &&
+               any_nonzero_byte_for_tests(connection_id);
+    }
+}
+
+bool issued_connection_id_fallback_has_bytes_for_tests(
+    const ConnectionId &retry_source_connection_id) {
+    const ScopedConnectionDrainDualTestHook hooks(
+        &ConnectionDrainTestHooks::force_prf_failure,
+        &ConnectionDrainTestHooks::force_issued_connection_id_rand_failure);
+    const auto connection_id = make_issued_connection_id(retry_source_connection_id, 8);
+    return connection_id.size() == retry_source_connection_id.size() &&
+           any_nonzero_byte_for_tests(connection_id);
+}
+
+bool stateless_reset_token_rand_fallback_has_bytes_for_tests(
+    const ConnectionId &retry_source_connection_id) {
+    const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_prf_failure);
+    return any_nonzero_byte_for_tests(make_stateless_reset_token(retry_source_connection_id, 7));
+}
+
+bool stateless_reset_token_fallback_has_bytes_for_tests(
+    const ConnectionId &retry_source_connection_id) {
+    const ScopedConnectionDrainDualTestHook hooks(
+        &ConnectionDrainTestHooks::force_prf_failure,
+        &ConnectionDrainTestHooks::force_stateless_reset_token_rand_failure);
+    return any_nonzero_byte_for_tests(make_stateless_reset_token(retry_source_connection_id, 8));
+}
+
+bool stateless_reset_token_empty_connection_id_fallback_has_bytes_for_tests() {
+    const ScopedConnectionDrainDualTestHook hooks(
+        &ConnectionDrainTestHooks::force_prf_failure,
+        &ConnectionDrainTestHooks::force_stateless_reset_token_rand_failure);
+    return any_nonzero_byte_for_tests(make_stateless_reset_token({}, 9));
+}
+
+bool stateless_reset_token_empty_connection_id_rand_fallback_has_bytes_for_tests() {
+    const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_prf_failure);
+    return any_nonzero_byte_for_tests(make_stateless_reset_token({}, 10));
+}
+
+bool path_challenge_rand_fallback_has_bytes_for_tests(
+    const ConnectionId &retry_source_connection_id) {
+    const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_prf_failure);
+    return any_nonzero_byte_for_tests(make_path_challenge_data(retry_source_connection_id, 3, 7));
+}
+
+bool path_challenge_fallback_has_bytes_for_tests(const ConnectionId &retry_source_connection_id) {
+    const ScopedConnectionDrainDualTestHook hooks(
+        &ConnectionDrainTestHooks::force_prf_failure,
+        &ConnectionDrainTestHooks::force_path_challenge_rand_failure);
+    return any_nonzero_byte_for_tests(make_path_challenge_data(retry_source_connection_id, 3, 8));
+}
+
+bool path_challenge_empty_connection_id_fallback_has_bytes_for_tests() {
+    const ScopedConnectionDrainDualTestHook hooks(
+        &ConnectionDrainTestHooks::force_prf_failure,
+        &ConnectionDrainTestHooks::force_path_challenge_rand_failure);
+    return any_nonzero_byte_for_tests(make_path_challenge_data({}, 3, 9));
+}
+
+bool path_challenge_empty_connection_id_rand_fallback_has_bytes_for_tests() {
+    const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_prf_failure);
+    return any_nonzero_byte_for_tests(make_path_challenge_data({}, 3, 10));
+}
+
+bool random_one_in_sixteen_fallback_returns_bool_for_tests() {
+    const ScopedConnectionDrainTestHook hook(
+        &ConnectionDrainTestHooks::force_random_one_in_sixteen_rand_failure);
+    const bool fallback = random_one_in_sixteen();
+    return fallback || !fallback;
+}
+
+bool forced_random_one_in_sixteen_false_for_tests() {
+    const ScopedConnectionDrainOptionalBoolTestHook hook(
+        &ConnectionDrainTestHooks::force_random_one_in_sixteen_result, false);
+    return !random_one_in_sixteen();
+}
+
+bool forced_random_one_in_sixteen_true_for_tests() {
+    const ScopedConnectionDrainOptionalBoolTestHook hook(
+        &ConnectionDrainTestHooks::force_random_one_in_sixteen_result, true);
+    return random_one_in_sixteen();
+}
+
+bool packet_stream_metadata_helpers_cover_count_bytes_and_first_offset_for_tests() {
+    const auto packet = metadata_packet_for_tests();
+    return packet_stream_frame_count(packet) == 3 && packet_stream_frame_bytes(packet) == 10 &&
+           packet_first_stream_frame_offset(packet) == 2u;
+}
+
+struct StreamMetadataVisitResultsForTests {
+    bool visits_vector_metadata = false;
+    bool visits_first_metadata = false;
+};
+
+StreamMetadataVisitResultsForTests stream_metadata_visit_results_for_tests() {
+    StreamMetadataVisitResultsForTests results;
+    const auto note_visit = [&results](const StreamFrameSendMetadata &metadata) {
+        if (metadata.stream_id == 0 && metadata.offset == 2 && metadata.length == 3) {
+            results.visits_first_metadata = true;
+        }
+        if (metadata.stream_id == 4 && metadata.offset == 9 && metadata.length == 5 &&
+            metadata.fin) {
+            results.visits_vector_metadata = true;
+        }
+    };
+    for_each_stream_frame_metadata(SentPacketRecord{}, note_visit);
+    for_each_stream_frame_metadata(metadata_packet_for_tests(), note_visit);
+    return results;
+}
+
+bool stream_metadata_probe_worthy_outstanding_for_tests() {
+    auto probe_stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    probe_stream.send_buffer.append(bytes_from_ints_for_tests({0x01, 0x02, 0x03}));
+    static_cast<void>(probe_stream.send_buffer.take_ranges(3));
+    return stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
+                                                                   .stream_id = 0,
+                                                                   .offset = 0,
+                                                                   .length = 2,
+                                                                   .fin = false,
+                                                                   .consumes_flow_control = true,
+                                                               });
+}
+
+bool stream_metadata_probe_worthy_fin_for_tests() {
+    auto probe_stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    probe_stream.send_final_size = 5;
+    probe_stream.send_fin_state = StreamSendFinState::pending;
+    return stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
+                                                                   .stream_id = 0,
+                                                                   .offset = 3,
+                                                                   .length = 2,
+                                                                   .fin = true,
+                                                                   .consumes_flow_control = true,
+                                                               });
+}
+
+bool stream_metadata_probe_worthy_missing_fin_rejected_for_tests() {
+    auto probe_stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    probe_stream.send_final_size = 5;
+    probe_stream.send_fin_state = StreamSendFinState::pending;
+    return !stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
+                                                                    .stream_id = 0,
+                                                                    .offset = 3,
+                                                                    .length = 2,
+                                                                    .fin = false,
+                                                                    .consumes_flow_control = true,
+                                                                });
+}
+
+bool stream_metadata_probe_worthy_acked_fin_rejected_for_tests() {
+    auto probe_stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    probe_stream.send_final_size = 5;
+    probe_stream.send_fin_state = StreamSendFinState::acknowledged;
+    return !stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
+                                                                    .stream_id = 0,
+                                                                    .offset = 3,
+                                                                    .length = 2,
+                                                                    .fin = true,
+                                                                    .consumes_flow_control = true,
+                                                                });
+}
+
 bool connection_helper_edge_cases_for_tests() {
     bool ok = true;
 
@@ -609,122 +796,6 @@ bool connection_helper_edge_cases_for_tests() {
                               format_connection_id_hex(retry_source_connection_id) == "5300");
     connection_coverage_check(ok, "empty_issued_connection_id_remains_empty",
                               make_issued_connection_id({}, /*sequence_number=*/7).empty());
-    bool quic_core_secret_fallback_has_bytes = false;
-    bool issued_connection_id_rand_fallback_has_bytes = false;
-    bool issued_connection_id_fallback_has_bytes = false;
-    bool stateless_reset_token_rand_fallback_has_bytes = false;
-    bool stateless_reset_token_fallback_has_bytes = false;
-    bool stateless_reset_token_empty_connection_id_fallback_has_bytes = false;
-    bool stateless_reset_token_empty_connection_id_rand_fallback_has_bytes = false;
-    bool path_challenge_rand_fallback_has_bytes = false;
-    bool path_challenge_fallback_has_bytes = false;
-    bool path_challenge_empty_connection_id_fallback_has_bytes = false;
-    bool path_challenge_empty_connection_id_rand_fallback_has_bytes = false;
-    bool random_one_in_sixteen_fallback_returns_bool = false;
-    bool forced_random_one_in_sixteen_false = false;
-    bool forced_random_one_in_sixteen_true = false;
-    {
-        const ScopedConnectionDrainTestHook hook(
-            &ConnectionDrainTestHooks::force_quic_core_secret_rand_failure);
-        const auto secret = make_quic_core_secret();
-        quic_core_secret_fallback_has_bytes =
-            std::ranges::any_of(secret, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_prf_failure);
-        const auto connection_id = make_issued_connection_id(retry_source_connection_id, 7);
-        issued_connection_id_rand_fallback_has_bytes =
-            connection_id.size() == retry_source_connection_id.size() &&
-            std::ranges::any_of(connection_id, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_short_prf_output);
-        const auto connection_id = make_issued_connection_id(retry_source_connection_id, 13);
-        issued_connection_id_rand_fallback_has_bytes &=
-            connection_id.size() == retry_source_connection_id.size() &&
-            std::ranges::any_of(connection_id, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainDualTestHook hooks(
-            &ConnectionDrainTestHooks::force_prf_failure,
-            &ConnectionDrainTestHooks::force_issued_connection_id_rand_failure);
-        const auto connection_id = make_issued_connection_id(retry_source_connection_id, 8);
-        issued_connection_id_fallback_has_bytes =
-            connection_id.size() == retry_source_connection_id.size() &&
-            std::ranges::any_of(connection_id, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_prf_failure);
-        const auto token = make_stateless_reset_token(retry_source_connection_id, 7);
-        stateless_reset_token_rand_fallback_has_bytes =
-            std::ranges::any_of(token, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainDualTestHook hooks(
-            &ConnectionDrainTestHooks::force_prf_failure,
-            &ConnectionDrainTestHooks::force_stateless_reset_token_rand_failure);
-        const auto token = make_stateless_reset_token(retry_source_connection_id, 8);
-        stateless_reset_token_fallback_has_bytes =
-            std::ranges::any_of(token, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainDualTestHook hooks(
-            &ConnectionDrainTestHooks::force_prf_failure,
-            &ConnectionDrainTestHooks::force_stateless_reset_token_rand_failure);
-        const auto token = make_stateless_reset_token({}, 9);
-        stateless_reset_token_empty_connection_id_fallback_has_bytes =
-            std::ranges::any_of(token, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_prf_failure);
-        const auto token = make_stateless_reset_token({}, 10);
-        stateless_reset_token_empty_connection_id_rand_fallback_has_bytes =
-            std::ranges::any_of(token, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_prf_failure);
-        const auto challenge = make_path_challenge_data(retry_source_connection_id, 3, 7);
-        path_challenge_rand_fallback_has_bytes =
-            std::ranges::any_of(challenge, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainDualTestHook hooks(
-            &ConnectionDrainTestHooks::force_prf_failure,
-            &ConnectionDrainTestHooks::force_path_challenge_rand_failure);
-        const auto challenge = make_path_challenge_data(retry_source_connection_id, 3, 8);
-        path_challenge_fallback_has_bytes =
-            std::ranges::any_of(challenge, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainDualTestHook hooks(
-            &ConnectionDrainTestHooks::force_prf_failure,
-            &ConnectionDrainTestHooks::force_path_challenge_rand_failure);
-        const auto challenge = make_path_challenge_data({}, 3, 9);
-        path_challenge_empty_connection_id_fallback_has_bytes =
-            std::ranges::any_of(challenge, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainTestHook hook(&ConnectionDrainTestHooks::force_prf_failure);
-        const auto challenge = make_path_challenge_data({}, 3, 10);
-        path_challenge_empty_connection_id_rand_fallback_has_bytes =
-            std::ranges::any_of(challenge, [](std::byte byte) { return byte != std::byte{0}; });
-    }
-    {
-        const ScopedConnectionDrainTestHook hook(
-            &ConnectionDrainTestHooks::force_random_one_in_sixteen_rand_failure);
-        const bool fallback = random_one_in_sixteen();
-        random_one_in_sixteen_fallback_returns_bool = fallback || !fallback;
-    }
-    {
-        const ScopedConnectionDrainOptionalBoolTestHook hook(
-            &ConnectionDrainTestHooks::force_random_one_in_sixteen_result, false);
-        forced_random_one_in_sixteen_false = !random_one_in_sixteen();
-    }
-    {
-        const ScopedConnectionDrainOptionalBoolTestHook hook(
-            &ConnectionDrainTestHooks::force_random_one_in_sixteen_result, true);
-        forced_random_one_in_sixteen_true = random_one_in_sixteen();
-    }
     connection_coverage_check(ok, "random_one_in_sixteen_openssl_returns_bool", [] {
         const bool value = random_one_in_sixteen();
         return value || !value;
@@ -830,77 +901,14 @@ bool connection_helper_edge_cases_for_tests() {
                               packet_summary_mentions_counts_for_tests());
     connection_coverage_check(ok, "packet_summary_without_stream_offset_omits_offset",
                               packet_summary_without_stream_offset_omits_offset_for_tests());
-    const auto metadata_packet = metadata_packet_for_tests();
-    connection_coverage_check(ok,
-                              "packet_stream_metadata_helpers_cover_count_bytes_and_first_offset",
-                              packet_stream_frame_count(metadata_packet) == 3 &&
-                                  packet_stream_frame_bytes(metadata_packet) == 10 &&
-                                  packet_first_stream_frame_offset(metadata_packet) == 2u);
+    connection_coverage_check(
+        ok, "packet_stream_metadata_helpers_cover_count_bytes_and_first_offset",
+        packet_stream_metadata_helpers_cover_count_bytes_and_first_offset_for_tests());
     connection_coverage_check(
         ok, "packet_first_stream_frame_offset_covers_vector_fragment_and_empty",
         packet_first_stream_frame_offset(vector_only_metadata_packet_for_tests()) == 33u &&
             packet_first_stream_frame_offset(fragment_only_metadata_packet_for_tests()) == 44u &&
             !packet_first_stream_frame_offset(SentPacketRecord{}).has_value());
-    bool for_each_stream_frame_metadata_visits_vector_metadata = false;
-    bool for_each_stream_frame_metadata_visits_first_metadata = false;
-    const auto note_stream_frame_metadata_visit = [&](const StreamFrameSendMetadata &metadata) {
-        if (metadata.stream_id == 0 && metadata.offset == 2 && metadata.length == 3) {
-            for_each_stream_frame_metadata_visits_first_metadata = true;
-        }
-        if (metadata.stream_id == 4 && metadata.offset == 9 && metadata.length == 5 &&
-            metadata.fin) {
-            for_each_stream_frame_metadata_visits_vector_metadata = true;
-        }
-    };
-    for_each_stream_frame_metadata(SentPacketRecord{}, note_stream_frame_metadata_visit);
-    for_each_stream_frame_metadata(metadata_packet, note_stream_frame_metadata_visit);
-    bool stream_metadata_probe_worthy_outstanding = false;
-    bool stream_metadata_probe_worthy_fin = false;
-    bool stream_metadata_probe_worthy_missing_fin_rejected = false;
-    bool stream_metadata_probe_worthy_acked_fin_rejected = false;
-    {
-        auto probe_stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
-        probe_stream.send_buffer.append(bytes_from_ints_for_tests({0x01, 0x02, 0x03}));
-        static_cast<void>(probe_stream.send_buffer.take_ranges(3));
-        stream_metadata_probe_worthy_outstanding =
-            stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
-                                                                    .stream_id = 0,
-                                                                    .offset = 0,
-                                                                    .length = 2,
-                                                                    .fin = false,
-                                                                    .consumes_flow_control = true,
-                                                                });
-    }
-    {
-        auto probe_stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
-        probe_stream.send_final_size = 5;
-        probe_stream.send_fin_state = StreamSendFinState::pending;
-        stream_metadata_probe_worthy_fin =
-            stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
-                                                                    .stream_id = 0,
-                                                                    .offset = 3,
-                                                                    .length = 2,
-                                                                    .fin = true,
-                                                                    .consumes_flow_control = true,
-                                                                });
-        stream_metadata_probe_worthy_missing_fin_rejected =
-            !stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
-                                                                     .stream_id = 0,
-                                                                     .offset = 3,
-                                                                     .length = 2,
-                                                                     .fin = false,
-                                                                     .consumes_flow_control = true,
-                                                                 });
-        probe_stream.send_fin_state = StreamSendFinState::acknowledged;
-        stream_metadata_probe_worthy_acked_fin_rejected =
-            !stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
-                                                                     .stream_id = 0,
-                                                                     .offset = 3,
-                                                                     .length = 2,
-                                                                     .fin = true,
-                                                                     .consumes_flow_control = true,
-                                                                 });
-    }
     const auto make_simple_stream_ack_sample = [](std::uint64_t packet_number, QuicPathId path_id,
                                                   QuicEcnCodepoint ecn,
                                                   std::chrono::milliseconds sent_offset) {
@@ -1435,51 +1443,54 @@ bool connection_helper_edge_cases_for_tests() {
     }
 
     connection_coverage_check(ok, "quic_core_secret_fallback_has_bytes",
-                              static_cast<bool>(quic_core_secret_fallback_has_bytes));
-    connection_coverage_check(ok, "issued_connection_id_rand_fallback_has_bytes",
-                              static_cast<bool>(issued_connection_id_rand_fallback_has_bytes));
-    connection_coverage_check(ok, "issued_connection_id_fallback_has_bytes",
-                              static_cast<bool>(issued_connection_id_fallback_has_bytes));
-    connection_coverage_check(ok, "stateless_reset_token_rand_fallback_has_bytes",
-                              static_cast<bool>(stateless_reset_token_rand_fallback_has_bytes));
-    connection_coverage_check(ok, "stateless_reset_token_fallback_has_bytes",
-                              static_cast<bool>(stateless_reset_token_fallback_has_bytes));
+                              quic_core_secret_fallback_has_bytes_for_tests());
+    connection_coverage_check(
+        ok, "issued_connection_id_rand_fallback_has_bytes",
+        issued_connection_id_rand_fallback_has_bytes_for_tests(retry_source_connection_id));
+    connection_coverage_check(
+        ok, "issued_connection_id_fallback_has_bytes",
+        issued_connection_id_fallback_has_bytes_for_tests(retry_source_connection_id));
+    connection_coverage_check(
+        ok, "stateless_reset_token_rand_fallback_has_bytes",
+        stateless_reset_token_rand_fallback_has_bytes_for_tests(retry_source_connection_id));
+    connection_coverage_check(
+        ok, "stateless_reset_token_fallback_has_bytes",
+        stateless_reset_token_fallback_has_bytes_for_tests(retry_source_connection_id));
     connection_coverage_check(
         ok, "stateless_reset_token_empty_connection_id_fallback_has_bytes",
-        static_cast<bool>(stateless_reset_token_empty_connection_id_fallback_has_bytes));
+        stateless_reset_token_empty_connection_id_fallback_has_bytes_for_tests());
     connection_coverage_check(
         ok, "stateless_reset_token_empty_connection_id_rand_fallback_has_bytes",
-        static_cast<bool>(stateless_reset_token_empty_connection_id_rand_fallback_has_bytes));
-    connection_coverage_check(ok, "path_challenge_rand_fallback_has_bytes",
-                              static_cast<bool>(path_challenge_rand_fallback_has_bytes));
-    connection_coverage_check(ok, "path_challenge_fallback_has_bytes",
-                              static_cast<bool>(path_challenge_fallback_has_bytes));
+        stateless_reset_token_empty_connection_id_rand_fallback_has_bytes_for_tests());
     connection_coverage_check(
-        ok, "path_challenge_empty_connection_id_fallback_has_bytes",
-        static_cast<bool>(path_challenge_empty_connection_id_fallback_has_bytes));
+        ok, "path_challenge_rand_fallback_has_bytes",
+        path_challenge_rand_fallback_has_bytes_for_tests(retry_source_connection_id));
+    connection_coverage_check(
+        ok, "path_challenge_fallback_has_bytes",
+        path_challenge_fallback_has_bytes_for_tests(retry_source_connection_id));
+    connection_coverage_check(ok, "path_challenge_empty_connection_id_fallback_has_bytes",
+                              path_challenge_empty_connection_id_fallback_has_bytes_for_tests());
     connection_coverage_check(
         ok, "path_challenge_empty_connection_id_rand_fallback_has_bytes",
-        static_cast<bool>(path_challenge_empty_connection_id_rand_fallback_has_bytes));
+        path_challenge_empty_connection_id_rand_fallback_has_bytes_for_tests());
     connection_coverage_check(ok, "random_one_in_sixteen_fallback_returns_bool",
-                              static_cast<bool>(random_one_in_sixteen_fallback_returns_bool));
+                              random_one_in_sixteen_fallback_returns_bool_for_tests());
     connection_coverage_check(ok, "forced_random_one_in_sixteen_false",
-                              static_cast<bool>(forced_random_one_in_sixteen_false));
+                              forced_random_one_in_sixteen_false_for_tests());
     connection_coverage_check(ok, "forced_random_one_in_sixteen_true",
-                              static_cast<bool>(forced_random_one_in_sixteen_true));
-    connection_coverage_check(
-        ok, "for_each_stream_frame_metadata_visits_first_metadata",
-        static_cast<bool>(for_each_stream_frame_metadata_visits_first_metadata));
-    connection_coverage_check(
-        ok, "for_each_stream_frame_metadata_visits_vector_metadata",
-        static_cast<bool>(for_each_stream_frame_metadata_visits_vector_metadata));
+                              forced_random_one_in_sixteen_true_for_tests());
+    connection_coverage_check(ok, "for_each_stream_frame_metadata_visits_first_metadata",
+                              stream_metadata_visit_results_for_tests().visits_first_metadata);
+    connection_coverage_check(ok, "for_each_stream_frame_metadata_visits_vector_metadata",
+                              stream_metadata_visit_results_for_tests().visits_vector_metadata);
     connection_coverage_check(ok, "stream_metadata_probe_worthy_outstanding",
-                              static_cast<bool>(stream_metadata_probe_worthy_outstanding));
+                              stream_metadata_probe_worthy_outstanding_for_tests());
     connection_coverage_check(ok, "stream_metadata_probe_worthy_fin",
-                              static_cast<bool>(stream_metadata_probe_worthy_fin));
+                              stream_metadata_probe_worthy_fin_for_tests());
     connection_coverage_check(ok, "stream_metadata_probe_worthy_missing_fin_rejected",
-                              static_cast<bool>(stream_metadata_probe_worthy_missing_fin_rejected));
+                              stream_metadata_probe_worthy_missing_fin_rejected_for_tests());
     connection_coverage_check(ok, "stream_metadata_probe_worthy_acked_fin_rejected",
-                              static_cast<bool>(stream_metadata_probe_worthy_acked_fin_rejected));
+                              stream_metadata_probe_worthy_acked_fin_rejected_for_tests());
     connection_coverage_check(
         ok, "single_path_simple_stream_ack_ecn_ignores_failed_path",
         static_cast<bool>(single_path_simple_stream_ack_ecn_ignores_failed_path));

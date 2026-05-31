@@ -4,6 +4,130 @@
 
 namespace coquic::quic::test {
 
+CodecResult<SerializedProtectedDatagram> successful_serialized_datagram_for_tests() {
+    SerializedProtectedDatagram datagram;
+    datagram.bytes = DatagramBuffer{std::byte{0x03}, std::byte{0x04}, std::byte{0x05}};
+    return CodecResult<SerializedProtectedDatagram>::success(std::move(datagram));
+}
+
+std::vector<std::byte> resumption_state_missing_application_context_for_tests(
+    std::span<const std::byte> transport_parameters) {
+    std::vector<std::byte> state = {std::byte{0x01}};
+    append_u32_be(state, kQuicVersion1);
+    append_length_prefixed_bytes(state, {});
+    append_length_prefixed_text(state, "h3");
+    append_length_prefixed_bytes(state, transport_parameters);
+    return state;
+}
+
+std::vector<std::byte> resumption_state_missing_application_protocol_for_tests() {
+    std::vector<std::byte> state = {std::byte{0x01}};
+    append_u32_be(state, kQuicVersion1);
+    append_length_prefixed_bytes(state, {});
+    return state;
+}
+
+std::vector<std::byte> resumption_state_missing_transport_parameters_for_tests() {
+    std::vector<std::byte> state = {std::byte{0x01}};
+    append_u32_be(state, kQuicVersion1);
+    append_length_prefixed_bytes(state, {});
+    append_length_prefixed_text(state, "h3");
+    return state;
+}
+
+struct PendingFinStreamCaseForTests {
+    std::uint64_t final_size = 0;
+    std::uint64_t peer_max_stream_data = 0;
+};
+
+bool stream_with_pending_fin_is_sendable_for_tests(PendingFinStreamCaseForTests test_case) {
+    auto stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    stream.send_final_size = test_case.final_size;
+    stream.send_fin_state = StreamSendFinState::pending;
+    stream.flow_control.peer_max_stream_data = test_case.peer_max_stream_data;
+    return stream_fin_sendable(stream);
+}
+
+bool pending_stream_data_blocks_fin_for_tests() {
+    auto stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    stream.send_final_size = 1;
+    stream.send_fin_state = StreamSendFinState::pending;
+    stream.flow_control.peer_max_stream_data = 1;
+    stream.send_buffer.append(std::array{std::byte{0x78}});
+    return !stream_fin_sendable(stream);
+}
+
+bool stream_limits_without_peer_credit_preserve_state_for_tests() {
+    LocalStreamLimitState stream_limits;
+    stream_limits.max_streams_bidi_state = StreamControlFrameState::pending;
+    stream_limits.max_streams_uni_state = StreamControlFrameState::pending;
+    return stream_limits.take_max_streams_frames().empty() &&
+           (stream_limits.max_streams_bidi_state == StreamControlFrameState::pending) &&
+           (stream_limits.max_streams_uni_state == StreamControlFrameState::pending);
+}
+
+ProtectedOneRttPacket protected_one_rtt_reset_packet_for_tests() {
+    return ProtectedOneRttPacket{
+        .frames =
+            {
+                ResetStreamFrame{
+                    .stream_id = 0,
+                    .application_protocol_error_code = 1,
+                    .final_size = 0,
+                },
+            },
+    };
+}
+
+ProtectedOneRttPacket protected_one_rtt_ack_packet_for_tests() {
+    return ProtectedOneRttPacket{
+        .frames =
+            {
+                AckFrame{},
+            },
+    };
+}
+
+ReceivedProtectedOneRttPacket received_one_rtt_ack_packet_for_tests() {
+    return ReceivedProtectedOneRttPacket{
+        .frames =
+            {
+                ReceivedAckFrame{},
+            },
+    };
+}
+
+ReceivedProtectedOneRttPacket received_one_rtt_reset_packet_for_tests() {
+    return ReceivedProtectedOneRttPacket{
+        .frames =
+            {
+                ResetStreamFrame{
+                    .stream_id = 0,
+                    .application_protocol_error_code = 1,
+                    .final_size = 0,
+                },
+            },
+    };
+}
+
+ReceivedProtectedOneRttAckOnlyPacket received_ack_only_fast_packet_for_tests() {
+    return ReceivedProtectedOneRttAckOnlyPacket{
+        .packet_number = 42,
+        .ack = ReceivedAckFrame{},
+    };
+}
+
+ReceivedProtectedOneRttStreamPacket received_stream_fast_packet_for_tests() {
+    return ReceivedProtectedOneRttStreamPacket{
+        .packet_number = 43,
+        .stream =
+            ReceivedStreamFrame{
+                .stream_id = 0,
+                .stream_data = SharedBytes(bytes_from_ints_for_tests({0xaa})),
+            },
+    };
+}
+
 bool connection_helper_edge_cases_for_tests() {
     bool ok = true;
 
@@ -28,13 +152,6 @@ bool connection_helper_edge_cases_for_tests() {
         CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::empty_packet_payload, 0);
     const auto failed_serialized_datagram =
         CodecResult<SerializedProtectedDatagram>::failure(CodecErrorCode::invalid_varint, 0);
-    const auto empty_packet_payload_serialized_datagram =
-        CodecResult<SerializedProtectedDatagram>::failure(CodecErrorCode::empty_packet_payload, 0);
-    SerializedProtectedDatagram successful_serialized_datagram_value;
-    successful_serialized_datagram_value.bytes =
-        DatagramBuffer{std::byte{0x03}, std::byte{0x04}, std::byte{0x05}};
-    const auto successful_serialized_datagram = CodecResult<SerializedProtectedDatagram>::success(
-        std::move(successful_serialized_datagram_value));
     connection_coverage_check(ok, "failed_datagram_reports_zero_size",
                               datagram_size_or_zero(failed_datagram) == 0);
     connection_coverage_check(ok, "successful_datagram_reports_size",
@@ -42,7 +159,8 @@ bool connection_helper_edge_cases_for_tests() {
     connection_coverage_check(ok, "failed_serialized_datagram_reports_zero_size",
                               datagram_size_or_zero(failed_serialized_datagram) == 0);
     connection_coverage_check(ok, "successful_serialized_datagram_reports_size",
-                              datagram_size_or_zero(successful_serialized_datagram) == 3);
+                              datagram_size_or_zero(successful_serialized_datagram_for_tests()) ==
+                                  3);
     connection_coverage_check(ok, "empty_packet_payload_error_reported",
                               is_empty_packet_payload_error(empty_packet_payload_datagram));
     connection_coverage_check(ok, "successful_datagram_not_reported",
@@ -51,7 +169,8 @@ bool connection_helper_edge_cases_for_tests() {
                               !is_empty_packet_payload_error(failed_datagram));
     connection_coverage_check(
         ok, "empty_packet_payload_serialized_error_reported",
-        is_empty_packet_payload_error(empty_packet_payload_serialized_datagram));
+        is_empty_packet_payload_error(CodecResult<SerializedProtectedDatagram>::failure(
+            CodecErrorCode::empty_packet_payload, 0)));
     connection_coverage_check(ok, "non_empty_packet_payload_serialized_error_not_reported",
                               !is_empty_packet_payload_error(failed_serialized_datagram));
 
@@ -71,73 +190,53 @@ bool connection_helper_edge_cases_for_tests() {
     connection_coverage_check(ok, "truncated_tls_state_rejected",
                               !decode_resumption_state(truncated_tls_state).has_value());
 
-    const TransportParameters resumption_transport_parameters{
+    const TransportParameters resumption_parameters{
         .max_udp_payload_size = 1200,
         .active_connection_id_limit = 8,
         .initial_source_connection_id = ConnectionId{std::byte{0x01}},
     };
-    const auto transport_parameters =
-        serialize_transport_parameters(resumption_transport_parameters).value();
 
-    std::vector<std::byte> missing_application_context = {std::byte{0x01}};
-    append_u32_be(missing_application_context, kQuicVersion1);
-    append_length_prefixed_bytes(missing_application_context, {});
-    append_length_prefixed_text(missing_application_context, "h3");
-    append_length_prefixed_bytes(missing_application_context, transport_parameters);
-    connection_coverage_check(ok, "missing_application_context_rejected",
-                              !decode_resumption_state(missing_application_context).has_value());
+    connection_coverage_check(
+        ok, "missing_application_context_rejected",
+        !decode_resumption_state(resumption_state_missing_application_context_for_tests(
+                                     serialize_transport_parameters(resumption_parameters).value()))
+             .has_value());
 
-    std::vector<std::byte> missing_application_protocol = {std::byte{0x01}};
-    append_u32_be(missing_application_protocol, kQuicVersion1);
-    append_length_prefixed_bytes(missing_application_protocol, {});
-    connection_coverage_check(ok, "missing_application_protocol_rejected",
-                              !decode_resumption_state(missing_application_protocol).has_value());
+    connection_coverage_check(
+        ok, "missing_application_protocol_rejected",
+        !decode_resumption_state(resumption_state_missing_application_protocol_for_tests())
+             .has_value());
 
-    std::vector<std::byte> missing_transport_parameters = {std::byte{0x01}};
-    append_u32_be(missing_transport_parameters, kQuicVersion1);
-    append_length_prefixed_bytes(missing_transport_parameters, {});
-    append_length_prefixed_text(missing_transport_parameters, "h3");
-    connection_coverage_check(ok, "missing_transport_parameters_rejected",
-                              !decode_resumption_state(missing_transport_parameters).has_value());
+    connection_coverage_check(
+        ok, "missing_transport_parameters_rejected",
+        !decode_resumption_state(resumption_state_missing_transport_parameters_for_tests())
+             .has_value());
 
     auto trailing_resumption_state =
-        encode_resumption_state({}, kQuicVersion1, "h3", resumption_transport_parameters, {});
+        encode_resumption_state({}, kQuicVersion1, "h3", resumption_parameters, {});
     trailing_resumption_state.push_back(std::byte{0xff});
     connection_coverage_check(ok, "trailing_bytes_rejected",
                               !decode_resumption_state(trailing_resumption_state).has_value());
 
-    auto fin_sendable_stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
-    fin_sendable_stream.send_final_size = 1;
-    fin_sendable_stream.send_fin_state = StreamSendFinState::pending;
-    fin_sendable_stream.flow_control.peer_max_stream_data = 1;
-    connection_coverage_check(ok, "pending_fin_without_buffer_is_sendable",
-                              stream_fin_sendable(fin_sendable_stream));
-
-    auto fin_blocked_by_credit_stream =
-        make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
-    fin_blocked_by_credit_stream.send_final_size = 2;
-    fin_blocked_by_credit_stream.send_fin_state = StreamSendFinState::pending;
-    fin_blocked_by_credit_stream.flow_control.peer_max_stream_data = 1;
-    connection_coverage_check(ok, "pending_fin_blocked_by_credit",
-                              !stream_fin_sendable(fin_blocked_by_credit_stream));
-
-    auto stream = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
-    stream.send_final_size = 1;
-    stream.send_fin_state = StreamSendFinState::pending;
-    stream.flow_control.peer_max_stream_data = 1;
-    const std::array pending_data = {std::byte{0x78}};
-    stream.send_buffer.append(pending_data);
-    connection_coverage_check(ok, "pending_data_blocks_fin", !stream_fin_sendable(stream));
-
-    LocalStreamLimitState stream_limits;
-    stream_limits.max_streams_bidi_state = StreamControlFrameState::pending;
-    stream_limits.max_streams_uni_state = StreamControlFrameState::pending;
-    const auto max_streams_frames = stream_limits.take_max_streams_frames();
     connection_coverage_check(
-        ok, "missing_pending_frames_preserve_state",
-        max_streams_frames.empty() &
-            (stream_limits.max_streams_bidi_state == StreamControlFrameState::pending) &
-            (stream_limits.max_streams_uni_state == StreamControlFrameState::pending));
+        ok, "pending_fin_without_buffer_is_sendable",
+        stream_with_pending_fin_is_sendable_for_tests(PendingFinStreamCaseForTests{
+            .final_size = 1,
+            .peer_max_stream_data = 1,
+        }));
+
+    connection_coverage_check(
+        ok, "pending_fin_blocked_by_credit",
+        !stream_with_pending_fin_is_sendable_for_tests(PendingFinStreamCaseForTests{
+            .final_size = 2,
+            .peer_max_stream_data = 1,
+        }));
+
+    connection_coverage_check(ok, "pending_data_blocks_fin",
+                              pending_stream_data_blocks_fin_for_tests());
+
+    connection_coverage_check(ok, "missing_pending_frames_preserve_state",
+                              stream_limits_without_peer_credit_preserve_state_for_tests());
 
     constexpr std::array short_header_packet = {std::byte{0x40}};
     connection_coverage_check(ok, "short_header_is_bufferable",
@@ -151,87 +250,44 @@ bool connection_helper_edge_cases_for_tests() {
     connection_coverage_check(ok, "handshake_long_header_is_bufferable",
                               packet_is_bufferable(handshake_long_header));
 
-    const ProtectedOneRttPacket connected_state_frame{
-        .frames =
-            {
-                ResetStreamFrame{
-                    .stream_id = 0,
-                    .application_protocol_error_code = 1,
-                    .final_size = 0,
-                },
-            },
-    };
-    const ProtectedOneRttPacket ack_only_frame{
-        .frames =
-            {
-                AckFrame{},
-            },
-    };
-    connection_coverage_check(ok, "server_protected_one_rtt_packet_deferred",
-                              should_defer_protected_one_rtt_packet(ack_only_frame,
-                                                                    EndpointRole::server,
-                                                                    HandshakeStatus::in_progress));
-    connection_coverage_check(ok, "client_connected_state_protected_one_rtt_packet_deferred",
-                              should_defer_protected_one_rtt_packet(connected_state_frame,
-                                                                    EndpointRole::client,
-                                                                    HandshakeStatus::in_progress));
-    const ReceivedProtectedOneRttPacket received_ack_only_frame{
-        .frames =
-            {
-                ReceivedAckFrame{},
-            },
-    };
-    const ReceivedProtectedOneRttPacket received_connected_state_frame{
-        .frames =
-            {
-                ResetStreamFrame{
-                    .stream_id = 0,
-                    .application_protocol_error_code = 1,
-                    .final_size = 0,
-                },
-            },
-    };
-    connection_coverage_check(ok, "server_received_one_rtt_packet_deferred",
-                              should_defer_protected_one_rtt_packet(received_ack_only_frame,
-                                                                    EndpointRole::server,
-                                                                    HandshakeStatus::in_progress));
-    connection_coverage_check(ok, "client_connected_state_received_one_rtt_packet_deferred",
-                              should_defer_protected_one_rtt_packet(received_connected_state_frame,
-                                                                    EndpointRole::client,
-                                                                    HandshakeStatus::in_progress));
-    const ReceivedProtectedOneRttAckOnlyPacket received_ack_only_fast_packet{
-        .packet_number = 42,
-        .ack = ReceivedAckFrame{},
-    };
-    const ReceivedProtectedOneRttStreamPacket received_stream_fast_packet{
-        .packet_number = 43,
-        .stream =
-            ReceivedStreamFrame{
-                .stream_id = 0,
-                .stream_data = SharedBytes(bytes_from_ints_for_tests({0xaa})),
-            },
-    };
-    connection_coverage_check(ok, "received_ack_only_fast_packet_deferred",
-                              should_defer_protected_one_rtt_packet(
-                                  ReceivedProtectedPacket{received_ack_only_fast_packet},
-                                  EndpointRole::server, HandshakeStatus::in_progress));
     connection_coverage_check(
-        ok, "received_stream_fast_packet_deferred",
-        should_defer_protected_one_rtt_packet(ReceivedProtectedPacket{received_stream_fast_packet},
+        ok, "server_protected_one_rtt_packet_deferred",
+        should_defer_protected_one_rtt_packet(protected_one_rtt_ack_packet_for_tests(),
                                               EndpointRole::server, HandshakeStatus::in_progress));
     connection_coverage_check(
-        ok, "connected_received_stream_fast_packet_not_deferred",
-        !should_defer_protected_one_rtt_packet(ReceivedProtectedPacket{received_stream_fast_packet},
-                                               EndpointRole::server, HandshakeStatus::connected));
+        ok, "client_connected_state_protected_one_rtt_packet_deferred",
+        should_defer_protected_one_rtt_packet(protected_one_rtt_reset_packet_for_tests(),
+                                              EndpointRole::client, HandshakeStatus::in_progress));
+    connection_coverage_check(
+        ok, "server_received_one_rtt_packet_deferred",
+        should_defer_protected_one_rtt_packet(received_one_rtt_ack_packet_for_tests(),
+                                              EndpointRole::server, HandshakeStatus::in_progress));
+    connection_coverage_check(
+        ok, "client_connected_state_received_one_rtt_packet_deferred",
+        should_defer_protected_one_rtt_packet(received_one_rtt_reset_packet_for_tests(),
+                                              EndpointRole::client, HandshakeStatus::in_progress));
+    connection_coverage_check(
+        ok, "received_ack_only_fast_packet_deferred",
+        should_defer_protected_one_rtt_packet(
+            ReceivedProtectedPacket{received_ack_only_fast_packet_for_tests()},
+            EndpointRole::server, HandshakeStatus::in_progress));
+    connection_coverage_check(ok, "received_stream_fast_packet_deferred",
+                              should_defer_protected_one_rtt_packet(
+                                  ReceivedProtectedPacket{received_stream_fast_packet_for_tests()},
+                                  EndpointRole::server, HandshakeStatus::in_progress));
+    connection_coverage_check(ok, "connected_received_stream_fast_packet_not_deferred",
+                              !should_defer_protected_one_rtt_packet(
+                                  ReceivedProtectedPacket{received_stream_fast_packet_for_tests()},
+                                  EndpointRole::server, HandshakeStatus::connected));
     connection_coverage_check(ok, "received_fast_packet_numbers_for_trace",
-                              protected_one_rtt_packet_number_for_trace(
-                                  ReceivedProtectedPacket{received_ack_only_fast_packet}) == 42u &&
-                                  protected_one_rtt_packet_number_for_trace(
-                                      ReceivedProtectedPacket{received_stream_fast_packet}) == 43u);
-    connection_coverage_check(ok, "connected_protected_one_rtt_packet_not_deferred",
-                              !should_defer_protected_one_rtt_packet(connected_state_frame,
-                                                                     EndpointRole::server,
-                                                                     HandshakeStatus::connected));
+                              protected_one_rtt_packet_number_for_trace(ReceivedProtectedPacket{
+                                  received_ack_only_fast_packet_for_tests()}) == 42u &&
+                                  protected_one_rtt_packet_number_for_trace(ReceivedProtectedPacket{
+                                      received_stream_fast_packet_for_tests()}) == 43u);
+    connection_coverage_check(
+        ok, "connected_protected_one_rtt_packet_not_deferred",
+        !should_defer_protected_one_rtt_packet(protected_one_rtt_reset_packet_for_tests(),
+                                               EndpointRole::server, HandshakeStatus::connected));
     connection_coverage_check(
         ok, "chacha_limits_match_expected",
         !confidentiality_limit_for_cipher_suite(CipherSuite::tls_chacha20_poly1305_sha256)

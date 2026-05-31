@@ -4,7 +4,8 @@
 
 <p align="center">
   <a href="https://github.com/minhuw/coquic/actions/workflows/ci.yml"><img src="https://github.com/minhuw/coquic/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/minhuw/coquic/actions/workflows/codeql.yml"><img src="https://github.com/minhuw/coquic/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
+  <a href="https://github.com/minhuw/coquic/actions/workflows/sonarqube.yml"><img src="https://github.com/minhuw/coquic/actions/workflows/sonarqube.yml/badge.svg?branch=main" alt="SonarQube"></a>
+  <a href="https://app.codacy.com/gh/minhuw/coquic/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade"><img src="https://app.codacy.com/project/badge/Grade/ef3ef4841ca94356b657b3c31ec2fc79" alt="Codacy Badge"></a>
   <a href="https://app.codecov.io/github/minhuw/coquic"><img src="https://codecov.io/github/minhuw/coquic/graph/badge.svg?branch=main" alt="codecov"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://coquic.minhuw.dev/"><img src="https://img.shields.io/badge/Website-CoQUIC-0F62FE" alt="CoQUIC website"></a>

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -35,6 +36,18 @@ static int debug_enabled(void) {
         initialized = 1;
     }
     return enabled;
+}
+
+static FILE *open_json_output(const char *path) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        return NULL;
+    }
+    FILE *f = fdopen(fd, "w");
+    if (f == NULL) {
+        close(fd);
+    }
+    return f;
 }
 
 #define DEBUG_LOG(...)                                                                             \
@@ -1377,7 +1390,7 @@ static void emit_summary(config_t *cfg, counters_t *c, uint64_t elapsed_us, cons
     if (cfg->json_out[0] == 0) {
         return;
     }
-    FILE *f = fopen(cfg->json_out, "w");
+    FILE *f = open_json_output(cfg->json_out);
     if (f == NULL) {
         return;
     }

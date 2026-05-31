@@ -198,7 +198,7 @@ std::optional<std::string> getenv_string(const char *name) {
 
 bool env_flag_enabled(const char *name) {
     const std::string value = getenv_string(name).value_or("");
-    return !value.empty() & (value != "0");
+    return !value.empty() && value != "0";
 }
 
 bool runtime_trace_enabled() {
@@ -4057,9 +4057,9 @@ ReceiveDatagramResult scripted_client_loop_receive_for_tests(void *context, int,
                                                              std::string_view) {
     auto &script = *static_cast<ScriptedClientLoopIoForTests *>(context);
     if (script.next_receive_index >= script.receive_results.size()) {
-        return ReceiveDatagramResult{
-            .status = ReceiveDatagramStatus::would_block,
-        };
+        ReceiveDatagramResult result{};
+        result.status = ReceiveDatagramStatus::would_block;
+        return result;
     }
     return std::move(script.receive_results[script.next_receive_index++]);
 }

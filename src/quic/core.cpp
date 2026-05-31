@@ -357,8 +357,8 @@ bool should_keep_endpoint_connection_entry(const QuicConnection &connection,
                                            const QuicCoreResult &drained,
                                            QuicCoreTimePoint now = QuicCoreTimePoint{}) {
     const bool failed_before_handshake =
-        connection.has_failed() & !connection.has_processed_peer_packet();
-    return !failed_before_handshake &
+        connection.has_failed() && !connection.has_processed_peer_packet();
+    return !failed_before_handshake &&
            !should_remove_endpoint_connection_entry(connection, drained, now);
 }
 

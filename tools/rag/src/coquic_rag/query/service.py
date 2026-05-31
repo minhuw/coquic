@@ -4,8 +4,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from typing import Any
-
 from coquic_rag.config import ProjectPaths
 from coquic_rag.embed.provider import EmbeddingProvider, SentenceTransformerEmbedder
 from coquic_rag.store.artifacts import (

@@ -190,7 +190,7 @@ std::optional<std::size_t> parse_size_arg(std::string_view value) {
     const auto *begin = value.data();
     const auto *end = value.data() + value.size();
     const auto result = std::from_chars(begin, end, parsed);
-    const bool invalid_parse = (result.ec != std::errc{}) | (result.ptr != end);
+    const bool invalid_parse = (result.ec != std::errc{}) || (result.ptr != end);
     if (invalid_parse) {
         return std::nullopt;
     }
@@ -215,10 +215,10 @@ std::optional<Http3RuntimeHeader> parse_header_arg(std::string_view value) {
 
     const auto name = lowercase_ascii(trim_copy(value.substr(0, colon)));
     const auto header_value = trim_copy(value.substr(colon + 1));
-    if (name.empty() | header_value.empty()) {
+    if (name.empty() || header_value.empty()) {
         return std::nullopt;
     }
-    if ((name.front() == ':') | (name == "content-length") | (name == "transfer-encoding")) {
+    if (name.front() == ':' || name == "content-length" || name == "transfer-encoding") {
         return std::nullopt;
     }
 
@@ -349,7 +349,7 @@ bool path_has_prefix(const std::filesystem::path &path, const std::filesystem::p
 
 bool has_raw_dot_segment(const std::filesystem::path &path) {
     return std::any_of(path.begin(), path.end(), [](const std::filesystem::path &part) {
-        return (part == ".") | (part == "..");
+        return part == "." || part == "..";
     });
 }
 
@@ -485,7 +485,7 @@ resolve_runtime_path_under_root(const std::filesystem::path &root, std::string_v
 
 std::string content_type_for_path(const std::filesystem::path &path) {
     const auto extension = lowercase_ascii(path.extension().string());
-    if ((extension == ".html") | (extension == ".htm")) {
+    if (extension == ".html" || extension == ".htm") {
         return "text/html; charset=utf-8";
     }
     if (extension == ".txt") {
@@ -541,7 +541,7 @@ Http3Response runtime_server_response(const std::filesystem::path &document_root
     const bool exists = std::filesystem::exists(*resolved, exists_error);
     std::error_code type_error;
     const bool regular = std::filesystem::is_regular_file(*resolved, type_error);
-    if ((!exists) | (!regular)) {
+    if (!exists || !regular) {
         return Http3Response{
             .head =
                 {
@@ -698,8 +698,8 @@ make_client_transfer_plans(const Http3RuntimeConfig &config,
     const auto &first = plans.front().execution;
     for (std::size_t index = 1; index < plans.size(); ++index) {
         const auto &candidate = plans[index].execution;
-        const bool mismatched_target = (candidate.host != first.host) |
-                                       (candidate.port != first.port) |
+        const bool mismatched_target = (candidate.host != first.host) ||
+                                       (candidate.port != first.port) ||
                                        (candidate.server_name != first.server_name);
         if (mismatched_target) {
             return std::nullopt;
@@ -787,10 +787,10 @@ quic::QuicConnectionHandle connection_handle_of_effect(const quic::QuicCoreEffec
 }
 
 bool effect_is_endpoint_relevant(const quic::QuicCoreEffect &effect) {
-    return std::holds_alternative<quic::QuicCoreReceiveStreamData>(effect) |
-           std::holds_alternative<quic::QuicCorePeerResetStream>(effect) |
-           std::holds_alternative<quic::QuicCorePeerStopSending>(effect) |
-           std::holds_alternative<quic::QuicCoreStateEvent>(effect) |
+    return std::holds_alternative<quic::QuicCoreReceiveStreamData>(effect) ||
+           std::holds_alternative<quic::QuicCorePeerResetStream>(effect) ||
+           std::holds_alternative<quic::QuicCorePeerStopSending>(effect) ||
+           std::holds_alternative<quic::QuicCoreStateEvent>(effect) ||
            std::holds_alternative<quic::QuicCoreConnectionLifecycleEvent>(effect);
 }
 
@@ -938,13 +938,13 @@ int run_http3_bootstrap_server_guarded(const Http3BootstrapConfig &config,
 }
 
 bool server_update_has_immediate_work(const Http3ServerEndpointUpdate &update) {
-    return !update.core_inputs.empty() | !update.request_cancelled_events.empty() |
+    return !update.core_inputs.empty() || !update.request_cancelled_events.empty() ||
            update.terminal_failure;
 }
 
 bool client_update_has_immediate_work(const Http3ClientEndpointUpdate &update) {
-    return !update.core_inputs.empty() | !update.events.empty() |
-           !update.request_error_events.empty() | update.terminal_failure;
+    return !update.core_inputs.empty() || !update.events.empty() ||
+           !update.request_error_events.empty() || update.terminal_failure;
 }
 
 class RuntimeTestBackend final : public io::QuicIoBackend {
@@ -1161,7 +1161,7 @@ class Http3ServerRuntime {
             }
 
             auto filtered = filter_result_for_connection(result, connection);
-            if (filtered.effects.empty() & !filtered.local_error.has_value()) {
+            if (filtered.effects.empty() && !filtered.local_error.has_value()) {
                 continue;
             }
 
@@ -1292,7 +1292,7 @@ class Http3ClientRuntime {
             const auto next_wakeup = core_.next_wakeup();
             const bool wakeup_due =
                 next_wakeup.value_or(current + std::chrono::nanoseconds{1}) <= current;
-            if (consume_forced_count(force_client_due_timer_count_for_test()) | wakeup_due) {
+            if (consume_forced_count(force_client_due_timer_count_for_test()) || wakeup_due) {
                 if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, current),
                                    current)) {
                     return 1;
@@ -1359,7 +1359,7 @@ class Http3ClientRuntime {
 
         if (connection_.has_value()) {
             auto filtered = filter_result_for_connection(result, *connection_);
-            if (!filtered.effects.empty() | filtered.local_error.has_value()) {
+            if (!filtered.effects.empty() || filtered.local_error.has_value()) {
                 auto update = endpoint_.on_core_result(filtered, now);
                 if (!drain_endpoint(std::move(update), now)) {
                     return false;
@@ -1367,7 +1367,7 @@ class Http3ClientRuntime {
             }
         }
 
-        if (saw_closed & (completed_responses_ != expected_responses_)) {
+        if (saw_closed && (completed_responses_ != expected_responses_)) {
             return false;
         }
         return true;
@@ -2093,8 +2093,8 @@ std::uint64_t runtime_loop_internal_coverage_mask_for_test() {
     live_backend_ptr->wait_results.push_back(std::nullopt);
     Http3ServerRuntime live_runtime(server_config, server_endpoint_config, std::move(live_backend));
     const bool server_rx_with_payload_ok =
-        server_endpoint_ready & live_rx_event_ready & (live_runtime.run() == 1) &
-        (live_backend_ptr->wait_calls == 2) & !live_backend_ptr->sends.empty();
+        server_endpoint_ready && live_rx_event_ready && (live_runtime.run() == 1) &&
+        (live_backend_ptr->wait_calls == 2) && !live_backend_ptr->sends.empty();
     mark(kRuntimeLoopMaskServerRxDatagramWithPayload, server_rx_with_payload_ok,
          "server runtime handles rx events with datagram payloads");
 
@@ -3423,8 +3423,8 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
 
         const bool arg_is_empty = arg.empty();
         const bool arg_has_single_dash = !arg_is_empty && arg.front() == '-';
-        if ((!arg_is_empty) & (!arg_has_single_dash)) {
-            if ((mode != Http3CliMode::client) | !config.url.empty()) {
+        if (!arg_is_empty && !arg_has_single_dash) {
+            if (mode != Http3CliMode::client || !config.url.empty()) {
                 print_usage(mode);
                 return std::nullopt;
             }
@@ -3432,7 +3432,7 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
 
-        if ((!arg_is_empty) & arg_has_single_dash) {
+        if (!arg_is_empty && arg_has_single_dash) {
             print_usage(mode);
             return std::nullopt;
         }

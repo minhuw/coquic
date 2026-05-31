@@ -2500,7 +2500,8 @@ TEST(QuicRecoveryTest, CopyMoveAndMetadataHelpersPreserveRecoveryState) {
     PacketSpaceRecovery moved(std::move(copied));
     EXPECT_EQ(packet_numbers_from_handles(moved, moved.tracked_packets()), tracked_before);
 
-    recovery = recovery;
+    auto &same_recovery = recovery;
+    recovery = same_recovery;
     EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.tracked_packets()), tracked_before);
 
     recovery = std::move(recovery);

@@ -3,8 +3,6 @@ import argparse
 import asyncio
 import json
 import math
-import os
-import socket
 import ssl
 import sys
 import time
@@ -238,7 +236,7 @@ async def handle_server_stream(
         try:
             writer.close()
         except Exception:
-            pass
+            return
 
 
 @asynccontextmanager

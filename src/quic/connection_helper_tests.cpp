@@ -1263,157 +1263,317 @@ bool connection_helper_edge_cases_for_tests() {
     }
 
     bool ok = true;
-#define COQUIC_CONNECTION_EDGE_RECORD(expr)                                                        \
-    connection_coverage_check(ok, #expr, static_cast<bool>(expr))
+    connection_coverage_check(ok, "retry_same_version_omits_version_information",
+                              static_cast<bool>(retry_same_version_omits_version_information));
+    connection_coverage_check(ok, "retry_version_change_keeps_version_information",
+                              static_cast<bool>(retry_version_change_keeps_version_information));
+    connection_coverage_check(ok, "failed_datagram_reports_zero_size",
+                              static_cast<bool>(failed_datagram_reports_zero_size));
+    connection_coverage_check(ok, "successful_datagram_reports_size",
+                              static_cast<bool>(successful_datagram_reports_size));
+    connection_coverage_check(ok, "failed_serialized_datagram_reports_zero_size",
+                              static_cast<bool>(failed_serialized_datagram_reports_zero_size));
+    connection_coverage_check(ok, "successful_serialized_datagram_reports_size",
+                              static_cast<bool>(successful_serialized_datagram_reports_size));
+    connection_coverage_check(ok, "empty_packet_payload_error_reported",
+                              static_cast<bool>(empty_packet_payload_error_reported));
+    connection_coverage_check(ok, "successful_datagram_not_reported",
+                              static_cast<bool>(successful_datagram_not_reported));
+    connection_coverage_check(ok, "non_empty_packet_payload_error_not_reported",
+                              static_cast<bool>(non_empty_packet_payload_error_not_reported));
+    connection_coverage_check(ok, "empty_packet_payload_serialized_error_reported",
+                              static_cast<bool>(empty_packet_payload_serialized_error_reported));
+    connection_coverage_check(
+        ok, "non_empty_packet_payload_serialized_error_not_reported",
+        static_cast<bool>(non_empty_packet_payload_serialized_error_not_reported));
+    connection_coverage_check(ok, "encode_failure_returns_empty",
+                              static_cast<bool>(encode_failure_returns_empty));
+    connection_coverage_check(ok, "wrong_magic_rejected", static_cast<bool>(wrong_magic_rejected));
+    connection_coverage_check(ok, "truncated_tls_state_rejected",
+                              static_cast<bool>(truncated_tls_state_rejected));
+    connection_coverage_check(ok, "missing_application_protocol_rejected",
+                              static_cast<bool>(missing_application_protocol_rejected));
+    connection_coverage_check(ok, "missing_transport_parameters_rejected",
+                              static_cast<bool>(missing_transport_parameters_rejected));
+    connection_coverage_check(ok, "missing_application_context_rejected",
+                              static_cast<bool>(missing_application_context_rejected));
+    connection_coverage_check(ok, "trailing_bytes_rejected",
+                              static_cast<bool>(trailing_bytes_rejected));
+    connection_coverage_check(ok, "pending_fin_without_buffer_is_sendable",
+                              static_cast<bool>(pending_fin_without_buffer_is_sendable));
+    connection_coverage_check(ok, "pending_fin_blocked_by_credit",
+                              static_cast<bool>(pending_fin_blocked_by_credit));
+    connection_coverage_check(ok, "pending_data_blocks_fin",
+                              static_cast<bool>(pending_data_blocks_fin));
+    connection_coverage_check(ok, "missing_pending_frames_preserve_state",
+                              static_cast<bool>(missing_pending_frames_preserve_state));
+    connection_coverage_check(ok, "short_header_is_bufferable",
+                              static_cast<bool>(short_header_is_bufferable));
+    connection_coverage_check(ok, "truncated_long_header_is_not_bufferable",
+                              static_cast<bool>(truncated_long_header_is_not_bufferable));
+    connection_coverage_check(ok, "handshake_long_header_is_bufferable",
+                              static_cast<bool>(handshake_long_header_is_bufferable));
+    connection_coverage_check(ok, "server_protected_one_rtt_packet_deferred",
+                              static_cast<bool>(server_protected_one_rtt_packet_deferred));
+    connection_coverage_check(
+        ok, "client_connected_state_protected_one_rtt_packet_deferred",
+        static_cast<bool>(client_connected_state_protected_one_rtt_packet_deferred));
+    connection_coverage_check(ok, "server_received_one_rtt_packet_deferred",
+                              static_cast<bool>(server_received_one_rtt_packet_deferred));
+    connection_coverage_check(
+        ok, "client_connected_state_received_one_rtt_packet_deferred",
+        static_cast<bool>(client_connected_state_received_one_rtt_packet_deferred));
+    connection_coverage_check(ok, "received_ack_only_fast_packet_deferred",
+                              static_cast<bool>(received_ack_only_fast_packet_deferred));
+    connection_coverage_check(ok, "received_stream_fast_packet_deferred",
+                              static_cast<bool>(received_stream_fast_packet_deferred));
+    connection_coverage_check(
+        ok, "connected_received_stream_fast_packet_not_deferred",
+        static_cast<bool>(connected_received_stream_fast_packet_not_deferred));
+    connection_coverage_check(ok, "received_fast_packet_numbers_for_trace",
+                              static_cast<bool>(received_fast_packet_numbers_for_trace));
+    connection_coverage_check(ok, "connected_protected_one_rtt_packet_not_deferred",
+                              static_cast<bool>(connected_protected_one_rtt_packet_not_deferred));
+    connection_coverage_check(ok, "chacha_limits_match_expected",
+                              static_cast<bool>(chacha_limits_match_expected));
+    connection_coverage_check(ok, "aes_gcm_limits_match_expected",
+                              static_cast<bool>(aes_gcm_limits_match_expected));
+    connection_coverage_check(ok, "invalid_cipher_limits_are_empty",
+                              static_cast<bool>(invalid_cipher_limits_are_empty));
+    connection_coverage_check(ok, "saturating_add_handles_overflow_and_sum",
+                              static_cast<bool>(saturating_add_handles_overflow_and_sum));
+    connection_coverage_check(ok, "protected_zero_rtt_crypto_can_advance_tls",
+                              static_cast<bool>(protected_zero_rtt_crypto_can_advance_tls));
+    connection_coverage_check(ok, "protected_one_rtt_ack_cannot_advance_tls",
+                              static_cast<bool>(protected_one_rtt_ack_cannot_advance_tls));
+    connection_coverage_check(ok, "corrupted_long_header_discarded",
+                              static_cast<bool>(corrupted_long_header_discarded));
+    connection_coverage_check(
+        ok, "short_header_not_discarded_as_corrupted_long_header",
+        static_cast<bool>(short_header_not_discarded_as_corrupted_long_header));
+    connection_coverage_check(ok, "empty_connection_id_formats_empty",
+                              static_cast<bool>(empty_connection_id_formats_empty));
+    connection_coverage_check(ok, "connection_id_formats_lower_hex",
+                              static_cast<bool>(connection_id_formats_lower_hex));
+    connection_coverage_check(ok, "empty_issued_connection_id_remains_empty",
+                              static_cast<bool>(empty_issued_connection_id_remains_empty));
+    connection_coverage_check(ok, "quic_core_secret_fallback_has_bytes",
+                              static_cast<bool>(quic_core_secret_fallback_has_bytes));
+    connection_coverage_check(ok, "issued_connection_id_rand_fallback_has_bytes",
+                              static_cast<bool>(issued_connection_id_rand_fallback_has_bytes));
+    connection_coverage_check(ok, "issued_connection_id_fallback_has_bytes",
+                              static_cast<bool>(issued_connection_id_fallback_has_bytes));
+    connection_coverage_check(ok, "stateless_reset_token_rand_fallback_has_bytes",
+                              static_cast<bool>(stateless_reset_token_rand_fallback_has_bytes));
+    connection_coverage_check(ok, "stateless_reset_token_fallback_has_bytes",
+                              static_cast<bool>(stateless_reset_token_fallback_has_bytes));
+    connection_coverage_check(
+        ok, "stateless_reset_token_empty_connection_id_fallback_has_bytes",
+        static_cast<bool>(stateless_reset_token_empty_connection_id_fallback_has_bytes));
+    connection_coverage_check(
+        ok, "stateless_reset_token_empty_connection_id_rand_fallback_has_bytes",
+        static_cast<bool>(stateless_reset_token_empty_connection_id_rand_fallback_has_bytes));
+    connection_coverage_check(ok, "path_challenge_rand_fallback_has_bytes",
+                              static_cast<bool>(path_challenge_rand_fallback_has_bytes));
+    connection_coverage_check(ok, "path_challenge_fallback_has_bytes",
+                              static_cast<bool>(path_challenge_fallback_has_bytes));
+    connection_coverage_check(
+        ok, "path_challenge_empty_connection_id_fallback_has_bytes",
+        static_cast<bool>(path_challenge_empty_connection_id_fallback_has_bytes));
+    connection_coverage_check(
+        ok, "path_challenge_empty_connection_id_rand_fallback_has_bytes",
+        static_cast<bool>(path_challenge_empty_connection_id_rand_fallback_has_bytes));
+    connection_coverage_check(ok, "random_one_in_sixteen_fallback_returns_bool",
+                              static_cast<bool>(random_one_in_sixteen_fallback_returns_bool));
+    connection_coverage_check(ok, "forced_random_one_in_sixteen_false",
+                              static_cast<bool>(forced_random_one_in_sixteen_false));
+    connection_coverage_check(ok, "forced_random_one_in_sixteen_true",
+                              static_cast<bool>(forced_random_one_in_sixteen_true));
+    connection_coverage_check(ok, "random_one_in_sixteen_openssl_returns_bool",
+                              static_cast<bool>(random_one_in_sixteen_openssl_returns_bool));
+    connection_coverage_check(ok, "stream_state_error_helpers_cover_all_codes",
+                              static_cast<bool>(stream_state_error_helpers_cover_all_codes));
+    connection_coverage_check(ok, "stream_state_codec_error_adds_transport_code",
+                              static_cast<bool>(stream_state_codec_error_adds_transport_code));
+    connection_coverage_check(ok, "stream_limit_frame_type_helpers_cover_uni",
+                              static_cast<bool>(stream_limit_frame_type_helpers_cover_uni));
+    connection_coverage_check(
+        ok, "transport_error_for_codec_error_covers_residual_codes",
+        static_cast<bool>(transport_error_for_codec_error_covers_residual_codes));
+    connection_coverage_check(ok, "vector_equals_deferred_packet",
+                              static_cast<bool>(vector_equals_deferred_packet));
+    connection_coverage_check(ok, "optional_path_none_formats_dash",
+                              static_cast<bool>(optional_path_none_formats_dash));
+    connection_coverage_check(ok, "optional_path_value_formats_decimal",
+                              static_cast<bool>(optional_path_value_formats_decimal));
+    connection_coverage_check(ok, "missing_optional_path_returns_null",
+                              static_cast<bool>(missing_optional_path_returns_null));
+    connection_coverage_check(ok, "unknown_path_returns_null",
+                              static_cast<bool>(unknown_path_returns_null));
+    connection_coverage_check(ok, "existing_path_is_found",
+                              static_cast<bool>(existing_path_is_found));
+    connection_coverage_check(ok, "null_path_summary_formats_dash",
+                              static_cast<bool>(null_path_summary_formats_dash));
+    connection_coverage_check(ok, "traced_path_summary_mentions_path_state",
+                              static_cast<bool>(traced_path_summary_mentions_path_state));
+    connection_coverage_check(ok, "invalid_ack_first_range_formats_invalid",
+                              static_cast<bool>(invalid_ack_first_range_formats_invalid));
+    connection_coverage_check(ok, "invalid_ack_gap_formats_invalid",
+                              static_cast<bool>(invalid_ack_gap_formats_invalid));
+    connection_coverage_check(ok, "invalid_ack_range_length_formats_invalid",
+                              static_cast<bool>(invalid_ack_range_length_formats_invalid));
+    connection_coverage_check(ok, "valid_ack_ranges_format_expected",
+                              static_cast<bool>(valid_ack_ranges_format_expected));
+    connection_coverage_check(ok, "invalid_received_ack_formats_invalid",
+                              static_cast<bool>(invalid_received_ack_formats_invalid));
+    connection_coverage_check(ok, "empty_packet_summary_reports_zero",
+                              static_cast<bool>(empty_packet_summary_reports_zero));
+    connection_coverage_check(ok, "packet_summary_mentions_counts",
+                              static_cast<bool>(packet_summary_mentions_counts));
+    connection_coverage_check(ok, "packet_summary_without_stream_offset_omits_offset",
+                              static_cast<bool>(packet_summary_without_stream_offset_omits_offset));
+    connection_coverage_check(
+        ok, "packet_stream_metadata_helpers_cover_count_bytes_and_first_offset",
+        static_cast<bool>(packet_stream_metadata_helpers_cover_count_bytes_and_first_offset));
+    connection_coverage_check(
+        ok, "packet_first_stream_frame_offset_covers_vector_fragment_and_empty",
+        static_cast<bool>(packet_first_stream_frame_offset_covers_vector_fragment_and_empty));
+    connection_coverage_check(
+        ok, "for_each_stream_frame_metadata_visits_first_metadata",
+        static_cast<bool>(for_each_stream_frame_metadata_visits_first_metadata));
+    connection_coverage_check(
+        ok, "for_each_stream_frame_metadata_visits_vector_metadata",
+        static_cast<bool>(for_each_stream_frame_metadata_visits_vector_metadata));
+    connection_coverage_check(ok, "stream_metadata_probe_worthy_outstanding",
+                              static_cast<bool>(stream_metadata_probe_worthy_outstanding));
+    connection_coverage_check(ok, "stream_metadata_probe_worthy_fin",
+                              static_cast<bool>(stream_metadata_probe_worthy_fin));
+    connection_coverage_check(ok, "stream_metadata_probe_worthy_missing_fin_rejected",
+                              static_cast<bool>(stream_metadata_probe_worthy_missing_fin_rejected));
+    connection_coverage_check(ok, "stream_metadata_probe_worthy_acked_fin_rejected",
+                              static_cast<bool>(stream_metadata_probe_worthy_acked_fin_rejected));
+    connection_coverage_check(
+        ok, "single_path_simple_stream_ack_ecn_ignores_failed_path",
+        static_cast<bool>(single_path_simple_stream_ack_ecn_ignores_failed_path));
+    connection_coverage_check(
+        ok, "single_path_simple_stream_ack_ecn_missing_counts_disable",
+        static_cast<bool>(single_path_simple_stream_ack_ecn_missing_counts_disable));
+    connection_coverage_check(
+        ok, "single_path_simple_stream_ack_ecn_decreased_counts_disable",
+        static_cast<bool>(single_path_simple_stream_ack_ecn_decreased_counts_disable));
+    connection_coverage_check(ok, "single_path_simple_stream_ack_ecn_counts_ect1",
+                              static_cast<bool>(single_path_simple_stream_ack_ecn_counts_ect1));
+    connection_coverage_check(
+        ok, "single_path_simple_stream_ack_ecn_missing_feedback_disables",
+        static_cast<bool>(single_path_simple_stream_ack_ecn_missing_feedback_disables));
+    connection_coverage_check(
+        ok, "single_path_simple_stream_ack_ecn_success_tracks_ce_time",
+        static_cast<bool>(single_path_simple_stream_ack_ecn_success_tracks_ce_time));
+    connection_coverage_check(ok, "simple_stream_ack_ecn_non_ect_samples_are_ignored",
+                              static_cast<bool>(simple_stream_ack_ecn_non_ect_samples_are_ignored));
+    connection_coverage_check(
+        ok, "multi_path_simple_stream_ack_ecn_ignores_failed_path",
+        static_cast<bool>(multi_path_simple_stream_ack_ecn_ignores_failed_path));
+    connection_coverage_check(
+        ok, "multi_path_simple_stream_ack_ecn_missing_counts_disable",
+        static_cast<bool>(multi_path_simple_stream_ack_ecn_missing_counts_disable));
+    connection_coverage_check(
+        ok, "multi_path_simple_stream_ack_ecn_decreased_counts_disable",
+        static_cast<bool>(multi_path_simple_stream_ack_ecn_decreased_counts_disable));
+    connection_coverage_check(
+        ok, "multi_path_simple_stream_ack_ecn_missing_feedback_disables",
+        static_cast<bool>(multi_path_simple_stream_ack_ecn_missing_feedback_disables));
+    connection_coverage_check(
+        ok, "multi_path_simple_stream_ack_ecn_success_tracks_ce_time",
+        static_cast<bool>(multi_path_simple_stream_ack_ecn_success_tracks_ce_time));
+    connection_coverage_check(ok, "stream_frame_payload_budget_handles_edges",
+                              static_cast<bool>(stream_frame_payload_budget_handles_edges));
+    connection_coverage_check(
+        ok, "application_stream_budget_handles_small_and_oversized_connection_ids",
+        static_cast<bool>(application_stream_budget_handles_small_and_oversized_connection_ids));
+    connection_coverage_check(
+        ok, "one_rtt_fragment_size_rejects_non_terminal_lengthless_stream_frames",
+        static_cast<bool>(one_rtt_fragment_size_rejects_non_terminal_lengthless_stream_frames));
+    connection_coverage_check(
+        ok, "one_rtt_fragment_size_propagates_frame_size_errors",
+        static_cast<bool>(one_rtt_fragment_size_propagates_frame_size_errors));
+    connection_coverage_check(ok, "one_rtt_fragment_size_rejects_empty_payloads",
+                              static_cast<bool>(one_rtt_fragment_size_rejects_empty_payloads));
+    connection_coverage_check(
+        ok, "one_rtt_fragment_helpers_count_stream_fragment_bytes",
+        static_cast<bool>(one_rtt_fragment_helpers_count_stream_fragment_bytes));
+    connection_coverage_check(
+        ok, "one_rtt_fragment_size_rejects_overflowing_fragment_offsets",
+        static_cast<bool>(one_rtt_fragment_size_rejects_overflowing_fragment_offsets));
+    connection_coverage_check(ok, "trace_unset_disabled", static_cast<bool>(trace_unset_disabled));
+    connection_coverage_check(ok, "trace_empty_disabled", static_cast<bool>(trace_empty_disabled));
+    connection_coverage_check(ok, "trace_zero_disabled", static_cast<bool>(trace_zero_disabled));
+    connection_coverage_check(ok, "trace_matches_without_filter",
+                              static_cast<bool>(trace_matches_without_filter));
+    connection_coverage_check(ok, "trace_matches_with_empty_filter",
+                              static_cast<bool>(trace_matches_with_empty_filter));
+    connection_coverage_check(ok, "trace_matches_with_exact_filter",
+                              static_cast<bool>(trace_matches_with_exact_filter));
+    connection_coverage_check(ok, "trace_rejects_mismatched_filter",
+                              static_cast<bool>(trace_rejects_mismatched_filter));
+    connection_coverage_check(ok, "empty_long_header_rejected",
+                              static_cast<bool>(empty_long_header_rejected));
+    connection_coverage_check(ok, "short_header_rejected",
+                              static_cast<bool>(short_header_rejected));
+    connection_coverage_check(ok, "truncated_version_rejected",
+                              static_cast<bool>(truncated_version_rejected));
+    connection_coverage_check(ok, "unsupported_version_rejected",
+                              static_cast<bool>(unsupported_version_rejected));
+    connection_coverage_check(ok, "missing_destination_connection_id_length_rejected",
+                              static_cast<bool>(missing_destination_connection_id_length_rejected));
+    connection_coverage_check(
+        ok, "oversized_destination_connection_id_length_rejected",
+        static_cast<bool>(oversized_destination_connection_id_length_rejected));
+    connection_coverage_check(ok, "truncated_destination_connection_id_rejected",
+                              static_cast<bool>(truncated_destination_connection_id_rejected));
+    connection_coverage_check(ok, "missing_source_connection_id_length_rejected",
+                              static_cast<bool>(missing_source_connection_id_length_rejected));
+    connection_coverage_check(ok, "oversized_source_connection_id_length_rejected",
+                              static_cast<bool>(oversized_source_connection_id_length_rejected));
+    connection_coverage_check(ok, "truncated_source_connection_id_rejected",
+                              static_cast<bool>(truncated_source_connection_id_rejected));
+    connection_coverage_check(ok, "missing_initial_token_length_rejected",
+                              static_cast<bool>(missing_initial_token_length_rejected));
+    connection_coverage_check(ok, "oversized_initial_token_length_rejected",
+                              static_cast<bool>(oversized_initial_token_length_rejected));
+    connection_coverage_check(ok, "unsupported_retry_packet_type_rejected",
+                              static_cast<bool>(unsupported_retry_packet_type_rejected));
+    connection_coverage_check(
+        ok, "missing_payload_length_after_initial_token_rejected",
+        static_cast<bool>(missing_payload_length_after_initial_token_rejected));
+    connection_coverage_check(ok, "missing_payload_length_for_handshake_rejected",
+                              static_cast<bool>(missing_payload_length_for_handshake_rejected));
+    connection_coverage_check(ok, "missing_payload_length_for_zero_rtt_rejected",
+                              static_cast<bool>(missing_payload_length_for_zero_rtt_rejected));
+    connection_coverage_check(ok, "oversized_payload_length_rejected",
+                              static_cast<bool>(oversized_payload_length_rejected));
+    connection_coverage_check(
+        ok, "discardable_deferred_replay_packet_does_not_block_current_packet",
+        static_cast<bool>(discardable_deferred_replay_packet_does_not_block_current_packet));
+    connection_coverage_check(ok, "in_place_receive_storage_before_begin_guard",
+                              static_cast<bool>(in_place_receive_storage_before_begin_guard));
+    connection_coverage_check(ok, "in_place_receive_storage_overflow_guard",
+                              static_cast<bool>(in_place_receive_storage_overflow_guard));
+    connection_coverage_check(ok, "replay_failure_before_current_packet_is_non_fatal",
+                              static_cast<bool>(replay_failure_before_current_packet_is_non_fatal));
+    connection_coverage_check(ok, "replay_failure_after_current_packet_is_non_fatal",
+                              static_cast<bool>(replay_failure_after_current_packet_is_non_fatal));
+    connection_coverage_check(ok, "fast_path_ack_only_packet_processed",
+                              static_cast<bool>(fast_path_ack_only_packet_processed));
+    connection_coverage_check(ok, "fast_path_duplicate_ack_only_packet_ignored",
+                              static_cast<bool>(fast_path_duplicate_ack_only_packet_ignored));
+    connection_coverage_check(ok, "fast_path_stream_packet_processed",
+                              static_cast<bool>(fast_path_stream_packet_processed));
+    connection_coverage_check(ok, "fast_path_duplicate_stream_packet_ignored",
+                              static_cast<bool>(fast_path_duplicate_stream_packet_ignored));
+    connection_coverage_check(ok, "fast_path_corrupted_packet_discarded",
+                              static_cast<bool>(fast_path_corrupted_packet_discarded));
 
-    COQUIC_CONNECTION_EDGE_RECORD(retry_same_version_omits_version_information);
-    COQUIC_CONNECTION_EDGE_RECORD(retry_version_change_keeps_version_information);
-    COQUIC_CONNECTION_EDGE_RECORD(failed_datagram_reports_zero_size);
-    COQUIC_CONNECTION_EDGE_RECORD(successful_datagram_reports_size);
-    COQUIC_CONNECTION_EDGE_RECORD(failed_serialized_datagram_reports_zero_size);
-    COQUIC_CONNECTION_EDGE_RECORD(successful_serialized_datagram_reports_size);
-    COQUIC_CONNECTION_EDGE_RECORD(empty_packet_payload_error_reported);
-    COQUIC_CONNECTION_EDGE_RECORD(successful_datagram_not_reported);
-    COQUIC_CONNECTION_EDGE_RECORD(non_empty_packet_payload_error_not_reported);
-    COQUIC_CONNECTION_EDGE_RECORD(empty_packet_payload_serialized_error_reported);
-    COQUIC_CONNECTION_EDGE_RECORD(non_empty_packet_payload_serialized_error_not_reported);
-    COQUIC_CONNECTION_EDGE_RECORD(encode_failure_returns_empty);
-    COQUIC_CONNECTION_EDGE_RECORD(wrong_magic_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(truncated_tls_state_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_application_protocol_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_transport_parameters_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_application_context_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(trailing_bytes_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(pending_fin_without_buffer_is_sendable);
-    COQUIC_CONNECTION_EDGE_RECORD(pending_fin_blocked_by_credit);
-    COQUIC_CONNECTION_EDGE_RECORD(pending_data_blocks_fin);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_pending_frames_preserve_state);
-    COQUIC_CONNECTION_EDGE_RECORD(short_header_is_bufferable);
-    COQUIC_CONNECTION_EDGE_RECORD(truncated_long_header_is_not_bufferable);
-    COQUIC_CONNECTION_EDGE_RECORD(handshake_long_header_is_bufferable);
-    COQUIC_CONNECTION_EDGE_RECORD(server_protected_one_rtt_packet_deferred);
-    COQUIC_CONNECTION_EDGE_RECORD(client_connected_state_protected_one_rtt_packet_deferred);
-    COQUIC_CONNECTION_EDGE_RECORD(server_received_one_rtt_packet_deferred);
-    COQUIC_CONNECTION_EDGE_RECORD(client_connected_state_received_one_rtt_packet_deferred);
-    COQUIC_CONNECTION_EDGE_RECORD(received_ack_only_fast_packet_deferred);
-    COQUIC_CONNECTION_EDGE_RECORD(received_stream_fast_packet_deferred);
-    COQUIC_CONNECTION_EDGE_RECORD(connected_received_stream_fast_packet_not_deferred);
-    COQUIC_CONNECTION_EDGE_RECORD(received_fast_packet_numbers_for_trace);
-    COQUIC_CONNECTION_EDGE_RECORD(connected_protected_one_rtt_packet_not_deferred);
-    COQUIC_CONNECTION_EDGE_RECORD(chacha_limits_match_expected);
-    COQUIC_CONNECTION_EDGE_RECORD(aes_gcm_limits_match_expected);
-    COQUIC_CONNECTION_EDGE_RECORD(invalid_cipher_limits_are_empty);
-    COQUIC_CONNECTION_EDGE_RECORD(saturating_add_handles_overflow_and_sum);
-    COQUIC_CONNECTION_EDGE_RECORD(protected_zero_rtt_crypto_can_advance_tls);
-    COQUIC_CONNECTION_EDGE_RECORD(protected_one_rtt_ack_cannot_advance_tls);
-    COQUIC_CONNECTION_EDGE_RECORD(corrupted_long_header_discarded);
-    COQUIC_CONNECTION_EDGE_RECORD(short_header_not_discarded_as_corrupted_long_header);
-    COQUIC_CONNECTION_EDGE_RECORD(empty_connection_id_formats_empty);
-    COQUIC_CONNECTION_EDGE_RECORD(connection_id_formats_lower_hex);
-    COQUIC_CONNECTION_EDGE_RECORD(empty_issued_connection_id_remains_empty);
-    COQUIC_CONNECTION_EDGE_RECORD(quic_core_secret_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(issued_connection_id_rand_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(issued_connection_id_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(stateless_reset_token_rand_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(stateless_reset_token_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(stateless_reset_token_empty_connection_id_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(
-        stateless_reset_token_empty_connection_id_rand_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(path_challenge_rand_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(path_challenge_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(path_challenge_empty_connection_id_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(path_challenge_empty_connection_id_rand_fallback_has_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(random_one_in_sixteen_fallback_returns_bool);
-    COQUIC_CONNECTION_EDGE_RECORD(forced_random_one_in_sixteen_false);
-    COQUIC_CONNECTION_EDGE_RECORD(forced_random_one_in_sixteen_true);
-    COQUIC_CONNECTION_EDGE_RECORD(random_one_in_sixteen_openssl_returns_bool);
-    COQUIC_CONNECTION_EDGE_RECORD(stream_state_error_helpers_cover_all_codes);
-    COQUIC_CONNECTION_EDGE_RECORD(stream_state_codec_error_adds_transport_code);
-    COQUIC_CONNECTION_EDGE_RECORD(stream_limit_frame_type_helpers_cover_uni);
-    COQUIC_CONNECTION_EDGE_RECORD(transport_error_for_codec_error_covers_residual_codes);
-    COQUIC_CONNECTION_EDGE_RECORD(vector_equals_deferred_packet);
-    COQUIC_CONNECTION_EDGE_RECORD(optional_path_none_formats_dash);
-    COQUIC_CONNECTION_EDGE_RECORD(optional_path_value_formats_decimal);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_optional_path_returns_null);
-    COQUIC_CONNECTION_EDGE_RECORD(unknown_path_returns_null);
-    COQUIC_CONNECTION_EDGE_RECORD(existing_path_is_found);
-    COQUIC_CONNECTION_EDGE_RECORD(null_path_summary_formats_dash);
-    COQUIC_CONNECTION_EDGE_RECORD(traced_path_summary_mentions_path_state);
-    COQUIC_CONNECTION_EDGE_RECORD(invalid_ack_first_range_formats_invalid);
-    COQUIC_CONNECTION_EDGE_RECORD(invalid_ack_gap_formats_invalid);
-    COQUIC_CONNECTION_EDGE_RECORD(invalid_ack_range_length_formats_invalid);
-    COQUIC_CONNECTION_EDGE_RECORD(valid_ack_ranges_format_expected);
-    COQUIC_CONNECTION_EDGE_RECORD(invalid_received_ack_formats_invalid);
-    COQUIC_CONNECTION_EDGE_RECORD(empty_packet_summary_reports_zero);
-    COQUIC_CONNECTION_EDGE_RECORD(packet_summary_mentions_counts);
-    COQUIC_CONNECTION_EDGE_RECORD(packet_summary_without_stream_offset_omits_offset);
-    COQUIC_CONNECTION_EDGE_RECORD(
-        packet_stream_metadata_helpers_cover_count_bytes_and_first_offset);
-    COQUIC_CONNECTION_EDGE_RECORD(
-        packet_first_stream_frame_offset_covers_vector_fragment_and_empty);
-    COQUIC_CONNECTION_EDGE_RECORD(for_each_stream_frame_metadata_visits_first_metadata);
-    COQUIC_CONNECTION_EDGE_RECORD(for_each_stream_frame_metadata_visits_vector_metadata);
-    COQUIC_CONNECTION_EDGE_RECORD(stream_metadata_probe_worthy_outstanding);
-    COQUIC_CONNECTION_EDGE_RECORD(stream_metadata_probe_worthy_fin);
-    COQUIC_CONNECTION_EDGE_RECORD(stream_metadata_probe_worthy_missing_fin_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(stream_metadata_probe_worthy_acked_fin_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(single_path_simple_stream_ack_ecn_ignores_failed_path);
-    COQUIC_CONNECTION_EDGE_RECORD(single_path_simple_stream_ack_ecn_missing_counts_disable);
-    COQUIC_CONNECTION_EDGE_RECORD(single_path_simple_stream_ack_ecn_decreased_counts_disable);
-    COQUIC_CONNECTION_EDGE_RECORD(single_path_simple_stream_ack_ecn_counts_ect1);
-    COQUIC_CONNECTION_EDGE_RECORD(single_path_simple_stream_ack_ecn_missing_feedback_disables);
-    COQUIC_CONNECTION_EDGE_RECORD(single_path_simple_stream_ack_ecn_success_tracks_ce_time);
-    COQUIC_CONNECTION_EDGE_RECORD(simple_stream_ack_ecn_non_ect_samples_are_ignored);
-    COQUIC_CONNECTION_EDGE_RECORD(multi_path_simple_stream_ack_ecn_ignores_failed_path);
-    COQUIC_CONNECTION_EDGE_RECORD(multi_path_simple_stream_ack_ecn_missing_counts_disable);
-    COQUIC_CONNECTION_EDGE_RECORD(multi_path_simple_stream_ack_ecn_decreased_counts_disable);
-    COQUIC_CONNECTION_EDGE_RECORD(multi_path_simple_stream_ack_ecn_missing_feedback_disables);
-    COQUIC_CONNECTION_EDGE_RECORD(multi_path_simple_stream_ack_ecn_success_tracks_ce_time);
-    COQUIC_CONNECTION_EDGE_RECORD(stream_frame_payload_budget_handles_edges);
-    COQUIC_CONNECTION_EDGE_RECORD(
-        application_stream_budget_handles_small_and_oversized_connection_ids);
-    COQUIC_CONNECTION_EDGE_RECORD(
-        one_rtt_fragment_size_rejects_non_terminal_lengthless_stream_frames);
-    COQUIC_CONNECTION_EDGE_RECORD(one_rtt_fragment_size_propagates_frame_size_errors);
-    COQUIC_CONNECTION_EDGE_RECORD(one_rtt_fragment_size_rejects_empty_payloads);
-    COQUIC_CONNECTION_EDGE_RECORD(one_rtt_fragment_helpers_count_stream_fragment_bytes);
-    COQUIC_CONNECTION_EDGE_RECORD(one_rtt_fragment_size_rejects_overflowing_fragment_offsets);
-    COQUIC_CONNECTION_EDGE_RECORD(trace_unset_disabled);
-    COQUIC_CONNECTION_EDGE_RECORD(trace_empty_disabled);
-    COQUIC_CONNECTION_EDGE_RECORD(trace_zero_disabled);
-    COQUIC_CONNECTION_EDGE_RECORD(trace_matches_without_filter);
-    COQUIC_CONNECTION_EDGE_RECORD(trace_matches_with_empty_filter);
-    COQUIC_CONNECTION_EDGE_RECORD(trace_matches_with_exact_filter);
-    COQUIC_CONNECTION_EDGE_RECORD(trace_rejects_mismatched_filter);
-    COQUIC_CONNECTION_EDGE_RECORD(empty_long_header_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(short_header_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(truncated_version_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(unsupported_version_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_destination_connection_id_length_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(oversized_destination_connection_id_length_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(truncated_destination_connection_id_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_source_connection_id_length_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(oversized_source_connection_id_length_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(truncated_source_connection_id_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_initial_token_length_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(oversized_initial_token_length_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(unsupported_retry_packet_type_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_payload_length_after_initial_token_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_payload_length_for_handshake_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(missing_payload_length_for_zero_rtt_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(oversized_payload_length_rejected);
-    COQUIC_CONNECTION_EDGE_RECORD(discardable_deferred_replay_packet_does_not_block_current_packet);
-    COQUIC_CONNECTION_EDGE_RECORD(in_place_receive_storage_before_begin_guard);
-    COQUIC_CONNECTION_EDGE_RECORD(in_place_receive_storage_overflow_guard);
-    COQUIC_CONNECTION_EDGE_RECORD(replay_failure_before_current_packet_is_non_fatal);
-    COQUIC_CONNECTION_EDGE_RECORD(replay_failure_after_current_packet_is_non_fatal);
-    COQUIC_CONNECTION_EDGE_RECORD(fast_path_ack_only_packet_processed);
-    COQUIC_CONNECTION_EDGE_RECORD(fast_path_duplicate_ack_only_packet_ignored);
-    COQUIC_CONNECTION_EDGE_RECORD(fast_path_stream_packet_processed);
-    COQUIC_CONNECTION_EDGE_RECORD(fast_path_duplicate_stream_packet_ignored);
-    COQUIC_CONNECTION_EDGE_RECORD(fast_path_corrupted_packet_discarded);
-
-#undef COQUIC_CONNECTION_EDGE_RECORD
     return ok;
 }
 

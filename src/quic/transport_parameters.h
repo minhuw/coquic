@@ -49,6 +49,7 @@ struct TransportParameters {
     std::optional<PreferredAddress> preferred_address;
     std::optional<VersionInformation> version_information;
     std::uint64_t max_datagram_frame_size = 0;
+    bool grease_quic_bit = false;
 };
 
 struct TransportParametersValidationContext {

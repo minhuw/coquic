@@ -485,7 +485,7 @@ CodecResult<PacketDecodeResult> decode_short_header_packet(std::span<const std::
                                                            BufferReader &reader,
                                                            std::uint8_t first_byte,
                                                            const DeserializeOptions &options) {
-    if ((first_byte & 0x40u) == 0) {
+    if ((first_byte & 0x40u) == 0 && !options.accept_greased_quic_bit) {
         return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_fixed_bit, 0);
     }
     if ((first_byte & 0x18u) != 0) {
@@ -723,7 +723,7 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
         return decode_version_negotiation_packet(first_byte, reader);
     }
 
-    if ((first_byte & 0x40u) == 0) {
+    if ((first_byte & 0x40u) == 0 && !options.accept_greased_quic_bit) {
         return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_fixed_bit, 0);
     }
 

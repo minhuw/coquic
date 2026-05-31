@@ -39,6 +39,7 @@ constexpr std::uint64_t initial_source_connection_id_parameter_id = 0x0f;
 constexpr std::uint64_t retry_source_connection_id_parameter_id = 0x10;
 constexpr std::uint64_t version_information_parameter_id = 0x11;
 constexpr std::uint64_t max_datagram_frame_size_parameter_id = 0x20;
+constexpr std::uint64_t grease_quic_bit_parameter_id = 0x2ab2;
 constexpr std::uint64_t minimum_max_udp_payload_size = 1200;
 constexpr std::uint64_t minimum_active_connection_id_limit = 2;
 constexpr std::uint64_t maximum_ack_delay_exponent = 20;
@@ -314,6 +315,9 @@ serialize_transport_parameters(const TransportParameters &parameters) {
         append_raw_parameter(output, max_datagram_frame_size_parameter_id,
                              encoded_max_datagram_frame_size.value());
     }
+    if (parameters.grease_quic_bit) {
+        append_parameter_header(output, grease_quic_bit_parameter_id, 0);
+    }
 
     return CodecResult<std::vector<std::byte>>::success(std::move(output));
 }
@@ -524,6 +528,13 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             parameters.max_datagram_frame_size = decoded.value();
             break;
         }
+        case grease_quic_bit_parameter_id:
+            if (!value.empty()) {
+                return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                                 offset);
+            }
+            parameters.grease_quic_bit = true;
+            break;
         default:
             break;
         }

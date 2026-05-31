@@ -248,6 +248,30 @@ TEST(QuicCoreEndpointInternalTest, ParseEndpointDatagramRejectsMalformedInputs) 
         QuicCore::parse_endpoint_datagram(initial_token_length_exceeds_remaining).has_value());
 }
 
+TEST(QuicCoreEndpointInternalTest, ParseEndpointDatagramAcceptsGreasedQuicBitWhenEnabled) {
+    const auto greased_short_header =
+        bytes_from_ints({0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02});
+    EXPECT_FALSE(QuicCore::parse_endpoint_datagram(greased_short_header).has_value());
+    const auto short_header =
+        QuicCore::parse_endpoint_datagram(greased_short_header, /*accept_greased_quic_bit=*/true);
+    ASSERT_TRUE(short_header.has_value());
+    const auto &short_header_value = optional_ref_or_terminate(short_header);
+    EXPECT_EQ(short_header_value.kind, QuicCore::ParsedEndpointDatagram::Kind::short_header);
+
+    const auto greased_initial =
+        bytes_from_ints({0x80, 0x00, 0x00, 0x00, 0x01, 0x01, 0xaa, 0x01, 0xbb, 0x00});
+    EXPECT_FALSE(QuicCore::parse_endpoint_datagram(greased_initial).has_value());
+    const auto initial =
+        QuicCore::parse_endpoint_datagram(greased_initial, /*accept_greased_quic_bit=*/true);
+    ASSERT_TRUE(initial.has_value());
+    const auto &initial_value = optional_ref_or_terminate(initial);
+    EXPECT_EQ(initial_value.kind, QuicCore::ParsedEndpointDatagram::Kind::supported_initial);
+    EXPECT_EQ(initial_value.destination_connection_id, bytes_from_ints({0xaa}));
+    ASSERT_TRUE(initial_value.source_connection_id.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(initial_value.source_connection_id),
+              bytes_from_ints({0xbb}));
+}
+
 TEST(QuicCoreEndpointInternalTest, RetryContextAndPacketBuildersRejectMissingOrMismatchedInputs) {
     QuicCore core(make_server_endpoint_config());
 

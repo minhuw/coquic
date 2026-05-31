@@ -910,6 +910,7 @@ class QuicConnection {
     bool latency_spin_bit_disabled_ = true;
     std::uint32_t original_version_;
     std::uint32_t current_version_;
+    std::uint64_t grease_quic_bit_seed_ = 0;
     HandshakeStatus status_ = HandshakeStatus::idle;
     bool started_ = false;
     PacketSpaceState initial_space_;
@@ -982,6 +983,7 @@ class QuicConnection {
         std::uint64_t secret_generation = 0;
         bool key_phase = false;
         std::size_t destination_connection_id_length = 0;
+        bool accept_greased_quic_bit = false;
         bool secret_cache_primed = false;
     };
     std::optional<ShortHeaderDeserializeContextCache> current_short_header_deserialize_cache_;

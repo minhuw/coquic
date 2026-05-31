@@ -273,6 +273,7 @@ inline QuicConnection make_connected_client_connection() {
         .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = connection.peer_source_connection_id_,
         .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = connection.config_.transport.grease_quic_bit,
     };
     connection.peer_transport_parameters_validated_ = true;
     connection.initialize_peer_flow_control_from_transport_parameters();
@@ -311,6 +312,7 @@ inline QuicConnection make_connected_server_connection() {
         .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = connection.config_.source_connection_id,
         .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = connection.config_.transport.grease_quic_bit,
     };
     connection.initialize_local_flow_control();
     connection.application_space_.read_secret =
@@ -332,6 +334,7 @@ inline QuicConnection make_connected_server_connection() {
         .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = connection.peer_source_connection_id_,
         .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = connection.config_.transport.grease_quic_bit,
     };
     connection.peer_transport_parameters_validated_ = true;
     connection.initialize_peer_flow_control_from_transport_parameters();
@@ -401,6 +404,7 @@ inline QuicConnection make_connected_server_connection_with_preferred_address() 
         .initial_source_connection_id = connection.config_.source_connection_id,
         .preferred_address = connection.config_.transport.preferred_address,
         .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = connection.config_.transport.grease_quic_bit,
     };
     connection.initialize_local_flow_control();
     connection.application_space_.read_secret =
@@ -422,6 +426,7 @@ inline QuicConnection make_connected_server_connection_with_preferred_address() 
         .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = connection.peer_source_connection_id_,
         .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = connection.config_.transport.grease_quic_bit,
     };
     connection.peer_transport_parameters_validated_ = true;
     connection.initialize_peer_flow_control_from_transport_parameters();

@@ -284,6 +284,69 @@ TEST(QuicCoreTest, HandshakeExportsConfiguredTransportParametersToPeer) {
     EXPECT_EQ(peer_transport_parameters.value().initial_max_streams_uni, 13u);
 }
 
+TEST(QuicCoreTest, GreaseQuicBitTransportParameterNegotiatesAndControlsOutgoingQuicBit) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.transport.grease_quic_bit = true;
+    auto server_config = coquic::quic::test::make_server_core_config();
+    server_config.transport.grease_quic_bit = true;
+
+    coquic::quic::QuicCore client(std::move(client_config));
+    coquic::quic::QuicCore server(std::move(server_config));
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+
+    ASSERT_TRUE(client.connection_ != nullptr);
+    ASSERT_TRUE(server.connection_ != nullptr);
+    ASSERT_TRUE(client.connection_->peer_transport_parameters_.has_value());
+    ASSERT_TRUE(server.connection_->peer_transport_parameters_.has_value());
+    const auto &client_peer_transport_parameters =
+        optional_ref_or_terminate(client.connection_->peer_transport_parameters_);
+    const auto &server_peer_transport_parameters =
+        optional_ref_or_terminate(server.connection_->peer_transport_parameters_);
+    EXPECT_TRUE(client.connection_->local_transport_parameters_.grease_quic_bit);
+    EXPECT_TRUE(server.connection_->local_transport_parameters_.grease_quic_bit);
+    EXPECT_TRUE(client_peer_transport_parameters.grease_quic_bit);
+    EXPECT_TRUE(server_peer_transport_parameters.grease_quic_bit);
+
+    const auto serialize_context = coquic::quic::SerializeProtectionContext{
+        .local_role = client.connection_->config_.role,
+        .client_initial_destination_connection_id =
+            client.connection_->client_initial_destination_connection_id(),
+        .one_rtt_secret = client.connection_->application_space_.write_secret,
+        .one_rtt_key_phase = client.connection_->application_write_key_phase_,
+        .grease_quic_bit = true,
+    };
+    const auto datagram = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = server.connection_->config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 2,
+                .frames = {coquic::quic::PingFrame{}},
+            },
+        },
+        serialize_context);
+    ASSERT_TRUE(datagram.has_value());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(datagram.value().front()) & 0x40u, 0u);
+
+    auto strict_context = coquic::quic::DeserializeProtectionContext{
+        .peer_role = coquic::quic::EndpointRole::client,
+        .one_rtt_secret = server.connection_->application_space_.read_secret,
+        .largest_authenticated_application_packet_number = 1,
+        .one_rtt_destination_connection_id_length =
+            server.connection_->config_.source_connection_id.size(),
+    };
+    const auto strict_decoded =
+        coquic::quic::deserialize_protected_datagram(datagram.value(), strict_context);
+    ASSERT_FALSE(strict_decoded.has_value());
+    EXPECT_EQ(strict_decoded.error().code, coquic::quic::CodecErrorCode::invalid_fixed_bit);
+
+    strict_context.accept_greased_quic_bit = true;
+    const auto decoded =
+        coquic::quic::deserialize_protected_datagram(datagram.value(), strict_context);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_NE(std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded.value().front()), nullptr);
+}
+
 TEST(QuicCoreTest, ServerAdvertisesInitialStatelessResetToken) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
@@ -2865,6 +2928,8 @@ TEST(QuicCoreTest, ConnectionTlsAndValidationHelpersCoverRemainingBranches) {
         malformed_params_connection.validate_peer_transport_parameters_if_ready();
     ASSERT_FALSE(malformed_params.has_value());
     EXPECT_EQ(malformed_params.error().code, coquic::quic::CodecErrorCode::truncated_input);
+    EXPECT_TRUE(malformed_params.error().has_transport_error_code);
+    EXPECT_EQ(malformed_params.error().transport_error_code, 0x08u);
     const auto sync_failure = malformed_params_connection.sync_tls_state();
     ASSERT_FALSE(sync_failure.has_value());
     EXPECT_EQ(sync_failure.error().code, coquic::quic::CodecErrorCode::truncated_input);

@@ -1019,4 +1019,53 @@ TEST(QuicPacketTest, RejectsMalformedGenericPacketHeaders) {
         {}, CodecErrorCode::invalid_reserved_bits);
 }
 
+TEST(QuicPacketTest, AcceptsGreasedQuicBitWhenEnabled) {
+    const auto initial_encoded = coquic::quic::serialize_packet(InitialPacket{
+        .version = 1,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .token = {},
+        .packet_number_length = 1,
+        .truncated_packet_number = 1,
+        .frames = {CryptoFrame{.offset = 0, .crypto_data = {std::byte{0x01}}}},
+    });
+    ASSERT_TRUE(initial_encoded.has_value());
+
+    auto greased_initial = initial_encoded.value();
+    greased_initial.front() &= std::byte{0xbfu};
+    const auto strict_initial = coquic::quic::deserialize_packet(greased_initial, {});
+    ASSERT_FALSE(strict_initial.has_value());
+    EXPECT_EQ(strict_initial.error().code, CodecErrorCode::invalid_fixed_bit);
+
+    const auto decoded_initial = coquic::quic::deserialize_packet(
+        greased_initial, coquic::quic::DeserializeOptions{.accept_greased_quic_bit = true});
+    ASSERT_TRUE(decoded_initial.has_value());
+    EXPECT_NE(std::get_if<InitialPacket>(&decoded_initial.value().packet), nullptr);
+
+    const auto one_rtt_encoded = coquic::quic::serialize_packet(OneRttPacket{
+        .destination_connection_id = {std::byte{0xaa}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 1,
+        .frames = {PingFrame{}},
+    });
+    ASSERT_TRUE(one_rtt_encoded.has_value());
+
+    auto greased_one_rtt = one_rtt_encoded.value();
+    greased_one_rtt.front() &= std::byte{0xbfu};
+    const auto strict_one_rtt = coquic::quic::deserialize_packet(
+        greased_one_rtt, coquic::quic::DeserializeOptions{
+                             .one_rtt_destination_connection_id_length = 1,
+                         });
+    ASSERT_FALSE(strict_one_rtt.has_value());
+    EXPECT_EQ(strict_one_rtt.error().code, CodecErrorCode::invalid_fixed_bit);
+
+    const auto decoded_one_rtt = coquic::quic::deserialize_packet(
+        greased_one_rtt, coquic::quic::DeserializeOptions{
+                             .one_rtt_destination_connection_id_length = 1,
+                             .accept_greased_quic_bit = true,
+                         });
+    ASSERT_TRUE(decoded_one_rtt.has_value());
+    EXPECT_NE(std::get_if<OneRttPacket>(&decoded_one_rtt.value().packet), nullptr);
+}
+
 } // namespace

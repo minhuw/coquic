@@ -190,6 +190,8 @@ struct SerializeProtectionContext {
     bool handshake_secret_cache_primed = false;
     bool zero_rtt_secret_cache_primed = false;
     bool one_rtt_secret_cache_primed = false;
+    bool grease_quic_bit = false;
+    std::uint64_t grease_quic_bit_seed = 0;
 };
 
 struct DeserializeProtectionContext {
@@ -205,6 +207,7 @@ struct DeserializeProtectionContext {
     std::optional<std::uint64_t> largest_authenticated_handshake_packet_number;
     std::optional<std::uint64_t> largest_authenticated_application_packet_number;
     std::size_t one_rtt_destination_connection_id_length = 0;
+    bool accept_greased_quic_bit = false;
 };
 
 using ProtectedPacket = std::variant<ProtectedInitialPacket, ProtectedHandshakePacket,

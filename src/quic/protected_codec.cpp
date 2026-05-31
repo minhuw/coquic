@@ -491,10 +491,28 @@ void append_varint_unchecked(std::vector<std::byte> &bytes, std::uint64_t value)
     append_bytes(bytes, std::span<const std::byte>(encoded.data(), written));
 }
 
+std::uint8_t quic_bit_mask(bool grease_quic_bit, std::uint64_t seed, std::uint64_t packet_number) {
+    if (!grease_quic_bit) {
+        return 0x40u;
+    }
+
+    auto mixed = seed ^ (packet_number * 0x9e3779b97f4a7c15ull);
+    mixed ^= mixed >> 30u;
+    mixed *= 0xbf58476d1ce4e5b9ull;
+    mixed ^= mixed >> 27u;
+    mixed *= 0x94d049bb133111ebull;
+    mixed ^= mixed >> 31u;
+    return (mixed & 0x01u) != 0 ? 0x40u : 0u;
+}
+
 std::byte make_short_header_first_byte(bool spin_bit, bool key_phase,
-                                       std::uint8_t packet_number_length) {
-    return static_cast<std::byte>(0x40u | (spin_bit ? 0x20u : 0u) | (key_phase ? 0x04u : 0u) |
-                                  ((packet_number_length - 1) & 0x03u));
+                                       std::uint8_t packet_number_length,
+                                       bool grease_quic_bit = false,
+                                       std::uint64_t grease_quic_bit_seed = 0,
+                                       std::uint64_t packet_number = 0) {
+    return static_cast<std::byte>(
+        quic_bit_mask(grease_quic_bit, grease_quic_bit_seed, packet_number) |
+        (spin_bit ? 0x20u : 0u) | (key_phase ? 0x04u : 0u) | ((packet_number_length - 1) & 0x03u));
 }
 
 struct TruncatedPacketNumberEncoding {
@@ -895,14 +913,15 @@ bool long_header_has_token(LongHeaderPacketType packet_type) {
     return packet_type == LongHeaderPacketType::initial;
 }
 
-CodecResult<LongHeaderPacketType> read_long_header_type(std::span<const std::byte> bytes) {
+CodecResult<LongHeaderPacketType> read_long_header_type(std::span<const std::byte> bytes,
+                                                        bool accept_greased_quic_bit = false) {
     if (bytes.size() < 5) {
         return CodecResult<LongHeaderPacketType>::failure(CodecErrorCode::truncated_input,
                                                           bytes.size());
     }
 
     const auto first_byte = std::to_integer<std::uint8_t>(bytes.front());
-    if ((first_byte & 0x40u) == 0)
+    if ((first_byte & 0x40u) == 0 && !accept_greased_quic_bit)
         return CodecResult<LongHeaderPacketType>::failure(CodecErrorCode::invalid_fixed_bit, 0);
 
     const auto version = read_u32_be(bytes.subspan(1, 4));
@@ -921,9 +940,13 @@ CodecResult<LongHeaderPacketType> read_long_header_type(std::span<const std::byt
 }
 
 CodecResult<LongHeaderLayout> locate_long_header(std::span<const std::byte> bytes,
-                                                 LongHeaderPacketType expected_type) {
+                                                 LongHeaderPacketType expected_type,
+                                                 bool accept_greased_quic_bit = false) {
     BufferReader reader(bytes);
-    reader.read_byte().value();
+    const auto first_byte = std::to_integer<std::uint8_t>(reader.read_byte().value());
+    if ((first_byte & 0x40u) == 0 && !accept_greased_quic_bit) {
+        return CodecResult<LongHeaderLayout>::failure(CodecErrorCode::invalid_fixed_bit, 0);
+    }
 
     const auto version_bytes = reader.read_exact(4).value();
     if (!is_supported_quic_version(read_u32_be(version_bytes)))
@@ -1291,8 +1314,9 @@ remove_short_header_protection(std::span<const std::byte> bytes, std::size_t pac
 }
 
 LongHeaderLayout locate_long_header_or_assert(std::span<const std::byte> bytes,
-                                              LongHeaderPacketType expected_type) {
-    return locate_long_header(bytes, expected_type).value();
+                                              LongHeaderPacketType expected_type,
+                                              bool accept_greased_quic_bit = false) {
+    return locate_long_header(bytes, expected_type, accept_greased_quic_bit).value();
 }
 
 PatchedLengthField patch_long_header_length_field_or_assert(std::vector<std::byte> &packet_bytes,
@@ -1490,17 +1514,16 @@ build_long_header_plaintext_header(const RemovedLongHeaderProtection &unprotecte
     return CodecResult<std::vector<std::byte>>::success(std::move(plaintext_header));
 }
 
-CodecResult<ReceivedLongHeaderPacketFields>
-decode_received_long_header_packet_fields(std::span<const std::byte> plaintext_header,
-                                          const SharedBytes &plaintext_payload,
-                                          ProtectedPayloadPacketType packet_type, bool has_token) {
+CodecResult<ReceivedLongHeaderPacketFields> decode_received_long_header_packet_fields(
+    std::span<const std::byte> plaintext_header, const SharedBytes &plaintext_payload,
+    ProtectedPayloadPacketType packet_type, bool has_token, bool accept_greased_quic_bit = false) {
     BufferReader reader(plaintext_header);
     const auto first_byte = read_u8(reader);
     if (!first_byte.has_value()) {
         return CodecResult<ReceivedLongHeaderPacketFields>::failure(first_byte.error().code,
                                                                     first_byte.error().offset);
     }
-    if ((first_byte.value() & 0x40u) == 0) {
+    if ((first_byte.value() & 0x40u) == 0 && !accept_greased_quic_bit) {
         return CodecResult<ReceivedLongHeaderPacketFields>::failure(
             CodecErrorCode::invalid_fixed_bit, 0);
     }
@@ -1584,14 +1607,15 @@ decode_received_long_header_packet_fields(std::span<const std::byte> plaintext_h
 
 CodecResult<ReceivedShortHeaderPacketFields>
 decode_received_short_header_packet_fields(std::span<const std::byte> plaintext_header,
-                                           const SharedBytes &plaintext_payload) {
+                                           const SharedBytes &plaintext_payload,
+                                           bool accept_greased_quic_bit = false) {
     BufferReader reader(plaintext_header);
     const auto first_byte = read_u8(reader);
     if (!first_byte.has_value()) {
         return CodecResult<ReceivedShortHeaderPacketFields>::failure(first_byte.error().code,
                                                                      first_byte.error().offset);
     }
-    if ((first_byte.value() & 0x40u) == 0) {
+    if ((first_byte.value() & 0x40u) == 0 && !accept_greased_quic_bit) {
         return CodecResult<ReceivedShortHeaderPacketFields>::failure(
             CodecErrorCode::invalid_fixed_bit, 0);
     }
@@ -1637,7 +1661,8 @@ decode_received_short_header_packet_fields(std::span<const std::byte> plaintext_
 
 CodecResult<ReceivedShortHeaderAckOnlyPacketFields>
 try_decode_received_short_header_ack_only_packet_fields(std::span<const std::byte> plaintext_header,
-                                                        const SharedBytes &plaintext_payload) {
+                                                        const SharedBytes &plaintext_payload,
+                                                        bool accept_greased_quic_bit = false) {
     const auto payload = plaintext_payload.span();
     if (payload.empty() ||
         (payload.front() != std::byte{0x02} && payload.front() != std::byte{0x03})) {
@@ -1651,7 +1676,7 @@ try_decode_received_short_header_ack_only_packet_fields(std::span<const std::byt
         return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::failure(
             first_byte.error().code, first_byte.error().offset);
     }
-    if ((first_byte.value() & 0x40u) == 0) {
+    if ((first_byte.value() & 0x40u) == 0 && !accept_greased_quic_bit) {
         return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::failure(
             CodecErrorCode::invalid_fixed_bit, 0);
     }
@@ -1698,7 +1723,8 @@ try_decode_received_short_header_ack_only_packet_fields(std::span<const std::byt
 
 CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>
 try_decode_received_short_header_ack_only_fast_packet_fields(
-    std::span<const std::byte> plaintext_header, const SharedBytes &plaintext_payload) {
+    std::span<const std::byte> plaintext_header, const SharedBytes &plaintext_payload,
+    bool accept_greased_quic_bit = false) {
     const auto payload = plaintext_payload.span();
     if (payload.empty() ||
         (payload.front() != std::byte{0x02} && payload.front() != std::byte{0x03})) {
@@ -1712,7 +1738,7 @@ try_decode_received_short_header_ack_only_fast_packet_fields(
         return CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>::failure(
             first_byte.error().code, first_byte.error().offset);
     }
-    if ((first_byte.value() & 0x40u) == 0) {
+    if ((first_byte.value() & 0x40u) == 0 && !accept_greased_quic_bit) {
         return CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>::failure(
             CodecErrorCode::invalid_fixed_bit, 0);
     }
@@ -1758,7 +1784,8 @@ try_decode_received_short_header_ack_only_fast_packet_fields(
 
 CodecResult<ReceivedShortHeaderStreamFastPacketFields>
 try_decode_received_short_header_stream_fast_packet_fields(
-    std::span<const std::byte> plaintext_header, const SharedBytes &plaintext_payload) {
+    std::span<const std::byte> plaintext_header, const SharedBytes &plaintext_payload,
+    bool accept_greased_quic_bit = false) {
     const auto payload = plaintext_payload.span();
     if (payload.empty()) {
         return CodecResult<ReceivedShortHeaderStreamFastPacketFields>::failure(
@@ -1776,7 +1803,7 @@ try_decode_received_short_header_stream_fast_packet_fields(
         return CodecResult<ReceivedShortHeaderStreamFastPacketFields>::failure(
             first_byte.error().code, first_byte.error().offset);
     }
-    if ((first_byte.value() & 0x40u) == 0) {
+    if ((first_byte.value() & 0x40u) == 0 && !accept_greased_quic_bit) {
         return CodecResult<ReceivedShortHeaderStreamFastPacketFields>::failure(
             CodecErrorCode::invalid_fixed_bit, 0);
     }
@@ -1823,7 +1850,8 @@ CodecResult<ReceivedProtectedPacketDecodeResult> deserialize_received_long_heade
     CipherSuite cipher_suite, const PacketProtectionKeys &keys,
     std::optional<std::uint64_t> largest_authenticated_packet_number, bool has_token,
     PacketFactory make_packet) {
-    const auto layout = locate_long_header(bytes, long_header_type);
+    const auto layout =
+        locate_long_header(bytes, long_header_type, context.accept_greased_quic_bit);
     if (!layout.has_value()) {
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(layout.error().code,
                                                                          layout.error().offset);
@@ -1870,7 +1898,7 @@ CodecResult<ReceivedProtectedPacketDecodeResult> deserialize_received_long_heade
 
     auto decoded_fields = decode_received_long_header_packet_fields(
         plaintext_header, SharedBytes(plaintext_storage, 0, plaintext_storage->size()), packet_type,
-        has_token);
+        has_token, context.accept_greased_quic_bit);
     if (!decoded_fields.has_value()) {
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
             decoded_fields.error().code, decoded_fields.error().offset);
@@ -1888,7 +1916,8 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
     const ConnectionId &destination_connection_id, const ConnectionId &source_connection_id,
     std::span<const std::byte> token, TruncatedPacketNumberEncoding packet_number,
     std::uint64_t full_packet_number, std::span<const Frame> frames, CipherSuite cipher_suite,
-    const PacketProtectionKeys &keys) {
+    const PacketProtectionKeys &keys, bool grease_quic_bit = false,
+    std::uint64_t grease_quic_bit_seed = 0) {
     const auto datagram_begin = datagram.size();
     const auto rollback = [&]() { datagram.resize(datagram_begin); };
 
@@ -1949,7 +1978,8 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
     abort_if(
         writer
             .write_byte(static_cast<std::byte>(
-                0x80u | 0x40u | ((encoded_long_header_type(packet_type, version) & 0x03u) << 4) |
+                0x80u | quic_bit_mask(grease_quic_bit, grease_quic_bit_seed, full_packet_number) |
+                ((encoded_long_header_type(packet_type, version) & 0x03u) << 4) |
                 ((packet_number.packet_number_length - 1) & 0x03u)))
             .has_value());
     abort_if(write_u32_be(writer, version).has_value());
@@ -2029,7 +2059,8 @@ serialize_protected_initial_packet(const ProtectedInitialPacket &packet,
             .packet_number_length = packet.packet_number_length,
             .truncated_packet_number = plaintext_packet.value().truncated_packet_number,
         },
-        packet.packet_number, packet.frames, kInitialCipherSuite, keys.value());
+        packet.packet_number, packet.frames, kInitialCipherSuite, keys.value(),
+        context.grease_quic_bit, context.grease_quic_bit_seed);
     if (!appended.has_value()) {
         return CodecResult<std::vector<std::byte>>::failure(appended.error().code,
                                                             appended.error().offset);
@@ -2041,7 +2072,8 @@ serialize_protected_initial_packet(const ProtectedInitialPacket &packet,
 CodecResult<ProtectedPacketDecodeResult>
 deserialize_protected_initial_packet(std::span<const std::byte> bytes,
                                      const DeserializeProtectionContext &context) {
-    const auto layout = locate_long_header(bytes, LongHeaderPacketType::initial);
+    const auto layout =
+        locate_long_header(bytes, LongHeaderPacketType::initial, context.accept_greased_quic_bit);
     if (!layout.has_value())
         return CodecResult<ProtectedPacketDecodeResult>::failure(layout.error().code,
                                                                  layout.error().offset);
@@ -2094,7 +2126,10 @@ deserialize_protected_initial_packet(std::span<const std::byte> bytes,
     plaintext_image.insert(plaintext_image.end(), plaintext.value().begin(),
                            plaintext.value().end());
 
-    const auto decoded = deserialize_plaintext_packet_image(plaintext_image, {});
+    const auto decoded = deserialize_plaintext_packet_image(
+        plaintext_image, DeserializeOptions{
+                             .accept_greased_quic_bit = context.accept_greased_quic_bit,
+                         });
     if (!decoded.has_value())
         return CodecResult<ProtectedPacketDecodeResult>::failure(decoded.error().code,
                                                                  decoded.error().offset);
@@ -2184,7 +2219,8 @@ serialize_protected_handshake_packet(const ProtectedHandshakePacket &packet,
             .packet_number_length = packet.packet_number_length,
             .truncated_packet_number = plaintext_packet.value().truncated_packet_number,
         },
-        packet.packet_number, packet.frames, cipher_suite, keys_ref);
+        packet.packet_number, packet.frames, cipher_suite, keys_ref, context.grease_quic_bit,
+        context.grease_quic_bit_seed);
     if (!appended.has_value()) {
         return CodecResult<std::vector<std::byte>>::failure(appended.error().code,
                                                             appended.error().offset);
@@ -2200,7 +2236,8 @@ deserialize_protected_handshake_packet(std::span<const std::byte> bytes,
         return CodecResult<ProtectedPacketDecodeResult>::failure(
             CodecErrorCode::missing_crypto_context, 0);
 
-    const auto layout = locate_long_header(bytes, LongHeaderPacketType::handshake);
+    const auto layout =
+        locate_long_header(bytes, LongHeaderPacketType::handshake, context.accept_greased_quic_bit);
     if (!layout.has_value())
         return CodecResult<ProtectedPacketDecodeResult>::failure(layout.error().code,
                                                                  layout.error().offset);
@@ -2254,7 +2291,10 @@ deserialize_protected_handshake_packet(std::span<const std::byte> bytes,
     plaintext_image.insert(plaintext_image.end(), plaintext.value().begin(),
                            plaintext.value().end());
 
-    const auto decoded = deserialize_plaintext_packet_image(plaintext_image, {});
+    const auto decoded = deserialize_plaintext_packet_image(
+        plaintext_image, DeserializeOptions{
+                             .accept_greased_quic_bit = context.accept_greased_quic_bit,
+                         });
     if (!decoded.has_value())
         return CodecResult<ProtectedPacketDecodeResult>::failure(decoded.error().code,
                                                                  decoded.error().offset);
@@ -2348,7 +2388,8 @@ serialize_protected_zero_rtt_packet(const ProtectedZeroRttPacket &packet,
             .packet_number_length = packet.packet_number_length,
             .truncated_packet_number = plaintext_packet.value().truncated_packet_number,
         },
-        packet.packet_number, packet.frames, cipher_suite, keys_ref);
+        packet.packet_number, packet.frames, cipher_suite, keys_ref, context.grease_quic_bit,
+        context.grease_quic_bit_seed);
     if (!appended.has_value()) {
         return CodecResult<std::vector<std::byte>>::failure(appended.error().code,
                                                             appended.error().offset);
@@ -2365,7 +2406,8 @@ deserialize_protected_zero_rtt_packet(std::span<const std::byte> bytes,
             CodecErrorCode::missing_crypto_context, 0);
     }
 
-    const auto layout = locate_long_header(bytes, LongHeaderPacketType::zero_rtt);
+    const auto layout =
+        locate_long_header(bytes, LongHeaderPacketType::zero_rtt, context.accept_greased_quic_bit);
     if (!layout.has_value()) {
         return CodecResult<ProtectedPacketDecodeResult>::failure(layout.error().code,
                                                                  layout.error().offset);
@@ -2422,7 +2464,10 @@ deserialize_protected_zero_rtt_packet(std::span<const std::byte> bytes,
     plaintext_image.insert(plaintext_image.end(), plaintext.value().begin(),
                            plaintext.value().end());
 
-    const auto decoded = deserialize_plaintext_packet_image(plaintext_image, {});
+    const auto decoded = deserialize_plaintext_packet_image(
+        plaintext_image, DeserializeOptions{
+                             .accept_greased_quic_bit = context.accept_greased_quic_bit,
+                         });
     if (!decoded.has_value()) {
         return CodecResult<ProtectedPacketDecodeResult>::failure(decoded.error().code,
                                                                  decoded.error().offset);
@@ -2708,8 +2753,10 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
             COQUIC_SERIALIZE_PROFILE_TIMER(header_timer, header_write_ns);
             SpanBufferWriter header_writer(packet_bytes.first(payload_offset));
             abort_if(header_writer
-                         .write_byte(make_short_header_first_byte(packet.spin_bit, packet.key_phase,
-                                                                  packet.packet_number_length))
+                         .write_byte(make_short_header_first_byte(
+                             packet.spin_bit, packet.key_phase, packet.packet_number_length,
+                             context.grease_quic_bit, context.grease_quic_bit_seed,
+                             packet.packet_number))
                          .has_value());
             abort_if(header_writer.write_bytes(packet.destination_connection_id).has_value());
             abort_if(
@@ -2842,10 +2889,12 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
     {
         COQUIC_SERIALIZE_PROFILE_TIMER(header_timer, header_write_ns);
         SpanBufferWriter header_writer(packet_bytes.first(payload_offset));
-        abort_if(header_writer
-                     .write_byte(make_short_header_first_byte(packet.spin_bit, packet.key_phase,
-                                                              packet.packet_number_length))
-                     .has_value());
+        abort_if(
+            header_writer
+                .write_byte(make_short_header_first_byte(
+                    packet.spin_bit, packet.key_phase, packet.packet_number_length,
+                    context.grease_quic_bit, context.grease_quic_bit_seed, packet.packet_number))
+                .has_value());
         abort_if(header_writer.write_bytes(packet.destination_connection_id).has_value());
         abort_if(
             append_packet_number(header_writer,
@@ -3098,6 +3147,7 @@ deserialize_protected_one_rtt_packet(std::span<const std::byte> bytes,
         plaintext_image, DeserializeOptions{
                              .one_rtt_destination_connection_id_length =
                                  context.one_rtt_destination_connection_id_length,
+                             .accept_greased_quic_bit = context.accept_greased_quic_bit,
                          });
     if (!decoded.has_value())
         return CodecResult<ProtectedPacketDecodeResult>::failure(decoded.error().code,
@@ -3189,7 +3239,8 @@ deserialize_received_protected_one_rtt_packet(std::span<const std::byte> bytes,
 
     auto plaintext_storage = std::make_shared<std::vector<std::byte>>(std::move(plaintext.value()));
     auto decoded_fields = decode_received_short_header_packet_fields(
-        plaintext_header, SharedBytes(plaintext_storage, 0, plaintext_storage->size()));
+        plaintext_header, SharedBytes(plaintext_storage, 0, plaintext_storage->size()),
+        context.accept_greased_quic_bit);
     if (!decoded_fields.has_value()) {
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
             decoded_fields.error().code, decoded_fields.error().offset);
@@ -3331,8 +3382,8 @@ deserialize_received_protected_one_rtt_packet(
     if (ack_only_fast) {
         auto decoded_ack_only_fields = [&] {
             COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
-            return try_decode_received_short_header_ack_only_fast_packet_fields(plaintext_header,
-                                                                                plaintext_payload);
+            return try_decode_received_short_header_ack_only_fast_packet_fields(
+                plaintext_header, plaintext_payload, context.accept_greased_quic_bit);
         }();
         if (decoded_ack_only_fields.has_value()) {
             COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes, plaintext_size);
@@ -3361,8 +3412,8 @@ deserialize_received_protected_one_rtt_packet(
         }
         auto decoded_stream_fields = [&] {
             COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
-            return try_decode_received_short_header_stream_fast_packet_fields(plaintext_header,
-                                                                              plaintext_payload);
+            return try_decode_received_short_header_stream_fast_packet_fields(
+                plaintext_header, plaintext_payload, context.accept_greased_quic_bit);
         }();
         if (decoded_stream_fields.has_value()) {
             COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes, plaintext_size);
@@ -3391,8 +3442,8 @@ deserialize_received_protected_one_rtt_packet(
     } else {
         auto decoded_ack_only_fields = [&] {
             COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
-            return try_decode_received_short_header_ack_only_packet_fields(plaintext_header,
-                                                                           plaintext_payload);
+            return try_decode_received_short_header_ack_only_packet_fields(
+                plaintext_header, plaintext_payload, context.accept_greased_quic_bit);
         }();
         if (decoded_ack_only_fields.has_value()) {
             COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes, plaintext_size);
@@ -3423,7 +3474,8 @@ deserialize_received_protected_one_rtt_packet(
 
     auto decoded_fields = [&] {
         COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
-        return decode_received_short_header_packet_fields(plaintext_header, plaintext_payload);
+        return decode_received_short_header_packet_fields(plaintext_header, plaintext_payload,
+                                                          context.accept_greased_quic_bit);
     }();
     if (!decoded_fields.has_value()) {
         return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
@@ -3613,7 +3665,8 @@ deserialize_protected_datagram(std::span<const std::byte> bytes,
         if ((first_byte & 0x80u) == 0) {
             decoded = deserialize_protected_one_rtt_packet(bytes.subspan(offset), context);
         } else {
-            const auto type = read_long_header_type(bytes.subspan(offset));
+            const auto type =
+                read_long_header_type(bytes.subspan(offset), context.accept_greased_quic_bit);
             if (!type.has_value())
                 return CodecResult<std::vector<ProtectedPacket>>::failure(
                     type.error().code, offset + type.error().offset);
@@ -3651,7 +3704,7 @@ deserialize_received_protected_packet(std::span<const std::byte> bytes,
     if ((first_byte & 0x80u) == 0) {
         decoded = deserialize_received_protected_one_rtt_packet(bytes, context);
     } else {
-        const auto type = read_long_header_type(bytes);
+        const auto type = read_long_header_type(bytes, context.accept_greased_quic_bit);
         if (!type.has_value()) {
             return CodecResult<ReceivedProtectedPacket>::failure(type.error().code,
                                                                  type.error().offset);
@@ -3748,7 +3801,8 @@ deserialize_received_protected_datagram(std::span<const std::byte> bytes,
         if ((first_byte & 0x80u) == 0) {
             decoded = deserialize_received_protected_one_rtt_packet(bytes.subspan(offset), context);
         } else {
-            const auto type = read_long_header_type(bytes.subspan(offset));
+            const auto type =
+                read_long_header_type(bytes.subspan(offset), context.accept_greased_quic_bit);
             if (!type.has_value()) {
                 return CodecResult<std::vector<ReceivedProtectedPacket>>::failure(
                     type.error().code, offset + type.error().offset);

@@ -1072,14 +1072,15 @@ QuicCore::stateless_reset_token_key(const std::array<std::byte, 16> &stateless_r
 }
 
 std::optional<QuicCore::ParsedEndpointDatagram>
-QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes) {
+QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes, bool accept_greased_quic_bit) {
     if (bytes.empty()) {
         return std::nullopt;
     }
 
     const auto first_byte = std::to_integer<std::uint8_t>(bytes.front());
     if ((first_byte & 0x80u) == 0) {
-        if ((first_byte & 0x40u) == 0 || bytes.size() < 1 + kEndpointConnectionIdLength) {
+        if (((first_byte & 0x40u) == 0 && !accept_greased_quic_bit) ||
+            bytes.size() < 1 + kEndpointConnectionIdLength) {
             return std::nullopt;
         }
 
@@ -1090,7 +1091,7 @@ QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes) {
         };
     }
 
-    if ((first_byte & 0x40u) == 0 || bytes.size() < 7) {
+    if (((first_byte & 0x40u) == 0 && !accept_greased_quic_bit) || bytes.size() < 7) {
         return std::nullopt;
     }
 
@@ -3501,7 +3502,8 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             }
             return true;
         };
-        const auto parsed = parse_endpoint_datagram(inbound_payload);
+        const auto parsed =
+            parse_endpoint_datagram(inbound_payload, endpoint_config_.transport.grease_quic_bit);
         if (!parsed.has_value()) {
             if (const auto reset_owner = detect_stateless_reset(inbound_payload);
                 reset_owner.has_value()) {

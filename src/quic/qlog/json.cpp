@@ -275,6 +275,8 @@ std::string serialize_parameters_set(std::string_view initiator,
     append_u64("initial_max_streams_bidi", parameters.initial_max_streams_bidi);
     append_u64("initial_max_streams_uni", parameters.initial_max_streams_uni);
     append_u64("max_datagram_frame_size", parameters.max_datagram_frame_size);
+    json += ",\"grease_quic_bit\":";
+    json += parameters.grease_quic_bit ? "true" : "false";
     json += "}";
     return json;
 }

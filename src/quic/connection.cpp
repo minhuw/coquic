@@ -880,6 +880,25 @@ COQUIC_NO_PROFILE bool random_one_in_sixteen_fallback() {
     return (fallback_random() & 0x0fu) == 0;
 }
 
+std::uint64_t read_u64_be(std::span<const std::byte, sizeof(std::uint64_t)> bytes) {
+    std::uint64_t value = 0;
+    for (const auto byte : bytes) {
+        value = (value << 8u) | std::to_integer<std::uint8_t>(byte);
+    }
+    return value;
+}
+
+std::uint64_t make_grease_quic_bit_seed() {
+    std::array<std::byte, sizeof(std::uint64_t)> seed_bytes{};
+    if (!rand_bytes_for_connection(seed_bytes, /*force_failure=*/false)) {
+        std::random_device random_device;
+        for (auto &byte : seed_bytes) {
+            byte = static_cast<std::byte>(random_device());
+        }
+    }
+    return read_u64_be(std::span<const std::byte, sizeof(std::uint64_t)>(seed_bytes));
+}
+
 void append_u64_be(std::vector<std::byte> &bytes, std::uint64_t value) {
     for (int shift = 56; shift >= 0; shift -= 8) {
         bytes.push_back(static_cast<std::byte>((value >> static_cast<unsigned>(shift)) & 0xffu));
@@ -1269,6 +1288,29 @@ bool datagram_starts_with_initial_packet(std::span<const std::byte> bytes) {
                                        static_cast<std::uint8_t>((first_byte >> 4) & 0x03u));
 }
 
+bool datagram_starts_with_initial_packet(std::span<const std::byte> bytes,
+                                         bool accept_greased_quic_bit) {
+    if (!accept_greased_quic_bit) {
+        return datagram_starts_with_initial_packet(bytes);
+    }
+    if (bytes.size() < 5) {
+        return false;
+    }
+
+    const auto first_byte = std::to_integer<std::uint8_t>(bytes.front());
+    if ((first_byte & 0x80u) == 0) {
+        return false;
+    }
+
+    const auto version = read_u32_be(bytes.subspan(1, 4));
+    if (!is_supported_quic_version(version)) {
+        return false;
+    }
+
+    return is_initial_long_header_type(version,
+                                       static_cast<std::uint8_t>((first_byte >> 4) & 0x03u));
+}
+
 std::optional<VersionInformation>
 make_local_version_information(std::span<const std::uint32_t> supported_versions,
                                std::uint32_t chosen_version) {
@@ -1616,6 +1658,16 @@ CodecError aead_limit_reached_error() {
         .offset = 0,
         .transport_error_code =
             transport_error_code_value(QuicTransportErrorCode::aead_limit_reached),
+        .has_transport_error_code = true,
+    };
+}
+
+CodecError transport_parameter_error(CodecErrorCode code, std::size_t offset = 0) {
+    return CodecError{
+        .code = code,
+        .offset = offset,
+        .transport_error_code =
+            transport_error_code_value(QuicTransportErrorCode::transport_parameter_error),
         .has_transport_error_code = true,
     };
 }
@@ -2054,6 +2106,13 @@ bool is_discardable_packet_length_error(CodecErrorCode code) {
         CodecErrorCode::unsupported_packet_type,
     };
     return std::ranges::find(kDiscardableErrors, code) != kDiscardableErrors.end();
+}
+
+bool peer_validated_grease_quic_bit_support(
+    bool local_grease_quic_bit_enabled, bool peer_transport_parameters_validated,
+    const std::optional<TransportParameters> &peer_transport_parameters) {
+    return local_grease_quic_bit_enabled && peer_transport_parameters_validated &&
+           peer_transport_parameters.has_value() && peer_transport_parameters->grease_quic_bit;
 }
 
 CodecResult<std::size_t>
@@ -2779,13 +2838,15 @@ COQUIC_NO_PROFILE bool can_skip_steady_state_receive_sync(
     const std::optional<TrafficSecret> &application_write_secret, bool resumption_state_emitted,
     bool peer_preferred_address_emitted,
     const std::optional<TransportParameters> &peer_transport_parameters,
-    const qlog::Session *qlog_session, std::span<const std::byte> bytes) {
+    const qlog::Session *qlog_session, std::span<const std::byte> bytes,
+    bool accept_greased_quic_bit = false) {
     return status == HandshakeStatus::connected && peer_transport_parameters_validated &&
            application_read_secret.has_value() && application_write_secret.has_value() &&
            (role == EndpointRole::server || resumption_state_emitted) &&
            (peer_preferred_address_emitted || !peer_transport_parameters.has_value() ||
             !peer_transport_parameters->preferred_address.has_value()) &&
-           qlog_session == nullptr && !datagram_starts_with_initial_packet(bytes) &&
+           qlog_session == nullptr &&
+           !datagram_starts_with_initial_packet(bytes, accept_greased_quic_bit) &&
            (std::to_integer<std::uint8_t>(bytes.front()) & 0x80u) == 0;
 }
 
@@ -2906,17 +2967,20 @@ COQUIC_NO_PROFILE bool should_count_inbound_bytes(bool count_inbound_bytes) {
     return count_inbound_bytes;
 }
 
-COQUIC_NO_PROFILE std::size_t accounted_inbound_datagram_bytes(std::span<const std::byte> bytes) {
-    return datagram_starts_with_initial_packet(bytes)
+COQUIC_NO_PROFILE std::size_t
+accounted_inbound_datagram_bytes(std::span<const std::byte> bytes,
+                                 bool accept_greased_quic_bit = false) {
+    return datagram_starts_with_initial_packet(bytes, accept_greased_quic_bit)
                ? std::max(bytes.size(), kMinimumInitialDatagramSize)
                : bytes.size();
 }
 
 COQUIC_NO_PROFILE void maybe_note_inbound_datagram_bytes(bool count_inbound_bytes,
                                                          std::span<const std::byte> bytes,
+                                                         bool accept_greased_quic_bit,
                                                          const auto &note_bytes) {
     if (should_count_inbound_bytes(count_inbound_bytes)) {
-        note_bytes(accounted_inbound_datagram_bytes(bytes));
+        note_bytes(accounted_inbound_datagram_bytes(bytes, accept_greased_quic_bit));
     }
 }
 
@@ -3998,6 +4062,7 @@ QuicConnection::QuicConnection(QuicCoreConfig config)
       latency_spin_bit_disabled_(config_.transport.enable_latency_spin_bit ? random_one_in_sixteen()
                                                                            : true),
       original_version_(config_.original_version), current_version_(config_.initial_version),
+      grease_quic_bit_seed_(make_grease_quic_bit_seed()),
       congestion_controller_(config_.transport.congestion_control,
                              initial_congestion_datagram_size(config_),
                              config_.transport.enable_hystart_plus_plus) {
@@ -4021,6 +4086,7 @@ QuicConnection::QuicConnection(QuicCoreConfig config)
         .initial_source_connection_id = config_.source_connection_id,
         .preferred_address = config_.transport.preferred_address,
         .max_datagram_frame_size = config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = config_.transport.grease_quic_bit,
     };
     initialize_local_flow_control();
     local_connection_ids_.emplace(0, LocalConnectionIdRecord{
@@ -4147,9 +4213,11 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
     maybe_discard_server_zero_rtt_packet_space(now);
     maybe_discard_previous_application_read_secret(now);
 
-    maybe_note_inbound_datagram_bytes(count_inbound_bytes, bytes, [&](std::size_t byte_count) {
-        note_inbound_datagram_bytes(byte_count);
-    });
+    const bool accept_greased_quic_bit = static_cast<bool>(
+        config_.transport.grease_quic_bit | local_transport_parameters_.grease_quic_bit);
+    maybe_note_inbound_datagram_bytes(
+        count_inbound_bytes, bytes, accept_greased_quic_bit,
+        [&](std::size_t byte_count) { note_inbound_datagram_bytes(byte_count); });
 
     if (!started_) {
         if (config_.role != EndpointRole::server) {
@@ -4175,7 +4243,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
     const bool steady_state_one_rtt_receive = can_skip_steady_state_receive_sync(
         config_.role, status_, peer_transport_parameters_validated_, application_space_.read_secret,
         application_space_.write_secret, resumption_state_emitted_, peer_preferred_address_emitted_,
-        peer_transport_parameters_, qlog_session_.get(), bytes);
+        peer_transport_parameters_, qlog_session_.get(), bytes, accept_greased_quic_bit);
     if (!steady_state_one_rtt_receive) {
         if (send_profile_enabled()) {
             ++send_profile_counters().inbound_initial_sync_tls_calls;
@@ -4240,6 +4308,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
             .largest_authenticated_application_packet_number =
                 application_space_.largest_authenticated_packet_number,
             .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
+            .accept_greased_quic_bit = accept_greased_quic_bit,
         });
     };
     const auto make_short_header_deserialize_context =
@@ -4263,6 +4332,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
             .largest_authenticated_application_packet_number =
                 application_space_.largest_authenticated_packet_number,
             .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
+            .accept_greased_quic_bit = accept_greased_quic_bit,
         });
     };
     struct PacketProcessingLabels {
@@ -6480,11 +6550,15 @@ QuicConnection::make_current_short_header_deserialize_context() {
             .largest_authenticated_application_packet_number =
                 application_space_.largest_authenticated_packet_number,
             .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
+            .accept_greased_quic_bit = static_cast<bool>(
+                config_.transport.grease_quic_bit | local_transport_parameters_.grease_quic_bit),
         });
     }
 
     const auto *secret = &application_space_.read_secret.value();
     const auto destination_connection_id_length = config_.source_connection_id.size();
+    const bool accept_greased_quic_bit = static_cast<bool>(
+        config_.transport.grease_quic_bit | local_transport_parameters_.grease_quic_bit);
     const bool cache_matches =
         current_short_header_deserialize_cache_.has_value() &&
         current_short_header_deserialize_cache_->secret == secret &&
@@ -6493,6 +6567,8 @@ QuicConnection::make_current_short_header_deserialize_context() {
         current_short_header_deserialize_cache_->key_phase == application_read_key_phase_ &&
         current_short_header_deserialize_cache_->destination_connection_id_length ==
             destination_connection_id_length &&
+        current_short_header_deserialize_cache_->accept_greased_quic_bit ==
+            accept_greased_quic_bit &&
         current_short_header_deserialize_cache_->secret_cache_primed ==
             traffic_secret_cache_is_primed(application_space_.read_secret);
     if (!cache_matches) {
@@ -6508,6 +6584,7 @@ QuicConnection::make_current_short_header_deserialize_context() {
             .secret_generation = application_read_secret_generation_,
             .key_phase = application_read_key_phase_,
             .destination_connection_id_length = destination_connection_id_length,
+            .accept_greased_quic_bit = accept_greased_quic_bit,
             .secret_cache_primed = traffic_secret_cache_is_primed(application_space_.read_secret),
         };
     }
@@ -6520,6 +6597,7 @@ QuicConnection::make_current_short_header_deserialize_context() {
         .largest_authenticated_application_packet_number =
             application_space_.largest_authenticated_packet_number,
         .one_rtt_destination_connection_id_length = destination_connection_id_length,
+        .accept_greased_quic_bit = current_short_header_deserialize_cache_->accept_greased_quic_bit,
     });
 }
 
@@ -6913,6 +6991,7 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
             config_.supported_versions, current_version_, config_.retry_source_connection_id,
             original_version_, current_version_),
         .max_datagram_frame_size = config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = config_.transport.grease_quic_bit,
     };
     initialize_local_flow_control();
 
@@ -7038,6 +7117,7 @@ void QuicConnection::start_server_if_needed(
             config_.supported_versions, current_version_, config_.retry_source_connection_id,
             original_version_, current_version_),
         .max_datagram_frame_size = config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = config_.transport.grease_quic_bit,
     };
     initialize_local_flow_control();
 
@@ -7099,7 +7179,7 @@ CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connec
     if ((header_byte & 0x80u) == 0) {
         return CodecResult<ConnectionId>::failure(CodecErrorCode::unsupported_packet_type, 0);
     }
-    if ((header_byte & 0x40u) == 0) {
+    if ((header_byte & 0x40u) == 0 && !config_.transport.grease_quic_bit) {
         return CodecResult<ConnectionId>::failure(CodecErrorCode::invalid_fixed_bit, 0);
     }
 
@@ -7149,12 +7229,12 @@ QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const 
 
     const auto header_byte = std::to_integer<std::uint8_t>(first_byte.value());
     if ((header_byte & 0x80u) == 0) {
-        if ((header_byte & 0x40u) == 0) {
+        if ((header_byte & 0x40u) == 0 && !config_.transport.grease_quic_bit) {
             return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_fixed_bit, 0);
         }
         return CodecResult<std::size_t>::success(bytes.size());
     }
-    if ((header_byte & 0x40u) == 0) {
+    if ((header_byte & 0x40u) == 0 && !config_.transport.grease_quic_bit) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_fixed_bit, 0);
     }
 
@@ -10174,7 +10254,8 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
             deserialize_transport_parameters(peer_transport_parameters_bytes.value());
         if (!parameters.has_value()) {
             log_codec_failure("deserialize_transport_parameters", parameters.error());
-            return CodecResult<bool>::failure(parameters.error().code, parameters.error().offset);
+            return CodecResult<bool>::failure(
+                transport_parameter_error(parameters.error().code, parameters.error().offset));
         }
 
         peer_transport_parameters_ = parameters.value();
@@ -10207,6 +10288,7 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
     }
 
     peer_transport_parameters_validated_ = true;
+    reset_current_short_header_deserialize_context_cache();
     initialize_peer_flow_control_from_transport_parameters();
     const auto peer_preferred_address = peer_transport_parameters.preferred_address;
     const auto emitted_preferred_address = peer_preferred_address.value_or(PreferredAddress{});
@@ -10832,6 +10914,7 @@ void QuicConnection::reset_client_handshake_peer_state_for_new_source_connection
     active_peer_connection_id_sequence_ = 0;
     largest_peer_retire_prior_to_ = 0;
     peer_transport_parameters_validated_ = false;
+    reset_current_short_header_deserialize_context_cache();
 }
 
 bool QuicConnection::packet_targets_discarded_long_header_space(
@@ -12701,6 +12784,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 traffic_secret_cache_is_primed(zero_rtt_space_.write_secret),
             .one_rtt_secret_cache_primed =
                 traffic_secret_cache_is_primed(application_space_.write_secret),
+            .grease_quic_bit = peer_validated_grease_quic_bit_support(
+                config_.transport.grease_quic_bit, peer_transport_parameters_validated_,
+                peer_transport_parameters_),
+            .grease_quic_bit_seed = grease_quic_bit_seed_,
         };
         return CodecResult<SerializeProtectionContext>::success(*cached_serialize_context);
     };

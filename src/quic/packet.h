@@ -16,6 +16,7 @@ using ConnectionId = std::vector<std::byte>;
 
 struct DeserializeOptions {
     std::optional<std::size_t> one_rtt_destination_connection_id_length;
+    bool accept_greased_quic_bit = false;
 };
 
 struct VersionNegotiationPacket {

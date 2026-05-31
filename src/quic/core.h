@@ -61,6 +61,7 @@ struct QuicTransportConfig {
     bool send_stream_fairness = true;
     bool enable_latency_spin_bit = false;
     bool grease_reserved_versions = false;
+    bool grease_quic_bit = false;
     bool enable_optimistic_ack_mitigation = false;
 };
 
@@ -659,7 +660,7 @@ class QuicCore {
     static std::string
     stateless_reset_token_key(const std::array<std::byte, 16> &stateless_reset_token);
     static std::optional<ParsedEndpointDatagram>
-    parse_endpoint_datagram(std::span<const std::byte> bytes);
+    parse_endpoint_datagram(std::span<const std::byte> bytes, bool accept_greased_quic_bit = false);
     std::vector<std::byte>
     make_endpoint_retry_token(std::uint64_t sequence,
                               const ParsedEndpointDatagram *parsed = nullptr,

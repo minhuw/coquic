@@ -320,6 +320,50 @@ TEST(QuicTransportParametersTest, RoundTripsMaxDatagramFrameSize) {
     EXPECT_EQ(decoded.value().max_datagram_frame_size, 65535u);
 }
 
+TEST(QuicTransportParametersTest, RoundTripsGreaseQuicBit) {
+    const TransportParameters parameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_source_connection_id = ConnectionId{std::byte{0xc1}},
+        .grease_quic_bit = true,
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto grease_quic_bit_parameter = byte_vector({0x6a, 0xb2, 0x00});
+    EXPECT_NE(std::search(encoded.value().begin(), encoded.value().end(),
+                          grease_quic_bit_parameter.begin(), grease_quic_bit_parameter.end()),
+              encoded.value().end());
+
+    const auto decoded = coquic::quic::deserialize_transport_parameters(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_TRUE(decoded.value().grease_quic_bit);
+}
+
+TEST(QuicTransportParametersTest, GreaseQuicBitDefaultsToFalseAndRejectsNonEmptyValue) {
+    const auto decoded_default = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x03,
+        0x02,
+        0x44,
+        0xb0,
+        0x0e,
+        0x01,
+        0x02,
+        0x0f,
+        0x01,
+        0x11,
+    }));
+
+    ASSERT_TRUE(decoded_default.has_value());
+    EXPECT_FALSE(decoded_default.value().grease_quic_bit);
+
+    const auto decoded_non_empty =
+        coquic::quic::deserialize_transport_parameters(byte_vector({0x6a, 0xb2, 0x01, 0x00}));
+    ASSERT_FALSE(decoded_non_empty.has_value());
+    EXPECT_EQ(decoded_non_empty.error().code, CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicTransportParametersTest, MaxDatagramFrameSizeDefaultsToZero) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
         0x03,

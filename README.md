@@ -24,6 +24,7 @@
   <a href="https://www.rfc-editor.org/rfc/rfc9114"><img src="https://img.shields.io/badge/RFC-9114-brightgreen" alt="RFC 9114"></a>
   <a href="https://www.rfc-editor.org/rfc/rfc9204"><img src="https://img.shields.io/badge/RFC-9204-brightgreen" alt="RFC 9204"></a>
   <a href="https://www.rfc-editor.org/rfc/rfc9221"><img src="https://img.shields.io/badge/RFC-9221-brightgreen" alt="RFC 9221"></a>
+  <a href="https://www.rfc-editor.org/rfc/rfc9287"><img src="https://img.shields.io/badge/RFC-9287-brightgreen" alt="RFC 9287"></a>
   <a href="https://www.rfc-editor.org/rfc/rfc9368"><img src="https://img.shields.io/badge/RFC-9368-brightgreen" alt="RFC 9368"></a>
   <a href="https://www.rfc-editor.org/rfc/rfc9369"><img src="https://img.shields.io/badge/RFC-9369-brightgreen" alt="RFC 9369"></a>
   <a href="https://datatracker.ietf.org/doc/draft-ietf-quic-qlog-main-schema/"><img src="https://img.shields.io/badge/qlog-draft--13-9cf" alt="qlog draft 13"></a>

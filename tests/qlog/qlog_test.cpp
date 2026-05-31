@@ -370,6 +370,13 @@ TEST(QuicQlogTest, SerializersCoverRemainingFramesAndOptionalFields) {
                   .bytes_in_flight = 1024,
               }),
               "{\"bytes_in_flight\":1024}");
+
+    const auto parameters_json = coquic::quic::qlog::serialize_parameters_set(
+        "local", coquic::quic::TransportParameters{.grease_quic_bit = true});
+    EXPECT_NE(parameters_json.find("\"grease_quic_bit\":true"), std::string::npos);
+    const auto default_parameters_json =
+        coquic::quic::qlog::serialize_parameters_set("remote", coquic::quic::TransportParameters{});
+    EXPECT_NE(default_parameters_json.find("\"grease_quic_bit\":false"), std::string::npos);
 }
 
 TEST(QuicQlogTest, SinkPathAndDisabledWritesRemainObservable) {

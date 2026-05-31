@@ -480,6 +480,64 @@ TEST(QuicProtectedCodecTest, OneRttPacketSerializesSharedStreamFrameViews) {
     EXPECT_EQ(stream->stream_data, (std::vector<std::byte>{std::byte{0xbb}, std::byte{0xcc}}));
 }
 
+TEST(QuicProtectedCodecTest, GreasesQuicBitOnlyWhenProtectionContextEnablesIt) {
+    auto one_rtt_packet = make_minimal_one_rtt_packet();
+    one_rtt_packet.packet_number = 0xa82f9b32ULL;
+    auto one_rtt_context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    one_rtt_context.grease_quic_bit = true;
+    one_rtt_context.grease_quic_bit_seed = 5;
+
+    const auto greased_one_rtt = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{one_rtt_packet}, one_rtt_context);
+    ASSERT_TRUE(greased_one_rtt.has_value());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(greased_one_rtt.value().front()) & 0x40u, 0u);
+
+    auto strict_one_rtt_context = make_one_rtt_deserialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    const auto strict_one_rtt = coquic::quic::deserialize_protected_datagram(
+        greased_one_rtt.value(), strict_one_rtt_context);
+    ASSERT_FALSE(strict_one_rtt.has_value());
+    EXPECT_EQ(strict_one_rtt.error().code, coquic::quic::CodecErrorCode::invalid_fixed_bit);
+
+    strict_one_rtt_context.accept_greased_quic_bit = true;
+    const auto accepted_one_rtt = coquic::quic::deserialize_protected_datagram(
+        greased_one_rtt.value(), strict_one_rtt_context);
+    ASSERT_TRUE(accepted_one_rtt.has_value());
+    EXPECT_NE(std::get_if<coquic::quic::ProtectedOneRttPacket>(&accepted_one_rtt.value().front()),
+              nullptr);
+
+    auto initial_context = make_rfc9001_client_initial_serialize_context();
+    initial_context.grease_quic_bit = true;
+    initial_context.grease_quic_bit_seed = 5;
+    auto initial_packet = make_minimal_initial_packet();
+    initial_packet.packet_number = 2;
+    const auto greased_initial = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{initial_packet}, initial_context);
+    ASSERT_TRUE(greased_initial.has_value());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(greased_initial.value().front()) & 0x40u, 0u);
+
+    auto initial_decode_context = make_rfc9001_client_initial_deserialize_context();
+    const auto strict_initial = coquic::quic::deserialize_protected_datagram(
+        greased_initial.value(), initial_decode_context);
+    ASSERT_FALSE(strict_initial.has_value());
+    EXPECT_EQ(strict_initial.error().code, coquic::quic::CodecErrorCode::invalid_fixed_bit);
+
+    initial_decode_context.accept_greased_quic_bit = true;
+    const auto accepted_initial = coquic::quic::deserialize_protected_datagram(
+        greased_initial.value(), initial_decode_context);
+    ASSERT_TRUE(accepted_initial.has_value());
+    EXPECT_NE(std::get_if<coquic::quic::ProtectedInitialPacket>(&accepted_initial.value().front()),
+              nullptr);
+
+    one_rtt_packet.packet_number = 0xa82f9b33ULL;
+    const auto greased_one_rtt_with_set_bit = coquic::quic::serialize_protected_datagram(
+        std::vector<coquic::quic::ProtectedPacket>{one_rtt_packet}, one_rtt_context);
+    ASSERT_TRUE(greased_one_rtt_with_set_bit.has_value());
+    EXPECT_NE(std::to_integer<std::uint8_t>(greased_one_rtt_with_set_bit.value().front()) & 0x40u,
+              0u);
+}
+
 TEST(QuicProtectedCodecTest, DeserializesReceivedOneRttPacketWithAliasedStreamPayload) {
     auto packet = make_minimal_one_rtt_packet();
     packet.frames = {

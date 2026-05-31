@@ -1,3 +1,6 @@
+#ifndef COQUIC_HTTP09_RUNTIME_TEST_SUPPORT_H
+#define COQUIC_HTTP09_RUNTIME_TEST_SUPPORT_H
+
 #include "src/http09/http09_runtime_internal.h"
 
 #if defined(__clang__)
@@ -1184,3 +1187,5 @@ bool runtime_registers_all_server_core_connection_ids_case_for_tests(
 #endif
 
 } // namespace coquic::http09
+
+#endif // COQUIC_HTTP09_RUNTIME_TEST_SUPPORT_H

@@ -892,14 +892,14 @@ static int loop_callback(picoquic_quic_t *quic, picoquic_packet_loop_cb_enum mod
     return 0;
 }
 
-static int run_server(config_t cfg) {
+static int run_server(const config_t *cfg) {
     app_ctx_t app;
     memset(&app, 0, sizeof(app));
-    app.cfg = cfg;
+    app.cfg = *cfg;
     signal(SIGTERM, handle_signal);
     signal(SIGINT, handle_signal);
     picoquic_register_all_congestion_control_algorithms();
-    picoquic_quic_t *quic = create_quic_context(&cfg, 1, &app);
+    picoquic_quic_t *quic = create_quic_context(cfg, 1, &app);
     if (quic == NULL) {
         fprintf(stderr, "could not create picoquic server context\n");
         return 1;
@@ -907,7 +907,7 @@ static int run_server(config_t cfg) {
     picoquic_set_default_callback(quic, app_callback, &app);
     picoquic_packet_loop_param_t param;
     memset(&param, 0, sizeof(param));
-    param.local_port = cfg.port;
+    param.local_port = cfg->port;
     param.socket_buffer_size = 0;
     param.do_not_use_gso = 0;
     int ret = picoquic_packet_loop_v2(quic, &param, loop_callback, &app);
@@ -1003,15 +1003,15 @@ static int run_client_session(app_ctx_t *app) {
     return app->failed ? -1 : 0;
 }
 
-static int run_crr(config_t cfg, counters_t *counters) {
-    uint64_t measure_start = picoquic_current_time() + cfg.warmup_us;
-    uint64_t measure_deadline = measure_start + cfg.duration_us;
+static int run_crr(const config_t *cfg, counters_t *counters) {
+    uint64_t measure_start = picoquic_current_time() + cfg->warmup_us;
+    uint64_t measure_deadline = measure_start + cfg->duration_us;
     uint64_t started = 0;
-    while ((cfg.requests.set && started < cfg.requests.value) ||
-           (!cfg.requests.set && picoquic_current_time() < measure_deadline)) {
+    while ((cfg->requests.set && started < cfg->requests.value) ||
+           (!cfg->requests.set && picoquic_current_time() < measure_deadline)) {
         app_ctx_t app;
         memset(&app, 0, sizeof(app));
-        app.cfg = cfg;
+        app.cfg = *cfg;
         app.cfg.mode = "rr";
         app.cfg.requests.set = 1;
         app.cfg.requests.value = 1;
@@ -1022,7 +1022,7 @@ static int run_crr(config_t cfg, counters_t *counters) {
         app.measure_start = measure_start;
         app.measure_deadline = measure_deadline;
         if (run_client_session(&app) != 0) {
-            if (!cfg.requests.set) {
+            if (!cfg->requests.set) {
                 counters->skipped_setup_errors++;
                 continue;
             }
@@ -1141,26 +1141,26 @@ static int emit_summary(const run_summary_t *summary, const char *json_out) {
     return 0;
 }
 
-static int run_client(config_t cfg) {
-    run_summary_t summary = new_summary(&cfg);
+static int run_client(const config_t *cfg) {
+    run_summary_t summary = new_summary(cfg);
     uint64_t start = picoquic_current_time();
     app_ctx_t app;
     memset(&app, 0, sizeof(app));
-    app.cfg = cfg;
+    app.cfg = *cfg;
     app.is_client = 1;
     int ret = 0;
 
-    if (is_mode(&cfg, "crr")) {
+    if (is_mode(cfg, "crr")) {
         ret = run_crr(cfg, &app.counters);
-        summary.elapsed_ms = cfg.requests.set
+        summary.elapsed_ms = cfg->requests.set
                                  ? (int64_t)duration_millis(picoquic_current_time() - start)
-                                 : (int64_t)duration_millis(cfg.duration_us);
+                                 : (int64_t)duration_millis(cfg->duration_us);
     } else {
         ret = run_client_session(&app);
-        if (cfg.total_bytes.set || cfg.requests.set) {
+        if (cfg->total_bytes.set || cfg->requests.set) {
             summary.elapsed_ms = (int64_t)duration_millis(picoquic_current_time() - start);
         } else {
-            summary.elapsed_ms = (int64_t)duration_millis(cfg.duration_us);
+            summary.elapsed_ms = (int64_t)duration_millis(cfg->duration_us);
         }
     }
 
@@ -1180,7 +1180,7 @@ static int run_client(config_t cfg) {
     summary.skipped_setup_errors = app.counters.skipped_setup_errors;
     summary.latency = summarize_latency(&app.counters.latencies);
     finalize_summary(&summary);
-    int emit_ret = emit_summary(&summary, cfg.json_out);
+    int emit_ret = emit_summary(&summary, cfg->json_out);
     free(app.counters.latencies.values);
     return emit_ret != 0 || strcmp(summary.status, "ok") != 0 ? 1 : 0;
 }
@@ -1192,7 +1192,7 @@ int main(int argc, char **argv) {
     }
     config_t cfg = parse_args(argc - 2, argv + 2);
     if (strcmp(argv[1], "server") == 0) {
-        return run_server(cfg);
+        return run_server(&cfg);
     }
-    return run_client(cfg);
+    return run_client(&cfg);
 }

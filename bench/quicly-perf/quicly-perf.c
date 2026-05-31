@@ -1334,12 +1334,13 @@ static int run_server(const config_t *cfg) {
             }
         }
 
-        for (size_t i = 0; i != num_server_conns; ++i) {
+        for (size_t i = 0; i < num_server_conns;) {
             quicly_error_t ret = send_pending(fd, server_conns[i]);
             if (ret != 0) {
                 remove_server_conn(i);
-                --i;
+                continue;
             }
+            ++i;
         }
     }
 

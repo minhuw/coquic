@@ -1,3 +1,6 @@
+#ifndef COQUIC_TESTS_SUPPORT_CORE_CONNECTION_ACK_TEST_SUPPORT_H
+#define COQUIC_TESTS_SUPPORT_CORE_CONNECTION_ACK_TEST_SUPPORT_H
+
 #include <algorithm>
 #include <array>
 
@@ -110,3 +113,5 @@ using coquic::quic::test_support::tracked_packet_or_terminate;
 using coquic::quic::test_support::tracked_packet_snapshot;
 
 } // namespace
+
+#endif // COQUIC_TESTS_SUPPORT_CORE_CONNECTION_ACK_TEST_SUPPORT_H

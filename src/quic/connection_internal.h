@@ -2086,22 +2086,19 @@ inline bool can_retry_short_header_with_next_key_phase(CodecErrorCode code) {
 
 inline std::optional<std::uint64_t>
 confidentiality_limit_for_cipher_suite(CipherSuite cipher_suite) {
-    switch (cipher_suite) {
-    case CipherSuite::tls_aes_128_gcm_sha256:
-    case CipherSuite::tls_aes_256_gcm_sha384:
+    if (cipher_suite == CipherSuite::tls_aes_128_gcm_sha256 ||
+        cipher_suite == CipherSuite::tls_aes_256_gcm_sha384) {
         return kAesGcmConfidentialityLimit;
-    case CipherSuite::tls_chacha20_poly1305_sha256:
-        return std::nullopt;
     }
     return std::nullopt;
 }
 
 inline std::optional<std::uint64_t> integrity_limit_for_cipher_suite(CipherSuite cipher_suite) {
-    switch (cipher_suite) {
-    case CipherSuite::tls_aes_128_gcm_sha256:
-    case CipherSuite::tls_aes_256_gcm_sha384:
+    if (cipher_suite == CipherSuite::tls_aes_128_gcm_sha256 ||
+        cipher_suite == CipherSuite::tls_aes_256_gcm_sha384) {
         return kAesGcmIntegrityLimit;
-    case CipherSuite::tls_chacha20_poly1305_sha256:
+    }
+    if (cipher_suite == CipherSuite::tls_chacha20_poly1305_sha256) {
         return kChaCha20Poly1305IntegrityLimit;
     }
     return std::nullopt;

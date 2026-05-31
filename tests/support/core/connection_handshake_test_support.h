@@ -1,3 +1,6 @@
+#ifndef COQUIC_TESTS_SUPPORT_CORE_CONNECTION_HANDSHAKE_TEST_SUPPORT_H
+#define COQUIC_TESTS_SUPPORT_CORE_CONNECTION_HANDSHAKE_TEST_SUPPORT_H
+
 #include <array>
 
 #include <gtest/gtest.h>
@@ -122,3 +125,5 @@ struct ScopedConnectionDrainTestHookReset {
 };
 
 } // namespace
+
+#endif // COQUIC_TESTS_SUPPORT_CORE_CONNECTION_HANDSHAKE_TEST_SUPPORT_H

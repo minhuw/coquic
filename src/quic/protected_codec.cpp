@@ -523,6 +523,23 @@ CodecResult<ConnectionId> read_connection_id(BufferReader &reader, bool enforce_
     });
 }
 
+CodecResult<bool> skip_connection_id(BufferReader &reader, bool enforce_v1_limit) {
+    const auto length = read_u8(reader);
+    if (!length.has_value()) {
+        return CodecResult<bool>::failure(length.error().code, length.error().offset);
+    }
+    if (enforce_v1_limit && length.value() > 20) {
+        return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, reader.offset());
+    }
+
+    const auto skipped = reader.read_exact(length.value());
+    if (!skipped.has_value()) {
+        return CodecResult<bool>::failure(skipped.error().code, skipped.error().offset);
+    }
+
+    return CodecResult<bool>::success(true);
+}
+
 bool frame_allowed_in_long_header_packet_type(const Frame &frame,
                                               LongHeaderPacketType packet_type) {
     const auto is_ack_like =
@@ -886,17 +903,11 @@ CodecResult<LongHeaderLayout> locate_long_header(std::span<const std::byte> byte
         return CodecResult<LongHeaderLayout>::failure(destination_connection_id.error().code,
                                                       destination_connection_id.error().offset);
 
-    const auto source_connection_id_length = read_u8(reader);
-    if (!source_connection_id_length.has_value())
-        return CodecResult<LongHeaderLayout>::failure(source_connection_id_length.error().code,
-                                                      source_connection_id_length.error().offset);
-    if (source_connection_id_length.value() > 20)
-        return CodecResult<LongHeaderLayout>::failure(CodecErrorCode::invalid_varint,
-                                                      reader.offset());
-    const auto source_connection_id = reader.read_exact(source_connection_id_length.value());
-    if (!source_connection_id.has_value())
+    const auto source_connection_id = skip_connection_id(reader, /*enforce_v1_limit=*/true);
+    if (!source_connection_id.has_value()) {
         return CodecResult<LongHeaderLayout>::failure(source_connection_id.error().code,
                                                       source_connection_id.error().offset);
+    }
 
     if (long_header_has_token(expected_type)) {
         const auto token_length = read_varint(reader);
@@ -911,11 +922,11 @@ CodecResult<LongHeaderLayout> locate_long_header(std::span<const std::byte> byte
 
     const auto length_offset = reader.offset();
     const auto payload_length = decode_varint(reader);
-    if (!payload_length.has_value())
+    if (!payload_length.has_value()) {
         return CodecResult<LongHeaderLayout>::failure(payload_length.error().code,
                                                       payload_length.error().offset);
+    }
 
-    const auto packet_number_offset = reader.offset();
     if (payload_length.value().value > static_cast<std::uint64_t>(reader.remaining()))
         return CodecResult<LongHeaderLayout>::failure(CodecErrorCode::packet_length_mismatch,
                                                       reader.offset());
@@ -924,9 +935,9 @@ CodecResult<LongHeaderLayout> locate_long_header(std::span<const std::byte> byte
         .length_offset = length_offset,
         .length_size = payload_length.value().bytes_consumed,
         .length_value = payload_length.value().value,
-        .packet_number_offset = packet_number_offset,
+        .packet_number_offset = reader.offset(),
         .packet_end_offset =
-            packet_number_offset + static_cast<std::size_t>(payload_length.value().value),
+            reader.offset() + static_cast<std::size_t>(payload_length.value().value),
     });
 }
 
@@ -1123,14 +1134,13 @@ remove_long_header_protection(std::span<const std::byte> bytes, const LongHeader
     packet_bytes[0] ^= static_cast<std::byte>(std::to_integer<std::uint8_t>(mask[0]) & 0x0fu);
     const auto packet_number_length =
         static_cast<std::uint8_t>((std::to_integer<std::uint8_t>(packet_bytes[0]) & 0x03u) + 1u);
-    const auto packet_number_length_mismatch =
-        consume_protected_codec_fault(
+    if (consume_protected_codec_fault(
             test::ProtectedCodecFaultPoint::remove_long_header_packet_length_mismatch) |
         (layout.length_value < packet_number_length) |
-        (layout.packet_number_offset + packet_number_length > packet_bytes.size());
-    if (packet_number_length_mismatch)
+        (layout.packet_number_offset + packet_number_length > packet_bytes.size())) {
         return CodecResult<RemovedLongHeaderProtection>::failure(
             CodecErrorCode::packet_length_mismatch, layout.packet_number_offset);
+    }
 
     for (std::size_t index = 0; index < packet_number_length; ++index) {
         packet_bytes[layout.packet_number_offset + index] ^= mask[index + 1];
@@ -1199,23 +1209,20 @@ remove_short_header_protection(std::span<const std::byte> bytes, std::size_t pac
         bytes[0] ^ static_cast<std::byte>(std::to_integer<std::uint8_t>(mask[0]) & 0x1fu);
     const auto packet_number_length =
         static_cast<std::uint8_t>((std::to_integer<std::uint8_t>(first_byte) & 0x03u) + 1u);
-    const auto packet_number_length_mismatch =
-        consume_protected_codec_fault(
+    if (consume_protected_codec_fault(
             test::ProtectedCodecFaultPoint::remove_short_header_packet_length_mismatch) |
-        (packet_number_offset + packet_number_length > bytes.size());
-    if (packet_number_length_mismatch)
+        (packet_number_offset + packet_number_length > bytes.size())) {
         return CodecResult<RemovedShortHeaderProtection>::failure(
             CodecErrorCode::packet_length_mismatch, packet_number_offset);
+    }
 
     const auto header_end = packet_number_offset + packet_number_length;
     RemovedShortHeaderProtection removed;
     removed.plaintext_header_size = header_end;
     removed.packet_number_length = packet_number_length;
-    const auto plaintext_header_overflow =
-        consume_protected_codec_fault(
+    if (consume_protected_codec_fault(
             test::ProtectedCodecFaultPoint::remove_short_header_plaintext_header_overflow) |
-        (header_end > removed.plaintext_header.size());
-    if (plaintext_header_overflow) {
+        (header_end > removed.plaintext_header.size())) {
         return CodecResult<RemovedShortHeaderProtection>::failure(
             CodecErrorCode::malformed_short_header_context, packet_number_offset);
     }
@@ -1454,9 +1461,8 @@ CodecResult<ReceivedLongHeaderPacketFields> decode_received_long_header_packet_f
     }
 
     const auto packet_number_length = static_cast<std::uint8_t>((first_byte.value() & 0x03u) + 1u);
-    const auto expected_payload_length =
-        static_cast<std::uint64_t>(packet_number_length + plaintext_payload.size());
-    if (payload_length.value() != expected_payload_length) {
+    if (payload_length.value() !=
+        static_cast<std::uint64_t>(packet_number_length + plaintext_payload.size())) {
         return CodecResult<ReceivedLongHeaderPacketFields>::failure(
             CodecErrorCode::packet_length_mismatch, reader.offset());
     }
@@ -1512,7 +1518,7 @@ decode_received_short_header_packet_fields(std::span<const std::byte> plaintext_
     const auto destination_connection_id_length = reader.remaining() - packet_number_length;
     const auto destination_connection_id =
         reader.read_exact(destination_connection_id_length).value();
-    const auto packet_number_bytes = reader.read_exact(packet_number_length).value();
+    static_cast<void>(reader.read_exact(packet_number_length).value());
 
     auto frames =
         try_decode_single_received_stream_frame_fast(plaintext_payload, plaintext_header.size());

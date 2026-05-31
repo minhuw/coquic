@@ -35,17 +35,13 @@ bool runtime_wait_and_receive_coverage_for_tests() {
     };
 
     bool ok = true;
-    struct RuntimeWaitReceiveCheck {
-        bool &ok;
-        bool operator()(std::string_view label, bool condition) const {
-            if (!condition) {
-                std::cerr << "runtime_wait_and_receive_coverage_for_tests failed: " << label
-                          << '\n';
-                ok = false;
-            }
-            return condition;
+    const auto check = [&](std::string_view label, bool condition) {
+        if (!condition) {
+            std::cerr << "runtime_wait_and_receive_coverage_for_tests failed: " << label << '\n';
+            ok = false;
         }
-    } check{ok};
+        return condition;
+    };
     const auto make_loopback_peer = [](std::uint16_t port) {
         sockaddr_storage peer{};
         auto &ipv4_peer = *reinterpret_cast<sockaddr_in *>(&peer);
@@ -239,17 +235,14 @@ bool runtime_wait_and_receive_coverage_for_tests() {
 
 bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
     bool ok = true;
-    struct RuntimeLowLevelSocketCheck {
-        bool &ok;
-        bool operator()(std::string_view label, bool condition) const {
-            if (!condition) {
-                std::cerr << "runtime_low_level_socket_and_ecn_coverage_for_tests failed: " << label
-                          << '\n';
-                ok = false;
-            }
-            return condition;
+    const auto check = [&](std::string_view label, bool condition) {
+        if (!condition) {
+            std::cerr << "runtime_low_level_socket_and_ecn_coverage_for_tests failed: " << label
+                      << '\n';
+            ok = false;
         }
-    } check{ok};
+        return condition;
+    };
 
     check("not_ect maps to zero traffic class",
           linux_traffic_class_for_ecn(QuicEcnCodepoint::not_ect) == 0x00);

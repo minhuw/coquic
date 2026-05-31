@@ -10,17 +10,13 @@ namespace test {
 
 bool runtime_parser_and_utility_coverage_for_tests() {
     bool ok = true;
-    struct RuntimeParserUtilityCheck {
-        bool &ok;
-        bool operator()(std::string_view label, bool condition) const {
-            if (!condition) {
-                std::cerr << "runtime_parser_and_utility_coverage_for_tests failed: " << label
-                          << '\n';
-                ok = false;
-            }
-            return condition;
+    const auto check = [&](std::string_view label, bool condition) {
+        if (!condition) {
+            std::cerr << "runtime_parser_and_utility_coverage_for_tests failed: " << label << '\n';
+            ok = false;
         }
-    } check{ok};
+        return condition;
+    };
 
     apply_runtime_ops_override(runtime_ops());
     check("parse_io_backend_kind accepts socket",
@@ -251,16 +247,13 @@ bool runtime_parser_and_utility_coverage_for_tests() {
 
 bool runtime_retry_and_probe_coverage_for_tests() {
     bool ok = true;
-    struct RuntimeRetryProbeCheck {
-        bool &ok;
-        bool operator()(std::string_view label, bool condition) const {
-            if (!condition) {
-                std::cerr << "runtime_retry_and_probe_coverage_for_tests failed: " << label << '\n';
-                ok = false;
-            }
-            return condition;
+    const auto check = [&](std::string_view label, bool condition) {
+        if (!condition) {
+            std::cerr << "runtime_retry_and_probe_coverage_for_tests failed: " << label << '\n';
+            ok = false;
         }
-    } check{ok};
+        return condition;
+    };
 
     sockaddr_storage peer{};
     auto &peer_ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
@@ -575,17 +568,13 @@ bool runtime_routing_and_driver_coverage_for_tests() {
     };
 
     bool ok = true;
-    struct RuntimeRoutingDriverCheck {
-        bool &ok;
-        bool operator()(std::string_view label, bool condition) const {
-            if (!condition) {
-                std::cerr << "runtime_routing_and_driver_coverage_for_tests failed: " << label
-                          << '\n';
-                ok = false;
-            }
-            return condition;
+    const auto check = [&](std::string_view label, bool condition) {
+        if (!condition) {
+            std::cerr << "runtime_routing_and_driver_coverage_for_tests failed: " << label << '\n';
+            ok = false;
         }
-    } check{ok};
+        return condition;
+    };
     const auto make_loopback_peer = [](std::uint16_t port) {
         sockaddr_storage peer{};
         auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);

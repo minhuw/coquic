@@ -22,13 +22,10 @@ bool runtime_openssl_available_for_tests() {
 
 bool runtime_server_loop_and_trace_coverage_for_tests() {
     bool ok = true;
-    struct RuntimeServerLoopCheck {
-        bool &ok;
-        bool operator()(std::string_view, bool condition) const {
-            ok &= condition;
-            return condition;
-        }
-    } check{ok};
+    const auto check = [&](std::string_view, bool condition) {
+        ok &= condition;
+        return condition;
+    };
     const auto make_loopback_peer = [](std::uint16_t port) {
         sockaddr_storage loopback_peer{};
         auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&loopback_peer);
@@ -1233,13 +1230,10 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
 
 bool runtime_server_endpoint_driver_coverage_for_tests() {
     bool ok = true;
-    struct RuntimeServerEndpointDriverCheck {
-        bool &ok;
-        bool operator()(std::string_view, bool condition) const {
-            ok &= condition;
-            return condition;
-        }
-    } check{ok};
+    const auto check = [&](std::string_view, bool condition) {
+        ok &= condition;
+        return condition;
+    };
     const auto make_loopback_peer = [](std::uint16_t port) {
         sockaddr_storage peer{};
         auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);

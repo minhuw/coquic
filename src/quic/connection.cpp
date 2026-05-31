@@ -7460,8 +7460,10 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         local_transport_parameters_.max_ack_delay);
                     return CodecResult<bool>::success(true);
                 }
-                const auto processed = process_inbound_application(protected_packet.frames, now,
-                                                                   true, last_inbound_path_id_);
+                const auto processed = process_inbound_application(
+                    protected_packet.frames, now, true, last_inbound_path_id_,
+                    /*used_previous_application_read_secret=*/false,
+                    protected_packet.packet_number);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
@@ -7493,7 +7495,7 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                     });
                 const auto processed = process_inbound_application(
                     protected_packet.frames, now, has_crypto_frame, last_inbound_path_id_,
-                    used_previous_application_read_secret);
+                    used_previous_application_read_secret, protected_packet.packet_number);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     if (config_.role == EndpointRole::server &&
@@ -7678,7 +7680,9 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     return CodecResult<bool>::success(true);
                 }
                 const auto processed = process_inbound_received_application(
-                    protected_packet.frames, now, true, last_inbound_path_id_);
+                    protected_packet.frames, now, true, last_inbound_path_id_,
+                    /*used_previous_application_read_secret=*/false,
+                    protected_packet.packet_number);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
@@ -7754,7 +7758,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     });
                 const auto processed = process_inbound_received_application(
                     protected_packet.frames, now, has_crypto_frame, last_inbound_path_id_,
-                    used_previous_application_read_secret);
+                    used_previous_application_read_secret, protected_packet.packet_number);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     if (config_.role == EndpointRole::server &&
@@ -9073,7 +9077,8 @@ void QuicConnection::rebuild_recovery(PacketSpaceState &packet_space) {
 CodecResult<bool>
 QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicCoreTimePoint now,
                                             bool allow_preconnected_frames, QuicPathId path_id,
-                                            bool used_previous_application_read_secret) {
+                                            bool used_previous_application_read_secret,
+                                            std::optional<std::uint64_t> packet_number) {
     static_assert(std::variant_size_v<Frame> == 23,
                   "Update process_inbound_application when Frame gains new variants");
     const bool require_connected = !allow_preconnected_frames;
@@ -9110,11 +9115,16 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                   << " bif=" << congestion_controller_.bytes_in_flight() << '\n';
     }
     if (path_id != current_send_path_id_.value_or(path_id) && !is_probing_only(frames) &&
-        !should_keep_current_send_path_for_inbound_non_probing(path_id)) {
+        !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
         maybe_switch_to_path(path_id, /*initiated_locally=*/false, now);
     }
+    PathState *inbound_path = nullptr;
     if (!paths_.empty() | (path_id != 0) | current_send_path_id_.has_value()) {
-        ensure_path_state(path_id);
+        inbound_path = &ensure_path_state(path_id);
+    }
+    if (packet_number.has_value()) {
+        note_inbound_application_packet_for_path(
+            inbound_path != nullptr ? *inbound_path : ensure_path_state(path_id), *packet_number);
     }
     for (const auto &frame : frames) {
         if (is_padding_frame(frame)) {
@@ -9538,7 +9548,8 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
 
 CodecResult<bool> QuicConnection::process_inbound_received_application(
     std::span<const ReceivedFrame> frames, QuicCoreTimePoint now, bool allow_preconnected_frames,
-    QuicPathId path_id, bool used_previous_application_read_secret) {
+    QuicPathId path_id, bool used_previous_application_read_secret,
+    std::optional<std::uint64_t> packet_number) {
     static_assert(std::variant_size_v<ReceivedFrame> == 22,
                   "Update process_inbound_received_application when ReceivedFrame changes");
     const bool require_connected = !allow_preconnected_frames;
@@ -9579,11 +9590,16 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                   << " bif=" << congestion_controller_.bytes_in_flight() << '\n';
     }
     if (path_id != current_send_path_id_.value_or(path_id) && !probing_only &&
-        !should_keep_current_send_path_for_inbound_non_probing(path_id)) {
+        !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
         maybe_switch_to_path(path_id, /*initiated_locally=*/false, now);
     }
+    PathState *inbound_path = nullptr;
     if (!paths_.empty() | (path_id != 0) | current_send_path_id_.has_value()) {
-        ensure_path_state(path_id);
+        inbound_path = &ensure_path_state(path_id);
+    }
+    if (packet_number.has_value()) {
+        note_inbound_application_packet_for_path(
+            inbound_path != nullptr ? *inbound_path : ensure_path_state(path_id), *packet_number);
     }
     for (const auto &frame : frames) {
         if (is_padding_frame(frame)) {
@@ -10016,12 +10032,12 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
     std::uint64_t packet_number, bool spin_bit, const ReceivedStreamFrame &stream_frame,
     QuicCoreTimePoint now, QuicEcnCodepoint ecn) {
     if (last_inbound_path_id_ != current_send_path_id_.value_or(last_inbound_path_id_) &&
-        !should_keep_current_send_path_for_inbound_non_probing(last_inbound_path_id_)) {
+        !should_keep_current_send_path_for_inbound_non_probing(last_inbound_path_id_,
+                                                               packet_number)) {
         maybe_switch_to_path(last_inbound_path_id_, /*initiated_locally=*/false, now);
     }
-    if (!paths_.empty() | (last_inbound_path_id_ != 0) | current_send_path_id_.has_value()) {
-        ensure_path_state(last_inbound_path_id_);
-    }
+    auto &inbound_path = ensure_path_state(last_inbound_path_id_);
+    note_inbound_application_packet_for_path(inbound_path, packet_number);
 
     const auto processed =
         process_inbound_received_application_stream(stream_frame, /*require_connected=*/true);
@@ -10052,12 +10068,11 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
     std::uint64_t packet_number, bool spin_bit, const ReceivedAckFrame &ack, QuicCoreTimePoint now,
     QuicEcnCodepoint ecn, QuicPathId path_id, bool used_previous_application_read_secret) {
     if (path_id != current_send_path_id_.value_or(path_id) &&
-        !should_keep_current_send_path_for_inbound_non_probing(path_id)) {
+        !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
         maybe_switch_to_path(path_id, /*initiated_locally=*/false, now);
     }
-    if (!paths_.empty() | (path_id != 0) | current_send_path_id_.has_value()) {
-        ensure_path_state(path_id);
-    }
+    auto &inbound_path = ensure_path_state(path_id);
+    note_inbound_application_packet_for_path(inbound_path, packet_number);
 
     const auto ack_delay_exponent = peer_transport_parameters_.has_value()
                                         ? peer_transport_parameters_->ack_delay_exponent
@@ -12040,18 +12055,29 @@ void QuicConnection::retire_peer_connection_id_for_inactive_path(QuicPathId old_
 }
 
 bool QuicConnection::should_keep_current_send_path_for_inbound_non_probing(
-    QuicPathId inbound_path_id) const {
+    QuicPathId inbound_path_id, std::optional<std::uint64_t> packet_number) const {
     if (!current_send_path_id_.has_value() || inbound_path_id == *current_send_path_id_) {
         return false;
     }
 
     const auto *current = find_path_state(paths_, current_send_path_id_);
     const auto *inbound = find_path_state(paths_, inbound_path_id);
+    if (current != nullptr && current->validated && packet_number.has_value() &&
+        current->largest_inbound_application_packet_number.has_value() &&
+        *packet_number < *current->largest_inbound_application_packet_number) {
+        return true;
+    }
     if (path_state_is_validating(current) & path_state_is_validated(inbound)) {
         return true;
     }
 
     return current != nullptr && current->preferred_address_path && current->validated;
+}
+
+void QuicConnection::note_inbound_application_packet_for_path(PathState &path,
+                                                              std::uint64_t packet_number) {
+    path.largest_inbound_application_packet_number = std::max(
+        path.largest_inbound_application_packet_number.value_or(packet_number), packet_number);
 }
 
 void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_locally,
@@ -19790,6 +19816,48 @@ bool connection_key_update_and_probe_coverage_for_tests() {
 
     {
         auto connection = make_connected_client_connection();
+        connection.current_send_path_id_ = 9;
+        auto &old_path = connection.ensure_path_state(0);
+        old_path.validated = true;
+        old_path.is_current_send_path = false;
+        old_path.largest_inbound_application_packet_number = 94;
+        auto &new_path = connection.ensure_path_state(9);
+        new_path.validated = true;
+        new_path.is_current_send_path = true;
+        new_path.largest_inbound_application_packet_number = 100;
+
+        const auto processed = connection.process_inbound_received_application_ack_only(
+            /*packet_number=*/95, /*spin_bit=*/false, ReceivedAckFrame{.largest_acknowledged = 1},
+            QuicCoreTimePoint{}, QuicEcnCodepoint::ect0, /*path_id=*/0);
+
+        COQUIC_CONNECTION_HOOK_RECORD(processed.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.current_send_path_id_ == 9);
+        COQUIC_CONNECTION_HOOK_RECORD(old_path.largest_inbound_application_packet_number == 95);
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.current_send_path_id_ = 9;
+        auto &old_path = connection.ensure_path_state(0);
+        old_path.validated = true;
+        old_path.is_current_send_path = false;
+        old_path.largest_inbound_application_packet_number = 94;
+        auto &new_path = connection.ensure_path_state(9);
+        new_path.validated = true;
+        new_path.is_current_send_path = true;
+        new_path.largest_inbound_application_packet_number = 100;
+
+        const auto processed = connection.process_inbound_received_application_ack_only(
+            /*packet_number=*/101, /*spin_bit=*/false, ReceivedAckFrame{.largest_acknowledged = 1},
+            QuicCoreTimePoint{}, QuicEcnCodepoint::ect0, /*path_id=*/0);
+
+        COQUIC_CONNECTION_HOOK_RECORD(processed.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.current_send_path_id_ == 0);
+        COQUIC_CONNECTION_HOOK_RECORD(old_path.largest_inbound_application_packet_number == 101);
+    }
+
+    {
+        auto connection = make_connected_client_connection();
         auto empty_destination_processed =
             connection.process_new_connection_id_frame(NewConnectionIdFrame{
                 .sequence_number = 1,
@@ -22057,6 +22125,15 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.ensure_path_state(3).validated = false;
         COQUIC_CONNECTION_HOOK_RECORD(
             !connection.should_keep_current_send_path_for_inbound_non_probing(3));
+
+        current.preferred_address_path = false;
+        current.validated = true;
+        current.largest_inbound_application_packet_number = 44;
+        connection.ensure_path_state(4).validated = true;
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.should_keep_current_send_path_for_inbound_non_probing(4, 43));
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !connection.should_keep_current_send_path_for_inbound_non_probing(4, 45));
     }
 
     {

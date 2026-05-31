@@ -497,6 +497,7 @@ struct PathState {
     std::optional<QuicCoreTimePoint> validation_deadline;
     std::uint64_t peer_connection_id_sequence = 0;
     std::optional<ConnectionId> destination_connection_id_override;
+    std::optional<std::uint64_t> largest_inbound_application_packet_number;
     PathEcnState ecn;
     PathSpinState spin;
     PathMtuState mtu;
@@ -633,11 +634,13 @@ class QuicConnection {
     CodecResult<bool>
     process_inbound_application(std::span<const Frame> frames, QuicCoreTimePoint now,
                                 bool allow_preconnected_frames = false, QuicPathId path_id = 0,
-                                bool used_previous_application_read_secret = false);
+                                bool used_previous_application_read_secret = false,
+                                std::optional<std::uint64_t> packet_number = std::nullopt);
     CodecResult<bool> process_inbound_received_application(
         std::span<const ReceivedFrame> frames, QuicCoreTimePoint now,
         bool allow_preconnected_frames = false, QuicPathId path_id = 0,
-        bool used_previous_application_read_secret = false);
+        bool used_previous_application_read_secret = false,
+        std::optional<std::uint64_t> packet_number = std::nullopt);
     CodecResult<bool>
     process_inbound_received_application_stream(const ReceivedStreamFrame &stream_frame,
                                                 bool require_connected);
@@ -844,7 +847,10 @@ class QuicConnection {
     bool can_initiate_path_validation(QuicPathId path_id) const;
     void retire_peer_connection_id_for_inactive_path(QuicPathId old_path_id,
                                                      QuicPathId new_path_id);
-    bool should_keep_current_send_path_for_inbound_non_probing(QuicPathId inbound_path_id) const;
+    bool should_keep_current_send_path_for_inbound_non_probing(
+        QuicPathId inbound_path_id,
+        std::optional<std::uint64_t> packet_number = std::nullopt) const;
+    void note_inbound_application_packet_for_path(PathState &path, std::uint64_t packet_number);
     void maybe_switch_to_path(QuicPathId path_id, bool initiated_locally,
                               QuicCoreTimePoint now = QuicCoreClock::now());
     static void set_path_peer_connection_id_sequence(PathState &path,

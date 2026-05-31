@@ -142,9 +142,8 @@ COQUIC_NO_PROFILE void print_serialize_profile() {
     }
 
     const auto &c = serialize_profile_counters();
-    std::cerr << "coquic-serialize-profile"
-              << " one_rtt_calls=" << c.one_rtt_calls << " one_rtt_ns=" << c.one_rtt_ns
-              << " one_rtt_bytes=" << c.one_rtt_bytes
+    std::cerr << "coquic-serialize-profile" << " one_rtt_calls=" << c.one_rtt_calls
+              << " one_rtt_ns=" << c.one_rtt_ns << " one_rtt_bytes=" << c.one_rtt_bytes
               << " one_rtt_payload_bytes=" << c.one_rtt_payload_bytes
               << " one_rtt_frames=" << c.one_rtt_frames
               << " one_rtt_stream_fragments=" << c.one_rtt_stream_fragments
@@ -1400,6 +1399,56 @@ build_long_header_plaintext_header(const RemovedLongHeaderProtection &unprotecte
     return CodecResult<std::vector<std::byte>>::success(std::move(plaintext_header));
 }
 
+struct ParsedShortHeaderPlaintext {
+    std::uint8_t first_byte = 0;
+    ConnectionId destination_connection_id;
+    std::uint8_t packet_number_length = 0;
+
+    bool spin_bit() const {
+        return (first_byte & 0x20u) != 0;
+    }
+    bool key_phase() const {
+        return (first_byte & 0x04u) != 0;
+    }
+};
+
+CodecResult<ParsedShortHeaderPlaintext>
+parse_short_header_plaintext(std::span<const std::byte> plaintext_header,
+                             bool accept_greased_quic_bit) {
+    BufferReader reader(plaintext_header);
+    const auto first_byte = read_u8(reader);
+    if (!first_byte.has_value()) {
+        return CodecResult<ParsedShortHeaderPlaintext>::failure(first_byte.error().code,
+                                                                first_byte.error().offset);
+    }
+    if ((first_byte.value() & 0x40u) == 0 && !accept_greased_quic_bit) {
+        return CodecResult<ParsedShortHeaderPlaintext>::failure(CodecErrorCode::invalid_fixed_bit,
+                                                                0);
+    }
+    if ((first_byte.value() & 0x18u) != 0) {
+        return CodecResult<ParsedShortHeaderPlaintext>::failure(
+            CodecErrorCode::invalid_reserved_bits, 0);
+    }
+
+    const auto packet_number_length = static_cast<std::uint8_t>((first_byte.value() & 0x03u) + 1u);
+    if (reader.remaining() < packet_number_length) {
+        return CodecResult<ParsedShortHeaderPlaintext>::failure(
+            CodecErrorCode::packet_length_mismatch, reader.offset());
+    }
+
+    const auto destination_connection_id_length = reader.remaining() - packet_number_length;
+    const auto destination_connection_id =
+        reader.read_exact(destination_connection_id_length).value();
+    static_cast<void>(reader.read_exact(packet_number_length).value());
+
+    return CodecResult<ParsedShortHeaderPlaintext>::success(ParsedShortHeaderPlaintext{
+        .first_byte = first_byte.value(),
+        .destination_connection_id =
+            ConnectionId{destination_connection_id.begin(), destination_connection_id.end()},
+        .packet_number_length = packet_number_length,
+    });
+}
+
 CodecResult<ReceivedLongHeaderPacketFields> decode_received_long_header_packet_fields(
     std::span<const std::byte> plaintext_header, const SharedBytes &plaintext_payload,
     ProtectedPayloadPacketType packet_type, bool has_token, bool accept_greased_quic_bit) {
@@ -1494,31 +1543,11 @@ CodecResult<ReceivedShortHeaderPacketFields>
 decode_received_short_header_packet_fields(std::span<const std::byte> plaintext_header,
                                            const SharedBytes &plaintext_payload,
                                            bool accept_greased_quic_bit) {
-    BufferReader reader(plaintext_header);
-    const auto first_byte = read_u8(reader);
-    if (!first_byte.has_value()) {
-        return CodecResult<ReceivedShortHeaderPacketFields>::failure(first_byte.error().code,
-                                                                     first_byte.error().offset);
+    auto header = parse_short_header_plaintext(plaintext_header, accept_greased_quic_bit);
+    if (!header.has_value()) {
+        return CodecResult<ReceivedShortHeaderPacketFields>::failure(header.error().code,
+                                                                     header.error().offset);
     }
-    if ((first_byte.value() & 0x40u) == 0 && !accept_greased_quic_bit) {
-        return CodecResult<ReceivedShortHeaderPacketFields>::failure(
-            CodecErrorCode::invalid_fixed_bit, 0);
-    }
-    if ((first_byte.value() & 0x18u) != 0) {
-        return CodecResult<ReceivedShortHeaderPacketFields>::failure(
-            CodecErrorCode::invalid_reserved_bits, 0);
-    }
-
-    const auto packet_number_length = static_cast<std::uint8_t>((first_byte.value() & 0x03u) + 1u);
-    if (reader.remaining() < packet_number_length) {
-        return CodecResult<ReceivedShortHeaderPacketFields>::failure(
-            CodecErrorCode::packet_length_mismatch, reader.offset());
-    }
-
-    const auto destination_connection_id_length = reader.remaining() - packet_number_length;
-    const auto destination_connection_id =
-        reader.read_exact(destination_connection_id_length).value();
-    static_cast<void>(reader.read_exact(packet_number_length).value());
 
     auto frames =
         try_decode_single_received_stream_frame_fast(plaintext_payload, plaintext_header.size());
@@ -1532,14 +1561,10 @@ decode_received_short_header_packet_fields(std::span<const std::byte> plaintext_
     }
 
     return CodecResult<ReceivedShortHeaderPacketFields>::success(ReceivedShortHeaderPacketFields{
-        .spin_bit = (first_byte.value() & 0x20u) != 0,
-        .key_phase = (first_byte.value() & 0x04u) != 0,
-        .destination_connection_id =
-            ConnectionId{
-                destination_connection_id.begin(),
-                destination_connection_id.end(),
-            },
-        .packet_number_length = packet_number_length,
+        .spin_bit = header.value().spin_bit(),
+        .key_phase = header.value().key_phase(),
+        .destination_connection_id = std::move(header.value().destination_connection_id),
+        .packet_number_length = header.value().packet_number_length,
         .frames = std::move(frames.value()),
     });
 }
@@ -1555,31 +1580,11 @@ try_decode_received_short_header_ack_only_packet_fields(std::span<const std::byt
             CodecErrorCode::unknown_frame_type, plaintext_header.size());
     }
 
-    BufferReader reader(plaintext_header);
-    const auto first_byte = read_u8(reader);
-    if (!first_byte.has_value()) {
-        return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::failure(
-            first_byte.error().code, first_byte.error().offset);
+    auto header = parse_short_header_plaintext(plaintext_header, accept_greased_quic_bit);
+    if (!header.has_value()) {
+        return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::failure(header.error().code,
+                                                                            header.error().offset);
     }
-    if ((first_byte.value() & 0x40u) == 0 && !accept_greased_quic_bit) {
-        return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::failure(
-            CodecErrorCode::invalid_fixed_bit, 0);
-    }
-    if ((first_byte.value() & 0x18u) != 0) {
-        return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::failure(
-            CodecErrorCode::invalid_reserved_bits, 0);
-    }
-
-    const auto packet_number_length = static_cast<std::uint8_t>((first_byte.value() & 0x03u) + 1u);
-    if (reader.remaining() < packet_number_length) {
-        return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::failure(
-            CodecErrorCode::packet_length_mismatch, reader.offset());
-    }
-
-    const auto destination_connection_id_length = reader.remaining() - packet_number_length;
-    const auto destination_connection_id =
-        reader.read_exact(destination_connection_id_length).value();
-    static_cast<void>(reader.read_exact(packet_number_length).value());
 
     auto ack_result = deserialize_received_ack_frame(plaintext_payload);
     if (!ack_result.has_value()) {
@@ -1594,14 +1599,10 @@ try_decode_received_short_header_ack_only_packet_fields(std::span<const std::byt
 
     return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::success(
         ReceivedShortHeaderAckOnlyPacketFields{
-            .spin_bit = (first_byte.value() & 0x20u) != 0,
-            .key_phase = (first_byte.value() & 0x04u) != 0,
-            .destination_connection_id =
-                ConnectionId{
-                    destination_connection_id.begin(),
-                    destination_connection_id.end(),
-                },
-            .packet_number_length = packet_number_length,
+            .spin_bit = header.value().spin_bit(),
+            .key_phase = header.value().key_phase(),
+            .destination_connection_id = std::move(header.value().destination_connection_id),
+            .packet_number_length = header.value().packet_number_length,
             .ack = std::move(ack_result.value().frame),
         });
 }
@@ -1617,30 +1618,11 @@ try_decode_received_short_header_ack_only_fast_packet_fields(
             CodecErrorCode::unknown_frame_type, plaintext_header.size());
     }
 
-    BufferReader reader(plaintext_header);
-    const auto first_byte = read_u8(reader);
-    if (!first_byte.has_value()) {
+    auto header = parse_short_header_plaintext(plaintext_header, accept_greased_quic_bit);
+    if (!header.has_value()) {
         return CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>::failure(
-            first_byte.error().code, first_byte.error().offset);
+            header.error().code, header.error().offset);
     }
-    if ((first_byte.value() & 0x40u) == 0 && !accept_greased_quic_bit) {
-        return CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>::failure(
-            CodecErrorCode::invalid_fixed_bit, 0);
-    }
-    if ((first_byte.value() & 0x18u) != 0) {
-        return CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>::failure(
-            CodecErrorCode::invalid_reserved_bits, 0);
-    }
-
-    const auto packet_number_length = static_cast<std::uint8_t>((first_byte.value() & 0x03u) + 1u);
-    if (reader.remaining() < packet_number_length) {
-        return CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>::failure(
-            CodecErrorCode::packet_length_mismatch, reader.offset());
-    }
-    const auto destination_connection_id_length = reader.remaining() - packet_number_length;
-    const auto destination_connection_id =
-        reader.read_exact(destination_connection_id_length).value();
-    static_cast<void>(reader.read_exact(packet_number_length).value());
 
     auto ack_result = deserialize_received_ack_frame(plaintext_payload);
     if (!ack_result.has_value()) {
@@ -1655,14 +1637,10 @@ try_decode_received_short_header_ack_only_fast_packet_fields(
 
     return CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>::success(
         ReceivedShortHeaderAckOnlyFastPacketFields{
-            .spin_bit = (first_byte.value() & 0x20u) != 0,
-            .key_phase = (first_byte.value() & 0x04u) != 0,
-            .destination_connection_id =
-                ConnectionId{
-                    destination_connection_id.begin(),
-                    destination_connection_id.end(),
-                },
-            .packet_number_length = packet_number_length,
+            .spin_bit = header.value().spin_bit(),
+            .key_phase = header.value().key_phase(),
+            .destination_connection_id = std::move(header.value().destination_connection_id),
+            .packet_number_length = header.value().packet_number_length,
             .ack = std::move(ack_result.value().frame),
         });
 }
@@ -1682,30 +1660,11 @@ try_decode_received_short_header_stream_fast_packet_fields(
             CodecErrorCode::unknown_frame_type, plaintext_header.size());
     }
 
-    BufferReader reader(plaintext_header);
-    const auto first_byte = read_u8(reader);
-    if (!first_byte.has_value()) {
+    auto header = parse_short_header_plaintext(plaintext_header, accept_greased_quic_bit);
+    if (!header.has_value()) {
         return CodecResult<ReceivedShortHeaderStreamFastPacketFields>::failure(
-            first_byte.error().code, first_byte.error().offset);
+            header.error().code, header.error().offset);
     }
-    if ((first_byte.value() & 0x40u) == 0 && !accept_greased_quic_bit) {
-        return CodecResult<ReceivedShortHeaderStreamFastPacketFields>::failure(
-            CodecErrorCode::invalid_fixed_bit, 0);
-    }
-    if ((first_byte.value() & 0x18u) != 0) {
-        return CodecResult<ReceivedShortHeaderStreamFastPacketFields>::failure(
-            CodecErrorCode::invalid_reserved_bits, 0);
-    }
-
-    const auto packet_number_length = static_cast<std::uint8_t>((first_byte.value() & 0x03u) + 1u);
-    if (reader.remaining() < packet_number_length) {
-        return CodecResult<ReceivedShortHeaderStreamFastPacketFields>::failure(
-            CodecErrorCode::packet_length_mismatch, reader.offset());
-    }
-    const auto destination_connection_id_length = reader.remaining() - packet_number_length;
-    const auto destination_connection_id =
-        reader.read_exact(destination_connection_id_length).value();
-    static_cast<void>(reader.read_exact(packet_number_length).value());
 
     auto stream = try_decode_single_received_stream_frame_value_fast(plaintext_payload,
                                                                      plaintext_header.size());
@@ -1716,14 +1675,10 @@ try_decode_received_short_header_stream_fast_packet_fields(
 
     return CodecResult<ReceivedShortHeaderStreamFastPacketFields>::success(
         ReceivedShortHeaderStreamFastPacketFields{
-            .spin_bit = (first_byte.value() & 0x20u) != 0,
-            .key_phase = (first_byte.value() & 0x04u) != 0,
-            .destination_connection_id =
-                ConnectionId{
-                    destination_connection_id.begin(),
-                    destination_connection_id.end(),
-                },
-            .packet_number_length = packet_number_length,
+            .spin_bit = header.value().spin_bit(),
+            .key_phase = header.value().key_phase(),
+            .destination_connection_id = std::move(header.value().destination_connection_id),
+            .packet_number_length = header.value().packet_number_length,
             .stream = std::move(stream.value()),
         });
 }

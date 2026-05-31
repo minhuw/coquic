@@ -30,6 +30,8 @@
 namespace coquic::http3 {
 Http3Response runtime_server_response_for_test(const std::filesystem::path &document_root,
                                                const Http3Request &request);
+Http3Response runtime_server_response_for_test(const Http3RuntimeConfig &config,
+                                               const Http3Request &request);
 void runtime_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path);
 void runtime_clear_forced_file_read_failure_path_for_test();
 std::optional<std::vector<std::byte>>
@@ -160,6 +162,86 @@ class ScopedTcpLoopbackListener {
 
   private:
     int fd_ = -1;
+};
+
+class ScopedHttpProxyUpstream {
+  public:
+    ScopedHttpProxyUpstream(std::uint16_t port, std::string response)
+        : response_(std::move(response)), thread_([this, port] { run(port); }) {
+    }
+
+    ~ScopedHttpProxyUpstream() {
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    ScopedHttpProxyUpstream(const ScopedHttpProxyUpstream &) = delete;
+    ScopedHttpProxyUpstream &operator=(const ScopedHttpProxyUpstream &) = delete;
+
+    bool ready() const {
+        return ready_.load(std::memory_order_acquire);
+    }
+
+    std::string request_text() const {
+        return request_text_;
+    }
+
+  private:
+    void run(std::uint16_t port) {
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            return;
+        }
+        ScopedFd listen_fd(fd);
+
+        const int enable = 1;
+        if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) != 0) {
+            return;
+        }
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(port);
+        if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+            return;
+        }
+        if (::listen(fd, 1) != 0) {
+            return;
+        }
+        ready_.store(true, std::memory_order_release);
+
+        const int client_fd = ::accept(fd, nullptr, nullptr);
+        if (client_fd < 0) {
+            return;
+        }
+        ScopedFd client(client_fd);
+
+        std::array<char, 4096> buffer{};
+        while (request_text_.find("\r\n\r\n") == std::string::npos) {
+            const auto received = ::recv(client_fd, buffer.data(), buffer.size(), 0);
+            if (received <= 0) {
+                break;
+            }
+            request_text_.append(buffer.data(), static_cast<std::size_t>(received));
+        }
+
+        std::size_t written = 0;
+        while (written < response_.size()) {
+            const auto result = ::send(client_fd, response_.data() + written,
+                                       response_.size() - written, MSG_NOSIGNAL);
+            if (result <= 0) {
+                break;
+            }
+            written += static_cast<std::size_t>(result);
+        }
+    }
+
+    std::string response_;
+    std::string request_text_;
+    std::atomic<bool> ready_ = false;
+    std::thread thread_;
 };
 
 class ScopedStdoutCapture {
@@ -598,9 +680,26 @@ TEST(QuicHttp3RuntimeTest, ParsesServerInvocation) {
     EXPECT_EQ(parsed.bootstrap_port, 9443);
     EXPECT_EQ(parsed.alt_svc_max_age, 120u);
     EXPECT_EQ(parsed.document_root, std::filesystem::path("site"));
+    EXPECT_FALSE(parsed.reverse_proxy.has_value());
     EXPECT_EQ(parsed.certificate_chain_path,
               std::filesystem::path("tests/fixtures/quic-server-cert.pem"));
     EXPECT_EQ(parsed.private_key_path, std::filesystem::path("tests/fixtures/quic-server-key.pem"));
+}
+
+TEST(QuicHttp3RuntimeTest, ParsesServerReverseProxyTarget) {
+    const char *argv[] = {
+        "h3-server",
+        "--reverse-proxy",
+        "http://127.0.0.1:3000",
+    };
+
+    const auto config = coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                               const_cast<char **>(argv));
+
+    const auto &config_value = optional_ref_or_terminate(config);
+    const auto &reverse_proxy = optional_ref_or_terminate(config_value.reverse_proxy);
+    EXPECT_EQ(reverse_proxy.host, "127.0.0.1");
+    EXPECT_EQ(reverse_proxy.port, 3000);
 }
 
 TEST(QuicHttp3RuntimeTest, ParsesClientInvocation) {
@@ -823,6 +922,17 @@ TEST(QuicHttp3RuntimeTest, ServerParserRejectsMalformedNumericAndBackendValues) 
             static_cast<int>(std::size(argv)), const_cast<char **>(argv));
         EXPECT_FALSE(config.has_value());
     }
+
+    {
+        const char *argv[] = {
+            "h3-server",
+            "--reverse-proxy",
+            "https://127.0.0.1:3000",
+        };
+        const auto config = coquic::http3::parse_http3_server_args(
+            static_cast<int>(std::size(argv)), const_cast<char **>(argv));
+        EXPECT_FALSE(config.has_value());
+    }
 }
 
 TEST(QuicHttp3RuntimeTest, ParsersRejectMissingOptionValuesAndRepeatedUrls) {
@@ -858,6 +968,12 @@ TEST(QuicHttp3RuntimeTest, ParsersRejectMissingOptionValuesAndRepeatedUrls) {
     }
     {
         const char *argv[] = {"h3-server", "--document-root"};
+        EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-server", "--reverse-proxy"};
         EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
                                                             const_cast<char **>(argv))
                          .has_value());
@@ -954,6 +1070,13 @@ TEST(QuicHttp3RuntimeTest, ParsersRejectWrongModeFlagsUnknownOptionsAndEmptyArgv
     }
     {
         const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--document-root", "site"};
+        EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
+                                                            const_cast<char **>(argv))
+                         .has_value());
+    }
+    {
+        const char *argv[] = {"h3-client", "https://localhost:9443/ok", "--reverse-proxy",
+                              "http://127.0.0.1:3000"};
         EXPECT_FALSE(coquic::http3::parse_http3_client_args(static_cast<int>(std::size(argv)),
                                                             const_cast<char **>(argv))
                          .has_value());
@@ -2168,6 +2291,7 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCoversPathAndMimeBranches) {
     document_root.write_file("index.html", "<h1>home</h1>");
     document_root.write_file("plain.txt", "plain");
     document_root.write_file("payload.json", "{\"ok\":true}");
+    document_root.write_file("workbench.html", "<main>workbench</main>");
     document_root.write_file("style.css", "body{}");
     document_root.write_file("app.js", "console.log('js')");
     document_root.write_file("module.mjs", "export const value = 1;");
@@ -2196,6 +2320,12 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCoversPathAndMimeBranches) {
     EXPECT_EQ(query_get.head.status, 200);
     EXPECT_EQ(query_get.body, bytes_from_text("plain"));
     expect_header_value(query_get.head, {"content-type", "text/plain; charset=utf-8"});
+
+    auto next_export_route = coquic::http3::runtime_server_response_for_test(
+        document_root.path(), request("GET", "/workbench"));
+    EXPECT_EQ(next_export_route.head.status, 200);
+    EXPECT_EQ(next_export_route.body, bytes_from_text("<main>workbench</main>"));
+    expect_header_value(next_export_route.head, {"content-type", "text/html; charset=utf-8"});
 
     auto head = coquic::http3::runtime_server_response_for_test(document_root.path(),
                                                                 request("HEAD", "/payload.json"));
@@ -2245,6 +2375,71 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCoversPathAndMimeBranches) {
     auto unreadable = coquic::http3::runtime_server_response_for_test(
         document_root.path(), request("GET", "/secret.txt"));
     EXPECT_EQ(unreadable.head.status, 500);
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyToHttpUpstream) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    ScopedHttpProxyUpstream upstream(port,
+                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                                     "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                                     "f\r\n<div>next</div>\r\n0\r\n\r\n");
+    for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    ASSERT_TRUE(upstream.ready());
+
+    const auto response = coquic::http3::runtime_server_response_for_test(
+        coquic::http3::Http3RuntimeConfig{
+            .reverse_proxy =
+                coquic::http3::Http3ReverseProxyConfig{
+                    .host = "127.0.0.1",
+                    .port = port,
+                },
+        },
+        coquic::http3::Http3Request{
+            .head =
+                {
+                    .method = "GET",
+                    .authority = "demo.test",
+                    .path = "/dashboard?tab=perf",
+                    .headers = {{"x-demo", "1"}},
+                },
+        });
+
+    EXPECT_EQ(response.head.status, 200);
+    EXPECT_EQ(response.body, bytes_from_text("<div>next</div>"));
+    expect_header_value(response.head, {"content-type", "text/html; charset=utf-8"});
+    const auto upstream_request = upstream.request_text();
+    EXPECT_NE(upstream_request.find("GET /dashboard?tab=perf HTTP/1.1\r\n"), std::string::npos);
+    EXPECT_NE(upstream_request.find("Host: demo.test\r\n"), std::string::npos);
+    EXPECT_NE(upstream_request.find("x-demo: 1\r\n"), std::string::npos);
+    EXPECT_NE(upstream_request.find("X-Forwarded-Proto: https\r\n"), std::string::npos);
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeServerResponseReturnsBadGatewayForMissingProxy) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto response = coquic::http3::runtime_server_response_for_test(
+        coquic::http3::Http3RuntimeConfig{
+            .reverse_proxy =
+                coquic::http3::Http3ReverseProxyConfig{
+                    .host = "127.0.0.1",
+                    .port = port,
+                },
+        },
+        coquic::http3::Http3Request{
+            .head =
+                {
+                    .method = "GET",
+                    .path = "/",
+                },
+        });
+
+    EXPECT_EQ(response.head.status, 502);
+    EXPECT_TRUE(response.body.empty());
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeInspectRouteSupportsPost) {

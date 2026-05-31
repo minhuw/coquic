@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "src/http3/http3.h"
+#include "src/http3/http3_reverse_proxy.h"
 #include "src/io/io_backend.h"
 #include "src/quic/core.h"
 
@@ -30,6 +31,7 @@ struct Http3RuntimeConfig {
     std::uint64_t alt_svc_max_age = 60;
     bool enable_bootstrap = true;
     std::filesystem::path document_root = ".";
+    std::optional<Http3ReverseProxyConfig> reverse_proxy;
     std::filesystem::path certificate_chain_path = "tests/fixtures/quic-server-cert.pem";
     std::filesystem::path private_key_path = "tests/fixtures/quic-server-key.pem";
     std::string url;

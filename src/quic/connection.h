@@ -850,7 +850,8 @@ class QuicConnection {
     bool should_keep_current_send_path_for_inbound_non_probing(
         QuicPathId inbound_path_id,
         std::optional<std::uint64_t> packet_number = std::nullopt) const;
-    void note_inbound_application_packet_for_path(PathState &path, std::uint64_t packet_number);
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+    void note_inbound_application_packet_for_path(QuicPathId path_id, std::uint64_t packet_number);
     void maybe_switch_to_path(QuicPathId path_id, bool initiated_locally,
                               QuicCoreTimePoint now = QuicCoreClock::now());
     static void set_path_peer_connection_id_sequence(PathState &path,

@@ -77,7 +77,8 @@ constexpr std::string_view kHttp3ServerUsageLine =
     "usage: h3-server [--host HOST] [--port PORT] [--bootstrap-port PORT] "
     "[--alt-svc-max-age SECONDS] [--io-backend socket|io_uring] "
     "[--congestion-control newreno|cubic|bbr|copa] "
-    "[--certificate-chain PATH] [--private-key PATH] [--document-root PATH]";
+    "[--certificate-chain PATH] [--private-key PATH] [--document-root PATH] "
+    "[--reverse-proxy http://HOST:PORT]";
 
 constexpr std::string_view kHttp3ClientUsageLine =
     "usage: h3-client URL [--method GET|HEAD|POST] [--header NAME:VALUE] "
@@ -483,6 +484,35 @@ resolve_runtime_path_under_root(const std::filesystem::path &root, std::string_v
     return (normalized_root / relative).lexically_normal();
 }
 
+std::optional<std::filesystem::path>
+resolve_existing_runtime_path_under_root(const std::filesystem::path &root,
+                                         std::string_view request_path) {
+    auto resolved = resolve_runtime_path_under_root(root, request_path);
+    if (!resolved.has_value()) {
+        return std::nullopt;
+    }
+
+    std::error_code status_error;
+    if (std::filesystem::exists(*resolved, status_error) &&
+        std::filesystem::is_regular_file(*resolved, status_error)) {
+        return resolved;
+    }
+
+    if (resolved->has_extension()) {
+        return resolved;
+    }
+
+    auto html_candidate = *resolved;
+    html_candidate += ".html";
+    status_error.clear();
+    if (std::filesystem::exists(html_candidate, status_error) &&
+        std::filesystem::is_regular_file(html_candidate, status_error)) {
+        return html_candidate.lexically_normal();
+    }
+
+    return resolved;
+}
+
 std::string content_type_for_path(const std::filesystem::path &path) {
     const auto extension = lowercase_ascii(path.extension().string());
     if ((extension == ".html") | (extension == ".htm")) {
@@ -509,10 +539,14 @@ std::string content_type_for_path(const std::filesystem::path &path) {
     return "application/octet-stream";
 }
 
-Http3Response runtime_server_response(const std::filesystem::path &document_root,
+Http3Response runtime_server_response(const Http3RuntimeConfig &config,
                                       const Http3Request &request) {
     if (const auto demo_route = try_demo_route_response(request); demo_route.has_value()) {
         return *demo_route;
+    }
+
+    if (config.reverse_proxy.has_value()) {
+        return fetch_http_reverse_proxy_response(*config.reverse_proxy, request);
     }
 
     if (request.head.method != "GET" && request.head.method != "HEAD") {
@@ -526,7 +560,8 @@ Http3Response runtime_server_response(const std::filesystem::path &document_root
         };
     }
 
-    const auto resolved = resolve_runtime_path_under_root(document_root, request.head.path);
+    const auto resolved =
+        resolve_existing_runtime_path_under_root(config.document_root, request.head.path);
     if (!resolved.has_value()) {
         return Http3Response{
             .head =
@@ -920,6 +955,7 @@ Http3BootstrapConfig make_http3_bootstrap_config(const Http3RuntimeConfig &confi
         .h3_port = config.port,
         .alt_svc_max_age = config.alt_svc_max_age,
         .document_root = config.document_root,
+        .reverse_proxy = config.reverse_proxy,
         .certificate_chain_path = config.certificate_chain_path,
         .private_key_path = config.private_key_path,
     };
@@ -1136,14 +1172,13 @@ class Http3ServerRuntime {
                 continue;
             }
             if (lifecycle->event == quic::QuicCoreConnectionLifecycle::accepted) {
-                endpoints_.try_emplace(
-                    lifecycle->connection,
-                    Http3ServerEndpoint(Http3ServerConfig{
-                        .fallback_request_handler =
-                            [document_root = config_.document_root](const Http3Request &request) {
-                                return runtime_server_response(document_root, request);
-                            },
-                    }));
+                endpoints_.try_emplace(lifecycle->connection,
+                                       Http3ServerEndpoint(Http3ServerConfig{
+                                           .fallback_request_handler =
+                                               [config = config_](const Http3Request &request) {
+                                                   return runtime_server_response(config, request);
+                                               },
+                                       }));
             }
             if (lifecycle->event == quic::QuicCoreConnectionLifecycle::closed) {
                 closed_connections.insert(lifecycle->connection);
@@ -1459,7 +1494,16 @@ class Http3ClientRuntime {
 
 Http3Response runtime_server_response_for_test(const std::filesystem::path &document_root,
                                                const Http3Request &request) {
-    return runtime_server_response(document_root, request);
+    return runtime_server_response(
+        Http3RuntimeConfig{
+            .document_root = document_root,
+        },
+        request);
+}
+
+Http3Response runtime_server_response_for_test(const Http3RuntimeConfig &config,
+                                               const Http3Request &request) {
+    return runtime_server_response(config, request);
 }
 
 void runtime_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path) {
@@ -1534,6 +1578,9 @@ bool runtime_misc_internal_coverage_for_test() {
     RuntimeScopedTempDir document_root;
     check(document_root.write_file("payload.txt", "payload"),
           "write temp payload for runtime_server_response");
+    const auto document_root_config = Http3RuntimeConfig{
+        .document_root = document_root.path(),
+    };
     check(!document_root.write_file(".", "x"),
           "temp runtime directory rejects writes targeting directories");
     check(!read_binary_file(document_root.path() / "missing.bin").has_value(),
@@ -1639,7 +1686,7 @@ bool runtime_misc_internal_coverage_for_test() {
           "content_type_for_path serves wasm with the WebAssembly MIME type");
 
     const auto method_not_allowed =
-        runtime_server_response(document_root.path(), Http3Request{
+        runtime_server_response(document_root_config, Http3Request{
                                                           .head =
                                                               {
                                                                   .method = "POST",
@@ -1659,7 +1706,7 @@ bool runtime_misc_internal_coverage_for_test() {
     forced_file_size_failure_path_for_test() =
         (document_root.path() / "payload.txt").lexically_normal();
     const auto file_size_failure =
-        runtime_server_response(document_root.path(), Http3Request{
+        runtime_server_response(document_root_config, Http3Request{
                                                           .head =
                                                               {
                                                                   .method = "HEAD",
@@ -1671,7 +1718,7 @@ bool runtime_misc_internal_coverage_for_test() {
           "runtime_server_response surfaces file_size failure");
     forced_read_failure_path_for_test() = (document_root.path() / "other.bin").lexically_normal();
     const auto unaffected_read =
-        runtime_server_response(document_root.path(), Http3Request{
+        runtime_server_response(document_root_config, Http3Request{
                                                           .head =
                                                               {
                                                                   .method = "GET",
@@ -1684,7 +1731,7 @@ bool runtime_misc_internal_coverage_for_test() {
     forced_file_size_failure_path_for_test() =
         (document_root.path() / "other.bin").lexically_normal();
     const auto unaffected_file_size =
-        runtime_server_response(document_root.path(), Http3Request{
+        runtime_server_response(document_root_config, Http3Request{
                                                           .head =
                                                               {
                                                                   .method = "HEAD",
@@ -1698,7 +1745,7 @@ bool runtime_misc_internal_coverage_for_test() {
         std::error_code ignored;
         std::filesystem::create_directory(document_root.path() / "assets", ignored);
         const auto directory_request =
-            runtime_server_response(document_root.path(), Http3Request{
+            runtime_server_response(document_root_config, Http3Request{
                                                               .head =
                                                                   {
                                                                       .method = "GET",
@@ -3304,6 +3351,23 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
                 return std::nullopt;
             }
             config.document_root = std::filesystem::path(*value);
+            continue;
+        }
+        if (arg == "--reverse-proxy") {
+            if (!is_server_mode) {
+                print_usage(mode);
+                return std::nullopt;
+            }
+            const auto value = require_value(arg);
+            if (!value.has_value()) {
+                return std::nullopt;
+            }
+            const auto parsed = parse_http_reverse_proxy_target(*value);
+            if (!parsed.has_value()) {
+                print_usage(mode);
+                return std::nullopt;
+            }
+            config.reverse_proxy = *parsed;
             continue;
         }
         if (arg == "--certificate-chain") {

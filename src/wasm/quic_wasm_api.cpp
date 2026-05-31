@@ -201,121 +201,122 @@ QuicCoreEndpointConfig endpoint_config(EndpointRole role, std::optional<TlsIdent
     return config;
 }
 
-void append_payload(std::vector<std::byte> &out, std::span<const std::byte> bytes) {
-    out.insert(out.end(), bytes.begin(), bytes.end());
+void append_payload(std::vector<std::byte> &payload, std::span<const std::byte> bytes) {
+    payload.insert(payload.end(), bytes.begin(), bytes.end());
 }
 
-void append_json_string(std::string &out, std::string_view value) {
-    out.push_back('"');
+void append_json_string(std::string &json, std::string_view value) {
+    json.push_back('"');
     for (const char ch : value) {
         switch (ch) {
         case '"':
-            out += "\\\"";
+            json += "\\\"";
             break;
         case '\\':
-            out += "\\\\";
+            json += "\\\\";
             break;
         case '\b':
-            out += "\\b";
+            json += "\\b";
             break;
         case '\f':
-            out += "\\f";
+            json += "\\f";
             break;
         case '\n':
-            out += "\\n";
+            json += "\\n";
             break;
         case '\r':
-            out += "\\r";
+            json += "\\r";
             break;
         case '\t':
-            out += "\\t";
+            json += "\\t";
             break;
         default:
             if (static_cast<unsigned char>(ch) < 0x20) {
-                out += "\\u00";
+                json += "\\u00";
                 constexpr char kHex[] = "0123456789abcdef";
-                out.push_back(kHex[(static_cast<unsigned char>(ch) >> 4) & 0x0f]);
-                out.push_back(kHex[static_cast<unsigned char>(ch) & 0x0f]);
+                json.push_back(kHex[(static_cast<unsigned char>(ch) >> 4) & 0x0f]);
+                json.push_back(kHex[static_cast<unsigned char>(ch) & 0x0f]);
             } else {
-                out.push_back(ch);
+                json.push_back(ch);
             }
             break;
         }
     }
-    out.push_back('"');
+    json.push_back('"');
 }
 
 std::string hex_bytes(std::span<const std::byte> bytes, std::size_t limit = 64) {
     constexpr char kHex[] = "0123456789abcdef";
-    std::string out;
+    std::string hex;
     const auto used = std::min(bytes.size(), limit);
-    out.reserve(used * 2);
+    hex.reserve(used * 2);
     for (std::size_t i = 0; i < used; ++i) {
         const auto byte = static_cast<std::uint8_t>(bytes[i]);
-        out.push_back(kHex[(byte >> 4) & 0x0f]);
-        out.push_back(kHex[byte & 0x0f]);
+        hex.push_back(kHex[(byte >> 4) & 0x0f]);
+        hex.push_back(kHex[byte & 0x0f]);
     }
-    return out;
+    return hex;
 }
 
 template <std::size_t Size> std::string hex_array(const std::array<std::byte, Size> &bytes) {
     return hex_bytes(std::span<const std::byte>(bytes.data(), bytes.size()), bytes.size());
 }
 
-void append_json_u64_field(std::string &out, std::string_view key, std::uint64_t value) {
-    out.push_back(',');
-    append_json_string(out, key);
-    out.push_back(':');
-    out += std::to_string(value);
+void append_json_u64_field(std::string &json, std::string_view key, std::uint64_t value) {
+    json.push_back(',');
+    append_json_string(json, key);
+    json.push_back(':');
+    json += std::to_string(value);
 }
 
-void append_json_first_u64_field(std::string &out, std::string_view key, std::uint64_t value) {
-    append_json_string(out, key);
-    out.push_back(':');
-    out += std::to_string(value);
+void append_json_first_u64_field(std::string &json, std::string_view key, std::uint64_t value) {
+    append_json_string(json, key);
+    json.push_back(':');
+    json += std::to_string(value);
 }
 
-void append_json_bool_field(std::string &out, std::string_view key, bool value) {
-    out.push_back(',');
-    append_json_string(out, key);
-    out.push_back(':');
-    out += value ? "true" : "false";
+void append_json_bool_field(std::string &json, std::string_view key, bool value) {
+    json.push_back(',');
+    append_json_string(json, key);
+    json.push_back(':');
+    json += value ? "true" : "false";
 }
 
-void append_json_first_string_field(std::string &out, std::string_view key,
+void append_json_first_string_field(std::string &json, std::string_view key,
                                     std::string_view value) {
-    append_json_string(out, key);
-    out.push_back(':');
-    append_json_string(out, value);
+    append_json_string(json, key);
+    json.push_back(':');
+    append_json_string(json, value);
 }
 
-void append_json_string_field(std::string &out, std::string_view key, std::string_view value) {
-    out.push_back(',');
-    append_json_string(out, key);
-    out.push_back(':');
-    append_json_string(out, value);
+void append_json_string_field(std::string &json, std::string_view key, std::string_view value) {
+    json.push_back(',');
+    append_json_string(json, key);
+    json.push_back(':');
+    append_json_string(json, value);
 }
 
-void append_json_string_field(std::string &out, std::string_view key, const std::string &value) {
-    append_json_string_field(out, key, std::string_view(value.data(), value.size()));
+void append_json_string_field(std::string &json, std::string_view key, const std::string &value) {
+    append_json_string_field(json, key, std::string_view(value.data(), value.size()));
 }
 
-void append_json_optional_u64_field(std::string &out, std::string_view key,
+void append_json_optional_u64_field(std::string &json, std::string_view key,
                                     std::optional<std::uint64_t> value) {
-    out.push_back(',');
-    append_json_string(out, key);
-    out.push_back(':');
+    json.push_back(',');
+    append_json_string(json, key);
+    json.push_back(':');
     if (value.has_value()) {
-        out += std::to_string(*value);
+        json += std::to_string(*value);
     } else {
-        out += "null";
+        json += "null";
     }
 }
 
-void append_json_hex_field(std::string &out, std::string_view key, std::span<const std::byte> value,
+void append_json_hex_field(std::string &json, std::string_view key,
+                           std::span<const std::byte> value,
                            std::size_t limit = std::numeric_limits<std::size_t>::max()) {
     const auto used = std::min(value.size(), limit);
-    append_json_string_field(out, key, hex_bytes(value, used));
+    append_json_string_field(json, key, hex_bytes(value, used));
 }
 
 std::string_view packet_type_name(QuicCorePacketInspectionPacketType packet_type) {
@@ -455,317 +456,317 @@ std::string_view received_frame_name(const ReceivedFrame &frame) {
     }
 }
 
-void append_packet_space_json(std::string &out, std::string_view name,
+void append_packet_space_json(std::string &json, std::string_view name,
                               const QuicCorePacketSpaceDiagnostics &space) {
-    out.push_back('{');
-    append_json_first_string_field(out, "name", name);
-    append_json_u64_field(out, "next_send_packet_number", space.next_send_packet_number);
-    append_json_optional_u64_field(out, "largest_authenticated_packet_number",
+    json.push_back('{');
+    append_json_first_string_field(json, "name", name);
+    append_json_u64_field(json, "next_send_packet_number", space.next_send_packet_number);
+    append_json_optional_u64_field(json, "largest_authenticated_packet_number",
                                    space.largest_authenticated_packet_number);
-    append_json_bool_field(out, "read_secret_available", space.read_secret_available);
-    append_json_bool_field(out, "write_secret_available", space.write_secret_available);
-    append_json_bool_field(out, "pending_crypto", space.pending_crypto);
-    append_json_u64_field(out, "outstanding_packets", space.outstanding_packets);
-    append_json_u64_field(out, "declared_lost_packets", space.declared_lost_packets);
-    append_json_bool_field(out, "pending_probe", space.pending_probe);
-    append_json_optional_u64_field(out, "pending_ack_deadline_ms",
+    append_json_bool_field(json, "read_secret_available", space.read_secret_available);
+    append_json_bool_field(json, "write_secret_available", space.write_secret_available);
+    append_json_bool_field(json, "pending_crypto", space.pending_crypto);
+    append_json_u64_field(json, "outstanding_packets", space.outstanding_packets);
+    append_json_u64_field(json, "declared_lost_packets", space.declared_lost_packets);
+    append_json_bool_field(json, "pending_probe", space.pending_probe);
+    append_json_optional_u64_field(json, "pending_ack_deadline_ms",
                                    space.pending_ack_deadline.has_value()
                                        ? std::optional<std::uint64_t>(static_cast<std::uint64_t>(
                                              ms_from_time(*space.pending_ack_deadline)))
                                        : std::nullopt);
-    append_json_bool_field(out, "force_ack", space.force_ack);
-    out.push_back('}');
+    append_json_bool_field(json, "force_ack", space.force_ack);
+    json.push_back('}');
 }
 
 std::string diagnostics_json(EndpointRole role,
                              std::span<const QuicCoreConnectionDiagnostics> connections) {
-    std::string out = "{\"ok\":true";
-    append_json_string_field(out, "role",
+    std::string json = "{\"ok\":true";
+    append_json_string_field(json, "role",
                              std::string_view(role == EndpointRole::client ? "client" : "server"));
-    append_json_u64_field(out, "connection_count", connections.size());
-    out += ",\"connections\":[";
+    append_json_u64_field(json, "connection_count", connections.size());
+    json += ",\"connections\":[";
     for (std::size_t index = 0; index < connections.size(); ++index) {
         if (index != 0) {
-            out.push_back(',');
+            json.push_back(',');
         }
         const auto &connection = connections[index];
-        out.push_back('{');
-        append_json_first_u64_field(out, "handle", connection.handle);
-        append_json_string_field(out, "handshake_status",
+        json.push_back('{');
+        append_json_first_u64_field(json, "handle", connection.handle);
+        append_json_string_field(json, "handshake_status",
                                  handshake_status_name(connection.handshake_status));
-        append_json_bool_field(out, "started", connection.started);
-        append_json_bool_field(out, "processed_peer_packet", connection.processed_peer_packet);
-        append_json_bool_field(out, "handshake_ready_emitted", connection.handshake_ready_emitted);
-        append_json_bool_field(out, "handshake_confirmed", connection.handshake_confirmed);
-        append_json_bool_field(out, "handshake_confirmed_emitted",
+        append_json_bool_field(json, "started", connection.started);
+        append_json_bool_field(json, "processed_peer_packet", connection.processed_peer_packet);
+        append_json_bool_field(json, "handshake_ready_emitted", connection.handshake_ready_emitted);
+        append_json_bool_field(json, "handshake_confirmed", connection.handshake_confirmed);
+        append_json_bool_field(json, "handshake_confirmed_emitted",
                                connection.handshake_confirmed_emitted);
-        append_json_bool_field(out, "failed_emitted", connection.failed_emitted);
-        append_json_bool_field(out, "peer_transport_parameters_validated",
+        append_json_bool_field(json, "failed_emitted", connection.failed_emitted);
+        append_json_bool_field(json, "peer_transport_parameters_validated",
                                connection.peer_transport_parameters_validated);
-        append_json_bool_field(out, "peer_address_validated", connection.peer_address_validated);
-        append_json_u64_field(out, "current_version", connection.current_version);
-        append_json_u64_field(out, "anti_amplification_received_bytes",
+        append_json_bool_field(json, "peer_address_validated", connection.peer_address_validated);
+        append_json_u64_field(json, "current_version", connection.current_version);
+        append_json_u64_field(json, "anti_amplification_received_bytes",
                               connection.anti_amplification_received_bytes);
-        append_json_u64_field(out, "anti_amplification_sent_bytes",
+        append_json_u64_field(json, "anti_amplification_sent_bytes",
                               connection.anti_amplification_sent_bytes);
-        append_json_u64_field(out, "active_paths", connection.active_paths);
-        append_json_optional_u64_field(out, "current_send_path_id",
+        append_json_u64_field(json, "active_paths", connection.active_paths);
+        append_json_optional_u64_field(json, "current_send_path_id",
                                        connection.current_send_path_id);
-        append_json_u64_field(out, "active_streams", connection.active_streams);
-        append_json_u64_field(out, "retired_streams", connection.retired_streams);
+        append_json_u64_field(json, "active_streams", connection.active_streams);
+        append_json_u64_field(json, "retired_streams", connection.retired_streams);
 
-        out += ",\"packet_spaces\":[";
-        append_packet_space_json(out, "Initial", connection.initial_space);
-        out.push_back(',');
-        append_packet_space_json(out, "Handshake", connection.handshake_space);
-        out.push_back(',');
-        append_packet_space_json(out, "0-RTT", connection.zero_rtt_space);
-        out.push_back(',');
-        append_packet_space_json(out, "1-RTT", connection.application_space);
-        out.push_back(']');
+        json += ",\"packet_spaces\":[";
+        append_packet_space_json(json, "Initial", connection.initial_space);
+        json.push_back(',');
+        append_packet_space_json(json, "Handshake", connection.handshake_space);
+        json.push_back(',');
+        append_packet_space_json(json, "0-RTT", connection.zero_rtt_space);
+        json.push_back(',');
+        append_packet_space_json(json, "1-RTT", connection.application_space);
+        json.push_back(']');
 
-        out += ",\"recovery\":{";
+        json += ",\"recovery\":{";
         append_json_first_string_field(
-            out, "algorithm", congestion_control_algorithm_name(connection.recovery.algorithm));
-        append_json_u64_field(out, "congestion_window", connection.recovery.congestion_window);
-        append_json_u64_field(out, "bytes_in_flight", connection.recovery.bytes_in_flight);
-        append_json_u64_field(out, "pto_count", connection.recovery.pto_count);
-        append_json_optional_u64_field(out, "latest_rtt_ms", connection.recovery.latest_rtt_ms);
-        append_json_optional_u64_field(out, "min_rtt_ms", connection.recovery.min_rtt_ms);
-        append_json_u64_field(out, "smoothed_rtt_ms", connection.recovery.smoothed_rtt_ms);
-        append_json_u64_field(out, "rttvar_ms", connection.recovery.rttvar_ms);
-        out.push_back('}');
+            json, "algorithm", congestion_control_algorithm_name(connection.recovery.algorithm));
+        append_json_u64_field(json, "congestion_window", connection.recovery.congestion_window);
+        append_json_u64_field(json, "bytes_in_flight", connection.recovery.bytes_in_flight);
+        append_json_u64_field(json, "pto_count", connection.recovery.pto_count);
+        append_json_optional_u64_field(json, "latest_rtt_ms", connection.recovery.latest_rtt_ms);
+        append_json_optional_u64_field(json, "min_rtt_ms", connection.recovery.min_rtt_ms);
+        append_json_u64_field(json, "smoothed_rtt_ms", connection.recovery.smoothed_rtt_ms);
+        append_json_u64_field(json, "rttvar_ms", connection.recovery.rttvar_ms);
+        json.push_back('}');
 
-        out += ",\"flow_control\":{";
-        append_json_first_u64_field(out, "peer_max_data", connection.flow_control.peer_max_data);
-        append_json_u64_field(out, "highest_sent", connection.flow_control.highest_sent);
-        append_json_u64_field(out, "advertised_max_data",
+        json += ",\"flow_control\":{";
+        append_json_first_u64_field(json, "peer_max_data", connection.flow_control.peer_max_data);
+        append_json_u64_field(json, "highest_sent", connection.flow_control.highest_sent);
+        append_json_u64_field(json, "advertised_max_data",
                               connection.flow_control.advertised_max_data);
-        append_json_u64_field(out, "delivered_bytes", connection.flow_control.delivered_bytes);
-        append_json_u64_field(out, "received_committed",
+        append_json_u64_field(json, "delivered_bytes", connection.flow_control.delivered_bytes);
+        append_json_u64_field(json, "received_committed",
                               connection.flow_control.received_committed);
-        out.push_back('}');
+        json.push_back('}');
 
-        out += ",\"stream_limits\":{";
-        append_json_first_u64_field(out, "peer_max_bidirectional",
+        json += ",\"stream_limits\":{";
+        append_json_first_u64_field(json, "peer_max_bidirectional",
                                     connection.stream_limits.peer_max_bidirectional);
-        append_json_u64_field(out, "peer_max_unidirectional",
+        append_json_u64_field(json, "peer_max_unidirectional",
                               connection.stream_limits.peer_max_unidirectional);
-        append_json_u64_field(out, "advertised_max_bidirectional",
+        append_json_u64_field(json, "advertised_max_bidirectional",
                               connection.stream_limits.advertised_max_bidirectional);
-        append_json_u64_field(out, "advertised_max_unidirectional",
+        append_json_u64_field(json, "advertised_max_unidirectional",
                               connection.stream_limits.advertised_max_unidirectional);
-        out.push_back('}');
+        json.push_back('}');
 
-        out += ",\"streams\":[";
+        json += ",\"streams\":[";
         for (std::size_t stream_index = 0; stream_index < connection.streams.size();
              ++stream_index) {
             if (stream_index != 0) {
-                out.push_back(',');
+                json.push_back(',');
             }
             const auto &stream = connection.streams[stream_index];
-            out.push_back('{');
-            append_json_first_u64_field(out, "stream_id", stream.stream_id);
-            append_json_string_field(out, "initiator", stream_initiator_name(stream.initiator));
-            append_json_string_field(out, "direction", stream_direction_name(stream.direction));
-            append_json_bool_field(out, "local_can_send", stream.local_can_send);
-            append_json_bool_field(out, "local_can_receive", stream.local_can_receive);
-            append_json_bool_field(out, "send_closed", stream.send_closed);
-            append_json_bool_field(out, "receive_closed", stream.receive_closed);
-            append_json_bool_field(out, "peer_send_closed", stream.peer_send_closed);
-            append_json_bool_field(out, "peer_fin_delivered", stream.peer_fin_delivered);
-            append_json_bool_field(out, "peer_reset_received", stream.peer_reset_received);
-            append_json_string_field(out, "send_fin_state",
+            json.push_back('{');
+            append_json_first_u64_field(json, "stream_id", stream.stream_id);
+            append_json_string_field(json, "initiator", stream_initiator_name(stream.initiator));
+            append_json_string_field(json, "direction", stream_direction_name(stream.direction));
+            append_json_bool_field(json, "local_can_send", stream.local_can_send);
+            append_json_bool_field(json, "local_can_receive", stream.local_can_receive);
+            append_json_bool_field(json, "send_closed", stream.send_closed);
+            append_json_bool_field(json, "receive_closed", stream.receive_closed);
+            append_json_bool_field(json, "peer_send_closed", stream.peer_send_closed);
+            append_json_bool_field(json, "peer_fin_delivered", stream.peer_fin_delivered);
+            append_json_bool_field(json, "peer_reset_received", stream.peer_reset_received);
+            append_json_string_field(json, "send_fin_state",
                                      stream_fin_state_name(stream.send_fin_state));
-            append_json_string_field(out, "reset_state",
+            append_json_string_field(json, "reset_state",
                                      control_frame_state_name(stream.reset_state));
-            append_json_string_field(out, "stop_sending_state",
+            append_json_string_field(json, "stop_sending_state",
                                      control_frame_state_name(stream.stop_sending_state));
-            append_json_bool_field(out, "pending_send", stream.pending_send);
-            append_json_bool_field(out, "outstanding_send", stream.outstanding_send);
-            append_json_u64_field(out, "sendable_bytes", stream.sendable_bytes);
-            append_json_u64_field(out, "send_flow_control_limit", stream.send_flow_control_limit);
-            append_json_u64_field(out, "receive_flow_control_limit",
+            append_json_bool_field(json, "pending_send", stream.pending_send);
+            append_json_bool_field(json, "outstanding_send", stream.outstanding_send);
+            append_json_u64_field(json, "sendable_bytes", stream.sendable_bytes);
+            append_json_u64_field(json, "send_flow_control_limit", stream.send_flow_control_limit);
+            append_json_u64_field(json, "receive_flow_control_limit",
                                   stream.receive_flow_control_limit);
-            append_json_u64_field(out, "highest_received_offset", stream.highest_received_offset);
-            append_json_u64_field(out, "receive_flow_control_consumed",
+            append_json_u64_field(json, "highest_received_offset", stream.highest_received_offset);
+            append_json_u64_field(json, "receive_flow_control_consumed",
                                   stream.receive_flow_control_consumed);
-            out.push_back('}');
+            json.push_back('}');
         }
-        out.push_back(']');
-        out.push_back('}');
+        json.push_back(']');
+        json.push_back('}');
     }
-    out += "]}";
-    return out;
+    json += "]}";
+    return json;
 }
 
-void append_received_frame_json(std::string &out, const ReceivedFrame &frame) {
-    out += "{\"type\":";
-    append_json_string(out, received_frame_name(frame));
+void append_received_frame_json(std::string &json, const ReceivedFrame &frame) {
+    json += "{\"type\":";
+    append_json_string(json, received_frame_name(frame));
     std::visit(
         [&](const auto &typed) {
             using T = std::decay_t<decltype(typed)>;
             if constexpr (std::is_same_v<T, PaddingFrame>) {
-                append_json_u64_field(out, "length", typed.length);
+                append_json_u64_field(json, "length", typed.length);
             } else if constexpr (std::is_same_v<T, ReceivedAckFrame>) {
-                append_json_u64_field(out, "largest_acknowledged", typed.largest_acknowledged);
-                append_json_u64_field(out, "ack_delay", typed.ack_delay);
-                append_json_u64_field(out, "first_ack_range", typed.first_ack_range);
-                append_json_u64_field(out, "additional_range_count", typed.additional_range_count);
+                append_json_u64_field(json, "largest_acknowledged", typed.largest_acknowledged);
+                append_json_u64_field(json, "ack_delay", typed.ack_delay);
+                append_json_u64_field(json, "first_ack_range", typed.first_ack_range);
+                append_json_u64_field(json, "additional_range_count", typed.additional_range_count);
                 if (typed.ecn_counts.has_value()) {
-                    append_json_u64_field(out, "ect0", typed.ecn_counts->ect0);
-                    append_json_u64_field(out, "ect1", typed.ecn_counts->ect1);
-                    append_json_u64_field(out, "ecn_ce", typed.ecn_counts->ecn_ce);
+                    append_json_u64_field(json, "ect0", typed.ecn_counts->ect0);
+                    append_json_u64_field(json, "ect1", typed.ecn_counts->ect1);
+                    append_json_u64_field(json, "ecn_ce", typed.ecn_counts->ecn_ce);
                 }
             } else if constexpr (std::is_same_v<T, ResetStreamFrame>) {
-                append_json_u64_field(out, "stream_id", typed.stream_id);
-                append_json_u64_field(out, "application_error",
+                append_json_u64_field(json, "stream_id", typed.stream_id);
+                append_json_u64_field(json, "application_error",
                                       typed.application_protocol_error_code);
-                append_json_u64_field(out, "final_size", typed.final_size);
+                append_json_u64_field(json, "final_size", typed.final_size);
             } else if constexpr (std::is_same_v<T, StopSendingFrame>) {
-                append_json_u64_field(out, "stream_id", typed.stream_id);
-                append_json_u64_field(out, "application_error",
+                append_json_u64_field(json, "stream_id", typed.stream_id);
+                append_json_u64_field(json, "application_error",
                                       typed.application_protocol_error_code);
             } else if constexpr (std::is_same_v<T, ReceivedCryptoFrame>) {
-                append_json_u64_field(out, "offset", typed.offset);
-                append_json_u64_field(out, "length", typed.crypto_data.size());
-                append_json_string_field(out, "preview", hex_bytes(typed.crypto_data.span(), 32));
+                append_json_u64_field(json, "offset", typed.offset);
+                append_json_u64_field(json, "length", typed.crypto_data.size());
+                append_json_string_field(json, "preview", hex_bytes(typed.crypto_data.span(), 32));
             } else if constexpr (std::is_same_v<T, NewTokenFrame>) {
-                append_json_u64_field(out, "length", typed.token.size());
-                append_json_string_field(out, "preview",
+                append_json_u64_field(json, "length", typed.token.size());
+                append_json_string_field(json, "preview",
                                          hex_bytes(std::span<const std::byte>(typed.token), 32));
             } else if constexpr (std::is_same_v<T, ReceivedStreamFrame>) {
-                append_json_u64_field(out, "stream_id", typed.stream_id);
-                append_json_bool_field(out, "fin", typed.fin);
-                append_json_bool_field(out, "has_offset", typed.has_offset);
-                append_json_bool_field(out, "has_length", typed.has_length);
-                append_json_u64_field(out, "offset", typed.offset.value_or(0));
-                append_json_u64_field(out, "length", typed.stream_data.size());
+                append_json_u64_field(json, "stream_id", typed.stream_id);
+                append_json_bool_field(json, "fin", typed.fin);
+                append_json_bool_field(json, "has_offset", typed.has_offset);
+                append_json_bool_field(json, "has_length", typed.has_length);
+                append_json_u64_field(json, "offset", typed.offset.value_or(0));
+                append_json_u64_field(json, "length", typed.stream_data.size());
             } else if constexpr (std::is_same_v<T, MaxDataFrame>) {
-                append_json_u64_field(out, "maximum_data", typed.maximum_data);
+                append_json_u64_field(json, "maximum_data", typed.maximum_data);
             } else if constexpr (std::is_same_v<T, MaxStreamDataFrame>) {
-                append_json_u64_field(out, "stream_id", typed.stream_id);
-                append_json_u64_field(out, "maximum_stream_data", typed.maximum_stream_data);
+                append_json_u64_field(json, "stream_id", typed.stream_id);
+                append_json_u64_field(json, "maximum_stream_data", typed.maximum_stream_data);
             } else if constexpr (std::is_same_v<T, MaxStreamsFrame>) {
                 append_json_string_field(
-                    out, "stream_type",
+                    json, "stream_type",
                     std::string_view(typed.stream_type == StreamLimitType::bidirectional
                                          ? "bidirectional"
                                          : "unidirectional"));
-                append_json_u64_field(out, "maximum_streams", typed.maximum_streams);
+                append_json_u64_field(json, "maximum_streams", typed.maximum_streams);
             } else if constexpr (std::is_same_v<T, DataBlockedFrame>) {
-                append_json_u64_field(out, "maximum_data", typed.maximum_data);
+                append_json_u64_field(json, "maximum_data", typed.maximum_data);
             } else if constexpr (std::is_same_v<T, StreamDataBlockedFrame>) {
-                append_json_u64_field(out, "stream_id", typed.stream_id);
-                append_json_u64_field(out, "maximum_stream_data", typed.maximum_stream_data);
+                append_json_u64_field(json, "stream_id", typed.stream_id);
+                append_json_u64_field(json, "maximum_stream_data", typed.maximum_stream_data);
             } else if constexpr (std::is_same_v<T, StreamsBlockedFrame>) {
                 append_json_string_field(
-                    out, "stream_type",
+                    json, "stream_type",
                     std::string_view(typed.stream_type == StreamLimitType::bidirectional
                                          ? "bidirectional"
                                          : "unidirectional"));
-                append_json_u64_field(out, "maximum_streams", typed.maximum_streams);
+                append_json_u64_field(json, "maximum_streams", typed.maximum_streams);
             } else if constexpr (std::is_same_v<T, NewConnectionIdFrame>) {
-                append_json_u64_field(out, "sequence_number", typed.sequence_number);
-                append_json_u64_field(out, "retire_prior_to", typed.retire_prior_to);
-                append_json_u64_field(out, "connection_id_length", typed.connection_id.size());
+                append_json_u64_field(json, "sequence_number", typed.sequence_number);
+                append_json_u64_field(json, "retire_prior_to", typed.retire_prior_to);
+                append_json_u64_field(json, "connection_id_length", typed.connection_id.size());
                 append_json_string_field(
-                    out, "connection_id",
+                    json, "connection_id",
                     hex_bytes(std::span<const std::byte>(typed.connection_id.data(),
                                                          typed.connection_id.size()),
                               typed.connection_id.size()));
             } else if constexpr (std::is_same_v<T, RetireConnectionIdFrame>) {
-                append_json_u64_field(out, "sequence_number", typed.sequence_number);
+                append_json_u64_field(json, "sequence_number", typed.sequence_number);
             } else if constexpr (std::is_same_v<T, PathChallengeFrame>) {
-                append_json_string_field(out, "data", hex_array(typed.data));
+                append_json_string_field(json, "data", hex_array(typed.data));
             } else if constexpr (std::is_same_v<T, PathResponseFrame>) {
-                append_json_string_field(out, "data", hex_array(typed.data));
+                append_json_string_field(json, "data", hex_array(typed.data));
             } else if constexpr (std::is_same_v<T, TransportConnectionCloseFrame>) {
-                append_json_u64_field(out, "error_code", typed.error_code);
-                append_json_u64_field(out, "frame_type", typed.frame_type);
-                append_json_u64_field(out, "reason_length", typed.reason.bytes.size());
+                append_json_u64_field(json, "error_code", typed.error_code);
+                append_json_u64_field(json, "frame_type", typed.frame_type);
+                append_json_u64_field(json, "reason_length", typed.reason.bytes.size());
             } else if constexpr (std::is_same_v<T, ApplicationConnectionCloseFrame>) {
-                append_json_u64_field(out, "error_code", typed.error_code);
-                append_json_u64_field(out, "reason_length", typed.reason.bytes.size());
+                append_json_u64_field(json, "error_code", typed.error_code);
+                append_json_u64_field(json, "reason_length", typed.reason.bytes.size());
             }
         },
         frame);
-    out.push_back('}');
+    json.push_back('}');
 }
 
 std::string initial_packet_json(const ReceivedProtectedInitialPacket &packet) {
-    std::string out;
-    out += "{\"ok\":true,\"kind\":\"Initial\"";
-    append_json_u64_field(out, "version", packet.version);
+    std::string json;
+    json += "{\"ok\":true,\"kind\":\"Initial\"";
+    append_json_u64_field(json, "version", packet.version);
     append_json_string_field(
-        out, "destination_connection_id",
+        json, "destination_connection_id",
         hex_bytes(std::span<const std::byte>(packet.destination_connection_id.data(),
                                              packet.destination_connection_id.size()),
                   packet.destination_connection_id.size()));
     append_json_string_field(
-        out, "source_connection_id",
+        json, "source_connection_id",
         hex_bytes(std::span<const std::byte>(packet.source_connection_id.data(),
                                              packet.source_connection_id.size()),
                   packet.source_connection_id.size()));
-    append_json_u64_field(out, "token_length", packet.token.size());
-    append_json_u64_field(out, "packet_number", packet.packet_number);
-    append_json_u64_field(out, "packet_number_length", packet.packet_number_length);
-    append_json_u64_field(out, "plaintext_payload_length",
+    append_json_u64_field(json, "token_length", packet.token.size());
+    append_json_u64_field(json, "packet_number", packet.packet_number);
+    append_json_u64_field(json, "packet_number_length", packet.packet_number_length);
+    append_json_u64_field(json, "plaintext_payload_length",
                           packet.plaintext_storage ? packet.plaintext_storage->size() : 0);
-    out += ",\"frames\":[";
+    json += ",\"frames\":[";
     for (std::size_t i = 0; i < packet.frames.size(); ++i) {
         if (i != 0) {
-            out.push_back(',');
+            json.push_back(',');
         }
-        append_received_frame_json(out, packet.frames[i]);
+        append_received_frame_json(json, packet.frames[i]);
     }
-    out += "]}";
-    return out;
+    json += "]}";
+    return json;
 }
 
 std::string packet_inspection_json(const QuicCorePacketInspection &inspection) {
-    std::string out;
-    out += "{\"ok\":true";
-    append_json_u64_field(out, "connection", inspection.connection);
-    append_json_string_field(out, "direction", inspection_direction_name(inspection.direction));
-    append_json_string_field(out, "kind", packet_type_name(inspection.packet_type));
-    append_json_u64_field(out, "datagram_id", inspection.datagram_id);
-    append_json_u64_field(out, "datagram_length", inspection.datagram_length);
-    append_json_u64_field(out, "datagram_offset", inspection.datagram_offset);
-    append_json_u64_field(out, "packet_length", inspection.packet_length);
-    append_json_u64_field(out, "version", inspection.version);
-    append_json_hex_field(out, "destination_connection_id",
+    std::string json;
+    json += "{\"ok\":true";
+    append_json_u64_field(json, "connection", inspection.connection);
+    append_json_string_field(json, "direction", inspection_direction_name(inspection.direction));
+    append_json_string_field(json, "kind", packet_type_name(inspection.packet_type));
+    append_json_u64_field(json, "datagram_id", inspection.datagram_id);
+    append_json_u64_field(json, "datagram_length", inspection.datagram_length);
+    append_json_u64_field(json, "datagram_offset", inspection.datagram_offset);
+    append_json_u64_field(json, "packet_length", inspection.packet_length);
+    append_json_u64_field(json, "version", inspection.version);
+    append_json_hex_field(json, "destination_connection_id",
                           std::span<const std::byte>(inspection.destination_connection_id.data(),
                                                      inspection.destination_connection_id.size()),
                           inspection.destination_connection_id.size());
-    append_json_hex_field(out, "source_connection_id",
+    append_json_hex_field(json, "source_connection_id",
                           std::span<const std::byte>(inspection.source_connection_id.data(),
                                                      inspection.source_connection_id.size()),
                           inspection.source_connection_id.size());
-    append_json_u64_field(out, "token_length", inspection.token.size());
-    append_json_bool_field(out, "spin_bit", inspection.spin_bit);
-    append_json_bool_field(out, "key_phase", inspection.key_phase);
-    append_json_u64_field(out, "packet_number", inspection.packet_number);
-    append_json_u64_field(out, "packet_number_length", inspection.packet_number_length);
-    append_json_u64_field(out, "plaintext_payload_length", inspection.plaintext_payload.size());
-    append_json_hex_field(out, "plaintext_payload",
+    append_json_u64_field(json, "token_length", inspection.token.size());
+    append_json_bool_field(json, "spin_bit", inspection.spin_bit);
+    append_json_bool_field(json, "key_phase", inspection.key_phase);
+    append_json_u64_field(json, "packet_number", inspection.packet_number);
+    append_json_u64_field(json, "packet_number_length", inspection.packet_number_length);
+    append_json_u64_field(json, "plaintext_payload_length", inspection.plaintext_payload.size());
+    append_json_hex_field(json, "plaintext_payload",
                           std::span<const std::byte>(inspection.plaintext_payload.data(),
                                                      inspection.plaintext_payload.size()),
                           256);
-    append_json_u64_field(out, "encrypted_packet_length", inspection.encrypted_packet.size());
-    append_json_hex_field(out, "encrypted_packet",
+    append_json_u64_field(json, "encrypted_packet_length", inspection.encrypted_packet.size());
+    append_json_hex_field(json, "encrypted_packet",
                           std::span<const std::byte>(inspection.encrypted_packet.data(),
                                                      inspection.encrypted_packet.size()),
                           256);
-    out += ",\"frames\":[";
+    json += ",\"frames\":[";
     for (std::size_t i = 0; i < inspection.frames.size(); ++i) {
         if (i != 0) {
-            out.push_back(',');
+            json.push_back(',');
         }
-        append_received_frame_json(out, inspection.frames[i]);
+        append_received_frame_json(json, inspection.frames[i]);
     }
-    out += "]}";
-    return out;
+    json += "]}";
+    return json;
 }
 
 void queue_result(WasmEndpoint &endpoint, QuicCoreResult result) {
@@ -914,16 +915,16 @@ std::int32_t copy_bytes(std::span<const std::byte> input, std::uint8_t *output,
     return static_cast<std::int32_t>(input.size());
 }
 
-void write_u32(std::uint8_t *out, std::size_t offset, std::uint32_t value) {
-    out[offset + 0] = static_cast<std::uint8_t>(value & 0xffu);
-    out[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xffu);
-    out[offset + 2] = static_cast<std::uint8_t>((value >> 16) & 0xffu);
-    out[offset + 3] = static_cast<std::uint8_t>((value >> 24) & 0xffu);
+void write_u32(std::uint8_t *output, std::size_t offset, std::uint32_t value) {
+    output[offset + 0] = static_cast<std::uint8_t>(value & 0xffu);
+    output[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xffu);
+    output[offset + 2] = static_cast<std::uint8_t>((value >> 16) & 0xffu);
+    output[offset + 3] = static_cast<std::uint8_t>((value >> 24) & 0xffu);
 }
 
-void write_u64(std::uint8_t *out, std::size_t offset, std::uint64_t value) {
+void write_u64(std::uint8_t *output, std::size_t offset, std::uint64_t value) {
     for (std::size_t i = 0; i < 8; ++i) {
-        out[offset + i] = static_cast<std::uint8_t>((value >> (i * 8)) & 0xffu);
+        output[offset + i] = static_cast<std::uint8_t>((value >> (i * 8)) & 0xffu);
     }
 }
 

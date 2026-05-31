@@ -368,11 +368,11 @@ ConnectClient(const Config &cfg, quic::QuicEventLoop *event_loop,
         throw std::runtime_error("failed to initialize Google QUICHE client");
     }
     if (!client->Connect()) {
-        std::ostringstream out;
-        out << "failed to connect Google QUICHE client: "
-            << quic::QuicErrorCodeToString(client->session()->error()) << " "
-            << client->session()->error_details();
-        throw std::runtime_error(out.str());
+        std::ostringstream error_message;
+        error_message << "failed to connect Google QUICHE client: "
+                      << quic::QuicErrorCodeToString(client->session()->error()) << " "
+                      << client->session()->error_details();
+        throw std::runtime_error(error_message.str());
     }
     return client;
 }
@@ -434,11 +434,11 @@ void RunRequests(const Config &cfg, uint64_t count, uint64_t response_bytes, uin
                     throw std::runtime_error("failed to reinitialize Google QUICHE client");
                 }
                 if (!client->Connect()) {
-                    std::ostringstream out;
-                    out << "failed to reconnect Google QUICHE client: "
-                        << quic::QuicErrorCodeToString(client->session()->error()) << " "
-                        << client->session()->error_details();
-                    throw std::runtime_error(out.str());
+                    std::ostringstream error_message;
+                    error_message << "failed to reconnect Google QUICHE client: "
+                                  << quic::QuicErrorCodeToString(client->session()->error()) << " "
+                                  << client->session()->error_details();
+                    throw std::runtime_error(error_message.str());
                 }
             } else if (completed >= cfg.requests_in_flight) {
                 // QUICHE's HTTP client waits synchronously, so requests-in-flight is a
@@ -577,84 +577,85 @@ int RunServer(const Config &cfg) {
 }
 
 std::string JsonString(std::string_view value) {
-    std::string out = "\"";
+    std::string json_string = "\"";
     for (char ch : value) {
         switch (ch) {
         case '"':
-            out += "\\\"";
+            json_string += "\\\"";
             break;
         case '\\':
-            out += "\\\\";
+            json_string += "\\\\";
             break;
         case '\n':
-            out += "\\n";
+            json_string += "\\n";
             break;
         case '\r':
-            out += "\\r";
+            json_string += "\\r";
             break;
         case '\t':
-            out += "\\t";
+            json_string += "\\t";
             break;
         default:
             if (static_cast<unsigned char>(ch) < 0x20) {
                 char buf[8];
                 snprintf(buf, sizeof(buf), "\\u%04x", ch);
-                out += buf;
+                json_string += buf;
             } else {
-                out += ch;
+                json_string += ch;
             }
             break;
         }
     }
-    out += "\"";
-    return out;
+    json_string += "\"";
+    return json_string;
 }
 
-void WriteSummaryJson(std::ostream &out, const RunSummary &summary) {
+void WriteSummaryJson(std::ostream &summary_stream, const RunSummary &summary) {
     const Config &cfg = *summary.cfg;
-    out << "{\n";
-    out << "  \"schema_version\": 1,\n";
-    out << "  \"status\": " << JsonString(summary.status) << ",\n";
+    summary_stream << "{\n";
+    summary_stream << "  \"schema_version\": 1,\n";
+    summary_stream << "  \"status\": " << JsonString(summary.status) << ",\n";
     if (!summary.failure_reason.empty()) {
-        out << "  \"failure_reason\": " << JsonString(summary.failure_reason) << ",\n";
+        summary_stream << "  \"failure_reason\": " << JsonString(summary.failure_reason) << ",\n";
     }
-    out << "  \"mode\": " << JsonString(cfg.mode) << ",\n";
-    out << "  \"direction\": " << JsonString(cfg.direction) << ",\n";
-    out << "  \"backend\": " << JsonString(cfg.io_backend) << ",\n";
-    out << "  \"congestion_control\": " << JsonString(cfg.congestion_control) << ",\n";
-    out << "  \"remote_host\": " << JsonString(cfg.host) << ",\n";
-    out << "  \"remote_port\": " << cfg.port << ",\n";
-    out << "  \"alpn\": " << JsonString(kApplicationProtocol) << ",\n";
-    out << "  \"elapsed_ms\": " << summary.elapsed_ms << ",\n";
-    out << "  \"warmup_ms\": " << DurationMillis(cfg.warmup) << ",\n";
-    out << "  \"bytes_sent\": " << summary.counters.bytes_sent << ",\n";
-    out << "  \"bytes_received\": " << summary.counters.bytes_received << ",\n";
-    out << "  \"server_counters\": {\n";
-    out << "    \"bytes_sent\": " << summary.counters.bytes_received << ",\n";
-    out << "    \"bytes_received\": " << summary.counters.bytes_sent << ",\n";
-    out << "    \"requests_completed\": " << summary.counters.requests_completed << "\n";
-    out << "  },\n";
-    out << "  \"requests_completed\": " << summary.counters.requests_completed << ",\n";
+    summary_stream << "  \"mode\": " << JsonString(cfg.mode) << ",\n";
+    summary_stream << "  \"direction\": " << JsonString(cfg.direction) << ",\n";
+    summary_stream << "  \"backend\": " << JsonString(cfg.io_backend) << ",\n";
+    summary_stream << "  \"congestion_control\": " << JsonString(cfg.congestion_control) << ",\n";
+    summary_stream << "  \"remote_host\": " << JsonString(cfg.host) << ",\n";
+    summary_stream << "  \"remote_port\": " << cfg.port << ",\n";
+    summary_stream << "  \"alpn\": " << JsonString(kApplicationProtocol) << ",\n";
+    summary_stream << "  \"elapsed_ms\": " << summary.elapsed_ms << ",\n";
+    summary_stream << "  \"warmup_ms\": " << DurationMillis(cfg.warmup) << ",\n";
+    summary_stream << "  \"bytes_sent\": " << summary.counters.bytes_sent << ",\n";
+    summary_stream << "  \"bytes_received\": " << summary.counters.bytes_received << ",\n";
+    summary_stream << "  \"server_counters\": {\n";
+    summary_stream << "    \"bytes_sent\": " << summary.counters.bytes_received << ",\n";
+    summary_stream << "    \"bytes_received\": " << summary.counters.bytes_sent << ",\n";
+    summary_stream << "    \"requests_completed\": " << summary.counters.requests_completed << "\n";
+    summary_stream << "  },\n";
+    summary_stream << "  \"requests_completed\": " << summary.counters.requests_completed << ",\n";
     if (summary.counters.skipped_setup_errors != 0) {
-        out << "  \"skipped_setup_errors\": " << summary.counters.skipped_setup_errors << ",\n";
+        summary_stream << "  \"skipped_setup_errors\": " << summary.counters.skipped_setup_errors
+                       << ",\n";
     }
-    out << "  \"streams\": " << cfg.streams << ",\n";
-    out << "  \"connections\": " << cfg.connections << ",\n";
-    out << "  \"requests_in_flight\": " << cfg.requests_in_flight << ",\n";
-    out << "  \"request_bytes\": " << cfg.request_bytes << ",\n";
-    out << "  \"response_bytes\": " << cfg.response_bytes << ",\n";
-    out << "  \"throughput_mib_per_s\": " << summary.throughput_mib_per_s << ",\n";
-    out << "  \"throughput_gbit_per_s\": " << summary.throughput_gbit_per_s << ",\n";
-    out << "  \"requests_per_s\": " << summary.requests_per_s << ",\n";
-    out << "  \"latency\": {\n";
-    out << "    \"min_us\": " << summary.latency.min_us << ",\n";
-    out << "    \"avg_us\": " << summary.latency.avg_us << ",\n";
-    out << "    \"p50_us\": " << summary.latency.p50_us << ",\n";
-    out << "    \"p90_us\": " << summary.latency.p90_us << ",\n";
-    out << "    \"p99_us\": " << summary.latency.p99_us << ",\n";
-    out << "    \"max_us\": " << summary.latency.max_us << "\n";
-    out << "  }\n";
-    out << "}\n";
+    summary_stream << "  \"streams\": " << cfg.streams << ",\n";
+    summary_stream << "  \"connections\": " << cfg.connections << ",\n";
+    summary_stream << "  \"requests_in_flight\": " << cfg.requests_in_flight << ",\n";
+    summary_stream << "  \"request_bytes\": " << cfg.request_bytes << ",\n";
+    summary_stream << "  \"response_bytes\": " << cfg.response_bytes << ",\n";
+    summary_stream << "  \"throughput_mib_per_s\": " << summary.throughput_mib_per_s << ",\n";
+    summary_stream << "  \"throughput_gbit_per_s\": " << summary.throughput_gbit_per_s << ",\n";
+    summary_stream << "  \"requests_per_s\": " << summary.requests_per_s << ",\n";
+    summary_stream << "  \"latency\": {\n";
+    summary_stream << "    \"min_us\": " << summary.latency.min_us << ",\n";
+    summary_stream << "    \"avg_us\": " << summary.latency.avg_us << ",\n";
+    summary_stream << "    \"p50_us\": " << summary.latency.p50_us << ",\n";
+    summary_stream << "    \"p90_us\": " << summary.latency.p90_us << ",\n";
+    summary_stream << "    \"p99_us\": " << summary.latency.p99_us << ",\n";
+    summary_stream << "    \"max_us\": " << summary.latency.max_us << "\n";
+    summary_stream << "  }\n";
+    summary_stream << "}\n";
 }
 
 int EmitSummary(const RunSummary &summary) {

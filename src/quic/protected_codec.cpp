@@ -1574,15 +1574,15 @@ try_decode_received_short_header_ack_only_packet_fields(std::span<const std::byt
         reader.read_exact(destination_connection_id_length).value();
     static_cast<void>(reader.read_exact(packet_number_length).value());
 
-    auto ack = deserialize_received_ack_frame(plaintext_payload);
-    if (!ack.has_value()) {
+    auto ack_result = deserialize_received_ack_frame(plaintext_payload);
+    if (!ack_result.has_value()) {
         return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::failure(
-            ack.error().code, plaintext_header.size() + ack.error().offset);
+            ack_result.error().code, plaintext_header.size() + ack_result.error().offset);
     }
-    if (ack.value().bytes_consumed != plaintext_payload.size()) {
+    if (ack_result.value().bytes_consumed != plaintext_payload.size()) {
         return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::failure(
             CodecErrorCode::unknown_frame_type,
-            plaintext_header.size() + ack.value().bytes_consumed);
+            plaintext_header.size() + ack_result.value().bytes_consumed);
     }
 
     return CodecResult<ReceivedShortHeaderAckOnlyPacketFields>::success(
@@ -1595,7 +1595,7 @@ try_decode_received_short_header_ack_only_packet_fields(std::span<const std::byt
                     destination_connection_id.end(),
                 },
             .packet_number_length = packet_number_length,
-            .ack = std::move(ack.value().frame),
+            .ack = std::move(ack_result.value().frame),
         });
 }
 
@@ -1635,15 +1635,15 @@ try_decode_received_short_header_ack_only_fast_packet_fields(
         reader.read_exact(destination_connection_id_length).value();
     static_cast<void>(reader.read_exact(packet_number_length).value());
 
-    auto ack = deserialize_received_ack_frame(plaintext_payload);
-    if (!ack.has_value()) {
+    auto ack_result = deserialize_received_ack_frame(plaintext_payload);
+    if (!ack_result.has_value()) {
         return CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>::failure(
-            ack.error().code, plaintext_header.size() + ack.error().offset);
+            ack_result.error().code, plaintext_header.size() + ack_result.error().offset);
     }
-    if (ack.value().bytes_consumed != plaintext_payload.size()) {
+    if (ack_result.value().bytes_consumed != plaintext_payload.size()) {
         return CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>::failure(
             CodecErrorCode::unknown_frame_type,
-            plaintext_header.size() + ack.value().bytes_consumed);
+            plaintext_header.size() + ack_result.value().bytes_consumed);
     }
 
     return CodecResult<ReceivedShortHeaderAckOnlyFastPacketFields>::success(
@@ -1656,7 +1656,7 @@ try_decode_received_short_header_ack_only_fast_packet_fields(
                     destination_connection_id.end(),
                 },
             .packet_number_length = packet_number_length,
-            .ack = std::move(ack.value().frame),
+            .ack = std::move(ack_result.value().frame),
         });
 }
 

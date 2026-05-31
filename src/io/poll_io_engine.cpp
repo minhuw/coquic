@@ -1060,8 +1060,8 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
                     sizes[datagram_index]);
     }
 
-    std::vector<ReceiveDatagramResult> out;
-    out.reserve(received_datagrams);
+    std::vector<ReceiveDatagramResult> received_results;
+    received_results.reserve(received_datagrams);
     for (int index = 0; index < received_count; ++index) {
         const auto datagram_index = static_cast<std::size_t>(index);
         auto &message = messages[static_cast<std::size_t>(index)].msg_hdr;
@@ -1069,13 +1069,13 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
         const auto ecn = recvmsg_ecn_from_control(message);
         const auto source = sources[static_cast<std::size_t>(index)];
         const auto source_len = static_cast<socklen_t>(message.msg_namelen);
-        append_shared_received_datagram_segments(out, shared, begins[datagram_index],
+        append_shared_received_datagram_segments(received_results, shared, begins[datagram_index],
                                                  sizes[datagram_index], ecn, source, source_len,
                                                  input_time, segment_size);
     }
     return ReceiveDatagramBatchResult{
         .status = ReceiveDatagramStatus::ok,
-        .datagrams = std::move(out),
+        .datagrams = std::move(received_results),
         .may_have_more_datagrams = static_cast<std::size_t>(received_count) == batch_size,
     };
 }
@@ -2337,11 +2337,11 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
            "record_recvmsg rejects missing iov");
 
     std::array<std::byte, 4> payload = {};
-    iovec iov{
+    iovec payload_iov{
         .iov_base = payload.data(),
         .iov_len = payload.size(),
     };
-    invalid_recv_message.msg_iov = &iov;
+    invalid_recv_message.msg_iov = &payload_iov;
     invalid_recv_message.msg_iovlen = 0;
     reset_for_case();
     record(record_recvmsg_for_tests(0, &invalid_recv_message, 0) == -1,
@@ -2364,7 +2364,7 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     ipv6.sin6_addr = in6addr_loopback;
     g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in6);
     msghdr recv_message{};
-    recv_message.msg_iov = &iov;
+    recv_message.msg_iov = &payload_iov;
     recv_message.msg_iovlen = 1;
     recv_message.msg_control = control.data();
     recv_message.msg_controllen = control.size();
@@ -2382,7 +2382,7 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     g_recorded_recvmsg_for_tests.bytes = {std::byte{0x30}};
     sockaddr_storage name_storage{};
     recv_message = {};
-    recv_message.msg_iov = &iov;
+    recv_message.msg_iov = &payload_iov;
     recv_message.msg_iovlen = 1;
     recv_message.msg_name = &name_storage;
     recv_message.msg_namelen = sizeof(sockaddr_storage) - 1;
@@ -2395,7 +2395,7 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     reset_for_case();
     g_recorded_recvmsg_for_tests.bytes = {std::byte{0x40}};
     recv_message = {};
-    recv_message.msg_iov = &iov;
+    recv_message.msg_iov = &payload_iov;
     recv_message.msg_iovlen = 1;
     recv_message.msg_control = nullptr;
     recv_message.msg_controllen = 0;
@@ -3760,15 +3760,15 @@ bool socket_io_backend_poll_engine_primes_descriptor_cache_for_tests() {
     second_registration_ok &= descriptor_cache_matches(2, 2, true);
     second_registration_ok &= engine.descriptor_scratch_.capacity() >= first_capacity;
 
-    bool ok = initial_state_ok;
-    ok &= first_registration_ok;
-    ok &= second_registration_ok;
-    return ok;
+    bool cache_state_ok = initial_state_ok;
+    cache_state_ok &= first_registration_ok;
+    cache_state_ok &= second_registration_ok;
+    return cache_state_ok;
 }
 
 bool poll_io_engine_descriptor_cache_guard_branches_for_tests() {
     PollIoEngine engine;
-    bool ok = true;
+    bool cache_guards_ok = true;
     struct DescriptorCacheExpectation {
         std::size_t expected_count;
         std::size_t minimum_capacity;
@@ -3784,14 +3784,14 @@ bool poll_io_engine_descriptor_cache_guard_branches_for_tests() {
         return engine.descriptor_scratch_.capacity() >= expected.minimum_capacity;
     };
 
-    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
         .expected_count = 1,
         .minimum_capacity = 0,
         .expect_empty = true,
     });
 
     engine.descriptor_scratch_.push_back(pollfd{});
-    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
         .expected_count = 0,
         .minimum_capacity = 0,
         .expect_empty = true,
@@ -3799,10 +3799,10 @@ bool poll_io_engine_descriptor_cache_guard_branches_for_tests() {
 
     engine.descriptor_scratch_.clear();
     engine.descriptor_scratch_.shrink_to_fit();
-    ok &= engine.register_socket(41);
+    cache_guards_ok &= engine.register_socket(41);
 
     engine.registered_socket_count_ = 0;
-    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
         .expected_count = 1,
         .minimum_capacity = 1,
         .expect_empty = true,
@@ -3810,19 +3810,19 @@ bool poll_io_engine_descriptor_cache_guard_branches_for_tests() {
 
     engine.registered_socket_count_ = 1;
     engine.descriptor_scratch_.push_back(pollfd{});
-    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
         .expected_count = 1,
         .minimum_capacity = 1,
         .expect_empty = true,
     });
 
     engine.descriptor_scratch_.clear();
-    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
         .expected_count = 1,
         .minimum_capacity = engine.descriptor_scratch_.capacity() + 1,
         .expect_empty = true,
     });
-    return ok;
+    return cache_guards_ok;
 }
 
 } // namespace test

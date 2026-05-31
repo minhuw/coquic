@@ -105,12 +105,13 @@ CodecResult<bool> QuicConnection::sync_tls_state() {
 
     update_handshake_status();
     maybe_emit_qlog_alpn_information(last_peer_activity_time_.value_or(QuicCoreTimePoint{}));
-    auto *tls = tls_.has_value() ? &*tls_ : nullptr;
-    const bool tls_handshake_complete = tls != nullptr ? tls->handshake_complete() : false;
+    auto *tls_adapter = tls_.has_value() ? &*tls_ : nullptr;
+    const bool tls_handshake_complete =
+        tls_adapter != nullptr ? tls_adapter->handshake_complete() : false;
     if (resumption_state_emitted_) {
         return CodecResult<bool>::success(true);
     }
-    if (tls == nullptr) {
+    if (tls_adapter == nullptr) {
         return CodecResult<bool>::success(true);
     }
     if (!tls_handshake_complete) {
@@ -120,7 +121,7 @@ CodecResult<bool> QuicConnection::sync_tls_state() {
         return CodecResult<bool>::success(true);
     }
 
-    if (const auto ticket = tls->take_resumption_state(); ticket.has_value()) {
+    if (const auto ticket = tls_adapter->take_resumption_state(); ticket.has_value()) {
         auto encoded = encode_resumption_state(
             *ticket, current_version_, config_.application_protocol, *peer_transport_parameters_,
             config_.zero_rtt.application_context);

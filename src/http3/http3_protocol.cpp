@@ -124,10 +124,10 @@ Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
         }
 
         std::uint64_t current = 0;
-        const auto *begin = token.data();
-        const auto *end = begin + token.size();
-        const auto parsed = std::from_chars(begin, end, current);
-        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+        const auto *token_begin = token.data();
+        const auto *token_end = token_begin + token.size();
+        const auto parsed = std::from_chars(token_begin, token_end, current);
+        if (parsed.ec != std::errc{} || parsed.ptr != token_end) {
             return http3_failure<std::uint64_t>(Http3ErrorCode::message_error,
                                                 "invalid content-length header");
         }
@@ -536,10 +536,10 @@ Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const H
         saw_status = true;
 
         unsigned int status = 0;
-        const auto *begin = field.value.data();
-        const auto *end = begin + field.value.size();
-        const auto parsed = std::from_chars(begin, end, status);
-        if (field.value.size() != 3 || parsed.ec != std::errc{} || parsed.ptr != end ||
+        const auto *status_begin = field.value.data();
+        const auto *status_end = status_begin + field.value.size();
+        const auto parsed = std::from_chars(status_begin, status_end, status);
+        if (field.value.size() != 3 || parsed.ec != std::errc{} || parsed.ptr != status_end ||
             status < 100) {
             return http3_failure<Http3ResponseHead>(Http3ErrorCode::message_error,
                                                     "invalid :status");

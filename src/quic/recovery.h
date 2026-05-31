@@ -430,13 +430,14 @@ class PacketSpaceRecovery {
 bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked);
 bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked,
                               std::uint64_t packet_threshold);
-QuicCoreTimePoint compute_time_threshold_deadline(const RecoveryRttState &rtt,
+QuicCoreTimePoint compute_time_threshold_deadline(const RecoveryRttState &rtt_state,
                                                   QuicCoreTimePoint sent_time);
-bool is_time_threshold_lost(const RecoveryRttState &rtt, QuicCoreTimePoint sent_time,
+bool is_time_threshold_lost(const RecoveryRttState &rtt_state, QuicCoreTimePoint sent_time,
                             QuicCoreTimePoint now);
-QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt, QuicCoreDuration max_ack_delay,
-                                       QuicCoreTimePoint now, std::uint32_t pto_count);
-void update_rtt(RecoveryRttState &rtt, QuicCoreTimePoint ack_receive_time,
+QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt_state,
+                                       QuicCoreDuration max_ack_delay, QuicCoreTimePoint now,
+                                       std::uint32_t pto_count);
+void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
                 const SentPacketRecord &largest_newly_acked_packet,
                 std::chrono::microseconds ack_delay, std::chrono::microseconds max_ack_delay);
 

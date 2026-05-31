@@ -25,7 +25,7 @@ bool fits_openssl_int(std::size_t size) {
 struct ReusableCipherContext {
     EVP_CIPHER_CTX *context = nullptr;
     const EVP_CIPHER *cipher = nullptr;
-    std::vector<std::byte> key;
+    std::vector<std::byte> cached_key;
     bool aes_stream_ready = false;
     std::size_t new_calls = 0;
 
@@ -35,7 +35,7 @@ struct ReusableCipherContext {
 
     void clear_cached_configuration() {
         cipher = nullptr;
-        key.clear();
+        cached_key.clear();
         aes_stream_ready = false;
     }
 
@@ -50,7 +50,7 @@ struct ReusableCipherContext {
 struct ReusableAeadCipherContext {
     EVP_CIPHER_CTX *context = nullptr;
     const EVP_CIPHER *cipher = nullptr;
-    std::vector<std::byte> key;
+    std::vector<std::byte> cached_key;
     std::size_t iv_length = 0;
     std::size_t new_calls = 0;
     std::size_t key_setup_calls = 0;
@@ -61,7 +61,7 @@ struct ReusableAeadCipherContext {
 
     void clear_cached_configuration() {
         cipher = nullptr;
-        key.clear();
+        cached_key.clear();
         iv_length = 0;
     }
 
@@ -142,8 +142,8 @@ COQUIC_NO_PROFILE bool reset_header_protection_context(ReusableCipherContext &ca
 
 COQUIC_NO_PROFILE bool cached_header_protection_configuration_matches(
     const ReusableCipherContext &cache, const EVP_CIPHER *cipher, std::span<const std::byte> key) {
-    return cache.cipher == cipher && cache.key.size() == key.size() &&
-           std::equal(cache.key.begin(), cache.key.end(), key.begin(), key.end());
+    return cache.cipher == cipher && cache.cached_key.size() == key.size() &&
+           std::equal(cache.cached_key.begin(), cache.cached_key.end(), key.begin(), key.end());
 }
 
 COQUIC_NO_PROFILE bool cached_aes_header_protection_context_ready(
@@ -192,7 +192,7 @@ EVP_CIPHER_CTX *prepare_header_protection_aes_context(ReusableCipherContext &cac
 
     if (!same_configuration) {
         cache.cipher = cipher;
-        cache.key.assign(key.begin(), key.end());
+        cache.cached_key.assign(key.begin(), key.end());
     }
     cache.aes_stream_ready = true;
     return context;
@@ -203,8 +203,8 @@ COQUIC_NO_PROFILE bool cached_cipher_configuration_matches(const ReusableAeadCip
                                                            std::span<const std::byte> key,
                                                            std::size_t iv_length) {
     return cache.cipher == cipher && cache.iv_length == iv_length &&
-           cache.key.size() == key.size() &&
-           std::equal(cache.key.begin(), cache.key.end(), key.begin(), key.end());
+           cache.cached_key.size() == key.size() &&
+           std::equal(cache.cached_key.begin(), cache.cached_key.end(), key.begin(), key.end());
 }
 
 COQUIC_NO_PROFILE bool reset_cipher_context(ReusableAeadCipherContext &cache,
@@ -225,7 +225,7 @@ COQUIC_NO_PROFILE bool reset_cipher_context(ReusableAeadCipherContext &cache,
 void cache_cipher_configuration(ReusableAeadCipherContext &cache, const EVP_CIPHER *cipher,
                                 std::span<const std::byte> key, std::size_t iv_length) {
     cache.cipher = cipher;
-    cache.key.assign(key.begin(), key.end());
+    cache.cached_key.assign(key.begin(), key.end());
     cache.iv_length = iv_length;
     ++cache.key_setup_calls;
 }

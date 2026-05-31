@@ -202,9 +202,9 @@ ReceiveDatagramResult scripted_client_loop_receive_for_tests(void *context, int,
                                                              std::string_view) {
     auto &script = *static_cast<ScriptedClientLoopIoForTests *>(context);
     if (script.next_receive_index >= script.receive_results.size()) {
-        return ReceiveDatagramResult{
-            .status = ReceiveDatagramStatus::would_block,
-        };
+        ReceiveDatagramResult result{};
+        result.status = ReceiveDatagramStatus::would_block;
+        return result;
     }
     return std::move(script.receive_results[script.next_receive_index++]);
 }

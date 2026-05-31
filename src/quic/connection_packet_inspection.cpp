@@ -72,14 +72,6 @@ void populate_packet_inspection_from_decoded_packet(QuicCorePacketInspection &in
     }
 }
 
-struct PacketInspectionPopulateVisitor {
-    QuicCorePacketInspection &inspection;
-
-    template <typename Packet> void operator()(const Packet &packet) const {
-        populate_packet_inspection_from_decoded_packet(inspection, packet);
-    }
-};
-
 struct PacketInspectionPlaintextStorageResetVisitor {
     template <typename Packet> void operator()(Packet &packet) const {
         if constexpr (requires { packet.plaintext_storage; }) {
@@ -138,7 +130,11 @@ QuicConnection::queue_outbound_packet_inspections(const SerializedProtectedDatag
             .encrypted_packet = std::vector<std::byte>(packet_bytes.begin(), packet_bytes.end()),
         };
 
-        std::visit(PacketInspectionPopulateVisitor{inspection}, decoded.value());
+        std::visit(
+            [&inspection](const auto &packet) {
+                populate_packet_inspection_from_decoded_packet(inspection, packet);
+            },
+            decoded.value());
 
         pending_packet_inspections_.push_back(std::move(inspection));
     }

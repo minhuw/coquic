@@ -75,7 +75,7 @@ std::optional<std::string> getenv_string(const char *name) {
 
 bool env_flag_enabled(const char *name) {
     const std::string value = getenv_string(name).value_or("");
-    return !value.empty() & (value != "0");
+    return !value.empty() && value != "0";
 }
 
 bool runtime_trace_enabled() {

@@ -77,8 +77,8 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
         }
     }
 
-    const bool should_complete = !complete_ & !has_unissued_requests() &
-                                 pending_open_requests_.empty() & all_streams_complete();
+    const bool should_complete = !complete_ && !has_unissued_requests() &&
+                                 pending_open_requests_.empty() && all_streams_complete();
     if (should_complete) {
         complete_ = true;
     }

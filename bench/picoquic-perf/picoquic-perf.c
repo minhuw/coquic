@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <signal.h>
@@ -6,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "picoquic.h"
 #include "picoquic_packet_loop.h"
@@ -26,6 +29,18 @@ typedef struct optional_u64_t {
     uint64_t value;
     int set;
 } optional_u64_t;
+
+static FILE *open_json_output(const char *path) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        return NULL;
+    }
+    FILE *f = fdopen(fd, "w");
+    if (f == NULL) {
+        close(fd);
+    }
+    return f;
+}
 
 typedef struct config_t {
     const char *host;
@@ -1075,7 +1090,7 @@ static int emit_summary(const run_summary_t *summary, const char *json_out) {
     if (json_out == NULL) {
         return 0;
     }
-    FILE *f = fopen(json_out, "w");
+    FILE *f = open_json_output(json_out);
     if (f == NULL) {
         fprintf(stderr, "failed to open JSON output %s\n", json_out);
         return -1;

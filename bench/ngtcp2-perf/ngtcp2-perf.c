@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -41,6 +42,18 @@ typedef struct {
     uint64_t value;
     int set;
 } optional_u64_t;
+
+static FILE *open_json_output(const char *path) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        return NULL;
+    }
+    FILE *out = fdopen(fd, "w");
+    if (out == NULL) {
+        close(fd);
+    }
+    return out;
+}
 
 typedef struct {
     char role[16];
@@ -1657,7 +1670,7 @@ static int emit_summary(const run_summary_t *summary) {
            summary->cfg->direction, summary->throughput_mib_per_s, summary->throughput_gbit_per_s,
            summary->requests_per_s);
     if (summary->cfg->json_out[0]) {
-        FILE *out = fopen(summary->cfg->json_out, "w");
+        FILE *out = open_json_output(summary->cfg->json_out);
         if (!out) {
             perror("fopen");
             return -1;

@@ -1,11 +1,13 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/queue.h>
 #include <sys/time.h>
 #include <time.h>
@@ -33,6 +35,18 @@ static int debug_enabled(void) {
         initialized = 1;
     }
     return enabled;
+}
+
+static FILE *open_json_output(const char *path) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        return NULL;
+    }
+    FILE *out = fdopen(fd, "w");
+    if (out == NULL) {
+        close(fd);
+    }
+    return out;
 }
 
 #define DEBUG_LOG(...)                                                                             \
@@ -1036,7 +1050,7 @@ static int emit_summary(const run_summary_t *summary) {
            summary->cfg->direction, summary->throughput_mib_per_s, summary->throughput_gbit_per_s,
            summary->requests_per_s);
     if (summary->cfg->json_out[0]) {
-        FILE *out = fopen(summary->cfg->json_out, "w");
+        FILE *out = open_json_output(summary->cfg->json_out);
         if (!out) {
             perror("fopen");
             return -1;

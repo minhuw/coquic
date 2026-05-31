@@ -128,6 +128,151 @@ ReceivedProtectedOneRttStreamPacket received_stream_fast_packet_for_tests() {
     };
 }
 
+bool stream_state_codec_error_adds_transport_code_for_tests() {
+    const auto codec_error = stream_state_codec_error(
+        CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0}, kFrameTypeStreamBase);
+    return codec_error.has_transport_error_code &&
+           codec_error.transport_error_code ==
+               transport_error_code_value(QuicTransportErrorCode::stream_state_error);
+}
+
+bool deferred_packet_equals_vector_for_tests() {
+    return bytes_from_ints_for_tests({0x01, 0x02, 0x03}) ==
+           DeferredProtectedDatagram(bytes_from_ints_for_tests({0x01, 0x02, 0x03}), /*id=*/9);
+}
+
+PathState traced_path_for_summary_tests() {
+    return PathState{
+        .id = 7,
+        .validated = true,
+        .is_current_send_path = true,
+        .challenge_pending = true,
+        .anti_amplification_received_bytes = 11,
+        .anti_amplification_sent_bytes = 7,
+        .outstanding_challenge =
+            std::array{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
+                       std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08}},
+        .pending_response =
+            std::array{std::byte{0x11}, std::byte{0x12}, std::byte{0x13}, std::byte{0x14},
+                       std::byte{0x15}, std::byte{0x16}, std::byte{0x17}, std::byte{0x18}},
+    };
+}
+
+bool path_summary_mentions_state_for_tests(const PathState &path) {
+    const auto summary = format_path_state_summary(&path);
+    return (summary.find("id=7") != std::string::npos) &
+           (summary.find("val=1") != std::string::npos) &
+           (summary.find("cur=1") != std::string::npos) &
+           (summary.find("chal=1") != std::string::npos) &
+           (summary.find("out=1") != std::string::npos) &
+           (summary.find("resp=1") != std::string::npos) &
+           (summary.find("recv=11") != std::string::npos) &
+           (summary.find("sent=7") != std::string::npos);
+}
+
+bool packet_summary_mentions_counts_for_tests() {
+    const auto summary = summarize_packets(std::array{
+        SentPacketRecord{
+            .packet_number = 5,
+            .stream_fragments =
+                {
+                    StreamFrameSendFragment{
+                        .stream_id = 0,
+                        .offset = 4,
+                        .bytes = SharedBytes(bytes_from_ints_for_tests({0xaa, 0xbb})),
+                        .fin = false,
+                        .consumes_flow_control = true,
+                    },
+                },
+        },
+        SentPacketRecord{
+            .packet_number = 9,
+        },
+    });
+    return (summary.find("count=2") != std::string::npos) &
+           (summary.find("pn=5-9") != std::string::npos) &
+           (summary.find("stream_fragments=1") != std::string::npos) &
+           (summary.find("first_stream_offset=4") != std::string::npos);
+}
+
+bool packet_summary_without_stream_offset_omits_offset_for_tests() {
+    const auto summary = summarize_packets(std::array{
+        SentPacketRecord{
+            .packet_number = 6,
+        },
+        SentPacketRecord{
+            .packet_number = 8,
+        },
+    });
+    return (summary.find("count=2") != std::string::npos) &
+           (summary.find("pn=6-8") != std::string::npos) &
+           (summary.find("stream_fragments=0") != std::string::npos) &
+           (summary.find("first_stream_offset=") == std::string::npos);
+}
+
+SentPacketRecord metadata_packet_for_tests() {
+    return SentPacketRecord{
+        .first_stream_frame_metadata =
+            StreamFrameSendMetadata{
+                .stream_id = 0,
+                .offset = 2,
+                .length = 3,
+                .fin = false,
+                .consumes_flow_control = true,
+            },
+        .stream_frame_metadata =
+            {
+                StreamFrameSendMetadata{
+                    .stream_id = 4,
+                    .offset = 9,
+                    .length = 5,
+                    .fin = true,
+                    .consumes_flow_control = true,
+                },
+            },
+        .stream_fragments =
+            {
+                StreamFrameSendFragment{
+                    .stream_id = 8,
+                    .offset = 14,
+                    .bytes = SharedBytes(bytes_from_ints_for_tests({0x01, 0x02})),
+                    .fin = false,
+                    .consumes_flow_control = true,
+                },
+            },
+    };
+}
+
+SentPacketRecord vector_only_metadata_packet_for_tests() {
+    return SentPacketRecord{
+        .stream_frame_metadata =
+            {
+                StreamFrameSendMetadata{
+                    .stream_id = 12,
+                    .offset = 33,
+                    .length = 7,
+                    .fin = false,
+                    .consumes_flow_control = true,
+                },
+            },
+    };
+}
+
+SentPacketRecord fragment_only_metadata_packet_for_tests() {
+    return SentPacketRecord{
+        .stream_fragments =
+            {
+                StreamFrameSendFragment{
+                    .stream_id = 16,
+                    .offset = 44,
+                    .bytes = SharedBytes(bytes_from_ints_for_tests({0x03})),
+                    .fin = false,
+                    .consumes_flow_control = true,
+                },
+            },
+    };
+}
+
 bool connection_helper_edge_cases_for_tests() {
     bool ok = true;
 
@@ -487,13 +632,8 @@ bool connection_helper_edge_cases_for_tests() {
                 QuicTransportErrorCode::stream_state_error &&
             stream_transport_error_for_state_error(StreamStateErrorCode::final_size_conflict) ==
                 QuicTransportErrorCode::final_size_error);
-    const auto stream_codec_without_transport = stream_state_codec_error(
-        CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0}, kFrameTypeStreamBase);
-    connection_coverage_check(
-        ok, "stream_state_codec_error_adds_transport_code",
-        stream_codec_without_transport.has_transport_error_code &&
-            stream_codec_without_transport.transport_error_code ==
-                transport_error_code_value(QuicTransportErrorCode::stream_state_error));
+    connection_coverage_check(ok, "stream_state_codec_error_adds_transport_code",
+                              stream_state_codec_error_adds_transport_code_for_tests());
     connection_coverage_check(ok, "stream_limit_frame_type_helpers_cover_uni",
                               frame_type_for_max_streams(StreamLimitType::unidirectional) ==
                                       kFrameTypeMaxStreamsUni &&
@@ -511,25 +651,10 @@ bool connection_helper_edge_cases_for_tests() {
                 QuicTransportErrorCode::application_error &&
             transport_error_for_codec_error(CodecErrorCode::http3_parse_error) ==
                 QuicTransportErrorCode::application_error);
-    const DeferredProtectedDatagram deferred_packet(bytes_from_ints({0x01, 0x02, 0x03}),
-                                                    /*id=*/9);
     connection_coverage_check(ok, "vector_equals_deferred_packet",
-                              bytes_from_ints({0x01, 0x02, 0x03}) == deferred_packet);
+                              deferred_packet_equals_vector_for_tests());
 
-    PathState traced_path{
-        .id = 7,
-        .validated = true,
-        .is_current_send_path = true,
-        .challenge_pending = true,
-        .anti_amplification_received_bytes = 11,
-        .anti_amplification_sent_bytes = 7,
-        .outstanding_challenge =
-            std::array{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
-                       std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08}},
-        .pending_response =
-            std::array{std::byte{0x11}, std::byte{0x12}, std::byte{0x13}, std::byte{0x14},
-                       std::byte{0x15}, std::byte{0x16}, std::byte{0x17}, std::byte{0x18}},
-    };
+    PathState traced_path = traced_path_for_summary_tests();
     std::map<QuicPathId, PathState> traced_paths{
         {traced_path.id, traced_path},
     };
@@ -545,16 +670,8 @@ bool connection_helper_edge_cases_for_tests() {
                               find_path_state(traced_paths, traced_path.id) != nullptr);
     connection_coverage_check(ok, "null_path_summary_formats_dash",
                               format_path_state_summary(nullptr) == "-");
-    const std::string traced_path_summary = format_path_state_summary(&traced_path);
     connection_coverage_check(ok, "traced_path_summary_mentions_path_state",
-                              (traced_path_summary.find("id=7") != std::string::npos) &
-                                  (traced_path_summary.find("val=1") != std::string::npos) &
-                                  (traced_path_summary.find("cur=1") != std::string::npos) &
-                                  (traced_path_summary.find("chal=1") != std::string::npos) &
-                                  (traced_path_summary.find("out=1") != std::string::npos) &
-                                  (traced_path_summary.find("resp=1") != std::string::npos) &
-                                  (traced_path_summary.find("recv=11") != std::string::npos) &
-                                  (traced_path_summary.find("sent=7") != std::string::npos));
+                              path_summary_mentions_state_for_tests(traced_path));
     connection_coverage_check(ok, "invalid_ack_first_range_formats_invalid",
                               format_ack_ranges(AckFrame{
                                   .largest_acknowledged = 1,
@@ -599,109 +716,20 @@ bool connection_helper_edge_cases_for_tests() {
                               }) == "[invalid]");
     connection_coverage_check(ok, "empty_packet_summary_reports_zero",
                               summarize_packets({}) == "count=0");
-    const std::array sent_packets = {
-        SentPacketRecord{
-            .packet_number = 5,
-            .stream_fragments =
-                {
-                    StreamFrameSendFragment{
-                        .stream_id = 0,
-                        .offset = 4,
-                        .bytes = SharedBytes(bytes_from_ints({0xaa, 0xbb})),
-                        .fin = false,
-                        .consumes_flow_control = true,
-                    },
-                },
-        },
-        SentPacketRecord{
-            .packet_number = 9,
-        },
-    };
-    const std::string packet_summary = summarize_packets(sent_packets);
-    connection_coverage_check(
-        ok, "packet_summary_mentions_counts",
-        (packet_summary.find("count=2") != std::string::npos) &
-            (packet_summary.find("pn=5-9") != std::string::npos) &
-            (packet_summary.find("stream_fragments=1") != std::string::npos) &
-            (packet_summary.find("first_stream_offset=4") != std::string::npos));
-    const std::array no_stream_packets = {
-        SentPacketRecord{
-            .packet_number = 6,
-        },
-        SentPacketRecord{
-            .packet_number = 8,
-        },
-    };
-    const std::string no_stream_packet_summary = summarize_packets(no_stream_packets);
-    connection_coverage_check(
-        ok, "packet_summary_without_stream_offset_omits_offset",
-        (no_stream_packet_summary.find("count=2") != std::string::npos) &
-            (no_stream_packet_summary.find("pn=6-8") != std::string::npos) &
-            (no_stream_packet_summary.find("stream_fragments=0") != std::string::npos) &
-            (no_stream_packet_summary.find("first_stream_offset=") == std::string::npos));
-    const SentPacketRecord metadata_packet{
-        .first_stream_frame_metadata =
-            StreamFrameSendMetadata{
-                .stream_id = 0,
-                .offset = 2,
-                .length = 3,
-                .fin = false,
-                .consumes_flow_control = true,
-            },
-        .stream_frame_metadata =
-            {
-                StreamFrameSendMetadata{
-                    .stream_id = 4,
-                    .offset = 9,
-                    .length = 5,
-                    .fin = true,
-                    .consumes_flow_control = true,
-                },
-            },
-        .stream_fragments =
-            {
-                StreamFrameSendFragment{
-                    .stream_id = 8,
-                    .offset = 14,
-                    .bytes = SharedBytes(bytes_from_ints_for_tests({0x01, 0x02})),
-                    .fin = false,
-                    .consumes_flow_control = true,
-                },
-            },
-    };
+    connection_coverage_check(ok, "packet_summary_mentions_counts",
+                              packet_summary_mentions_counts_for_tests());
+    connection_coverage_check(ok, "packet_summary_without_stream_offset_omits_offset",
+                              packet_summary_without_stream_offset_omits_offset_for_tests());
+    const auto metadata_packet = metadata_packet_for_tests();
     connection_coverage_check(ok,
                               "packet_stream_metadata_helpers_cover_count_bytes_and_first_offset",
                               packet_stream_frame_count(metadata_packet) == 3 &&
                                   packet_stream_frame_bytes(metadata_packet) == 10 &&
                                   packet_first_stream_frame_offset(metadata_packet) == 2u);
-    const SentPacketRecord vector_only_metadata_packet{
-        .stream_frame_metadata =
-            {
-                StreamFrameSendMetadata{
-                    .stream_id = 12,
-                    .offset = 33,
-                    .length = 7,
-                    .fin = false,
-                    .consumes_flow_control = true,
-                },
-            },
-    };
-    const SentPacketRecord fragment_only_metadata_packet{
-        .stream_fragments =
-            {
-                StreamFrameSendFragment{
-                    .stream_id = 16,
-                    .offset = 44,
-                    .bytes = SharedBytes(bytes_from_ints_for_tests({0x03})),
-                    .fin = false,
-                    .consumes_flow_control = true,
-                },
-            },
-    };
     connection_coverage_check(
         ok, "packet_first_stream_frame_offset_covers_vector_fragment_and_empty",
-        packet_first_stream_frame_offset(vector_only_metadata_packet) == 33u &&
-            packet_first_stream_frame_offset(fragment_only_metadata_packet) == 44u &&
+        packet_first_stream_frame_offset(vector_only_metadata_packet_for_tests()) == 33u &&
+            packet_first_stream_frame_offset(fragment_only_metadata_packet_for_tests()) == 44u &&
             !packet_first_stream_frame_offset(SentPacketRecord{}).has_value());
     bool for_each_stream_frame_metadata_visits_vector_metadata = false;
     bool for_each_stream_frame_metadata_visits_first_metadata = false;

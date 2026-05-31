@@ -387,23 +387,45 @@ class ScopedServerSocketPollTraceReset {
     ScopedServerSocketPollTraceReset &operator=(const ScopedServerSocketPollTraceReset &) = delete;
 };
 
+inline sockaddr *copy_addrinfo_address(const sockaddr_in &address) {
+    return reinterpret_cast<sockaddr *>(new sockaddr_in(address));
+}
+
+inline sockaddr *copy_addrinfo_address(const sockaddr_in6 &address) {
+    return reinterpret_cast<sockaddr *>(new sockaddr_in6(address));
+}
+
+inline void delete_addrinfo_address(sockaddr *address) {
+    if (address == nullptr) {
+        return;
+    }
+
+    if (address->sa_family == AF_INET) {
+        delete reinterpret_cast<sockaddr_in *>(address);
+        return;
+    }
+    if (address->sa_family == AF_INET6) {
+        delete reinterpret_cast<sockaddr_in6 *>(address);
+        return;
+    }
+    delete address;
+}
+
 inline int fail_getaddrinfo_with_results(const char *, const char *, const addrinfo *,
                                          addrinfo **results) {
     if (results == nullptr) {
         return EAI_FAIL;
     }
 
-    auto *address = new sockaddr_storage{};
     sockaddr_in ipv4{};
     ipv4.sin_family = AF_INET;
-    std::memcpy(address, &ipv4, sizeof(ipv4));
 
     auto *result = new addrinfo{};
     result->ai_family = AF_INET;
     result->ai_socktype = SOCK_DGRAM;
     result->ai_protocol = IPPROTO_UDP;
     result->ai_addrlen = sizeof(sockaddr_in);
-    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    result->ai_addr = copy_addrinfo_address(ipv4);
 
     *results = result;
     return EAI_FAIL;
@@ -424,12 +446,14 @@ inline int record_server_socket_then_succeed(int, int, int) {
 inline int record_server_bind_then_succeed(int, const sockaddr *address, socklen_t address_len) {
     if (address != nullptr && address->sa_family == AF_INET &&
         address_len >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
-        const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(address);
-        g_server_socket_poll_trace.bound_ports.push_back(ntohs(ipv4->sin_port));
+        sockaddr_in ipv4{};
+        std::memcpy(&ipv4, address, sizeof(ipv4));
+        g_server_socket_poll_trace.bound_ports.push_back(ntohs(ipv4.sin_port));
     } else if (address != nullptr && address->sa_family == AF_INET6 &&
                address_len >= static_cast<socklen_t>(sizeof(sockaddr_in6))) {
-        const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(address);
-        g_server_socket_poll_trace.bound_ports.push_back(ntohs(ipv6->sin6_port));
+        sockaddr_in6 ipv6{};
+        std::memcpy(&ipv6, address, sizeof(ipv6));
+        g_server_socket_poll_trace.bound_ports.push_back(ntohs(ipv6.sin6_port));
     }
     return 0;
 }
@@ -456,19 +480,17 @@ inline int ipv6_only_getaddrinfo(const char *node, const char *service, const ad
         return EAI_SOCKTYPE;
     }
 
-    auto *address = new sockaddr_storage{};
     sockaddr_in6 ipv6{};
     ipv6.sin6_family = AF_INET6;
     ipv6.sin6_port = htons(9443);
     ipv6.sin6_addr = in6addr_loopback;
-    std::memcpy(address, &ipv6, sizeof(ipv6));
 
     auto *result = new addrinfo{};
     result->ai_family = AF_INET6;
     result->ai_socktype = SOCK_DGRAM;
     result->ai_protocol = IPPROTO_UDP;
     result->ai_addrlen = sizeof(sockaddr_in6);
-    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    result->ai_addr = copy_addrinfo_address(ipv6);
 
     *results = result;
     return 0;
@@ -478,51 +500,43 @@ inline void counting_freeaddrinfo(addrinfo *results) {
     ++g_freeaddrinfo_calls;
     while (results != nullptr) {
         auto *next = results->ai_next;
-        if (results->ai_addr != nullptr) {
-            delete reinterpret_cast<sockaddr_storage *>(results->ai_addr);
-        }
+        delete_addrinfo_address(results->ai_addr);
         delete results;
         results = next;
     }
 }
 
 inline addrinfo *make_ipv4_addrinfo_result(std::string_view ip, std::uint16_t port) {
-    auto *address = new sockaddr_storage{};
     sockaddr_in ipv4{};
     ipv4.sin_family = AF_INET;
     ipv4.sin_port = htons(port);
     if (::inet_pton(AF_INET, std::string(ip).c_str(), &ipv4.sin_addr) != 1) {
-        delete address;
         return nullptr;
     }
-    std::memcpy(address, &ipv4, sizeof(ipv4));
 
     auto *result = new addrinfo{};
     result->ai_family = AF_INET;
     result->ai_socktype = SOCK_DGRAM;
     result->ai_protocol = IPPROTO_UDP;
     result->ai_addrlen = sizeof(sockaddr_in);
-    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    result->ai_addr = copy_addrinfo_address(ipv4);
     return result;
 }
 
 inline addrinfo *make_ipv6_addrinfo_result(std::string_view ip, std::uint16_t port) {
-    auto *address = new sockaddr_storage{};
     sockaddr_in6 ipv6{};
     ipv6.sin6_family = AF_INET6;
     ipv6.sin6_port = htons(port);
     if (::inet_pton(AF_INET6, std::string(ip).c_str(), &ipv6.sin6_addr) != 1) {
-        delete address;
         return nullptr;
     }
-    std::memcpy(address, &ipv6, sizeof(ipv6));
 
     auto *result = new addrinfo{};
     result->ai_family = AF_INET6;
     result->ai_socktype = SOCK_DGRAM;
     result->ai_protocol = IPPROTO_UDP;
     result->ai_addrlen = sizeof(sockaddr_in6);
-    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    result->ai_addr = copy_addrinfo_address(ipv6);
     return result;
 }
 
@@ -615,19 +629,17 @@ inline int unsupported_family_getaddrinfo(const char *node, const char *service,
         return EAI_NONAME;
     }
 
-    auto *address = new sockaddr_storage{};
     sockaddr_in ipv4{};
     ipv4.sin_family = AF_INET;
     ipv4.sin_port = htons(443);
     ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    std::memcpy(address, &ipv4, sizeof(ipv4));
 
     auto *result = new addrinfo{};
     result->ai_family = AF_UNIX;
     result->ai_socktype = SOCK_DGRAM;
     result->ai_protocol = IPPROTO_UDP;
     result->ai_addrlen = sizeof(sockaddr_in);
-    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    result->ai_addr = copy_addrinfo_address(ipv4);
     *results = result;
     return 0;
 }

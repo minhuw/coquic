@@ -346,6 +346,53 @@
     @apply rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-1.5 py-0.5 font-mono text-[0.88em] text-[var(--ink)];
   }
 
+  .qa-markdown {
+    @apply grid gap-3 text-[15px] leading-relaxed text-[var(--soft)];
+  }
+
+  .qa-markdown h3,
+  .qa-markdown h4 {
+    @apply mt-1 text-sm font-semibold leading-tight text-[var(--ink)];
+  }
+
+  .qa-markdown p {
+    @apply text-[15px] leading-relaxed text-[var(--soft)];
+  }
+
+  .qa-markdown ul,
+  .qa-markdown ol {
+    @apply grid gap-2 pl-5;
+  }
+
+  .qa-markdown ul {
+    @apply list-disc;
+  }
+
+  .qa-markdown ol {
+    @apply list-decimal;
+  }
+
+  .qa-markdown li {
+    @apply pl-1 text-[15px] leading-relaxed text-[var(--soft)];
+  }
+
+  .qa-markdown strong {
+    @apply font-semibold text-[var(--ink)];
+  }
+
+  .qa-markdown code {
+    @apply rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-1.5 py-0.5 font-mono text-[0.88em] text-[var(--ink)];
+  }
+
+  .qa-markdown pre {
+    @apply max-w-full overflow-x-auto rounded-[var(--radius)] border border-[var(--line)] bg-[#f6f8fa] p-3;
+  }
+
+  .qa-markdown pre code {
+    @apply block border-0 bg-transparent p-0 text-[12px] leading-relaxed text-[var(--ink)];
+    white-space: pre;
+  }
+
   .docs-code-block {
     @apply overflow-hidden rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)];
   }

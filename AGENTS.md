@@ -47,24 +47,24 @@
 
 ## QUIC Sources And RAG
 
-- Prefer `references/rfc/` as the source of truth for QUIC specification questions.
-- The local RAG project lives under `tools/rag/`.
+- Prefer `docs/rfc/` as the source of truth for QUIC specification questions.
+- The local RAG project lives under `rag/`.
 - The repo-local Codex skill for QUIC questions lives under
   `.agents/skills/quic-rag/`.
 - Generated RAG state lives under `.rag/` and must not be committed.
 - Build or rebuild the RAG index with:
-  - `tools/rag/scripts/build-index --source references/rfc --state-dir .rag`
+  - `rag/scripts/build-index --source docs/rfc --state-dir .rag`
 - Check index readiness with:
-  - `tools/rag/scripts/query-rag doctor --source references/rfc --state-dir .rag`
+  - `rag/scripts/query-rag doctor --source docs/rfc --state-dir .rag`
 - Query the local QUIC specification knowledge base with:
-  - `tools/rag/scripts/query-rag search-sections "ACK frame behavior" --top-k 5`
-  - `tools/rag/scripts/query-rag get-section --doc rfc9000 --section-id 18.2`
-  - `tools/rag/scripts/query-rag get-section --doc draft-ietf-quic-qlog-main-schema-13 --section-id 1`
-  - `tools/rag/scripts/query-rag trace-term max_udp_payload_size`
+  - `rag/scripts/query-rag search-sections "ACK frame behavior" --top-k 5`
+  - `rag/scripts/query-rag get-section --doc rfc9000 --section-id 18.2`
+  - `rag/scripts/query-rag get-section --doc draft-ietf-quic-qlog-main-schema-13 --section-id 1`
+  - `rag/scripts/query-rag trace-term max_udp_payload_size`
 - For QUIC protocol questions, use the repo-local `quic-rag` skill and the
   query wrapper above instead of the old MCP flow.
-- If you change `tools/rag/`, run:
-  - `uv run --project tools/rag pytest tools/rag/tests`
+- If you change `rag/`, run:
+  - `uv run --project rag pytest rag/tests`
 
 ## Repo Conventions
 

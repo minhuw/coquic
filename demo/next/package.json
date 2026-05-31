@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "predev": "node scripts/prepare-public-assets.mjs",
-    "dev": "next dev --hostname 127.0.0.1 --port 3000",
+    "dev": "next dev --hostname 127.0.0.1 --port 3001",
     "prebuild": "node scripts/prepare-public-assets.mjs",
     "build": "next build",
     "build:wasm-deps": "cd ../.. && nix develop -c bash scripts/build-boringssl-wasm.sh",
@@ -12,7 +12,7 @@
     "build:wasm": "npm run build:wasm-deps && npm run compile:wasm && npm run smoke:wasm",
     "build:demo": "npm run build:wasm && npm run build",
     "package:demo": "cd ../.. && demo/deploy/package-demo.sh",
-    "start": "next start --hostname 127.0.0.1 --port 3000"
+    "start": "next start --hostname 127.0.0.1 --port 3001"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",
@@ -23,6 +23,8 @@
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "shiki": "^4.1.0",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.0"

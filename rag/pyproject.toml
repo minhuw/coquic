@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coquic-rag"
+version = "0.1.0"
+description = "Local QUIC RFC knowledge base tooling for coquic"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "httpx",
+  "cocoindex",
+  "llama-index-core",
+  "llama-index-readers-file",
+  "mcp",
+  "qdrant-client>=1.18,<1.19",
+  "uvicorn[standard]",
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

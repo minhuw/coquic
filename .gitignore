@@ -9,11 +9,13 @@ coverage/
 !demo/next/app/coverage/
 .rag/
 .remote-ci/
+.envrc.local
 .interop-logs/
 result
-tools/rag/.venv/
-tools/rag/**/__pycache__/
-tools/rag/**/*.egg-info/
+rag/.pytest_cache/
+rag/.venv/
+rag/**/__pycache__/
+rag/**/*.egg-info/
 compile_commands.json
 .bench-results/
 bench/*/target/

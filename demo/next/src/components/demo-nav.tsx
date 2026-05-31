@@ -4,17 +4,18 @@ import { ChevronDown } from 'lucide-react';
 
 import { GitHubIcon } from './icons';
 
-export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'interop' | 'coverage';
+export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'interop' | 'coverage' | 'qa';
 
 const views: Array<{ href: string; label: string; route: DemoRoute }> = [
+  { href: '/qa', label: 'Ask', route: 'qa' },
   { href: '/docs', label: 'Docs', route: 'docs' },
   { href: '/workbench', label: 'Workbench', route: 'workbench' },
-  { href: '/performance', label: 'LAN', route: 'performance' },
+  { href: '/performance', label: 'Performance', route: 'performance' },
   { href: '/interop', label: 'Interop', route: 'interop' },
   { href: '/coverage', label: 'Coverage', route: 'coverage' },
 ];
 
-const primaryViews = views.filter((view) => view.route === 'docs' || view.route === 'workbench');
+const primaryViews = views.filter((view) => view.route === 'docs' || view.route === 'workbench' || view.route === 'qa');
 const benchmarkViews = views.filter((view) => view.route === 'performance');
 const developmentViews = views.filter((view) => view.route === 'interop' || view.route === 'coverage');
 

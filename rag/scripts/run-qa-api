@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export COQUIC_REPO_ROOT="${COQUIC_REPO_ROOT:-$(pwd)}"
+export COQUIC_QDRANT_URL="${COQUIC_QDRANT_URL:-http://127.0.0.1:6333}"
+
+uv run --project rag uvicorn coquic_rag.qa.app:app \
+  --host "${COQUIC_QA_HOST:-127.0.0.1}" \
+  --port "${COQUIC_QA_PORT:-8787}" \
+  "$@"

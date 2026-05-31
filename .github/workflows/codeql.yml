@@ -29,7 +29,7 @@ jobs:
         with:
           languages: c-cpp
           build-mode: none
-          queries: +security-extended
+          queries: +security-extended,security-and-quality
 
       - name: Analyze
         uses: github/codeql-action/analyze@v4
@@ -51,7 +51,7 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: python
-          queries: +security-extended
+          queries: +security-extended,security-and-quality
 
       - name: Analyze
         uses: github/codeql-action/analyze@v4

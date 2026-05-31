@@ -1,0 +1,25 @@
+---
+engines:
+  cppcheck:
+    language: c++
+  duplication:
+    exclude_paths:
+      - "bench/**"
+      - "demo/**"
+      - "docs/**"
+      - "tests/**"
+      - "tools/rag/tests/**"
+  metric:
+    exclude_paths:
+      - "bench/**"
+      - "demo/**"
+      - "docs/**"
+      - "tests/**"
+      - "tools/rag/tests/**"
+
+exclude_paths:
+  - ".agents/**"
+  - "bench/**"
+  - "docs/references/**"
+  - "docs/rfc/**"
+  - "docs/superpowers/**"

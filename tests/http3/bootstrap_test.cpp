@@ -603,6 +603,7 @@ TEST(QuicHttp3BootstrapTest, HttpsHeadSuppressesBodyButAdvertisesAltSvc) {
 TEST(QuicHttp3BootstrapTest, HttpsGetResolvesIndexQueryAndContentTypes) {
     coquic::quic::test::ScopedTempDir document_root;
     document_root.write_file("index.html", "<h1>hello</h1>");
+    document_root.write_file("workbench.html", "<main>workbench</main>");
     document_root.write_file("data.json", "{\"ok\":true}");
     document_root.write_file("site.css", "body{}");
     document_root.write_file("app.js", "console.log('js');");
@@ -625,6 +626,15 @@ TEST(QuicHttp3BootstrapTest, HttpsGetResolvesIndexQueryAndContentTypes) {
     EXPECT_EQ(root_response.status_code, 200);
     EXPECT_EQ(root_response.body, "<h1>hello</h1>");
     EXPECT_EQ(root_response.headers.at("Content-Type"), "text/html; charset=utf-8");
+
+    const auto next_export_route = https_request("127.0.0.1", bootstrap_port, "GET", "/workbench");
+    ASSERT_TRUE(next_export_route.has_value());
+    if (!next_export_route.has_value()) {
+        return;
+    }
+    EXPECT_EQ(next_export_route.value().status_code, 200);
+    EXPECT_EQ(next_export_route.value().body, "<main>workbench</main>");
+    EXPECT_EQ(next_export_route.value().headers.at("Content-Type"), "text/html; charset=utf-8");
 
     const auto json = https_request("127.0.0.1", bootstrap_port, "GET", "/data.json?cache=1");
     ASSERT_TRUE(json.has_value());

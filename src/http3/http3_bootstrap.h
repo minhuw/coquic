@@ -3,7 +3,10 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
+
+#include "src/http3/http3_reverse_proxy.h"
 
 namespace coquic::http3 {
 
@@ -13,6 +16,7 @@ struct Http3BootstrapConfig {
     std::uint16_t h3_port = 4433;
     std::uint64_t alt_svc_max_age = 60;
     std::filesystem::path document_root = ".";
+    std::optional<Http3ReverseProxyConfig> reverse_proxy;
     std::filesystem::path certificate_chain_path = "tests/fixtures/quic-server-cert.pem";
     std::filesystem::path private_key_path = "tests/fixtures/quic-server-key.pem";
 };

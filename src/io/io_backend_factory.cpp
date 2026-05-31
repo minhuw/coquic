@@ -178,7 +178,7 @@ bool client_bootstrap_is_usable_for_factory_tests(
     if (!bootstrap.has_value()) {
         return false;
     }
-    return (bootstrap->backend != nullptr) & (bootstrap->primary_route_handle != 0) &
+    return (bootstrap->backend != nullptr) && (bootstrap->primary_route_handle != 0) &&
            !bootstrap->primary_address_validation_identity.empty();
 }
 
@@ -207,8 +207,8 @@ bool io_backend_factory_coverage_for_tests() {
         const auto bootstrap = bootstrap_client_io_backend(
             make_io_uring_factory_config_for_tests(QuicIoBackendKind::io_uring), "invalid-host",
             4433);
-        covered =
-            static_cast<bool>(covered & !client_bootstrap_is_usable_for_factory_tests(bootstrap));
+        const bool failed_as_expected = !client_bootstrap_is_usable_for_factory_tests(bootstrap);
+        covered = covered && failed_as_expected;
     }
 
     {
@@ -217,8 +217,8 @@ bool io_backend_factory_coverage_for_tests() {
         };
         const auto bootstrap = bootstrap_client_io_backend(
             make_io_uring_factory_config_for_tests(QuicIoBackendKind::io_uring), "127.0.0.1", 4433);
-        covered =
-            static_cast<bool>(covered & client_bootstrap_is_usable_for_factory_tests(bootstrap));
+        const bool succeeded_as_expected = client_bootstrap_is_usable_for_factory_tests(bootstrap);
+        covered = covered && succeeded_as_expected;
     }
 
     {
@@ -234,8 +234,8 @@ bool io_backend_factory_coverage_for_tests() {
         const auto bootstrap = bootstrap_server_io_backend(
             make_io_uring_factory_config_for_tests(QuicIoBackendKind::io_uring), "127.0.0.1",
             ports);
-        covered =
-            static_cast<bool>(covered & !server_bootstrap_is_usable_for_factory_tests(bootstrap));
+        const bool failed_as_expected = !server_bootstrap_is_usable_for_factory_tests(bootstrap);
+        covered = covered && failed_as_expected;
     }
 
     {
@@ -246,16 +246,16 @@ bool io_backend_factory_coverage_for_tests() {
         const auto bootstrap = bootstrap_server_io_backend(
             make_io_uring_factory_config_for_tests(QuicIoBackendKind::io_uring), "127.0.0.1",
             ports);
-        covered =
-            static_cast<bool>(covered & server_bootstrap_is_usable_for_factory_tests(bootstrap));
+        const bool succeeded_as_expected = server_bootstrap_is_usable_for_factory_tests(bootstrap);
+        covered = covered && succeeded_as_expected;
     }
 
     {
         const auto bootstrap = bootstrap_client_io_backend(
             make_io_uring_factory_config_for_tests(invalid_backend_kind_for_factory_tests()),
             "127.0.0.1", 4433);
-        covered =
-            static_cast<bool>(covered & !client_bootstrap_is_usable_for_factory_tests(bootstrap));
+        const bool failed_as_expected = !client_bootstrap_is_usable_for_factory_tests(bootstrap);
+        covered = covered && failed_as_expected;
     }
 
     const std::array<std::uint16_t, 1> ports = {0};
@@ -263,8 +263,8 @@ bool io_backend_factory_coverage_for_tests() {
         const auto bootstrap = bootstrap_server_io_backend(
             make_io_uring_factory_config_for_tests(invalid_backend_kind_for_factory_tests()),
             "127.0.0.1", ports);
-        covered =
-            static_cast<bool>(covered & !server_bootstrap_is_usable_for_factory_tests(bootstrap));
+        const bool failed_as_expected = !server_bootstrap_is_usable_for_factory_tests(bootstrap);
+        covered = covered && failed_as_expected;
     }
 
     return covered;

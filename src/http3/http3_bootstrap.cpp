@@ -401,6 +401,35 @@ resolve_bootstrap_path_under_root(const std::filesystem::path &root,
     return (normalized_root / relative).lexically_normal();
 }
 
+std::optional<std::filesystem::path>
+resolve_existing_bootstrap_path_under_root(const std::filesystem::path &root,
+                                           std::string_view request_path) {
+    auto resolved = resolve_bootstrap_path_under_root(root, request_path);
+    if (!resolved.has_value()) {
+        return std::nullopt;
+    }
+
+    std::error_code status_error;
+    if (std::filesystem::exists(*resolved, status_error) &&
+        std::filesystem::is_regular_file(*resolved, status_error)) {
+        return resolved;
+    }
+
+    if (resolved->has_extension()) {
+        return resolved;
+    }
+
+    auto html_candidate = *resolved;
+    html_candidate += ".html";
+    status_error.clear();
+    if (std::filesystem::exists(html_candidate, status_error) &&
+        std::filesystem::is_regular_file(html_candidate, status_error)) {
+        return html_candidate.lexically_normal();
+    }
+
+    return resolved;
+}
+
 std::optional<std::string> read_binary_file(const std::filesystem::path &path) {
     const auto normalized_path = path.lexically_normal();
     if (forced_read_failure_path_for_test() == normalized_path) {
@@ -495,7 +524,35 @@ BootstrapResponse make_bootstrap_response(const Http3BootstrapConfig &config,
         };
     }
 
-    const auto resolved = resolve_bootstrap_path_under_root(config.document_root, request.target);
+    if (config.reverse_proxy.has_value()) {
+        Http3Request proxy_request{
+            .head =
+                {
+                    .method = request.method,
+                    .scheme = "https",
+                    .path = request.target,
+                },
+        };
+        auto proxied = fetch_http_reverse_proxy_response(*config.reverse_proxy, proxy_request);
+        BootstrapResponse response{
+            .status_code = proxied.head.status,
+            .content_length = proxied.body.size(),
+            .body = std::string(reinterpret_cast<const char *>(proxied.body.data()),
+                                proxied.body.size()),
+        };
+        for (const auto &header : proxied.head.headers) {
+            if (lowercase_ascii(header.name) == "content-type") {
+                response.content_type = header.value;
+            }
+        }
+        if (request.method == "HEAD") {
+            response.body.clear();
+        }
+        return response;
+    }
+
+    const auto resolved =
+        resolve_existing_bootstrap_path_under_root(config.document_root, request.target);
     if (!resolved.has_value()) {
         return BootstrapResponse{
             .status_code = 404,

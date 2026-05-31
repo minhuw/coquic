@@ -151,6 +151,109 @@ fn validateTlsConfiguration(tls_backend: []const u8, tls_linkage: []const u8) vo
     }
 }
 
+fn appendSourceFiles(files: *StringList, source_files: []const []const u8) void {
+    files.appendSlice(source_files) catch @panic("oom");
+}
+
+fn quicSourceFiles() []const []const u8 {
+    return &.{
+        "src/quic/buffer.cpp",
+        "src/quic/cca/bbr.cpp",
+        "src/quic/cca/common.cpp",
+        "src/quic/cca/copa.cpp",
+        "src/quic/cca/cubic.cpp",
+        "src/quic/cca/newreno.cpp",
+        "src/quic/congestion.cpp",
+        "src/quic/connection.cpp",
+        "src/quic/connection_diagnostics.cpp",
+        "src/quic/connection_effects.cpp",
+        "src/quic/connection_flow_control.cpp",
+        "src/quic/connection_helper_tests.cpp",
+        "src/quic/connection_inbound_recovery.cpp",
+        "src/quic/connection_internal_helper_tests.cpp",
+        "src/quic/connection_key_update_tests.cpp",
+        "src/quic/connection_packet_inspection.cpp",
+        "src/quic/connection_paths_streams.cpp",
+        "src/quic/connection_pmtud_tests.cpp",
+        "src/quic/connection_qlog.cpp",
+        "src/quic/connection_send.cpp",
+        "src/quic/connection_timers.cpp",
+        "src/quic/core.cpp",
+        "src/quic/crypto_stream.cpp",
+        "src/quic/frame.cpp",
+        "src/quic/packet.cpp",
+        "src/quic/packet_number.cpp",
+        "src/quic/plaintext_codec.cpp",
+        "src/quic/protected_codec.cpp",
+        "src/quic/protected_codec_test_hooks.cpp",
+        "src/quic/qlog/json.cpp",
+        "src/quic/qlog/session.cpp",
+        "src/quic/qlog/sink.cpp",
+        "src/quic/recovery.cpp",
+        "src/quic/streams.cpp",
+        "src/quic/transport_parameters.cpp",
+        "src/quic/varint.cpp",
+    };
+}
+
+fn ioSourceFiles() []const []const u8 {
+    return &.{
+        "src/io/io_backend_factory.cpp",
+        "src/io/io_uring_backend.cpp",
+        "src/io/io_uring_io_engine.cpp",
+        "src/io/poll_io_engine.cpp",
+        "src/io/shared_udp_backend_core.cpp",
+        "src/io/socket_io_backend.cpp",
+    };
+}
+
+fn http09SourceFiles() []const []const u8 {
+    return &.{
+        "src/http09/http09.cpp",
+        "src/http09/http09_client.cpp",
+        "src/http09/http09_runtime.cpp",
+        "src/http09/http09_runtime_io_restart_tests.cpp",
+        "src/http09/http09_runtime_parser_routing_tests.cpp",
+        "src/http09/http09_runtime_server_loop_tests.cpp",
+        "src/http09/http09_runtime_test_hooks.cpp",
+        "src/http09/http09_server.cpp",
+    };
+}
+
+fn http3SourceFiles() []const []const u8 {
+    return &.{
+        "src/http3/http3_bootstrap.cpp",
+        "src/http3/http3_client.cpp",
+        "src/http3/http3_connection.cpp",
+        "src/http3/http3_demo_routes.cpp",
+        "src/http3/http3_interop.cpp",
+        "src/http3/http3_protocol.cpp",
+        "src/http3/http3_qpack.cpp",
+        "src/http3/http3_reverse_proxy.cpp",
+        "src/http3/http3_runtime.cpp",
+        "src/http3/http3_server.cpp",
+    };
+}
+
+fn perfSourceFiles() []const []const u8 {
+    return &.{
+        "src/perf/perf_client.cpp",
+        "src/perf/perf_loop.cpp",
+        "src/perf/perf_metrics.cpp",
+        "src/perf/perf_protocol.cpp",
+        "src/perf/perf_runtime.cpp",
+        "src/perf/perf_server.cpp",
+    };
+}
+
+fn apiSourceFiles() []const []const u8 {
+    return &.{
+        "src/api/core.cpp",
+        "src/api/http3.cpp",
+        "src/api/quic.cpp",
+    };
+}
+
 fn addProjectLibrary(
     b: *std.Build,
     name: []const u8,
@@ -169,62 +272,20 @@ fn addProjectLibrary(
         .root_module = rootModule(b, target, optimize),
     });
     addIncludePath(lib, b.path("."));
+    addIncludePath(lib, b.path("include"));
     addIncludePath(lib, .{ .cwd_relative = tls_include_dir });
     addIncludePath(lib, .{ .cwd_relative = spdlog_include_dir });
     addIncludePath(lib, .{ .cwd_relative = fmt_include_dir });
     addIncludePath(lib, .{ .cwd_relative = liburing_include_dir });
     var files = StringList.init(b.allocator);
-    files.appendSlice(&.{
-        "src/quic/buffer.cpp",
-        "src/quic/cca/bbr.cpp",
-        "src/quic/cca/common.cpp",
-        "src/quic/cca/copa.cpp",
-        "src/quic/cca/cubic.cpp",
-        "src/quic/cca/newreno.cpp",
-        "src/quic/congestion.cpp",
-        "src/quic/connection.cpp",
-        "src/quic/core.cpp",
-        "src/quic/crypto_stream.cpp",
-        "src/quic/frame.cpp",
-        "src/http09/http09.cpp",
-        "src/http09/http09_client.cpp",
-        "src/http09/http09_runtime.cpp",
-        "src/http09/http09_server.cpp",
-        "src/http3/http3_connection.cpp",
-        "src/http3/http3_client.cpp",
-        "src/http3/http3_bootstrap.cpp",
-        "src/http3/http3_protocol.cpp",
-        "src/http3/http3_qpack.cpp",
-        "src/http3/http3_demo_routes.cpp",
-        "src/http3/http3_runtime.cpp",
-        "src/http3/http3_server.cpp",
-        "src/http3/http3_interop.cpp",
-        "src/perf/perf_runtime.cpp",
-        "src/perf/perf_protocol.cpp",
-        "src/perf/perf_metrics.cpp",
-        "src/perf/perf_loop.cpp",
-        "src/perf/perf_server.cpp",
-        "src/perf/perf_client.cpp",
-        "src/quic/packet.cpp",
-        "src/quic/packet_number.cpp",
-        "src/quic/plaintext_codec.cpp",
-        "src/quic/qlog/json.cpp",
-        "src/quic/qlog/session.cpp",
-        "src/quic/qlog/sink.cpp",
-        "src/quic/recovery.cpp",
-        "src/io/io_backend_factory.cpp",
-        "src/io/io_uring_backend.cpp",
-        "src/io/io_uring_io_engine.cpp",
-        "src/io/poll_io_engine.cpp",
-        "src/io/shared_udp_backend_core.cpp",
-        "src/io/socket_io_backend.cpp",
-        "src/quic/protected_codec.cpp",
-        "src/quic/streams.cpp",
-        "src/quic/transport_parameters.cpp",
-        "src/quic/varint.cpp",
-    }) catch @panic("oom");
+    appendSourceFiles(&files, quicSourceFiles());
     appendPacketCryptoSource(&files, tls_backend);
     appendTlsAdapterSource(&files, tls_backend);
+    appendSourceFiles(&files, ioSourceFiles());
+    appendSourceFiles(&files, http09SourceFiles());
+    appendSourceFiles(&files, http3SourceFiles());
+    appendSourceFiles(&files, perfSourceFiles());
+    appendSourceFiles(&files, apiSourceFiles());
     addCSourceFiles(lib, .{
         .root = b.path("."),
         .files = files.toOwnedSlice() catch @panic("oom"),
@@ -244,6 +305,19 @@ fn wasmQuicSourceFiles() []const []const u8 {
         "src/quic/cca/newreno.cpp",
         "src/quic/congestion.cpp",
         "src/quic/connection.cpp",
+        "src/quic/connection_diagnostics.cpp",
+        "src/quic/connection_effects.cpp",
+        "src/quic/connection_flow_control.cpp",
+        "src/quic/connection_helper_tests.cpp",
+        "src/quic/connection_inbound_recovery.cpp",
+        "src/quic/connection_internal_helper_tests.cpp",
+        "src/quic/connection_key_update_tests.cpp",
+        "src/quic/connection_packet_inspection.cpp",
+        "src/quic/connection_paths_streams.cpp",
+        "src/quic/connection_pmtud_tests.cpp",
+        "src/quic/connection_qlog.cpp",
+        "src/quic/connection_send.cpp",
+        "src/quic/connection_timers.cpp",
         "src/quic/core.cpp",
         "src/quic/crypto_stream.cpp",
         "src/quic/frame.cpp",
@@ -252,6 +326,7 @@ fn wasmQuicSourceFiles() []const []const u8 {
         "src/quic/packet_number.cpp",
         "src/quic/plaintext_codec.cpp",
         "src/quic/protected_codec.cpp",
+        "src/quic/protected_codec_test_hooks.cpp",
         "src/quic/qlog/json.cpp",
         "src/quic/qlog/session.cpp",
         "src/quic/qlog/sink.cpp",
@@ -385,6 +460,7 @@ fn addTestBinary(
         .root_module = rootModule(b, target, optimize),
     });
     addIncludePath(test_exe, b.path("."));
+    addIncludePath(test_exe, b.path("include"));
     addIncludePath(test_exe, .{ .cwd_relative = tls_include_dir });
     addIncludePath(test_exe, .{ .cwd_relative = gtest_include_dir });
     addIncludePath(test_exe, .{ .cwd_relative = gtest_src_dir });
@@ -446,6 +522,7 @@ pub fn build(b: *std.Build) void {
         ".zig-cache/boringssl-wasm/build";
     const smoke_test_files = &.{
         "tests/smoke/smoke_test.cpp",
+        "tests/api/public_api_test.cpp",
     };
     const core_test_files = &.{
         "tests/core/recovery/congestion_test.cpp",
@@ -460,12 +537,16 @@ pub fn build(b: *std.Build) void {
         "tests/core/packets/varint_test.cpp",
         "tests/core/streams/streams_test.cpp",
         "tests/core/streams/crypto_stream_test.cpp",
-        "tests/core/connection/handshake_test.cpp",
+        "tests/core/connection/handshake_lifecycle_test.cpp",
+        "tests/core/connection/handshake_inbound_test.cpp",
+        "tests/core/connection/handshake_qlog_trace_test.cpp",
         "tests/core/connection/zero_rtt_test.cpp",
         "tests/core/connection/connection_id_test.cpp",
         "tests/core/connection/stream_test.cpp",
         "tests/core/connection/flow_control_test.cpp",
-        "tests/core/connection/ack_test.cpp",
+        "tests/core/connection/ack_receive_test.cpp",
+        "tests/core/connection/ack_recovery_test.cpp",
+        "tests/core/connection/ack_send_path_test.cpp",
         "tests/core/connection/migration_test.cpp",
         "tests/core/connection/path_validation_test.cpp",
         "tests/core/connection/retry_version_test.cpp",
@@ -495,7 +576,9 @@ pub fn build(b: *std.Build) void {
         "tests/http09/runtime/io_uring_backend_test.cpp",
     };
     const http3_test_files = &.{
-        "tests/http3/connection_test.cpp",
+        "tests/http3/connection_control_stream_test.cpp",
+        "tests/http3/connection_request_response_test.cpp",
+        "tests/http3/connection_error_paths_test.cpp",
         "tests/http3/protocol_test.cpp",
         "tests/http3/qpack_test.cpp",
         "tests/http3/qpack_dynamic_test.cpp",
@@ -540,6 +623,7 @@ pub fn build(b: *std.Build) void {
         .root_module = rootModule(b, target, optimize),
     });
     addIncludePath(exe, b.path("."));
+    addIncludePath(exe, b.path("include"));
     const project_lib = addProjectLibrary(
         b,
         "coquic",
@@ -569,6 +653,7 @@ pub fn build(b: *std.Build) void {
         .root_module = rootModule(b, target, optimize),
     });
     addIncludePath(h3_server_exe, b.path("."));
+    addIncludePath(h3_server_exe, b.path("include"));
     addCSourceFiles(h3_server_exe, .{
         .root = b.path("."),
         .files = &.{"src/main_h3_server.cpp"},
@@ -586,6 +671,7 @@ pub fn build(b: *std.Build) void {
         .root_module = rootModule(b, target, optimize),
     });
     addIncludePath(perf_exe, b.path("."));
+    addIncludePath(perf_exe, b.path("include"));
     addCSourceFiles(perf_exe, .{
         .root = b.path("."),
         .files = &.{"src/main_perf.cpp"},

@@ -393,8 +393,9 @@ inline int fail_getaddrinfo_with_results(const char *, const char *, const addri
         return EAI_FAIL;
     }
 
-    auto *address = new sockaddr_in{};
-    address->sin_family = AF_INET;
+    auto *address = new sockaddr_storage{};
+    auto *ipv4 = reinterpret_cast<sockaddr_in *>(address);
+    ipv4->sin_family = AF_INET;
 
     auto *result = new addrinfo{};
     result->ai_family = AF_INET;
@@ -454,10 +455,11 @@ inline int ipv6_only_getaddrinfo(const char *node, const char *service, const ad
         return EAI_SOCKTYPE;
     }
 
-    auto *address = new sockaddr_in6{};
-    address->sin6_family = AF_INET6;
-    address->sin6_port = htons(9443);
-    address->sin6_addr = in6addr_loopback;
+    auto *address = new sockaddr_storage{};
+    auto *ipv6 = reinterpret_cast<sockaddr_in6 *>(address);
+    ipv6->sin6_family = AF_INET6;
+    ipv6->sin6_port = htons(9443);
+    ipv6->sin6_addr = in6addr_loopback;
 
     auto *result = new addrinfo{};
     result->ai_family = AF_INET6;
@@ -475,11 +477,7 @@ inline void counting_freeaddrinfo(addrinfo *results) {
     while (results != nullptr) {
         auto *next = results->ai_next;
         if (results->ai_addr != nullptr) {
-            if (results->ai_family == AF_INET6) {
-                delete reinterpret_cast<sockaddr_in6 *>(results->ai_addr);
-            } else {
-                delete reinterpret_cast<sockaddr_in *>(results->ai_addr);
-            }
+            delete reinterpret_cast<sockaddr_storage *>(results->ai_addr);
         }
         delete results;
         results = next;
@@ -487,10 +485,11 @@ inline void counting_freeaddrinfo(addrinfo *results) {
 }
 
 inline addrinfo *make_ipv4_addrinfo_result(std::string_view ip, std::uint16_t port) {
-    auto *address = new sockaddr_in{};
-    address->sin_family = AF_INET;
-    address->sin_port = htons(port);
-    if (::inet_pton(AF_INET, std::string(ip).c_str(), &address->sin_addr) != 1) {
+    auto *address = new sockaddr_storage{};
+    auto *ipv4 = reinterpret_cast<sockaddr_in *>(address);
+    ipv4->sin_family = AF_INET;
+    ipv4->sin_port = htons(port);
+    if (::inet_pton(AF_INET, std::string(ip).c_str(), &ipv4->sin_addr) != 1) {
         delete address;
         return nullptr;
     }
@@ -505,10 +504,11 @@ inline addrinfo *make_ipv4_addrinfo_result(std::string_view ip, std::uint16_t po
 }
 
 inline addrinfo *make_ipv6_addrinfo_result(std::string_view ip, std::uint16_t port) {
-    auto *address = new sockaddr_in6{};
-    address->sin6_family = AF_INET6;
-    address->sin6_port = htons(port);
-    if (::inet_pton(AF_INET6, std::string(ip).c_str(), &address->sin6_addr) != 1) {
+    auto *address = new sockaddr_storage{};
+    auto *ipv6 = reinterpret_cast<sockaddr_in6 *>(address);
+    ipv6->sin6_family = AF_INET6;
+    ipv6->sin6_port = htons(port);
+    if (::inet_pton(AF_INET6, std::string(ip).c_str(), &ipv6->sin6_addr) != 1) {
         delete address;
         return nullptr;
     }
@@ -611,10 +611,11 @@ inline int unsupported_family_getaddrinfo(const char *node, const char *service,
         return EAI_NONAME;
     }
 
-    auto *address = new sockaddr_in{};
-    address->sin_family = AF_INET;
-    address->sin_port = htons(443);
-    address->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    auto *address = new sockaddr_storage{};
+    auto *ipv4 = reinterpret_cast<sockaddr_in *>(address);
+    ipv4->sin_family = AF_INET;
+    ipv4->sin_port = htons(443);
+    ipv4->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     auto *result = new addrinfo{};
     result->ai_family = AF_UNIX;

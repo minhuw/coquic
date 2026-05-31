@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cerrno>
 #include <chrono>
@@ -64,6 +65,7 @@ translate_non_receive_wait_event(const QuicIoEngineEvent &event) {
     case QuicIoEngineEvent::Kind::path_mtu_update:
         return std::nullopt;
     }
+    return std::nullopt;
 }
 
 } // namespace
@@ -330,10 +332,12 @@ std::vector<std::byte> address_validation_identity_from_peer(const sockaddr_stor
         std::vector<std::byte> identity;
         identity.reserve(1 + sizeof(ipv4.sin_addr) + sizeof(ipv4.sin_port));
         identity.push_back(std::byte{0x04});
-        const auto *address = reinterpret_cast<const std::byte *>(&ipv4.sin_addr);
-        identity.insert(identity.end(), address, address + sizeof(ipv4.sin_addr));
-        const auto *port = reinterpret_cast<const std::byte *>(&ipv4.sin_port);
-        identity.insert(identity.end(), port, port + sizeof(ipv4.sin_port));
+        std::array<std::byte, sizeof(ipv4.sin_addr)> address{};
+        std::memcpy(address.data(), &ipv4.sin_addr, address.size());
+        identity.insert(identity.end(), address.begin(), address.end());
+        std::array<std::byte, sizeof(ipv4.sin_port)> port{};
+        std::memcpy(port.data(), &ipv4.sin_port, port.size());
+        identity.insert(identity.end(), port.begin(), port.end());
         return identity;
     }
 
@@ -342,10 +346,12 @@ std::vector<std::byte> address_validation_identity_from_peer(const sockaddr_stor
         std::vector<std::byte> identity;
         identity.reserve(1 + sizeof(ipv6.sin6_addr) + sizeof(ipv6.sin6_port));
         identity.push_back(std::byte{0x06});
-        const auto *address = reinterpret_cast<const std::byte *>(&ipv6.sin6_addr);
-        identity.insert(identity.end(), address, address + sizeof(ipv6.sin6_addr));
-        const auto *port = reinterpret_cast<const std::byte *>(&ipv6.sin6_port);
-        identity.insert(identity.end(), port, port + sizeof(ipv6.sin6_port));
+        std::array<std::byte, sizeof(ipv6.sin6_addr)> address{};
+        std::memcpy(address.data(), &ipv6.sin6_addr, address.size());
+        identity.insert(identity.end(), address.begin(), address.end());
+        std::array<std::byte, sizeof(ipv6.sin6_port)> port{};
+        std::memcpy(port.data(), &ipv6.sin6_port, port.size());
+        identity.insert(identity.end(), port.begin(), port.end());
         return identity;
     }
 

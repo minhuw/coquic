@@ -6,12 +6,12 @@ from pathlib import Path
 import anyio
 import pytest
 
-import coquic_rag.mcp_server.server as mcp_server_module
-import coquic_rag.query.service as query_service_module
 from coquic_rag.cli.main import main as cli_main
 from coquic_rag.config import ProjectPaths
 from coquic_rag.embed.provider import FakeEmbedder
+from coquic_rag.mcp_server import server as mcp_server_module
 from coquic_rag.mcp_server.server import create_mcp_server, main as mcp_main
+from coquic_rag.query import service as query_service_module
 from coquic_rag.query.service import IndexNotBuiltError, IndexStatus, QueryService
 from coquic_rag.store.qdrant_store import QdrantSectionStore
 

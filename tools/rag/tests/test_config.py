@@ -27,7 +27,7 @@ def test_default_state_dir_is_dot_rag():
 def test_project_paths_constructor_defaults_qdrant_url_to_none(tmp_path):
     paths = ProjectPaths(
         repo_root=tmp_path,
-        rfc_source=tmp_path / "docs" / "rfc",
+        rfc_source=tmp_path / "references" / "rfc",
         state_dir=tmp_path / ".rag",
         model_cache_dir=tmp_path / ".rag" / "cache" / "models",
     )

@@ -38,4 +38,4 @@
 
 CoQUIC is an experimental QUIC implementation exploring how far Codex, paired with GPT-5.4 and later models, can go in building a full-featured transport stack. The whole repo is generated entirely by LLM, with careful human prompt.
 
-Public C++ API documentation lives in [docs/public-api.md](docs/public-api.md).
+Public C++ API documentation lives in [docs/api/public-api.md](docs/api/public-api.md).

@@ -9,7 +9,7 @@
       "title": "BBR Congestion Control",
       "category": "recovery",
       "url": "https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.txt",
-      "local_path": "docs/rfc/draft-ietf-ccwg-bbr-05.txt"
+      "local_path": "references/rfc/draft-ietf-ccwg-bbr-05.txt"
     },
     {
       "doc_id": "draft-ietf-quic-ack-frequency-14",
@@ -18,7 +18,7 @@
       "title": "QUIC Acknowledgment Frequency",
       "category": "extension",
       "url": "https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.txt",
-      "local_path": "docs/rfc/draft-ietf-quic-ack-frequency-14.txt"
+      "local_path": "references/rfc/draft-ietf-quic-ack-frequency-14.txt"
     },
     {
       "doc_id": "draft-ietf-quic-multipath-21",
@@ -27,7 +27,7 @@
       "title": "Managing multiple paths for a QUIC connection",
       "category": "extension",
       "url": "https://www.ietf.org/archive/id/draft-ietf-quic-multipath-21.txt",
-      "local_path": "docs/rfc/draft-ietf-quic-multipath-21.txt"
+      "local_path": "references/rfc/draft-ietf-quic-multipath-21.txt"
     },
     {
       "doc_id": "draft-ietf-quic-qlog-h3-events-12",
@@ -36,7 +36,7 @@
       "title": "HTTP/3 qlog event definitions",
       "category": "qlog",
       "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-h3-events-12.txt",
-      "local_path": "docs/rfc/draft-ietf-quic-qlog-h3-events-12.txt"
+      "local_path": "references/rfc/draft-ietf-quic-qlog-h3-events-12.txt"
     },
     {
       "doc_id": "draft-ietf-quic-qlog-main-schema-13",
@@ -45,7 +45,7 @@
       "title": "qlog: Structured Logging for Network Protocols",
       "category": "qlog",
       "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-main-schema-13.txt",
-      "local_path": "docs/rfc/draft-ietf-quic-qlog-main-schema-13.txt"
+      "local_path": "references/rfc/draft-ietf-quic-qlog-main-schema-13.txt"
     },
     {
       "doc_id": "draft-ietf-quic-qlog-quic-events-12",
@@ -54,7 +54,7 @@
       "title": "QUIC event definitions for qlog",
       "category": "qlog",
       "url": "https://www.ietf.org/archive/id/draft-ietf-quic-qlog-quic-events-12.txt",
-      "local_path": "docs/rfc/draft-ietf-quic-qlog-quic-events-12.txt"
+      "local_path": "references/rfc/draft-ietf-quic-qlog-quic-events-12.txt"
     },
     {
       "doc_id": "rfc8985",
@@ -63,7 +63,7 @@
       "title": "The RACK-TLP Loss Detection Algorithm for TCP",
       "category": "reference",
       "url": "https://www.rfc-editor.org/rfc/rfc8985.txt",
-      "local_path": "docs/rfc/rfc8985.txt"
+      "local_path": "references/rfc/rfc8985.txt"
     },
     {
       "doc_id": "rfc8999",
@@ -72,7 +72,7 @@
       "title": "Version-Independent Properties of QUIC",
       "category": "core",
       "url": "https://www.rfc-editor.org/rfc/rfc8999.txt",
-      "local_path": "docs/rfc/rfc8999.txt"
+      "local_path": "references/rfc/rfc8999.txt"
     },
     {
       "doc_id": "rfc9000",
@@ -81,7 +81,7 @@
       "title": "QUIC: A UDP-Based Multiplexed and Secure Transport",
       "category": "core",
       "url": "https://www.rfc-editor.org/rfc/rfc9000.txt",
-      "local_path": "docs/rfc/rfc9000.txt"
+      "local_path": "references/rfc/rfc9000.txt"
     },
     {
       "doc_id": "rfc9001",
@@ -90,7 +90,7 @@
       "title": "Using TLS to Secure QUIC",
       "category": "core",
       "url": "https://www.rfc-editor.org/rfc/rfc9001.txt",
-      "local_path": "docs/rfc/rfc9001.txt"
+      "local_path": "references/rfc/rfc9001.txt"
     },
     {
       "doc_id": "rfc9002",
@@ -99,7 +99,7 @@
       "title": "QUIC Loss Detection and Congestion Control",
       "category": "core",
       "url": "https://www.rfc-editor.org/rfc/rfc9002.txt",
-      "local_path": "docs/rfc/rfc9002.txt"
+      "local_path": "references/rfc/rfc9002.txt"
     },
     {
       "doc_id": "rfc9114",
@@ -108,7 +108,7 @@
       "title": "HTTP/3",
       "category": "http3",
       "url": "https://www.rfc-editor.org/rfc/rfc9114.txt",
-      "local_path": "docs/rfc/rfc9114.txt"
+      "local_path": "references/rfc/rfc9114.txt"
     },
     {
       "doc_id": "rfc9204",
@@ -117,7 +117,7 @@
       "title": "QPACK: Field Compression for HTTP/3",
       "category": "http3",
       "url": "https://www.rfc-editor.org/rfc/rfc9204.txt",
-      "local_path": "docs/rfc/rfc9204.txt"
+      "local_path": "references/rfc/rfc9204.txt"
     },
     {
       "doc_id": "rfc9221",
@@ -126,7 +126,7 @@
       "title": "An Unreliable Datagram Extension to QUIC",
       "category": "extension",
       "url": "https://www.rfc-editor.org/rfc/rfc9221.txt",
-      "local_path": "docs/rfc/rfc9221.txt"
+      "local_path": "references/rfc/rfc9221.txt"
     },
     {
       "doc_id": "rfc9287",
@@ -135,7 +135,7 @@
       "title": "Greasing the QUIC Bit",
       "category": "extension",
       "url": "https://www.rfc-editor.org/rfc/rfc9287.txt",
-      "local_path": "docs/rfc/rfc9287.txt"
+      "local_path": "references/rfc/rfc9287.txt"
     },
     {
       "doc_id": "rfc9308",
@@ -144,7 +144,7 @@
       "title": "Applicability of the QUIC Transport Protocol",
       "category": "ops",
       "url": "https://www.rfc-editor.org/rfc/rfc9308.txt",
-      "local_path": "docs/rfc/rfc9308.txt"
+      "local_path": "references/rfc/rfc9308.txt"
     },
     {
       "doc_id": "rfc9312",
@@ -153,7 +153,7 @@
       "title": "Manageability of the QUIC Transport Protocol",
       "category": "ops",
       "url": "https://www.rfc-editor.org/rfc/rfc9312.txt",
-      "local_path": "docs/rfc/rfc9312.txt"
+      "local_path": "references/rfc/rfc9312.txt"
     },
     {
       "doc_id": "rfc9368",
@@ -162,7 +162,7 @@
       "title": "Compatible Version Negotiation for QUIC",
       "category": "extension",
       "url": "https://www.rfc-editor.org/rfc/rfc9368.txt",
-      "local_path": "docs/rfc/rfc9368.txt"
+      "local_path": "references/rfc/rfc9368.txt"
     },
     {
       "doc_id": "rfc9369",
@@ -171,7 +171,7 @@
       "title": "QUIC Version 2",
       "category": "extension",
       "url": "https://www.rfc-editor.org/rfc/rfc9369.txt",
-      "local_path": "docs/rfc/rfc9369.txt"
+      "local_path": "references/rfc/rfc9369.txt"
     }
   ]
 }

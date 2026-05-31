@@ -18,7 +18,10 @@ STOP_WAIT_SECONDS = 10.0
 
 def discover_repo_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
-        if (candidate / "build.zig").is_file() and (candidate / "docs" / "rfc").is_dir():
+        if (
+            (candidate / "build.zig").is_file()
+            and (candidate / "references" / "rfc").is_dir()
+        ):
             return candidate
     raise RuntimeError(f"Unable to find repository root from {start}")
 

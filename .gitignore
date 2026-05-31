@@ -6,6 +6,7 @@ out/
 .pre-commit-config.yaml
 .worktrees/
 coverage/
+!demo/next/app/coverage/
 .rag/
 .remote-ci/
 .interop-logs/

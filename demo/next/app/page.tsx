@@ -1,7 +1,6 @@
 import Image from 'next/image';
-import Link from 'next/link';
 
-import { DemoNav, demoViews } from '@/components/demo-nav';
+import { DemoNav } from '@/components/demo-nav';
 
 export default function Home() {
   return (
@@ -19,17 +18,6 @@ export default function Home() {
             , from Prompt to Packet.
           </span>
         </h1>
-        <div className="mt-8 flex w-full max-w-[660px] flex-wrap items-center justify-center gap-2.5 sm:mt-9" aria-label="Feature links">
-          {demoViews.slice(0, 3).map((view) => (
-            <Link
-              key={view.href}
-              className="inline-flex min-h-11 min-w-[148px] items-center justify-center rounded-[var(--radius)] border border-[var(--line-strong)] bg-[var(--surface)] px-5 text-sm font-semibold text-[var(--ink)] no-underline transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[var(--primary)] hover:text-white focus-visible:border-[var(--primary)] focus-visible:bg-[var(--primary)] focus-visible:text-white max-sm:w-full"
-              href={view.href}
-            >
-              {view.label}
-            </Link>
-          ))}
-        </div>
       </section>
 
       <footer className="text-center font-mono text-xs font-medium text-[var(--muted)]">Hosted by CoQUIC</footer>

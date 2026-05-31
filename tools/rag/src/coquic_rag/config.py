@@ -7,7 +7,10 @@ from pathlib import Path
 
 def discover_repo_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
-        if (candidate / "build.zig").is_file() and (candidate / "docs" / "rfc").is_dir():
+        if (
+            (candidate / "build.zig").is_file()
+            and (candidate / "references" / "rfc").is_dir()
+        ):
             return candidate
     raise RuntimeError(f"Unable to find repository root from {start}")
 
@@ -33,7 +36,7 @@ class ProjectPaths:
         repo_root = discover_repo_root(Path(__file__).resolve().parent)
         return cls(
             repo_root=repo_root,
-            rfc_source=repo_root / "docs" / "rfc",
+            rfc_source=repo_root / "references" / "rfc",
             state_dir=repo_root / ".rag",
             model_cache_dir=repo_root / ".rag" / "cache" / "models",
             qdrant_url=os.getenv("COQUIC_QDRANT_URL"),

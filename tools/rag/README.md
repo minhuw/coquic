@@ -4,7 +4,7 @@ This directory contains the local Python tooling for the QUIC specification
 knowledge base.
 
 Current scope:
-- index mixed RFC and Internet-Draft text from `docs/rfc`
+- index mixed RFC and Internet-Draft text from `references/rfc`
 - store generated local state under `.rag`
 - expose query tooling through a repo-local Codex skill and CLI
 - share one localhost-only Qdrant dev backend across multiple Codex sessions
@@ -19,8 +19,8 @@ uv run --project tools/rag pytest
 Build or rebuild the local index from the mixed specification corpus:
 
 ```bash
-uv run --project tools/rag python -m coquic_rag.cli.main build-index --source docs/rfc --state-dir .rag
-uv run --project tools/rag python -m coquic_rag.cli.main doctor --source docs/rfc --state-dir .rag
+uv run --project tools/rag python -m coquic_rag.cli.main build-index --source references/rfc --state-dir .rag
+uv run --project tools/rag python -m coquic_rag.cli.main doctor --source references/rfc --state-dir .rag
 ```
 
 The default embedding model is `sentence-transformers/all-MiniLM-L6-v2`, stored under `.rag/cache/models`.
@@ -42,8 +42,8 @@ The repo-root wrappers default `COQUIC_QDRANT_URL` to
 that environment variable yourself:
 
 ```bash
-tools/rag/scripts/build-index --source docs/rfc --state-dir .rag
-tools/rag/scripts/query-rag doctor --source docs/rfc --state-dir .rag
+tools/rag/scripts/build-index --source references/rfc --state-dir .rag
+tools/rag/scripts/query-rag doctor --source references/rfc --state-dir .rag
 ```
 
 Common query commands:

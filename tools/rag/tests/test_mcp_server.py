@@ -38,7 +38,7 @@ This section describes structured logging for network protocol analysis.
 def _copy_query_fixtures(source_dir: Path) -> None:
     source_dir.mkdir(parents=True, exist_ok=True)
     for filename in ("rfc9000.txt", "rfc9369.txt"):
-        shutil.copyfile(Path("docs/rfc") / filename, source_dir / filename)
+        shutil.copyfile(Path("references/rfc") / filename, source_dir / filename)
     (source_dir / "draft-ietf-quic-qlog-main-schema-13.txt").write_text(
         _DRAFT_FIXTURE_TEXT,
         encoding="utf-8",

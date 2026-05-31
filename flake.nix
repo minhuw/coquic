@@ -1556,7 +1556,7 @@ EOF
         text = ''
           search_dir="$PWD"
           while true; do
-            if [ -f "$search_dir/build.zig" ] && [ -d "$search_dir/docs/rfc" ]; then
+            if [ -f "$search_dir/build.zig" ] && [ -d "$search_dir/references/rfc" ]; then
               exec "$search_dir/tools/rag/scripts/qdrant-dev" "$@"
             fi
             if [ "$search_dir" = "/" ]; then

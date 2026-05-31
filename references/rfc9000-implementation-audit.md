@@ -3,7 +3,7 @@
 Date: 2026-05-13
 
 Scope: RFC 9000, "QUIC: A UDP-Based Multiplexed and Secure Transport", as
-indexed from `docs/rfc/rfc9000.txt`. This is a source inspection audit and
+indexed from `references/rfc/rfc9000.txt`. This is a source inspection audit and
 implementation tracker, not a formal conformance certification.
 
 Method: I read RFC 9000 in document order using the repo-local QUIC RAG index

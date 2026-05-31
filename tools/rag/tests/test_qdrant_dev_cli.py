@@ -14,7 +14,7 @@ SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "qdrant-dev"
 
 def _make_repo_root(tmp_path: Path, name: str = "repo") -> Path:
     repo_root = tmp_path / name
-    (repo_root / "docs" / "rfc").mkdir(parents=True)
+    (repo_root / "references" / "rfc").mkdir(parents=True)
     (repo_root / "build.zig").write_text("", encoding="utf-8")
     return repo_root
 

@@ -9,7 +9,7 @@ local RAG indexes them together by generic document identifier such as
 - Source selection: `https://quicwg.org/`
 - RFC text source: `https://www.rfc-editor.org/rfc/`
 - Internet-Draft text source: `https://www.ietf.org/archive/id/`
-- Machine-readable index: `docs/rfc/manifest.json`
+- Machine-readable index: `references/rfc/manifest.json`
 
 Included documents:
 

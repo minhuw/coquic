@@ -30,7 +30,7 @@ if is_same_or_descendant "${output_dir}" "${next_dir}" || is_same_or_descendant 
   exit 1
 fi
 
-for required_next_file in index.html workbench.html perf-comparison.html interop-results.html coverage-results.html performance.html interop.html coverage.html coquic-logo.svg quic-demo.js perf-comparison.js interop-results.js coverage-results.js; do
+for required_next_file in index.html docs.html workbench.html perf-comparison.html interop-results.html coverage-results.html performance.html interop.html coverage.html coquic-logo.svg quic-demo.js perf-comparison.js interop-results.js coverage-results.js; do
   if [[ ! -f "${next_dir}/${required_next_file}" ]]; then
     echo "next demo export is missing ${required_next_file}: ${next_dir}" >&2
     exit 1

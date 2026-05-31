@@ -190,7 +190,7 @@ def _add_runtime_args(
     *,
     include_embedder: bool = False,
 ) -> None:
-    parser.add_argument("--source", default="docs/rfc")
+    parser.add_argument("--source", default="references/rfc")
     parser.add_argument("--state-dir", default=".rag")
     parser.add_argument("--collection-name", default="quic_sections")
     if include_embedder:

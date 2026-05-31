@@ -10,7 +10,7 @@ questions in `coquic`.
 
 ## When to Use
 
-- QUIC RFC or Internet-Draft questions grounded in `docs/rfc/`
+- QUIC RFC or Internet-Draft questions grounded in `references/rfc/`
 - Requests for exact section lookups or document citations
 - Questions about frames, transport parameters, packet formats, recovery, congestion control, version negotiation, or error codes
 
@@ -18,7 +18,7 @@ questions in `coquic`.
 
 1. Check readiness:
    - `nix run .#qdrant-dev -- status`
-   - `tools/rag/scripts/query-rag doctor --source docs/rfc --state-dir .rag`
+   - `tools/rag/scripts/query-rag doctor --source references/rfc --state-dir .rag`
 2. If the shared backend is unavailable, run `nix run .#qdrant-dev -- start` and retry once.
 3. Use the smallest fitting query:
    - `tools/rag/scripts/query-rag get-section --doc rfc9000 --section-id 18.2`
@@ -28,7 +28,7 @@ questions in `coquic`.
    - `tools/rag/scripts/query-rag related-sections --doc rfc9369 --section-id 5`
    - `tools/rag/scripts/query-rag search-sections "ACK frame behavior" --top-k 5`
 4. Cite the document IDs and section IDs from command output in the final answer.
-5. If the index is not ready, rebuild it with `tools/rag/scripts/build-index --source docs/rfc --state-dir .rag`.
+5. If the index is not ready, rebuild it with `tools/rag/scripts/build-index --source references/rfc --state-dir .rag`.
 
 ## Don't Use
 

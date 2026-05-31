@@ -1845,13 +1845,16 @@ bool runtime_misc_internal_coverage_for_tests() {
     };
 
     bool ok = true;
-    const auto check = [&](std::string_view label, bool condition) {
-        if (!condition) {
-            std::cerr << "runtime_misc_internal_coverage_for_tests failed: " << label << '\n';
-            ok = false;
+    struct RuntimeMiscInternalCheck {
+        bool &ok;
+        bool operator()(std::string_view label, bool condition) const {
+            if (!condition) {
+                std::cerr << "runtime_misc_internal_coverage_for_tests failed: " << label << '\n';
+                ok = false;
+            }
+            return condition;
         }
-        return condition;
-    };
+    } check{ok};
 
     {
         static_cast<void>(::setenv("COQUIC_RUNTIME_MISC_RESTORE", "seed", 1));
@@ -2377,11 +2380,13 @@ bool runtime_misc_internal_coverage_for_tests() {
 
 bool runtime_additional_internal_coverage_for_tests() {
     bool ok = true;
-    const auto check = [&](std::string_view label, bool condition) {
-        static_cast<void>(label);
-        ok &= condition;
-        return condition;
-    };
+    struct RuntimeAdditionalInternalCheck {
+        bool &ok;
+        bool operator()(std::string_view, bool condition) const {
+            ok &= condition;
+            return condition;
+        }
+    } check{ok};
 
     check("empty transfer requests do not trigger migration",
           !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{

@@ -51,13 +51,17 @@ TEST(QuicCoreTest, CorruptedOneRttRequestWithPendingPostHandshakeDataDoesNotBrea
     connection.process_inbound_datagram(request_datagram, coquic::quic::test::test_time(2));
     EXPECT_FALSE(connection.has_failed());
 
-    const auto received = connection.take_received_stream_data();
-    ASSERT_TRUE(received.has_value());
-    const auto &received_value = optional_ref_or_terminate(received);
-    EXPECT_EQ(received_value.stream_id, 0u);
-    EXPECT_EQ(received_value.bytes,
-              coquic::quic::test::bytes_from_string("GET /toasty-vibrant-mesprit\r\n"));
-    EXPECT_TRUE(received_value.fin);
+    const auto received_value = optional_value_or_terminate(connection.take_received_stream_data());
+    if (received_value.stream_id != 0u) {
+        ADD_FAILURE() << "unexpected received stream id";
+    }
+    if (received_value.bytes !=
+        coquic::quic::test::bytes_from_string("GET /toasty-vibrant-mesprit\r\n")) {
+        ADD_FAILURE() << "unexpected received stream bytes";
+    }
+    if (!received_value.fin) {
+        ADD_FAILURE() << "received stream did not carry FIN";
+    }
 }
 
 TEST(QuicCoreTest, ApplicationSendRetransmitsLostDataWithoutConnectionCredit) {
@@ -81,11 +85,20 @@ TEST(QuicCoreTest, ApplicationSendRetransmitsLostDataWithoutConnectionCredit) {
 
     const auto retransmitted = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
 
-    ASSERT_FALSE(retransmitted.empty());
+    if (retransmitted.empty()) {
+        ADD_FAILURE() << "missing retransmitted stream datagram";
+        return;
+    }
     const auto packets = decode_sender_datagram(connection, retransmitted);
-    ASSERT_EQ(packets.size(), 1u);
+    if (packets.size() != 1u) {
+        ADD_FAILURE() << "unexpected retransmitted packet count";
+        return;
+    }
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
-    ASSERT_NE(application, nullptr);
+    if (application == nullptr) {
+        ADD_FAILURE() << "retransmitted datagram was not a 1-RTT packet";
+        return;
+    }
 
     bool saw_stream = false;
     for (const auto &frame : application->frames) {
@@ -95,11 +108,17 @@ TEST(QuicCoreTest, ApplicationSendRetransmitsLostDataWithoutConnectionCredit) {
         }
 
         saw_stream = true;
-        EXPECT_EQ(stream->stream_id, 0u);
-        EXPECT_EQ(coquic::quic::test::string_from_bytes(stream->stream_data), "hello");
+        if (stream->stream_id != 0u) {
+            ADD_FAILURE() << "retransmitted stream used the wrong id";
+        }
+        if (coquic::quic::test::string_from_bytes(stream->stream_data) != "hello") {
+            ADD_FAILURE() << "retransmitted stream used the wrong bytes";
+        }
     }
 
-    EXPECT_TRUE(saw_stream);
+    if (!saw_stream) {
+        ADD_FAILURE() << "missing retransmitted stream frame";
+    }
 }
 
 TEST(QuicCoreTest, AckGapsRetransmitLostOffsetsBeforeFreshData) {
@@ -195,13 +214,22 @@ TEST(QuicCoreTest, AckGapsRetransmitLostOffsetsBeforeFreshData) {
 
     const auto repaired_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
-    ASSERT_FALSE(repaired_datagram.empty());
+    if (repaired_datagram.empty()) {
+        ADD_FAILURE() << "missing repaired stream datagram";
+        return;
+    }
 
     const auto repaired_packets = decode_sender_datagram(connection, repaired_datagram);
-    ASSERT_EQ(repaired_packets.size(), 1u);
+    if (repaired_packets.size() != 1u) {
+        ADD_FAILURE() << "unexpected repaired packet count";
+        return;
+    }
     const auto *application =
         std::get_if<coquic::quic::ProtectedOneRttPacket>(&repaired_packets[0]);
-    ASSERT_NE(application, nullptr);
+    if (application == nullptr) {
+        ADD_FAILURE() << "repaired datagram was not a 1-RTT packet";
+        return;
+    }
 
     std::vector<std::uint64_t> repaired_offsets;
     for (const auto &frame : application->frames) {
@@ -210,13 +238,23 @@ TEST(QuicCoreTest, AckGapsRetransmitLostOffsetsBeforeFreshData) {
             continue;
         }
 
-        ASSERT_TRUE(stream->offset.has_value());
+        if (!stream->offset.has_value()) {
+            ADD_FAILURE() << "repaired stream frame did not carry an offset";
+            return;
+        }
         repaired_offsets.push_back(optional_value_or_terminate(stream->offset));
     }
 
-    ASSERT_FALSE(repaired_offsets.empty());
-    EXPECT_EQ(repaired_offsets.front(), optional_value_or_terminate(first_lost_offset));
-    EXPECT_NE(repaired_offsets.front(), next_unsent_offset);
+    if (repaired_offsets.empty()) {
+        ADD_FAILURE() << "repaired datagram did not carry stream data";
+        return;
+    }
+    if (repaired_offsets.front() != optional_value_or_terminate(first_lost_offset)) {
+        ADD_FAILURE() << "repaired datagram did not send the first lost offset first";
+    }
+    if (repaired_offsets.front() == next_unsent_offset) {
+        ADD_FAILURE() << "repaired datagram sent fresh data before lost data";
+    }
 }
 
 TEST(QuicCoreTest, ApplicationSendRemainsContiguousAfterAcknowledgingInitialFlight) {
@@ -243,9 +281,14 @@ TEST(QuicCoreTest, ApplicationSendRemainsContiguousAfterAcknowledgingInitialFlig
                 continue;
             }
 
-            ASSERT_TRUE(stream->offset.has_value());
+            if (!stream->offset.has_value()) {
+                ADD_FAILURE() << "stream frame did not carry an offset";
+                return;
+            }
             const auto stream_offset = optional_value_or_terminate(stream->offset);
-            EXPECT_EQ(stream_offset, expected_offset);
+            if (stream_offset != expected_offset) {
+                ADD_FAILURE() << "stream send offset was not contiguous";
+            }
             expected_offset += static_cast<std::uint64_t>(stream->stream_data.size());
         }
 
@@ -272,16 +315,33 @@ TEST(QuicCoreTest, ApplicationSendRemainsContiguousAfterAcknowledgingInitialFlig
 
     const auto resumed_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
-    ASSERT_FALSE(resumed_datagram.empty());
+    if (resumed_datagram.empty()) {
+        ADD_FAILURE() << "missing resumed stream datagram";
+        return;
+    }
     const auto resumed_packets = decode_sender_datagram(connection, resumed_datagram);
-    ASSERT_EQ(resumed_packets.size(), 1u);
+    if (resumed_packets.size() != 1u) {
+        ADD_FAILURE() << "unexpected resumed packet count";
+        return;
+    }
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&resumed_packets[0]);
-    ASSERT_NE(application, nullptr);
+    if (application == nullptr) {
+        ADD_FAILURE() << "resumed datagram was not a 1-RTT packet";
+        return;
+    }
 
     const auto *stream = std::get_if<coquic::quic::StreamFrame>(&application->frames.back());
-    ASSERT_NE(stream, nullptr);
-    ASSERT_TRUE(stream->offset.has_value());
-    EXPECT_EQ(optional_value_or_terminate(stream->offset), expected_offset);
+    if (stream == nullptr) {
+        ADD_FAILURE() << "resumed datagram did not end with a stream frame";
+        return;
+    }
+    if (!stream->offset.has_value()) {
+        ADD_FAILURE() << "resumed stream frame did not carry an offset";
+        return;
+    }
+    if (optional_value_or_terminate(stream->offset) != expected_offset) {
+        ADD_FAILURE() << "resumed datagram did not continue at the expected offset";
+    }
 }
 
 TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {

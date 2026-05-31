@@ -48,8 +48,14 @@ jobs:
       - name: Smoke wasm QUIC demo
         run: node scripts/wasm-quic-smoke.mjs zig-out/share/wasm-quic/coquic-wasm-quic.wasm
 
-      - name: Package wasm demo site
-        run: demo/deploy/package-demo.sh "${RUNNER_TEMP}/demo-site" "$(pwd)/zig-out/share/wasm-quic"
+      - name: Build Next.js demo
+        working-directory: demo/next
+        run: |
+          npm install
+          npm run build
+
+      - name: Package demo site
+        run: demo/deploy/package-demo.sh "${RUNNER_TEMP}/demo-site" "$(pwd)/zig-out/share/wasm-quic" "$(pwd)/demo/next/out"
 
       - name: Configure SSH
         env:

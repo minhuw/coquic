@@ -1,0 +1,24 @@
+{
+  "scripts": {
+    "predev": "node scripts/link-public-assets.mjs",
+    "dev": "next dev --hostname 127.0.0.1 --port 3000",
+    "prebuild": "node scripts/link-public-assets.mjs",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 3000"
+  },
+  "dependencies": {
+    "next": "16.2.6",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.1",
+    "@types/react": "19.2.15",
+    "typescript": "6.0.3"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.15"
+    }
+  }
+}

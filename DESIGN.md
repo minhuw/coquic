@@ -196,8 +196,7 @@ Do not:
 - Root design source: this `DESIGN.md`.
 - Packaging must include `demo-theme.css`.
 - When changing UI, run:
-  - `bash tests/nix/demo_package_contract_test.sh`
-  - `bash tests/nix/demo_layout_contract_test.sh`
+  - `npm --prefix demo/next run build`
   - `node --check demo/wasm-quic/perf-comparison.js`
   - `node --check demo/wasm-quic/interop-results.js`
   - `git diff --check`

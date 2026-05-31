@@ -9,20 +9,6 @@ permissions:
   contents: read
 
 jobs:
-  perf-contract:
-    name: Perf Harness Contract
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Perf Harness Contract
-        run: bash tests/nix/perf_harness_test.sh
-
   perf-impl:
     name: ${{ matrix.display_name }} Perf
     runs-on: ubuntu-latest

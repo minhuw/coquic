@@ -17,3 +17,5 @@
 !zig-out/share/
 !zig-out/share/wasm-quic/
 !zig-out/share/wasm-quic/**
+!zig-out/demo-site/
+!zig-out/demo-site/**

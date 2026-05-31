@@ -5,12 +5,19 @@ This document covers the remote continuous deployment flow for the public
 
 ## Repo Layout
 
-- `demo/wasm-quic/` is the current repo-owned browser demo source.
+- `demo/next/` is the framework-backed browser demo source. It owns the
+  homepage, workbench, performance, interop, and coverage HTML routes.
+- `demo/wasm-quic/` contains browser runtime assets used by those routes:
+  shared theme/logo files, dashboard scripts, benchmark snapshots, and the
+  installed WASM module.
 - `demo/h3-server/Dockerfile` is the optional container wrapper for serving
-  the built `h3-server` binary and wasm demo assets.
+  the built `h3-server` binary and packaged demo assets.
 - `zig build wasm-quic` writes the deployable document root to
   `zig-out/share/wasm-quic/`, including `coquic-wasm-quic.wasm`.
-- `demo/deploy/package-demo.sh` packages the built wasm demo document root.
+- `npm --prefix demo/next run build` writes the Next.js static export to
+  `demo/next/out/`.
+- `demo/deploy/package-demo.sh` packages the built wasm runtime assets, then
+  overlays the Next.js HTML routes and `_next/` assets.
 - `demo/deploy/deploy-remote.sh` uploads the built binary, prepared site
   directory, and TLS material to the remote host.
 - `demo/deploy/coquic-demo.service` is the systemd unit installed on the
@@ -25,8 +32,12 @@ This document covers the remote continuous deployment flow for the public
   summary and the full LLVM coverage HTML report into the live demo site after
   `main` branch test runs.
 
-The current workflow builds the wasm demo first, then packages
-`zig-out/share/wasm-quic/`. The deploy script accepts any prepared document-root
+The current workflow builds the wasm demo first, builds the Next.js static
+export, then packages `zig-out/share/wasm-quic/` with the exported Next.js
+HTML routes and `_next/` assets from `demo/next/out/`. The deploy script keeps
+the built wasm runtime assets authoritative for JavaScript, CSS, images, data,
+and `coquic-wasm-quic.wasm` so a Next public symlink cannot overwrite the
+fresh build output. The deploy script accepts any prepared document-root
 directory as its second argument, so the remote release layout stays stable.
 
 ## GitHub Actions Inputs
@@ -123,7 +134,9 @@ Local packaging:
 
 ```bash
 nix develop -c zig build wasm-quic -Doptimize=ReleaseSmall --summary all
-demo/deploy/package-demo.sh "${RUNNER_TEMP:-/tmp}/demo-site" "$(pwd)/zig-out/share/wasm-quic"
+npm --prefix demo/next install
+npm --prefix demo/next run build
+demo/deploy/package-demo.sh "${RUNNER_TEMP:-/tmp}/demo-site" "$(pwd)/zig-out/share/wasm-quic" "$(pwd)/demo/next/out"
 ```
 
 Manual CI-style deployment from a prepared workspace:
@@ -131,6 +144,27 @@ Manual CI-style deployment from a prepared workspace:
 ```bash
 demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "/path/to/site-dir"
 ```
+
+## Next.js Reverse Proxy Mode
+
+`h3-server` can also serve as an HTTP/3 edge in front of a running Next.js
+server:
+
+```bash
+npm --prefix demo/next run dev
+./zig-out/bin/h3-server \
+  --host 127.0.0.1 \
+  --port 4433 \
+  --bootstrap-port 4433 \
+  --reverse-proxy http://127.0.0.1:3000 \
+  --certificate-chain tests/fixtures/quic-server-cert.pem \
+  --private-key tests/fixtures/quic-server-key.pem
+```
+
+The proxy target must currently be an `http://HOST:PORT` origin. CoQUIC
+terminates TLS and HTTP/3, forwards requests to the upstream over HTTP/1.1, and
+returns buffered upstream responses to the QUIC client. The static export path
+remains the production deploy path.
 
 ## Manual Certificate Refresh
 

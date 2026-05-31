@@ -1,0 +1,278 @@
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-width: 320px;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+      }
+
+      h1,
+      h2,
+      p {
+        margin: 0;
+      }
+
+      .interop-main {
+        width: min(100%, 1340px);
+        margin: 0 auto;
+      }
+
+      .interop-shell {
+        margin-top: 22px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        overflow: hidden;
+      }
+
+      .interop-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .interop-head p {
+        margin-top: 5px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      .interop-legend {
+        display: inline-flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .interop-legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 26px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+
+      .interop-legend i {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: var(--legend-color);
+      }
+
+      .compat-wrap {
+        overflow: auto;
+      }
+
+      .compat-matrix {
+        width: max-content;
+        min-width: 100%;
+        border-collapse: collapse;
+        table-layout: auto;
+      }
+
+      .compat-matrix th,
+      .compat-matrix td {
+        padding: 10px;
+        border-bottom: 1px solid var(--line);
+        border-right: 1px solid var(--line);
+        text-align: center;
+        vertical-align: middle;
+        white-space: nowrap;
+      }
+
+      .compat-matrix th:last-child,
+      .compat-matrix td:last-child {
+        border-right: 0;
+      }
+
+      .compat-matrix thead th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        background: var(--surface);
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+
+      .compat-matrix th:nth-child(n + 4),
+      .compat-matrix td:nth-child(n + 4) {
+        width: 82px;
+        min-width: 82px;
+        max-width: 82px;
+      }
+
+      .compat-matrix thead th:nth-child(n + 4) {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .compat-matrix .row-status-column {
+        position: sticky;
+        left: 0;
+        z-index: 2;
+        background: var(--surface);
+        width: 82px;
+        min-width: 82px;
+        max-width: 82px;
+      }
+
+      .compat-matrix .corner,
+      .compat-matrix .participant-name {
+        position: sticky;
+        left: 82px;
+        z-index: 2;
+        background: var(--surface);
+        text-align: left;
+        width: 154px;
+        min-width: 154px;
+        max-width: 154px;
+      }
+
+      .compat-matrix .participant-name {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      .compat-matrix .server-column {
+        position: sticky;
+        left: 236px;
+        z-index: 2;
+        background: var(--surface);
+        border-right: 2px solid var(--line-strong);
+        text-align: left;
+        width: 154px;
+        min-width: 154px;
+        max-width: 154px;
+      }
+
+      .participant-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        width: 100%;
+        min-height: 28px;
+        padding: 5px 8px;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .participant-chip img,
+      .participant-fallback {
+        width: 20px;
+        height: 20px;
+        flex: 0 0 auto;
+        border-radius: 5px;
+      }
+
+      .participant-chip img {
+        object-fit: cover;
+      }
+
+      .participant-fallback {
+        display: inline-grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 9px;
+        font-weight: 600;
+        line-height: 1;
+      }
+
+      .participant-chip img + .participant-fallback {
+        display: none;
+      }
+
+      .participant-chip strong {
+        min-width: 0;
+        overflow: hidden;
+        font: inherit;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .participant-chip.coquic {
+        border-color: rgba(15, 98, 254, 0.28);
+        background: #edf5ff;
+        color: var(--client);
+        font-family: var(--mono);
+      }
+
+      .test-cell {
+        display: inline-grid;
+        place-items: center;
+        min-width: 58px;
+        min-height: 30px;
+        padding: 7px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-2);
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1;
+        text-transform: uppercase;
+      }
+
+      .test-cell.succeeded {
+        border-color: rgba(31, 138, 101, 0.28);
+        background: #edf8f4;
+        color: var(--ok);
+      }
+
+      .test-cell.unsupported {
+        border-color: rgba(192, 133, 50, 0.3);
+        background: #fcf4d6;
+        color: var(--warning);
+      }
+
+      .test-cell.failed {
+        border-color: rgba(207, 45, 86, 0.28);
+        background: #fff1f1;
+        color: var(--danger);
+      }
+
+      .test-cell.unknown {
+        color: var(--muted);
+      }
+
+      .test-cell.row-status {
+        min-width: 50px;
+      }
+
+      .empty-cell {
+        padding: 18px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 12px;
+        text-align: left;
+      }
+
+      @media (max-width: 680px) {
+        .interop-head {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .interop-legend {
+          justify-content: flex-start;
+        }
+      }

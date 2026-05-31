@@ -1,0 +1,231 @@
+    <main>
+      <nav class="top-nav" aria-label="Demo views">
+        <a class="top-nav-home" href="/" aria-label="Home">
+          <img src="/coquic-logo.svg" alt="" aria-hidden="true">
+        </a>
+        <span class="top-nav-links">
+          <a href="/workbench" aria-current="page">Workbench</a>
+          <a href="/performance">Performance</a>
+          <a href="/interop">Interop</a>
+          <a href="/coverage">Coverage</a>
+          <a class="repo-link" href="https://github.com/minhuw/coquic" target="_blank" rel="noopener noreferrer" aria-label="CoQUIC on GitHub">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M12 .5C5.73.5.96 5.27.96 11.54c0 4.88 3.17 9.01 7.57 10.46.55.1.75-.24.75-.53v-1.87c-3.08.67-3.73-1.33-3.73-1.33-.5-1.28-1.23-1.62-1.23-1.62-1.01-.69.08-.68.08-.68 1.11.08 1.7 1.14 1.7 1.14.99 1.69 2.59 1.2 3.22.92.1-.72.39-1.2.7-1.48-2.46-.28-5.04-1.23-5.04-5.48 0-1.21.43-2.2 1.14-2.98-.11-.28-.49-1.41.11-2.94 0 0 .93-.3 3.04 1.14.88-.24 1.83-.37 2.77-.37s1.89.13 2.77.37c2.11-1.44 3.04-1.14 3.04-1.14.6 1.53.22 2.66.11 2.94.71.78 1.14 1.77 1.14 2.98 0 4.26-2.59 5.19-5.05 5.47.4.34.75 1.01.75 2.04v3.02c0 .29.2.64.76.53 4.39-1.45 7.56-5.58 7.56-10.46C23.04 5.27 18.27.5 12 .5Z"></path>
+            </svg>
+          </a>
+        </span>
+      </nav>
+      <header>
+        <div>
+          <span class="eyebrow">wasm QUIC laboratory</span>
+          <h1>CoQUIC Protocol Workbench</h1>
+        </div>
+      </header>
+
+      <section class="packet-stage" aria-label="QUIC packet exchange">
+        <div class="stage-node stage-client">
+          <span>C</span>
+          <strong>Client</strong>
+          <small>browser endpoint</small>
+        </div>
+        <div id="packet-rail" class="packet-rail">
+          <div class="packet-lane c2s"><span>C -> S</span></div>
+          <div class="packet-lane s2c"><span>S -> C</span></div>
+        </div>
+        <div class="stage-node stage-server">
+          <span>S</span>
+          <strong>Server</strong>
+          <small>browser endpoint</small>
+        </div>
+        <div class="stage-controls" aria-label="Debugger controls">
+          <div class="control-timer" aria-live="polite">
+            <span>Global Timer</span>
+            <strong id="global-timer">0ms</strong>
+          </div>
+          <div id="module-state" class="module-state" aria-live="polite">loading wasm</div>
+          <button id="start" class="control-button" type="button" aria-label="Start protocol exchange">
+            <span class="control-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="7 4 19 12 7 20 7 4"></polygon>
+              </svg>
+            </span>
+            <span id="start-label" class="control-label">Start</span>
+          </button>
+          <button id="stop" class="control-button" type="button" aria-label="Stop protocol exchange">
+            <span class="control-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="6" y="6" width="12" height="12"></rect>
+              </svg>
+            </span>
+            <span class="control-label">Stop</span>
+          </button>
+          <button id="step" class="control-button" type="button" aria-label="Step one protocol action">
+            <span class="control-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 4 15 12 5 20 5 4"></polygon>
+                <line x1="19" y1="5" x2="19" y2="19"></line>
+              </svg>
+            </span>
+            <span id="step-label" class="control-label">Step</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="workbench" aria-label="Endpoint diagnostics">
+        <div class="endpoint-grid">
+          <div class="endpoint client">
+            <div class="endpoint-head">
+              <div class="role">C</div>
+              <div class="endpoint-title">
+                <h2>Client Endpoint</h2>
+                <span>active opener</span>
+              </div>
+              <div id="client-endpoint-chip" class="endpoint-chip">no connection</div>
+            </div>
+
+            <div id="client-state-machine" class="state-machine"></div>
+
+            <dl class="mini-stats">
+              <div class="diag-stat"><dt>State</dt><dd id="client-state">idle</dd></div>
+              <div class="diag-stat"><dt>Connection</dt><dd id="client-connection">none</dd></div>
+              <div class="diag-stat"><dt>Wakeup</dt><dd id="client-wakeup">none</dd></div>
+              <div class="diag-stat"><dt>Version</dt><dd id="client-version">none</dd></div>
+              <div class="diag-stat"><dt>Sent</dt><dd id="client-sent">0 / 0B</dd></div>
+              <div class="diag-stat"><dt>Received</dt><dd id="client-received">0 / 0B</dd></div>
+              <div class="diag-stat"><dt>Events</dt><dd id="client-events">0</dd></div>
+              <div class="diag-stat"><dt>Streams</dt><dd id="client-stream-count">0 active</dd></div>
+            </dl>
+
+            <div class="diag-section">
+              <div class="diag-section-head">
+                <h3>Path And Recovery</h3>
+                <span id="client-recovery-caption" class="diag-caption">newreno</span>
+              </div>
+              <dl id="client-path-flags" class="flag-grid"></dl>
+              <dl id="client-recovery" class="recovery-grid"></dl>
+            </div>
+
+            <div class="diag-section">
+              <div class="diag-section-head">
+                <h3>Packet Spaces</h3>
+                <span id="client-packet-caption" class="diag-caption">Initial / Handshake / 1-RTT</span>
+              </div>
+              <div id="client-packet-spaces" class="diag-table-wrap"></div>
+            </div>
+
+            <div class="diag-section">
+              <div class="diag-section-head">
+                <h3>Flow Control</h3>
+                <span class="diag-caption">connection window</span>
+              </div>
+              <dl id="client-flow" class="flow-grid"></dl>
+              <dl id="client-stream-limits" class="stream-limit-grid"></dl>
+            </div>
+
+            <div class="diag-section">
+              <div class="diag-section-head">
+                <h3>Streams</h3>
+                <span id="client-stream-caption" class="diag-caption">none</span>
+              </div>
+              <div id="client-streams" class="diag-table-wrap"></div>
+            </div>
+          </div>
+
+          <div class="endpoint server">
+            <div class="endpoint-head">
+              <div class="role">S</div>
+              <div class="endpoint-title">
+                <h2>Server Endpoint</h2>
+                <span>TLS terminator</span>
+              </div>
+              <div id="server-endpoint-chip" class="endpoint-chip">no connection</div>
+            </div>
+
+            <div id="server-state-machine" class="state-machine"></div>
+
+            <dl class="mini-stats">
+              <div class="diag-stat"><dt>State</dt><dd id="server-state">idle</dd></div>
+              <div class="diag-stat"><dt>Connection</dt><dd id="server-connection">none</dd></div>
+              <div class="diag-stat"><dt>Wakeup</dt><dd id="server-wakeup">none</dd></div>
+              <div class="diag-stat"><dt>Version</dt><dd id="server-version">none</dd></div>
+              <div class="diag-stat"><dt>Sent</dt><dd id="server-sent">0 / 0B</dd></div>
+              <div class="diag-stat"><dt>Received</dt><dd id="server-received">0 / 0B</dd></div>
+              <div class="diag-stat"><dt>Events</dt><dd id="server-events">0</dd></div>
+              <div class="diag-stat"><dt>Streams</dt><dd id="server-stream-count">0 active</dd></div>
+            </dl>
+
+            <div class="diag-section">
+              <div class="diag-section-head">
+                <h3>Path And Recovery</h3>
+                <span id="server-recovery-caption" class="diag-caption">newreno</span>
+              </div>
+              <dl id="server-path-flags" class="flag-grid"></dl>
+              <dl id="server-recovery" class="recovery-grid"></dl>
+            </div>
+
+            <div class="diag-section">
+              <div class="diag-section-head">
+                <h3>Packet Spaces</h3>
+                <span id="server-packet-caption" class="diag-caption">Initial / Handshake / 1-RTT</span>
+              </div>
+              <div id="server-packet-spaces" class="diag-table-wrap"></div>
+            </div>
+
+            <div class="diag-section">
+              <div class="diag-section-head">
+                <h3>Flow Control</h3>
+                <span class="diag-caption">connection window</span>
+              </div>
+              <dl id="server-flow" class="flow-grid"></dl>
+              <dl id="server-stream-limits" class="stream-limit-grid"></dl>
+            </div>
+
+            <div class="diag-section">
+              <div class="diag-section-head">
+                <h3>Streams</h3>
+                <span id="server-stream-caption" class="diag-caption">none</span>
+              </div>
+              <div id="server-streams" class="diag-table-wrap"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="timeline">
+          <h2>Datagram And Event Trace</h2>
+          <div id="log" class="log"></div>
+        </div>
+      </section>
+
+      <section class="packet-inspector" aria-label="Packet capture inspector">
+        <div class="capture-panel">
+          <div class="panel-head">
+            <h2>Packet Log</h2>
+            <div class="panel-actions">
+              <button id="download-pcap" class="panel-button" type="button" disabled>Download PCAP</button>
+              <span id="packet-count">0 captured</span>
+            </div>
+          </div>
+          <div id="packet-list" class="packet-list"></div>
+        </div>
+
+        <span id="packet-selected" hidden>none selected</span>
+        <div id="packet-detail" hidden></div>
+      </section>
+    </main>
+
+    <div id="packet-modal" class="modal-backdrop" aria-hidden="true">
+      <section class="packet-modal" role="dialog" aria-modal="true" aria-labelledby="packet-modal-title">
+        <div class="modal-head">
+          <div>
+            <h2 id="packet-modal-title">Packet Details</h2>
+            <span id="packet-modal-selected">none selected</span>
+          </div>
+          <button id="packet-modal-close" class="modal-close" type="button" aria-label="Close packet details">x</button>
+        </div>
+        <div id="packet-modal-detail" class="packet-detail modal-detail">
+          <p class="empty-detail">Select a packet to inspect its QUIC header, protected payload, and raw bytes.</p>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="./quic-demo.js"></script>

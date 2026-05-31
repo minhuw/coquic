@@ -57,18 +57,6 @@ Adjust the certificate paths to match your local files. If you prefer
 `https://localhost:4433/`, start the server with a certificate that covers
 `localhost` and use a matching host in the URL.
 
-## Automated Preflight
-
-Before opening a browser, run the repo-owned smoke test:
-
-```bash
-nix develop -c bash tests/nix/http3_browser_discovery_test.sh
-```
-
-That test starts `h3-server`, verifies the HTTPS bootstrap response
-advertises `Alt-Svc`, and verifies direct `--http3-only` content retrieval with
-the pinned Nix `curl`.
-
 ## Confirm The Bootstrap Response
 
 Before using a browser, confirm that the HTTPS bootstrap response carries the

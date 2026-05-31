@@ -1,0 +1,1 @@
+../../wasm-quic/perf-comparison.js

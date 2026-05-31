@@ -19,3 +19,6 @@ demo/wasm-quic/perf-results.json
 demo/wasm-quic/perf-history.json
 demo/wasm-quic/coverage-results.json
 coverage-html.tar.gz
+demo/next/.next/
+demo/next/out/
+demo/next/node_modules/

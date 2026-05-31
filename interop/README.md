@@ -163,21 +163,10 @@ INTEROP_DIRECTIONS=both \
 nix develop -c bash interop/run-official.sh
 ```
 
-To run Chromium-as-client against `coquic` as server for the official `http3`
-case only, use the repo-owned wrapper:
-
-```bash
-nix develop -c bash tests/nix/chrome_http3_interop_smoke_test.sh
-```
-
-That wrapper pins the current `martenseemann/chrome-quic-interop-runner`
-digest, forces `INTEROP_TESTCASES=http3`, and forces
-`INTEROP_DIRECTIONS=coquic-server` because the Chrome runner is client-only.
-
-That script builds and loads `coquic-interop:quictls-musl`, pulls the pinned
-official `quic-go`, simulator, and iperf images, and runs the requested
-testcases in both directions. The separate GitHub Actions workflow in
-`.github/workflows/interop.yml` calls the same script.
+The separate GitHub Actions workflow in `.github/workflows/interop.yml` builds
+and loads `coquic-interop:quictls-musl`, pulls the pinned official peer,
+simulator, and iperf images, and runs the requested testcases in both
+directions through `interop/run-official.sh`.
 
 The image verification scripts live under `interop/tests/`.
 

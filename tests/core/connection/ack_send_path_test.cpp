@@ -390,12 +390,12 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
         std::size_t emitted_packets = 0;
         std::uint64_t largest_sent = 0;
         for (;;) {
-            const auto datagram = connection.drain_outbound_datagram(burst_time);
-            if (datagram.empty()) {
+            const auto sent_datagram = connection.drain_outbound_datagram(burst_time);
+            if (sent_datagram.empty()) {
                 break;
             }
 
-            largest_sent = verify_sent_datagram(datagram);
+            largest_sent = verify_sent_datagram(sent_datagram);
             ++emitted_packets;
         }
 
@@ -1503,8 +1503,9 @@ TEST(QuicCoreTest, AckProcessingAccountsForLateAckedEcnPackets) {
     EXPECT_EQ(connection.application_space_.recovery.find_packet(3), nullptr);
     EXPECT_EQ(connection.application_space_.recovery.find_packet(5), nullptr);
     EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
-    EXPECT_FALSE(std::ranges::any_of(tracked_packet_snapshot(connection.application_space_),
-                                     [](const auto &packet) { return packet.declared_lost; }));
+    EXPECT_FALSE(
+        std::ranges::any_of(tracked_packet_snapshot(connection.application_space_),
+                            [](const auto &sent_packet) { return sent_packet.declared_lost; }));
 }
 
 TEST(QuicCoreTest, CompatibilitySentPacketsViewRefreshesAfterRecoveryMetadataMutation) {
@@ -1521,9 +1522,9 @@ TEST(QuicCoreTest, CompatibilitySentPacketsViewRefreshesAfterRecoveryMetadataMut
     ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
     EXPECT_FALSE(tracked_packet_or_terminate(connection.application_space_, 7).qlog_pto_probe);
 
-    auto *packet = connection.application_space_.recovery.find_packet(7);
-    ASSERT_NE(packet, nullptr);
-    packet->qlog_pto_probe = true;
+    auto *recovery_packet = connection.application_space_.recovery.find_packet(7);
+    ASSERT_NE(recovery_packet, nullptr);
+    recovery_packet->qlog_pto_probe = true;
     connection.application_space_.recovery.note_packet_metadata_updated();
 
     EXPECT_TRUE(tracked_packet_or_terminate(connection.application_space_, 7).qlog_pto_probe);
@@ -2076,9 +2077,10 @@ TEST(QuicCoreTest, ServerDefersOneRttDataUntilHandshakeCompletionWhenKeysAlready
     const auto find_packet_datagram_index = [&](std::span<const std::vector<std::byte>> datagrams,
                                                 auto matches_packet) -> std::optional<std::size_t> {
         for (std::size_t index = 0; index < datagrams.size(); ++index) {
-            const auto packets = decode_sender_datagram(*client.connection_, datagrams[index]);
-            for (const auto &packet : packets) {
-                if (matches_packet(packet)) {
+            const auto decoded_packets =
+                decode_sender_datagram(*client.connection_, datagrams[index]);
+            for (const auto &decoded_packet : decoded_packets) {
+                if (matches_packet(decoded_packet)) {
                     return index;
                 }
             }
@@ -2088,12 +2090,12 @@ TEST(QuicCoreTest, ServerDefersOneRttDataUntilHandshakeCompletionWhenKeysAlready
     };
 
     const auto has_handshake_datagram =
-        find_packet_datagram_index(handshake_datagrams, [](const auto &packet) {
-            return std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(packet);
+        find_packet_datagram_index(handshake_datagrams, [](const auto &decoded_packet) {
+            return std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(decoded_packet);
         });
     const auto one_rtt_datagram_index =
-        find_packet_datagram_index(request_datagrams, [](const auto &packet) {
-            return std::holds_alternative<coquic::quic::ProtectedOneRttPacket>(packet);
+        find_packet_datagram_index(request_datagrams, [](const auto &decoded_packet) {
+            return std::holds_alternative<coquic::quic::ProtectedOneRttPacket>(decoded_packet);
         });
     ASSERT_TRUE(has_handshake_datagram.has_value());
     ASSERT_TRUE(one_rtt_datagram_index.has_value());
@@ -2564,10 +2566,10 @@ TEST(QuicCoreTest, LargePartialResponseSchedulesAckAndClearsOutstandingRequest) 
     const auto response_datagrams = coquic::quic::test::send_datagrams_from(response);
     ASSERT_FALSE(response_datagrams.empty());
 
-    EXPECT_TRUE(std::any_of(response_datagrams.begin(), response_datagrams.end(),
-                            [&](const auto &datagram) {
-                                return datagram_has_application_ack(*server.connection_, datagram);
-                            }));
+    EXPECT_TRUE(std::any_of(
+        response_datagrams.begin(), response_datagrams.end(), [&](const auto &response_datagram) {
+            return datagram_has_application_ack(*server.connection_, response_datagram);
+        }));
 
     auto response_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
         response, client, coquic::quic::test::test_time(4));
@@ -2580,9 +2582,10 @@ TEST(QuicCoreTest, LargePartialResponseSchedulesAckAndClearsOutstandingRequest) 
     }
     const auto ack_datagrams = coquic::quic::test::send_datagrams_from(response_delivered);
     EXPECT_FALSE(ack_datagrams.empty());
-    EXPECT_TRUE(std::any_of(ack_datagrams.begin(), ack_datagrams.end(), [&](const auto &datagram) {
-        return datagram_has_application_ack(*client.connection_, datagram);
-    }));
+    EXPECT_TRUE(
+        std::any_of(ack_datagrams.begin(), ack_datagrams.end(), [&](const auto &ack_datagram) {
+            return datagram_has_application_ack(*client.connection_, ack_datagram);
+        }));
 
     ASSERT_TRUE(client.connection_->handshake_confirmed_);
     ASSERT_TRUE(client.connection_->streams_.contains(0));
@@ -2625,14 +2628,16 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
     EXPECT_FALSE(coquic::quic::test::send_datagrams_from(response_delivered).empty());
 
     bool saw_ack = false;
-    const auto note_client_ack = [&](const auto &result) {
-        for (const auto &datagram : coquic::quic::test::send_datagrams_from(result)) {
-            for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
-                const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
-                if (application == nullptr) {
+    const auto note_client_ack = [&](const auto &core_result) {
+        for (const auto &outbound_datagram : coquic::quic::test::send_datagrams_from(core_result)) {
+            for (const auto &decoded_packet :
+                 decode_sender_datagram(*client.connection_, outbound_datagram)) {
+                const auto *one_rtt_packet =
+                    std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded_packet);
+                if (one_rtt_packet == nullptr) {
                     continue;
                 }
-                for (const auto &frame : application->frames) {
+                for (const auto &frame : one_rtt_packet->frames) {
                     saw_ack = saw_ack || std::holds_alternative<coquic::quic::AckFrame>(frame);
                 }
             }
@@ -2667,8 +2672,9 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
 
     const auto sent_packets = tracked_packet_snapshot(client.connection_->application_space_);
     const auto in_flight_application_packets =
-        std::count_if(sent_packets.begin(), sent_packets.end(),
-                      [](const auto &packet) { return packet.ack_eliciting && packet.in_flight; });
+        std::count_if(sent_packets.begin(), sent_packets.end(), [](const auto &sent_packet) {
+            return sent_packet.ack_eliciting && sent_packet.in_flight;
+        });
     ASSERT_LE(in_flight_application_packets, 1);
 
     const auto deadline = client.connection_->next_wakeup();

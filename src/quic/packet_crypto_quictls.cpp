@@ -567,7 +567,7 @@ serialize_retry_pseudo_packet(const RetryPacket &packet,
     return CodecResult<std::vector<std::byte>>::success(std::move(pseudo_packet));
 }
 
-CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
+CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *aead_cipher,
                                                std::span<const std::byte> key,
                                                std::span<const std::byte> nonce,
                                                std::span<const std::byte> associated_data,
@@ -577,10 +577,10 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
     if (!plaintext_length.has_value()) {
         return plaintext_length;
     }
-    const auto invalid_lengths =
+    const auto invalid_aead_lengths =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_length_guard) |
         !fits_openssl_int(nonce.size()) | !fits_openssl_int(associated_data.size());
-    if (invalid_lengths)
+    if (invalid_aead_lengths)
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
     if (ciphertext.size() < plaintext_length.value() + aead_tag_length)
@@ -588,8 +588,8 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
                                                  0);
 
     auto &cache = seal_context_cache();
-    auto *context = prepare_seal_cipher_context(cache, cipher, key, nonce);
-    if (context == nullptr) {
+    auto *seal_context = prepare_seal_cipher_context(cache, aead_cipher, key, nonce);
+    if (seal_context == nullptr) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
     }
@@ -598,7 +598,7 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
     if (!associated_data.empty()) {
         const auto aad_failed =
             consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_aad_update) |
-            (EVP_EncryptUpdate(context, nullptr, &output_length, openssl_data(associated_data),
+            (EVP_EncryptUpdate(seal_context, nullptr, &output_length, openssl_data(associated_data),
                                static_cast<int>(associated_data.size())) <= 0);
         if (aad_failed) {
             reset_cipher_context(cache, PacketCryptoFaultPoint::seal_context_reset);
@@ -614,18 +614,18 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
             continue;
         }
 
-        int produced_length = 0;
+        int chunk_produced_length = 0;
         const auto payload_failed =
             consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_payload_update) |
-            (EVP_EncryptUpdate(context, openssl_data(payload_output.subspan(produced_total)),
-                               &produced_length, openssl_data(chunk.bytes),
+            (EVP_EncryptUpdate(seal_context, openssl_data(payload_output.subspan(produced_total)),
+                               &chunk_produced_length, openssl_data(chunk.bytes),
                                static_cast<int>(chunk.bytes.size())) <= 0);
         if (payload_failed) {
             reset_cipher_context(cache, PacketCryptoFaultPoint::seal_context_reset);
             return CodecResult<std::size_t>::failure(
                 CodecErrorCode::invalid_packet_protection_state, 0);
         }
-        produced_total += static_cast<std::size_t>(produced_length);
+        produced_total += static_cast<std::size_t>(chunk_produced_length);
     }
     if (consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_native_seal)) {
         reset_cipher_context(cache, PacketCryptoFaultPoint::seal_context_reset);
@@ -634,11 +634,11 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
     }
 
     int final_length = 0;
-    const auto final_failed =
+    const auto seal_final_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_final) |
-        (EVP_EncryptFinal_ex(context, openssl_data(payload_output.subspan(produced_total)),
+        (EVP_EncryptFinal_ex(seal_context, openssl_data(payload_output.subspan(produced_total)),
                              &final_length) <= 0);
-    if (final_failed) {
+    if (seal_final_failed) {
         reset_cipher_context(cache, PacketCryptoFaultPoint::seal_context_reset);
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
@@ -649,7 +649,7 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
     std::array<std::byte, aead_tag_length> tag{};
     const auto get_tag_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_get_tag) |
-        (EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_AEAD_GET_TAG, static_cast<int>(tag.size()),
+        (EVP_CIPHER_CTX_ctrl(seal_context, EVP_CTRL_AEAD_GET_TAG, static_cast<int>(tag.size()),
                              openssl_data(std::span<std::byte>{tag})) <= 0);
     if (get_tag_failed) {
         reset_cipher_context(cache, PacketCryptoFaultPoint::seal_context_reset);
@@ -662,36 +662,37 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *cipher,
     return CodecResult<std::size_t>::success(total_ciphertext_length + tag.size());
 }
 
-CodecResult<std::size_t> seal_aead_into(const EVP_CIPHER *cipher, const SealAeadRequest &request) {
+CodecResult<std::size_t> seal_aead_into(const EVP_CIPHER *aead_cipher,
+                                        const SealAeadRequest &request) {
     const std::array chunks{
         PlaintextChunk{
             .bytes = request.plaintext,
         },
     };
-    return seal_aead_chunks_into(cipher, request.key, request.nonce, request.associated_data,
+    return seal_aead_chunks_into(aead_cipher, request.key, request.nonce, request.associated_data,
                                  chunks, request.ciphertext);
 }
 
-CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *cipher,
+CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *aead_cipher,
                                               std::span<const std::byte> key,
                                               std::span<const std::byte> nonce,
                                               std::span<const std::byte> associated_data,
                                               std::span<const std::byte> ciphertext) {
     if (ciphertext.size() < aead_tag_length)
         return crypto_failure(CodecErrorCode::packet_decryption_failed);
-    const auto invalid_lengths =
+    const auto invalid_aead_lengths =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard) |
         !fits_openssl_int(nonce.size()) | !fits_openssl_int(associated_data.size()) |
         !fits_openssl_int(ciphertext.size() - aead_tag_length);
-    if (invalid_lengths)
+    if (invalid_aead_lengths)
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
 
     const auto ciphertext_without_tag = ciphertext.first(ciphertext.size() - aead_tag_length);
     const auto tag = ciphertext.last(aead_tag_length);
 
     auto &cache = open_context_cache();
-    auto *context = prepare_open_cipher_context(cache, cipher, key, nonce);
-    if (context == nullptr) {
+    auto *open_context = prepare_open_cipher_context(cache, aead_cipher, key, nonce);
+    if (open_context == nullptr) {
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
     }
 
@@ -699,7 +700,7 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *cipher,
     if (!associated_data.empty()) {
         const auto aad_failed =
             consume_packet_crypto_fault(PacketCryptoFaultPoint::open_aad_update) |
-            (EVP_DecryptUpdate(context, nullptr, &output_length, openssl_data(associated_data),
+            (EVP_DecryptUpdate(open_context, nullptr, &output_length, openssl_data(associated_data),
                                static_cast<int>(associated_data.size())) <= 0);
         if (aad_failed) {
             reset_cipher_context(cache, PacketCryptoFaultPoint::open_context_reset);
@@ -708,11 +709,11 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *cipher,
     }
 
     std::vector<std::byte> plaintext(ciphertext_without_tag.size());
-    int produced_length = 0;
+    int plaintext_produced_length = 0;
     const auto payload_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::open_payload_update) |
-        (EVP_DecryptUpdate(context, openssl_data(std::span{plaintext}), &produced_length,
-                           openssl_data(ciphertext_without_tag),
+        (EVP_DecryptUpdate(open_context, openssl_data(std::span{plaintext}),
+                           &plaintext_produced_length, openssl_data(ciphertext_without_tag),
                            static_cast<int>(ciphertext_without_tag.size())) <= 0);
     if (payload_failed) {
         reset_cipher_context(cache, PacketCryptoFaultPoint::open_context_reset);
@@ -721,7 +722,7 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *cipher,
 
     const auto set_tag_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::open_set_tag) |
-        (EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_AEAD_SET_TAG, static_cast<int>(tag.size()),
+        (EVP_CIPHER_CTX_ctrl(open_context, EVP_CTRL_AEAD_SET_TAG, static_cast<int>(tag.size()),
                              const_cast<unsigned char *>(openssl_data(tag))) <= 0);
     if (set_tag_failed) {
         reset_cipher_context(cache, PacketCryptoFaultPoint::open_context_reset);
@@ -729,34 +730,33 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *cipher,
     }
 
     int final_length = 0;
-    if (EVP_DecryptFinal_ex(
-            context,
-            openssl_data(std::span{plaintext}.subspan(static_cast<std::size_t>(produced_length))),
-            &final_length) <= 0) {
+    if (EVP_DecryptFinal_ex(open_context,
+                            openssl_data(std::span{plaintext}.subspan(
+                                static_cast<std::size_t>(plaintext_produced_length))),
+                            &final_length) <= 0) {
         reset_cipher_context(cache, PacketCryptoFaultPoint::open_context_reset);
         return crypto_failure(CodecErrorCode::packet_decryption_failed);
     }
 
-    plaintext.resize(static_cast<std::size_t>(produced_length) +
+    plaintext.resize(static_cast<std::size_t>(plaintext_produced_length) +
                      static_cast<std::size_t>(final_length));
     return CodecResult<std::vector<std::byte>>::success(std::move(plaintext));
 }
 
-CodecResult<std::size_t> open_aead_into(const EVP_CIPHER *cipher, std::span<const std::byte> key,
-                                        std::span<const std::byte> nonce,
-                                        std::span<const std::byte> associated_data,
-                                        std::span<const std::byte> ciphertext,
-                                        std::span<std::byte> plaintext) {
+CodecResult<std::size_t>
+open_aead_into(const EVP_CIPHER *aead_cipher, std::span<const std::byte> key,
+               std::span<const std::byte> nonce, std::span<const std::byte> associated_data,
+               std::span<const std::byte> ciphertext, std::span<std::byte> plaintext) {
     if (ciphertext.size() < aead_tag_length) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::packet_decryption_failed, 0);
     }
 
     const auto plaintext_size = ciphertext.size() - aead_tag_length;
-    const auto invalid_lengths =
+    const auto invalid_aead_lengths =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard) |
         !fits_openssl_int(nonce.size()) | !fits_openssl_int(associated_data.size()) |
         !fits_openssl_int(plaintext_size) | (plaintext.size() < plaintext_size);
-    if (invalid_lengths) {
+    if (invalid_aead_lengths) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
     }
@@ -765,8 +765,8 @@ CodecResult<std::size_t> open_aead_into(const EVP_CIPHER *cipher, std::span<cons
     const auto tag = ciphertext.last(aead_tag_length);
 
     auto &cache = open_context_cache();
-    auto *context = prepare_open_cipher_context(cache, cipher, key, nonce);
-    if (context == nullptr) {
+    auto *open_context = prepare_open_cipher_context(cache, aead_cipher, key, nonce);
+    if (open_context == nullptr) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
     }
@@ -775,7 +775,7 @@ CodecResult<std::size_t> open_aead_into(const EVP_CIPHER *cipher, std::span<cons
     if (!associated_data.empty()) {
         const auto aad_failed =
             consume_packet_crypto_fault(PacketCryptoFaultPoint::open_aad_update) |
-            (EVP_DecryptUpdate(context, nullptr, &output_length, openssl_data(associated_data),
+            (EVP_DecryptUpdate(open_context, nullptr, &output_length, openssl_data(associated_data),
                                static_cast<int>(associated_data.size())) <= 0);
         if (aad_failed) {
             reset_cipher_context(cache, PacketCryptoFaultPoint::open_context_reset);
@@ -784,10 +784,10 @@ CodecResult<std::size_t> open_aead_into(const EVP_CIPHER *cipher, std::span<cons
         }
     }
 
-    int produced_length = 0;
+    int plaintext_produced_length = 0;
     const auto payload_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::open_payload_update) |
-        (EVP_DecryptUpdate(context, openssl_data(plaintext), &produced_length,
+        (EVP_DecryptUpdate(open_context, openssl_data(plaintext), &plaintext_produced_length,
                            openssl_data(ciphertext_without_tag),
                            static_cast<int>(ciphertext_without_tag.size())) <= 0);
     if (payload_failed) {
@@ -798,7 +798,7 @@ CodecResult<std::size_t> open_aead_into(const EVP_CIPHER *cipher, std::span<cons
 
     const auto set_tag_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::open_set_tag) |
-        (EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_AEAD_SET_TAG, static_cast<int>(tag.size()),
+        (EVP_CIPHER_CTX_ctrl(open_context, EVP_CTRL_AEAD_SET_TAG, static_cast<int>(tag.size()),
                              const_cast<unsigned char *>(openssl_data(tag))) <= 0);
     if (set_tag_failed) {
         reset_cipher_context(cache, PacketCryptoFaultPoint::open_context_reset);
@@ -808,13 +808,14 @@ CodecResult<std::size_t> open_aead_into(const EVP_CIPHER *cipher, std::span<cons
 
     int final_length = 0;
     if (EVP_DecryptFinal_ex(
-            context, openssl_data(plaintext.subspan(static_cast<std::size_t>(produced_length))),
+            open_context,
+            openssl_data(plaintext.subspan(static_cast<std::size_t>(plaintext_produced_length))),
             &final_length) <= 0) {
         reset_cipher_context(cache, PacketCryptoFaultPoint::open_context_reset);
         return CodecResult<std::size_t>::failure(CodecErrorCode::packet_decryption_failed, 0);
     }
 
-    return CodecResult<std::size_t>::success(static_cast<std::size_t>(produced_length) +
+    return CodecResult<std::size_t>::success(static_cast<std::size_t>(plaintext_produced_length) +
                                              static_cast<std::size_t>(final_length));
 }
 

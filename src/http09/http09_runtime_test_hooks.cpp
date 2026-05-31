@@ -1818,6 +1818,14 @@ bool runtime_registers_all_server_core_connection_ids_for_tests() {
         /*include_preferred_address=*/true);
 }
 
+bool runtime_misc_internal_coverage_check(bool &ok, std::string_view label, bool condition) {
+    if (!condition) {
+        std::cerr << "runtime_misc_internal_coverage_for_tests failed: " << label << '\n';
+        ok = false;
+    }
+    return condition;
+}
+
 bool runtime_misc_internal_coverage_for_tests() {
     struct ScopedEnvVar {
         std::string name;
@@ -1845,37 +1853,35 @@ bool runtime_misc_internal_coverage_for_tests() {
     };
 
     bool ok = true;
-    const auto check = [&](std::string_view label, bool condition) {
-        if (!condition) {
-            std::cerr << "runtime_misc_internal_coverage_for_tests failed: " << label << '\n';
-            ok = false;
-        }
-        return condition;
-    };
 
     {
         static_cast<void>(::setenv("COQUIC_RUNTIME_MISC_RESTORE", "seed", 1));
         {
             ScopedEnvVar unset_existing("COQUIC_RUNTIME_MISC_RESTORE", std::nullopt);
-            check("scoped env clears existing variable",
-                  std::getenv("COQUIC_RUNTIME_MISC_RESTORE") == nullptr);
+            runtime_misc_internal_coverage_check(ok, "scoped env clears existing variable",
+                                                 std::getenv("COQUIC_RUNTIME_MISC_RESTORE") ==
+                                                     nullptr);
         }
-        check("scoped env restores previous variable",
-              getenv_string("COQUIC_RUNTIME_MISC_RESTORE").value_or("") == "seed");
+        runtime_misc_internal_coverage_check(
+            ok, "scoped env restores previous variable",
+            getenv_string("COQUIC_RUNTIME_MISC_RESTORE").value_or("") == "seed");
         static_cast<void>(::unsetenv("COQUIC_RUNTIME_MISC_RESTORE"));
     }
 
-    static_cast<void>(check("expected diagnostic path", false));
+    static_cast<void>(runtime_misc_internal_coverage_check(ok, "expected diagnostic path", false));
     ok = true;
 
     sockaddr_storage invalid_address{};
     invalid_address.ss_family = AF_UNSPEC;
-    check("format trace empty length", format_sockaddr_for_trace(invalid_address, 0) == "-");
-    check("format trace invalid family",
-          format_sockaddr_for_trace(invalid_address, sizeof(invalid_address)) == "-");
+    runtime_misc_internal_coverage_check(ok, "format trace empty length",
+                                         format_sockaddr_for_trace(invalid_address, 0) == "-");
+    runtime_misc_internal_coverage_check(
+        ok, "format trace invalid family",
+        format_sockaddr_for_trace(invalid_address, sizeof(invalid_address)) == "-");
 
-    check("empty host unspecified", host_is_unspecified(""));
-    check("named host not unspecified", !host_is_unspecified("interop-server-host"));
+    runtime_misc_internal_coverage_check(ok, "empty host unspecified", host_is_unspecified(""));
+    runtime_misc_internal_coverage_check(ok, "named host not unspecified",
+                                         !host_is_unspecified("interop-server-host"));
 
     {
         ScopedEnvVar empty_hostname("HOSTNAME", std::string{});
@@ -1889,15 +1895,16 @@ bool runtime_misc_internal_coverage_for_tests() {
             return 0;
         };
         char dummy = '\0';
-        check("zero-length gethostname fails",
-              (gethostname_fn(&dummy, 0) == -1) & (errno == EINVAL));
+        runtime_misc_internal_coverage_check(ok, "zero-length gethostname fails",
+                                             (gethostname_fn(&dummy, 0) == -1) & (errno == EINVAL));
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
             Http09RuntimeOpsOverride{
                 .gethostname_fn = gethostname_fn,
             },
         };
-        check("hostname fallback succeeds",
-              preferred_address_host_for_server("").value_or("") == "runtime-host");
+        runtime_misc_internal_coverage_check(ok, "hostname fallback succeeds",
+                                             preferred_address_host_for_server("").value_or("") ==
+                                                 "runtime-host");
     }
 
     {
@@ -1911,15 +1918,15 @@ bool runtime_misc_internal_coverage_for_tests() {
             return 0;
         };
         char dummy = '\0';
-        check("empty hostname zero-length gethostname fails",
-              (gethostname_fn(&dummy, 0) == -1) & (errno == EINVAL));
+        runtime_misc_internal_coverage_check(ok, "empty hostname zero-length gethostname fails",
+                                             (gethostname_fn(&dummy, 0) == -1) & (errno == EINVAL));
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
             Http09RuntimeOpsOverride{
                 .gethostname_fn = gethostname_fn,
             },
         };
-        check("hostname fallback empty string returns nullopt",
-              !preferred_address_host_for_server("").has_value());
+        runtime_misc_internal_coverage_check(ok, "hostname fallback empty string returns nullopt",
+                                             !preferred_address_host_for_server("").has_value());
     }
 
     {
@@ -1932,28 +1939,30 @@ bool runtime_misc_internal_coverage_for_tests() {
                 },
             },
         };
-        check("hostname fallback failure returns nullopt",
-              !preferred_address_host_for_server("").has_value());
-        check("preferred address lookup failure returns nullopt",
-              !runtime_preferred_address_for_server(
-                   Http09RuntimeConfig{
-                       .mode = Http09RuntimeMode::server,
-                       .host = "",
-                       .port = 443,
-                       .testcase = QuicHttp09Testcase::connectionmigration,
-                   })
-                   .has_value());
+        runtime_misc_internal_coverage_check(ok, "hostname fallback failure returns nullopt",
+                                             !preferred_address_host_for_server("").has_value());
+        runtime_misc_internal_coverage_check(
+            ok, "preferred address lookup failure returns nullopt",
+            !runtime_preferred_address_for_server(
+                 Http09RuntimeConfig{
+                     .mode = Http09RuntimeMode::server,
+                     .host = "",
+                     .port = 443,
+                     .testcase = QuicHttp09Testcase::connectionmigration,
+                 })
+                 .has_value());
     }
 
-    check("invalid host preferred address fails",
-          !runtime_preferred_address_for_server(
-               Http09RuntimeConfig{
-                   .mode = Http09RuntimeMode::server,
-                   .host = "invalid host",
-                   .port = 443,
-                   .testcase = QuicHttp09Testcase::connectionmigration,
-               })
-               .has_value());
+    runtime_misc_internal_coverage_check(
+        ok, "invalid host preferred address fails",
+        !runtime_preferred_address_for_server(
+             Http09RuntimeConfig{
+                 .mode = Http09RuntimeMode::server,
+                 .host = "invalid host",
+                 .port = 443,
+                 .testcase = QuicHttp09Testcase::connectionmigration,
+             })
+             .has_value());
 
     PreferredAddress ipv6_preferred_address{
         .ipv6_address =
@@ -1980,8 +1989,10 @@ bool runtime_misc_internal_coverage_for_tests() {
     };
     const auto ipv6_sockaddr = sockaddr_from_preferred_address(ipv6_preferred_address);
     const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(&ipv6_sockaddr);
-    check("preferred address sockaddr family", ipv6->sin6_family == AF_INET6);
-    check("preferred address sockaddr port", ntohs(ipv6->sin6_port) == 4444);
+    runtime_misc_internal_coverage_check(ok, "preferred address sockaddr family",
+                                         ipv6->sin6_family == AF_INET6);
+    runtime_misc_internal_coverage_check(ok, "preferred address sockaddr port",
+                                         ntohs(ipv6->sin6_port) == 4444);
 
     ResolvedUdpAddress ipv4_resolved{};
     auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&ipv4_resolved.address);
@@ -1992,27 +2003,30 @@ bool runtime_misc_internal_coverage_for_tests() {
     ipv4_resolved.family = AF_INET;
     const auto ipv4_preferred_address =
         preferred_address_from_resolved_udp_address(ipv4_resolved, {});
-    check("preferred address ipv4 port", ipv4_preferred_address.ipv4_port == 4443);
-    check("preferred address empty cid still mints reset token",
-          std::ranges::any_of(ipv4_preferred_address.stateless_reset_token,
-                              [](std::byte value) { return value != std::byte{0x00}; }));
+    runtime_misc_internal_coverage_check(ok, "preferred address ipv4 port",
+                                         ipv4_preferred_address.ipv4_port == 4443);
+    runtime_misc_internal_coverage_check(
+        ok, "preferred address empty cid still mints reset token",
+        std::ranges::any_of(ipv4_preferred_address.stateless_reset_token,
+                            [](std::byte value) { return value != std::byte{0x00}; }));
     ResolvedUdpAddress unknown_family_resolved{};
     unknown_family_resolved.family = AF_UNSPEC;
     const auto unknown_family_preferred_address =
         preferred_address_from_resolved_udp_address(unknown_family_resolved, {});
-    check("preferred address unknown family leaves ports empty",
-          (unknown_family_preferred_address.ipv4_port == 0) &
-              (unknown_family_preferred_address.ipv6_port == 0));
+    runtime_misc_internal_coverage_check(ok, "preferred address unknown family leaves ports empty",
+                                         (unknown_family_preferred_address.ipv4_port == 0) &
+                                             (unknown_family_preferred_address.ipv6_port == 0));
 
-    check("wait without sockets fails", !wait_for_socket_or_deadline(
-                                             RuntimeWaitConfig{
-                                                 .socket_fds = {-1, -1},
-                                                 .socket_fd_count = 0,
-                                                 .idle_timeout_ms = 1,
-                                                 .role_name = "client",
-                                             },
-                                             std::nullopt)
-                                             .has_value());
+    runtime_misc_internal_coverage_check(ok, "wait without sockets fails",
+                                         !wait_for_socket_or_deadline(
+                                              RuntimeWaitConfig{
+                                                  .socket_fds = {-1, -1},
+                                                  .socket_fd_count = 0,
+                                                  .idle_timeout_ms = 1,
+                                                  .role_name = "client",
+                                              },
+                                              std::nullopt)
+                                              .has_value());
 
     {
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
@@ -2020,15 +2034,16 @@ bool runtime_misc_internal_coverage_for_tests() {
                 .poll_fn = [](pollfd *, nfds_t, int) -> int { return 1; },
             },
         };
-        check("wait unreadable socket fails", !wait_for_socket_or_deadline(
-                                                   RuntimeWaitConfig{
-                                                       .socket_fds = {-1, -1},
-                                                       .socket_fd_count = 1,
-                                                       .idle_timeout_ms = 1,
-                                                       .role_name = "client",
-                                                   },
-                                                   std::nullopt)
-                                                   .has_value());
+        runtime_misc_internal_coverage_check(ok, "wait unreadable socket fails",
+                                             !wait_for_socket_or_deadline(
+                                                  RuntimeWaitConfig{
+                                                      .socket_fds = {-1, -1},
+                                                      .socket_fd_count = 1,
+                                                      .idle_timeout_ms = 1,
+                                                      .role_name = "client",
+                                                  },
+                                                  std::nullopt)
+                                                  .has_value());
     }
 
     {
@@ -2041,28 +2056,32 @@ bool runtime_misc_internal_coverage_for_tests() {
             .source_len = sizeof(sockaddr_in6),
             .has_source = true,
         };
-        check("timer step does not assign path",
-              !assign_runtime_path_for_inbound_step(state, step).has_value());
+        runtime_misc_internal_coverage_check(
+            ok, "timer step does not assign path",
+            !assign_runtime_path_for_inbound_step(state, step).has_value());
     }
 
-    check("invalid requests env does not trigger migration",
-          !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
-              .mode = Http09RuntimeMode::client,
-              .testcase = QuicHttp09Testcase::transfer,
-              .requests_env = "not-a-valid-request",
-          }));
-    check("server transfer request never triggers migration",
-          !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
-              .mode = Http09RuntimeMode::server,
-              .testcase = QuicHttp09Testcase::transfer,
-              .requests_env = "https://server46:443/file.bin",
-          }));
-    check("non-server46 transfer request does not trigger migration",
-          !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
-              .mode = Http09RuntimeMode::client,
-              .testcase = QuicHttp09Testcase::transfer,
-              .requests_env = "https://example.com:443/file.bin",
-          }));
+    runtime_misc_internal_coverage_check(
+        ok, "invalid requests env does not trigger migration",
+        !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::transfer,
+            .requests_env = "not-a-valid-request",
+        }));
+    runtime_misc_internal_coverage_check(
+        ok, "server transfer request never triggers migration",
+        !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::server,
+            .testcase = QuicHttp09Testcase::transfer,
+            .requests_env = "https://server46:443/file.bin",
+        }));
+    runtime_misc_internal_coverage_check(
+        ok, "non-server46 transfer request does not trigger migration",
+        !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::transfer,
+            .requests_env = "https://example.com:443/file.bin",
+        }));
 
     {
         ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
@@ -2122,8 +2141,8 @@ bool runtime_misc_internal_coverage_for_tests() {
                 .setsockopt_fn = [](int, int, int, const void *, socklen_t) -> int { return 0; },
             },
         };
-        check(
-            "policy observes cross-family preferred address",
+        runtime_misc_internal_coverage_check(
+            ok, "policy observes cross-family preferred address",
             observe_client_runtime_policy_effects(result, state, policy, client_sockets, "client"));
         std::vector<QuicCoreInput> core_inputs;
         maybe_queue_client_runtime_policy_inputs(
@@ -2132,17 +2151,19 @@ bool runtime_misc_internal_coverage_for_tests() {
                 .testcase = QuicHttp09Testcase::connectionmigration,
             },
             policy, core_inputs);
-        check("policy records preferred address route",
-              policy.preferred_address_route_handle.has_value());
-        check("policy queues one migration input", core_inputs.size() == 1);
+        runtime_misc_internal_coverage_check(ok, "policy records preferred address route",
+                                             policy.preferred_address_route_handle.has_value());
+        runtime_misc_internal_coverage_check(ok, "policy queues one migration input",
+                                             core_inputs.size() == 1);
 
         const auto client_timer_trace = run_client_connection_loop_case_for_tests(
             ClientConnectionLoopCaseForTests::outer_timer_then_wait_failure);
-        check("client timer trace samples time", client_timer_trace.current_time_calls > 0);
+        runtime_misc_internal_coverage_check(ok, "client timer trace samples time",
+                                             client_timer_trace.current_time_calls > 0);
         const auto client_timer_send_trace = run_client_connection_loop_case_for_tests(
             ClientConnectionLoopCaseForTests::timer_due_emits_send_trace_with_future_wakeup);
-        check("client timer trace records send-count path",
-              client_timer_send_trace.current_time_calls > 0);
+        runtime_misc_internal_coverage_check(ok, "client timer trace records send-count path",
+                                             client_timer_send_trace.current_time_calls > 0);
     }
 
     {
@@ -2161,8 +2182,9 @@ bool runtime_misc_internal_coverage_for_tests() {
             /*socket_fd=*/32, nullptr, /*length=*/7, /*flags=*/0,
             reinterpret_cast<const sockaddr *>(&short_ipv6),
             static_cast<socklen_t>(sizeof(sockaddr_in6) - 1)));
-        check("short sendto destinations keep peer port zero",
-              g_recorded_sendto_for_tests.peer_ports == std::vector<std::uint16_t>{0, 0});
+        runtime_misc_internal_coverage_check(ok, "short sendto destinations keep peer port zero",
+                                             g_recorded_sendto_for_tests.peer_ports ==
+                                                 std::vector<std::uint16_t>{0, 0});
     }
 
     {
@@ -2190,7 +2212,8 @@ bool runtime_misc_internal_coverage_for_tests() {
             .alternate_connection_id_keys = {"stale-route"},
         };
         refresh_server_session_connection_id_routes(session, connection_id_routes);
-        check("refresh removes stale route", !connection_id_routes.contains("stale-route"));
+        runtime_misc_internal_coverage_check(ok, "refresh removes stale route",
+                                             !connection_id_routes.contains("stale-route"));
     }
 
     {
@@ -2202,8 +2225,9 @@ bool runtime_misc_internal_coverage_for_tests() {
         });
         const auto preferred_address =
             core_config.transport.preferred_address.value_or(PreferredAddress{});
-        check("connectionmigration config provides a preferred address",
-              core_config.transport.preferred_address.has_value());
+        runtime_misc_internal_coverage_check(
+            ok, "connectionmigration config provides a preferred address",
+            core_config.transport.preferred_address.has_value());
         const auto local_connection_id_key = connection_id_key(core_config.source_connection_id);
         const auto preferred_connection_id_key = connection_id_key(preferred_address.connection_id);
         ServerConnectionIdRouteMap connection_id_routes{
@@ -2223,10 +2247,11 @@ bool runtime_misc_internal_coverage_for_tests() {
             .alternate_connection_id_keys = {preferred_connection_id_key},
         };
         refresh_server_session_connection_id_routes(session, connection_id_routes);
-        check("refresh preserves live alternate routes",
-              connection_id_routes.contains(preferred_connection_id_key) &
-                  (session.alternate_connection_id_keys.size() == 1) &
-                  (session.alternate_connection_id_keys.front() == preferred_connection_id_key));
+        runtime_misc_internal_coverage_check(
+            ok, "refresh preserves live alternate routes",
+            connection_id_routes.contains(preferred_connection_id_key) &
+                (session.alternate_connection_id_keys.size() == 1) &
+                (session.alternate_connection_id_keys.front() == preferred_connection_id_key));
     }
 
     {
@@ -2260,9 +2285,12 @@ bool runtime_misc_internal_coverage_for_tests() {
                          }));
         erase_server_session_with_routes(sessions, connection_id_routes, initial_destination_routes,
                                          local_connection_id_key);
-        check("erase removes session", !sessions.contains(local_connection_id_key));
-        check("erase removes alternate route", !connection_id_routes.contains("alternate-route"));
-        check("erase removes initial route", !initial_destination_routes.contains("initial-route"));
+        runtime_misc_internal_coverage_check(ok, "erase removes session",
+                                             !sessions.contains(local_connection_id_key));
+        runtime_misc_internal_coverage_check(ok, "erase removes alternate route",
+                                             !connection_id_routes.contains("alternate-route"));
+        runtime_misc_internal_coverage_check(ok, "erase removes initial route",
+                                             !initial_destination_routes.contains("initial-route"));
     }
 
     {
@@ -2274,7 +2302,8 @@ bool runtime_misc_internal_coverage_for_tests() {
             .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
             .private_key_path = "tests/fixtures/quic-server-key.pem",
         };
-        check("invalid host server fails", run_http09_server(server_config) == 1);
+        runtime_misc_internal_coverage_check(ok, "invalid host server fails",
+                                             run_http09_server(server_config) == 1);
     }
 
     {
@@ -2306,8 +2335,8 @@ bool runtime_misc_internal_coverage_for_tests() {
             .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
             .private_key_path = "tests/fixtures/quic-server-key.pem",
         };
-        check("preferred bind resolve failure aborts server",
-              run_http09_server(server_config) == 1);
+        runtime_misc_internal_coverage_check(ok, "preferred bind resolve failure aborts server",
+                                             run_http09_server(server_config) == 1);
     }
 
     {
@@ -2336,7 +2365,8 @@ bool runtime_misc_internal_coverage_for_tests() {
             .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
             .private_key_path = "tests/fixtures/quic-server-key.pem",
         };
-        check("second bind failure aborts server", run_http09_server(server_config) == 1);
+        runtime_misc_internal_coverage_check(ok, "second bind failure aborts server",
+                                             run_http09_server(server_config) == 1);
     }
 
     {
@@ -2359,7 +2389,8 @@ bool runtime_misc_internal_coverage_for_tests() {
             bytes_from_string_for_runtime_tests("odcid"),
             /*inbound_socket_fd=*/11, duplicate_seed_peer, sizeof(sockaddr_in6),
             bytes_from_string_for_runtime_tests("payload"), now());
-        check("duplicate seeded route is rejected", !duplicate_result.processed);
+        runtime_misc_internal_coverage_check(ok, "duplicate seeded route is rejected",
+                                             !duplicate_result.processed);
     }
 
     {
@@ -2369,7 +2400,8 @@ bool runtime_misc_internal_coverage_for_tests() {
             bytes_from_string_for_runtime_tests("local"),
             bytes_from_string_for_runtime_tests("odcid"), /*inbound_socket_fd=*/11, ipv6_sockaddr,
             sizeof(sockaddr_in6), std::vector<std::byte>{std::byte{0x00}}, now());
-        check("unparsable datagram is rejected", !unparsable_result.processed);
+        runtime_misc_internal_coverage_check(ok, "unparsable datagram is rejected",
+                                             !unparsable_result.processed);
     }
 
     return ok;
@@ -2377,30 +2409,29 @@ bool runtime_misc_internal_coverage_for_tests() {
 
 bool runtime_additional_internal_coverage_for_tests() {
     bool ok = true;
-    const auto check = [&](std::string_view, bool condition) {
-        ok &= condition;
-        return condition;
-    };
 
-    check("empty transfer requests do not trigger migration",
-          !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
-              .mode = Http09RuntimeMode::client,
-              .testcase = QuicHttp09Testcase::transfer,
-              .requests_env = "",
-          }));
-    check("non-server46 transfer request still does not trigger migration",
-          !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
-              .mode = Http09RuntimeMode::client,
-              .testcase = QuicHttp09Testcase::transfer,
-              .requests_env = "https://example.com:443/file.bin",
-          }));
+    runtime_misc_internal_coverage_check(
+        ok, "empty transfer requests do not trigger migration",
+        !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::transfer,
+            .requests_env = "",
+        }));
+    runtime_misc_internal_coverage_check(
+        ok, "non-server46 transfer request still does not trigger migration",
+        !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::transfer,
+            .requests_env = "https://example.com:443/file.bin",
+        }));
 
     g_recorded_sendto_for_tests = {};
     static_cast<void>(record_sendto_for_tests(
         /*socket_fd=*/33, nullptr, /*length=*/0, /*flags=*/0, /*destination=*/nullptr,
         /*destination_len=*/0));
-    check("null sendto destination keeps peer port zero",
-          g_recorded_sendto_for_tests.peer_ports == std::vector<std::uint16_t>{0});
+    runtime_misc_internal_coverage_check(ok, "null sendto destination keeps peer port zero",
+                                         g_recorded_sendto_for_tests.peer_ports ==
+                                             std::vector<std::uint16_t>{0});
 
     return ok;
 }

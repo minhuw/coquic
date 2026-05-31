@@ -354,14 +354,14 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
     std::uint64_t expected_offset = 0;
     auto verify_sent_datagram = [&](std::span<const std::byte> datagram) -> std::uint64_t {
         const auto packets = decode_sender_datagram(connection, datagram);
-        EXPECT_EQ(packets.size(), 1u);
         if (packets.size() != 1u) {
+            ADD_FAILURE() << "unexpected sent packet count";
             return 0;
         }
 
         const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
-        EXPECT_NE(application, nullptr);
         if (application == nullptr) {
+            ADD_FAILURE() << "sent datagram was not a 1-RTT packet";
             return 0;
         }
 
@@ -371,12 +371,14 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
                 continue;
             }
 
-            EXPECT_TRUE(stream->offset.has_value());
             if (!stream->offset.has_value()) {
+                ADD_FAILURE() << "stream frame did not carry an offset";
                 return application->packet_number;
             }
 
-            EXPECT_EQ(*stream->offset, expected_offset);
+            if (*stream->offset != expected_offset) {
+                ADD_FAILURE() << "stream send offset was not contiguous";
+            }
             expected_offset += static_cast<std::uint64_t>(stream->stream_data.size());
         }
 
@@ -400,16 +402,21 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
         return std::pair{emitted_packets, largest_sent};
     };
 
-    const auto [first_burst_packets, first_largest_sent] =
-        drain_burst(coquic::quic::test::test_time(1));
-    ASSERT_EQ(first_burst_packets, 10u);
-    ASSERT_GT(expected_offset, 0u);
+    const auto first_burst = drain_burst(coquic::quic::test::test_time(1));
+    if (first_burst.first != 10u) {
+        ADD_FAILURE() << "unexpected first burst packet count";
+        return;
+    }
+    if (expected_offset == 0u) {
+        ADD_FAILURE() << "first burst did not send stream data";
+        return;
+    }
 
     ASSERT_TRUE(connection
                     .process_inbound_ack(connection.application_space_,
                                          coquic::quic::AckFrame{
-                                             .largest_acknowledged = first_largest_sent,
-                                             .first_ack_range = first_largest_sent,
+                                             .largest_acknowledged = first_burst.second,
+                                             .first_ack_range = first_burst.second,
                                          },
                                          coquic::quic::test::test_time(2),
                                          peer_transport_parameters.ack_delay_exponent,
@@ -417,16 +424,20 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
                                          /*suppress_pto_reset=*/false)
                     .has_value());
 
-    const auto [second_burst_packets, second_largest_sent] =
-        drain_burst(coquic::quic::test::test_time(3));
-    ASSERT_EQ(second_burst_packets, 10u);
-    EXPECT_GT(second_largest_sent, first_largest_sent);
+    const auto second_burst = drain_burst(coquic::quic::test::test_time(3));
+    if (second_burst.first != 10u) {
+        ADD_FAILURE() << "unexpected second burst packet count";
+        return;
+    }
+    if (second_burst.second <= first_burst.second) {
+        ADD_FAILURE() << "second burst did not advance packet numbers";
+    }
 
     ASSERT_TRUE(connection
                     .process_inbound_ack(connection.application_space_,
                                          coquic::quic::AckFrame{
-                                             .largest_acknowledged = second_largest_sent,
-                                             .first_ack_range = second_largest_sent,
+                                             .largest_acknowledged = second_burst.second,
+                                             .first_ack_range = second_burst.second,
                                          },
                                          coquic::quic::test::test_time(4),
                                          peer_transport_parameters.ack_delay_exponent,
@@ -434,11 +445,17 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
                                          /*suppress_pto_reset=*/false)
                     .has_value());
 
-    const auto [third_burst_packets, third_largest_sent] =
-        drain_burst(coquic::quic::test::test_time(5));
-    ASSERT_GT(third_burst_packets, 0u);
-    EXPECT_GT(third_largest_sent, second_largest_sent);
-    EXPECT_GT(expected_offset, 30000u);
+    const auto third_burst = drain_burst(coquic::quic::test::test_time(5));
+    if (third_burst.first == 0u) {
+        ADD_FAILURE() << "third burst did not send packets";
+        return;
+    }
+    if (third_burst.second <= second_burst.second) {
+        ADD_FAILURE() << "third burst did not advance packet numbers";
+    }
+    if (expected_offset <= 30000u) {
+        ADD_FAILURE() << "stream data did not advance after cumulative ACK bursts";
+    }
 }
 
 TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossRepeatedCumulativeAcks) {
@@ -644,27 +661,51 @@ TEST(QuicCoreTest, BbrPacingBlocksFurtherApplicationSendsUntilPacingWakeup) {
 
     const auto send_time = coquic::quic::test::test_time(1);
     const auto first_datagram = connection.drain_outbound_datagram(send_time);
-    ASSERT_FALSE(first_datagram.empty());
+    if (first_datagram.empty()) {
+        ADD_FAILURE() << "missing first paced datagram";
+        return;
+    }
     const auto second_datagram = connection.drain_outbound_datagram(send_time);
-    ASSERT_FALSE(second_datagram.empty());
+    if (second_datagram.empty()) {
+        ADD_FAILURE() << "missing second paced datagram";
+        return;
+    }
 
     const auto blocked_datagram = connection.drain_outbound_datagram(send_time);
-    EXPECT_TRUE(blocked_datagram.empty());
+    if (!blocked_datagram.empty()) {
+        ADD_FAILURE() << "pacing did not block the third datagram";
+    }
 
     const auto pacing_deadline =
         connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
-    ASSERT_TRUE(pacing_deadline.has_value());
+    if (!pacing_deadline.has_value()) {
+        ADD_FAILURE() << "missing pacing deadline";
+        return;
+    }
     const auto quantum_deadline = connection.congestion_controller_.next_send_time(
         connection.congestion_controller_.pacing_send_quantum());
-    ASSERT_TRUE(quantum_deadline.has_value());
-    EXPECT_EQ(connection.next_wakeup(), quantum_deadline);
-    EXPECT_FALSE(connection.has_sendable_datagram(send_time + std::chrono::milliseconds(9)));
-    EXPECT_FALSE(connection.has_sendable_datagram(optional_value_or_terminate(pacing_deadline)));
-    EXPECT_TRUE(connection.has_sendable_datagram(optional_value_or_terminate(quantum_deadline)));
-    EXPECT_TRUE(
-        connection.drain_outbound_datagram(send_time + std::chrono::milliseconds(9)).empty());
-    EXPECT_FALSE(
-        connection.drain_outbound_datagram(optional_value_or_terminate(quantum_deadline)).empty());
+    if (!quantum_deadline.has_value()) {
+        ADD_FAILURE() << "missing quantum pacing deadline";
+        return;
+    }
+    if (connection.next_wakeup() != quantum_deadline) {
+        ADD_FAILURE() << "next wakeup did not use the quantum deadline";
+    }
+    if (connection.has_sendable_datagram(send_time + std::chrono::milliseconds(9))) {
+        ADD_FAILURE() << "connection became sendable before pacing delay";
+    }
+    if (connection.has_sendable_datagram(optional_value_or_terminate(pacing_deadline))) {
+        ADD_FAILURE() << "connection became sendable at single-datagram pacing deadline";
+    }
+    if (!connection.has_sendable_datagram(optional_value_or_terminate(quantum_deadline))) {
+        ADD_FAILURE() << "connection was not sendable at quantum pacing deadline";
+    }
+    if (!connection.drain_outbound_datagram(send_time + std::chrono::milliseconds(9)).empty()) {
+        ADD_FAILURE() << "connection drained a datagram before pacing delay";
+    }
+    if (connection.drain_outbound_datagram(optional_value_or_terminate(quantum_deadline)).empty()) {
+        ADD_FAILURE() << "connection did not drain at quantum pacing deadline";
+    }
 }
 
 TEST(QuicCoreTest, BbrPacingWakeupUsesSendQuantumForPureStreamData) {
@@ -700,15 +741,30 @@ TEST(QuicCoreTest, BbrPacingWakeupUsesSendQuantumForPureStreamData) {
         connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
     const auto quantum_deadline = connection.congestion_controller_.next_send_time(
         connection.congestion_controller_.pacing_send_quantum());
-    ASSERT_TRUE(single_datagram_deadline.has_value());
-    ASSERT_TRUE(quantum_deadline.has_value());
-    EXPECT_LT(optional_value_or_terminate(single_datagram_deadline),
-              optional_value_or_terminate(quantum_deadline));
-    EXPECT_EQ(connection.pacing_deadline(), quantum_deadline);
-    EXPECT_EQ(connection.next_wakeup(), quantum_deadline);
-    EXPECT_FALSE(
-        connection.has_sendable_datagram(optional_value_or_terminate(single_datagram_deadline)));
-    EXPECT_TRUE(connection.has_sendable_datagram(optional_value_or_terminate(quantum_deadline)));
+    if (!single_datagram_deadline.has_value()) {
+        ADD_FAILURE() << "missing single-datagram pacing deadline";
+        return;
+    }
+    if (!quantum_deadline.has_value()) {
+        ADD_FAILURE() << "missing quantum pacing deadline";
+        return;
+    }
+    if (optional_value_or_terminate(single_datagram_deadline) >=
+        optional_value_or_terminate(quantum_deadline)) {
+        ADD_FAILURE() << "single-datagram pacing deadline was not earlier";
+    }
+    if (connection.pacing_deadline() != quantum_deadline) {
+        ADD_FAILURE() << "pacing deadline did not use send quantum";
+    }
+    if (connection.next_wakeup() != quantum_deadline) {
+        ADD_FAILURE() << "next wakeup did not use send quantum";
+    }
+    if (connection.has_sendable_datagram(optional_value_or_terminate(single_datagram_deadline))) {
+        ADD_FAILURE() << "connection became sendable at single-datagram deadline";
+    }
+    if (!connection.has_sendable_datagram(optional_value_or_terminate(quantum_deadline))) {
+        ADD_FAILURE() << "connection was not sendable at quantum deadline";
+    }
 }
 
 TEST(QuicCoreTest, BbrPacingWakeupUsesSingleDatagramWhenRemainingStreamDataIsSmall) {
@@ -745,12 +801,24 @@ TEST(QuicCoreTest, BbrPacingWakeupUsesSingleDatagramWhenRemainingStreamDataIsSma
         connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
     const auto quantum_deadline = connection.congestion_controller_.next_send_time(
         connection.congestion_controller_.pacing_send_quantum());
-    ASSERT_TRUE(single_datagram_deadline.has_value());
-    ASSERT_TRUE(quantum_deadline.has_value());
-    EXPECT_LT(optional_value_or_terminate(single_datagram_deadline),
-              optional_value_or_terminate(quantum_deadline));
-    EXPECT_EQ(connection.pacing_deadline(), single_datagram_deadline);
-    EXPECT_EQ(connection.next_wakeup(), single_datagram_deadline);
+    if (!single_datagram_deadline.has_value()) {
+        ADD_FAILURE() << "missing single-datagram pacing deadline";
+        return;
+    }
+    if (!quantum_deadline.has_value()) {
+        ADD_FAILURE() << "missing quantum pacing deadline";
+        return;
+    }
+    if (optional_value_or_terminate(single_datagram_deadline) >=
+        optional_value_or_terminate(quantum_deadline)) {
+        ADD_FAILURE() << "single-datagram pacing deadline was not earlier";
+    }
+    if (connection.pacing_deadline() != single_datagram_deadline) {
+        ADD_FAILURE() << "pacing deadline did not use the single-datagram deadline";
+    }
+    if (connection.next_wakeup() != single_datagram_deadline) {
+        ADD_FAILURE() << "next wakeup did not use the single-datagram deadline";
+    }
 }
 
 TEST(QuicCoreTest, BbrPacingWakeupKeepsFullDatagramMinimumWithSmallCwndRemainder) {
@@ -813,7 +881,10 @@ TEST(QuicCoreTest, CorePacingWakeupDrainsWithoutRunningConnectionTimeout) {
     ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
 
     const auto pacing_deadline = connection.pacing_deadline();
-    ASSERT_TRUE(pacing_deadline.has_value());
+    if (!pacing_deadline.has_value()) {
+        ADD_FAILURE() << "missing pacing deadline";
+        return;
+    }
     const auto due = optional_value_or_terminate(pacing_deadline);
     connection.application_space_.received_packets.record_received(
         /*packet_number=*/41, /*ack_eliciting=*/true, send_time);

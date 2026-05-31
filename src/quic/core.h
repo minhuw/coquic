@@ -661,25 +661,25 @@ class QuicCore {
     stateless_reset_token_key(const std::array<std::byte, 16> &stateless_reset_token);
     static std::optional<ParsedEndpointDatagram>
     parse_endpoint_datagram(std::span<const std::byte> bytes, bool accept_greased_quic_bit = false);
-    std::vector<std::byte>
-    make_endpoint_retry_token(std::uint64_t sequence,
-                              const ParsedEndpointDatagram *parsed = nullptr,
-                              const ConnectionId *retry_source_connection_id = nullptr,
-                              std::optional<QuicRouteHandle> route_handle = std::nullopt,
-                              std::span<const std::byte> address_validation_identity = {},
-                              QuicCoreTimePoint now = QuicCoreTimePoint{});
-    std::vector<std::byte>
-    make_endpoint_new_token(std::uint64_t sequence, std::uint32_t version = kQuicVersion1,
-                            std::optional<QuicRouteHandle> route_handle = std::nullopt,
-                            std::span<const std::byte> address_validation_identity = {},
-                            QuicCoreTimePoint now = QuicCoreTimePoint{});
-    std::optional<PendingRetryToken>
-    take_retry_context(const ParsedEndpointDatagram &parsed,
-                       const std::optional<QuicRouteHandle> &route_handle, QuicCoreTimePoint now,
-                       std::span<const std::byte> address_validation_identity = {});
+    std::vector<std::byte> make_endpoint_retry_token(
+        std::uint64_t sequence, const ParsedEndpointDatagram *parsed = nullptr,
+        const ConnectionId *retry_source_connection_id = nullptr,
+        std::optional<QuicRouteHandle> route_handle = std::nullopt,
+        std::span<const std::byte> address_validation_identity = std::span<const std::byte>{},
+        QuicCoreTimePoint now = QuicCoreTimePoint{});
+    std::vector<std::byte> make_endpoint_new_token(
+        std::uint64_t sequence, std::uint32_t version = kQuicVersion1,
+        std::optional<QuicRouteHandle> route_handle = std::nullopt,
+        std::span<const std::byte> address_validation_identity = std::span<const std::byte>{},
+        QuicCoreTimePoint now = QuicCoreTimePoint{});
+    std::optional<PendingRetryToken> take_retry_context(
+        const ParsedEndpointDatagram &parsed, const std::optional<QuicRouteHandle> &route_handle,
+        QuicCoreTimePoint now,
+        std::span<const std::byte> address_validation_identity = std::span<const std::byte>{});
     std::optional<StoredEndpointNewToken> take_new_token_context(
         const ParsedEndpointDatagram &parsed, const std::optional<QuicRouteHandle> &route_handle,
-        QuicCoreTimePoint now, std::span<const std::byte> address_validation_identity = {});
+        QuicCoreTimePoint now,
+        std::span<const std::byte> address_validation_identity = std::span<const std::byte>{});
     void maybe_queue_server_new_token(ConnectionEntry &entry, QuicCoreTimePoint now);
     void drain_queued_server_new_token(ConnectionEntry &entry, QuicCoreResult &drained,
                                        QuicCoreTimePoint now);
@@ -720,12 +720,12 @@ class QuicCore {
     static void
     remember_address_validation_identity(ConnectionEntry &entry, QuicPathId path_id,
                                          std::span<const std::byte> address_validation_identity);
-    QuicPathId remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle,
-                                     std::span<const std::byte> address_validation_identity = {});
-    std::optional<QuicPathId>
-    path_id_for_inbound_route(ConnectionEntry &entry,
-                              const std::optional<QuicRouteHandle> &route_handle,
-                              std::span<const std::byte> address_validation_identity = {});
+    QuicPathId remember_inbound_path(
+        ConnectionEntry &entry, QuicRouteHandle route_handle,
+        std::span<const std::byte> address_validation_identity = std::span<const std::byte>{});
+    std::optional<QuicPathId> path_id_for_inbound_route(
+        ConnectionEntry &entry, const std::optional<QuicRouteHandle> &route_handle,
+        std::span<const std::byte> address_validation_identity = std::span<const std::byte>{});
     static std::optional<QuicRouteHandle>
     route_handle_for_path(const ConnectionEntry &entry, const std::optional<QuicPathId> &path_id);
     static bool should_run_connection_timeout(const ConnectionEntry &entry, QuicCoreTimePoint now);

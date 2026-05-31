@@ -169,6 +169,17 @@ static uint64_t duration_millis(uint64_t usec) {
     return usec / 1000ULL;
 }
 
+static long timeout_delta_ms(int64_t timeout_at, int64_t now_ms, long max_wait_ms) {
+    if (timeout_at == INT64_MAX) {
+        return max_wait_ms;
+    }
+    if (timeout_at <= now_ms) {
+        return 0;
+    }
+    const uint64_t delta = (uint64_t)(timeout_at - now_ms);
+    return delta > (uint64_t)max_wait_ms ? max_wait_ms : (long)delta;
+}
+
 static uint64_t parse_u64(const char *text, const char *name) {
     char *end = NULL;
     errno = 0;
@@ -986,13 +997,7 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
         struct timeval tv;
         int64_t timeout_at = quicly_get_first_timeout(conn);
         int64_t now_ms = ctx.now->cb(ctx.now);
-        int64_t delta = timeout_at == INT64_MAX ? 100 : timeout_at - now_ms;
-        if (delta < 0) {
-            delta = 0;
-        }
-        if (delta > 100) {
-            delta = 100;
-        }
+        long delta = timeout_delta_ms(timeout_at, now_ms, 100);
         tv.tv_sec = delta / 1000;
         tv.tv_usec = (delta % 1000) * 1000;
         int sret;
@@ -1253,13 +1258,7 @@ static int run_server(const config_t *cfg) {
             }
         }
         struct timeval tv;
-        int64_t delta = timeout_at == INT64_MAX ? 100 : timeout_at - ctx.now->cb(ctx.now);
-        if (delta < 0) {
-            delta = 0;
-        }
-        if (delta > 100) {
-            delta = 100;
-        }
+        long delta = timeout_delta_ms(timeout_at, ctx.now->cb(ctx.now), 100);
         tv.tv_sec = delta / 1000;
         tv.tv_usec = (delta % 1000) * 1000;
         int sret;

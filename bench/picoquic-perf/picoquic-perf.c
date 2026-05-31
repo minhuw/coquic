@@ -775,7 +775,7 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
                 }
             }
         }
-        break;
+        return 0;
     case picoquic_callback_stream_data:
     case picoquic_callback_stream_fin:
         if (app->is_client) {
@@ -791,7 +791,7 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
             return receive_server_stream(app, cnx, stream_id, bytes, length,
                                          event == picoquic_callback_stream_fin, stream);
         }
-        break;
+        return 0;
     case picoquic_callback_prepare_to_send:
         if (stream == NULL) {
             set_error(app, "prepare_to_send without stream context");
@@ -815,7 +815,7 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
                 return -1;
             }
         }
-        break;
+        return 0;
     case picoquic_callback_stream_reset:
     case picoquic_callback_stop_sending:
         if (stream != NULL) {
@@ -830,11 +830,10 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
     case picoquic_callback_application_close:
     case picoquic_callback_stateless_reset:
         app->finished = 1;
-        break;
+        return 0;
     default:
-        break;
+        return 0;
     }
-    return 0;
 }
 
 static int loop_callback(picoquic_quic_t *quic, picoquic_packet_loop_cb_enum mode,

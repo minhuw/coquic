@@ -150,56 +150,65 @@ Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
 } // namespace
 
 CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame) {
-    return std::visit(
-        [](const auto &typed_frame) -> CodecResult<std::vector<std::byte>> {
-            using T = std::decay_t<decltype(typed_frame)>;
-            if constexpr (std::is_same_v<T, Http3DataFrame>) {
-                return serialize_http3_payload_frame(kHttp3FrameTypeData, typed_frame.payload);
-            } else if constexpr (std::is_same_v<T, Http3HeadersFrame>) {
-                return serialize_http3_payload_frame(kHttp3FrameTypeHeaders,
-                                                     typed_frame.field_section);
-            } else if constexpr (std::is_same_v<T, Http3SettingsFrame>) {
-                BufferWriter writer;
-                for (const auto &setting : typed_frame.settings) {
-                    const auto encoded_id = encode_varint(setting.id);
-                    if (!encoded_id.has_value()) {
-                        return codec_failure<std::vector<std::byte>>(encoded_id.error().code,
-                                                                     encoded_id.error().offset);
-                    }
+    struct FrameSerializer {
+        CodecResult<std::vector<std::byte>> operator()(const Http3DataFrame &typed_frame) const {
+            return serialize_http3_payload_frame(kHttp3FrameTypeData, typed_frame.payload);
+        }
 
-                    const auto encoded_value = encode_varint(setting.value);
-                    if (!encoded_value.has_value()) {
-                        return codec_failure<std::vector<std::byte>>(encoded_value.error().code,
-                                                                     encoded_value.error().offset);
-                    }
+        CodecResult<std::vector<std::byte>> operator()(const Http3HeadersFrame &typed_frame) const {
+            return serialize_http3_payload_frame(kHttp3FrameTypeHeaders, typed_frame.field_section);
+        }
 
-                    writer.write_bytes(encoded_id.value());
-                    writer.write_bytes(encoded_value.value());
-                }
-
-                return serialize_http3_payload_frame(kHttp3FrameTypeSettings, writer.bytes());
-            } else if constexpr (std::is_same_v<T, Http3GoawayFrame>) {
-                const auto encoded_id = encode_varint(typed_frame.id);
+        CodecResult<std::vector<std::byte>>
+        operator()(const Http3SettingsFrame &typed_frame) const {
+            BufferWriter writer;
+            for (const auto &setting : typed_frame.settings) {
+                const auto encoded_id = encode_varint(setting.id);
                 if (!encoded_id.has_value()) {
                     return codec_failure<std::vector<std::byte>>(encoded_id.error().code,
                                                                  encoded_id.error().offset);
                 }
 
-                return serialize_http3_payload_frame(kHttp3FrameTypeGoaway, encoded_id.value());
-            } else if constexpr (std::is_same_v<T, Http3MaxPushIdFrame>) {
-                const auto encoded_push_id = encode_varint(typed_frame.push_id);
-                if (!encoded_push_id.has_value()) {
-                    return codec_failure<std::vector<std::byte>>(encoded_push_id.error().code,
-                                                                 encoded_push_id.error().offset);
+                const auto encoded_value = encode_varint(setting.value);
+                if (!encoded_value.has_value()) {
+                    return codec_failure<std::vector<std::byte>>(encoded_value.error().code,
+                                                                 encoded_value.error().offset);
                 }
 
-                return serialize_http3_payload_frame(kHttp3FrameTypeMaxPushId,
-                                                     encoded_push_id.value());
-            } else {
-                return serialize_http3_payload_frame(typed_frame.type, typed_frame.payload);
+                writer.write_bytes(encoded_id.value());
+                writer.write_bytes(encoded_value.value());
             }
-        },
-        frame);
+
+            return serialize_http3_payload_frame(kHttp3FrameTypeSettings, writer.bytes());
+        }
+
+        CodecResult<std::vector<std::byte>> operator()(const Http3GoawayFrame &typed_frame) const {
+            const auto encoded_id = encode_varint(typed_frame.id);
+            if (!encoded_id.has_value()) {
+                return codec_failure<std::vector<std::byte>>(encoded_id.error().code,
+                                                             encoded_id.error().offset);
+            }
+
+            return serialize_http3_payload_frame(kHttp3FrameTypeGoaway, encoded_id.value());
+        }
+
+        CodecResult<std::vector<std::byte>>
+        operator()(const Http3MaxPushIdFrame &typed_frame) const {
+            const auto encoded_push_id = encode_varint(typed_frame.push_id);
+            if (!encoded_push_id.has_value()) {
+                return codec_failure<std::vector<std::byte>>(encoded_push_id.error().code,
+                                                             encoded_push_id.error().offset);
+            }
+
+            return serialize_http3_payload_frame(kHttp3FrameTypeMaxPushId, encoded_push_id.value());
+        }
+
+        CodecResult<std::vector<std::byte>> operator()(const Http3UnknownFrame &typed_frame) const {
+            return serialize_http3_payload_frame(typed_frame.type, typed_frame.payload);
+        }
+    };
+
+    return std::visit(FrameSerializer{}, frame);
 }
 
 CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> bytes) {

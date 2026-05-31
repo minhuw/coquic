@@ -27,6 +27,7 @@ using coquic::quic::QuicCoreResult;
 using coquic::quic::QuicCoreSendStreamData;
 using coquic::quic::QuicCoreStateChange;
 using coquic::quic::QuicCoreStateEvent;
+using coquic::quic::QuicCoreTimePoint;
 
 bool http09_client_internal_coverage_for_tests();
 
@@ -98,8 +99,8 @@ bool http09_client_internal_coverage_for_tests() {
             .request_index = 0,
             .stream_id = 0,
         });
-    const auto pending_completion = pending_completion_endpoint.on_core_result(
-        QuicCoreResult{}, coquic::quic::test::test_time());
+    const auto pending_completion =
+        pending_completion_endpoint.on_core_result(QuicCoreResult{}, QuicCoreTimePoint{});
     if (pending_completion.terminal_success || pending_completion_endpoint.complete_) {
         return false;
     }
@@ -115,8 +116,8 @@ bool http09_client_internal_coverage_for_tests() {
                .request_target = "/alpha.txt",
                .complete = false,
            });
-    const auto active_completion = active_completion_endpoint.on_core_result(
-        QuicCoreResult{}, coquic::quic::test::test_time());
+    const auto active_completion =
+        active_completion_endpoint.on_core_result(QuicCoreResult{}, QuicCoreTimePoint{});
     return !active_completion.terminal_success && !active_completion_endpoint.complete_;
 }
 

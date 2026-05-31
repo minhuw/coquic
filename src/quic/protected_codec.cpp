@@ -295,11 +295,11 @@ traffic_secret_cached_keys_or_assert(const TrafficSecret *secret, bool cache_pri
     if (!cache_primed || secret == nullptr) {
         std::abort();
     }
-    const auto &keys = secret->cached_packet_protection_keys;
-    if (!keys.has_value()) {
+    const auto &cached_keys = secret->cached_packet_protection_keys;
+    if (!cached_keys.has_value()) {
         std::abort();
     }
-    return keys.value();
+    return cached_keys.value();
 }
 
 COQUIC_NO_PROFILE bool one_rtt_cached_keys_available(const DeserializeProtectionContext &context) {
@@ -615,9 +615,10 @@ CodecResult<ReceivedFrameList> deserialize_received_frame_sequence(
     return CodecResult<ReceivedFrameList>::success(std::move(frames));
 }
 
-std::size_t encoded_stream_frame_payload_size(std::uint64_t stream_id, std::uint64_t offset,
+std::size_t encoded_stream_frame_payload_size(std::uint64_t frame_stream_id,
+                                              std::uint64_t frame_offset,
                                               std::size_t payload_size) {
-    return 1 + encoded_varint_size(stream_id) + encoded_varint_size(offset) +
+    return 1 + encoded_varint_size(frame_stream_id) + encoded_varint_size(frame_offset) +
            encoded_varint_size(payload_size) + payload_size;
 }
 

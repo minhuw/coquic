@@ -53,8 +53,8 @@ bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family
                                                                                         family);
 }
 
-bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_len) {
-    return test::socket_io_backend_is_ipv4_mapped_ipv6_address_for_runtime_tests(peer, peer_len);
+bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_length) {
+    return test::socket_io_backend_is_ipv4_mapped_ipv6_address_for_runtime_tests(peer, peer_length);
 }
 
 QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message) {
@@ -1139,8 +1139,9 @@ COQUIC_NO_PROFILE QuicCoreResult advance_core_with_inputs(QuicCore &core,
         });
     }
     auto combined = core.advance(inputs, step_time);
-    with_runtime_trace(
-        [&](std::ostream &stream) { write_advance_core_output_trace(stream, combined); });
+    with_runtime_trace([&](std::ostream &trace_stream) {
+        write_advance_core_output_trace(trace_stream, combined);
+    });
     return combined;
 }
 
@@ -1374,12 +1375,12 @@ bool observe_client_runtime_policy_effects(const QuicCoreResult &result, Endpoin
                 test::socket_io_backend_address_validation_identity_for_runtime_tests(peer,
                                                                                       peer_len);
             static_cast<void>(remember_runtime_path(state, peer, peer_len, *preferred_socket_fd));
-            with_runtime_trace([&](std::ostream &stream) {
-                stream << "http09-client trace: observed preferred_address route_handle="
-                       << *policy.preferred_address_route_handle
-                       << " socket_fd=" << *preferred_socket_fd
-                       << " ipv4_port=" << preferred->preferred_address.ipv4_port
-                       << " ipv6_port=" << preferred->preferred_address.ipv6_port << '\n';
+            with_runtime_trace([&](std::ostream &trace_stream) {
+                trace_stream << "http09-client trace: observed preferred_address route_handle="
+                             << *policy.preferred_address_route_handle
+                             << " socket_fd=" << *preferred_socket_fd
+                             << " ipv4_port=" << preferred->preferred_address.ipv4_port
+                             << " ipv6_port=" << preferred->preferred_address.ipv6_port << '\n';
             });
         }
     }
@@ -1429,11 +1430,11 @@ bool observe_client_runtime_policy_effects_with_backend(const QuicCoreResult &re
             policy.preferred_address_validation_identity =
                 test::socket_io_backend_address_validation_identity_for_runtime_tests(peer,
                                                                                       peer_len);
-            with_runtime_trace([&](std::ostream &stream) {
-                stream << "http09-client trace: observed preferred_address route_handle="
-                       << route_handle.value()
-                       << " ipv4_port=" << preferred->preferred_address.ipv4_port
-                       << " ipv6_port=" << preferred->preferred_address.ipv6_port << '\n';
+            with_runtime_trace([&](std::ostream &trace_stream) {
+                trace_stream << "http09-client trace: observed preferred_address route_handle="
+                             << route_handle.value()
+                             << " ipv4_port=" << preferred->preferred_address.ipv4_port
+                             << " ipv6_port=" << preferred->preferred_address.ipv6_port << '\n';
             });
         }
     }
@@ -1812,24 +1813,24 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
             return {};
         }
 
-        auto update = endpoint.poll(now());
-        state.endpoint_has_pending_work = update.has_pending_work;
-        if (update.terminal_failure) {
+        auto endpoint_update = endpoint.poll(now());
+        state.endpoint_has_pending_work = endpoint_update.has_pending_work;
+        if (endpoint_update.terminal_failure) {
             state.terminal_failure = true;
             return PumpEndpointWorkResult{
                 .ok = false,
             };
         }
-        if (update.terminal_success) {
+        if (endpoint_update.terminal_success) {
             state.terminal_success = true;
             return {};
         }
-        if (update.core_inputs.empty()) {
+        if (endpoint_update.core_inputs.empty()) {
             return {};
         }
 
         return PumpEndpointWorkResult{
-            .ok = drive_result(advance_core_with_inputs(core, update.core_inputs, now())),
+            .ok = drive_result(advance_core_with_inputs(core, endpoint_update.core_inputs, now())),
             .advanced_core = true,
         };
     };
@@ -2020,30 +2021,30 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
         }
 
         const bool pending_before = state.endpoint_has_pending_work;
-        auto update = endpoint.poll(now());
-        state.endpoint_has_pending_work = update.has_pending_work;
-        with_runtime_trace([&](std::ostream &stream) {
-            stream << "http09-client trace: poll pending_before=" << pending_before
-                   << " pending_after=" << update.has_pending_work
-                   << " core_inputs=" << update.core_inputs.size()
-                   << " terminal_success=" << update.terminal_success
-                   << " terminal_failure=" << update.terminal_failure << '\n';
+        auto endpoint_update = endpoint.poll(now());
+        state.endpoint_has_pending_work = endpoint_update.has_pending_work;
+        with_runtime_trace([&](std::ostream &trace_stream) {
+            trace_stream << "http09-client trace: poll pending_before=" << pending_before
+                         << " pending_after=" << endpoint_update.has_pending_work
+                         << " core_inputs=" << endpoint_update.core_inputs.size()
+                         << " terminal_success=" << endpoint_update.terminal_success
+                         << " terminal_failure=" << endpoint_update.terminal_failure << '\n';
         });
-        if (update.terminal_failure) {
+        if (endpoint_update.terminal_failure) {
             state.terminal_failure = true;
             return PumpEndpointWorkResult{
                 .ok = false,
             };
         }
-        if (update.terminal_success) {
+        if (endpoint_update.terminal_success) {
             state.terminal_success = true;
             return {};
         }
-        if (update.core_inputs.empty()) {
+        if (endpoint_update.core_inputs.empty()) {
             return {};
         }
 
-        auto result = advance_core_with_inputs(core, update.core_inputs, now());
+        auto result = advance_core_with_inputs(core, endpoint_update.core_inputs, now());
         return PumpEndpointWorkResult{
             .ok = drive_endpoint_until_blocked(endpoint, core, client_sockets.primary.fd, &peer,
                                                peer_len, result, state, "client", &config,
@@ -2109,7 +2110,7 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
             if (received_datagram) {
                 continue;
             }
-            with_runtime_trace([&](std::ostream &stream) {
+            with_runtime_trace([&](std::ostream &trace_stream) {
                 const auto current = now();
                 const auto next_wakeup_delay_ms =
                     state.next_wakeup.has_value()
@@ -2117,13 +2118,13 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
                               std::chrono::abs(state.next_wakeup.value() - current))
                               .count()
                         : -1;
-                stream << "http09-client trace: would-block pending="
-                       << state.endpoint_has_pending_work
-                       << " advanced_core=" << pump_result.advanced_core
-                       << " terminal_success=" << state.terminal_success
-                       << " terminal_failure=" << state.terminal_failure
-                       << " has_next_wakeup=" << state.next_wakeup.has_value()
-                       << " next_wakeup_delta_ms=" << next_wakeup_delay_ms << '\n';
+                trace_stream << "http09-client trace: would-block pending="
+                             << state.endpoint_has_pending_work
+                             << " advanced_core=" << pump_result.advanced_core
+                             << " terminal_success=" << state.terminal_success
+                             << " terminal_failure=" << state.terminal_failure
+                             << " has_next_wakeup=" << state.next_wakeup.has_value()
+                             << " next_wakeup_delta_ms=" << next_wakeup_delay_ms << '\n';
             });
             if (pump_result.advanced_core) {
                 if (state.endpoint_has_pending_work) {
@@ -2366,10 +2367,10 @@ int run_http09_client(const Http09RuntimeConfig &config) {
     return run_http09_resumed_client_sequence(
         config, requests.value(),
         [](const Http09RuntimeConfig &runner_config,
-           const std::vector<QuicHttp09Request> &runner_requests, QuicCoreConfig core_config,
-           std::uint64_t connection_index) {
+           const std::vector<QuicHttp09Request> &runner_requests,
+           QuicCoreConfig resumed_core_config, std::uint64_t connection_index) {
             return run_http09_client_connection_with_core_config(
-                runner_config, runner_requests, std::move(core_config), connection_index);
+                runner_config, runner_requests, std::move(resumed_core_config), connection_index);
         });
 }
 
@@ -3338,18 +3339,19 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
                                                      defer_output_until, input_time);
         return ok;
     };
-    const auto process_path_mtu_update = [&](const QuicIoPathMtuUpdate &update,
+    const auto process_path_mtu_update = [&](const QuicIoPathMtuUpdate &path_mtu_update,
                                              QuicCoreTimePoint update_time) -> bool {
         auto result = core.advance_endpoint(
             QuicCorePathMtuUpdate{
-                .route_handle = update.route_handle,
-                .max_udp_payload_size = update.max_udp_payload_size,
+                .route_handle = path_mtu_update.route_handle,
+                .max_udp_payload_size = path_mtu_update.max_udp_payload_size,
             },
             update_time);
         bool observed_early_stream_data = false;
         const bool ok = process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
-            update.route_handle, backend, nullptr, &deferred_output, &observed_early_stream_data);
+            path_mtu_update.route_handle, backend, nullptr, &deferred_output,
+            &observed_early_stream_data);
         maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data,
                                                      defer_output_until, update_time);
         return ok;

@@ -124,10 +124,10 @@ Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
         }
 
         std::uint64_t current = 0;
-        const auto *token_begin = token.data();
-        const auto *token_end = token_begin + token.size();
-        const auto parsed = std::from_chars(token_begin, token_end, current);
-        if (parsed.ec != std::errc{} || parsed.ptr != token_end) {
+        const auto *field_begin = token.data();
+        const auto *field_end = field_begin + token.size();
+        const auto parsed_number = std::from_chars(field_begin, field_end, current);
+        if (parsed_number.ec != std::errc{} || parsed_number.ptr != field_end) {
             return http3_failure<std::uint64_t>(Http3ErrorCode::message_error,
                                                 "invalid content-length header");
         }

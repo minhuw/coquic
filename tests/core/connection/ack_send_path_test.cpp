@@ -563,7 +563,7 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossRepeatedCumulativeAcks
             << " queued_bytes=" << connection.total_queued_stream_bytes()
             << " pending_send=" << connection.has_pending_application_send();
         ASSERT_TRUE(largest_outstanding.has_value());
-        const auto largest_acknowledged = optional_value_or_terminate(largest_outstanding);
+        const std::uint64_t largest_acknowledged = optional_value_or_terminate(largest_outstanding);
 
         ASSERT_TRUE(connection
                         .process_inbound_ack(
@@ -1358,7 +1358,7 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossDroppedCumulativeAckRo
         }
 
         ASSERT_TRUE(largest_outstanding.has_value());
-        const auto largest_acknowledged = optional_value_or_terminate(largest_outstanding);
+        const std::uint64_t largest_acknowledged = optional_value_or_terminate(largest_outstanding);
 
         ASSERT_TRUE(connection
                         .process_inbound_ack(
@@ -1406,7 +1406,7 @@ TEST(QuicCoreTest, CongestionWindowGatesAckElicitingSendsUntilAckArrives) {
     EXPECT_TRUE(blocked.empty());
 
     ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
-    const auto largest_packet_number =
+    const std::uint64_t largest_packet_number =
         last_tracked_packet(connection.application_space_).packet_number;
     ASSERT_TRUE(connection
                     .process_inbound_ack(connection.application_space_,
@@ -1420,7 +1420,8 @@ TEST(QuicCoreTest, CongestionWindowGatesAckElicitingSendsUntilAckArrives) {
                                          /*suppress_pto_reset=*/false)
                     .has_value());
 
-    const auto after_ack = connection.drain_outbound_datagram(coquic::quic::test::test_time(4));
+    const coquic::quic::DatagramBuffer after_ack =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(4));
     EXPECT_FALSE(after_ack.empty());
 }
 
@@ -1488,12 +1489,12 @@ TEST(QuicCoreTest, AckProcessingAccountsForLateAckedEcnPackets) {
                                      .path_id = 0,
                                      .ecn = coquic::quic::QuicEcnCodepoint::ect0,
                                  });
-    const auto late_handle = optional_value_or_terminate(
+    const coquic::quic::RecoveryPacketHandle late_handle = optional_value_or_terminate(
         connection.application_space_.recovery.handle_for_packet_number(3));
     ASSERT_TRUE(
         connection.mark_lost_packet(connection.application_space_, late_handle).has_value());
 
-    const auto processed =
+    const coquic::quic::CodecResult<bool> processed =
         connection.process_inbound_ack(connection.application_space_,
                                        coquic::quic::AckFrame{
                                            .largest_acknowledged = 5,
@@ -1567,27 +1568,28 @@ TEST(QuicCoreTest, AckProcessingRetiresLateAckedPacketFromRecoveryLedger) {
                                      .path_id = 0,
                                  });
 
-    const auto late_handle = optional_value_or_terminate(
+    const coquic::quic::RecoveryPacketHandle late_handle = optional_value_or_terminate(
         connection.application_space_.recovery.handle_for_packet_number(3));
     EXPECT_TRUE(
         connection.mark_lost_packet(connection.application_space_, late_handle).has_value());
 
-    const auto processed = connection.process_inbound_ack(connection.application_space_,
-                                                          coquic::quic::AckFrame{
-                                                              .largest_acknowledged = 5,
-                                                              .first_ack_range = 0,
-                                                              .additional_ranges =
-                                                                  {
-                                                                      coquic::quic::AckRange{
-                                                                          .gap = 0,
-                                                                          .range_length = 0,
-                                                                      },
-                                                                  },
-                                                          },
-                                                          coquic::quic::test::test_time(10),
-                                                          /*ack_delay_exponent=*/0,
-                                                          /*max_ack_delay_ms=*/0,
-                                                          /*suppress_pto_reset=*/false);
+    const coquic::quic::CodecResult<bool> processed =
+        connection.process_inbound_ack(connection.application_space_,
+                                       coquic::quic::AckFrame{
+                                           .largest_acknowledged = 5,
+                                           .first_ack_range = 0,
+                                           .additional_ranges =
+                                               {
+                                                   coquic::quic::AckRange{
+                                                       .gap = 0,
+                                                       .range_length = 0,
+                                                   },
+                                               },
+                                       },
+                                       coquic::quic::test::test_time(10),
+                                       /*ack_delay_exponent=*/0,
+                                       /*max_ack_delay_ms=*/0,
+                                       /*suppress_pto_reset=*/false);
 
     ASSERT_TRUE(processed.has_value());
     EXPECT_EQ(connection.application_space_.recovery.find_packet(3), nullptr);
@@ -1648,7 +1650,7 @@ TEST(QuicCoreTest, AckProcessingDisablesEcnWhenPeerDecreasesEct1OrCeCounts) {
                                          .ecn = coquic::quic::QuicEcnCodepoint::ect0,
                                      });
 
-        const auto processed = connection.process_inbound_ack(
+        const coquic::quic::CodecResult<bool> processed = connection.process_inbound_ack(
             connection.application_space_,
             coquic::quic::AckFrame{
                 .largest_acknowledged = 1,
@@ -1686,7 +1688,7 @@ TEST(QuicCoreTest, AckProcessingDisablesEcnWhenPeerCountsDecrease) {
                                      .ecn = coquic::quic::QuicEcnCodepoint::ect0,
                                  });
 
-    const auto processed =
+    const coquic::quic::CodecResult<bool> processed =
         connection.process_inbound_ack(connection.application_space_,
                                        coquic::quic::AckFrame{
                                            .largest_acknowledged = 1,
@@ -2105,17 +2107,17 @@ TEST(QuicCoreTest, ServerDefersOneRttDataUntilHandshakeCompletionWhenKeysAlready
         return std::nullopt;
     };
 
-    const auto has_handshake_datagram =
+    const std::optional<std::size_t> has_handshake_datagram =
         find_packet_datagram_index(handshake_datagrams, [](const auto &decoded_packet) {
             return std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(decoded_packet);
         });
-    const auto one_rtt_datagram_index =
+    const std::optional<std::size_t> one_rtt_datagram_index =
         find_packet_datagram_index(request_datagrams, [](const auto &decoded_packet) {
             return std::holds_alternative<coquic::quic::ProtectedOneRttPacket>(decoded_packet);
         });
     ASSERT_TRUE(has_handshake_datagram.has_value());
     ASSERT_TRUE(one_rtt_datagram_index.has_value());
-    const auto one_rtt_index = optional_value_or_terminate(one_rtt_datagram_index);
+    const std::size_t one_rtt_index = optional_value_or_terminate(one_rtt_datagram_index);
 
     ASSERT_TRUE(server.connection_->application_space_.read_secret.has_value());
 
@@ -2306,12 +2308,14 @@ TEST(QuicCoreTest, ClientHandshakeRecoveryProbeBypassesCongestionForFirstHandsha
     connection.congestion_controller_.congestion_window_ = 2400;
     connection.congestion_controller_.bytes_in_flight_ = 2400;
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    const coquic::quic::DatagramBuffer datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
     ASSERT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.handshake_space_.send_crypto.has_pending_data());
     EXPECT_TRUE(connection.initial_packet_space_discarded_);
 
-    const auto packets = decode_sender_datagram(connection, datagram);
+    const std::vector<coquic::quic::ProtectedPacket> packets =
+        decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front());
     ASSERT_NE(handshake, nullptr);
@@ -2351,7 +2355,8 @@ TEST(QuicCoreTest, ClientReceiveKeepalivePtoDeadlineArmsProbeWithoutInflightPack
         optional_value_or_terminate(connection.application_space_.pending_probe_packet).has_ping);
     EXPECT_EQ(connection.remaining_pto_probe_datagrams_, 2);
 
-    const auto datagram = connection.drain_outbound_datagram(deadline_value);
+    const coquic::quic::DatagramBuffer datagram =
+        connection.drain_outbound_datagram(deadline_value);
     ASSERT_FALSE(datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), std::optional<coquic::quic::QuicPathId>{1});
     EXPECT_EQ(connection.last_client_receive_keepalive_probe_time_, std::optional{deadline_value});
@@ -2391,7 +2396,8 @@ TEST(QuicCoreTest, ClientReceiveKeepalivePtoDeadlineArmsProbeWithApplicationInFl
     EXPECT_TRUE(
         optional_value_or_terminate(connection.application_space_.pending_probe_packet).force_ack);
 
-    const auto datagram = connection.drain_outbound_datagram(optional_value_or_terminate(deadline));
+    const coquic::quic::DatagramBuffer datagram =
+        connection.drain_outbound_datagram(optional_value_or_terminate(deadline));
     ASSERT_FALSE(datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), std::optional<coquic::quic::QuicPathId>{0});
 }
@@ -2434,15 +2440,16 @@ TEST(QuicCoreTest, ClientReceiveKeepaliveSkipsPathChallengeOnUnvalidatedCurrentP
     ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
     EXPECT_FALSE(connection.ensure_path_state(1).challenge_pending);
 
-    const auto ack_deadline =
+    const coquic::quic::QuicCoreTimePoint ack_deadline =
         optional_value_or_terminate(connection.application_space_.pending_ack_deadline);
     connection.on_timeout(ack_deadline);
 
-    const auto response = connection.drain_outbound_datagram(ack_deadline);
+    const coquic::quic::DatagramBuffer response = connection.drain_outbound_datagram(ack_deadline);
     ASSERT_FALSE(response.empty());
     EXPECT_EQ(connection.last_drained_path_id(), 1u);
 
-    const auto packets = decode_sender_datagram(connection, response);
+    const std::vector<coquic::quic::ProtectedPacket> packets =
+        decode_sender_datagram(connection, response);
     ASSERT_EQ(packets.size(), 1u);
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
     ASSERT_NE(application, nullptr);
@@ -2483,11 +2490,12 @@ TEST(QuicCoreTest, ClientReceiveKeepaliveSkipsPathChallengeOnValidatedCurrentPat
     EXPECT_FALSE(connection.ensure_path_state(1).challenge_pending);
     EXPECT_FALSE(connection.ensure_path_state(1).outstanding_challenge.has_value());
 
-    const auto datagram = connection.drain_outbound_datagram(deadline);
+    const coquic::quic::DatagramBuffer datagram = connection.drain_outbound_datagram(deadline);
     ASSERT_FALSE(datagram.empty());
     EXPECT_EQ(connection.last_client_receive_keepalive_probe_time_, std::optional{deadline});
 
-    const auto packets = decode_sender_datagram(connection, datagram);
+    const std::vector<coquic::quic::ProtectedPacket> packets =
+        decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
     ASSERT_NE(application, nullptr);
@@ -2543,10 +2551,11 @@ TEST(QuicCoreTest, ClientReceiveKeepalivePtoDeadlineStaysArmedAfterPartialRespon
     ASSERT_TRUE(client.connection_->streams_.contains(0));
     EXPECT_FALSE(client.connection_->streams_.at(0).peer_fin_delivered);
 
-    const auto deadline = client.connection_->next_wakeup();
+    const std::optional<coquic::quic::QuicCoreTimePoint> deadline =
+        client.connection_->next_wakeup();
     ASSERT_TRUE(deadline.has_value());
 
-    const auto timeout_result =
+    const coquic::quic::QuicCoreResult timeout_result =
         client.advance(coquic::quic::QuicCoreTimerExpired{}, optional_value_or_terminate(deadline));
     EXPECT_FALSE(coquic::quic::test::send_datagrams_from(timeout_result).empty());
 }
@@ -2591,16 +2600,17 @@ TEST(QuicCoreTest, LargePartialResponseSchedulesAckAndClearsOutstandingRequest) 
         response, client, coquic::quic::test::test_time(4));
     EXPECT_FALSE(coquic::quic::test::received_application_data_from(response_delivered).empty());
     if (coquic::quic::test::send_datagrams_from(response_delivered).empty()) {
-        const auto ack_deadline = client.connection_->next_wakeup();
+        const std::optional<coquic::quic::QuicCoreTimePoint> ack_deadline =
+            client.connection_->next_wakeup();
         ASSERT_TRUE(ack_deadline.has_value());
         response_delivered = client.advance(coquic::quic::QuicCoreTimerExpired{},
                                             optional_value_or_terminate(ack_deadline));
     }
     const auto ack_datagrams = coquic::quic::test::send_datagrams_from(response_delivered);
     EXPECT_FALSE(ack_datagrams.empty());
-    EXPECT_TRUE(
-        std::any_of(ack_datagrams.begin(), ack_datagrams.end(), [&](const auto &ack_datagram) {
-            return datagram_has_application_ack(*client.connection_, ack_datagram);
+    EXPECT_TRUE(std::any_of(
+        ack_datagrams.begin(), ack_datagrams.end(), [&](const auto &client_ack_datagram) {
+            return datagram_has_application_ack(*client.connection_, client_ack_datagram);
         }));
 
     ASSERT_TRUE(client.connection_->handshake_confirmed_);
@@ -2686,17 +2696,19 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
         break;
     }
 
-    const auto sent_packets = tracked_packet_snapshot(client.connection_->application_space_);
-    const auto in_flight_application_packets =
+    const std::vector<coquic::quic::SentPacketRecord> sent_packets =
+        tracked_packet_snapshot(client.connection_->application_space_);
+    const std::ptrdiff_t in_flight_application_packets =
         std::count_if(sent_packets.begin(), sent_packets.end(), [](const auto &sent_packet) {
             return sent_packet.ack_eliciting && sent_packet.in_flight;
         });
-    ASSERT_LE(in_flight_application_packets, 1);
+    ASSERT_LE(in_flight_application_packets, std::ptrdiff_t{1});
 
-    const auto deadline = client.connection_->next_wakeup();
+    const std::optional<coquic::quic::QuicCoreTimePoint> deadline =
+        client.connection_->next_wakeup();
     ASSERT_TRUE(deadline.has_value());
 
-    const auto timeout_result =
+    const coquic::quic::QuicCoreResult timeout_result =
         client.advance(coquic::quic::QuicCoreTimerExpired{}, optional_value_or_terminate(deadline));
     const auto timeout_datagrams = coquic::quic::test::send_datagrams_from(timeout_result);
     ASSERT_FALSE(timeout_datagrams.empty());
@@ -2728,7 +2740,8 @@ TEST(QuicCoreTest, SelectPtoProbePrefersRetransmittableCryptoOverPingFallback) {
                                      .crypto_ranges = crypto_ranges,
                                  });
 
-    const auto probe = connection.select_pto_probe(connection.handshake_space_);
+    const coquic::quic::SentPacketRecord probe =
+        connection.select_pto_probe(connection.handshake_space_);
 
     EXPECT_EQ(probe.packet_number, 2u);
     EXPECT_EQ(probe.crypto_ranges.size(), 1u);

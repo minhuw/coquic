@@ -25,6 +25,241 @@ bool runtime_openssl_available_for_tests() {
     return runtime_has_openssl();
 }
 
+struct BackendLoopScriptForTests {
+    std::vector<QuicCoreTimePoint> current_times;
+    std::vector<std::optional<QuicCoreTimePoint>> next_wakeup_results;
+    std::vector<std::optional<QuicIoEvent>> wait_results;
+    std::vector<bool> pump_return_results;
+    std::vector<bool> pending_work_after_pump;
+    std::vector<bool> pump_made_progress;
+    std::vector<bool> process_wait_timer_results;
+    bool process_datagram_result = true;
+    bool process_path_mtu_result = true;
+};
+
+ServerLoopResultForTests
+run_server_loop_script_for_tests(const ScriptedServerLoopCaseForTests &script,
+                                 bool include_preferred_socket,
+                                 const std::vector<bool> &has_failed_results) {
+    std::size_t current_time_calls = 0;
+    std::size_t receive_calls = 0;
+    std::size_t wait_calls = 0;
+    std::size_t process_expired_calls = 0;
+    std::size_t process_datagram_calls = 0;
+    std::size_t pump_calls = 0;
+    std::size_t has_failed_calls = 0;
+    bool endpoint_has_pending_work = false;
+
+    const auto io = ServerLoopIo{
+        .current_time =
+            [&] {
+                current_time_calls += 1;
+                return now();
+            },
+        .receive_datagram =
+            [&](int, int, std::string_view) {
+                const auto index = std::min(receive_calls, script.receive_results.size() - 1);
+                receive_calls += 1;
+                return script.receive_results.at(index);
+            },
+        .wait_for_socket_or_deadline =
+            [&](const RuntimeWaitConfig &,
+                const std::optional<QuicCoreTimePoint> &) -> std::optional<RuntimeWaitStep> {
+            const auto index = std::min(wait_calls, script.wait_steps.size() - 1);
+            wait_calls += 1;
+            return script.wait_steps.at(index);
+        },
+    };
+    const auto driver = ServerLoopDriver{
+        .earliest_wakeup = [] { return std::optional<QuicCoreTimePoint>{}; },
+        .process_expired_timers =
+            [&](QuicCoreTimePoint, bool &processed_any) {
+                const auto index =
+                    std::min(process_expired_calls, script.processed_timers_results.size() - 1);
+                process_expired_calls += 1;
+                processed_any = script.processed_timers_results.at(index);
+            },
+        .pump_endpoint_work =
+            [&] {
+                const auto work_index =
+                    std::min(pump_calls, script.pending_work_after_pump.size() - 1);
+                endpoint_has_pending_work = script.pending_work_after_pump.at(work_index);
+                const auto progress_index =
+                    std::min(pump_calls, script.pump_made_progress.size() - 1);
+                const bool made_progress = script.pump_made_progress.at(progress_index);
+                pump_calls += 1;
+                return made_progress;
+            },
+        .has_pending_endpoint_work = [&] { return endpoint_has_pending_work; },
+        .process_datagram =
+            [&](const RuntimeWaitStep &) {
+                process_datagram_calls += 1;
+                return script.process_datagram_result;
+            },
+        .has_failed = [&]() -> bool {
+            const auto index = std::min(has_failed_calls, has_failed_results.size() - 1);
+            has_failed_calls += 1;
+            return static_cast<bool>(has_failed_results.at(index));
+        },
+    };
+    return ServerLoopResultForTests{
+        .exit_code = run_http09_server_loop(
+            ServerSocketSet{
+                .primary_fd = -1,
+                .preferred_fd = include_preferred_socket ? std::optional<int>{-2} : std::nullopt,
+            },
+            io, driver),
+        .current_time_calls = current_time_calls,
+        .receive_calls = receive_calls,
+        .wait_calls = wait_calls,
+        .process_expired_calls = process_expired_calls,
+        .process_datagram_calls = process_datagram_calls,
+        .pump_calls = pump_calls,
+    };
+}
+
+ServerLoopResultForTests
+run_backend_loop_script_for_tests(const BackendLoopScriptForTests &script) {
+    std::size_t current_time_calls = 0;
+    std::size_t next_wakeup_calls = 0;
+    std::size_t wait_calls = 0;
+    std::size_t process_wait_timer_calls = 0;
+    std::size_t process_datagram_calls = 0;
+    std::size_t process_path_mtu_calls = 0;
+    std::size_t pump_calls = 0;
+    bool endpoint_has_pending_work = false;
+    QuicCoreTimePoint last_current_time = script.current_times.front();
+
+    const auto driver = ServerBackendLoopDriver{
+        .current_time =
+            [&] {
+                const auto index = std::min(current_time_calls, script.current_times.size() - 1);
+                last_current_time = script.current_times.at(index);
+                current_time_calls += 1;
+                return last_current_time;
+            },
+        .next_wakeup =
+            [&] {
+                const auto index =
+                    std::min(next_wakeup_calls, script.next_wakeup_results.size() - 1);
+                next_wakeup_calls += 1;
+                return script.next_wakeup_results.at(index);
+            },
+        .pump_endpoint_work =
+            [&](bool &made_progress) {
+                const auto work_index =
+                    std::min(pump_calls, script.pending_work_after_pump.size() - 1);
+                endpoint_has_pending_work = script.pending_work_after_pump.at(work_index);
+                const auto progress_index =
+                    std::min(pump_calls, script.pump_made_progress.size() - 1);
+                made_progress = script.pump_made_progress.at(progress_index);
+                const auto result_index =
+                    std::min(pump_calls, script.pump_return_results.size() - 1);
+                const bool result = script.pump_return_results.at(result_index);
+                pump_calls += 1;
+                return result;
+            },
+        .has_pending_endpoint_work = [&] { return endpoint_has_pending_work; },
+        .wait =
+            [&](const std::optional<QuicCoreTimePoint> &) {
+                const auto index = std::min(wait_calls, script.wait_results.size() - 1);
+                wait_calls += 1;
+                return script.wait_results.at(index);
+            },
+        .process_wait_timer = [&](QuicCoreTimePoint) -> bool {
+            const auto index =
+                std::min(process_wait_timer_calls, script.process_wait_timer_results.size() - 1);
+            process_wait_timer_calls += 1;
+            return static_cast<bool>(script.process_wait_timer_results.at(index));
+        },
+        .process_datagram =
+            [&](const QuicIoRxDatagram &, QuicCoreTimePoint) {
+                process_datagram_calls += 1;
+                return script.process_datagram_result;
+            },
+        .process_path_mtu_update =
+            [&](const QuicIoPathMtuUpdate &, QuicCoreTimePoint) {
+                process_path_mtu_calls += 1;
+                return script.process_path_mtu_result;
+            },
+    };
+    return ServerLoopResultForTests{
+        .exit_code = run_server_backend_loop_with_driver(driver),
+        .current_time_calls = current_time_calls,
+        .wait_calls = wait_calls,
+        .process_expired_calls = process_wait_timer_calls,
+        .process_datagram_calls = process_datagram_calls,
+        .process_path_mtu_calls = process_path_mtu_calls,
+        .pump_calls = pump_calls,
+    };
+}
+
+struct ExpectedServerLoopResultForTests {
+    int exit_code = 1;
+    std::optional<std::size_t> receive_calls;
+    std::optional<std::size_t> wait_calls;
+    std::optional<std::size_t> process_expired_calls;
+    std::optional<std::size_t> process_datagram_calls;
+    std::optional<std::size_t> process_path_mtu_calls;
+    std::optional<std::size_t> pump_calls;
+};
+
+bool server_loop_result_matches_for_tests(const ServerLoopResultForTests &result,
+                                          const ExpectedServerLoopResultForTests &expected) {
+    return result.exit_code == expected.exit_code &&
+           (!expected.receive_calls.has_value() ||
+            result.receive_calls == *expected.receive_calls) &&
+           (!expected.wait_calls.has_value() || result.wait_calls == *expected.wait_calls) &&
+           (!expected.process_expired_calls.has_value() ||
+            result.process_expired_calls == *expected.process_expired_calls) &&
+           (!expected.process_datagram_calls.has_value() ||
+            result.process_datagram_calls == *expected.process_datagram_calls) &&
+           (!expected.process_path_mtu_calls.has_value() ||
+            result.process_path_mtu_calls == *expected.process_path_mtu_calls) &&
+           (!expected.pump_calls.has_value() || result.pump_calls == *expected.pump_calls);
+}
+
+BackendLoopScriptForTests
+backend_loop_top_due_successful_datagram_script_for_tests(QuicCoreTimePoint base_time) {
+    return BackendLoopScriptForTests{
+        .current_times = {base_time, base_time},
+        .next_wakeup_results = {base_time, std::nullopt},
+        .wait_results =
+            {
+                QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::rx_datagram,
+                    .now = base_time,
+                    .datagram =
+                        QuicIoRxDatagram{
+                            .route_handle = QuicRouteHandle{17},
+                            .bytes = {std::byte{0x34}},
+                        },
+                },
+                std::nullopt,
+            },
+        .pump_return_results = {true},
+        .pending_work_after_pump = {false},
+        .pump_made_progress = {false},
+    };
+}
+
+bool result_connection_helpers_cover_effect_variants_for_tests(const QuicCoreResult &result) {
+    const auto handles = result_connection_handles(result);
+    const auto contains = [&](QuicConnectionHandle handle) {
+        return std::find(handles.begin(), handles.end(), handle) != handles.end();
+    };
+    const auto sliced = slice_result_for_connection(result, 4);
+    return contains(1) & contains(2) & contains(3) & contains(4) & contains(5) & contains(6) &
+           contains(7) & contains(8) & contains(9) & contains(10) & contains(12) &
+           sliced.effects.size() == 1 &
+           std::holds_alternative<QuicCorePeerStopSending>(sliced.effects.at(0)) &
+           !result_has_connection_lifecycle(result, 4, QuicCoreConnectionLifecycle::accepted);
+}
+
+bool transport_wide_error_connection_helpers_for_tests(const QuicCoreResult &result) {
+    return result_connection_handles(result) == std::vector<QuicConnectionHandle>{11};
+}
+
 bool runtime_server_loop_and_trace_coverage_for_tests() {
     bool ok = true;
     const auto make_loopback_peer = [](std::uint16_t port) {
@@ -41,18 +276,6 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .private_key_pem = read_text_file("tests/fixtures/quic-server-key.pem"),
         };
     };
-    struct BackendLoopScriptForTests {
-        std::vector<QuicCoreTimePoint> current_times;
-        std::vector<std::optional<QuicCoreTimePoint>> next_wakeup_results;
-        std::vector<std::optional<QuicIoEvent>> wait_results;
-        std::vector<bool> pump_return_results;
-        std::vector<bool> pending_work_after_pump;
-        std::vector<bool> pump_made_progress;
-        std::vector<bool> process_wait_timer_results;
-        bool process_datagram_result = true;
-        bool process_path_mtu_result = true;
-    };
-
     const auto peer = make_loopback_peer(4443);
     const ParsedServerDatagram supported_initial{
         .kind = ParsedServerDatagram::Kind::supported_initial,
@@ -247,11 +470,6 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .connection = 12,
             .token = bytes_from_string_for_runtime_tests("token"),
         });
-        const auto handles = result_connection_handles(result);
-        const auto contains = [&](QuicConnectionHandle handle) {
-            return std::find(handles.begin(), handles.end(), handle) != handles.end();
-        };
-        const auto sliced = slice_result_for_connection(result, 4);
         QuicCoreResult transport_error_result;
         transport_error_result.local_error = QuicCoreLocalError{
             .connection = std::nullopt,
@@ -262,17 +480,12 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             .connection = 11,
             .change = QuicCoreStateChange::handshake_ready,
         });
-        const auto transport_handles = result_connection_handles(transport_error_result);
         server_loop_coverage_check(
             ok, "result connection helpers cover the remaining effect variants",
-            contains(1) & contains(2) & contains(3) & contains(4) & contains(5) & contains(6) &
-                contains(7) & contains(8) & contains(9) & contains(10) & contains(12) &
-                sliced.effects.size() == 1 &
-                std::holds_alternative<QuicCorePeerStopSending>(sliced.effects.at(0)) &
-                !result_has_connection_lifecycle(result, 4, QuicCoreConnectionLifecycle::accepted));
+            result_connection_helpers_cover_effect_variants_for_tests(result));
         server_loop_coverage_check(
             ok, "result connection helpers ignore transport-wide local errors without connections",
-            transport_handles == std::vector<QuicConnectionHandle>{11});
+            transport_wide_error_connection_helpers_for_tests(transport_error_result));
     }
 
     {
@@ -362,103 +575,26 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
     }
 
     {
-        const auto run_server_loop_script = [&](ScriptedServerLoopCaseForTests script,
-                                                bool include_preferred_socket,
-                                                std::vector<bool> has_failed_results) {
-            std::size_t current_time_calls = 0;
-            std::size_t receive_calls = 0;
-            std::size_t wait_calls = 0;
-            std::size_t process_expired_calls = 0;
-            std::size_t process_datagram_calls = 0;
-            std::size_t pump_calls = 0;
-            std::size_t has_failed_calls = 0;
-            bool endpoint_has_pending_work = false;
-
-            const auto io = ServerLoopIo{
-                .current_time =
-                    [&] {
-                        current_time_calls += 1;
-                        return now();
-                    },
-                .receive_datagram =
-                    [&](int, int, std::string_view) {
-                        const auto index =
-                            std::min(receive_calls, script.receive_results.size() - 1);
-                        receive_calls += 1;
-                        return script.receive_results.at(index);
-                    },
-                .wait_for_socket_or_deadline = [&](const RuntimeWaitConfig &,
-                                                   const std::optional<QuicCoreTimePoint> &)
-                    -> std::optional<RuntimeWaitStep> {
-                    const auto index = std::min(wait_calls, script.wait_steps.size() - 1);
-                    wait_calls += 1;
-                    return script.wait_steps.at(index);
-                },
-            };
-            const auto driver = ServerLoopDriver{
-                .earliest_wakeup = [] { return std::optional<QuicCoreTimePoint>{}; },
-                .process_expired_timers =
-                    [&](QuicCoreTimePoint, bool &processed_any) {
-                        const auto index = std::min(process_expired_calls,
-                                                    script.processed_timers_results.size() - 1);
-                        process_expired_calls += 1;
-                        processed_any = script.processed_timers_results.at(index);
-                    },
-                .pump_endpoint_work =
-                    [&] {
-                        const auto work_index =
-                            std::min(pump_calls, script.pending_work_after_pump.size() - 1);
-                        endpoint_has_pending_work = script.pending_work_after_pump.at(work_index);
-                        const auto progress_index =
-                            std::min(pump_calls, script.pump_made_progress.size() - 1);
-                        const bool made_progress = script.pump_made_progress.at(progress_index);
-                        pump_calls += 1;
-                        return made_progress;
-                    },
-                .has_pending_endpoint_work = [&] { return endpoint_has_pending_work; },
-                .process_datagram =
-                    [&](const RuntimeWaitStep &) {
-                        process_datagram_calls += 1;
-                        return script.process_datagram_result;
-                    },
-                .has_failed = [&]() -> bool {
-                    const auto index = std::min(has_failed_calls, has_failed_results.size() - 1);
-                    has_failed_calls += 1;
-                    return static_cast<bool>(has_failed_results.at(index));
-                },
-            };
-            return ServerLoopResultForTests{
-                .exit_code = run_http09_server_loop(
-                    ServerSocketSet{
-                        .primary_fd = -1,
-                        .preferred_fd =
-                            include_preferred_socket ? std::optional<int>{-2} : std::nullopt,
-                    },
-                    io, driver),
-                .current_time_calls = current_time_calls,
-                .receive_calls = receive_calls,
-                .wait_calls = wait_calls,
-                .process_expired_calls = process_expired_calls,
-                .process_datagram_calls = process_datagram_calls,
-                .pump_calls = pump_calls,
-            };
-        };
-
-        const auto top_level_failed =
-            run_server_loop_script({}, /*include_preferred_socket=*/false, {true});
         server_loop_coverage_check(
             ok, "server loop exits immediately when the driver has already failed",
-            top_level_failed.exit_code == 1 & top_level_failed.receive_calls == 0 &
-                top_level_failed.wait_calls == 0);
+            server_loop_result_matches_for_tests(
+                run_server_loop_script_for_tests({}, /*include_preferred_socket=*/false, {true}),
+                ExpectedServerLoopResultForTests{
+                    .receive_calls = 0,
+                    .wait_calls = 0,
+                }));
 
         ScriptedServerLoopCaseForTests inner_timer_failure_case;
         inner_timer_failure_case.processed_timers_results = {false};
-        const auto inner_timer_failed = run_server_loop_script(
-            inner_timer_failure_case, /*include_preferred_socket=*/false, {false, true});
         server_loop_coverage_check(
             ok, "server loop exits when timer processing marks the driver failed",
-            inner_timer_failed.exit_code == 1 & inner_timer_failed.process_expired_calls == 1 &
-                inner_timer_failed.receive_calls == 0);
+            server_loop_result_matches_for_tests(
+                run_server_loop_script_for_tests(inner_timer_failure_case,
+                                                 /*include_preferred_socket=*/false, {false, true}),
+                ExpectedServerLoopResultForTests{
+                    .receive_calls = 0,
+                    .process_expired_calls = 1,
+                }));
 
         ScriptedServerLoopCaseForTests preferred_socket_case;
         preferred_socket_case.receive_results = {
@@ -468,13 +604,15 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
             make_error_receive_for_tests(),
         };
         preferred_socket_case.processed_timers_results = {false, false};
-        const auto preferred_socket_result = run_server_loop_script(
-            preferred_socket_case, /*include_preferred_socket=*/true, {false});
         server_loop_coverage_check(
             ok, "server loop covers preferred-socket short-circuiting after a ready datagram",
-            preferred_socket_result.exit_code == 1 &
-                preferred_socket_result.process_datagram_calls == 1 &
-                preferred_socket_result.receive_calls == 2);
+            server_loop_result_matches_for_tests(
+                run_server_loop_script_for_tests(preferred_socket_case,
+                                                 /*include_preferred_socket=*/true, {false}),
+                ExpectedServerLoopResultForTests{
+                    .receive_calls = 2,
+                    .process_datagram_calls = 1,
+                }));
 
         ScriptedServerLoopCaseForTests inner_pump_failure_case;
         inner_pump_failure_case.receive_results = {
@@ -483,12 +621,16 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         inner_pump_failure_case.processed_timers_results = {false};
         inner_pump_failure_case.pending_work_after_pump = {false};
         inner_pump_failure_case.pump_made_progress = {false};
-        const auto inner_pump_failed = run_server_loop_script(
-            inner_pump_failure_case, /*include_preferred_socket=*/false, {false, false, true});
         server_loop_coverage_check(
             ok, "server loop exits when pumping pending work marks the driver failed",
-            inner_pump_failed.exit_code == 1 & inner_pump_failed.pump_calls == 1 &
-                inner_pump_failed.wait_calls == 0);
+            server_loop_result_matches_for_tests(
+                run_server_loop_script_for_tests(inner_pump_failure_case,
+                                                 /*include_preferred_socket=*/false,
+                                                 {false, false, true}),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 0,
+                    .pump_calls = 1,
+                }));
 
         ScriptedServerLoopCaseForTests outer_failure_case;
         outer_failure_case.receive_results = {
@@ -497,19 +639,26 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         outer_failure_case.processed_timers_results = {false, false};
         outer_failure_case.pending_work_after_pump = {false, false};
         outer_failure_case.pump_made_progress = {false, false};
-        const auto outer_timer_failed = run_server_loop_script(
-            outer_failure_case, /*include_preferred_socket=*/false, {false, false, false, true});
         server_loop_coverage_check(
             ok, "server loop exits when the outer timer pass marks the driver failed",
-            outer_timer_failed.exit_code == 1 & outer_timer_failed.process_expired_calls == 2 &
-                outer_timer_failed.pump_calls == 1);
-        const auto outer_pump_failed =
-            run_server_loop_script(outer_failure_case, /*include_preferred_socket=*/false,
-                                   {false, false, false, false, true});
-        server_loop_coverage_check(
-            ok, "server loop exits when the outer pump marks the driver failed",
-            outer_pump_failed.exit_code == 1 & outer_pump_failed.process_expired_calls == 2 &
-                outer_pump_failed.pump_calls == 2);
+            server_loop_result_matches_for_tests(
+                run_server_loop_script_for_tests(outer_failure_case,
+                                                 /*include_preferred_socket=*/false,
+                                                 {false, false, false, true}),
+                ExpectedServerLoopResultForTests{
+                    .process_expired_calls = 2,
+                    .pump_calls = 1,
+                }));
+        server_loop_coverage_check(ok,
+                                   "server loop exits when the outer pump marks the driver failed",
+                                   server_loop_result_matches_for_tests(
+                                       run_server_loop_script_for_tests(
+                                           outer_failure_case, /*include_preferred_socket=*/false,
+                                           {false, false, false, false, true}),
+                                       ExpectedServerLoopResultForTests{
+                                           .process_expired_calls = 2,
+                                           .pump_calls = 2,
+                                       }));
 
         ScriptedServerLoopCaseForTests idle_timeout_case;
         idle_timeout_case.receive_results = {
@@ -522,12 +671,15 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         idle_timeout_case.processed_timers_results = {false, false, false};
         idle_timeout_case.pending_work_after_pump = {false};
         idle_timeout_case.pump_made_progress = {false};
-        const auto idle_timeout_result =
-            run_server_loop_script(idle_timeout_case, /*include_preferred_socket=*/false, {false});
-        server_loop_coverage_check(ok, "server loop continues after idle timeout steps",
-                                   idle_timeout_result.exit_code == 1 &
-                                       idle_timeout_result.wait_calls == 1 &
-                                       idle_timeout_result.receive_calls == 2);
+        server_loop_coverage_check(
+            ok, "server loop continues after idle timeout steps",
+            server_loop_result_matches_for_tests(
+                run_server_loop_script_for_tests(idle_timeout_case,
+                                                 /*include_preferred_socket=*/false, {false}),
+                ExpectedServerLoopResultForTests{
+                    .receive_calls = 2,
+                    .wait_calls = 1,
+                }));
 
         ScriptedServerLoopCaseForTests wait_datagram_failure_case;
         wait_datagram_failure_case.receive_results = {
@@ -542,549 +694,507 @@ bool runtime_server_loop_and_trace_coverage_for_tests() {
         wait_datagram_failure_case.pending_work_after_pump = {false};
         wait_datagram_failure_case.pump_made_progress = {false};
         wait_datagram_failure_case.process_datagram_result = false;
-        const auto wait_datagram_failure = run_server_loop_script(
-            wait_datagram_failure_case, /*include_preferred_socket=*/false, {false});
         server_loop_coverage_check(
             ok, "server loop propagates failures from datagrams returned by blocking waits",
-            wait_datagram_failure.exit_code == 1 & wait_datagram_failure.wait_calls == 1 &
-                wait_datagram_failure.process_datagram_calls == 1);
+            server_loop_result_matches_for_tests(
+                run_server_loop_script_for_tests(wait_datagram_failure_case,
+                                                 /*include_preferred_socket=*/false, {false}),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 1,
+                    .process_datagram_calls = 1,
+                }));
     }
 
     {
-        const auto run_backend_loop_script = [&](BackendLoopScriptForTests script) {
-            std::size_t current_time_calls = 0;
-            std::size_t next_wakeup_calls = 0;
-            std::size_t wait_calls = 0;
-            std::size_t process_wait_timer_calls = 0;
-            std::size_t process_datagram_calls = 0;
-            std::size_t process_path_mtu_calls = 0;
-            std::size_t pump_calls = 0;
-            bool endpoint_has_pending_work = false;
-            QuicCoreTimePoint last_current_time = script.current_times.front();
-
-            const auto driver = ServerBackendLoopDriver{
-                .current_time =
-                    [&] {
-                        const auto index =
-                            std::min(current_time_calls, script.current_times.size() - 1);
-                        last_current_time = script.current_times.at(index);
-                        current_time_calls += 1;
-                        return last_current_time;
-                    },
-                .next_wakeup =
-                    [&] {
-                        const auto index =
-                            std::min(next_wakeup_calls, script.next_wakeup_results.size() - 1);
-                        next_wakeup_calls += 1;
-                        return script.next_wakeup_results.at(index);
-                    },
-                .pump_endpoint_work =
-                    [&](bool &made_progress) {
-                        const auto work_index =
-                            std::min(pump_calls, script.pending_work_after_pump.size() - 1);
-                        endpoint_has_pending_work = script.pending_work_after_pump.at(work_index);
-                        const auto progress_index =
-                            std::min(pump_calls, script.pump_made_progress.size() - 1);
-                        made_progress = script.pump_made_progress.at(progress_index);
-                        const auto result_index =
-                            std::min(pump_calls, script.pump_return_results.size() - 1);
-                        const bool result = script.pump_return_results.at(result_index);
-                        pump_calls += 1;
-                        return result;
-                    },
-                .has_pending_endpoint_work = [&] { return endpoint_has_pending_work; },
-                .wait =
-                    [&](const std::optional<QuicCoreTimePoint> &) {
-                        const auto index = std::min(wait_calls, script.wait_results.size() - 1);
-                        wait_calls += 1;
-                        return script.wait_results.at(index);
-                    },
-                .process_wait_timer = [&](QuicCoreTimePoint) -> bool {
-                    const auto index = std::min(process_wait_timer_calls,
-                                                script.process_wait_timer_results.size() - 1);
-                    process_wait_timer_calls += 1;
-                    return static_cast<bool>(script.process_wait_timer_results.at(index));
-                },
-                .process_datagram =
-                    [&](const QuicIoRxDatagram &, QuicCoreTimePoint) {
-                        process_datagram_calls += 1;
-                        return script.process_datagram_result;
-                    },
-                .process_path_mtu_update =
-                    [&](const QuicIoPathMtuUpdate &, QuicCoreTimePoint) {
-                        process_path_mtu_calls += 1;
-                        return script.process_path_mtu_result;
-                    },
-            };
-            return ServerLoopResultForTests{
-                .exit_code = run_server_backend_loop_with_driver(driver),
-                .current_time_calls = current_time_calls,
-                .wait_calls = wait_calls,
-                .process_expired_calls = process_wait_timer_calls,
-                .process_datagram_calls = process_datagram_calls,
-                .process_path_mtu_calls = process_path_mtu_calls,
-                .pump_calls = pump_calls,
-            };
-        };
-
         const auto base_time = now();
-        const auto wait_failure = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time},
-            .next_wakeup_results = {base_time},
-            .wait_results = {std::nullopt},
-        });
         server_loop_coverage_check(
             ok, "backend loop covers top-due wait failures and null event tracing",
-            wait_failure.exit_code == 1 & wait_failure.wait_calls == 1);
+            server_loop_result_matches_for_tests(
+                run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                    .current_times = {base_time},
+                    .next_wakeup_results = {base_time},
+                    .wait_results = {std::nullopt},
+                }),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 1,
+                }));
 
-        const auto top_due_missing_datagram = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time},
-            .next_wakeup_results = {base_time},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::rx_datagram,
-                        .now = base_time,
-                    },
-                },
-        });
         server_loop_coverage_check(
             ok, "backend loop covers top-due datagrams that arrive without payloads",
-            top_due_missing_datagram.exit_code == 1 &
-                top_due_missing_datagram.process_datagram_calls == 0 &
-                top_due_missing_datagram.wait_calls == 1);
-
-        const auto top_due_successful_datagram = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time},
-            .next_wakeup_results = {base_time, std::nullopt},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::rx_datagram,
-                        .now = base_time,
-                        .datagram =
-                            QuicIoRxDatagram{
-                                .route_handle = QuicRouteHandle{17},
-                                .bytes = {std::byte{0x34}},
+            server_loop_result_matches_for_tests(
+                run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                    .current_times = {base_time},
+                    .next_wakeup_results = {base_time},
+                    .wait_results =
+                        {
+                            QuicIoEvent{
+                                .kind = QuicIoEvent::Kind::rx_datagram,
+                                .now = base_time,
                             },
-                    },
-                    std::nullopt,
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {false},
-            .pump_made_progress = {false},
-        });
-        server_loop_coverage_check(ok, "backend loop covers successful top-due datagrams",
-                                   top_due_successful_datagram.exit_code == 1 &
-                                       top_due_successful_datagram.process_datagram_calls == 1 &
-                                       top_due_successful_datagram.wait_calls == 2);
+                        },
+                }),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 1,
+                    .process_datagram_calls = 0,
+                }));
 
-        const auto top_due_missing_path_mtu = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time},
-            .next_wakeup_results = {base_time},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::path_mtu_update,
-                        .now = base_time,
-                    },
-                },
-        });
+        server_loop_coverage_check(
+            ok, "backend loop covers successful top-due datagrams",
+            server_loop_result_matches_for_tests(
+                run_backend_loop_script_for_tests(
+                    backend_loop_top_due_successful_datagram_script_for_tests(base_time)),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 2,
+                    .process_datagram_calls = 1,
+                }));
+
         server_loop_coverage_check(ok,
                                    "backend loop covers top-due path MTU events without payloads",
-                                   top_due_missing_path_mtu.exit_code == 1 &
-                                       top_due_missing_path_mtu.process_path_mtu_calls == 0 &
-                                       top_due_missing_path_mtu.wait_calls == 1);
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time},
+                                           .next_wakeup_results = {base_time},
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::path_mtu_update,
+                                                       .now = base_time,
+                                                   },
+                                               },
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 1,
+                                           .process_path_mtu_calls = 0,
+                                       }));
 
-        const auto top_due_path_mtu_failure = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time},
-            .next_wakeup_results = {base_time},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::path_mtu_update,
-                        .now = base_time,
-                        .path_mtu =
-                            QuicIoPathMtuUpdate{
-                                .route_handle = QuicRouteHandle{17},
-                                .max_udp_payload_size = 1400,
-                            },
-                    },
-                },
-            .process_path_mtu_result = false,
-        });
         server_loop_coverage_check(ok, "backend loop propagates top-due path MTU update failures",
-                                   top_due_path_mtu_failure.exit_code == 1 &
-                                       top_due_path_mtu_failure.process_path_mtu_calls == 1 &
-                                       top_due_path_mtu_failure.wait_calls == 1);
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time},
+                                           .next_wakeup_results = {base_time},
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::path_mtu_update,
+                                                       .now = base_time,
+                                                       .path_mtu =
+                                                           QuicIoPathMtuUpdate{
+                                                               .route_handle = QuicRouteHandle{17},
+                                                               .max_udp_payload_size = 1400,
+                                                           },
+                                                   },
+                                               },
+                                           .process_path_mtu_result = false,
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 1,
+                                           .process_path_mtu_calls = 1,
+                                       }));
 
-        const auto top_due_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time},
-            .next_wakeup_results = {base_time},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::timer_expired,
-                        .now = base_time,
-                    },
-                },
-            .process_wait_timer_results = {false},
-        });
         server_loop_coverage_check(ok,
                                    "backend loop covers due timer events that fail while tracing",
-                                   top_due_timer_failure.exit_code == 1 &
-                                       top_due_timer_failure.process_expired_calls == 1);
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time},
+                                           .next_wakeup_results = {base_time},
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::timer_expired,
+                                                       .now = base_time,
+                                                   },
+                                               },
+                                           .process_wait_timer_results = {false},
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .process_expired_calls = 1,
+                                       }));
 
-        const auto top_due_timer_success = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time},
-            .next_wakeup_results = {base_time, std::nullopt},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::timer_expired,
-                        .now = base_time,
-                    },
-                    std::nullopt,
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {false},
-            .pump_made_progress = {false},
-            .process_wait_timer_results = {true},
-        });
         server_loop_coverage_check(ok, "backend loop covers successful top-due timer handling",
-                                   top_due_timer_success.exit_code == 1 &
-                                       top_due_timer_success.process_expired_calls == 1 &
-                                       top_due_timer_success.wait_calls == 2);
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time},
+                                           .next_wakeup_results = {base_time, std::nullopt},
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::timer_expired,
+                                                       .now = base_time,
+                                                   },
+                                                   std::nullopt,
+                                               },
+                                           .pump_return_results = {true},
+                                           .pending_work_after_pump = {false},
+                                           .pump_made_progress = {false},
+                                           .process_wait_timer_results = {true},
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 2,
+                                           .process_expired_calls = 1,
+                                       }));
 
-        const auto buffered_shutdown = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time},
-            .next_wakeup_results = {base_time},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::shutdown,
-                        .now = base_time,
-                    },
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {false},
-            .pump_made_progress = {false},
-        });
         server_loop_coverage_check(
             ok, "backend loop buffers top-due shutdown events before consuming them",
-            buffered_shutdown.exit_code == 1 & buffered_shutdown.wait_calls == 1 &
-                buffered_shutdown.pump_calls == 1);
+            server_loop_result_matches_for_tests(
+                run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                    .current_times = {base_time, base_time},
+                    .next_wakeup_results = {base_time},
+                    .wait_results =
+                        {
+                            QuicIoEvent{
+                                .kind = QuicIoEvent::Kind::shutdown,
+                                .now = base_time,
+                            },
+                        },
+                    .pump_return_results = {true},
+                    .pending_work_after_pump = {false},
+                    .pump_made_progress = {false},
+                }),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 1,
+                    .pump_calls = 1,
+                }));
 
-        const auto buffered_idle_timeout = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time, base_time},
-            .next_wakeup_results = {base_time, std::nullopt},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::idle_timeout,
-                        .now = base_time,
-                    },
-                    std::nullopt,
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {false},
-            .pump_made_progress = {false},
-        });
         server_loop_coverage_check(
             ok, "backend loop buffers top-due idle timeouts before consuming them",
-            buffered_idle_timeout.exit_code == 1 & buffered_idle_timeout.wait_calls == 2 &
-                buffered_idle_timeout.pump_calls == 2);
+            server_loop_result_matches_for_tests(
+                run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                    .current_times = {base_time, base_time, base_time},
+                    .next_wakeup_results = {base_time, std::nullopt},
+                    .wait_results =
+                        {
+                            QuicIoEvent{
+                                .kind = QuicIoEvent::Kind::idle_timeout,
+                                .now = base_time,
+                            },
+                            std::nullopt,
+                        },
+                    .pump_return_results = {true},
+                    .pending_work_after_pump = {false},
+                    .pump_made_progress = {false},
+                }),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 2,
+                    .pump_calls = 2,
+                }));
 
-        const auto pump_failure = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time},
-            .next_wakeup_results = {std::nullopt},
-            .pump_return_results = {false},
-            .pending_work_after_pump = {false},
-            .pump_made_progress = {false},
-        });
         server_loop_coverage_check(ok, "backend loop exits after pending-work pump failures",
-                                   pump_failure.exit_code == 1 & pump_failure.pump_calls == 1);
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time},
+                                           .next_wakeup_results = {std::nullopt},
+                                           .pump_return_results = {false},
+                                           .pending_work_after_pump = {false},
+                                           .pump_made_progress = {false},
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .pump_calls = 1,
+                                       }));
 
-        const auto ready_probe_wait_failure = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time},
-            .next_wakeup_results =
-                {
-                    base_time + std::chrono::milliseconds(5),
-                    base_time + std::chrono::milliseconds(5),
-                },
-            .wait_results = {std::nullopt},
-            .pump_return_results = {true},
-            .pending_work_after_pump = {true},
-            .pump_made_progress = {true},
-        });
         server_loop_coverage_check(ok, "backend loop covers ready-probe wait failures",
-                                   ready_probe_wait_failure.exit_code == 1 &
-                                       ready_probe_wait_failure.wait_calls == 1 &
-                                       ready_probe_wait_failure.pump_calls == 1);
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time},
+                                           .next_wakeup_results =
+                                               {
+                                                   base_time + std::chrono::milliseconds(5),
+                                                   base_time + std::chrono::milliseconds(5),
+                                               },
+                                           .wait_results = {std::nullopt},
+                                           .pump_return_results = {true},
+                                           .pending_work_after_pump = {true},
+                                           .pump_made_progress = {true},
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 1,
+                                           .pump_calls = 1,
+                                       }));
 
-        const auto ready_probe_missing_datagram = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time},
-            .next_wakeup_results =
-                {
-                    base_time + std::chrono::milliseconds(5),
-                    base_time + std::chrono::milliseconds(5),
-                },
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::rx_datagram,
-                        .now = base_time,
-                    },
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {true},
-            .pump_made_progress = {true},
-        });
         server_loop_coverage_check(
             ok, "backend loop covers ready-probe datagrams that arrive without payloads",
-            ready_probe_missing_datagram.exit_code == 1 &
-                ready_probe_missing_datagram.process_datagram_calls == 0 &
-                ready_probe_missing_datagram.wait_calls == 1);
+            server_loop_result_matches_for_tests(
+                run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                    .current_times = {base_time, base_time},
+                    .next_wakeup_results =
+                        {
+                            base_time + std::chrono::milliseconds(5),
+                            base_time + std::chrono::milliseconds(5),
+                        },
+                    .wait_results =
+                        {
+                            QuicIoEvent{
+                                .kind = QuicIoEvent::Kind::rx_datagram,
+                                .now = base_time,
+                            },
+                        },
+                    .pump_return_results = {true},
+                    .pending_work_after_pump = {true},
+                    .pump_made_progress = {true},
+                }),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 1,
+                    .process_datagram_calls = 0,
+                }));
 
-        const auto ready_probe_missing_path_mtu = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time},
-            .next_wakeup_results =
-                {
-                    base_time + std::chrono::milliseconds(5),
-                    base_time + std::chrono::milliseconds(5),
-                },
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::path_mtu_update,
-                        .now = base_time,
-                    },
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {true},
-            .pump_made_progress = {true},
-        });
         server_loop_coverage_check(
             ok, "backend loop covers ready-probe path MTU events without payloads",
-            ready_probe_missing_path_mtu.exit_code == 1 &
-                ready_probe_missing_path_mtu.process_path_mtu_calls == 0 &
-                ready_probe_missing_path_mtu.wait_calls == 1);
-
-        const auto ready_probe_path_mtu_failure = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time},
-            .next_wakeup_results =
-                {
-                    base_time + std::chrono::milliseconds(5),
-                    base_time + std::chrono::milliseconds(5),
-                },
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::path_mtu_update,
-                        .now = base_time,
-                        .path_mtu =
-                            QuicIoPathMtuUpdate{
-                                .route_handle = QuicRouteHandle{17},
-                                .max_udp_payload_size = 1400,
+            server_loop_result_matches_for_tests(
+                run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                    .current_times = {base_time, base_time},
+                    .next_wakeup_results =
+                        {
+                            base_time + std::chrono::milliseconds(5),
+                            base_time + std::chrono::milliseconds(5),
+                        },
+                    .wait_results =
+                        {
+                            QuicIoEvent{
+                                .kind = QuicIoEvent::Kind::path_mtu_update,
+                                .now = base_time,
                             },
-                    },
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {true},
-            .pump_made_progress = {true},
-            .process_path_mtu_result = false,
-        });
+                        },
+                    .pump_return_results = {true},
+                    .pending_work_after_pump = {true},
+                    .pump_made_progress = {true},
+                }),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 1,
+                    .process_path_mtu_calls = 0,
+                }));
+
         server_loop_coverage_check(ok,
                                    "backend loop propagates ready-probe path MTU update failures",
-                                   ready_probe_path_mtu_failure.exit_code == 1 &
-                                       ready_probe_path_mtu_failure.process_path_mtu_calls == 1 &
-                                       ready_probe_path_mtu_failure.wait_calls == 1);
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time},
+                                           .next_wakeup_results =
+                                               {
+                                                   base_time + std::chrono::milliseconds(5),
+                                                   base_time + std::chrono::milliseconds(5),
+                                               },
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::path_mtu_update,
+                                                       .now = base_time,
+                                                       .path_mtu =
+                                                           QuicIoPathMtuUpdate{
+                                                               .route_handle = QuicRouteHandle{17},
+                                                               .max_udp_payload_size = 1400,
+                                                           },
+                                                   },
+                                               },
+                                           .pump_return_results = {true},
+                                           .pending_work_after_pump = {true},
+                                           .pump_made_progress = {true},
+                                           .process_path_mtu_result = false,
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 1,
+                                           .process_path_mtu_calls = 1,
+                                       }));
 
-        const auto ready_probe_idle_timeout = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time, base_time},
-            .next_wakeup_results =
-                {
-                    base_time + std::chrono::milliseconds(5),
-                    base_time + std::chrono::milliseconds(5),
-                    std::nullopt,
-                },
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::idle_timeout,
-                        .now = base_time,
-                    },
-                    std::nullopt,
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {true, false},
-            .pump_made_progress = {true, false},
-        });
         server_loop_coverage_check(ok, "backend loop covers ready-probe idle timeouts",
-                                   ready_probe_idle_timeout.exit_code == 1 &
-                                       ready_probe_idle_timeout.wait_calls == 2 &
-                                       ready_probe_idle_timeout.pump_calls == 2);
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time, base_time},
+                                           .next_wakeup_results =
+                                               {
+                                                   base_time + std::chrono::milliseconds(5),
+                                                   base_time + std::chrono::milliseconds(5),
+                                                   std::nullopt,
+                                               },
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::idle_timeout,
+                                                       .now = base_time,
+                                                   },
+                                                   std::nullopt,
+                                               },
+                                           .pump_return_results = {true},
+                                           .pending_work_after_pump = {true, false},
+                                           .pump_made_progress = {true, false},
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 2,
+                                           .pump_calls = 2,
+                                       }));
 
-        const auto ready_probe_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time, base_time},
-            .next_wakeup_results = {base_time, base_time},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::timer_expired,
-                        .now = base_time,
-                    },
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {true},
-            .pump_made_progress = {true},
-            .process_wait_timer_results = {false},
-        });
         server_loop_coverage_check(
             ok, "backend loop covers ready-probe timer failures when wakeups are already due",
-            ready_probe_timer_failure.exit_code == 1 &
-                ready_probe_timer_failure.process_expired_calls == 1 &
-                ready_probe_timer_failure.wait_calls == 1);
+            server_loop_result_matches_for_tests(
+                run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                    .current_times = {base_time, base_time, base_time},
+                    .next_wakeup_results = {base_time, base_time},
+                    .wait_results =
+                        {
+                            QuicIoEvent{
+                                .kind = QuicIoEvent::Kind::timer_expired,
+                                .now = base_time,
+                            },
+                        },
+                    .pump_return_results = {true},
+                    .pending_work_after_pump = {true},
+                    .pump_made_progress = {true},
+                    .process_wait_timer_results = {false},
+                }),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 1,
+                    .process_expired_calls = 1,
+                }));
 
-        const auto ready_probe_timer_not_due = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time, base_time},
-            .next_wakeup_results =
-                {
-                    base_time + std::chrono::milliseconds(5),
-                    base_time + std::chrono::milliseconds(5),
-                    std::nullopt,
-                },
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::timer_expired,
-                        .now = base_time,
-                    },
-                    std::nullopt,
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {true, false},
-            .pump_made_progress = {true, false},
-        });
         server_loop_coverage_check(
             ok,
             "backend loop ignores ready-probe timer events when wakeups are still in the future",
-            ready_probe_timer_not_due.exit_code == 1 &
-                ready_probe_timer_not_due.process_expired_calls == 0 &
-                ready_probe_timer_not_due.wait_calls == 2 &
-                ready_probe_timer_not_due.pump_calls == 2);
-
-        const auto ready_probe_shutdown = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time},
-            .next_wakeup_results =
-                {
-                    base_time + std::chrono::milliseconds(5),
-                    base_time + std::chrono::milliseconds(5),
-                },
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::shutdown,
-                        .now = base_time,
-                    },
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {true},
-            .pump_made_progress = {true},
-        });
-        server_loop_coverage_check(ok, "backend loop covers ready-probe shutdown handling",
-                                   ready_probe_shutdown.exit_code == 1 &
-                                       ready_probe_shutdown.wait_calls == 1);
-
-        const auto main_timer_failure = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time, base_time},
-            .next_wakeup_results = {std::nullopt},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::timer_expired,
-                        .now = base_time,
-                    },
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {false},
-            .pump_made_progress = {false},
-            .process_wait_timer_results = {false},
-        });
-        server_loop_coverage_check(ok, "backend loop covers main-wait timer failures",
-                                   main_timer_failure.exit_code == 1 &
-                                       main_timer_failure.process_expired_calls == 1 &
-                                       main_timer_failure.wait_calls == 1);
-
-        const auto main_datagram_failure = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time, base_time},
-            .next_wakeup_results = {std::nullopt},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::rx_datagram,
-                        .now = base_time,
-                        .datagram =
-                            QuicIoRxDatagram{
-                                .route_handle = QuicRouteHandle{17},
-                                .bytes = {std::byte{0x44}},
+            server_loop_result_matches_for_tests(
+                run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                    .current_times = {base_time, base_time, base_time},
+                    .next_wakeup_results =
+                        {
+                            base_time + std::chrono::milliseconds(5),
+                            base_time + std::chrono::milliseconds(5),
+                            std::nullopt,
+                        },
+                    .wait_results =
+                        {
+                            QuicIoEvent{
+                                .kind = QuicIoEvent::Kind::timer_expired,
+                                .now = base_time,
                             },
-                    },
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {false},
-            .pump_made_progress = {false},
-            .process_datagram_result = false,
-        });
-        server_loop_coverage_check(ok, "backend loop covers main-wait datagram failures",
-                                   main_datagram_failure.exit_code == 1 &
-                                       main_datagram_failure.process_datagram_calls == 1 &
-                                       main_datagram_failure.wait_calls == 1);
+                            std::nullopt,
+                        },
+                    .pump_return_results = {true},
+                    .pending_work_after_pump = {true, false},
+                    .pump_made_progress = {true, false},
+                }),
+                ExpectedServerLoopResultForTests{
+                    .wait_calls = 2,
+                    .process_expired_calls = 0,
+                    .pump_calls = 2,
+                }));
 
-        const auto main_missing_path_mtu = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time, base_time},
-            .next_wakeup_results = {std::nullopt},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::path_mtu_update,
-                        .now = base_time,
-                    },
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {false},
-            .pump_made_progress = {false},
-        });
+        server_loop_coverage_check(ok, "backend loop covers ready-probe shutdown handling",
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time},
+                                           .next_wakeup_results =
+                                               {
+                                                   base_time + std::chrono::milliseconds(5),
+                                                   base_time + std::chrono::milliseconds(5),
+                                               },
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::shutdown,
+                                                       .now = base_time,
+                                                   },
+                                               },
+                                           .pump_return_results = {true},
+                                           .pending_work_after_pump = {true},
+                                           .pump_made_progress = {true},
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 1,
+                                       }));
+
+        server_loop_coverage_check(ok, "backend loop covers main-wait timer failures",
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time, base_time},
+                                           .next_wakeup_results = {std::nullopt},
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::timer_expired,
+                                                       .now = base_time,
+                                                   },
+                                               },
+                                           .pump_return_results = {true},
+                                           .pending_work_after_pump = {false},
+                                           .pump_made_progress = {false},
+                                           .process_wait_timer_results = {false},
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 1,
+                                           .process_expired_calls = 1,
+                                       }));
+
+        server_loop_coverage_check(ok, "backend loop covers main-wait datagram failures",
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time, base_time},
+                                           .next_wakeup_results = {std::nullopt},
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::rx_datagram,
+                                                       .now = base_time,
+                                                       .datagram =
+                                                           QuicIoRxDatagram{
+                                                               .route_handle = QuicRouteHandle{17},
+                                                               .bytes = {std::byte{0x44}},
+                                                           },
+                                                   },
+                                               },
+                                           .pump_return_results = {true},
+                                           .pending_work_after_pump = {false},
+                                           .pump_made_progress = {false},
+                                           .process_datagram_result = false,
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 1,
+                                           .process_datagram_calls = 1,
+                                       }));
+
         server_loop_coverage_check(ok,
                                    "backend loop covers main-wait path MTU events without payloads",
-                                   main_missing_path_mtu.exit_code == 1 &
-                                       main_missing_path_mtu.process_path_mtu_calls == 0 &
-                                       main_missing_path_mtu.wait_calls == 1);
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time, base_time},
+                                           .next_wakeup_results = {std::nullopt},
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::path_mtu_update,
+                                                       .now = base_time,
+                                                   },
+                                               },
+                                           .pump_return_results = {true},
+                                           .pending_work_after_pump = {false},
+                                           .pump_made_progress = {false},
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 1,
+                                           .process_path_mtu_calls = 0,
+                                       }));
 
-        const auto main_path_mtu_failure = run_backend_loop_script(BackendLoopScriptForTests{
-            .current_times = {base_time, base_time, base_time},
-            .next_wakeup_results = {std::nullopt},
-            .wait_results =
-                {
-                    QuicIoEvent{
-                        .kind = QuicIoEvent::Kind::path_mtu_update,
-                        .now = base_time,
-                        .path_mtu =
-                            QuicIoPathMtuUpdate{
-                                .route_handle = QuicRouteHandle{17},
-                                .max_udp_payload_size = 1400,
-                            },
-                    },
-                },
-            .pump_return_results = {true},
-            .pending_work_after_pump = {false},
-            .pump_made_progress = {false},
-            .process_path_mtu_result = false,
-        });
         server_loop_coverage_check(ok, "backend loop propagates main-wait path MTU update failures",
-                                   main_path_mtu_failure.exit_code == 1 &
-                                       main_path_mtu_failure.process_path_mtu_calls == 1 &
-                                       main_path_mtu_failure.wait_calls == 1);
+                                   server_loop_result_matches_for_tests(
+                                       run_backend_loop_script_for_tests(BackendLoopScriptForTests{
+                                           .current_times = {base_time, base_time, base_time},
+                                           .next_wakeup_results = {std::nullopt},
+                                           .wait_results =
+                                               {
+                                                   QuicIoEvent{
+                                                       .kind = QuicIoEvent::Kind::path_mtu_update,
+                                                       .now = base_time,
+                                                       .path_mtu =
+                                                           QuicIoPathMtuUpdate{
+                                                               .route_handle = QuicRouteHandle{17},
+                                                               .max_udp_payload_size = 1400,
+                                                           },
+                                                   },
+                                               },
+                                           .pump_return_results = {true},
+                                           .pending_work_after_pump = {false},
+                                           .pump_made_progress = {false},
+                                           .process_path_mtu_result = false,
+                                       }),
+                                       ExpectedServerLoopResultForTests{
+                                           .wait_calls = 1,
+                                           .process_path_mtu_calls = 1,
+                                       }));
 
         const auto default_no_pending_work = [] { return false; };
         const auto default_accept_timer = [](QuicCoreTimePoint) { return true; };

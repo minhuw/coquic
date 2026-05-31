@@ -2,7 +2,7 @@
 
 namespace {
 
-TEST(QuicCoreTest, CorruptedOneRttRequestWithPendingPostHandshakeDataDoesNotBreakRetransmit) {
+void run_corrupted_one_rtt_request_with_pending_post_handshake_data_does_not_break_retransmit_test() {
     auto connection = make_connected_server_connection();
     connection.handshake_done_state_ = coquic::quic::StreamControlFrameState::pending;
     connection.application_space_.send_crypto.append(
@@ -64,7 +64,11 @@ TEST(QuicCoreTest, CorruptedOneRttRequestWithPendingPostHandshakeDataDoesNotBrea
     }
 }
 
-TEST(QuicCoreTest, ApplicationSendRetransmitsLostDataWithoutConnectionCredit) {
+TEST(QuicCoreTest, CorruptedOneRttRequestWithPendingPostHandshakeDataDoesNotBreakRetransmit) {
+    run_corrupted_one_rtt_request_with_pending_post_handshake_data_does_not_break_retransmit_test();
+}
+
+void run_application_send_retransmits_lost_data_without_connection_credit_test() {
     auto connection = make_connected_client_connection();
     ASSERT_TRUE(
         connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("hello"), false)
@@ -121,7 +125,11 @@ TEST(QuicCoreTest, ApplicationSendRetransmitsLostDataWithoutConnectionCredit) {
     }
 }
 
-TEST(QuicCoreTest, AckGapsRetransmitLostOffsetsBeforeFreshData) {
+TEST(QuicCoreTest, ApplicationSendRetransmitsLostDataWithoutConnectionCredit) {
+    run_application_send_retransmits_lost_data_without_connection_credit_test();
+}
+
+void run_ack_gaps_retransmit_lost_offsets_before_fresh_data_test() {
     auto connection = make_connected_server_connection();
     const auto &peer_transport_parameters =
         optional_ref_or_terminate(connection.peer_transport_parameters_);
@@ -257,7 +265,11 @@ TEST(QuicCoreTest, AckGapsRetransmitLostOffsetsBeforeFreshData) {
     }
 }
 
-TEST(QuicCoreTest, ApplicationSendRemainsContiguousAfterAcknowledgingInitialFlight) {
+TEST(QuicCoreTest, AckGapsRetransmitLostOffsetsBeforeFreshData) {
+    run_ack_gaps_retransmit_lost_offsets_before_fresh_data_test();
+}
+
+void run_application_send_remains_contiguous_after_acknowledging_initial_flight_test() {
     auto connection = make_connected_client_connection();
     const auto payload = std::vector<std::byte>(static_cast<std::size_t>(200000), std::byte{0x41});
     ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
@@ -342,6 +354,10 @@ TEST(QuicCoreTest, ApplicationSendRemainsContiguousAfterAcknowledgingInitialFlig
     if (optional_value_or_terminate(stream->offset) != expected_offset) {
         ADD_FAILURE() << "resumed datagram did not continue at the expected offset";
     }
+}
+
+TEST(QuicCoreTest, ApplicationSendRemainsContiguousAfterAcknowledgingInitialFlight) {
+    run_application_send_remains_contiguous_after_acknowledging_initial_flight_test();
 }
 
 TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {

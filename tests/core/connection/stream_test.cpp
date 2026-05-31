@@ -1812,11 +1812,22 @@ TEST(QuicCoreTest, SelectPtoProbePrefersOutstandingStreamDataOverNewerControlOnl
 
     const auto probe = connection.select_pto_probe(connection.application_space_);
 
-    EXPECT_EQ(probe.packet_number, 10u);
-    ASSERT_EQ(probe.stream_fragments.size(), 1u);
-    EXPECT_EQ(probe.stream_fragments.front().stream_id, 0u);
-    EXPECT_EQ(probe.stream_fragments.front().bytes, payload);
-    EXPECT_TRUE(probe.stream_fragments.front().fin);
+    if (probe.packet_number != 10u) {
+        ADD_FAILURE() << "PTO probe selected the wrong packet number";
+    }
+    if (probe.stream_fragments.size() != 1u) {
+        ADD_FAILURE() << "PTO probe did not carry exactly one stream fragment";
+        return;
+    }
+    if (probe.stream_fragments.front().stream_id != 0u) {
+        ADD_FAILURE() << "PTO probe selected the wrong stream";
+    }
+    if (probe.stream_fragments.front().bytes != payload) {
+        ADD_FAILURE() << "PTO probe selected the wrong payload";
+    }
+    if (!probe.stream_fragments.front().fin) {
+        ADD_FAILURE() << "PTO probe did not preserve FIN";
+    }
 }
 
 TEST(QuicCoreTest, ApplicationPtoSkipsProbePacketsWhoseStreamDataWasAckedByRetransmission) {
@@ -1868,11 +1879,14 @@ TEST(QuicCoreTest, ApplicationPtoSkipsProbePacketsWhoseStreamDataWasAckedByRetra
                                          /*suppress_pto_reset=*/false)
                     .has_value());
 
-    const auto probe = connection.select_pto_probe(connection.application_space_);
-    const auto &probe_packet = probe;
-    EXPECT_TRUE(probe_packet.stream_fragments.empty());
-    EXPECT_TRUE(probe_packet.has_ping);
-    connection.application_space_.pending_probe_packet = probe;
+    const auto pto_probe = connection.select_pto_probe(connection.application_space_);
+    if (!pto_probe.stream_fragments.empty()) {
+        ADD_FAILURE() << "PTO probe kept acked stream fragments";
+    }
+    if (!pto_probe.has_ping) {
+        ADD_FAILURE() << "PTO probe did not fall back to PING";
+    }
+    connection.application_space_.pending_probe_packet = pto_probe;
 }
 
 TEST(QuicCoreTest, ApplicationSendClearsPendingProbeAfterSendingStreamData) {
@@ -1889,11 +1903,21 @@ TEST(QuicCoreTest, ApplicationSendClearsPendingProbeAfterSendingStreamData) {
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-    ASSERT_FALSE(datagram.empty());
-    EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
-    ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
-    EXPECT_TRUE(sent_packet_has_stream_frames_for_tests(
-        first_tracked_packet(connection.application_space_)));
+    if (datagram.empty()) {
+        ADD_FAILURE() << "missing application send datagram";
+        return;
+    }
+    if (connection.application_space_.pending_probe_packet.has_value()) {
+        ADD_FAILURE() << "pending PTO probe was not cleared";
+    }
+    if (tracked_packet_count(connection.application_space_) != 1u) {
+        ADD_FAILURE() << "unexpected tracked packet count";
+        return;
+    }
+    if (!sent_packet_has_stream_frames_for_tests(
+            first_tracked_packet(connection.application_space_))) {
+        ADD_FAILURE() << "application send datagram did not carry stream frames";
+    }
 }
 
 TEST(QuicCoreTest, ApplicationSendBudgetsManyFinOnlyStreamsWithinDatagramLimit) {
@@ -1926,12 +1950,21 @@ TEST(QuicCoreTest, ExpiredApplicationAckDeadlineSendsAckBeforeMoreStreamData) {
     connection.on_timeout(coquic::quic::test::test_time(1));
     const auto ack_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-    ASSERT_FALSE(ack_datagram.empty());
+    if (ack_datagram.empty()) {
+        ADD_FAILURE() << "missing ACK datagram";
+        return;
+    }
     const auto ack_packets = decode_sender_datagram(connection, ack_datagram);
-    ASSERT_EQ(ack_packets.size(), 1u);
+    if (ack_packets.size() != 1u) {
+        ADD_FAILURE() << "unexpected ACK datagram packet count";
+        return;
+    }
     const auto *ack_application =
         std::get_if<coquic::quic::ProtectedOneRttPacket>(&ack_packets.front());
-    ASSERT_NE(ack_application, nullptr);
+    if (ack_application == nullptr) {
+        ADD_FAILURE() << "ACK datagram was not a 1-RTT packet";
+        return;
+    }
 
     bool saw_ack = false;
     bool saw_stream = false;
@@ -1940,15 +1973,30 @@ TEST(QuicCoreTest, ExpiredApplicationAckDeadlineSendsAckBeforeMoreStreamData) {
         saw_stream = saw_stream || std::holds_alternative<coquic::quic::StreamFrame>(frame);
     }
 
-    EXPECT_TRUE(saw_ack);
-    EXPECT_FALSE(saw_stream);
-    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
-    EXPECT_EQ(connection.application_space_.pending_ack_deadline, std::nullopt);
-    EXPECT_FALSE(connection.application_space_.force_ack_send);
+    if (!saw_ack) {
+        ADD_FAILURE() << "ACK datagram did not carry an ACK frame";
+    }
+    if (saw_stream) {
+        ADD_FAILURE() << "ACK datagram unexpectedly carried stream data";
+    }
+    if (connection.application_space_.received_packets.has_ack_to_send()) {
+        ADD_FAILURE() << "ACK state was not drained";
+    }
+    if (connection.application_space_.pending_ack_deadline != std::nullopt) {
+        ADD_FAILURE() << "ACK deadline was not cleared";
+    }
+    if (connection.application_space_.force_ack_send) {
+        ADD_FAILURE() << "force ACK flag was not cleared";
+    }
 
     const auto data_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
-    ASSERT_FALSE(data_datagram.empty());
-    EXPECT_FALSE(application_stream_ids_from_datagram(connection, data_datagram).empty());
+    if (data_datagram.empty()) {
+        ADD_FAILURE() << "missing deferred data datagram";
+        return;
+    }
+    if (application_stream_ids_from_datagram(connection, data_datagram).empty()) {
+        ADD_FAILURE() << "deferred data datagram did not carry stream data";
+    }
 }
 
 TEST(QuicCoreTest, NewDataSchedulingRoundsRobinAcrossSendableStreams) {
@@ -2064,21 +2112,39 @@ TEST(QuicCoreTest, LastPtoProbeFreshSchedulingTreatsSingleFinOnlyStreamAsActive)
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
-    ASSERT_FALSE(datagram.empty());
+    if (datagram.empty()) {
+        ADD_FAILURE() << "missing PTO FIN-only datagram";
+        return;
+    }
     const auto packets = decode_sender_datagram(connection, datagram);
-    ASSERT_EQ(packets.size(), 1u);
+    if (packets.size() != 1u) {
+        ADD_FAILURE() << "unexpected PTO FIN-only packet count";
+        return;
+    }
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
-    ASSERT_NE(application, nullptr);
+    if (application == nullptr) {
+        ADD_FAILURE() << "PTO FIN-only datagram was not a 1-RTT packet";
+        return;
+    }
 
     const auto stream_it =
         std::find_if(application->frames.begin(), application->frames.end(), [](const auto &frame) {
             return std::holds_alternative<coquic::quic::StreamFrame>(frame);
         });
-    ASSERT_NE(stream_it, application->frames.end());
+    if (stream_it == application->frames.end()) {
+        ADD_FAILURE() << "PTO FIN-only datagram did not carry a stream frame";
+        return;
+    }
     const auto &stream = std::get<coquic::quic::StreamFrame>(*stream_it);
-    EXPECT_EQ(stream.stream_id, 0u);
-    EXPECT_TRUE(stream.fin);
-    EXPECT_TRUE(stream.stream_data.empty());
+    if (stream.stream_id != 0u) {
+        ADD_FAILURE() << "PTO FIN-only datagram used the wrong stream";
+    }
+    if (!stream.fin) {
+        ADD_FAILURE() << "PTO FIN-only stream frame did not preserve FIN";
+    }
+    if (!stream.stream_data.empty()) {
+        ADD_FAILURE() << "PTO FIN-only stream frame carried data";
+    }
 }
 
 TEST(QuicCoreTest, RetransmissionPreservesStreamIdentityAcrossMultipleStreams) {
@@ -2090,14 +2156,26 @@ TEST(QuicCoreTest, RetransmissionPreservesStreamIdentityAcrossMultipleStreams) {
 
     const auto first_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
-    ASSERT_FALSE(first_datagram.empty());
-    ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
+    if (first_datagram.empty()) {
+        ADD_FAILURE() << "missing first stream datagram";
+        return;
+    }
+    if (tracked_packet_count(connection.application_space_) != 1u) {
+        ADD_FAILURE() << "unexpected first datagram tracked packet count";
+        return;
+    }
     const auto first_packet = first_tracked_packet(connection.application_space_);
 
     const auto second_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
-    ASSERT_FALSE(second_datagram.empty());
-    ASSERT_EQ(tracked_packet_count(connection.application_space_), 2u);
+    if (second_datagram.empty()) {
+        ADD_FAILURE() << "missing second stream datagram";
+        return;
+    }
+    if (tracked_packet_count(connection.application_space_) != 2u) {
+        ADD_FAILURE() << "unexpected second datagram tracked packet count";
+        return;
+    }
     const auto second_packet = tracked_packet_or_terminate(connection.application_space_, 1);
 
     connection.mark_lost_packet(
@@ -2111,11 +2189,18 @@ TEST(QuicCoreTest, RetransmissionPreservesStreamIdentityAcrossMultipleStreams) {
 
     const auto repaired_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
-    ASSERT_FALSE(repaired_datagram.empty());
+    if (repaired_datagram.empty()) {
+        ADD_FAILURE() << "missing repaired stream datagram";
+        return;
+    }
 
     const auto stream_ids = application_stream_ids_from_datagram(connection, repaired_datagram);
-    EXPECT_NE(std::find(stream_ids.begin(), stream_ids.end(), 0), stream_ids.end());
-    EXPECT_NE(std::find(stream_ids.begin(), stream_ids.end(), 4), stream_ids.end());
+    if (std::find(stream_ids.begin(), stream_ids.end(), 0) == stream_ids.end()) {
+        ADD_FAILURE() << "repaired datagram did not preserve stream 0";
+    }
+    if (std::find(stream_ids.begin(), stream_ids.end(), 4) == stream_ids.end()) {
+        ADD_FAILURE() << "repaired datagram did not preserve stream 4";
+    }
 }
 
 TEST(QuicCoreTest, ApplicationSendQueuesBlockedFrameWhenStreamCreditIsZero) {
@@ -2522,8 +2607,12 @@ TEST(QuicCoreTest, MarkLostPacketRequeuesConnectionAndStreamControlState) {
     EXPECT_EQ(fin_stream.send_fin_state, coquic::quic::StreamSendFinState::pending);
     const auto &lost_packet =
         tracked_packet_or_terminate(connection.application_space_, packet.packet_number);
-    EXPECT_TRUE(lost_packet.declared_lost);
-    EXPECT_FALSE(lost_packet.in_flight);
+    if (!lost_packet.declared_lost) {
+        ADD_FAILURE() << "packet was not marked lost";
+    }
+    if (lost_packet.in_flight) {
+        ADD_FAILURE() << "lost packet remained in flight";
+    }
 }
 
 TEST(QuicCoreTest, InboundApplicationStreamAllowsOmittedOffsetAndLengthFlags) {
@@ -2549,19 +2638,18 @@ TEST(QuicCoreTest, InboundApplicationStreamAllowsOmittedOffsetAndLengthFlags) {
         coquic::quic::test::make_server_core_config());
     coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
         missing_length_connection, coquic::quic::HandshakeStatus::connected);
-    const auto missing_length_ok =
-        coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+    if (!coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
             missing_length_connection, {coquic::quic::test::make_inbound_application_stream_frame(
-                                           "b", 0, 0, false, true, false)});
-    EXPECT_TRUE(missing_length_ok);
-    EXPECT_FALSE(missing_length_connection.has_failed());
-    const auto missing_length_data = missing_length_connection.take_received_stream_data();
-    ASSERT_TRUE(missing_length_data.has_value());
-    if (!missing_length_data.has_value()) {
+                                           "b", 0, 0, false, true, false)})) {
+        ADD_FAILURE() << "missing-length stream data injection failed";
         return;
     }
-    const auto &missing_length_effect = missing_length_data.value();
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(missing_length_effect.bytes), "b");
+    EXPECT_FALSE(missing_length_connection.has_failed());
+    const auto missing_length_effect =
+        optional_value_or_terminate(missing_length_connection.take_received_stream_data());
+    if (coquic::quic::test::string_from_bytes(missing_length_effect.bytes) != "b") {
+        ADD_FAILURE() << "unexpected missing-length stream bytes";
+    }
 }
 
 TEST(QuicCoreTest, InboundApplicationStreamFailsBeforeHandshakeConnected) {
@@ -2671,11 +2759,13 @@ TEST(QuicCoreTest, SelectPtoProbeDropsAcknowledgedAndMismatchedMaxStreamsFrames)
                               },
                       });
 
-    const auto probe = connection.select_pto_probe(packet_space);
-
-    const auto &probe_packet = probe;
-    EXPECT_TRUE(probe_packet.max_streams_frames.empty());
-    EXPECT_TRUE(probe_packet.has_ping);
+    const auto pto_probe = connection.select_pto_probe(packet_space);
+    if (!pto_probe.max_streams_frames.empty()) {
+        ADD_FAILURE() << "PTO probe retained acked MAX_STREAMS frames";
+    }
+    if (!pto_probe.has_ping) {
+        ADD_FAILURE() << "PTO probe did not fall back to PING";
+    }
 }
 
 TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {

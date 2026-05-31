@@ -111,6 +111,29 @@ TEST(QuicCoreTest, TwoPeersExchangeDatagramFramesThroughEffects) {
     EXPECT_EQ(datagram_events[0].byte_count(), 4u);
 }
 
+TEST(QuicCoreTest, TwoPeersExchangeSharedDatagramFramesThroughEffects) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto send = client.advance(
+        coquic::quic::QuicCoreSendSharedDatagramData{
+            .bytes = coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("pong")),
+        },
+        coquic::quic::test::test_time(1));
+    const auto received = coquic::quic::test::relay_send_datagrams_to_peer(
+        send, server, coquic::quic::test::test_time(2));
+
+    const auto datagram_events = coquic::quic::test::received_datagram_data_from(received);
+    ASSERT_EQ(datagram_events.size(), 1u);
+    EXPECT_EQ(datagram_events[0].connection, 1u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(datagram_events[0].payload()), "pong");
+    EXPECT_EQ(datagram_events[0].byte_count(), 4u);
+}
+
 TEST(QuicCoreTest, TwoPeersExchangeEmptyDatagramFrame) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());

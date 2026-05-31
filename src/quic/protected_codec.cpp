@@ -4321,6 +4321,29 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                                           LongHeaderPacketType::zero_rtt)
                   .has_value());
 
+        const std::array<Frame, 1> terminal_lengthless_datagram_frames = {
+            Frame(DatagramFrame{
+                .has_length = false,
+                .data = {std::byte{0x06}},
+            }),
+        };
+        check("validate_long_header_frames accepts terminal lengthless datagram frames",
+              validate_long_header_frames(terminal_lengthless_datagram_frames,
+                                          LongHeaderPacketType::zero_rtt)
+                  .has_value());
+
+        const std::array<Frame, 2> length_prefixed_datagram_frames = {
+            Frame(DatagramFrame{
+                .has_length = true,
+                .data = {std::byte{0x07}},
+            }),
+            Frame(PingFrame{}),
+        };
+        check("validate_long_header_frames accepts non-terminal length-prefixed datagram frames",
+              validate_long_header_frames(length_prefixed_datagram_frames,
+                                          LongHeaderPacketType::zero_rtt)
+                  .has_value());
+
         const std::array<Frame, 1> valid_long_header_frames = {
             Frame(PingFrame{}),
         };
@@ -4454,7 +4477,10 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
             SharedBytes{std::byte{0x02}, std::byte{0x00}, std::byte{0x00},
                         std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
         const auto stream_payload = SharedBytes{std::byte{0x08}, std::byte{0x00}};
+        const auto length_prefixed_stream_payload =
+            SharedBytes{std::byte{0x0a}, std::byte{0x00}, std::byte{0x00}};
         const std::array<std::byte, 0> empty_header{};
+        const std::array greased_header = {std::byte{0x00}, std::byte{0x00}};
         const std::array bad_fixed_header = {std::byte{0x00}};
         const std::array reserved_header = {std::byte{0x58}};
         const std::array missing_packet_number_header = {std::byte{0x41}};
@@ -4490,6 +4516,10 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                       try_decode_received_short_header_ack_only_packet_fields(
                           std::array{std::byte{0x40}, std::byte{0x00}}, trailing_ack_payload),
                       CodecErrorCode::unknown_frame_type));
+        check("short-header ack-only decoder accepts greased fixed bits when configured",
+              try_decode_received_short_header_ack_only_packet_fields(greased_header,
+                                                                      valid_ack_payload, true)
+                  .has_value());
 
         check("short-header ack-only fast decoder covers malformed header and ack payload "
               "failures",
@@ -4519,6 +4549,10 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                       try_decode_received_short_header_ack_only_fast_packet_fields(
                           std::array{std::byte{0x40}, std::byte{0x00}}, trailing_ack_payload),
                       CodecErrorCode::unknown_frame_type));
+        check("short-header ack-only fast decoder accepts greased fixed bits when configured",
+              try_decode_received_short_header_ack_only_fast_packet_fields(greased_header,
+                                                                           valid_ack_payload, true)
+                  .has_value());
 
         check("short-header stream fast decoder covers malformed header failures",
               codec_failure(try_decode_received_short_header_stream_fast_packet_fields(
@@ -4536,6 +4570,10 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                   codec_failure(try_decode_received_short_header_stream_fast_packet_fields(
                                     missing_packet_number_header, stream_payload),
                                 CodecErrorCode::packet_length_mismatch));
+        check("short-header stream fast decoder accepts greased fixed bits when configured",
+              try_decode_received_short_header_stream_fast_packet_fields(
+                  greased_header, length_prefixed_stream_payload, true)
+                  .has_value());
     }
 
     {
@@ -5166,6 +5204,14 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
             locate_long_header_or_assert(long_header_packet, LongHeaderPacketType::initial);
         check("locate_long_header_or_assert finds an initial packet layout",
               layout.length_offset > 0 && layout.packet_end_offset == long_header_packet.size());
+
+        const std::array missing_fixed_bit_header = {
+            std::byte{0x80},
+        };
+        check("locate_long_header rejects missing fixed bits",
+              codec_failure(
+                  locate_long_header(missing_fixed_bit_header, LongHeaderPacketType::initial),
+                  CodecErrorCode::invalid_fixed_bit));
 
         auto patched_packet = long_header_packet;
         const auto patched =

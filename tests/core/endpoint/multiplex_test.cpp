@@ -268,6 +268,52 @@ TEST(QuicCoreEndpointTest, SharedSendCommandProducesSameDatagramAsOwnedSendComma
     EXPECT_EQ(shared_sends.front().bytes, owned_sends.front().bytes);
 }
 
+TEST(QuicCoreEndpointTest, EndpointConnectionCommandSendsSharedDatagramOnSelectedConnection) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(1),
+            .initial_route_handle = 11,
+        },
+        coquic::quic::test::test_time(0)));
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(2),
+            .initial_route_handle = 22,
+        },
+        coquic::quic::test::test_time(1)));
+
+    *core.connections_.at(1).connection = make_connected_client_connection();
+    *core.connections_.at(2).connection = make_connected_client_connection();
+    core.connections_.at(1).route_handle_by_path_id.emplace(0, 11);
+    core.connections_.at(1).path_id_by_route_handle.emplace(11, 0);
+    core.connections_.at(2).route_handle_by_path_id.emplace(0, 22);
+    core.connections_.at(2).path_id_by_route_handle.emplace(22, 0);
+
+    const auto result = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 2,
+            .input =
+                coquic::quic::QuicCoreSendSharedDatagramData{
+                    .bytes = coquic::quic::SharedBytes(bytes_from_ints({0x73, 0x68})),
+                },
+        },
+        coquic::quic::test::test_time(2));
+
+    EXPECT_FALSE(result.local_error.has_value());
+    const auto sends = send_effects_from(result);
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends.front().connection, 2u);
+    ASSERT_TRUE(sends.front().route_handle.has_value());
+    EXPECT_EQ(sends.front().route_handle.value_or(0), 22u);
+
+    const auto payloads = application_datagram_payloads_from_datagram(
+        *core.connections_.at(2).connection, sends.front().bytes.span());
+    ASSERT_EQ(payloads.size(), 1u);
+    EXPECT_EQ(payloads.front(), bytes_from_ints({0x73, 0x68}));
+}
+
 TEST(QuicCoreEndpointTest, EndpointTimerExpiredWalksAllDueConnections) {
     coquic::quic::QuicCore core(make_client_endpoint_config());
 

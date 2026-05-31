@@ -2759,6 +2759,14 @@ bool frame_span_writer_branch_coverage_for_tests() {
         .stream_id = 9,
         .stream_data = {std::byte{0x33}},
     };
+    const DatagramFrame length_datagram_frame{
+        .has_length = true,
+        .data = {std::byte{0x34}},
+    };
+    const DatagramFrame lengthless_datagram_frame{
+        .has_length = false,
+        .data = {std::byte{0x35}},
+    };
     const NewConnectionIdFrame new_connection_id{
         .sequence_number = 3,
         .retire_prior_to = 1,
@@ -2835,6 +2843,12 @@ bool frame_span_writer_branch_coverage_for_tests() {
     ok &= span_writer_fault_matches(Frame{stream_with_offset}, FrameFaultPoint::append_varint, 2);
     ok &= span_writer_fault_matches(Frame{stream_with_length}, FrameFaultPoint::append_varint, 2);
     ok &= span_writer_fault_matches(Frame{stream_with_offset}, FrameFaultPoint::append_bytes, 1);
+
+    ok &= span_writer_fault_matches(Frame{length_datagram_frame}, FrameFaultPoint::append_byte, 1);
+    ok &=
+        span_writer_fault_matches(Frame{length_datagram_frame}, FrameFaultPoint::append_varint, 1);
+    ok &= span_writer_fault_matches(Frame{lengthless_datagram_frame}, FrameFaultPoint::append_bytes,
+                                    1);
 
     ok &= span_writer_fault_matches(
         Frame{MaxStreamDataFrame{.stream_id = 1, .maximum_stream_data = 2}},

@@ -1129,6 +1129,10 @@ TEST(QuicFrameTest, DirectReceivedAckDecoderRejectsHeaderEdges) {
     expect_received_ack_decode_error(SharedBytes{std::byte{0x40}}, CodecErrorCode::truncated_input);
     expect_received_ack_decode_error(SharedBytes{std::byte{0x40}, std::byte{0x02}},
                                      CodecErrorCode::non_shortest_frame_type_encoding);
+    expect_received_ack_decode_error(SharedBytes{std::byte{0x40}, std::byte{0x30}},
+                                     CodecErrorCode::non_shortest_frame_type_encoding);
+    expect_received_ack_decode_error(SharedBytes{std::byte{0x40}, std::byte{0x31}},
+                                     CodecErrorCode::non_shortest_frame_type_encoding);
     expect_received_ack_decode_error(SharedBytes{std::byte{0x01}},
                                      CodecErrorCode::unknown_frame_type);
     expect_received_ack_decode_error(SharedBytes{std::byte{0x40}, std::byte{0x20}},

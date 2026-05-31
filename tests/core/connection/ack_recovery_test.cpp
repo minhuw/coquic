@@ -1526,8 +1526,10 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveAckOnlyPacketDoesNotRefreshPeerActivi
     EXPECT_EQ(connection.pto_count_, 5u);
     EXPECT_EQ(connection.last_peer_activity_time_, std::optional{coquic::quic::test::test_time(4)});
     const auto next_deadline = connection.pto_deadline();
-    EXPECT_TRUE(next_deadline.has_value() &&
-                next_deadline.value() > coquic::quic::test::test_time(5000));
+    if (!next_deadline.has_value() ||
+        next_deadline.value() <= coquic::quic::test::test_time(5000)) {
+        ADD_FAILURE() << "ACK-only Initial packet did not preserve the backed off PTO deadline";
+    }
 }
 
 TEST(QuicCoreTest, ClientHandshakeKeepaliveUsesMostRecentProbeTimeAsReference) {
@@ -1593,12 +1595,21 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsHandshakeAckAfterAckOnlyS
         optional_ref_or_terminate(connection.handshake_space_.pending_probe_packet).has_ping);
 
     const auto probe_datagram = connection.drain_outbound_datagram(deadline);
-    ASSERT_FALSE(probe_datagram.empty());
+    if (probe_datagram.empty()) {
+        ADD_FAILURE() << "missing keepalive Handshake PTO probe datagram";
+        return;
+    }
 
     const auto probe_packets = decode_sender_datagram(connection, probe_datagram);
-    ASSERT_EQ(probe_packets.size(), 1u);
+    if (probe_packets.size() != 1u) {
+        ADD_FAILURE() << "unexpected keepalive Handshake PTO packet count";
+        return;
+    }
     const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&probe_packets[0]);
-    ASSERT_NE(handshake, nullptr);
+    if (handshake == nullptr) {
+        ADD_FAILURE() << "keepalive PTO probe was not a Handshake packet";
+        return;
+    }
 
     bool saw_ack = false;
     bool saw_ping = false;
@@ -1609,8 +1620,12 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsHandshakeAckAfterAckOnlyS
         saw_ping = saw_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
     }
 
-    EXPECT_TRUE(saw_ack);
-    EXPECT_TRUE(saw_ping);
+    if (!saw_ack) {
+        ADD_FAILURE() << "keepalive Handshake PTO probe did not repeat the ACK";
+    }
+    if (!saw_ping) {
+        ADD_FAILURE() << "keepalive Handshake PTO probe did not include PING";
+    }
 }
 
 TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsInitialAckAfterAckOnlySend) {
@@ -1637,12 +1652,21 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsInitialAckAfterAckOnlySen
     EXPECT_TRUE(optional_ref_or_terminate(connection.initial_space_.pending_probe_packet).has_ping);
 
     const auto probe_datagram = connection.drain_outbound_datagram(deadline);
-    ASSERT_FALSE(probe_datagram.empty());
+    if (probe_datagram.empty()) {
+        ADD_FAILURE() << "missing keepalive Initial PTO probe datagram";
+        return;
+    }
 
     const auto probe_packets = decode_sender_datagram(connection, probe_datagram);
-    ASSERT_EQ(probe_packets.size(), 1u);
+    if (probe_packets.size() != 1u) {
+        ADD_FAILURE() << "unexpected keepalive Initial PTO packet count";
+        return;
+    }
     const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&probe_packets[0]);
-    ASSERT_NE(initial, nullptr);
+    if (initial == nullptr) {
+        ADD_FAILURE() << "keepalive PTO probe was not an Initial packet";
+        return;
+    }
 
     bool saw_ack = false;
     bool saw_ping = false;
@@ -1653,8 +1677,12 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsInitialAckAfterAckOnlySen
         saw_ping = saw_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
     }
 
-    EXPECT_TRUE(saw_ack);
-    EXPECT_TRUE(saw_ping);
+    if (!saw_ack) {
+        ADD_FAILURE() << "keepalive Initial PTO probe did not repeat the ACK";
+    }
+    if (!saw_ping) {
+        ADD_FAILURE() << "keepalive Initial PTO probe did not include PING";
+    }
 }
 
 TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeDoesNotArmBeforeDeadline) {
@@ -1707,20 +1735,34 @@ TEST(QuicCoreTest, ServerInitialAckOnlySendAddsSinglePingWhenNothingIsInFlight) 
     EXPECT_TRUE(saw_ack);
     EXPECT_TRUE(saw_ping);
     const auto tracked_after_first_initial_send = tracked_packet_count(connection.initial_space_);
-    ASSERT_NE(tracked_after_first_initial_send, 0u);
-    EXPECT_TRUE(last_tracked_packet(connection.initial_space_).has_ping);
+    if (tracked_after_first_initial_send == 0u) {
+        ADD_FAILURE() << "first Initial ACK-only send was not tracked";
+        return;
+    }
+    if (!last_tracked_packet(connection.initial_space_).has_ping) {
+        ADD_FAILURE() << "first Initial ACK-only send did not add PING";
+    }
 
     connection.initial_space_.received_packets.record_received(
         /*packet_number=*/9, /*ack_eliciting=*/true, coquic::quic::test::test_time(2));
     const auto second_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
 
-    ASSERT_FALSE(second_datagram.empty());
+    if (second_datagram.empty()) {
+        ADD_FAILURE() << "missing second Initial ACK-only datagram";
+        return;
+    }
     const auto second_packets = decode_sender_datagram(connection, second_datagram);
-    ASSERT_EQ(second_packets.size(), 1u);
+    if (second_packets.size() != 1u) {
+        ADD_FAILURE() << "unexpected second Initial ACK-only packet count";
+        return;
+    }
     const auto *second_initial =
         std::get_if<coquic::quic::ProtectedInitialPacket>(&second_packets.front());
-    ASSERT_NE(second_initial, nullptr);
+    if (second_initial == nullptr) {
+        ADD_FAILURE() << "second ACK-only datagram was not an Initial packet";
+        return;
+    }
 
     bool saw_second_ack = false;
     bool saw_second_ping = false;
@@ -1732,10 +1774,18 @@ TEST(QuicCoreTest, ServerInitialAckOnlySendAddsSinglePingWhenNothingIsInFlight) 
         saw_second_ping = saw_second_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
     }
 
-    EXPECT_TRUE(saw_second_ack);
-    EXPECT_FALSE(saw_second_ping);
-    EXPECT_FALSE(last_tracked_packet(connection.initial_space_).has_ping);
-    EXPECT_FALSE(last_tracked_packet(connection.initial_space_).ack_eliciting);
+    if (!saw_second_ack) {
+        ADD_FAILURE() << "second Initial ACK-only send did not ACK packet 9";
+    }
+    if (saw_second_ping) {
+        ADD_FAILURE() << "second Initial ACK-only send added an extra PING";
+    }
+    if (last_tracked_packet(connection.initial_space_).has_ping) {
+        ADD_FAILURE() << "second Initial ACK-only send tracked an extra PING";
+    }
+    if (last_tracked_packet(connection.initial_space_).ack_eliciting) {
+        ADD_FAILURE() << "second Initial ACK-only send was tracked as ack-eliciting";
+    }
 }
 
 TEST(QuicCoreTest, ServerHandshakeAckOnlySendAddsSinglePingWhenNothingIsInFlight) {
@@ -1777,20 +1827,34 @@ TEST(QuicCoreTest, ServerHandshakeAckOnlySendAddsSinglePingWhenNothingIsInFlight
     EXPECT_TRUE(saw_ping);
     const auto tracked_after_first_handshake_send =
         tracked_packet_count(connection.handshake_space_);
-    ASSERT_NE(tracked_after_first_handshake_send, 0u);
-    EXPECT_TRUE(last_tracked_packet(connection.handshake_space_).has_ping);
+    if (tracked_after_first_handshake_send == 0u) {
+        ADD_FAILURE() << "first Handshake ACK-only send was not tracked";
+        return;
+    }
+    if (!last_tracked_packet(connection.handshake_space_).has_ping) {
+        ADD_FAILURE() << "first Handshake ACK-only send did not add PING";
+    }
 
     connection.handshake_space_.received_packets.record_received(
         /*packet_number=*/13, /*ack_eliciting=*/true, coquic::quic::test::test_time(2));
     const auto second_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
 
-    ASSERT_FALSE(second_datagram.empty());
+    if (second_datagram.empty()) {
+        ADD_FAILURE() << "missing second Handshake ACK-only datagram";
+        return;
+    }
     const auto second_packets = decode_sender_datagram(connection, second_datagram);
-    ASSERT_EQ(second_packets.size(), 1u);
+    if (second_packets.size() != 1u) {
+        ADD_FAILURE() << "unexpected second Handshake ACK-only packet count";
+        return;
+    }
     const auto *second_handshake =
         std::get_if<coquic::quic::ProtectedHandshakePacket>(&second_packets.front());
-    ASSERT_NE(second_handshake, nullptr);
+    if (second_handshake == nullptr) {
+        ADD_FAILURE() << "second ACK-only datagram was not a Handshake packet";
+        return;
+    }
 
     bool saw_second_ack = false;
     bool saw_second_ping = false;
@@ -1802,10 +1866,18 @@ TEST(QuicCoreTest, ServerHandshakeAckOnlySendAddsSinglePingWhenNothingIsInFlight
         saw_second_ping = saw_second_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
     }
 
-    EXPECT_TRUE(saw_second_ack);
-    EXPECT_FALSE(saw_second_ping);
-    EXPECT_FALSE(last_tracked_packet(connection.handshake_space_).has_ping);
-    EXPECT_FALSE(last_tracked_packet(connection.handshake_space_).ack_eliciting);
+    if (!saw_second_ack) {
+        ADD_FAILURE() << "second Handshake ACK-only send did not ACK packet 13";
+    }
+    if (saw_second_ping) {
+        ADD_FAILURE() << "second Handshake ACK-only send added an extra PING";
+    }
+    if (last_tracked_packet(connection.handshake_space_).has_ping) {
+        ADD_FAILURE() << "second Handshake ACK-only send tracked an extra PING";
+    }
+    if (last_tracked_packet(connection.handshake_space_).ack_eliciting) {
+        ADD_FAILURE() << "second Handshake ACK-only send was tracked as ack-eliciting";
+    }
 }
 
 TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeDoesNotArmAfterInitialSpaceDiscarded) {
@@ -1948,17 +2020,28 @@ TEST(QuicCoreTest, ClientSendsStandaloneHandshakeAckWhileHandshakeInProgress) {
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
 
-    ASSERT_FALSE(datagram.empty());
+    if (datagram.empty()) {
+        ADD_FAILURE() << "missing standalone Handshake ACK datagram";
+        return;
+    }
     const auto packets = decode_sender_datagram(connection, datagram);
-    ASSERT_EQ(packets.size(), 1u);
+    if (packets.size() != 1u) {
+        ADD_FAILURE() << "unexpected standalone Handshake ACK packet count";
+        return;
+    }
     const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets[0]);
-    ASSERT_NE(handshake, nullptr);
+    if (handshake == nullptr) {
+        ADD_FAILURE() << "standalone ACK datagram was not a Handshake packet";
+        return;
+    }
 
     const auto ack_it =
         std::find_if(handshake->frames.begin(), handshake->frames.end(), [](const auto &frame) {
             return std::holds_alternative<coquic::quic::AckFrame>(frame);
         });
-    EXPECT_NE(ack_it, handshake->frames.end());
+    if (ack_it == handshake->frames.end()) {
+        ADD_FAILURE() << "standalone Handshake ACK packet did not carry an ACK frame";
+    }
 }
 
 TEST(QuicCoreTest, ApplicationSpaceAckOfPingOnlyPacketResetsHandshakePtoBackoff) {
@@ -1986,7 +2069,10 @@ TEST(QuicCoreTest, ApplicationSpaceAckOfPingOnlyPacketResetsHandshakePtoBackoff)
         coquic::quic::test::test_time(2), /*ack_delay_exponent=*/0, /*max_ack_delay_ms=*/0,
         /*suppress_pto_reset=*/false);
 
-    ASSERT_TRUE(processed.has_value());
+    if (!processed.has_value()) {
+        ADD_FAILURE() << "application ACK for ping-only packet was rejected";
+        return;
+    }
     EXPECT_EQ(connection.pto_count_, 0u);
 }
 
@@ -2056,9 +2142,9 @@ TEST(QuicCoreTest, ReceivingAckElicitingPacketsSchedulesAckResponse) {
     ASSERT_FALSE(response_datagrams.empty());
 
     bool saw_ack = false;
-    for (const auto &datagram : response_datagrams) {
+    for (const auto &response_datagram : response_datagrams) {
         const auto decoded = coquic::quic::deserialize_protected_datagram(
-            datagram,
+            response_datagram,
             coquic::quic::DeserializeProtectionContext{
                 .peer_role = coquic::quic::EndpointRole::server,
                 .client_initial_destination_connection_id =
@@ -2090,7 +2176,9 @@ TEST(QuicCoreTest, ReceivingAckElicitingPacketsSchedulesAckResponse) {
         }
     }
 
-    EXPECT_TRUE(saw_ack);
+    if (!saw_ack) {
+        ADD_FAILURE() << "server response did not include an ACK frame";
+    }
 }
 
 TEST(QuicCoreTest, ReorderedApplicationPacketsAreDeliveredOnceContiguous) {
@@ -2121,15 +2209,22 @@ TEST(QuicCoreTest, ReorderedApplicationPacketsAreDeliveredOnceContiguous) {
 
     const auto reordered = coquic::quic::test::relay_datagrams_to_peer(
         datagrams, std::array<std::size_t, 1>{1}, server, coquic::quic::test::test_time(3));
-    EXPECT_FALSE(server.has_failed());
-    EXPECT_TRUE(coquic::quic::test::received_application_data_from(reordered).empty());
+    if (server.has_failed()) {
+        ADD_FAILURE() << "server failed after reordered packet";
+    }
+    if (!coquic::quic::test::received_application_data_from(reordered).empty()) {
+        ADD_FAILURE() << "server delivered application data before stream data was contiguous";
+    }
 
     const auto contiguous = coquic::quic::test::relay_datagrams_to_peer(
         datagrams, std::array<std::size_t, 1>{0}, server, coquic::quic::test::test_time(4));
-    EXPECT_FALSE(server.has_failed());
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(
-                  coquic::quic::test::received_application_data_from(contiguous)),
-              "pingpong");
+    if (server.has_failed()) {
+        ADD_FAILURE() << "server failed after contiguous packet";
+    }
+    if (coquic::quic::test::string_from_bytes(
+            coquic::quic::test::received_application_data_from(contiguous)) != "pingpong") {
+        ADD_FAILURE() << "server did not deliver reordered stream data once contiguous";
+    }
 }
 
 TEST(QuicCoreTest, InboundApplicationAckRetiresOwnedSendRanges) {
@@ -2157,7 +2252,10 @@ TEST(QuicCoreTest, InboundApplicationAckRetiresOwnedSendRanges) {
 
     const auto ack_deadline = optional_value_or_terminate(server_step.next_wakeup);
     const auto server_ack = server.advance(coquic::quic::QuicCoreTimerExpired{}, ack_deadline);
-    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(server_ack).empty());
+    if (coquic::quic::test::send_datagrams_from(server_ack).empty()) {
+        ADD_FAILURE() << "server did not emit an ACK datagram";
+        return;
+    }
 
     const auto client_step = coquic::quic::test::relay_send_datagrams_to_peer(
         server_ack, client, ack_deadline + std::chrono::milliseconds(1));

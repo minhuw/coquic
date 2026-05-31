@@ -63,6 +63,13 @@ using coquic::quic::test_support::tracked_packet_or_null;
 using coquic::quic::test_support::tracked_packet_or_terminate;
 using coquic::quic::test_support::tracked_packet_snapshot;
 
+template <typename T> T codec_value_or_terminate(coquic::quic::CodecResult<T> result) {
+    if (!result.has_value()) {
+        std::abort();
+    }
+    return std::move(result).value();
+}
+
 TEST(QuicCoreTest, TwoPeersExchangeStreamZeroDataThroughEffects) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
@@ -269,15 +276,17 @@ TEST(QuicCoreTest, ServerProcessesOneRttStreamBeforeHandshakeCompletesWhenApplic
         coquic::quic::test::test_time(1));
     ASSERT_TRUE(processed.has_value());
 
-    const auto received = connection.take_received_stream_data();
-    ASSERT_TRUE(received.has_value());
-    if (!received.has_value()) {
-        return;
+    const auto received_stream =
+        optional_value_or_terminate(connection.take_received_stream_data());
+    if (received_stream.stream_id != 0u) {
+        ADD_FAILURE() << "unexpected stream id";
     }
-    const auto &received_stream = *received;
-    EXPECT_EQ(received_stream.stream_id, 0u);
-    EXPECT_EQ(received_stream.bytes, coquic::quic::test::bytes_from_string("late-handshake"));
-    EXPECT_TRUE(received_stream.fin);
+    if (received_stream.bytes != coquic::quic::test::bytes_from_string("late-handshake")) {
+        ADD_FAILURE() << "unexpected stream bytes";
+    }
+    if (!received_stream.fin) {
+        ADD_FAILURE() << "stream fin was not set";
+    }
     EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
 }
 
@@ -318,8 +327,7 @@ TEST(QuicCoreTest,
     connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
 
     EXPECT_FALSE(connection.has_failed());
-    const auto received = connection.take_received_stream_data();
-    EXPECT_FALSE(received.has_value());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
     EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
     EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
     ASSERT_EQ(connection.deferred_protected_packets_.size(), 1u);
@@ -349,10 +357,10 @@ TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilG
             });
     };
 
-    const auto late = make_datagram(
-        7, coquic::quic::test::make_inbound_application_stream_frame("lo", 3, 0, true));
-    ASSERT_TRUE(late.has_value());
-    connection.process_inbound_datagram(late.value(), coquic::quic::test::test_time(1));
+    connection.process_inbound_datagram(
+        codec_value_or_terminate(make_datagram(
+            7, coquic::quic::test::make_inbound_application_stream_frame("lo", 3, 0, true))),
+        coquic::quic::test::test_time(1));
 
     ASSERT_EQ(connection.streams_.at(0).receive_buffer.buffered_bytes_.size(), 1u);
     const auto &buffered = connection.streams_.at(0).receive_buffer.buffered_bytes_.begin()->second;
@@ -360,16 +368,19 @@ TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilG
     EXPECT_GT(buffered.storage()->size(), buffered.size());
     EXPECT_FALSE(connection.take_received_stream_data().has_value());
 
-    const auto early = make_datagram(
-        8, coquic::quic::test::make_inbound_application_stream_frame("hel", 0, 0, false));
-    ASSERT_TRUE(early.has_value());
-    connection.process_inbound_datagram(early.value(), coquic::quic::test::test_time(2));
+    connection.process_inbound_datagram(
+        codec_value_or_terminate(make_datagram(
+            8, coquic::quic::test::make_inbound_application_stream_frame("hel", 0, 0, false))),
+        coquic::quic::test::test_time(2));
 
-    const auto received = connection.take_received_stream_data();
-    ASSERT_TRUE(received.has_value());
-    const auto received_value = optional_value_or_terminate(received);
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_value.bytes), "hello");
-    EXPECT_TRUE(received_value.fin);
+    const auto received_stream =
+        optional_value_or_terminate(connection.take_received_stream_data());
+    if (coquic::quic::test::string_from_bytes(received_stream.bytes) != "hello") {
+        ADD_FAILURE() << "unexpected coalesced stream bytes";
+    }
+    if (!received_stream.fin) {
+        ADD_FAILURE() << "coalesced stream fin was not set";
+    }
     EXPECT_TRUE(connection.streams_.at(0).receive_buffer.buffered_bytes_.empty());
 }
 
@@ -425,9 +436,9 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresAckRangeTrimmedOneRttReplay) {
             });
     };
 
-    const auto replayed = make_stream_datagram(0, 0, "replay");
-    ASSERT_TRUE(replayed.has_value());
-    connection.process_inbound_datagram(replayed.value(), coquic::quic::test::test_time(1));
+    connection.process_inbound_datagram(
+        codec_value_or_terminate(make_stream_datagram(0, 0, "replay")),
+        coquic::quic::test::test_time(1));
     ASSERT_TRUE(connection.take_received_stream_data().has_value());
 
     for (std::uint64_t packet_number = 2; packet_number <= coquic::quic::kMaxTrackedAckRanges * 2;
@@ -443,7 +454,9 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresAckRangeTrimmedOneRttReplay) {
     EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number,
               coquic::quic::kMaxTrackedAckRanges * 2);
 
-    connection.process_inbound_datagram(replayed.value(), coquic::quic::test::test_time(200));
+    connection.process_inbound_datagram(
+        codec_value_or_terminate(make_stream_datagram(0, 0, "replay")),
+        coquic::quic::test::test_time(200));
 
     EXPECT_FALSE(connection.take_received_stream_data().has_value());
     EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number,
@@ -493,8 +506,7 @@ TEST(
     connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
 
     EXPECT_FALSE(connection.has_failed());
-    const auto received = connection.take_received_stream_data();
-    EXPECT_FALSE(received.has_value());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
     EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
     EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
     ASSERT_EQ(connection.deferred_protected_packets_.size(), 1u);
@@ -523,14 +535,23 @@ TEST(QuicCoreTest, ReceivedApplicationStreamDataCanBeEmittedAsSharedBytes) {
         /*path_id=*/0);
     ASSERT_TRUE(processed.has_value());
 
-    const auto received = connection.take_received_stream_data();
-    ASSERT_TRUE(received.has_value());
-    const auto received_value = optional_value_or_terminate(received);
-    EXPECT_TRUE(received_value.bytes.empty());
-    EXPECT_EQ(received_value.shared_bytes.storage(), storage);
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_value.payload()), "shared");
-    EXPECT_EQ(received_value.byte_count(), 6u);
-    EXPECT_TRUE(received_value.fin);
+    const auto received_stream =
+        optional_value_or_terminate(connection.take_received_stream_data());
+    if (!received_stream.bytes.empty()) {
+        ADD_FAILURE() << "shared receive unexpectedly copied bytes";
+    }
+    if (received_stream.shared_bytes.storage() != storage) {
+        ADD_FAILURE() << "shared receive did not preserve storage";
+    }
+    if (coquic::quic::test::string_from_bytes(received_stream.payload()) != "shared") {
+        ADD_FAILURE() << "unexpected shared stream payload";
+    }
+    if (received_stream.byte_count() != 6u) {
+        ADD_FAILURE() << "unexpected shared stream byte count";
+    }
+    if (!received_stream.fin) {
+        ADD_FAILURE() << "shared stream fin was not set";
+    }
 }
 
 TEST(QuicCoreTest, SharedReceiveModeFallsBackToOwnedBytesForCoalescedSegments) {
@@ -557,32 +578,40 @@ TEST(QuicCoreTest, SharedReceiveModeFallsBackToOwnedBytesForCoalescedSegments) {
                     .has_value());
     EXPECT_FALSE(connection.take_received_stream_data().has_value());
 
-    const auto early_storage =
+    const auto first_segment_storage =
         std::make_shared<std::vector<std::byte>>(coquic::quic::test::bytes_from_string("one"));
-    const std::array early_frames = {
+    const std::array first_segment_frames = {
         coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
             .fin = false,
             .has_offset = true,
             .has_length = true,
             .stream_id = 0,
             .offset = 0,
-            .stream_data = coquic::quic::SharedBytes(early_storage, 0, early_storage->size()),
+            .stream_data =
+                coquic::quic::SharedBytes(first_segment_storage, 0, first_segment_storage->size()),
         }},
     };
     ASSERT_TRUE(connection
-                    .process_inbound_received_application(early_frames,
+                    .process_inbound_received_application(first_segment_frames,
                                                           coquic::quic::test::test_time(2),
                                                           /*allow_preconnected_frames=*/false,
                                                           /*path_id=*/0)
                     .has_value());
 
-    const auto received = connection.take_received_stream_data();
-    ASSERT_TRUE(received.has_value());
-    const auto received_value = optional_value_or_terminate(received);
-    EXPECT_TRUE(received_value.shared_bytes.empty());
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_value.bytes), "onetwo");
-    EXPECT_EQ(received_value.byte_count(), 6u);
-    EXPECT_TRUE(received_value.fin);
+    const auto received_stream =
+        optional_value_or_terminate(connection.take_received_stream_data());
+    if (!received_stream.shared_bytes.empty()) {
+        ADD_FAILURE() << "coalesced receive unexpectedly preserved shared bytes";
+    }
+    if (coquic::quic::test::string_from_bytes(received_stream.bytes) != "onetwo") {
+        ADD_FAILURE() << "unexpected coalesced receive bytes";
+    }
+    if (received_stream.byte_count() != 6u) {
+        ADD_FAILURE() << "unexpected coalesced receive byte count";
+    }
+    if (!received_stream.fin) {
+        ADD_FAILURE() << "coalesced receive fin was not set";
+    }
 }
 
 TEST(QuicCoreTest, InboundSharedDatagramPreservesSharedPayload) {
@@ -601,13 +630,20 @@ TEST(QuicCoreTest, InboundSharedDatagramPreservesSharedPayload) {
         /*path_id=*/0);
     ASSERT_TRUE(processed.has_value());
 
-    const auto received = connection.take_received_datagram_data();
-    ASSERT_TRUE(received.has_value());
-    const auto received_value = optional_value_or_terminate(received);
-    EXPECT_TRUE(received_value.bytes.empty());
-    EXPECT_EQ(received_value.shared_bytes.storage(), storage);
-    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_value.payload()), "shared");
-    EXPECT_EQ(received_value.byte_count(), 6u);
+    const auto received_datagram =
+        optional_value_or_terminate(connection.take_received_datagram_data());
+    if (!received_datagram.bytes.empty()) {
+        ADD_FAILURE() << "shared datagram unexpectedly copied bytes";
+    }
+    if (received_datagram.shared_bytes.storage() != storage) {
+        ADD_FAILURE() << "shared datagram did not preserve storage";
+    }
+    if (coquic::quic::test::string_from_bytes(received_datagram.payload()) != "shared") {
+        ADD_FAILURE() << "unexpected shared datagram payload";
+    }
+    if (received_datagram.byte_count() != 6u) {
+        ADD_FAILURE() << "unexpected shared datagram byte count";
+    }
 }
 
 TEST(QuicCoreTest, SendStreamLocalErrorsCoverInvalidIdAndClosedSendSide) {
@@ -674,16 +710,16 @@ TEST(QuicCoreTest, DatagramSendReportsPeerSupportAndSizeLocalErrors) {
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(shared_unsupported).empty());
 
     peer_transport.max_datagram_frame_size = 2;
-    const auto too_large = client.advance(
+    const auto oversized_send = client.advance(
         coquic::quic::QuicCoreSendDatagramData{
             .bytes = bytes_from_ints({0x01}),
         },
         coquic::quic::test::test_time(3));
-    ASSERT_TRUE(too_large.local_error.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(too_large.local_error).code,
+    ASSERT_TRUE(oversized_send.local_error.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(oversized_send.local_error).code,
               coquic::quic::QuicCoreLocalErrorCode::datagram_too_large);
-    EXPECT_FALSE(optional_ref_or_terminate(too_large.local_error).stream_id.has_value());
-    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(too_large).empty());
+    EXPECT_FALSE(optional_ref_or_terminate(oversized_send.local_error).stream_id.has_value());
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(oversized_send).empty());
 }
 
 TEST(QuicCoreTest, ClosedPeerInitiatedBidirectionalStreamRefreshesMaxStreams) {

@@ -24,10 +24,11 @@ std::uint64_t encode_ack_delay(std::chrono::microseconds ack_delay,
     return static_cast<std::uint64_t>(ack_delay.count()) >> ack_delay_exponent;
 }
 
-QuicCoreDuration latest_loss_delay(const RecoveryRttState &rtt_state) {
-    const auto base_rtt = rtt_state.latest_rtt.has_value()
-                              ? std::max(*rtt_state.latest_rtt, rtt_state.smoothed_rtt)
-                              : kInitialRtt;
+QuicCoreDuration latest_loss_delay(const RecoveryRttState &recovery_rtt_state) {
+    const auto base_rtt =
+        recovery_rtt_state.latest_rtt.has_value()
+            ? std::max(*recovery_rtt_state.latest_rtt, recovery_rtt_state.smoothed_rtt)
+            : kInitialRtt;
     const auto rounded_up_loss_delay = QuicCoreDuration((base_rtt.count() * 9 + 7) / 8);
     return std::max(kGranularity, rounded_up_loss_delay);
 }

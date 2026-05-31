@@ -156,10 +156,10 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
         }
 
         auto reference_time = last_peer_activity_time_;
-        const auto probe_time =
+        const auto keepalive_probe_time =
             last_client_handshake_keepalive_probe_time_.value_or(QuicCoreTimePoint::min());
-        if (probe_time > *reference_time) {
-            reference_time = probe_time;
+        if (keepalive_probe_time > *reference_time) {
+            reference_time = keepalive_probe_time;
         }
 
         return reference_time;

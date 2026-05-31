@@ -1283,19 +1283,20 @@ bool QuicConnection::try_retire_simple_stream_acked_packet(
                                             additional_retirement_candidates, stream_id);
     };
     const auto acknowledge_metadata = [&](const StreamFrameSendMetadata &metadata) {
-        const auto stream = streams_.find(metadata.stream_id);
-        if (stream == streams_.end()) {
+        const auto stream_it = streams_.find(metadata.stream_id);
+        if (stream_it == streams_.end()) {
             return;
         }
 
-        const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
-        const auto previous_has_lost_send_data =
-            stream->second.reset_state == StreamControlFrameState::none &&
-            stream->second.send_buffer.has_lost_data();
-        stream->second.acknowledge_send_metadata(metadata);
-        note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
-                                       stream->second);
-        maybe_refresh_peer_stream_limit(stream->second);
+        const auto previous_fresh_sendable_bytes =
+            fresh_sendable_bytes_for_cache(stream_it->second);
+        const auto previous_stream_has_lost_send_data =
+            stream_it->second.reset_state == StreamControlFrameState::none &&
+            stream_it->second.send_buffer.has_lost_data();
+        stream_it->second.acknowledge_send_metadata(metadata);
+        note_stream_send_state_changed(previous_fresh_sendable_bytes,
+                                       previous_stream_has_lost_send_data, stream_it->second);
+        maybe_refresh_peer_stream_limit(stream_it->second);
         note_retirement_candidate(metadata.stream_id);
     };
     if (first_stream_frame_metadata.has_value()) {

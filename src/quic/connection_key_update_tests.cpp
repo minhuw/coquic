@@ -20,36 +20,38 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.peer_preferred_address_emitted_ = true;
         return connection;
     };
-    const auto process_fast_path_datagram = [](QuicConnection &connection,
+    const auto process_fast_path_datagram = [](QuicConnection &test_connection,
                                                std::vector<std::byte> datagram,
                                                QuicCoreTimePoint now = QuicCoreTimePoint{}) {
         auto storage = std::make_shared<std::vector<std::byte>>(std::move(datagram));
-        connection.process_inbound_datagram(
+        test_connection.process_inbound_datagram(
             storage, /*begin=*/0, /*end=*/storage->size(), now, /*path_id=*/0,
             QuicEcnCodepoint::unavailable, std::nullopt, /*replay_trigger=*/false,
             /*count_inbound_bytes=*/true, /*allow_in_place_receive_decode=*/true);
     };
-    const auto make_runtime_transport_parameters = [](const QuicConnection &connection) {
+    const auto make_runtime_transport_parameters = [](const QuicConnection &test_connection) {
         return TransportParameters{
             .original_destination_connection_id =
-                connection.config_.initial_destination_connection_id,
-            .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
-            .active_connection_id_limit = connection.config_.transport.active_connection_id_limit,
-            .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
-            .max_ack_delay = connection.config_.transport.max_ack_delay,
-            .initial_max_data = connection.config_.transport.initial_max_data,
+                test_connection.config_.initial_destination_connection_id,
+            .max_udp_payload_size = test_connection.config_.transport.max_udp_payload_size,
+            .active_connection_id_limit =
+                test_connection.config_.transport.active_connection_id_limit,
+            .ack_delay_exponent = test_connection.config_.transport.ack_delay_exponent,
+            .max_ack_delay = test_connection.config_.transport.max_ack_delay,
+            .initial_max_data = test_connection.config_.transport.initial_max_data,
             .initial_max_stream_data_bidi_local =
-                connection.config_.transport.initial_max_stream_data_bidi_local,
+                test_connection.config_.transport.initial_max_stream_data_bidi_local,
             .initial_max_stream_data_bidi_remote =
-                connection.config_.transport.initial_max_stream_data_bidi_remote,
-            .initial_max_stream_data_uni = connection.config_.transport.initial_max_stream_data_uni,
-            .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
-            .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
-            .initial_source_connection_id = connection.peer_source_connection_id_,
+                test_connection.config_.transport.initial_max_stream_data_bidi_remote,
+            .initial_max_stream_data_uni =
+                test_connection.config_.transport.initial_max_stream_data_uni,
+            .initial_max_streams_bidi = test_connection.config_.transport.initial_max_streams_bidi,
+            .initial_max_streams_uni = test_connection.config_.transport.initial_max_streams_uni,
+            .initial_source_connection_id = test_connection.peer_source_connection_id_,
             .version_information = version_information_for_handshake(
-                connection.config_.supported_versions, connection.current_version_,
-                connection.config_.retry_source_connection_id, connection.original_version_,
-                connection.current_version_),
+                test_connection.config_.supported_versions, test_connection.current_version_,
+                test_connection.config_.retry_source_connection_id,
+                test_connection.original_version_, test_connection.current_version_),
         };
     };
     const auto make_new_connection_id_frame = [](std::uint64_t sequence_number) {
@@ -76,13 +78,13 @@ bool connection_key_update_and_probe_coverage_for_tests() {
     };
 
     const auto serialize_one_rtt_ack_datagram =
-        [](const QuicConnection &connection, const TrafficSecret &secret,
+        [](const QuicConnection &test_connection, const TrafficSecret &secret,
            std::uint64_t packet_number, bool key_phase = false) {
             const auto encoded = serialize_protected_datagram(
                 std::array<ProtectedPacket, 1>{
                     ProtectedOneRttPacket{
                         .key_phase = key_phase,
-                        .destination_connection_id = connection.config_.source_connection_id,
+                        .destination_connection_id = test_connection.config_.source_connection_id,
                         .packet_number_length = 2,
                         .packet_number = packet_number,
                         .frames = {AckFrame{}},
@@ -91,7 +93,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                 SerializeProtectionContext{
                     .local_role = EndpointRole::server,
                     .client_initial_destination_connection_id =
-                        connection.client_initial_destination_connection_id(),
+                        test_connection.client_initial_destination_connection_id(),
                     .one_rtt_secret = secret,
                     .one_rtt_key_phase = key_phase,
                 });
@@ -100,14 +102,14 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             }
             return encoded.value();
         };
-    const auto serialize_handshake_ping_datagram = [](const QuicConnection &connection,
+    const auto serialize_handshake_ping_datagram = [](const QuicConnection &test_connection,
                                                       const TrafficSecret &secret,
                                                       std::uint64_t packet_number) {
         const auto encoded = serialize_protected_datagram(
             std::array<ProtectedPacket, 1>{
                 ProtectedHandshakePacket{
                     .version = kQuicVersion1,
-                    .destination_connection_id = connection.config_.source_connection_id,
+                    .destination_connection_id = test_connection.config_.source_connection_id,
                     .source_connection_id = bytes_from_ints_for_tests({0x11, 0x90}),
                     .packet_number_length = 2,
                     .packet_number = packet_number,
@@ -117,7 +119,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             SerializeProtectionContext{
                 .local_role = EndpointRole::server,
                 .client_initial_destination_connection_id =
-                    connection.client_initial_destination_connection_id(),
+                    test_connection.client_initial_destination_connection_id(),
                 .handshake_secret = secret,
             });
         if (!encoded.has_value()) {
@@ -126,13 +128,13 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         return encoded.value();
     };
     const auto serialize_one_rtt_frames_datagram =
-        [](const QuicConnection &connection, const TrafficSecret &secret,
+        [](const QuicConnection &test_connection, const TrafficSecret &secret,
            std::uint64_t packet_number, std::vector<Frame> frames, bool key_phase = false) {
             const auto encoded = serialize_protected_datagram(
                 std::array<ProtectedPacket, 1>{
                     ProtectedOneRttPacket{
                         .key_phase = key_phase,
-                        .destination_connection_id = connection.config_.source_connection_id,
+                        .destination_connection_id = test_connection.config_.source_connection_id,
                         .packet_number_length = 2,
                         .packet_number = packet_number,
                         .frames = std::move(frames),
@@ -141,7 +143,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                 SerializeProtectionContext{
                     .local_role = EndpointRole::server,
                     .client_initial_destination_connection_id =
-                        connection.client_initial_destination_connection_id(),
+                        test_connection.client_initial_destination_connection_id(),
                     .one_rtt_secret = secret,
                     .one_rtt_key_phase = key_phase,
                 });

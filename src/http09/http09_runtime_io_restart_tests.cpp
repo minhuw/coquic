@@ -48,10 +48,10 @@ bool runtime_wait_and_receive_coverage_for_tests() {
     } check{ok};
     const auto make_loopback_peer = [](std::uint16_t port) {
         sockaddr_storage peer{};
-        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
-        ipv4.sin_family = AF_INET;
-        ipv4.sin_port = htons(port);
-        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        auto &ipv4_peer = *reinterpret_cast<sockaddr_in *>(&peer);
+        ipv4_peer.sin_family = AF_INET;
+        ipv4_peer.sin_port = htons(port);
+        ipv4_peer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         return peer;
     };
 

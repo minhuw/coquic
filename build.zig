@@ -529,17 +529,11 @@ pub fn build(b: *std.Build) void {
         .dest_dir = .{ .override = .prefix },
         .dest_sub_path = "share/wasm-quic/coquic-wasm-quic.wasm",
     });
-    const install_wasm_quic_demo = b.addInstallDirectory(.{
-        .source_dir = b.path("demo/wasm-quic"),
-        .install_dir = .prefix,
-        .install_subdir = "share/wasm-quic",
-    });
     const wasm_quic_step = b.step(
         "wasm-quic",
-        "Build the no-I/O QUIC WebAssembly module and browser demo assets",
+        "Build the no-I/O QUIC WebAssembly module for the Next.js browser demo",
     );
     wasm_quic_step.dependOn(&install_wasm_quic.step);
-    wasm_quic_step.dependOn(&install_wasm_quic_demo.step);
 
     const exe = b.addExecutable(.{
         .name = "coquic",

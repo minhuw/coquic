@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="demo/wasm-quic/coquic-logo.svg" alt="CoQUIC logo" width="96" height="96">
+  <img src="demo/next/public/coquic-logo.svg" alt="CoQUIC logo" width="96" height="96">
 </p>
 
 <p align="center">

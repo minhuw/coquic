@@ -1,1 +1,14 @@
-../../wasm-quic/coquic-logo.svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">coquic logo</title>
+  <desc id="desc">A minimal Q-shaped protocol mark with a horizontal stream cut and blue packet-flow tail.</desc>
+  <defs>
+    <mask id="q-cutouts" maskUnits="userSpaceOnUse">
+      <rect width="512" height="512" fill="#fff"/>
+      <circle cx="256" cy="253" r="96" fill="#000"/>
+      <rect x="82" y="245" width="352" height="20" fill="#000"/>
+      <rect x="-59" y="296" width="89" height="128" rx="15" transform="skewX(45)" fill="#000"/>
+    </mask>
+  </defs>
+  <circle cx="256" cy="253" r="171" fill="#161616" mask="url(#q-cutouts)"/>
+  <rect fill="#0F62FE" x="-47" y="307" width="65" height="101" rx="9" transform="skewX(45)"/>
+</svg>

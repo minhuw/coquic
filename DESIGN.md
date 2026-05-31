@@ -1,6 +1,6 @@
 # CoQUIC Design System
 
-This file is the design source of truth for CoQUIC UI work. Agents should read it before changing `demo/wasm-quic/*` or adding new demo, dashboard, documentation, benchmark, or interop views.
+This file is the design source of truth for CoQUIC UI work. Agents should read it before changing `demo/next/*` or adding new demo, dashboard, documentation, benchmark, or interop views.
 
 CoQUIC inherits the design-md convention from VoltAgent's `awesome-design-md` collection and the Cursor-inspired developer-tool baseline used in that collection: quiet confidence, flat editorial surfaces, restrained type, code/data-friendly rhythm, and minimal decoration. CoQUIC does not copy Cursor branding, IBM branding, logos, copywriting, or proprietary identity assets. The CoQUIC identity is its own: protocol engineering, generated implementation, benchmark evidence, and documentation-grade clarity.
 
@@ -174,7 +174,7 @@ The slogan may use subtle CoQUIC blue gradient text effects, but the page must s
 
 Do:
 
-- Use the tokens in this file and `demo/wasm-quic/demo-theme.css`.
+- Use the tokens in this file and `demo/next/app/globals.css`.
 - Keep surfaces flat, borders crisp, and spacing predictable.
 - Preserve dense but readable dashboards for benchmark and interop views.
 - Use icons/logos only when they clarify identity or action.
@@ -191,14 +191,14 @@ Do not:
 
 ## Implementation Notes
 
-- Primary implementation file: `demo/wasm-quic/demo-theme.css`.
-- Page-level styles may exist, but shared brand rules should live in `demo-theme.css`.
+- Primary implementation file: `demo/next/app/globals.css`.
+- Page-level styles may exist, but shared brand rules should live in Tailwind component layers in `globals.css`.
 - Root design source: this `DESIGN.md`.
-- Packaging must include `demo-theme.css`.
+- Packaging must include the Next.js generated CSS assets.
 - When changing UI, run:
   - `npm --prefix demo/next run build`
-  - `node --check demo/wasm-quic/perf-comparison.js`
-  - `node --check demo/wasm-quic/interop-results.js`
+  - `node --check demo/next/public/perf-comparison.js`
+  - `node --check demo/next/public/interop-results.js`
   - `git diff --check`
 
 ## Agent Prompt Guide

@@ -1,15 +1,30 @@
 {
+  "name": "coquic-demo",
+  "private": true,
   "scripts": {
-    "predev": "node scripts/link-public-assets.mjs",
+    "predev": "node scripts/prepare-public-assets.mjs",
     "dev": "next dev --hostname 127.0.0.1 --port 3000",
-    "prebuild": "node scripts/link-public-assets.mjs",
+    "prebuild": "node scripts/prepare-public-assets.mjs",
     "build": "next build",
+    "build:wasm-deps": "cd ../.. && nix develop -c bash scripts/build-boringssl-wasm.sh",
+    "compile:wasm": "cd ../.. && nix develop -c zig build wasm-quic -Doptimize=ReleaseSmall --summary all",
+    "smoke:wasm": "cd ../.. && node scripts/wasm-quic-smoke.mjs zig-out/share/wasm-quic/coquic-wasm-quic.wasm",
+    "build:wasm": "npm run build:wasm-deps && npm run compile:wasm && npm run smoke:wasm",
+    "build:demo": "npm run build:wasm && npm run build",
+    "package:demo": "cd ../.. && demo/deploy/package-demo.sh",
     "start": "next start --hostname 127.0.0.1 --port 3000"
   },
   "dependencies": {
+    "@radix-ui/react-slot": "^1.2.4",
+    "@tailwindcss/postcss": "^4.3.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.17.0",
     "next": "16.2.6",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.0"
   },
   "devDependencies": {
     "@types/node": "25.9.1",

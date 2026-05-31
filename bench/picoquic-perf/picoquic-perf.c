@@ -858,8 +858,6 @@ static int loop_callback(picoquic_quic_t *quic, picoquic_packet_loop_cb_enum mod
             if (app->finished) {
                 return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
             }
-        } else if (picoquic_get_first_cnx(quic) == NULL && stop_requested) {
-            return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
         }
         break;
     case picoquic_packet_loop_time_check: {

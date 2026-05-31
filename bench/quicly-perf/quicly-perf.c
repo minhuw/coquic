@@ -961,27 +961,33 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
     hs_properties.client.negotiated_protocols.list = negotiated_protocols;
     hs_properties.client.negotiated_protocols.count = 1;
 
-    client_batch_t batch;
-    memset(&batch, 0, sizeof(batch));
-    batch.cfg = cfg;
-    batch.counters = counters;
-    batch.expected_requests = count;
-    batch.request_bytes = request_bytes;
-    batch.response_bytes = response_bytes;
-    batch.counts_latency = counts_latency;
+    client_batch_t *batch = calloc(1, sizeof(*batch));
+    if (batch == NULL) {
+        close(fd);
+        snprintf(failure_reason, failure_reason_len, "out of memory");
+        return -1;
+    }
+    batch->cfg = cfg;
+    batch->counters = counters;
+    batch->expected_requests = count;
+    batch->request_bytes = request_bytes;
+    batch->response_bytes = response_bytes;
+    batch->counts_latency = counts_latency;
 
     quicly_conn_t *conn = NULL;
     quicly_error_t ret =
         quicly_connect(&conn, &ctx, cfg->server_name, (struct sockaddr *)&sa, NULL, &next_cid,
                        ptls_iovec_init(NULL, 0), &hs_properties, NULL, NULL);
     if (ret != 0 || conn == NULL) {
+        free(batch);
         close(fd);
         snprintf(failure_reason, failure_reason_len, "quicly_connect failed");
         return -1;
     }
     ++next_cid.master_id;
-    if (enqueue_requests(conn, &batch, count) != 0) {
-        snprintf(failure_reason, failure_reason_len, "%s", batch.failure_reason);
+    if (enqueue_requests(conn, batch, count) != 0) {
+        snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
+        free(batch);
         quicly_free(conn);
         close(fd);
         return -1;
@@ -1027,7 +1033,7 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
             }
         }
 
-        if (!close_called && batch.completed_requests >= batch.expected_requests &&
+        if (!close_called && batch->completed_requests >= batch->expected_requests &&
             quicly_num_streams(conn) == 0) {
             quicly_close(conn, 0, "");
             close_called = 1;
@@ -1040,15 +1046,17 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
             if (ret != QUICLY_ERROR_FREE_CONNECTION) {
                 snprintf(failure_reason, failure_reason_len, "quicly_send returned %" PRId64,
                          (int64_t)ret);
+                free(batch);
                 close(fd);
                 return -1;
             }
         }
-        if (batch.failed) {
-            snprintf(failure_reason, failure_reason_len, "%s", batch.failure_reason);
+        if (batch->failed) {
+            snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
             if (conn != NULL) {
                 quicly_close(conn, QUICLY_ERROR_FROM_APPLICATION_ERROR_CODE(1), "perf failure");
             }
+            free(batch);
             close(fd);
             return -1;
         }
@@ -1057,17 +1065,20 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
             if (conn != NULL) {
                 quicly_free(conn);
             }
+            free(batch);
             close(fd);
             return -1;
         }
     }
     close(fd);
-    if (batch.completed_requests != batch.expected_requests) {
+    if (batch->completed_requests != batch->expected_requests) {
         snprintf(failure_reason, failure_reason_len,
                  "quicly-perf completed %" PRIu64 " of %" PRIu64 " requests",
-                 batch.completed_requests, batch.expected_requests);
+                 batch->completed_requests, batch->expected_requests);
+        free(batch);
         return -1;
     }
+    free(batch);
     return 0;
 }
 

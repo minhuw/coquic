@@ -1392,24 +1392,26 @@ bool connection_helper_edge_cases_for_tests() {
 }
 
 bool connection_ack_deadline_and_stream_utilities_for_tests() {
+    bool ok = true;
+    const auto record = [&](bool condition) {
+        ok &= condition;
+        return condition;
+    };
     const auto now = QuicCoreTimePoint{} + std::chrono::milliseconds(17);
 
     PacketSpaceState ce_packet_space;
     schedule_application_ack_deadline(ce_packet_space, now, /*max_ack_delay_ms=*/25,
                                       QuicEcnCodepoint::ce);
-    const bool ce_ack_forces_immediate_deadline =
-        ce_packet_space.pending_ack_deadline == now && ce_packet_space.force_ack_send;
+    record(ce_packet_space.pending_ack_deadline == now && ce_packet_space.force_ack_send);
 
     PacketSpaceState delayed_ack_packet_space;
     schedule_application_ack_deadline(delayed_ack_packet_space, now, /*max_ack_delay_ms=*/25,
                                       QuicEcnCodepoint::ect0);
-    const bool delayed_ack_sets_max_ack_deadline =
-        delayed_ack_packet_space.pending_ack_deadline == now + std::chrono::milliseconds(25) &&
-        !delayed_ack_packet_space.force_ack_send;
+    record(delayed_ack_packet_space.pending_ack_deadline == now + std::chrono::milliseconds(25) &&
+           !delayed_ack_packet_space.force_ack_send);
     schedule_application_ack_deadline(delayed_ack_packet_space, now + std::chrono::milliseconds(4),
                                       /*max_ack_delay_ms=*/25, QuicEcnCodepoint::ect0);
-    const bool existing_deadline_is_preserved =
-        delayed_ack_packet_space.pending_ack_deadline == now + std::chrono::milliseconds(25);
+    record(delayed_ack_packet_space.pending_ack_deadline == now + std::chrono::milliseconds(25));
 
     PacketSpaceState immediate_ack_packet_space;
     for (std::uint64_t packet_number = 4; packet_number < 19; ++packet_number) {
@@ -1423,44 +1425,29 @@ bool connection_ack_deadline_and_stream_utilities_for_tests() {
     schedule_application_ack_deadline(immediate_ack_packet_space,
                                       now + std::chrono::milliseconds(2),
                                       /*max_ack_delay_ms=*/25, QuicEcnCodepoint::ect0);
-    const bool immediate_ack_uses_current_time =
-        immediate_ack_packet_space.pending_ack_deadline == now + std::chrono::milliseconds(2) &&
-        !immediate_ack_packet_space.force_ack_send;
+    record(immediate_ack_packet_space.pending_ack_deadline == now + std::chrono::milliseconds(2) &&
+           !immediate_ack_packet_space.force_ack_send);
 
     const std::map<std::uint64_t, StreamState> empty_streams;
-    const bool empty_stream_round_robin_is_empty =
-        round_robin_stream_order(empty_streams, std::nullopt).empty();
-    const bool empty_stream_unfair_order_is_empty =
-        unfair_stream_order(empty_streams, std::nullopt).empty();
+    record(round_robin_stream_order(empty_streams, std::nullopt).empty());
+    record(unfair_stream_order(empty_streams, std::nullopt).empty());
 
     std::map<std::uint64_t, StreamState> streams;
     streams.emplace(4, make_implicit_stream_state(/*stream_id=*/4, EndpointRole::client));
     streams.emplace(8, make_implicit_stream_state(/*stream_id=*/8, EndpointRole::client));
     streams.emplace(12, make_implicit_stream_state(/*stream_id=*/12, EndpointRole::client));
-    const bool round_robin_without_last_stream_keeps_natural_order =
-        round_robin_stream_order(streams, std::nullopt) == std::vector<std::uint64_t>{4, 8, 12};
-    const bool round_robin_after_middle_stream_wraps_remaining_ids =
-        round_robin_stream_order(streams, /*last_stream_id=*/8) ==
-        std::vector<std::uint64_t>{12, 4, 8};
-    const bool round_robin_after_last_stream_wraps_to_front =
-        round_robin_stream_order(streams, /*last_stream_id=*/12) ==
-        std::vector<std::uint64_t>{4, 8, 12};
-    const bool unfair_after_middle_stream_reuses_same_stream_first =
-        unfair_stream_order(streams, /*last_stream_id=*/8) == std::vector<std::uint64_t>{8, 12, 4};
-    const bool unfair_after_last_stream_keeps_last_stream_first =
-        unfair_stream_order(streams, /*last_stream_id=*/12) == std::vector<std::uint64_t>{12, 4, 8};
-    const bool unfair_without_last_stream_keeps_natural_order =
-        unfair_stream_order(streams, std::nullopt) == std::vector<std::uint64_t>{4, 8, 12};
+    record(round_robin_stream_order(streams, std::nullopt) == std::vector<std::uint64_t>{4, 8, 12});
+    record(round_robin_stream_order(streams, /*last_stream_id=*/8) ==
+           std::vector<std::uint64_t>{12, 4, 8});
+    record(round_robin_stream_order(streams, /*last_stream_id=*/12) ==
+           std::vector<std::uint64_t>{4, 8, 12});
+    record(unfair_stream_order(streams, /*last_stream_id=*/8) ==
+           std::vector<std::uint64_t>{8, 12, 4});
+    record(unfair_stream_order(streams, /*last_stream_id=*/12) ==
+           std::vector<std::uint64_t>{12, 4, 8});
+    record(unfair_stream_order(streams, std::nullopt) == std::vector<std::uint64_t>{4, 8, 12});
 
-    return ce_ack_forces_immediate_deadline & delayed_ack_sets_max_ack_deadline &
-           existing_deadline_is_preserved & immediate_ack_uses_current_time &
-           empty_stream_round_robin_is_empty & empty_stream_unfair_order_is_empty &
-           round_robin_without_last_stream_keeps_natural_order &
-           round_robin_after_middle_stream_wraps_remaining_ids &
-           round_robin_after_last_stream_wraps_to_front &
-           unfair_after_middle_stream_reuses_same_stream_first &
-           unfair_after_last_stream_keeps_last_stream_first &
-           unfair_without_last_stream_keeps_natural_order;
+    return ok;
 }
 
 bool connection_header_packet_space_coverage_for_tests() {
@@ -1485,7 +1472,7 @@ bool connection_header_packet_space_coverage_for_tests() {
             make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x72});
         connection.zero_rtt_space_.write_secret =
             make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x73});
-        const std::array<ProtectedPacket, 3> packets{
+        const std::array<ProtectedPacket, 3> protected_packets{
             ProtectedPacket{ProtectedInitialPacket{
                 .version = kQuicVersion1,
                 .destination_connection_id = connection.config_.initial_destination_connection_id,
@@ -1512,13 +1499,13 @@ bool connection_header_packet_space_coverage_for_tests() {
             }},
         };
         const auto datagram = serialize_protected_datagram_with_metadata(
-            packets, SerializeProtectionContext{
-                         .local_role = connection.config_.role,
-                         .client_initial_destination_connection_id =
-                             connection.client_initial_destination_connection_id(),
-                         .handshake_secret = connection.handshake_space_.write_secret,
-                         .zero_rtt_secret = connection.zero_rtt_space_.write_secret,
-                     });
+            protected_packets, SerializeProtectionContext{
+                                   .local_role = connection.config_.role,
+                                   .client_initial_destination_connection_id =
+                                       connection.client_initial_destination_connection_id(),
+                                   .handshake_secret = connection.handshake_space_.write_secret,
+                                   .zero_rtt_secret = connection.zero_rtt_space_.write_secret,
+                               });
         record(datagram.has_value());
         if (datagram.has_value()) {
             record(connection.queue_outbound_packet_inspections(datagram.value(), 7) == 3);
@@ -1573,9 +1560,9 @@ bool connection_header_packet_space_coverage_for_tests() {
         record(duplicate_it != outstanding.end());
         record(outstanding.erase(99) == 0);
 
-        const auto [declared_lost_it, declared_lost_inserted] = declared_lost.emplace(9, packet);
-        record(declared_lost_inserted);
-        record(declared_lost_it != declared_lost.end());
+        const auto declared_lost_result = declared_lost.emplace(9, packet);
+        record(declared_lost_result.second);
+        record(declared_lost_result.first != declared_lost.end());
         record(declared_lost.contains(9));
         const auto &declared_lost_packet = declared_lost.at(9);
         record(declared_lost_packet.packet_number == 9);

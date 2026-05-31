@@ -16,6 +16,7 @@ namespace {
 using coquic::quic::AckFrame;
 using coquic::quic::CodecErrorCode;
 using coquic::quic::CryptoFrame;
+using coquic::quic::DatagramFrame;
 using coquic::quic::HandshakeDoneFrame;
 using coquic::quic::HandshakePacket;
 using coquic::quic::InitialPacket;
@@ -537,6 +538,94 @@ TEST(QuicPacketTest, AllowsTerminalStreamFramesWithoutLength) {
     EXPECT_TRUE(std::holds_alternative<OneRttPacket>(decoded.value().packet));
 }
 
+TEST(QuicPacketTest, RejectsDatagramFrameInInitialAndHandshakePackets) {
+    expect_packet_serialize_error(
+        InitialPacket{
+            .version = 1,
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = {std::byte{0xbb}},
+            .packet_number_length = 1,
+            .truncated_packet_number = 1,
+            .frames =
+                {
+                    DatagramFrame{
+                        .has_length = true,
+                        .data = {std::byte{0x01}},
+                    },
+                },
+        },
+        CodecErrorCode::frame_not_allowed_in_packet_type);
+
+    expect_packet_serialize_error(
+        HandshakePacket{
+            .version = 1,
+            .destination_connection_id = {std::byte{0xaa}},
+            .source_connection_id = {std::byte{0xbb}},
+            .packet_number_length = 1,
+            .truncated_packet_number = 1,
+            .frames =
+                {
+                    DatagramFrame{
+                        .has_length = true,
+                        .data = {std::byte{0x01}},
+                    },
+                },
+        },
+        CodecErrorCode::frame_not_allowed_in_packet_type);
+}
+
+TEST(QuicPacketTest, AllowsDatagramFramesInZeroRttAndOneRttPackets) {
+    const auto zero_rtt_encoded = coquic::quic::serialize_packet(ZeroRttPacket{
+        .version = 1,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 1,
+        .frames =
+            {
+                DatagramFrame{
+                    .has_length = true,
+                    .data = {std::byte{0x01}, std::byte{0x02}},
+                },
+            },
+    });
+    ASSERT_TRUE(zero_rtt_encoded.has_value());
+
+    const auto zero_rtt_decoded = coquic::quic::deserialize_packet(zero_rtt_encoded.value(), {});
+    ASSERT_TRUE(zero_rtt_decoded.has_value());
+    const auto *zero_rtt = std::get_if<ZeroRttPacket>(&zero_rtt_decoded.value().packet);
+    ASSERT_NE(zero_rtt, nullptr);
+    ASSERT_EQ(zero_rtt->frames.size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<DatagramFrame>(zero_rtt->frames.front()));
+
+    const auto one_rtt_encoded = coquic::quic::serialize_packet(OneRttPacket{
+        .destination_connection_id = {std::byte{0xaa}},
+        .packet_number_length = 1,
+        .truncated_packet_number = 2,
+        .frames =
+            {
+                DatagramFrame{
+                    .has_length = false,
+                    .data = {std::byte{0x03}, std::byte{0x04}},
+                },
+            },
+    });
+    ASSERT_TRUE(one_rtt_encoded.has_value());
+
+    const auto one_rtt_decoded = coquic::quic::deserialize_packet(
+        one_rtt_encoded.value(), coquic::quic::DeserializeOptions{
+                                     .one_rtt_destination_connection_id_length = 1,
+                                 });
+    ASSERT_TRUE(one_rtt_decoded.has_value());
+    const auto *one_rtt = std::get_if<OneRttPacket>(&one_rtt_decoded.value().packet);
+    ASSERT_NE(one_rtt, nullptr);
+    ASSERT_EQ(one_rtt->frames.size(), 1u);
+    const auto *datagram = std::get_if<DatagramFrame>(&one_rtt->frames.front());
+    ASSERT_NE(datagram, nullptr);
+    EXPECT_FALSE(datagram->has_length);
+    EXPECT_EQ(datagram->data, (std::vector<std::byte>{std::byte{0x03}, std::byte{0x04}}));
+}
+
 TEST(QuicPacketTest, RejectsInvalidPacketSerializationInputs) {
     expect_packet_serialize_error(
         VersionNegotiationPacket{
@@ -651,6 +740,21 @@ TEST(QuicPacketTest, RejectsInvalidPacketSerializationInputs) {
                         .has_length = false,
                         .stream_id = 0,
                         .stream_data = {std::byte{0x01}},
+                    },
+                    PingFrame{},
+                },
+        },
+        CodecErrorCode::packet_length_mismatch);
+    expect_packet_serialize_error(
+        OneRttPacket{
+            .destination_connection_id = {std::byte{0xaa}},
+            .packet_number_length = 1,
+            .truncated_packet_number = 1,
+            .frames =
+                {
+                    DatagramFrame{
+                        .has_length = false,
+                        .data = {std::byte{0x01}},
                     },
                     PingFrame{},
                 },

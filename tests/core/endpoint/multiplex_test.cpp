@@ -62,6 +62,121 @@ TEST(QuicCoreEndpointTest, ConnectionCommandsOnlyAdvanceTheSelectedHandle) {
     EXPECT_EQ(core.connection_count(), 2u);
 }
 
+TEST(QuicCoreEndpointTest, EndpointConnectionCommandSendsDatagramOnSelectedConnection) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(1),
+            .initial_route_handle = 11,
+        },
+        coquic::quic::test::test_time(0)));
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(2),
+            .initial_route_handle = 22,
+        },
+        coquic::quic::test::test_time(1)));
+
+    *core.connections_.at(1).connection = make_connected_client_connection();
+    *core.connections_.at(2).connection = make_connected_client_connection();
+    core.connections_.at(1).route_handle_by_path_id.emplace(0, 11);
+    core.connections_.at(1).path_id_by_route_handle.emplace(11, 0);
+    core.connections_.at(2).route_handle_by_path_id.emplace(0, 22);
+    core.connections_.at(2).path_id_by_route_handle.emplace(22, 0);
+
+    const auto result = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 2,
+            .input =
+                coquic::quic::QuicCoreSendDatagramData{
+                    .bytes = bytes_from_ints({0x64}),
+                },
+        },
+        coquic::quic::test::test_time(2));
+
+    const auto sends = send_effects_from(result);
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends.front().connection, 2u);
+    ASSERT_TRUE(sends.front().route_handle.has_value());
+    EXPECT_EQ(sends.front().route_handle.value_or(0), 22u);
+
+    const auto payloads = application_datagram_payloads_from_datagram(
+        *core.connections_.at(2).connection, sends.front().bytes.span());
+    ASSERT_EQ(payloads.size(), 1u);
+    EXPECT_EQ(payloads.front(), bytes_from_ints({0x64}));
+}
+
+TEST(QuicCoreEndpointTest, EndpointConnectionCommandReportsDatagramLocalErrors) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(1),
+            .initial_route_handle = 11,
+        },
+        coquic::quic::test::test_time(0)));
+
+    *core.connections_.at(1).connection = make_connected_client_connection();
+    core.connections_.at(1).route_handle_by_path_id.emplace(0, 11);
+    core.connections_.at(1).path_id_by_route_handle.emplace(11, 0);
+
+    auto &peer_transport =
+        optional_ref_or_terminate(core.connections_.at(1).connection->peer_transport_parameters_);
+    peer_transport.max_datagram_frame_size = 0;
+    const auto unsupported = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreSendDatagramData{
+                    .bytes = bytes_from_ints({0x64}),
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(unsupported.local_error.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(unsupported.local_error).connection, 1u);
+    EXPECT_EQ(optional_ref_or_terminate(unsupported.local_error).code,
+              coquic::quic::QuicCoreLocalErrorCode::datagram_not_supported);
+    EXPECT_FALSE(optional_ref_or_terminate(unsupported.local_error).stream_id.has_value());
+    EXPECT_TRUE(send_effects_from(unsupported).empty());
+
+    const auto shared_unsupported = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreSendSharedDatagramData{
+                    .bytes = coquic::quic::SharedBytes(bytes_from_ints({0x65})),
+                },
+        },
+        coquic::quic::test::test_time(2));
+
+    ASSERT_TRUE(shared_unsupported.local_error.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(shared_unsupported.local_error).connection, 1u);
+    EXPECT_EQ(optional_ref_or_terminate(shared_unsupported.local_error).code,
+              coquic::quic::QuicCoreLocalErrorCode::datagram_not_supported);
+    EXPECT_FALSE(optional_ref_or_terminate(shared_unsupported.local_error).stream_id.has_value());
+    EXPECT_TRUE(send_effects_from(shared_unsupported).empty());
+
+    peer_transport.max_datagram_frame_size = 2;
+    const auto too_large = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreSendDatagramData{
+                    .bytes = bytes_from_ints({0x64}),
+                },
+        },
+        coquic::quic::test::test_time(3));
+
+    ASSERT_TRUE(too_large.local_error.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(too_large.local_error).connection, 1u);
+    EXPECT_EQ(optional_ref_or_terminate(too_large.local_error).code,
+              coquic::quic::QuicCoreLocalErrorCode::datagram_too_large);
+    EXPECT_FALSE(optional_ref_or_terminate(too_large.local_error).stream_id.has_value());
+    EXPECT_TRUE(send_effects_from(too_large).empty());
+}
+
 TEST(QuicCoreEndpointTest, ConnectionCommandStillDrainsEachStreamSend) {
     coquic::quic::QuicCore core(make_client_endpoint_config());
 

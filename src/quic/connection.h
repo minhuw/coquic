@@ -521,6 +521,8 @@ class QuicConnection {
                                               std::span<const std::byte> bytes, bool fin);
     StreamStateResult<bool> queue_stream_send_shared(std::uint64_t stream_id, SharedBytes bytes,
                                                      bool fin);
+    CodecResult<bool> queue_datagram_send(std::span<const std::byte> bytes);
+    CodecResult<bool> queue_datagram_send_shared(SharedBytes bytes);
     StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
     StreamStateResult<bool> queue_stop_sending(LocalStopSendingCommand command);
     CodecResult<bool> request_connection_migration(QuicPathId path_id,
@@ -534,6 +536,7 @@ class QuicConnection {
     DatagramBuffer drain_outbound_datagram(QuicCoreTimePoint now, bool continue_paced_burst);
     void on_timeout(QuicCoreTimePoint now);
     std::optional<QuicCoreReceiveStreamData> take_received_stream_data();
+    std::optional<QuicCoreReceiveDatagramData> take_received_datagram_data();
     std::optional<QuicCorePeerResetStream> take_peer_reset_stream();
     std::optional<QuicCorePeerStopSending> take_peer_stop_sending();
     std::optional<QuicCoreStateChange> take_state_change();
@@ -807,6 +810,8 @@ class QuicConnection {
     bool has_pending_application_control_send(bool application_ack_due) const;
     std::optional<std::size_t> minimum_pending_application_stream_wire_bytes() const;
     std::optional<std::size_t> minimum_pending_application_stream_datagram_bytes() const;
+    std::optional<std::size_t> minimum_pending_application_datagram_wire_bytes() const;
+    std::optional<std::size_t> minimum_pending_application_datagram_datagram_bytes() const;
     std::optional<std::size_t> application_stream_pacing_deadline_bytes() const;
     std::optional<std::size_t> application_stream_pacing_deadline_bytes(
         std::optional<std::size_t> minimum_datagram_bytes) const;
@@ -939,7 +944,9 @@ class QuicConnection {
     ConnectionFlowControlState connection_flow_control_;
     StreamOpenLimits stream_open_limits_;
     LocalStreamLimitState local_stream_limit_state_;
+    std::deque<SharedBytes> pending_datagram_send_queue_;
     std::deque<QuicCoreReceiveStreamData> pending_stream_receive_effects_;
+    std::deque<QuicCoreReceiveDatagramData> pending_datagram_receive_effects_;
     std::deque<QuicCorePeerResetStream> pending_peer_reset_effects_;
     std::deque<QuicCorePeerStopSending> pending_peer_stop_effects_;
     std::deque<QuicCoreStateChange> pending_state_changes_;

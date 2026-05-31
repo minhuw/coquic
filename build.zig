@@ -274,6 +274,7 @@ fn wasmQuicExportNames() []const []const u8 {
         "coquic_wasm_endpoint_open_connection",
         "coquic_wasm_endpoint_input_datagram",
         "coquic_wasm_endpoint_send_stream",
+        "coquic_wasm_endpoint_send_datagram",
         "coquic_wasm_endpoint_timer_expired",
         "coquic_wasm_endpoint_next_wakeup_ms",
         "coquic_wasm_endpoint_next_datagram_header",

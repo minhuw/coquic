@@ -272,6 +272,7 @@ inline QuicConnection make_connected_client_connection() {
         .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = connection.peer_source_connection_id_,
+        .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
     };
     connection.peer_transport_parameters_validated_ = true;
     connection.initialize_peer_flow_control_from_transport_parameters();
@@ -309,6 +310,7 @@ inline QuicConnection make_connected_server_connection() {
         .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = connection.config_.source_connection_id,
+        .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
     };
     connection.initialize_local_flow_control();
     connection.application_space_.read_secret =
@@ -329,6 +331,7 @@ inline QuicConnection make_connected_server_connection() {
         .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = connection.peer_source_connection_id_,
+        .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
     };
     connection.peer_transport_parameters_validated_ = true;
     connection.initialize_peer_flow_control_from_transport_parameters();
@@ -397,6 +400,7 @@ inline QuicConnection make_connected_server_connection_with_preferred_address() 
         .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = connection.config_.source_connection_id,
         .preferred_address = connection.config_.transport.preferred_address,
+        .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
     };
     connection.initialize_local_flow_control();
     connection.application_space_.read_secret =
@@ -417,6 +421,7 @@ inline QuicConnection make_connected_server_connection_with_preferred_address() 
         .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = connection.peer_source_connection_id_,
+        .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
     };
     connection.peer_transport_parameters_validated_ = true;
     connection.initialize_peer_flow_control_from_transport_parameters();
@@ -756,6 +761,34 @@ inline bool datagram_has_application_stream(const QuicConnection &connection,
     }
 
     return false;
+}
+
+inline std::vector<std::vector<std::byte>>
+application_datagram_payloads_from_datagram(const QuicConnection &connection,
+                                            std::span<const std::byte> datagram) {
+    std::vector<std::vector<std::byte>> payloads;
+    for (const auto &packet : decode_sender_datagram(connection, datagram)) {
+        const auto *application = std::get_if<ProtectedOneRttPacket>(&packet);
+        if (application == nullptr) {
+            continue;
+        }
+
+        for (const auto &frame : application->frames) {
+            const auto *datagram_frame = std::get_if<DatagramFrame>(&frame);
+            if (datagram_frame == nullptr) {
+                continue;
+            }
+
+            payloads.push_back(datagram_frame->data);
+        }
+    }
+
+    return payloads;
+}
+
+inline bool datagram_has_application_datagram_frame(const QuicConnection &connection,
+                                                    std::span<const std::byte> datagram) {
+    return !application_datagram_payloads_from_datagram(connection, datagram).empty();
 }
 
 inline std::optional<std::size_t> find_application_probe_payload_size_that_drops_ack() {

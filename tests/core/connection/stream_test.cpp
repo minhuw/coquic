@@ -28,10 +28,12 @@ CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secre
 
 namespace {
 using coquic::quic::test_support::ack_frame_acks_packet_number_for_tests;
+using coquic::quic::test_support::application_datagram_payloads_from_datagram;
 using coquic::quic::test_support::application_stream_ids_from_datagram;
 using coquic::quic::test_support::bytes_from_hex;
 using coquic::quic::test_support::bytes_from_ints;
 using coquic::quic::test_support::datagram_has_application_ack;
+using coquic::quic::test_support::datagram_has_application_datagram_frame;
 using coquic::quic::test_support::datagram_has_application_stream;
 using coquic::quic::test_support::decode_sender_datagram;
 using coquic::quic::test_support::expect_local_error;
@@ -84,6 +86,48 @@ TEST(QuicCoreTest, TwoPeersExchangeStreamZeroDataThroughEffects) {
     EXPECT_EQ(stream_events[0].stream_id, 0u);
     EXPECT_EQ(coquic::quic::test::string_from_bytes(stream_events[0].bytes), "ping");
     EXPECT_FALSE(stream_events[0].fin);
+}
+
+TEST(QuicCoreTest, TwoPeersExchangeDatagramFramesThroughEffects) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto send = client.advance(
+        coquic::quic::QuicCoreSendDatagramData{
+            .bytes = coquic::quic::test::bytes_from_string("ping"),
+        },
+        coquic::quic::test::test_time(1));
+    const auto received = coquic::quic::test::relay_send_datagrams_to_peer(
+        send, server, coquic::quic::test::test_time(2));
+
+    const auto datagram_events = coquic::quic::test::received_datagram_data_from(received);
+    ASSERT_EQ(datagram_events.size(), 1u);
+    EXPECT_EQ(datagram_events[0].connection, 1u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(datagram_events[0].payload()), "ping");
+    EXPECT_EQ(datagram_events[0].byte_count(), 4u);
+}
+
+TEST(QuicCoreTest, TwoPeersExchangeEmptyDatagramFrame) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+    ASSERT_TRUE(client.is_handshake_complete());
+    ASSERT_TRUE(server.is_handshake_complete());
+
+    const auto send =
+        client.advance(coquic::quic::QuicCoreSendDatagramData{}, coquic::quic::test::test_time(1));
+    const auto received = coquic::quic::test::relay_send_datagrams_to_peer(
+        send, server, coquic::quic::test::test_time(2));
+
+    const auto datagram_events = coquic::quic::test::received_datagram_data_from(received);
+    ASSERT_EQ(datagram_events.size(), 1u);
+    EXPECT_TRUE(datagram_events[0].payload().empty());
+    EXPECT_EQ(datagram_events[0].byte_count(), 0u);
 }
 
 TEST(QuicCoreTest, ClientCanSendOnMultipleBidirectionalStreams) {
@@ -518,6 +562,31 @@ TEST(QuicCoreTest, SharedReceiveModeFallsBackToOwnedBytesForCoalescedSegments) {
     EXPECT_TRUE(received_value.fin);
 }
 
+TEST(QuicCoreTest, InboundSharedDatagramPreservesSharedPayload) {
+    auto connection = make_connected_server_connection();
+    const auto storage =
+        std::make_shared<std::vector<std::byte>>(coquic::quic::test::bytes_from_string("xxshared"));
+    const std::array frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedDatagramFrame{
+            .has_length = true,
+            .data = coquic::quic::SharedBytes(storage, 2, storage->size()),
+        }},
+    };
+
+    const auto processed = connection.process_inbound_received_application(
+        frames, coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false,
+        /*path_id=*/0);
+    ASSERT_TRUE(processed.has_value());
+
+    const auto received = connection.take_received_datagram_data();
+    ASSERT_TRUE(received.has_value());
+    const auto received_value = optional_value_or_terminate(received);
+    EXPECT_TRUE(received_value.bytes.empty());
+    EXPECT_EQ(received_value.shared_bytes.storage(), storage);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_value.payload()), "shared");
+    EXPECT_EQ(received_value.byte_count(), 6u);
+}
+
 TEST(QuicCoreTest, SendStreamLocalErrorsCoverInvalidIdAndClosedSendSide) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     client.connection_->stream_open_limits_.peer_max_bidirectional = 1;
@@ -548,6 +617,50 @@ TEST(QuicCoreTest, SendStreamLocalErrorsCoverInvalidIdAndClosedSendSide) {
         },
         coquic::quic::test::test_time(2));
     expect_local_error(closed, coquic::quic::QuicCoreLocalErrorCode::send_side_closed, 0);
+}
+
+TEST(QuicCoreTest, DatagramSendReportsPeerSupportAndSizeLocalErrors) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    client.connection_ =
+        std::make_unique<coquic::quic::QuicConnection>(make_connected_client_connection());
+
+    auto &peer_transport =
+        optional_ref_or_terminate(client.connection_->peer_transport_parameters_);
+    peer_transport.max_datagram_frame_size = 0;
+
+    const auto unsupported = client.advance(
+        coquic::quic::QuicCoreSendDatagramData{
+            .bytes = bytes_from_ints({0x01}),
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(unsupported.local_error.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(unsupported.local_error).code,
+              coquic::quic::QuicCoreLocalErrorCode::datagram_not_supported);
+    EXPECT_FALSE(optional_ref_or_terminate(unsupported.local_error).stream_id.has_value());
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(unsupported).empty());
+
+    const auto shared_unsupported = client.advance(
+        coquic::quic::QuicCoreSendSharedDatagramData{
+            .bytes = coquic::quic::SharedBytes(bytes_from_ints({0x02})),
+        },
+        coquic::quic::test::test_time(2));
+    ASSERT_TRUE(shared_unsupported.local_error.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(shared_unsupported.local_error).code,
+              coquic::quic::QuicCoreLocalErrorCode::datagram_not_supported);
+    EXPECT_FALSE(optional_ref_or_terminate(shared_unsupported.local_error).stream_id.has_value());
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(shared_unsupported).empty());
+
+    peer_transport.max_datagram_frame_size = 2;
+    const auto too_large = client.advance(
+        coquic::quic::QuicCoreSendDatagramData{
+            .bytes = bytes_from_ints({0x01}),
+        },
+        coquic::quic::test::test_time(3));
+    ASSERT_TRUE(too_large.local_error.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(too_large.local_error).code,
+              coquic::quic::QuicCoreLocalErrorCode::datagram_too_large);
+    EXPECT_FALSE(optional_ref_or_terminate(too_large.local_error).stream_id.has_value());
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(too_large).empty());
 }
 
 TEST(QuicCoreTest, ClosedPeerInitiatedBidirectionalStreamRefreshesMaxStreams) {
@@ -950,6 +1063,56 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresEmptyAndFailedInputs) {
     EXPECT_FALSE(connection.current_send_path_id_.has_value());
 }
 
+TEST(QuicCoreTest, InboundDatagramWithoutLocalSupportFailsWithProtocolViolation) {
+    auto connection = make_connected_server_connection();
+    connection.local_transport_parameters_.max_datagram_frame_size = 0;
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 1,
+            .packet_number = 7,
+            .frames =
+                {
+                    coquic::quic::DatagramFrame{
+                        .has_length = true,
+                        .data = bytes_from_ints({0x01}),
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(processed.has_value());
+    EXPECT_TRUE(processed.error().has_transport_error_code);
+    EXPECT_EQ(processed.error().transport_error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
+}
+
+TEST(QuicCoreTest, InboundDatagramLargerThanLocalLimitFailsWithProtocolViolation) {
+    auto connection = make_connected_server_connection();
+    connection.local_transport_parameters_.max_datagram_frame_size = 2;
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 1,
+            .packet_number = 7,
+            .frames =
+                {
+                    coquic::quic::DatagramFrame{
+                        .has_length = true,
+                        .data = bytes_from_ints({0x01}),
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(processed.has_value());
+    EXPECT_TRUE(processed.error().has_transport_error_code);
+    EXPECT_EQ(processed.error().transport_error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
+}
+
 TEST(QuicCoreTest, InboundStopSendingFailsForReceiveOnlyStream) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
@@ -1037,6 +1200,35 @@ TEST(QuicCoreTest, LostStopSendingIsReEmitted) {
         saw_stop = saw_stop || std::holds_alternative<coquic::quic::StopSendingFrame>(frame);
     }
     EXPECT_TRUE(saw_stop);
+}
+
+TEST(QuicCoreTest, LostDatagramFrameIsNotRetransmitted) {
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(connection.queue_datagram_send(bytes_from_ints({0x64, 0x67})).has_value());
+
+    const auto first_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_datagram.empty());
+    EXPECT_EQ(application_datagram_payloads_from_datagram(connection, first_datagram),
+              std::vector<std::vector<std::byte>>({bytes_from_ints({0x64, 0x67})}));
+    EXPECT_TRUE(connection.pending_datagram_send_queue_.empty());
+
+    ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
+    const auto sent_packet = first_tracked_packet(connection.application_space_);
+    EXPECT_TRUE(sent_packet.ack_eliciting);
+    EXPECT_FALSE(sent_packet_has_stream_frames_for_tests(sent_packet));
+
+    const auto handle = optional_value_or_terminate(
+        connection.application_space_.recovery.handle_for_packet_number(sent_packet.packet_number));
+    const auto lost = connection.mark_lost_packet(connection.application_space_, handle);
+    ASSERT_TRUE(lost.has_value());
+    EXPECT_FALSE(sent_packet_has_stream_frames_for_tests(optional_ref_or_terminate(lost)));
+    EXPECT_TRUE(connection.pending_datagram_send_queue_.empty());
+
+    const auto &tracked =
+        tracked_packet_or_terminate(connection.application_space_, sent_packet.packet_number);
+    EXPECT_TRUE(tracked.declared_lost);
+    EXPECT_FALSE(tracked.in_flight);
 }
 
 TEST(QuicCoreTest, ApplicationPtoBurstUsesFreshStreamDataAfterFirstProbe) {

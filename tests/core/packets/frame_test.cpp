@@ -38,6 +38,7 @@ using coquic::quic::CodecErrorCode;
 using coquic::quic::ConnectionCloseReason;
 using coquic::quic::CryptoFrame;
 using coquic::quic::DataBlockedFrame;
+using coquic::quic::DatagramFrame;
 using coquic::quic::Frame;
 using coquic::quic::HandshakeDoneFrame;
 using coquic::quic::MaxDataFrame;
@@ -51,6 +52,7 @@ using coquic::quic::PathChallengeFrame;
 using coquic::quic::PathResponseFrame;
 using coquic::quic::PingFrame;
 using coquic::quic::ReceivedAckFrame;
+using coquic::quic::ReceivedDatagramFrame;
 using coquic::quic::ReceivedFrame;
 using coquic::quic::ReceivedFrameList;
 using coquic::quic::ReceivedStreamFrame;
@@ -895,6 +897,114 @@ TEST(QuicFrameTest, RoundTripsStreamFrameWithoutOffsetOrLength) {
               (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}}));
 }
 
+TEST(QuicFrameTest, RoundTripsDatagramFrameWithLength) {
+    const Frame frame = DatagramFrame{
+        .has_length = true,
+        .data = {std::byte{0xaa}, std::byte{0xbb}},
+    };
+
+    const auto encoded = coquic::quic::serialize_frame(frame);
+    ASSERT_TRUE(encoded.has_value());
+    EXPECT_EQ(encoded.value(), (std::vector<std::byte>{std::byte{0x31}, std::byte{0x02},
+                                                       std::byte{0xaa}, std::byte{0xbb}}));
+
+    const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().bytes_consumed, encoded.value().size());
+
+    const auto *datagram = std::get_if<DatagramFrame>(&decoded.value().frame);
+    ASSERT_NE(datagram, nullptr);
+    EXPECT_TRUE(datagram->has_length);
+    EXPECT_EQ(datagram->data, (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}}));
+}
+
+TEST(QuicFrameTest, DeserializesDatagramFrameWithoutLengthUsingRemainingBytes) {
+    const std::array<std::byte, 4> bytes{
+        std::byte{0x30},
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+    };
+
+    const auto decoded = coquic::quic::deserialize_frame(bytes);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().bytes_consumed, bytes.size());
+
+    const auto *datagram = std::get_if<DatagramFrame>(&decoded.value().frame);
+    ASSERT_NE(datagram, nullptr);
+    EXPECT_FALSE(datagram->has_length);
+    EXPECT_EQ(datagram->data,
+              (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}}));
+}
+
+TEST(QuicFrameTest, RoundTripsEmptyLengthPrefixedDatagramFrame) {
+    const Frame frame = DatagramFrame{
+        .has_length = true,
+        .data = {},
+    };
+
+    const auto encoded = coquic::quic::serialize_frame(frame);
+    ASSERT_TRUE(encoded.has_value());
+    EXPECT_EQ(encoded.value(), (std::vector<std::byte>{std::byte{0x31}, std::byte{0x00}}));
+
+    const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *datagram = std::get_if<DatagramFrame>(&decoded.value().frame);
+    ASSERT_NE(datagram, nullptr);
+    EXPECT_TRUE(datagram->has_length);
+    EXPECT_TRUE(datagram->data.empty());
+}
+
+TEST(QuicFrameTest, ReceivedDatagramFrameAliasesPayloadStorage) {
+    auto storage = std::make_shared<std::vector<std::byte>>(std::initializer_list<std::byte>{
+        std::byte{0xff},
+        std::byte{0x31},
+        std::byte{0x02},
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xee},
+    });
+    const SharedBytes bytes(storage, 1, 5);
+
+    const auto decoded = coquic::quic::deserialize_received_frame(bytes);
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *datagram = std::get_if<ReceivedDatagramFrame>(&decoded.value().frame);
+    ASSERT_NE(datagram, nullptr);
+    EXPECT_TRUE(datagram->has_length);
+    EXPECT_EQ(datagram->data, (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}}));
+    EXPECT_EQ(datagram->data.storage(), storage);
+    EXPECT_EQ(datagram->data.begin_offset(), 3u);
+    EXPECT_EQ(datagram->data.end_offset(), 5u);
+    EXPECT_EQ(decoded.value().bytes_consumed, 4u);
+}
+
+TEST(QuicFrameTest, ReceivedLengthlessDatagramFrameAliasesRemainingPayloadStorage) {
+    auto storage = std::make_shared<std::vector<std::byte>>(std::initializer_list<std::byte>{
+        std::byte{0xff},
+        std::byte{0x30},
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+        std::byte{0xee},
+    });
+    const SharedBytes bytes(storage, 1, 5);
+
+    const auto decoded = coquic::quic::deserialize_received_frame(bytes);
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto *datagram = std::get_if<ReceivedDatagramFrame>(&decoded.value().frame);
+    ASSERT_NE(datagram, nullptr);
+    EXPECT_FALSE(datagram->has_length);
+    EXPECT_EQ(datagram->data,
+              (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}, std::byte{0xcc}}));
+    EXPECT_EQ(datagram->data.storage(), storage);
+    EXPECT_EQ(datagram->data.begin_offset(), 2u);
+    EXPECT_EQ(datagram->data.end_offset(), 5u);
+    EXPECT_EQ(decoded.value().bytes_consumed, 4u);
+}
+
 TEST(QuicFrameTest, RoundTripsTransportConnectionClose) {
     Frame frame = TransportConnectionCloseFrame{
         .error_code = 3,
@@ -1000,6 +1110,18 @@ TEST(QuicFrameTest, RejectsNonShortestReceivedFrameTypeEncoding) {
         coquic::quic::deserialize_received_frame(SharedBytes{std::byte{0x40}, std::byte{0x01}});
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, CodecErrorCode::non_shortest_frame_type_encoding);
+}
+
+TEST(QuicFrameTest, RejectsNonShortestDatagramFrameTypeEncoding) {
+    const std::array<std::byte, 3> bytes{std::byte{0x40}, std::byte{0x30}, std::byte{0xaa}};
+    const auto decoded = coquic::quic::deserialize_frame(bytes);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::non_shortest_frame_type_encoding);
+
+    const auto received = coquic::quic::deserialize_received_frame(
+        SharedBytes{std::byte{0x40}, std::byte{0x31}, std::byte{0x00}});
+    ASSERT_FALSE(received.has_value());
+    EXPECT_EQ(received.error().code, CodecErrorCode::non_shortest_frame_type_encoding);
 }
 
 TEST(QuicFrameTest, DirectReceivedAckDecoderRejectsHeaderEdges) {
@@ -1682,6 +1804,24 @@ TEST(QuicFrameTest, RejectsMalformedCryptoTokenAndStreamFrames) {
                         CodecErrorCode::invalid_varint);
 }
 
+TEST(QuicFrameTest, RejectsMalformedDatagramFrames) {
+    expect_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x31}}),
+                        CodecErrorCode::truncated_input);
+    expect_decode_error(
+        as_span(std::array<std::byte, 3>{std::byte{0x31}, std::byte{0x02}, std::byte{0xaa}}),
+        CodecErrorCode::truncated_input);
+
+    auto storage = std::make_shared<std::vector<std::byte>>(std::initializer_list<std::byte>{
+        std::byte{0x31},
+        std::byte{0x02},
+        std::byte{0xaa},
+    });
+    const auto received =
+        coquic::quic::deserialize_received_frame(SharedBytes(storage, 0, storage->size()));
+    ASSERT_FALSE(received.has_value());
+    EXPECT_EQ(received.error().code, CodecErrorCode::truncated_input);
+}
+
 TEST(QuicFrameTest, ReceivedDecodeMatchesDecodeErrorsForMalformedFrames) {
     const std::array<std::array<std::byte, 3>, 3> truncated_cases{{
         {std::byte{0x06}, std::byte{0x00}, std::byte{0x01}},
@@ -2092,7 +2232,7 @@ TEST(QuicFrameTest, ReceivedFrameListCoversVectorAndMutableAccessors) {
 TEST(QuicFrameTest, ToReceivedVariantCoverageMaskIncludesColdAlternatives) {
     constexpr std::uint64_t kExpectedMask = (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 3) |
                                             (1ull << 4) | (1ull << 5) | (1ull << 6) | (1ull << 7) |
-                                            (1ull << 8);
+                                            (1ull << 8) | (1ull << 9);
     EXPECT_EQ(coquic::quic::test::frame_to_received_variant_coverage_mask_for_tests(),
               kExpectedMask);
 }

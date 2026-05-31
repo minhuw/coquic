@@ -38,6 +38,7 @@ constexpr std::uint64_t active_connection_id_limit_parameter_id = 0x0e;
 constexpr std::uint64_t initial_source_connection_id_parameter_id = 0x0f;
 constexpr std::uint64_t retry_source_connection_id_parameter_id = 0x10;
 constexpr std::uint64_t version_information_parameter_id = 0x11;
+constexpr std::uint64_t max_datagram_frame_size_parameter_id = 0x20;
 constexpr std::uint64_t minimum_max_udp_payload_size = 1200;
 constexpr std::uint64_t minimum_active_connection_id_limit = 2;
 constexpr std::uint64_t maximum_ack_delay_exponent = 20;
@@ -303,6 +304,16 @@ serialize_transport_parameters(const TransportParameters &parameters) {
     }
     append_preferred_address_parameter(output, parameters.preferred_address);
     append_version_information_parameter(output, parameters.version_information);
+    if (parameters.max_datagram_frame_size > 0) {
+        auto encoded_max_datagram_frame_size = encode_varint(parameters.max_datagram_frame_size);
+        if (!encoded_max_datagram_frame_size.has_value()) {
+            return CodecResult<std::vector<std::byte>>::failure(
+                encoded_max_datagram_frame_size.error().code,
+                encoded_max_datagram_frame_size.error().offset);
+        }
+        append_raw_parameter(output, max_datagram_frame_size_parameter_id,
+                             encoded_max_datagram_frame_size.value());
+    }
 
     return CodecResult<std::vector<std::byte>>::success(std::move(output));
 }
@@ -503,6 +514,14 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
                 return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
             }
             parameters.max_ack_delay = decoded.value();
+            break;
+        }
+        case max_datagram_frame_size_parameter_id: {
+            const auto decoded = decode_integer_parameter(value);
+            if (!decoded.has_value()) {
+                return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
+            }
+            parameters.max_datagram_frame_size = decoded.value();
             break;
         }
         default:

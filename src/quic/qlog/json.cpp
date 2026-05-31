@@ -74,6 +74,9 @@ std::string serialize_frame_json(const Frame &frame) {
                        ",\"offset\":" + std::to_string(value.offset.value_or(0)) +
                        ",\"length\":" + std::to_string(value.stream_data.size()) +
                        ",\"fin\":" + std::string(value.fin ? "true" : "false") + "}";
+            } else if constexpr (std::is_same_v<FrameType, DatagramFrame>) {
+                return "{\"frame_type\":\"datagram\",\"length\":" +
+                       std::to_string(value.data.size()) + "}";
             } else if constexpr (std::is_same_v<FrameType, MaxDataFrame>) {
                 return "{\"frame_type\":\"max_data\",\"maximum\":" +
                        std::to_string(value.maximum_data) + "}";
@@ -271,6 +274,7 @@ std::string serialize_parameters_set(std::string_view initiator,
     append_u64("initial_max_stream_data_uni", parameters.initial_max_stream_data_uni);
     append_u64("initial_max_streams_bidi", parameters.initial_max_streams_bidi);
     append_u64("initial_max_streams_uni", parameters.initial_max_streams_uni);
+    append_u64("max_datagram_frame_size", parameters.max_datagram_frame_size);
     json += "}";
     return json;
 }

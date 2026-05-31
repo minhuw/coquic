@@ -150,6 +150,29 @@ QuicCoreLocalError stream_state_error_to_local_error(const StreamStateError &err
     };
 }
 
+QuicCoreLocalError datagram_send_error_to_local_error(const CodecError &error) {
+    switch (error.code) {
+    case CodecErrorCode::invalid_packet_protection_state:
+        return QuicCoreLocalError{
+            .connection = std::nullopt,
+            .code = QuicCoreLocalErrorCode::datagram_not_supported,
+            .stream_id = std::nullopt,
+        };
+    case CodecErrorCode::packet_length_mismatch:
+        return QuicCoreLocalError{
+            .connection = std::nullopt,
+            .code = QuicCoreLocalErrorCode::datagram_too_large,
+            .stream_id = std::nullopt,
+        };
+    default:
+        return QuicCoreLocalError{
+            .connection = std::nullopt,
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        };
+    }
+}
+
 COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
     QuicConnectionHandle handle, const std::optional<QuicRouteHandle> &default_route_handle,
     const std::unordered_map<QuicPathId, QuicRouteHandle> &route_handle_by_path_id,
@@ -194,6 +217,10 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
     }
 
     while (auto received = connection.take_received_stream_data()) {
+        received->connection = handle;
+        result.effects.emplace_back(std::move(*received));
+    }
+    while (auto received = connection.take_received_datagram_data()) {
         received->connection = handle;
         result.effects.emplace_back(std::move(*received));
     }
@@ -269,6 +296,17 @@ queue_legacy_local_command(QuicConnection &connection, const QuicCoreSendStreamD
 COQUIC_NO_PROFILE StreamStateResult<bool>
 queue_legacy_local_command(QuicConnection &connection, const QuicCoreSendSharedStreamData &input) {
     return connection.queue_stream_send_shared(input.stream_id, input.bytes, input.fin);
+}
+
+COQUIC_NO_PROFILE CodecResult<bool>
+queue_legacy_local_command(QuicConnection &connection, const QuicCoreSendDatagramData &input) {
+    return connection.queue_datagram_send(input.bytes);
+}
+
+COQUIC_NO_PROFILE CodecResult<bool>
+queue_legacy_local_command(QuicConnection &connection,
+                           const QuicCoreSendSharedDatagramData &input) {
+    return connection.queue_datagram_send_shared(input.bytes);
 }
 
 COQUIC_NO_PROFILE bool legacy_stream_send_batchable(const QuicCoreInput &input) {
@@ -2216,6 +2254,13 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         COQUIC_CORE_HOOK_RECORD(empty_target.local_error.has_value());
         const auto &empty_target_error = optional_ref_or_abort(empty_target.local_error);
         COQUIC_CORE_HOOK_RECORD(empty_target_error.connection == std::optional{3u});
+
+        const auto mapped_datagram_error = datagram_send_error_to_local_error(CodecError{
+            .code = CodecErrorCode::truncated_input,
+            .offset = 0,
+        });
+        COQUIC_CORE_HOOK_RECORD(mapped_datagram_error.code ==
+                                QuicCoreLocalErrorCode::unsupported_operation);
     }
 
     {
@@ -3737,6 +3782,20 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                         result.local_error->connection = entry.handle;
                     }
                 },
+                [&](const QuicCoreSendDatagramData &in) {
+                    const auto queued = entry.connection->queue_datagram_send(in.bytes);
+                    if (!queued.has_value()) {
+                        result.local_error = datagram_send_error_to_local_error(queued.error());
+                        result.local_error->connection = entry.handle;
+                    }
+                },
+                [&](const QuicCoreSendSharedDatagramData &in) {
+                    const auto queued = entry.connection->queue_datagram_send_shared(in.bytes);
+                    if (!queued.has_value()) {
+                        result.local_error = datagram_send_error_to_local_error(queued.error());
+                        result.local_error->connection = entry.handle;
+                    }
+                },
                 [&](const QuicCoreResetStream &in) {
                     const auto queued = entry.connection->queue_stream_reset(LocalResetCommand{
                         .stream_id = in.stream_id,
@@ -3981,6 +4040,18 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                     connection->queue_stream_send_shared(in.stream_id, in.bytes, in.fin);
                 if (!queued.has_value()) {
                     result.local_error = stream_state_error_to_local_error(queued.error());
+                }
+            },
+            [&](const QuicCoreSendDatagramData &in) {
+                const auto queued = queue_legacy_local_command(*connection, in);
+                if (!queued.has_value()) {
+                    result.local_error = datagram_send_error_to_local_error(queued.error());
+                }
+            },
+            [&](const QuicCoreSendSharedDatagramData &in) {
+                const auto queued = queue_legacy_local_command(*connection, in);
+                if (!queued.has_value()) {
+                    result.local_error = datagram_send_error_to_local_error(queued.error());
                 }
             },
             [&](const QuicCoreResetStream &in) {

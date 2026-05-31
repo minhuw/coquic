@@ -127,6 +127,16 @@ struct ReceivedStreamFrame {
     SharedBytes stream_data;
 };
 
+struct DatagramFrame {
+    bool has_length = true;
+    std::vector<std::byte> data;
+};
+
+struct ReceivedDatagramFrame {
+    bool has_length = true;
+    SharedBytes data;
+};
+
 struct MaxDataFrame {
     std::uint64_t maximum_data = 0;
 };
@@ -198,19 +208,20 @@ struct HandshakeDoneFrame {};
 
 using Frame =
     std::variant<PaddingFrame, PingFrame, AckFrame, ResetStreamFrame, StopSendingFrame, CryptoFrame,
-                 NewTokenFrame, StreamFrame, MaxDataFrame, MaxStreamDataFrame, MaxStreamsFrame,
-                 DataBlockedFrame, StreamDataBlockedFrame, StreamsBlockedFrame,
+                 NewTokenFrame, StreamFrame, DatagramFrame, MaxDataFrame, MaxStreamDataFrame,
+                 MaxStreamsFrame, DataBlockedFrame, StreamDataBlockedFrame, StreamsBlockedFrame,
                  NewConnectionIdFrame, RetireConnectionIdFrame, PathChallengeFrame,
                  PathResponseFrame, TransportConnectionCloseFrame, ApplicationConnectionCloseFrame,
                  HandshakeDoneFrame, OutboundAckFrame>;
 
 using ReceivedFrame =
     std::variant<PaddingFrame, PingFrame, ReceivedAckFrame, ResetStreamFrame, StopSendingFrame,
-                 ReceivedCryptoFrame, NewTokenFrame, ReceivedStreamFrame, MaxDataFrame,
-                 MaxStreamDataFrame, MaxStreamsFrame, DataBlockedFrame, StreamDataBlockedFrame,
-                 StreamsBlockedFrame, NewConnectionIdFrame, RetireConnectionIdFrame,
-                 PathChallengeFrame, PathResponseFrame, TransportConnectionCloseFrame,
-                 ApplicationConnectionCloseFrame, HandshakeDoneFrame>;
+                 ReceivedCryptoFrame, NewTokenFrame, ReceivedStreamFrame, ReceivedDatagramFrame,
+                 MaxDataFrame, MaxStreamDataFrame, MaxStreamsFrame, DataBlockedFrame,
+                 StreamDataBlockedFrame, StreamsBlockedFrame, NewConnectionIdFrame,
+                 RetireConnectionIdFrame, PathChallengeFrame, PathResponseFrame,
+                 TransportConnectionCloseFrame, ApplicationConnectionCloseFrame,
+                 HandshakeDoneFrame>;
 
 class ReceivedFrameList {
   public:

@@ -796,6 +796,47 @@ CodecResult<ReceivedStreamFrame> decode_received_stream_frame(BufferReader &read
     return CodecResult<ReceivedStreamFrame>::success(std::move(frame));
 }
 
+CodecResult<DatagramFrame> decode_datagram_frame(BufferReader &reader, std::uint64_t frame_type) {
+    DatagramFrame frame{};
+    frame.has_length = (frame_type & 0x01u) != 0;
+
+    if (frame.has_length) {
+        const auto data = read_length_prefixed_bytes(reader);
+        if (!data.has_value()) {
+            return CodecResult<DatagramFrame>::failure(data.error().code, data.error().offset);
+        }
+        frame.data = data.value();
+    } else {
+        const auto bytes = reader.read_exact(reader.remaining()).value();
+        frame.data.assign(bytes.begin(), bytes.end());
+    }
+
+    return CodecResult<DatagramFrame>::success(std::move(frame));
+}
+
+CodecResult<ReceivedDatagramFrame> decode_received_datagram_frame(BufferReader &reader,
+                                                                  std::uint64_t frame_type,
+                                                                  const SharedBytes &bytes) {
+    ReceivedDatagramFrame frame{};
+    frame.has_length = (frame_type & 0x01u) != 0;
+
+    if (frame.has_length) {
+        auto data = read_length_prefixed_shared_bytes(reader, bytes);
+        if (!data.has_value()) {
+            return CodecResult<ReceivedDatagramFrame>::failure(data.error().code,
+                                                               data.error().offset);
+        }
+        frame.data = std::move(data.value());
+    } else {
+        const auto data_offset = reader.offset();
+        const auto remaining = reader.remaining();
+        static_cast<void>(reader.read_exact(remaining).value());
+        frame.data = bytes.subspan(data_offset, remaining);
+    }
+
+    return CodecResult<ReceivedDatagramFrame>::success(std::move(frame));
+}
+
 ReceivedFrame to_received_frame(Frame frame) {
     return std::visit(
         [](const auto &value) -> ReceivedFrame {
@@ -830,6 +871,11 @@ ReceivedFrame to_received_frame(Frame frame) {
                     .stream_id = value.stream_id,
                     .offset = value.offset,
                     .stream_data = SharedBytes(std::move(value.stream_data)),
+                };
+            } else if constexpr (std::is_same_v<Value, DatagramFrame>) {
+                return ReceivedDatagramFrame{
+                    .has_length = value.has_length,
+                    .data = SharedBytes(std::move(value.data)),
                 };
             } else {
                 return value;
@@ -1136,6 +1182,22 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
         return std::nullopt;
     }
 
+    if (const auto *datagram = std::get_if<DatagramFrame>(&frame)) {
+        if (const auto error =
+                append_byte(writer, datagram->has_length ? std::byte{0x31} : std::byte{0x30})) {
+            return error;
+        }
+        if (datagram->has_length) {
+            if (const auto error = append_varint(writer, datagram->data.size())) {
+                return error;
+            }
+        }
+        if (const auto error = append_bytes(writer, datagram->data)) {
+            return error;
+        }
+        return std::nullopt;
+    }
+
     if (const auto *max_data = std::get_if<MaxDataFrame>(&frame)) {
         return append_single_varint_frame(writer, std::byte{0x10}, max_data->maximum_data);
     }
@@ -1398,12 +1460,24 @@ CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> byte
     }
 
     const auto frame_type = frame_type_result.value().value;
-    if (frame_type <= 0x1eu && frame_type_result.value().bytes_consumed != 1) {
+    if ((frame_type <= 0x1eu || frame_type == 0x30u || frame_type == 0x31u) &&
+        frame_type_result.value().bytes_consumed != 1) {
         return decode_failure(CodecErrorCode::non_shortest_frame_type_encoding, 0);
     }
 
     if (frame_type >= 0x08 && frame_type <= 0x0f) {
         const auto frame = decode_stream_frame(reader, frame_type);
+        if (!frame.has_value()) {
+            return decode_failure(frame.error().code, frame.error().offset);
+        }
+        return CodecResult<FrameDecodeResult>::success(FrameDecodeResult{
+            .frame = frame.value(),
+            .bytes_consumed = reader.offset(),
+        });
+    }
+
+    if (frame_type == 0x30 || frame_type == 0x31) {
+        const auto frame = decode_datagram_frame(reader, frame_type);
         if (!frame.has_value()) {
             return decode_failure(frame.error().code, frame.error().offset);
         }
@@ -1649,7 +1723,8 @@ CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(const SharedBy
     }
 
     const auto frame_type = frame_type_result.value().value;
-    if (frame_type <= 0x1eu && frame_type_result.value().bytes_consumed != 1) {
+    if ((frame_type <= 0x1eu || frame_type == 0x30u || frame_type == 0x31u) &&
+        frame_type_result.value().bytes_consumed != 1) {
         return received_decode_failure(CodecErrorCode::non_shortest_frame_type_encoding, 0);
     }
 
@@ -1686,6 +1761,17 @@ CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(const SharedBy
         });
     }
 
+    if (frame_type == 0x30 || frame_type == 0x31) {
+        auto frame = decode_received_datagram_frame(reader, frame_type, bytes);
+        if (!frame.has_value()) {
+            return received_decode_failure(frame.error().code, frame.error().offset);
+        }
+        return CodecResult<ReceivedFrameDecodeResult>::success(ReceivedFrameDecodeResult{
+            .frame = std::move(frame.value()),
+            .bytes_consumed = reader.offset(),
+        });
+    }
+
     auto decoded = deserialize_frame(span);
     if (!decoded.has_value()) {
         return received_decode_failure(decoded.error().code, decoded.error().offset);
@@ -1711,7 +1797,8 @@ CodecResult<ReceivedAckFrameDecodeResult> deserialize_received_ack_frame(const S
     }
 
     const auto frame_type = frame_type_result.value().value;
-    if (frame_type <= 0x1eu && frame_type_result.value().bytes_consumed != 1) {
+    if ((frame_type <= 0x1eu || frame_type == 0x30u || frame_type == 0x31u) &&
+        frame_type_result.value().bytes_consumed != 1) {
         return received_ack_decode_failure(CodecErrorCode::non_shortest_frame_type_encoding, 0);
     }
     if (frame_type != 0x02 && frame_type != 0x03) {
@@ -2001,6 +2088,14 @@ std::uint64_t frame_to_received_variant_coverage_mask_for_tests() {
         const auto &blocked = std::get<StreamDataBlockedFrame>(received);
         mark(1ull << 8, (blocked.stream_id == 5) & (blocked.maximum_stream_data == 23));
     }
+    {
+        const auto received = to_received_frame(Frame{DatagramFrame{
+            .has_length = true,
+            .data = {std::byte{0xdd}},
+        }});
+        const auto &datagram = std::get<ReceivedDatagramFrame>(received);
+        mark(1ull << 9, datagram.has_length & (datagram.data == SharedBytes{std::byte{0xdd}}));
+    }
 
     return mask;
 }
@@ -2124,6 +2219,14 @@ bool frame_internal_coverage_for_tests() {
         .stream_id = 9,
         .stream_data = {std::byte{0x33}},
     };
+    const DatagramFrame length_datagram_frame{
+        .has_length = true,
+        .data = {std::byte{0x34}},
+    };
+    const DatagramFrame lengthless_datagram_frame{
+        .has_length = false,
+        .data = {std::byte{0x35}},
+    };
     const NewConnectionIdFrame new_connection_id{
         .sequence_number = 3,
         .retire_prior_to = 1,
@@ -2177,6 +2280,12 @@ bool frame_internal_coverage_for_tests() {
         serialize_fault(Frame{length_stream_frame}, FrameFaultPoint::append_varint, 2));
     ok &= fault_failure(
         serialize_fault(Frame{length_stream_frame}, FrameFaultPoint::append_bytes, 1));
+    ok &= fault_failure(
+        serialize_fault(Frame{length_datagram_frame}, FrameFaultPoint::append_byte, 1));
+    ok &= fault_failure(
+        serialize_fault(Frame{length_datagram_frame}, FrameFaultPoint::append_varint, 1));
+    ok &= fault_failure(
+        serialize_fault(Frame{lengthless_datagram_frame}, FrameFaultPoint::append_bytes, 1));
     ok &= fault_failure(
         serialize_fault(Frame{MaxDataFrame{.maximum_data = 1}}, FrameFaultPoint::append_byte, 1));
     ok &= fault_failure(

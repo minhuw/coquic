@@ -50,6 +50,7 @@ enum class WasmEventType : std::uint32_t {
     zero_rtt_status = 7,
     resumption_state_available = 8,
     peer_preferred_address_available = 9,
+    receive_datagram = 10,
 };
 
 struct PendingDatagram {
@@ -422,30 +423,32 @@ std::string_view received_frame_name(const ReceivedFrame &frame) {
     case 7:
         return "STREAM";
     case 8:
-        return "MAX_DATA";
+        return "DATAGRAM";
     case 9:
-        return "MAX_STREAM_DATA";
+        return "MAX_DATA";
     case 10:
-        return "MAX_STREAMS";
+        return "MAX_STREAM_DATA";
     case 11:
-        return "DATA_BLOCKED";
+        return "MAX_STREAMS";
     case 12:
-        return "STREAM_DATA_BLOCKED";
+        return "DATA_BLOCKED";
     case 13:
-        return "STREAMS_BLOCKED";
+        return "STREAM_DATA_BLOCKED";
     case 14:
-        return "NEW_CONNECTION_ID";
+        return "STREAMS_BLOCKED";
     case 15:
-        return "RETIRE_CONNECTION_ID";
+        return "NEW_CONNECTION_ID";
     case 16:
-        return "PATH_CHALLENGE";
+        return "RETIRE_CONNECTION_ID";
     case 17:
-        return "PATH_RESPONSE";
+        return "PATH_CHALLENGE";
     case 18:
-        return "CONNECTION_CLOSE";
+        return "PATH_RESPONSE";
     case 19:
-        return "APPLICATION_CLOSE";
+        return "CONNECTION_CLOSE";
     case 20:
+        return "APPLICATION_CLOSE";
+    case 21:
         return "HANDSHAKE_DONE";
     default:
         return "UNKNOWN";
@@ -809,6 +812,16 @@ void queue_result(WasmEndpoint &endpoint, QuicCoreResult result) {
             continue;
         }
 
+        if (const auto *received = std::get_if<QuicCoreReceiveDatagramData>(&effect)) {
+            PendingEvent pending{
+                .type = WasmEventType::receive_datagram,
+                .connection = received->connection,
+            };
+            append_payload(pending.payload, received->payload());
+            endpoint.events.push_back(std::move(pending));
+            continue;
+        }
+
         if (const auto *state = std::get_if<QuicCoreStateEvent>(&effect)) {
             endpoint.events.push_back(PendingEvent{
                 .type = WasmEventType::state,
@@ -1122,6 +1135,26 @@ coquic_wasm_endpoint_send_stream(std::uint32_t endpoint_id, std::uint64_t now_ms
                     .bytes = std::move(*bytes),
                     .fin = fin != 0,
                 },
+        },
+        time_from_ms(now_ms));
+    queue_result(*endpoint, std::move(result));
+    return 0;
+}
+
+__attribute__((export_name("coquic_wasm_endpoint_send_datagram"))) std::int32_t
+coquic_wasm_endpoint_send_datagram(std::uint32_t endpoint_id, std::uint64_t now_ms,
+                                   std::uint64_t connection_handle, const std::uint8_t *data,
+                                   std::size_t data_len) {
+    auto *endpoint = endpoint_from_id(endpoint_id);
+    auto bytes = input_vector(data, data_len);
+    if (endpoint == nullptr || !bytes.has_value() || connection_handle == 0) {
+        return kErrorInvalidArgument;
+    }
+
+    auto result = endpoint->core.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = connection_handle,
+            .input = QuicCoreSendDatagramData{.bytes = std::move(*bytes)},
         },
         time_from_ms(now_ms));
     queue_result(*endpoint, std::move(result));

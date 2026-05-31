@@ -202,6 +202,11 @@ CodecResult<std::vector<std::byte>> serialize_frame_sequence(const std::vector<F
             return CodecResult<std::vector<std::byte>>::failure(
                 CodecErrorCode::packet_length_mismatch, i);
         }
+        if (const auto *datagram = std::get_if<DatagramFrame>(&frames[i]);
+            datagram != nullptr && !datagram->has_length && i + 1 != frames.size()) {
+            return CodecResult<std::vector<std::byte>>::failure(
+                CodecErrorCode::packet_length_mismatch, i);
+        }
 
         const auto encoded = serialize_frame(frames[i]);
         if (!encoded.has_value()) {

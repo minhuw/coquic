@@ -156,6 +156,18 @@ received_stream_data_from(const QuicCoreResult &result) {
     return out;
 }
 
+inline std::vector<QuicCoreReceiveDatagramData>
+received_datagram_data_from(const QuicCoreResult &result) {
+    std::vector<QuicCoreReceiveDatagramData> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *received = std::get_if<QuicCoreReceiveDatagramData>(&effect)) {
+            out.push_back(*received);
+        }
+    }
+
+    return out;
+}
+
 struct StreamPayload {
     std::uint64_t stream_id = 0;
     std::string text;

@@ -619,6 +619,10 @@ CodecResult<bool> validate_long_header_frames(std::span<const Frame> frames,
         if (stream != nullptr && !stream->has_length && index + 1 != frames.size()) {
             return CodecResult<bool>::failure(CodecErrorCode::packet_length_mismatch, index);
         }
+        const auto *datagram = std::get_if<DatagramFrame>(&frames[index]);
+        if (datagram != nullptr && !datagram->has_length && index + 1 != frames.size()) {
+            return CodecResult<bool>::failure(CodecErrorCode::packet_length_mismatch, index);
+        }
     }
 
     return CodecResult<bool>::success(true);
@@ -630,16 +634,20 @@ bool frame_allowed_in_protected_payload_packet_type(const ReceivedFrame &frame,
         return true;
     }
 
-    const auto frame_index = frame.index();
     if (packet_type == ProtectedPayloadPacketType::zero_rtt) {
-        const auto forbidden_in_zero_rtt = (frame_index == 2) | (frame_index == 5) |
-                                           (frame_index == 20) | (frame_index == 6) |
-                                           (frame_index == 17) | (frame_index == 15);
+        const auto forbidden_in_zero_rtt = std::holds_alternative<ReceivedAckFrame>(frame) |
+                                           std::holds_alternative<ReceivedCryptoFrame>(frame) |
+                                           std::holds_alternative<HandshakeDoneFrame>(frame) |
+                                           std::holds_alternative<NewTokenFrame>(frame) |
+                                           std::holds_alternative<PathResponseFrame>(frame) |
+                                           std::holds_alternative<RetireConnectionIdFrame>(frame);
         return !forbidden_in_zero_rtt;
     }
 
-    return (frame_index == 0) | (frame_index == 1) | (frame_index == 2) | (frame_index == 5) |
-           (frame_index == 18);
+    return std::holds_alternative<PaddingFrame>(frame) | std::holds_alternative<PingFrame>(frame) |
+           std::holds_alternative<ReceivedAckFrame>(frame) |
+           std::holds_alternative<ReceivedCryptoFrame>(frame) |
+           std::holds_alternative<TransportConnectionCloseFrame>(frame);
 }
 
 CodecResult<ReceivedFrameList> deserialize_received_frame_sequence(
@@ -4232,6 +4240,18 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
         };
         check("validate_long_header_frames rejects non-terminal lengthless stream frames",
               codec_failure_offset(validate_long_header_frames(lengthless_stream_frames,
+                                                               LongHeaderPacketType::zero_rtt),
+                                   CodecErrorCode::packet_length_mismatch, 0));
+
+        const std::array<Frame, 2> lengthless_datagram_frames = {
+            Frame(DatagramFrame{
+                .has_length = false,
+                .data = {std::byte{0x05}},
+            }),
+            Frame(PingFrame{}),
+        };
+        check("validate_long_header_frames rejects non-terminal lengthless datagram frames",
+              codec_failure_offset(validate_long_header_frames(lengthless_datagram_frames,
                                                                LongHeaderPacketType::zero_rtt),
                                    CodecErrorCode::packet_length_mismatch, 0));
 

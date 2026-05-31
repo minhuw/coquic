@@ -55,6 +55,7 @@ struct QuicTransportConfig {
     std::uint64_t initial_max_stream_data_uni = 256 << 10;
     std::uint64_t initial_max_streams_bidi = 16;
     std::uint64_t initial_max_streams_uni = 16;
+    std::uint64_t max_datagram_frame_size = 65535;
     QuicCongestionControlAlgorithm congestion_control = QuicCongestionControlAlgorithm::newreno;
     bool enable_hystart_plus_plus = true;
     bool send_stream_fairness = true;
@@ -308,6 +309,8 @@ enum class QuicCoreLocalErrorCode : std::uint8_t {
     send_side_closed,
     receive_side_closed,
     final_size_conflict,
+    datagram_not_supported,
+    datagram_too_large,
 };
 
 enum class QuicMigrationRequestReason : std::uint8_t {
@@ -365,6 +368,14 @@ struct QuicCoreSendSharedStreamData {
     bool fin = false;
 };
 
+struct QuicCoreSendDatagramData {
+    std::vector<std::byte> bytes;
+};
+
+struct QuicCoreSendSharedDatagramData {
+    SharedBytes bytes;
+};
+
 struct QuicCoreResetStream {
     std::uint64_t stream_id = 0;
     std::uint64_t application_error_code = 0;
@@ -395,8 +406,9 @@ struct QuicCoreOpenConnection {
 };
 
 using QuicCoreConnectionInput =
-    std::variant<QuicCoreSendStreamData, QuicCoreSendSharedStreamData, QuicCoreResetStream,
-                 QuicCoreStopSending, QuicCoreCloseConnection, QuicCoreRequestKeyUpdate,
+    std::variant<QuicCoreSendStreamData, QuicCoreSendSharedStreamData, QuicCoreSendDatagramData,
+                 QuicCoreSendSharedDatagramData, QuicCoreResetStream, QuicCoreStopSending,
+                 QuicCoreCloseConnection, QuicCoreRequestKeyUpdate,
                  QuicCoreRequestConnectionMigration>;
 
 struct QuicCoreConnectionCommand {
@@ -410,7 +422,8 @@ using QuicCoreEndpointInput =
 
 using QuicCoreInput =
     std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
-                 QuicCoreSendSharedStreamData, QuicCoreResetStream, QuicCoreStopSending,
+                 QuicCoreSendSharedStreamData, QuicCoreSendDatagramData,
+                 QuicCoreSendSharedDatagramData, QuicCoreResetStream, QuicCoreStopSending,
                  QuicCoreCloseConnection, QuicCoreRequestKeyUpdate,
                  QuicCoreRequestConnectionMigration, QuicCorePathMtuUpdate, QuicCoreTimerExpired>;
 
@@ -429,6 +442,20 @@ struct QuicCoreReceiveStreamData {
     std::vector<std::byte> bytes;
     SharedBytes shared_bytes;
     bool fin = false;
+
+    std::size_t byte_count() const {
+        return shared_bytes.empty() ? bytes.size() : shared_bytes.size();
+    }
+
+    std::span<const std::byte> payload() const {
+        return shared_bytes.empty() ? std::span<const std::byte>(bytes) : shared_bytes.span();
+    }
+};
+
+struct QuicCoreReceiveDatagramData {
+    QuicConnectionHandle connection = 0;
+    std::vector<std::byte> bytes;
+    SharedBytes shared_bytes;
 
     std::size_t byte_count() const {
         return shared_bytes.empty() ? bytes.size() : shared_bytes.size();
@@ -489,10 +516,11 @@ struct QuicCoreNewTokenAvailable {
 };
 
 using QuicCoreEffect =
-    std::variant<QuicCoreSendDatagram, QuicCoreReceiveStreamData, QuicCorePeerResetStream,
-                 QuicCorePeerStopSending, QuicCoreStateEvent, QuicCoreConnectionLifecycleEvent,
-                 QuicCorePeerPreferredAddressAvailable, QuicCoreResumptionStateAvailable,
-                 QuicCoreZeroRttStatusEvent, QuicCorePacketInspection, QuicCoreNewTokenAvailable>;
+    std::variant<QuicCoreSendDatagram, QuicCoreReceiveStreamData, QuicCoreReceiveDatagramData,
+                 QuicCorePeerResetStream, QuicCorePeerStopSending, QuicCoreStateEvent,
+                 QuicCoreConnectionLifecycleEvent, QuicCorePeerPreferredAddressAvailable,
+                 QuicCoreResumptionStateAvailable, QuicCoreZeroRttStatusEvent,
+                 QuicCorePacketInspection, QuicCoreNewTokenAvailable>;
 
 struct QuicCoreResult {
     std::vector<QuicCoreEffect> effects;

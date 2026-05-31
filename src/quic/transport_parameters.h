@@ -48,6 +48,7 @@ struct TransportParameters {
     std::optional<ConnectionId> retry_source_connection_id;
     std::optional<PreferredAddress> preferred_address;
     std::optional<VersionInformation> version_information;
+    std::uint64_t max_datagram_frame_size = 0;
 };
 
 struct TransportParametersValidationContext {

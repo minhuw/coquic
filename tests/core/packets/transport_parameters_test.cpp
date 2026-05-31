@@ -1,4 +1,5 @@
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -301,6 +302,65 @@ TEST(QuicTransportParametersTest, RoundTripsFlowControlAndStreamCountParameters)
     EXPECT_EQ(decoded.value().initial_max_streams_uni, 5u);
 }
 
+TEST(QuicTransportParametersTest, RoundTripsMaxDatagramFrameSize) {
+    const TransportParameters parameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_source_connection_id = ConnectionId{std::byte{0xc1}},
+        .max_datagram_frame_size = 65535,
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+    ASSERT_TRUE(encoded.has_value());
+    EXPECT_NE(std::find(encoded.value().begin(), encoded.value().end(), std::byte{0x20}),
+              encoded.value().end());
+
+    const auto decoded = coquic::quic::deserialize_transport_parameters(encoded.value());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().max_datagram_frame_size, 65535u);
+}
+
+TEST(QuicTransportParametersTest, MaxDatagramFrameSizeDefaultsToZero) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x03,
+        0x02,
+        0x44,
+        0xb0,
+        0x0e,
+        0x01,
+        0x02,
+        0x0f,
+        0x01,
+        0x11,
+    }));
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().max_datagram_frame_size, 0u);
+}
+
+TEST(QuicTransportParametersTest, ExplicitZeroMaxDatagramFrameSizeDecodesButSerializesAbsent) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x20,
+        0x01,
+        0x00,
+    }));
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value().max_datagram_frame_size, 0u);
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(TransportParameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_source_connection_id = ConnectionId{std::byte{0xc1}},
+        .max_datagram_frame_size = 0,
+    });
+    ASSERT_TRUE(encoded.has_value());
+
+    const auto max_datagram_parameter =
+        std::find(encoded.value().begin(), encoded.value().end(), std::byte{0x20});
+    EXPECT_EQ(max_datagram_parameter, encoded.value().end());
+}
+
 TEST(QuicTransportParametersTest, MissingFlowControlParametersDefaultToZero) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
         0x03,
@@ -453,6 +513,20 @@ TEST(QuicTransportParametersTest, RejectsMaxAckDelayAboveVarintLimitDuringSerial
     EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
 }
 
+TEST(QuicTransportParametersTest, RejectsMaxDatagramFrameSizeAboveVarintLimitDuringSerialization) {
+    const TransportParameters parameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_source_connection_id = ConnectionId{std::byte{0x01}},
+        .max_datagram_frame_size = (std::uint64_t{1} << 62),
+    };
+
+    const auto encoded = coquic::quic::serialize_transport_parameters(parameters);
+
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
+}
+
 TEST(QuicTransportParametersTest,
      RejectsFlowControlAndStreamCountValuesAboveVarintLimitDuringSerialization) {
     const auto make_parameters = [] {
@@ -490,7 +564,7 @@ TEST(QuicTransportParametersTest,
 
 TEST(QuicTransportParametersTest, IgnoresUnknownParameterIdsDuringParse) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
-        0x20,
+        0x21,
         0x01,
         0xff,
         0x03,
@@ -531,10 +605,10 @@ TEST(QuicTransportParametersTest, RejectsDuplicateKnownParameterIdsDuringParse) 
 
 TEST(QuicTransportParametersTest, RejectsDuplicateUnknownParameterIdsDuringParse) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
-        0x20,
+        0x21,
         0x01,
         0xff,
-        0x20,
+        0x21,
         0x01,
         0xee,
     }));
@@ -632,6 +706,18 @@ TEST(QuicTransportParametersTest, RejectsInvalidAckDelayExponentEncoding) {
 TEST(QuicTransportParametersTest, RejectsInvalidMaxAckDelayEncoding) {
     const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
         0x0b,
+        0x02,
+        0x01,
+        0x00,
+    }));
+
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
+}
+
+TEST(QuicTransportParametersTest, RejectsInvalidMaxDatagramFrameSizeEncoding) {
+    const auto decoded = coquic::quic::deserialize_transport_parameters(byte_vector({
+        0x20,
         0x02,
         0x01,
         0x00,

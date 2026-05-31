@@ -663,30 +663,34 @@ TEST(QuicCoreTest, BbrPacingBlocksFurtherApplicationSendsUntilPacingWakeup) {
     ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
 
     const auto send_time = coquic::quic::test::test_time(1);
-    const auto first_datagram = connection.drain_outbound_datagram(send_time);
+    const coquic::quic::DatagramBuffer first_datagram =
+        connection.drain_outbound_datagram(send_time);
     if (first_datagram.empty()) {
         ADD_FAILURE() << "missing first paced datagram";
         return;
     }
-    const auto second_datagram = connection.drain_outbound_datagram(send_time);
+    const coquic::quic::DatagramBuffer second_datagram =
+        connection.drain_outbound_datagram(send_time);
     if (second_datagram.empty()) {
         ADD_FAILURE() << "missing second paced datagram";
         return;
     }
 
-    const auto blocked_datagram = connection.drain_outbound_datagram(send_time);
+    const coquic::quic::DatagramBuffer blocked_datagram =
+        connection.drain_outbound_datagram(send_time);
     if (!blocked_datagram.empty()) {
         ADD_FAILURE() << "pacing did not block the third datagram";
     }
 
-    const auto pacing_deadline =
+    const std::optional<coquic::quic::QuicCoreTimePoint> pacing_deadline =
         connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
     if (!pacing_deadline.has_value()) {
         ADD_FAILURE() << "missing pacing deadline";
         return;
     }
-    const auto quantum_deadline = connection.congestion_controller_.next_send_time(
-        connection.congestion_controller_.pacing_send_quantum());
+    const std::optional<coquic::quic::QuicCoreTimePoint> quantum_deadline =
+        connection.congestion_controller_.next_send_time(
+            connection.congestion_controller_.pacing_send_quantum());
     if (!quantum_deadline.has_value()) {
         ADD_FAILURE() << "missing quantum pacing deadline";
         return;
@@ -740,10 +744,11 @@ TEST(QuicCoreTest, BbrPacingWakeupUsesSendQuantumForPureStreamData) {
     ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
     ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
 
-    const auto single_datagram_deadline =
+    const std::optional<coquic::quic::QuicCoreTimePoint> single_datagram_deadline =
         connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
-    const auto quantum_deadline = connection.congestion_controller_.next_send_time(
-        connection.congestion_controller_.pacing_send_quantum());
+    const std::optional<coquic::quic::QuicCoreTimePoint> quantum_deadline =
+        connection.congestion_controller_.next_send_time(
+            connection.congestion_controller_.pacing_send_quantum());
     if (!single_datagram_deadline.has_value()) {
         ADD_FAILURE() << "missing single-datagram pacing deadline";
         return;
@@ -800,10 +805,11 @@ TEST(QuicCoreTest, BbrPacingWakeupUsesSingleDatagramWhenRemainingStreamDataIsSma
         ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
     }
 
-    const auto single_datagram_deadline =
+    const std::optional<coquic::quic::QuicCoreTimePoint> single_datagram_deadline =
         connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
-    const auto quantum_deadline = connection.congestion_controller_.next_send_time(
-        connection.congestion_controller_.pacing_send_quantum());
+    const std::optional<coquic::quic::QuicCoreTimePoint> quantum_deadline =
+        connection.congestion_controller_.next_send_time(
+            connection.congestion_controller_.pacing_send_quantum());
     if (!single_datagram_deadline.has_value()) {
         ADD_FAILURE() << "missing single-datagram pacing deadline";
         return;
@@ -883,12 +889,13 @@ TEST(QuicCoreTest, CorePacingWakeupDrainsWithoutRunningConnectionTimeout) {
     ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
     ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
 
-    const auto pacing_deadline = connection.pacing_deadline();
+    const std::optional<coquic::quic::QuicCoreTimePoint> pacing_deadline =
+        connection.pacing_deadline();
     if (!pacing_deadline.has_value()) {
         ADD_FAILURE() << "missing pacing deadline";
         return;
     }
-    const auto due = optional_value_or_terminate(pacing_deadline);
+    const coquic::quic::QuicCoreTimePoint due = optional_value_or_terminate(pacing_deadline);
     connection.application_space_.received_packets.record_received(
         /*packet_number=*/41, /*ack_eliciting=*/true, send_time);
     connection.application_space_.pending_ack_deadline = due + std::chrono::seconds{1};
@@ -1026,7 +1033,8 @@ TEST(QuicCoreTest, HasSendableDatagramAllowsAckOnlyWhenApplicationStreamDataIsCw
     connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(1);
 
     EXPECT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(2)));
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    const coquic::quic::DatagramBuffer datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
     ASSERT_FALSE(datagram.empty());
     EXPECT_TRUE(datagram_has_application_ack(connection, datagram));
 }
@@ -1060,10 +1068,11 @@ TEST(QuicCoreTest, AckDueBeforeBbrQuantumDoesNotPullApplicationStreamData) {
     ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
     ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
 
-    const auto single_datagram_deadline =
+    const std::optional<coquic::quic::QuicCoreTimePoint> single_datagram_deadline =
         connection.congestion_controller_.next_send_time(connection.outbound_datagram_size_limit());
-    const auto quantum_deadline = connection.congestion_controller_.next_send_time(
-        connection.congestion_controller_.pacing_send_quantum());
+    const std::optional<coquic::quic::QuicCoreTimePoint> quantum_deadline =
+        connection.congestion_controller_.next_send_time(
+            connection.congestion_controller_.pacing_send_quantum());
     ASSERT_TRUE(single_datagram_deadline.has_value());
     ASSERT_TRUE(quantum_deadline.has_value());
     ASSERT_LT(optional_value_or_terminate(single_datagram_deadline),
@@ -1076,7 +1085,7 @@ TEST(QuicCoreTest, AckDueBeforeBbrQuantumDoesNotPullApplicationStreamData) {
     connection.application_space_.pending_ack_deadline = ack_due;
 
     EXPECT_TRUE(connection.has_sendable_datagram(ack_due));
-    const auto ack_datagram = connection.drain_outbound_datagram(ack_due);
+    const coquic::quic::DatagramBuffer ack_datagram = connection.drain_outbound_datagram(ack_due);
     ASSERT_FALSE(ack_datagram.empty());
     EXPECT_TRUE(datagram_has_application_ack(connection, ack_datagram));
     EXPECT_FALSE(datagram_has_application_stream(connection, ack_datagram));
@@ -1085,7 +1094,7 @@ TEST(QuicCoreTest, AckDueBeforeBbrQuantumDoesNotPullApplicationStreamData) {
     EXPECT_FALSE(connection.has_sendable_datagram(ack_due));
     EXPECT_TRUE(connection.has_sendable_datagram(optional_value_or_terminate(quantum_deadline)));
 
-    const auto stream_datagram =
+    const coquic::quic::DatagramBuffer stream_datagram =
         connection.drain_outbound_datagram(optional_value_or_terminate(quantum_deadline));
     ASSERT_FALSE(stream_datagram.empty());
     EXPECT_FALSE(datagram_has_application_ack(connection, stream_datagram));
@@ -1122,13 +1131,14 @@ TEST(QuicCoreTest, ContinuedBbrPacedBurstCanSendBeforeNextQuantumDeadline) {
     ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
     ASSERT_FALSE(connection.drain_outbound_datagram(send_time).empty());
 
-    const auto quantum_deadline = connection.congestion_controller_.next_send_time(
-        connection.congestion_controller_.pacing_send_quantum());
+    const std::optional<coquic::quic::QuicCoreTimePoint> quantum_deadline =
+        connection.congestion_controller_.next_send_time(
+            connection.congestion_controller_.pacing_send_quantum());
     ASSERT_TRUE(quantum_deadline.has_value());
-    const auto due = optional_value_or_terminate(quantum_deadline);
+    const coquic::quic::QuicCoreTimePoint due = optional_value_or_terminate(quantum_deadline);
     std::size_t normally_paced_datagrams = 0;
     while (connection.has_sendable_datagram(due, /*continue_paced_burst=*/false)) {
-        const auto stream_datagram =
+        const coquic::quic::DatagramBuffer stream_datagram =
             connection.drain_outbound_datagram(due, /*continue_paced_burst=*/false);
         ASSERT_FALSE(stream_datagram.empty());
         EXPECT_TRUE(datagram_has_application_stream(connection, stream_datagram));
@@ -1141,7 +1151,7 @@ TEST(QuicCoreTest, ContinuedBbrPacedBurstCanSendBeforeNextQuantumDeadline) {
     EXPECT_FALSE(connection.has_sendable_datagram(due));
     EXPECT_TRUE(connection.has_sendable_datagram(due, /*continue_paced_burst=*/true));
 
-    const auto continued_stream_datagram =
+    const coquic::quic::DatagramBuffer continued_stream_datagram =
         connection.drain_outbound_datagram(due, /*continue_paced_burst=*/true);
     ASSERT_FALSE(continued_stream_datagram.empty());
     EXPECT_TRUE(datagram_has_application_stream(connection, continued_stream_datagram));
@@ -1168,12 +1178,14 @@ TEST(QuicCoreTest, PathResponseCanBeSentWhileApplicationStreamDataIsQueued) {
 
     bool saw_path_response = false;
     for (;;) {
-        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        const coquic::quic::DatagramBuffer datagram =
+            connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
         if (datagram.empty()) {
             break;
         }
 
-        const auto packets = decode_sender_datagram(connection, datagram);
+        const std::vector<coquic::quic::ProtectedPacket> packets =
+            decode_sender_datagram(connection, datagram);
         ASSERT_EQ(packets.size(), 1u);
         const auto *application =
             std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
@@ -1212,12 +1224,13 @@ TEST(QuicCoreTest, ApplicationProbePacketDoesNotLeaveRetransmittedFragmentPendin
         .stream_fragments = initial_fragments,
     };
 
-    const auto probe_datagram =
+    const coquic::quic::DatagramBuffer probe_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(probe_datagram.empty());
     EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
 
-    const auto probe_packets = decode_sender_datagram(connection, probe_datagram);
+    const std::vector<coquic::quic::ProtectedPacket> probe_packets =
+        decode_sender_datagram(connection, probe_datagram);
     ASSERT_EQ(probe_packets.size(), 1u);
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&probe_packets[0]);
     ASSERT_NE(application, nullptr);

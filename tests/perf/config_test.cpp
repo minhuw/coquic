@@ -1,10 +1,49 @@
 #include <gtest/gtest.h>
 
+#include <stdexcept>
+
 #include "src/perf/perf_runtime.h"
 
 namespace {
 using coquic::io::QuicIoBackendKind;
 using namespace coquic::perf;
+
+void require_perf_config_check(bool condition, const char *label) {
+    if (!condition) {
+        throw std::runtime_error(label);
+    }
+}
+
+const QuicPerfConfig &require_perf_config_value(const std::optional<QuicPerfConfig> &config,
+                                                const char *label) {
+    if (!config.has_value()) {
+        throw std::runtime_error(label);
+    }
+    return *config;
+}
+
+bool parsed_client_rr_invocation_matches(const QuicPerfConfig &parsed) {
+    return parsed.role == QuicPerfRole::client && parsed.mode == QuicPerfMode::rr &&
+           parsed.io_backend == QuicIoBackendKind::socket && parsed.host == "127.0.0.1" &&
+           parsed.port == 9443 && parsed.request_bytes == 64u && parsed.response_bytes == 96u &&
+           parsed.requests == std::optional<std::size_t>{1000u} &&
+           parsed.requests_in_flight == 4u &&
+           parsed.json_out.value_or(std::filesystem::path{}).string() == "results.json";
+}
+
+bool parsed_socket_single_flow_defaults_match(const QuicPerfConfig &parsed) {
+    return parsed.io_backend == QuicIoBackendKind::socket && parsed.streams == 1u &&
+           parsed.connections == 1u && parsed.requests_in_flight == 1u &&
+           parsed.duration == std::chrono::milliseconds{5000};
+}
+
+bool parsed_server_io_uring_invocation_matches(const QuicPerfConfig &parsed) {
+    return parsed.role == QuicPerfRole::server &&
+           parsed.io_backend == QuicIoBackendKind::io_uring &&
+           parsed.certificate_chain_path ==
+               std::filesystem::path{"tests/fixtures/quic-server-cert.pem"} &&
+           parsed.private_key_path == std::filesystem::path{"tests/fixtures/quic-server-key.pem"};
+}
 
 TEST(QuicPerfConfigTest, ParsesClientRrInvocation) {
     const char *argv[] = {
@@ -31,28 +70,9 @@ TEST(QuicPerfConfigTest, ParsesClientRrInvocation) {
     auto config =
         parse_perf_runtime_args(static_cast<int>(std::size(argv)), const_cast<char **>(argv));
 
-    ASSERT_TRUE(config.has_value());
-    auto parsed = config.value_or(QuicPerfConfig{});
-    auto parsed_role = parsed.role;
-    auto parsed_mode = parsed.mode;
-    auto parsed_backend = parsed.io_backend;
-    auto parsed_host = parsed.host;
-    auto parsed_port = parsed.port;
-    auto parsed_request_bytes = parsed.request_bytes;
-    auto parsed_response_bytes = parsed.response_bytes;
-    auto parsed_requests = parsed.requests;
-    auto parsed_requests_in_flight = parsed.requests_in_flight;
-    auto parsed_json_out = parsed.json_out.value_or(std::filesystem::path{}).string();
-    EXPECT_EQ(parsed_role, QuicPerfRole::client);
-    EXPECT_EQ(parsed_mode, QuicPerfMode::rr);
-    EXPECT_EQ(parsed_backend, QuicIoBackendKind::socket);
-    EXPECT_EQ(parsed_host, "127.0.0.1");
-    EXPECT_EQ(parsed_port, 9443);
-    EXPECT_EQ(parsed_request_bytes, 64u);
-    EXPECT_EQ(parsed_response_bytes, 96u);
-    EXPECT_EQ(parsed_requests, std::optional<std::size_t>{1000u});
-    EXPECT_EQ(parsed_requests_in_flight, 4u);
-    EXPECT_EQ(parsed_json_out, "results.json");
+    const auto &parsed = require_perf_config_value(config, "client rr invocation should parse");
+    require_perf_config_check(parsed_client_rr_invocation_matches(parsed),
+                              "client rr invocation should populate every option");
 }
 
 TEST(QuicPerfConfigTest, DefaultsToSocketSingleFlow) {
@@ -64,18 +84,9 @@ TEST(QuicPerfConfigTest, DefaultsToSocketSingleFlow) {
     auto config =
         parse_perf_runtime_args(static_cast<int>(std::size(argv)), const_cast<char **>(argv));
 
-    ASSERT_TRUE(config.has_value());
-    auto parsed = config.value_or(QuicPerfConfig{});
-    auto parsed_backend = parsed.io_backend;
-    auto parsed_streams = parsed.streams;
-    auto parsed_connections = parsed.connections;
-    auto parsed_requests_in_flight = parsed.requests_in_flight;
-    auto parsed_duration = parsed.duration;
-    EXPECT_EQ(parsed_backend, QuicIoBackendKind::socket);
-    EXPECT_EQ(parsed_streams, 1u);
-    EXPECT_EQ(parsed_connections, 1u);
-    EXPECT_EQ(parsed_requests_in_flight, 1u);
-    EXPECT_EQ(parsed_duration, std::chrono::milliseconds{5000});
+    const auto &parsed = require_perf_config_value(config, "single-flow invocation should parse");
+    require_perf_config_check(parsed_socket_single_flow_defaults_match(parsed),
+                              "single-flow invocation should use expected defaults");
 }
 
 TEST(QuicPerfConfigTest, RejectsBulkOnlyFlagsInRrMode) {
@@ -108,17 +119,10 @@ TEST(QuicPerfConfigTest, ParsesServerIoUringInvocation) {
     auto config =
         parse_perf_runtime_args(static_cast<int>(std::size(argv)), const_cast<char **>(argv));
 
-    ASSERT_TRUE(config.has_value());
-    auto parsed = config.value_or(QuicPerfConfig{});
-    auto parsed_role = parsed.role;
-    auto parsed_backend = parsed.io_backend;
-    auto parsed_certificate_chain_path = parsed.certificate_chain_path;
-    auto parsed_private_key_path = parsed.private_key_path;
-    EXPECT_EQ(parsed_role, QuicPerfRole::server);
-    EXPECT_EQ(parsed_backend, QuicIoBackendKind::io_uring);
-    EXPECT_EQ(parsed_certificate_chain_path,
-              std::filesystem::path{"tests/fixtures/quic-server-cert.pem"});
-    EXPECT_EQ(parsed_private_key_path, std::filesystem::path{"tests/fixtures/quic-server-key.pem"});
+    const auto &parsed =
+        require_perf_config_value(config, "server io_uring invocation should parse");
+    require_perf_config_check(parsed_server_io_uring_invocation_matches(parsed),
+                              "server io_uring invocation should populate runtime paths");
 }
 
 TEST(QuicPerfConfigTest, ParsesAndPropagatesCongestionControlSelection) {
@@ -140,10 +144,10 @@ TEST(QuicPerfConfigTest, ParsesAndPropagatesCongestionControlSelection) {
     auto config =
         parse_perf_runtime_args(static_cast<int>(std::size(argv)), const_cast<char **>(argv));
 
-    ASSERT_TRUE(config.has_value());
-    auto parsed = config.value_or(QuicPerfConfig{});
-    auto parsed_congestion_control = parsed.congestion_control;
-    EXPECT_EQ(parsed_congestion_control, coquic::quic::QuicCongestionControlAlgorithm::copa);
+    const auto &parsed = require_perf_config_value(config, "copa client invocation should parse");
+    require_perf_config_check(parsed.congestion_control ==
+                                  coquic::quic::QuicCongestionControlAlgorithm::copa,
+                              "copa client invocation should set congestion control");
 
     const auto client = make_perf_client_endpoint_config(QuicPerfConfig{
         .role = QuicPerfRole::client,

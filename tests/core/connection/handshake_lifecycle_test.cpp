@@ -73,7 +73,7 @@ TEST(QuicCoreTest, ClientStartProducesSendEffect) {
     EXPECT_TRUE(coquic::quic::test::state_changes_from(result).empty());
     EXPECT_TRUE(result.next_wakeup.has_value());
 
-    const auto decoded = coquic::quic::deserialize_protected_datagram(
+    auto decoded = coquic::quic::deserialize_protected_datagram(
         datagrams.front(),
         coquic::quic::DeserializeProtectionContext{
             .peer_role = coquic::quic::EndpointRole::client,
@@ -188,7 +188,7 @@ TEST(QuicCoreTest, GreaseQuicBitTransportParameterNegotiatesAndControlsOutgoingQ
     EXPECT_TRUE(client_peer_transport_parameters.grease_quic_bit);
     EXPECT_TRUE(server_peer_transport_parameters.grease_quic_bit);
 
-    const auto serialize_context = coquic::quic::SerializeProtectionContext{
+    auto serialize_context = coquic::quic::SerializeProtectionContext{
         .local_role = client.connection_->config_.role,
         .client_initial_destination_connection_id =
             client.connection_->client_initial_destination_connection_id(),
@@ -196,7 +196,7 @@ TEST(QuicCoreTest, GreaseQuicBitTransportParameterNegotiatesAndControlsOutgoingQ
         .one_rtt_key_phase = client.connection_->application_write_key_phase_,
         .grease_quic_bit = true,
     };
-    const auto datagram = coquic::quic::serialize_protected_datagram(
+    auto datagram = coquic::quic::serialize_protected_datagram(
         std::vector<coquic::quic::ProtectedPacket>{
             coquic::quic::ProtectedOneRttPacket{
                 .destination_connection_id = server.connection_->config_.source_connection_id,
@@ -216,14 +216,13 @@ TEST(QuicCoreTest, GreaseQuicBitTransportParameterNegotiatesAndControlsOutgoingQ
         .one_rtt_destination_connection_id_length =
             server.connection_->config_.source_connection_id.size(),
     };
-    const auto strict_decoded =
+    auto strict_decoded =
         coquic::quic::deserialize_protected_datagram(datagram.value(), strict_context);
     ASSERT_FALSE(strict_decoded.has_value());
     EXPECT_EQ(strict_decoded.error().code, coquic::quic::CodecErrorCode::invalid_fixed_bit);
 
     strict_context.accept_greased_quic_bit = true;
-    const auto decoded =
-        coquic::quic::deserialize_protected_datagram(datagram.value(), strict_context);
+    auto decoded = coquic::quic::deserialize_protected_datagram(datagram.value(), strict_context);
     ASSERT_TRUE(decoded.has_value());
     EXPECT_NE(std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded.value().front()), nullptr);
 }
@@ -387,14 +386,14 @@ TEST(QuicCoreTest, ServerEmitsHandshakeCryptoAfterOutOfOrderClientInitialRecover
     }
 
     std::size_t prefix = 63u;
-    std::size_t gap = 4u;
+    std::size_t crypto_gap = 4u;
     std::size_t tail_offset = 1230u;
     if (client_hello.size() <= tail_offset) {
         prefix = std::min<std::size_t>(63u, client_hello.size() / 4u);
-        gap = 1u;
-        tail_offset = prefix + gap + ((client_hello.size() - (prefix + gap)) / 2u);
+        crypto_gap = 1u;
+        tail_offset = prefix + crypto_gap + ((client_hello.size() - (prefix + crypto_gap)) / 2u);
     }
-    ASSERT_LT(prefix + gap, tail_offset);
+    ASSERT_LT(prefix + crypto_gap, tail_offset);
     ASSERT_LT(tail_offset, client_hello.size());
 
     const auto slice_bytes = [&](std::size_t begin, std::size_t end) {
@@ -416,8 +415,8 @@ TEST(QuicCoreTest, ServerEmitsHandshakeCryptoAfterOutOfOrderClientInitialRecover
                     .crypto_data = slice_bytes(0u, prefix),
                 },
                 coquic::quic::CryptoFrame{
-                    .offset = static_cast<std::uint64_t>(prefix + gap),
-                    .crypto_data = slice_bytes(prefix + gap, tail_offset),
+                    .offset = static_cast<std::uint64_t>(prefix + crypto_gap),
+                    .crypto_data = slice_bytes(prefix + crypto_gap, tail_offset),
                 },
             },
     };
@@ -432,7 +431,7 @@ TEST(QuicCoreTest, ServerEmitsHandshakeCryptoAfterOutOfOrderClientInitialRecover
             {
                 coquic::quic::CryptoFrame{
                     .offset = static_cast<std::uint64_t>(prefix),
-                    .crypto_data = slice_bytes(prefix, prefix + gap),
+                    .crypto_data = slice_bytes(prefix, prefix + crypto_gap),
                 },
                 coquic::quic::CryptoFrame{
                     .offset = static_cast<std::uint64_t>(tail_offset),
@@ -441,7 +440,8 @@ TEST(QuicCoreTest, ServerEmitsHandshakeCryptoAfterOutOfOrderClientInitialRecover
             },
     };
 
-    const auto pad_initial = [&](coquic::quic::ProtectedInitialPacket packet) {
+    const auto pad_initial = [&](const coquic::quic::ProtectedInitialPacket &initial_packet) {
+        auto packet = initial_packet;
         auto encoded = coquic::quic::serialize_protected_datagram(
             std::array<coquic::quic::ProtectedPacket, 1>{packet},
             coquic::quic::SerializeProtectionContext{
@@ -479,7 +479,7 @@ TEST(QuicCoreTest, ServerEmitsHandshakeCryptoAfterOutOfOrderClientInitialRecover
     };
 
     const auto second_initial_datagram = pad_initial(second_initial);
-    const auto server_after_second_initial =
+    auto server_after_second_initial =
         server.advance(coquic::quic::QuicCoreInboundDatagram{second_initial_datagram},
                        coquic::quic::test::test_time(1));
     EXPECT_FALSE(server.has_failed());
@@ -488,7 +488,7 @@ TEST(QuicCoreTest, ServerEmitsHandshakeCryptoAfterOutOfOrderClientInitialRecover
         coquic::quic::test::send_datagrams_from(server_after_second_initial);
     ASSERT_FALSE(second_response_datagrams.empty());
     for (const auto &datagram : second_response_datagrams) {
-        const auto packets = decode_sender_datagram(*server.connection_, datagram);
+        auto packets = decode_sender_datagram(*server.connection_, datagram);
         for (const auto &packet : packets) {
             const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packet);
             if (initial == nullptr) {
@@ -501,7 +501,7 @@ TEST(QuicCoreTest, ServerEmitsHandshakeCryptoAfterOutOfOrderClientInitialRecover
     }
 
     const auto first_initial_datagram = pad_initial(first_initial);
-    const auto server_after_first_initial =
+    auto server_after_first_initial =
         server.advance(coquic::quic::QuicCoreInboundDatagram{first_initial_datagram},
                        coquic::quic::test::test_time(2));
     EXPECT_FALSE(server.has_failed());
@@ -513,7 +513,7 @@ TEST(QuicCoreTest, ServerEmitsHandshakeCryptoAfterOutOfOrderClientInitialRecover
     bool saw_initial_crypto = false;
     bool saw_handshake_crypto = false;
     for (const auto &datagram : response_datagrams) {
-        const auto packets = decode_sender_datagram(*server.connection_, datagram);
+        auto packets = decode_sender_datagram(*server.connection_, datagram);
         for (const auto &packet : packets) {
             if (const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packet)) {
                 for (const auto &frame : initial->frames) {
@@ -595,7 +595,7 @@ TEST(QuicCoreTest, ServerHandshakeCompletionQueuesHandshakeDoneFrame) {
 
     EXPECT_EQ(connection.handshake_done_state_, coquic::quic::StreamControlFrameState::pending);
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
 
     bool saw_handshake_done = false;
@@ -836,7 +836,7 @@ TEST(QuicCoreTest, ConnectionCloseFramesDoNotEmitInternalFailureDebugLog) {
             .error_code = 0,
         }},
         /*packet_number=*/2));
-    const auto application_close_stderr = testing::internal::GetCapturedStderr();
+    auto application_close_stderr = testing::internal::GetCapturedStderr();
 
     EXPECT_TRUE(connection.has_failed());
     EXPECT_TRUE(application_close_stderr.empty());
@@ -910,12 +910,12 @@ TEST(QuicCoreTest, InitialPaddingSearchCoversZeroDeltaAndAlternatePaths) {
         connection.initial_space_.send_crypto.append(
             std::vector<std::byte>(crypto_size, std::byte{0x41}));
 
-        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
         if (connection.has_failed() || datagram.empty()) {
             continue;
         }
 
-        const auto packets = decode_sender_datagram(connection, datagram);
+        auto packets = decode_sender_datagram(connection, datagram);
         if (packets.size() != 1u) {
             continue;
         }
@@ -980,7 +980,7 @@ TEST(QuicCoreTest, HandshakePacketSerializationFailureMarksConnectionFailed) {
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
         coquic::quic::test::PacketCryptoFaultPoint::seal_context_new);
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_TRUE(datagram.empty());
     EXPECT_TRUE(connection.has_failed());
@@ -1007,10 +1007,10 @@ TEST(QuicCoreTest, ClosingTransportErrorUsesHandshakeProtectionWithoutOneRttKeys
         coquic::quic::CodecError{.code = coquic::quic::CodecErrorCode::invalid_varint,
                                  .offset = 0});
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
 
     ASSERT_FALSE(datagram.empty());
-    const auto packets = decode_sender_datagram(connection, datagram);
+    auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front());
     ASSERT_NE(handshake, nullptr);
@@ -1044,11 +1044,11 @@ TEST(QuicCoreTest, ClosingTransportErrorUsesInitialProtectionWithoutHandshakeKey
         coquic::quic::CodecError{.code = coquic::quic::CodecErrorCode::invalid_varint,
                                  .offset = 0});
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
 
     ASSERT_FALSE(datagram.empty());
     EXPECT_GE(datagram.size(), 1200u);
-    const auto packets = decode_sender_datagram(connection, datagram);
+    auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets.front());
     ASSERT_NE(initial, nullptr);
@@ -1083,13 +1083,13 @@ TEST(QuicCoreTest, ApplicationEmptyCandidateFinalizesExistingHandshakePacket) {
     ASSERT_EQ(connection.congestion_controller_.bytes_in_flight(),
               connection.congestion_controller_.congestion_window());
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     ASSERT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
     EXPECT_TRUE(connection.has_pending_application_send());
 
-    const auto packets = decode_sender_datagram(connection, datagram);
+    auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     EXPECT_NE(std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front()), nullptr);
 }
@@ -1118,7 +1118,7 @@ TEST(QuicCoreTest,
     configure_connection(control);
     const auto control_datagram = control.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(control_datagram.empty());
-    const auto control_packets = decode_sender_datagram(control, control_datagram);
+    auto control_packets = decode_sender_datagram(control, control_datagram);
     ASSERT_EQ(control_packets.size(), 2u);
     EXPECT_NE(std::get_if<coquic::quic::ProtectedHandshakePacket>(&control_packets.front()),
               nullptr);
@@ -1129,7 +1129,7 @@ TEST(QuicCoreTest,
     const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
         coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
-    const auto faulted_datagram = failure.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto faulted_datagram = failure.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_TRUE(faulted_datagram.empty());
     EXPECT_TRUE(failure.has_failed());
@@ -1158,7 +1158,7 @@ TEST(QuicCoreTest,
     const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
         coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update);
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_TRUE(datagram.empty());
     EXPECT_TRUE(connection.has_failed());
@@ -1179,7 +1179,7 @@ TEST(QuicCoreTest, HandshakeTrimLoopStopsWhenAckStillOverflowsAfterAllCryptoIsRe
             /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
     }
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
@@ -1225,7 +1225,7 @@ TEST(QuicCoreTest, PendingApplicationCryptoDoesNotStarveQueuedServerResponse) {
     bool saw_crypto = false;
     bool saw_stream = false;
     for (int index = 0; index < 4; ++index) {
-        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
         if (datagram.empty()) {
             break;
         }
@@ -1294,7 +1294,7 @@ TEST(QuicCoreTest, ConnectionHelperMethodsCoverAdditionalPendingSendAndLimitBran
         coquic::quic::MaxDataFrame{.maximum_data = 1};
     connection.connection_flow_control_.max_data_state =
         coquic::quic::StreamControlFrameState::pending;
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     EXPECT_FALSE(datagram.empty());
 }
 
@@ -1373,17 +1373,17 @@ TEST(QuicCoreTest, ConnectionParserHelpersRejectMalformedClientInitialHeaders) {
     EXPECT_EQ(unsupported_version.error().code,
               coquic::quic::CodecErrorCode::unsupported_packet_type);
 
-    const auto missing_dcid_length = connection.peek_client_initial_destination_connection_id(
+    auto missing_dcid_length = connection.peek_client_initial_destination_connection_id(
         bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01}));
     ASSERT_FALSE(missing_dcid_length.has_value());
     EXPECT_EQ(missing_dcid_length.error().code, coquic::quic::CodecErrorCode::truncated_input);
 
-    const auto oversized_dcid = connection.peek_client_initial_destination_connection_id(
+    auto oversized_dcid = connection.peek_client_initial_destination_connection_id(
         bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x15}));
     ASSERT_FALSE(oversized_dcid.has_value());
     EXPECT_EQ(oversized_dcid.error().code, coquic::quic::CodecErrorCode::invalid_varint);
 
-    const auto truncated_dcid = connection.peek_client_initial_destination_connection_id(
+    auto truncated_dcid = connection.peek_client_initial_destination_connection_id(
         bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x02}));
     ASSERT_FALSE(truncated_dcid.has_value());
     EXPECT_EQ(truncated_dcid.error().code, coquic::quic::CodecErrorCode::truncated_input);
@@ -1411,27 +1411,27 @@ TEST(QuicCoreTest, ConnectionParserHelpersRejectMalformedPacketLengths) {
     EXPECT_EQ(unsupported_version.error().code,
               coquic::quic::CodecErrorCode::unsupported_packet_type);
 
-    const auto truncated_dcid = connection.peek_next_packet_length(
+    auto truncated_dcid = connection.peek_next_packet_length(
         bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x03, 0x01}));
     ASSERT_FALSE(truncated_dcid.has_value());
     EXPECT_EQ(truncated_dcid.error().code, coquic::quic::CodecErrorCode::truncated_input);
 
-    const auto oversized_scid = connection.peek_next_packet_length(
+    auto oversized_scid = connection.peek_next_packet_length(
         bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x15}));
     ASSERT_FALSE(oversized_scid.has_value());
     EXPECT_EQ(oversized_scid.error().code, coquic::quic::CodecErrorCode::invalid_varint);
 
-    const auto unsupported_type = connection.peek_next_packet_length(
+    auto unsupported_type = connection.peek_next_packet_length(
         bytes_from_ints({0xf0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00}));
     ASSERT_FALSE(unsupported_type.has_value());
     EXPECT_EQ(unsupported_type.error().code, coquic::quic::CodecErrorCode::unsupported_packet_type);
 
-    const auto token_too_long = connection.peek_next_packet_length(
+    auto token_too_long = connection.peek_next_packet_length(
         bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02}));
     ASSERT_FALSE(token_too_long.has_value());
     EXPECT_EQ(token_too_long.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
 
-    const auto payload_too_long = connection.peek_next_packet_length(
+    auto payload_too_long = connection.peek_next_packet_length(
         bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0x02}));
     ASSERT_FALSE(payload_too_long.has_value());
     EXPECT_EQ(payload_too_long.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);

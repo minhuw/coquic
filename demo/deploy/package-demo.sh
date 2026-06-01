@@ -12,6 +12,7 @@ wasm_module="$(realpath -m -- "${requested_wasm_module}")"
 standalone_dir="${next_dir}/.next/standalone"
 static_dir="${next_dir}/.next/static"
 public_dir="${next_dir}/public"
+next_runtime_router_utils_dir="${next_dir}/node_modules/next/dist/server/lib/router-utils"
 rag_dir="${repo_root}/rag"
 rfc_dir="${repo_root}/references/rfc"
 rag_artifacts_dir="${repo_root}/.rag/artifacts"
@@ -28,6 +29,10 @@ if [[ ! -d "${static_dir}" ]]; then
 fi
 if [[ ! -d "${public_dir}" ]]; then
   echo "missing Next.js public directory: ${public_dir}" >&2
+  exit 1
+fi
+if [[ ! -d "${next_runtime_router_utils_dir}" ]]; then
+  echo "missing Next.js router runtime directory: ${next_runtime_router_utils_dir}" >&2
   exit 1
 fi
 if [[ ! -f "${wasm_module}" ]]; then
@@ -57,6 +62,9 @@ fi
 rm -rf -- "${output_dir}"
 install -d -m 755 -- "${output_dir}"
 cp -R -- "${standalone_dir}/." "${output_dir}/"
+install -d -m 755 -- "${output_dir}/node_modules/next/dist/server/lib"
+rm -rf -- "${output_dir}/node_modules/next/dist/server/lib/router-utils"
+cp -R -- "${next_runtime_router_utils_dir}" "${output_dir}/node_modules/next/dist/server/lib/router-utils"
 install -d -m 755 -- "${output_dir}/.next"
 cp -R -- "${static_dir}" "${output_dir}/.next/static"
 cp -R -- "${public_dir}" "${output_dir}/public"
@@ -74,6 +82,11 @@ cp -R -- "${rfc_dir}" "${output_dir}/references/rfc"
 if [[ -d "${rag_artifacts_dir}" ]]; then
   install -d -m 755 -- "${output_dir}/.rag"
   cp -R -- "${rag_artifacts_dir}" "${output_dir}/.rag/artifacts"
+fi
+
+if [[ ! -f "${output_dir}/node_modules/next/dist/server/lib/router-utils/is-postpone.js" ]]; then
+  echo "packaged Next.js server is missing router-utils/is-postpone.js" >&2
+  exit 1
 fi
 
 printf '%s\n' "${output_dir}"

@@ -176,7 +176,7 @@ EVP_CIPHER_CTX *prepare_header_protection_aes_context(ReusableCipherContext &cac
     }
 
     const auto *init_cipher = same_configuration ? nullptr : cipher;
-    const auto key_data = same_configuration ? nullptr : openssl_data(key);
+    auto key_data = same_configuration ? nullptr : openssl_data(key);
     auto init_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::header_protection_aes_init) |
         (EVP_EncryptInit_ex(context, init_cipher, nullptr, key_data, nullptr) <= 0);
@@ -1163,7 +1163,7 @@ CodecResult<std::size_t> make_header_protection_mask_into(CipherSuite cipher_sui
         }
 
         int final_length = 0;
-        const auto final_failed =
+        auto final_failed =
             consume_packet_crypto_fault(PacketCryptoFaultPoint::header_protection_chacha_final) |
             (EVP_EncryptFinal_ex(
                  context,
@@ -1190,7 +1190,7 @@ CodecResult<std::size_t> make_header_protection_mask_into(CipherSuite cipher_sui
         &EVP_aes_128_ecb,
         &EVP_aes_256_ecb,
     };
-    const auto cipher = kHeaderProtectionAesCiphers[static_cast<std::size_t>(cipher_suite)]();
+    auto cipher = kHeaderProtectionAesCiphers[static_cast<std::size_t>(cipher_suite)]();
     auto *context = prepare_header_protection_aes_context(cache, cipher, input.hp_key);
     if (context == nullptr) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::header_protection_failed, 0);
@@ -1335,14 +1335,14 @@ bool packet_crypto_cached_header_protection_mismatch_branch_coverage_for_tests()
 
     auto missing_inputs_secret = secret;
     missing_inputs_secret.cached_packet_protection_inputs.reset();
-    const auto missing_inputs_expanded = expand_traffic_secret_cached(missing_inputs_secret);
+    auto missing_inputs_expanded = expand_traffic_secret_cached(missing_inputs_secret);
     bool missing_inputs_rebuilds_cache = missing_inputs_expanded.has_value();
     missing_inputs_rebuilds_cache &=
         missing_inputs_secret.cached_packet_protection_inputs.has_value();
 
     auto mismatched_inputs_secret = secret;
-    const auto stale_hp_key = mismatched_inputs_secret.cached_packet_protection_keys->hp_key;
-    const auto mismatched_inputs_expanded = expand_traffic_secret_cached(mismatched_inputs_secret);
+    auto stale_hp_key = mismatched_inputs_secret.cached_packet_protection_keys->hp_key;
+    auto mismatched_inputs_expanded = expand_traffic_secret_cached(mismatched_inputs_secret);
     bool mismatched_inputs_refreshes_cache = mismatched_inputs_expanded.has_value();
     mismatched_inputs_refreshes_cache &=
         mismatched_inputs_secret.cached_packet_protection_inputs.has_value();
@@ -1381,15 +1381,14 @@ COQUIC_NO_PROFILE bool packet_crypto_open_into_internal_guard_coverage_for_tests
         std::byte{0x28}, std::byte{0x29}, std::byte{0x2a}, std::byte{0x2b},
         std::byte{0x2c}, std::byte{0x2d}, std::byte{0x2e}, std::byte{0x2f},
     };
-    const ScopedPacketCryptoFaultInjector invalid_length_fault(
-        PacketCryptoFaultPoint::open_length_guard);
-    const auto invalid_lengths =
+    ScopedPacketCryptoFaultInjector invalid_length_fault(PacketCryptoFaultPoint::open_length_guard);
+    auto invalid_lengths =
         open_aead_into(EVP_aes_128_gcm(), key, nonce, {}, tag_only_ciphertext, output);
-    const bool invalid_length_guard =
+    bool invalid_length_guard =
         !invalid_lengths.has_value() &&
         invalid_lengths.error().code == CodecErrorCode::invalid_packet_protection_state;
 
-    const std::array chacha_key{
+    std::array chacha_key{
         std::byte{0x00}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
         std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08}, std::byte{0x09},
         std::byte{0x0a}, std::byte{0x0b}, std::byte{0x0c}, std::byte{0x0d}, std::byte{0x0e},
@@ -1398,7 +1397,7 @@ COQUIC_NO_PROFILE bool packet_crypto_open_into_internal_guard_coverage_for_tests
         std::byte{0x19}, std::byte{0x1a}, std::byte{0x1b}, std::byte{0x1c}, std::byte{0x1d},
         std::byte{0x1e}, std::byte{0x1f},
     };
-    const std::array sample{
+    std::array sample{
         std::byte{0x20}, std::byte{0x21}, std::byte{0x22}, std::byte{0x23},
         std::byte{0x24}, std::byte{0x25}, std::byte{0x26}, std::byte{0x27},
         std::byte{0x28}, std::byte{0x29}, std::byte{0x2a}, std::byte{0x2b},
@@ -1438,23 +1437,21 @@ COQUIC_NO_PROFILE bool packet_crypto_open_into_internal_guard_coverage_for_tests
     }
 
     reset_packet_crypto_runtime_caches_for_tests();
-    const auto aes_context_prime =
-        make_header_protection_mask_into(CipherSuite::tls_aes_128_gcm_sha256,
-                                         HeaderProtectionMaskInput{
-                                             .hp_key = key,
-                                             .sample = sample,
-                                         },
-                                         mask);
-    const ScopedPacketCryptoFaultInjector aes_context_fault(
+    auto aes_context_prime = make_header_protection_mask_into(CipherSuite::tls_aes_128_gcm_sha256,
+                                                              HeaderProtectionMaskInput{
+                                                                  .hp_key = key,
+                                                                  .sample = sample,
+                                                              },
+                                                              mask);
+    ScopedPacketCryptoFaultInjector aes_context_fault(
         PacketCryptoFaultPoint::header_protection_aes_context_new);
-    const auto aes_context_failure =
-        make_header_protection_mask_into(CipherSuite::tls_aes_128_gcm_sha256,
-                                         HeaderProtectionMaskInput{
-                                             .hp_key = key,
-                                             .sample = sample,
-                                         },
-                                         mask);
-    const bool aes_context_guard =
+    auto aes_context_failure = make_header_protection_mask_into(CipherSuite::tls_aes_128_gcm_sha256,
+                                                                HeaderProtectionMaskInput{
+                                                                    .hp_key = key,
+                                                                    .sample = sample,
+                                                                },
+                                                                mask);
+    bool aes_context_guard =
         aes_context_prime.has_value() && !aes_context_failure.has_value() &&
         aes_context_failure.error().code == CodecErrorCode::header_protection_failed;
 

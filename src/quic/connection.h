@@ -806,11 +806,13 @@ class QuicConnection {
                                                    std::span<const std::byte> owned_bytes,
                                                    std::optional<SharedBytes> shared_bytes,
                                                    bool fin);
+    void maybe_emit_zero_rtt_attempted_event();
     PeerStreamOpenLimits peer_stream_open_limits() const;
     bool has_pending_application_send() const;
     bool has_pending_congestion_controlled_send() const;
     bool has_pending_fresh_application_stream_send() const;
     bool has_pending_application_control_send(bool application_ack_due) const;
+    bool has_application_space_sendable_data(bool application_ack_due) const;
     std::optional<std::size_t> minimum_pending_application_stream_wire_bytes() const;
     std::optional<std::size_t> minimum_pending_application_stream_datagram_bytes() const;
     std::optional<std::size_t> minimum_pending_application_datagram_wire_bytes() const;
@@ -912,6 +914,8 @@ class QuicConnection {
     void mark_failed();
     void queue_state_change(QuicCoreStateChange change);
     void note_endpoint_route_state_changed();
+    bool accepts_greased_quic_bit() const;
+    bool can_skip_receive_tls_sync(std::span<const std::byte> bytes) const;
 
     QuicCoreConfig config_;
     bool latency_spin_bit_disabled_ = true;

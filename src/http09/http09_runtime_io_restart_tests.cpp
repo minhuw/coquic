@@ -934,10 +934,10 @@ ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_d
         .source_len = inbound_peer_len,
         .has_source = true,
     };
-    const auto parsed_datagram = parse_server_datagram_for_routing(
+    auto parsed_datagram_for_routing = parse_server_datagram_for_routing(
         std::span<const std::byte>(std::get<QuicCoreInboundDatagram>(*step.input).bytes.data(),
                                    std::get<QuicCoreInboundDatagram>(*step.input).bytes.size()));
-    if (!parsed_datagram.has_value()) {
+    if (!parsed_datagram_for_routing.has_value()) {
         core = std::move(session.core);
         return result;
     }
@@ -945,7 +945,7 @@ ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_d
     bool erased = false;
     ServerConnectionIdRouteMap connection_id_routes;
     result.processed = process_existing_server_session_datagram(
-        session, step, connection_id_routes, *parsed_datagram,
+        session, step, connection_id_routes, *parsed_datagram_for_routing,
         [&](const std::string &) { erased = true; });
     result.erased = erased;
     if (const auto route_it = session.state.path_routes.find(2);
@@ -1161,11 +1161,12 @@ bool version_negotiation_without_source_connection_id_fails_for_tests() {
 }
 
 std::optional<QuicConnectionHandle> seed_live_backend_response_for_tests(
-    ScopedRuntimeTempDirForTests &document_root, const Http09RuntimeConfig &config, QuicCore &core,
-    EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
-    ScriptedIoBackendForTests &backend, QuicRouteHandle route_handle) {
+    ScopedRuntimeTempDirForTests &document_root, const Http09RuntimeConfig &config,
+    QuicCore &server_core, EndpointDriveState &transport_state,
+    ServerConnectionEndpointMap &endpoint_map, ScriptedIoBackendForTests &backend,
+    QuicRouteHandle route_handle) {
     document_root.write_file("large.bin", std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
-    core = QuicCore(make_runtime_server_endpoint_config(
+    server_core = QuicCore(make_runtime_server_endpoint_config(
         config, TlsIdentity{
                     .certificate_pem = read_text_file("tests/fixtures/quic-server-cert.pem"),
                     .private_key_pem = read_text_file("tests/fixtures/quic-server-key.pem"),
@@ -1176,7 +1177,7 @@ std::optional<QuicConnectionHandle> seed_live_backend_response_for_tests(
     }));
     QuicCoreTimePoint step_now = now();
     const auto accepted_connection =
-        drive_live_server_endpoint_handshake_for_tests(client, route_handle, core, step_now);
+        drive_live_server_endpoint_handshake_for_tests(client, route_handle, server_core, step_now);
     if (!accepted_connection.has_value()) {
         return std::nullopt;
     }
@@ -1190,30 +1191,29 @@ std::optional<QuicConnectionHandle> seed_live_backend_response_for_tests(
         },
         step_now);
     step_now += std::chrono::milliseconds(1);
-    endpoints.emplace(*accepted_connection,
-                      ServerConnectionEndpointState{
-                          .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
-                              .document_root = document_root.path(),
-                          }),
-                      });
+    endpoint_map.emplace(*accepted_connection,
+                         ServerConnectionEndpointState{
+                             .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                                 .document_root = document_root.path(),
+                             }),
+                         });
     static_cast<void>(process_server_endpoint_core_result_with_backend(
-        core, transport_state, endpoints, config.document_root,
-        relay_send_datagrams_to_endpoint_core_for_tests(request_result, core, route_handle,
+        server_core, transport_state, endpoint_map, config.document_root,
+        relay_send_datagrams_to_endpoint_core_for_tests(request_result, server_core, route_handle,
                                                         step_now),
         route_handle, backend));
     step_now += std::chrono::milliseconds(1);
-    const auto response_time = step_now;
-    step_now += std::chrono::milliseconds(1);
     static_cast<void>(relay_send_datagrams_to_endpoint_core_for_tests(
         relay_backend_sent_datagrams_to_client_core_for_tests(backend.sent_datagrams, client,
-                                                              response_time),
-        core, route_handle, step_now));
+                                                              step_now),
+        server_core, route_handle, step_now + std::chrono::milliseconds(1)));
     return accepted_connection;
 }
 
-std::size_t count_pending_server_endpoints_for_tests(const ServerConnectionEndpointMap &endpoints) {
+std::size_t
+count_pending_server_endpoints_for_tests(const ServerConnectionEndpointMap &endpoint_map) {
     return static_cast<std::size_t>(
-        std::count_if(endpoints.begin(), endpoints.end(),
+        std::count_if(endpoint_map.begin(), endpoint_map.end(),
                       [](const auto &entry) { return entry.second.has_pending_work; }));
 }
 
@@ -1224,29 +1224,29 @@ struct ServerBackendLoopInitialStateForTests {
 };
 
 ServerBackendLoopInitialStateForTests
-capture_server_backend_loop_initial_state_for_tests(const ServerConnectionEndpointMap &endpoints,
+capture_server_backend_loop_initial_state_for_tests(const ServerConnectionEndpointMap &endpoint_map,
                                                     const ScriptedIoBackendForTests &backend) {
     return ServerBackendLoopInitialStateForTests{
-        .endpoints = endpoints.size(),
-        .pending_endpoints = count_pending_server_endpoints_for_tests(endpoints),
+        .endpoints = endpoint_map.size(),
+        .pending_endpoints = count_pending_server_endpoints_for_tests(endpoint_map),
         .send_calls = backend.sent_datagrams.size(),
     };
 }
 
 ServerLoopResultForTests collect_server_backend_loop_result_for_tests(
-    const Http09RuntimeConfig &config, QuicCore &core, EndpointDriveState &transport_state,
-    ServerConnectionEndpointMap &endpoints, ScriptedIoBackendForTests &backend,
+    const Http09RuntimeConfig &config, QuicCore &server_core, EndpointDriveState &transport_state,
+    ServerConnectionEndpointMap &endpoint_map, ScriptedIoBackendForTests &backend,
     const ServerBackendLoopInitialStateForTests &initial_state) {
     return ServerLoopResultForTests{
-        .exit_code =
-            run_http09_server_backend_loop(config, core, transport_state, endpoints, backend),
+        .exit_code = run_http09_server_backend_loop(config, server_core, transport_state,
+                                                    endpoint_map, backend),
         .wait_calls = backend.wait_requests.size(),
         .initial_send_calls = initial_state.send_calls,
         .send_calls = backend.sent_datagrams.size(),
         .initial_endpoints = initial_state.endpoints,
         .initial_pending_endpoints = initial_state.pending_endpoints,
-        .remaining_endpoints = endpoints.size(),
-        .remaining_pending_endpoints = count_pending_server_endpoints_for_tests(endpoints),
+        .remaining_endpoints = endpoint_map.size(),
+        .remaining_pending_endpoints = count_pending_server_endpoints_for_tests(endpoint_map),
     };
 }
 

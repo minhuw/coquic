@@ -654,8 +654,8 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
 
         const auto destination_connection_id_bytes =
             reader.read_exact(destination_connection_id_length).value();
-        const auto packet_number_length = static_cast<std::uint8_t>((first_byte & 0x03u) + 1);
-        auto decoded_packet_number = read_packet_number(reader, packet_number_length);
+        auto decoded_packet_number =
+            read_packet_number(reader, static_cast<std::uint8_t>((first_byte & 0x03u) + 1));
         if (!decoded_packet_number.has_value()) {
             return CodecResult<PacketDecodeResult>::failure(decoded_packet_number.error().code,
                                                             decoded_packet_number.error().offset);
@@ -696,7 +696,7 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
                             destination_connection_id_bytes.begin(),
                             destination_connection_id_bytes.end(),
                         },
-                    .packet_number_length = packet_number_length,
+                    .packet_number_length = static_cast<std::uint8_t>((first_byte & 0x03u) + 1),
                     .truncated_packet_number = decoded_packet_number.value(),
                     .frames = std::move(frames),
                 },

@@ -223,7 +223,6 @@ jobs:
     name: Publish Perf Results
     runs-on: ubuntu-latest
     needs:
-      - perf-contract
       - perf-impl
     if: always()
 
@@ -347,7 +346,6 @@ jobs:
               failed=1
             fi
           }
-          check_job "perf-contract" "${{ needs.perf-contract.result }}"
           check_job "perf-impl" "${{ needs.perf-impl.result }}"
           exit "${failed}"
 

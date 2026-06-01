@@ -104,7 +104,8 @@ previous_release_target=""
 rollback_armed=0
 rollback_performed=0
 deploy_succeeded=0
-verification_attempts=5
+verification_attempts=30
+verification_sleep_seconds=2
 same_release_repair_mode=0
 
 cleanup_local() {
@@ -551,98 +552,159 @@ if [[ -z "${curl_http3_bin}" ]]; then
 fi
 
 headers_verified=0
+last_headers=""
+last_headers_error=""
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: headers
   headers=""
-  if headers="$(timeout 20s "${curl_http3_bin}" -I "${url}" 2>/dev/null)"; then
+  headers_error_path="${staging_dir}/verify-headers-${attempt}.err"
+  if headers="$(timeout 20s "${curl_http3_bin}" -I "${url}" 2>"${headers_error_path}")"; then
     normalized_headers="$(printf '%s' "${headers}" | tr -d '\r')"
+    last_headers="${normalized_headers}"
+    last_headers_error=""
     if grep -Fq 'HTTP/1.1 200 OK' <<<"${normalized_headers}" &&
        grep -Eiq '^alt-svc:[[:space:]].*h3=":'"${public_port}"'".*ma=60' <<<"${normalized_headers}"; then
       headers_verified=1
       break
     fi
+  else
+    last_headers_error="$(cat "${headers_error_path}" 2>/dev/null || true)"
   fi
   if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
-    sleep "${attempt}"
+    sleep "${verification_sleep_seconds}"
   fi
 done
 if [[ ${headers_verified} -ne 1 ]]; then
+  if [[ -n "${last_headers}" ]]; then
+    echo "last header verification response:" >&2
+    printf '%s\n' "${last_headers}" >&2
+  fi
+  if [[ -n "${last_headers_error}" ]]; then
+    echo "last header verification error:" >&2
+    printf '%s\n' "${last_headers_error}" >&2
+  fi
   fail_with_rollback "deployment verification failed: headers did not converge after retries"
 fi
 
 http3_verified=0
+last_http3_error=""
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: http3-version
   http3_version=""
-  if http3_version="$(timeout 20s "${curl_http3_bin}" --http3-only -sS -o /dev/null -w '%{http_version}' "${url}" 2>/dev/null)"; then
+  http3_error_path="${staging_dir}/verify-http3-${attempt}.err"
+  if http3_version="$(timeout 20s "${curl_http3_bin}" --http3-only -sS -o /dev/null -w '%{http_version}' "${url}" 2>"${http3_error_path}")"; then
     if [[ "${http3_version}" == "3" ]]; then
       http3_verified=1
       break
     fi
+  else
+    last_http3_error="$(cat "${http3_error_path}" 2>/dev/null || true)"
   fi
   if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
-    sleep "${attempt}"
+    sleep "${verification_sleep_seconds}"
   fi
 done
 if [[ ${http3_verified} -ne 1 ]]; then
+  if [[ -n "${last_http3_error}" ]]; then
+    echo "last HTTP/3 verification error:" >&2
+    printf '%s\n' "${last_http3_error}" >&2
+  fi
   fail_with_rollback "deployment verification failed: HTTP/3 version did not converge after retries"
 fi
 
 page_verified=0
+last_page_error=""
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: page-markers
   page=""
-  if page="$(timeout 20s "${curl_http3_bin}" --http3-only -sS "${url}" 2>/dev/null)"; then
+  page_error_path="${staging_dir}/verify-page-${attempt}.err"
+  if page="$(timeout 20s "${curl_http3_bin}" --http3-only -sS "${url}" 2>"${page_error_path}")"; then
     # verification marker: coquic-wasm-demo-v1
     if grep -Fq "coquic-wasm-demo-v1" <<<"${page}"; then
       page_verified=1
       break
     fi
+  else
+    last_page_error="$(cat "${page_error_path}" 2>/dev/null || true)"
   fi
   if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
-    sleep "${attempt}"
+    sleep "${verification_sleep_seconds}"
   fi
 done
 if [[ ${page_verified} -ne 1 ]]; then
+  if [[ -n "${last_page_error}" ]]; then
+    echo "last page verification error:" >&2
+    printf '%s\n' "${last_page_error}" >&2
+  fi
   fail_with_rollback "deployment verification failed: page markers did not converge after retries"
 fi
 
 wasm_mime_verified=0
+last_wasm_headers=""
+last_wasm_error=""
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: wasm MIME
   wasm_headers=""
-  if wasm_headers="$(timeout 20s "${curl_http3_bin}" --http3-only -I "${url}coquic-wasm-quic.wasm" 2>/dev/null)"; then
+  wasm_error_path="${staging_dir}/verify-wasm-${attempt}.err"
+  if wasm_headers="$(timeout 20s "${curl_http3_bin}" --http3-only -I "${url}coquic-wasm-quic.wasm" 2>"${wasm_error_path}")"; then
     normalized_wasm_headers="$(printf '%s' "${wasm_headers}" | tr -d '\r')"
+    last_wasm_headers="${normalized_wasm_headers}"
+    last_wasm_error=""
     if grep -Eq '^HTTP/[0-9](\.[0-9])?[[:space:]]+200([[:space:]]|$)' <<<"${normalized_wasm_headers}" &&
        grep -Eiq '^content-type:[[:space:]]*application/wasm[[:space:]]*$' <<<"${normalized_wasm_headers}"; then
       wasm_mime_verified=1
       break
     fi
+  else
+    last_wasm_error="$(cat "${wasm_error_path}" 2>/dev/null || true)"
   fi
   if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
-    sleep "${attempt}"
+    sleep "${verification_sleep_seconds}"
   fi
 done
 if [[ ${wasm_mime_verified} -ne 1 ]]; then
+  if [[ -n "${last_wasm_headers}" ]]; then
+    echo "last wasm header verification response:" >&2
+    printf '%s\n' "${last_wasm_headers}" >&2
+  fi
+  if [[ -n "${last_wasm_error}" ]]; then
+    echo "last wasm header verification error:" >&2
+    printf '%s\n' "${last_wasm_error}" >&2
+  fi
   fail_with_rollback "deployment verification failed: wasm MIME type did not converge after retries"
 fi
 
 if [[ ${rag_env_configured} -eq 1 ]]; then
   qa_verified=0
+  last_qa_health=""
+  last_qa_error=""
   for attempt in $(seq 1 "${verification_attempts}"); do
     # verification retry loop: RAG QA health through Next rewrite
     qa_health=""
-    if qa_health="$(timeout 20s "${curl_http3_bin}" --http3-only -sS "${url}rag-api/api/health" 2>/dev/null)"; then
+    qa_error_path="${staging_dir}/verify-qa-${attempt}.err"
+    if qa_health="$(timeout 20s "${curl_http3_bin}" --http3-only -sS "${url}rag-api/api/health" 2>"${qa_error_path}")"; then
+      last_qa_health="${qa_health}"
+      last_qa_error=""
       if grep -Fq '"ready":true' <<<"${qa_health}"; then
         qa_verified=1
         break
       fi
+    else
+      last_qa_error="$(cat "${qa_error_path}" 2>/dev/null || true)"
     fi
     if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
-      sleep "${attempt}"
+      sleep "${verification_sleep_seconds}"
     fi
   done
   if [[ ${qa_verified} -ne 1 ]]; then
+    if [[ -n "${last_qa_health}" ]]; then
+      echo "last RAG QA health response:" >&2
+      printf '%s\n' "${last_qa_health}" >&2
+    fi
+    if [[ -n "${last_qa_error}" ]]; then
+      echo "last RAG QA health error:" >&2
+      printf '%s\n' "${last_qa_error}" >&2
+    fi
     fail_with_rollback "deployment verification failed: RAG QA health did not converge after retries"
   fi
 fi

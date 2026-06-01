@@ -66,7 +66,7 @@ TEST(QuicPerfBulkTest, DownloadRunWritesJsonSummary) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto json = read_result_text(json_path);
+    auto json = read_result_text(json_path);
     EXPECT_NE(json.find("\"mode\":\"bulk\""), std::string::npos);
     EXPECT_NE(json.find("\"direction\":\"download\""), std::string::npos);
     EXPECT_NE(json.find("\"bytes_received\":"), std::string::npos);
@@ -106,10 +106,10 @@ TEST(QuicPerfBulkTest, ZeroByteDownloadTargetCompletesAndWritesJsonSummary) {
     };
     ScopedPerfProcess client_process(client);
 
-    const auto exit_code = client_process.wait_for_exit(std::chrono::seconds{2});
+    auto exit_code = client_process.wait_for_exit(std::chrono::seconds{2});
     EXPECT_EQ(exit_code, std::optional<int>{0});
 
-    const auto json = read_result_text(json_path);
+    auto json = read_result_text(json_path);
     EXPECT_NE(json.find("\"mode\":\"bulk\""), std::string::npos);
     EXPECT_NE(json.find("\"direction\":\"download\""), std::string::npos);
     EXPECT_NE(json.find("\"status\":\"ok\""), std::string::npos);
@@ -147,7 +147,7 @@ TEST(QuicPerfBulkTest, UploadRunReportsServerReceivedByteCount) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto json = read_result_text(json_path);
+    auto json = read_result_text(json_path);
     EXPECT_NE(json.find("\"direction\":\"upload\""), std::string::npos);
     EXPECT_NE(json.find("\"bytes_sent\":32768"), std::string::npos);
     EXPECT_NE(json.find("\"bytes_received\":0"), std::string::npos);
@@ -244,7 +244,7 @@ TEST(QuicPerfBulkTest, TimedDownloadWaitsOnMeasurementDeadline) {
     EXPECT_EQ(client.next_wait_wakeup(std::nullopt), std::optional{client.measure_deadline_});
     EXPECT_EQ(client.next_wait_wakeup(late_core_wakeup), std::optional{client.measure_deadline_});
 
-    const auto early_core_wakeup = client.measure_deadline_ - std::chrono::milliseconds{25};
+    auto early_core_wakeup = client.measure_deadline_ - std::chrono::milliseconds{25};
     EXPECT_EQ(client.next_wait_wakeup(early_core_wakeup), std::optional{early_core_wakeup});
 }
 
@@ -351,7 +351,7 @@ TEST(QuicPerfBulkTest, TimedDownloadDoesNotReportZeroByteMeasurementAsSuccess) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 1);
-    const auto json = read_result_text(json_path);
+    auto json = read_result_text(json_path);
     EXPECT_NE(json.find("\"status\":\"failed\""), std::string::npos);
     EXPECT_NE(json.find("timed bulk download measured zero bytes"), std::string::npos);
 }
@@ -393,20 +393,20 @@ TEST(QuicPerfBulkTest, TimedDownloadUsesMeasurementWindow) {
     const auto wall_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started_at);
 
-    const auto json = read_result_text(json_path);
+    auto json = read_result_text(json_path);
     const auto warmup_ms = json_u64_field(json, "warmup_ms");
     const auto elapsed_ms = json_u64_field(json, "elapsed_ms");
-    const auto measured_bytes_received = json_first_u64_field(json, "bytes_received");
+    auto measured_bytes_received = json_first_u64_field(json, "bytes_received");
     const auto streams = json_u64_field(json, "streams");
 
     ASSERT_TRUE(warmup_ms.has_value());
     ASSERT_TRUE(elapsed_ms.has_value());
     ASSERT_TRUE(measured_bytes_received.has_value());
     ASSERT_TRUE(streams.has_value());
-    const auto warmup_ms_value = warmup_ms.value_or(0);
+    auto warmup_ms_value = warmup_ms.value_or(0);
     const auto elapsed_ms_value = elapsed_ms.value_or(0);
-    const auto measured_bytes_received_value = measured_bytes_received.value_or(0);
-    const auto streams_value = streams.value_or(0);
+    auto measured_bytes_received_value = measured_bytes_received.value_or(0);
+    auto streams_value = streams.value_or(0);
     EXPECT_EQ(warmup_ms_value, 100u);
     EXPECT_EQ(streams_value, 2u);
     EXPECT_GE(elapsed_ms_value, 120u);
@@ -506,12 +506,12 @@ TEST(QuicPerfBulkTest, TimedDownloadDurationScalesMeasuredBytes) {
         return json_first_u64_field(json, "bytes_received");
     };
 
-    const auto short_bytes = run_timed_client(std::chrono::milliseconds{150}, short_json_path);
-    const auto long_bytes = run_timed_client(std::chrono::milliseconds{800}, long_json_path);
+    auto short_bytes = run_timed_client(std::chrono::milliseconds{150}, short_json_path);
+    auto long_bytes = run_timed_client(std::chrono::milliseconds{800}, long_json_path);
     ASSERT_TRUE(short_bytes.has_value());
     ASSERT_TRUE(long_bytes.has_value());
-    const auto short_bytes_value = short_bytes.value_or(0);
-    const auto long_bytes_value = long_bytes.value_or(0);
+    auto short_bytes_value = short_bytes.value_or(0);
+    auto long_bytes_value = long_bytes.value_or(0);
     EXPECT_GT(short_bytes_value, 0u);
     EXPECT_GT(long_bytes_value, short_bytes_value + 8192u);
 }

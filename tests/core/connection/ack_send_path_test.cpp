@@ -2655,7 +2655,7 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
 
     struct ClientAckObserver {
         static void note(const coquic::quic::QuicConnection &client_connection,
-                         const coquic::quic::QuicCoreResult &core_result, bool &client_ack_seen) {
+                         const coquic::quic::QuicCoreResult &core_result, bool &ack_detected) {
             for (const auto &outbound_datagram :
                  coquic::quic::test::send_datagrams_from(core_result)) {
                 for (const auto &decoded_packet :
@@ -2666,15 +2666,15 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
                         continue;
                     }
                     for (const auto &frame : one_rtt_packet->frames) {
-                        client_ack_seen = client_ack_seen ||
-                                          std::holds_alternative<coquic::quic::AckFrame>(frame);
+                        ack_detected =
+                            ack_detected || std::holds_alternative<coquic::quic::AckFrame>(frame);
                     }
                 }
             }
         }
     };
-    bool client_ack_seen = false;
-    ClientAckObserver::note(*client.connection_, response_delivered, client_ack_seen);
+    bool client_ack_observed = false;
+    ClientAckObserver::note(*client.connection_, response_delivered, client_ack_observed);
 
     ASSERT_TRUE(client.connection_->handshake_confirmed_);
     auto to_server = response_delivered;
@@ -2682,7 +2682,7 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
     auto step_now = coquic::quic::test::test_time(5);
     for (int i = 0; i < 64; ++i) {
         if (!coquic::quic::test::send_datagrams_from(to_server).empty()) {
-            ClientAckObserver::note(*client.connection_, to_server, client_ack_seen);
+            ClientAckObserver::note(*client.connection_, to_server, client_ack_observed);
             to_client =
                 coquic::quic::test::relay_send_datagrams_to_peer(to_server, server, step_now);
             to_server.effects.clear();
@@ -2717,9 +2717,9 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
         client.advance(coquic::quic::QuicCoreTimerExpired{}, optional_value_or_terminate(deadline));
     const auto timeout_datagrams = coquic::quic::test::send_datagrams_from(timeout_result);
     ASSERT_FALSE(timeout_datagrams.empty());
-    ClientAckObserver::note(*client.connection_, timeout_result, client_ack_seen);
+    ClientAckObserver::note(*client.connection_, timeout_result, client_ack_observed);
 
-    EXPECT_TRUE(client_ack_seen);
+    EXPECT_TRUE(client_ack_observed);
 }
 
 TEST(QuicCoreTest, SelectPtoProbePrefersRetransmittableCryptoOverPingFallback) {

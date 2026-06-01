@@ -346,8 +346,49 @@
     @apply rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-1.5 py-0.5 font-mono text-[0.88em] text-[var(--ink)];
   }
 
+  .docs-markdown table,
+  .qa-markdown table {
+    @apply block max-w-full overflow-x-auto rounded-[var(--radius)] border border-[var(--line)] border-collapse border-spacing-0 bg-[var(--surface)] text-sm;
+  }
+
+  .docs-markdown thead,
+  .qa-markdown thead {
+    @apply bg-[#f6f8fa];
+  }
+
+  .docs-markdown th,
+  .qa-markdown th {
+    @apply border border-[var(--line-strong)] px-3 py-2 text-left align-top text-xs font-semibold uppercase leading-snug text-[var(--ink)];
+    border-bottom-width: 2px;
+  }
+
+  .docs-markdown td,
+  .qa-markdown td {
+    @apply border border-[var(--line)] px-3 py-2.5 align-top text-sm leading-relaxed text-[var(--soft)];
+    overflow-wrap: anywhere;
+  }
+
+  .docs-markdown tbody tr:nth-child(even),
+  .qa-markdown tbody tr:nth-child(even) {
+    @apply bg-[#f6f8fa];
+  }
+
+  .docs-markdown td > :first-child,
+  .docs-markdown th > :first-child,
+  .qa-markdown td > :first-child,
+  .qa-markdown th > :first-child {
+    @apply mt-0;
+  }
+
+  .docs-markdown td > :last-child,
+  .docs-markdown th > :last-child,
+  .qa-markdown td > :last-child,
+  .qa-markdown th > :last-child {
+    @apply mb-0;
+  }
+
   .qa-markdown {
-    @apply grid gap-3 text-[15px] leading-relaxed text-[var(--soft)];
+    @apply grid min-w-0 max-w-full gap-3 overflow-hidden text-[15px] leading-relaxed text-[var(--soft)];
   }
 
   .qa-markdown h3,
@@ -356,12 +397,13 @@
   }
 
   .qa-markdown p {
-    @apply text-[15px] leading-relaxed text-[var(--soft)];
+    @apply min-w-0 text-[15px] leading-relaxed text-[var(--soft)];
+    overflow-wrap: anywhere;
   }
 
   .qa-markdown ul,
   .qa-markdown ol {
-    @apply grid gap-2 pl-5;
+    @apply grid min-w-0 max-w-full gap-2 pl-5;
   }
 
   .qa-markdown ul {
@@ -373,7 +415,8 @@
   }
 
   .qa-markdown li {
-    @apply pl-1 text-[15px] leading-relaxed text-[var(--soft)];
+    @apply min-w-0 pl-1 text-[15px] leading-relaxed text-[var(--soft)];
+    overflow-wrap: anywhere;
   }
 
   .qa-markdown strong {
@@ -385,7 +428,7 @@
   }
 
   .qa-markdown pre {
-    @apply max-w-full overflow-x-auto rounded-[var(--radius)] border border-[var(--line)] bg-[#f6f8fa] p-3;
+    @apply min-w-0 max-w-full overflow-x-auto rounded-[var(--radius)] border border-[var(--line)] bg-[#f6f8fa] p-3;
   }
 
   .qa-markdown pre code {

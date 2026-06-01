@@ -121,6 +121,14 @@ struct Http3Response {
     Http3Headers trailers;
 };
 
+struct Http3ResponsePart {
+    std::vector<Http3ResponseHead> interim_heads;
+    std::optional<Http3ResponseHead> head;
+    std::vector<std::byte> body;
+    Http3Headers trailers;
+    bool complete = false;
+};
+
 struct Http3PeerRequestHeadEvent {
     std::uint64_t stream_id = 0;
     Http3RequestHead head;

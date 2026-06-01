@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Sequence
@@ -15,9 +16,8 @@ OPENROUTER_CHAT_TIMEOUT_SECONDS = 20
 FREE_ANSWER_MODELS = (
     ("openai/gpt-oss-120b:free", "OpenAI: gpt-oss-120b (free)"),
     ("nvidia/nemotron-3-super-120b-a12b:free", "NVIDIA: Nemotron 3 Super (free)"),
-    ("moonshotai/kimi-k2.6:free", "MoonshotAI: Kimi K2.6 (free)"),
-    ("qwen/qwen3-coder:free", "Qwen: Qwen3 Coder 480B A35B (free)"),
-    ("meta-llama/llama-3.3-70b-instruct:free", "Meta: Llama 3.3 70B Instruct (free)"),
+    ("z-ai/glm-4.5-air:free", "Z.AI: GLM 4.5 Air (free)"),
+    ("google/gemma-4-31b-it:free", "Google: Gemma 4 31B IT (free)"),
 )
 FREE_ANSWER_MODEL_IDS = frozenset(model_id for model_id, _label in FREE_ANSWER_MODELS)
 
@@ -38,6 +38,14 @@ class ChatResult:
     answer: str
     usage: ChatUsage
     model: str
+
+
+@dataclass(frozen=True)
+class ChatStreamChunk:
+    delta: str = ""
+    usage: ChatUsage | None = None
+    model: str | None = None
+    done: bool = False
 
 
 class OpenRouterChatClient:
@@ -109,6 +117,55 @@ class OpenRouterChatClient:
 
         return self._chat(payload, requested_model=selected_model)
 
+    def stream_answer(
+        self,
+        *,
+        question: str,
+        sections: Sequence[dict[str, object]],
+        max_tokens: int,
+        user_id: str | None = None,
+        model: str | None = None,
+    ):
+        selected_model = self._selected_model(model)
+        payload: dict[str, object] = {
+            "model": selected_model,
+            "messages": [
+                {"role": "system", "content": _system_prompt()},
+                {"role": "user", "content": _user_prompt(question, sections)},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if user_id:
+            payload["user"] = user_id
+        yield from self._chat_stream(payload, requested_model=selected_model)
+
+    def stream_answer_direct(
+        self,
+        *,
+        question: str,
+        max_tokens: int,
+        user_id: str | None = None,
+        model: str | None = None,
+    ):
+        selected_model = self._selected_model(model)
+        payload: dict[str, object] = {
+            "model": selected_model,
+            "messages": [
+                {"role": "system", "content": _direct_system_prompt()},
+                {"role": "user", "content": question.strip()},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if user_id:
+            payload["user"] = user_id
+        yield from self._chat_stream(payload, requested_model=selected_model)
+
     def _selected_model(self, model: str | None) -> str:
         try:
             return normalize_answer_model(model or self._model)
@@ -155,6 +212,42 @@ class OpenRouterChatClient:
                 time.sleep(0.3 * (2**attempt))
         raise OpenRouterChatError(f"OpenRouter request failed: {last_error}") from last_error
 
+    def _chat_stream(self, payload: dict[str, object], *, requested_model: str):
+        if not self._api_key:
+            raise OpenRouterChatError("OPENROUTER_API_KEY is required for answer generation")
+        last_model = requested_model
+        last_usage: ChatUsage | None = None
+        try:
+            with self._client_or_create().stream(
+                "POST",
+                self._base_url,
+                json=payload,
+                timeout=self._timeout,
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    event = _parse_sse_line(line)
+                    if event is None:
+                        continue
+                    if event == "[DONE]":
+                        yield ChatStreamChunk(usage=last_usage, model=last_model, done=True)
+                        return
+                    try:
+                        body = json.loads(event)
+                    except ValueError as error:
+                        raise OpenRouterChatError("OpenRouter stream returned invalid JSON") from error
+                    model = _model_from_response(body, last_model)
+                    last_model = model
+                    usage = _usage_from_response(body)
+                    if usage != ChatUsage():
+                        last_usage = usage
+                    delta = _delta_from_stream_response(body)
+                    if delta:
+                        yield ChatStreamChunk(delta=delta, model=model)
+                yield ChatStreamChunk(usage=last_usage, model=last_model, done=True)
+        except httpx.HTTPError as error:
+            raise OpenRouterChatError(f"OpenRouter stream failed: {error}") from error
+
     def _client_or_create(self) -> httpx.Client:
         if self._client is None:
             self._client = httpx.Client(
@@ -190,8 +283,10 @@ def _system_prompt() -> str:
         "excerpts are weak or incomplete, still answer from general knowledge "
         "when the question is clearly in scope, and say which parts are based "
         "on general protocol knowledge rather than the provided excerpts. Keep "
-        "the answer concise and practical. Wrap packet diagrams, frame layouts, "
-        "and other fixed-width ASCII art in triple-backtick Markdown code blocks."
+        "the answer concise and practical. Answer in the same natural language "
+        "as the user's question unless the user explicitly asks for another "
+        "language. Wrap packet diagrams, frame layouts, and other fixed-width "
+        "ASCII art in triple-backtick Markdown code blocks."
     )
 
 
@@ -201,7 +296,8 @@ def _direct_system_prompt() -> str:
         "transport-protocol topics from your general networking and protocol "
         "knowledge. Do not use or refer to retrieved context, a local corpus, "
         "or citations. Keep the answer concise, practical, and clear about "
-        "protocol tradeoffs."
+        "protocol tradeoffs. Answer in the same natural language as the user's "
+        "question unless the user explicitly asks for another language."
     )
 
 
@@ -218,7 +314,8 @@ def _user_prompt(question: str, sections: Sequence[dict[str, object]]) -> str:
         f"Retrieved context:\n{context}\n\n"
         "Answer with a concise explanation and cite supporting sections by "
         "their labels, for example '(RFC 9000 Section 1)'. Do not use source "
-        "line markers such as ''. "
+        "line markers such as ''. Answer in the same natural language as the "
+        "question unless the user explicitly asks for another language. "
         "Use triple-backtick Markdown code blocks for packet diagrams, frame "
         "layouts, and fixed-width ASCII art."
     )
@@ -240,6 +337,34 @@ def _model_from_response(response: dict[str, Any], fallback: str) -> str:
     if isinstance(model, str) and model.strip():
         return model.strip()
     return fallback
+
+
+def _delta_from_stream_response(response: dict[str, Any]) -> str:
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        return ""
+    delta = first_choice.get("delta")
+    if isinstance(delta, dict):
+        content = delta.get("content")
+        return content if isinstance(content, str) else ""
+    message = first_choice.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        return content if isinstance(content, str) else ""
+    return ""
+
+
+def _parse_sse_line(line: str) -> str | None:
+    if not line:
+        return None
+    if line.startswith(":"):
+        return None
+    if not line.startswith("data:"):
+        return None
+    return line.removeprefix("data:").strip()
 
 
 def _optional_int(value: object) -> int | None:

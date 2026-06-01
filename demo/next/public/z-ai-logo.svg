@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Source: https://z-cdn.chatglm.cn/z-ai/static/logo.svg -->
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" xml:space="preserve">
+  <style type="text/css">
+    .st0{opacity:0.3;fill:#E2E4E7;}
+    .st1{opacity:0.1;fill:#6C7E95;}
+    .st2{fill:#232323;}
+  </style>
+  <path class="st0" d="M19.4,26.4H3.6V10.6L19.4,26.4z"/>
+  <path class="st1" d="M10.6,3.6h15.8v15.8L10.6,3.6z"/>
+  <path class="st2" d="M3.6,3.6h15.8L3.6,19.4V3.6z"/>
+  <path class="st2" d="M26.4,26.4H10.6l15.8-15.8V26.4z"/>
+</svg>

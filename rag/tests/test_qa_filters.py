@@ -15,6 +15,7 @@ from coquic_rag.qa.filters import (
     RelevanceClassifierError,
     SlidingWindowRateLimiter,
     _clean_generated_question,
+    _question_choice_text,
 )
 
 
@@ -145,7 +146,7 @@ def test_openrouter_question_generator_returns_clean_question() -> None:
     payload = json.loads(requests[0].read())
     assert payload["model"] == QUESTION_GENERATOR_MODEL
     assert payload["temperature"] == 1.2
-    assert payload["max_tokens"] == 80
+    assert payload["max_tokens"] == 160
     assert "Return only the question text" in payload["messages"][0]["content"]
     assert "Generate one random question about this area:" in payload["messages"][1]["content"]
 
@@ -212,6 +213,30 @@ def test_clean_generated_question_normalizes_bullets_and_quotes() -> None:
     assert _clean_generated_question("Question: How does QUIC path validation work?") == (
         "How does QUIC path validation work?"
     )
+    assert _clean_generated_question('Potential: "How does QPACK handle stream cancellation in QUIC/HTTP/3?') == (
+        "How does QPACK handle stream cancellation in QUIC/HTTP/3?"
+    )
+    assert _clean_generated_question("Suggested question: How does qlog record QUIC packet loss?") == (
+        "How does qlog record QUIC packet loss?"
+    )
+    assert _clean_generated_question("Possible angles: How does QPACK affect flow control window sizes?") == (
+        "How does QPACK affect flow control window sizes?"
+    )
+
+
+def test_question_choice_text_accepts_valid_reasoning_fallback() -> None:
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "reasoning": "Maybe ask: How does QUIC packet number encoding affect ACK processing?",
+                }
+            }
+        ]
+    }
+
+    assert _question_choice_text(body) == "How does QUIC packet number encoding affect ACK processing?"
 
 
 def test_openrouter_question_generator_rejects_prompt_echo() -> None:

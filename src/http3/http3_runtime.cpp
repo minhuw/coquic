@@ -12,6 +12,8 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <future>
@@ -19,6 +21,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string_view>
 #include <system_error>
@@ -1053,21 +1056,21 @@ class RuntimeScopedTempDir {
     std::filesystem::path path_;
 };
 
-class AsyncReverseProxyDispatcher {
+class StreamingReverseProxyDispatcher {
   public:
     static constexpr std::size_t kMaxJobsPerConnection = 16;
 
-    explicit AsyncReverseProxyDispatcher(Http3ReverseProxyConfig config)
+    explicit StreamingReverseProxyDispatcher(Http3ReverseProxyConfig config)
         : config_(std::move(config)) {
     }
 
-    ~AsyncReverseProxyDispatcher() {
+    ~StreamingReverseProxyDispatcher() {
         cancel_all();
         wait_for_all();
     }
 
-    AsyncReverseProxyDispatcher(const AsyncReverseProxyDispatcher &) = delete;
-    AsyncReverseProxyDispatcher &operator=(const AsyncReverseProxyDispatcher &) = delete;
+    StreamingReverseProxyDispatcher(const StreamingReverseProxyDispatcher &) = delete;
+    StreamingReverseProxyDispatcher &operator=(const StreamingReverseProxyDispatcher &) = delete;
 
     bool start(std::uint64_t stream_id, Http3Request request) {
         drain_finished();
@@ -1075,75 +1078,72 @@ class AsyncReverseProxyDispatcher {
             return true;
         }
         if (jobs_.size() >= kMaxJobsPerConnection) {
-            return store_ready_response(stream_id, reverse_proxy_unavailable_response());
+            return store_ready_part(stream_id, reverse_proxy_unavailable_part());
         }
 
-        auto [job_it, inserted] = jobs_.try_emplace(stream_id);
+        auto queue = std::make_shared<PartQueue>();
+        auto [job_it, inserted] = jobs_.try_emplace(stream_id, Job{.queue = queue});
         if (!inserted) {
             return true;
         }
 
         try {
-            auto task = std::packaged_task<Http3Response()>(
-                [config = config_, request = std::move(request)]() mutable {
-                    return fetch_http_reverse_proxy_response(config, request);
+            job_it->second.worker =
+                std::thread([config = config_, request = std::move(request), queue]() mutable {
+                    stream_http_reverse_proxy_response(config, request,
+                                                       [queue](Http3ResponsePart part) {
+                                                           queue->push(std::move(part));
+                                                           return !queue->cancelled();
+                                                       });
+                    queue->mark_finished();
                 });
-            job_it->second.result = task.get_future();
-            job_it->second.worker = std::thread(std::move(task));
         } catch (...) {
-            job_it->second.result = ready_response_future(reverse_proxy_unavailable_response());
+            job_it->second.queue->push(reverse_proxy_unavailable_part());
+            job_it->second.queue->mark_finished();
         }
         return true;
     }
 
-    std::optional<Http3Response> take_response(std::uint64_t stream_id) {
+    std::optional<Http3ResponsePart> take_part(std::uint64_t stream_id) {
         const auto job_it = jobs_.find(stream_id);
-        if (job_it == jobs_.end() || job_it->second.cancelled ||
-            job_it->second.result.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
+        if (job_it == jobs_.end()) {
             return std::nullopt;
         }
-        auto response = job_it->second.result.get();
-        if (job_it->second.worker.joinable()) {
-            job_it->second.worker.join();
+        auto part = job_it->second.queue->pop();
+        if (job_it->second.queue->done()) {
+            join_and_erase(job_it);
         }
-        jobs_.erase(job_it);
-        return response;
+        return part;
     }
 
     void cancel(std::uint64_t stream_id) {
         const auto job_it = jobs_.find(stream_id);
         if (job_it != jobs_.end()) {
-            job_it->second.cancelled = true;
+            job_it->second.queue->cancel();
         }
         drain_finished();
     }
 
     void cancel_all() {
         for (auto &[_, job] : jobs_) {
-            job.cancelled = true;
+            job.queue->cancel();
         }
         drain_finished();
     }
 
     void drain_finished() {
         for (auto it = jobs_.begin(); it != jobs_.end();) {
-            if (it->second.result.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
+            if (!it->second.queue->done()) {
                 ++it;
                 continue;
             }
-            static_cast<void>(it->second.result.get());
-            if (it->second.worker.joinable()) {
-                it->second.worker.join();
-            }
-            it = jobs_.erase(it);
+            it = join_and_erase(it);
         }
     }
 
     void wait_for_all() {
         for (auto &[_, job] : jobs_) {
-            if (job.result.valid()) {
-                static_cast<void>(job.result.get());
-            }
+            job.queue->cancel();
             if (job.worker.joinable()) {
                 job.worker.join();
             }
@@ -1152,39 +1152,88 @@ class AsyncReverseProxyDispatcher {
     }
 
   private:
-    struct Job {
-        std::future<Http3Response> result;
-        std::thread worker;
-        bool cancelled = false;
+    class PartQueue {
+      public:
+        void push(Http3ResponsePart part) {
+            std::lock_guard lock(mutex_);
+            if (cancelled_) {
+                return;
+            }
+            parts_.push_back(std::move(part));
+        }
+
+        std::optional<Http3ResponsePart> pop() {
+            std::lock_guard lock(mutex_);
+            if (parts_.empty()) {
+                return std::nullopt;
+            }
+            auto part = std::move(parts_.front());
+            parts_.pop_front();
+            return part;
+        }
+
+        void cancel() {
+            std::lock_guard lock(mutex_);
+            cancelled_ = true;
+        }
+
+        bool cancelled() const {
+            std::lock_guard lock(mutex_);
+            return cancelled_;
+        }
+
+        void mark_finished() {
+            std::lock_guard lock(mutex_);
+            finished_ = true;
+        }
+
+        bool done() const {
+            std::lock_guard lock(mutex_);
+            return finished_ && parts_.empty();
+        }
+
+      private:
+        mutable std::mutex mutex_;
+        std::deque<Http3ResponsePart> parts_;
+        bool cancelled_ = false;
+        bool finished_ = false;
     };
 
-    static Http3Response reverse_proxy_unavailable_response() {
-        return Http3Response{
+    struct Job {
+        std::shared_ptr<PartQueue> queue;
+        std::thread worker;
+    };
+
+    static Http3ResponsePart reverse_proxy_unavailable_part() {
+        return Http3ResponsePart{
             .head =
-                {
+                Http3ResponseHead{
                     .status = 503,
                     .content_length = 0,
                     .headers = {{"cache-control", "no-store"}},
                 },
+            .complete = true,
         };
     }
 
-    static std::future<Http3Response> ready_response_future(Http3Response response) {
-        std::promise<Http3Response> promise;
-        promise.set_value(std::move(response));
-        return promise.get_future();
-    }
-
-    bool store_ready_response(std::uint64_t stream_id, Http3Response response) {
+    bool store_ready_part(std::uint64_t stream_id, Http3ResponsePart part) {
         try {
-            jobs_.insert_or_assign(stream_id,
-                                   Job{
-                                       .result = ready_response_future(std::move(response)),
-                                   });
+            auto queue = std::make_shared<PartQueue>();
+            queue->push(std::move(part));
+            queue->mark_finished();
+            jobs_.insert_or_assign(stream_id, Job{.queue = std::move(queue)});
         } catch (...) {
             return false;
         }
         return true;
+    }
+
+    auto join_and_erase(std::unordered_map<std::uint64_t, Job>::iterator it)
+        -> std::unordered_map<std::uint64_t, Job>::iterator {
+        if (it->second.worker.joinable()) {
+            it->second.worker.join();
+        }
+        return jobs_.erase(it);
     }
 
     Http3ReverseProxyConfig config_;
@@ -1320,32 +1369,32 @@ class Http3ServerRuntime {
                 continue;
             }
             if (lifecycle->event == quic::QuicCoreConnectionLifecycle::accepted) {
-                auto async_proxy =
+                auto streaming_proxy =
                     config_.reverse_proxy.has_value()
-                        ? std::make_shared<AsyncReverseProxyDispatcher>(*config_.reverse_proxy)
+                        ? std::make_shared<StreamingReverseProxyDispatcher>(*config_.reverse_proxy)
                         : nullptr;
                 endpoints_.try_emplace(lifecycle->connection,
                                        Http3ServerEndpoint(Http3ServerConfig{
                                            .deferred_request_handler =
-                                               async_proxy == nullptr
+                                               streaming_proxy == nullptr
                                                    ? std::function<bool(std::uint64_t, Http3Request)>()
-                                                   : [async_proxy](std::uint64_t stream_id,
-                                                                   Http3Request request) {
-                                                         return async_proxy->start(
+                                                   : [streaming_proxy](std::uint64_t stream_id,
+                                                                       Http3Request request) {
+                                                         return streaming_proxy->start(
                                                              stream_id, std::move(request));
                                                      },
-                                           .deferred_response_handler =
-                                               async_proxy == nullptr
-                                                   ? std::function<std::optional<Http3Response>(
+                                           .deferred_response_part_handler =
+                                               streaming_proxy == nullptr
+                                                   ? std::function<std::optional<Http3ResponsePart>(
                                                          std::uint64_t)>()
-                                                   : [async_proxy](std::uint64_t stream_id) {
-                                                         return async_proxy->take_response(stream_id);
+                                                   : [streaming_proxy](std::uint64_t stream_id) {
+                                                         return streaming_proxy->take_part(stream_id);
                                                      },
                                            .deferred_request_cancel_handler =
-                                               async_proxy == nullptr
+                                               streaming_proxy == nullptr
                                                    ? std::function<void(std::uint64_t)>()
-                                                   : [async_proxy](std::uint64_t stream_id) {
-                                                         async_proxy->cancel(stream_id);
+                                                   : [streaming_proxy](std::uint64_t stream_id) {
+                                                         streaming_proxy->cancel(stream_id);
                                                      },
                                            .fallback_request_handler =
                                                [config = config_](const Http3Request &request) {

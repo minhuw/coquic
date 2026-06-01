@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 from functools import lru_cache
@@ -10,6 +11,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from coquic_rag.config import ProjectPaths
@@ -24,6 +26,7 @@ from coquic_rag.qa.filters import (
     OpenRouterRelevanceClassifier,
     OpenRouterQuestionGenerator,
     QuestionGenerationError,
+    QUESTION_GENERATOR_MODEL,
     SlidingWindowRateLimiter,
     is_valid_generated_question,
     normalize_question,
@@ -66,6 +69,7 @@ class QaResponsePayload(BaseModel):
     reason: str
     citations: list[dict[str, object]]
     retrieved_sections: list[dict[str, object]]
+    rag_confidence: float | None = None
     usage: UsagePayload | None = None
     direct_answer: str | None = None
     direct_usage: UsagePayload | None = None
@@ -96,7 +100,7 @@ def app_config() -> QaConfig:
     return QaConfig(
         top_k=_env_int("COQUIC_QA_TOP_K", 10),
         max_context_chars=_env_int("COQUIC_QA_MAX_CONTEXT_CHARS", 6500),
-        min_retrieval_score=_env_float("COQUIC_QA_MIN_RETRIEVAL_SCORE", 0.18),
+        min_retrieval_score=_env_float("COQUIC_QA_MIN_RETRIEVAL_SCORE", 0.4),
         max_output_tokens=_env_int("COQUIC_QA_MAX_OUTPUT_TOKENS", 650),
     )
 
@@ -158,8 +162,9 @@ def relevance_classifier() -> OpenRouterRelevanceClassifier:
 @lru_cache
 def question_generator() -> OpenRouterQuestionGenerator:
     return OpenRouterQuestionGenerator(
-        models=tuple(model_id for model_id, _label in FREE_ANSWER_MODELS),
-        max_generation_attempts=len(FREE_ANSWER_MODELS),
+        model=QUESTION_GENERATOR_MODEL,
+        timeout=12,
+        max_generation_attempts=5,
     )
 
 
@@ -223,6 +228,51 @@ def create_app() -> FastAPI:
         )
         return _to_payload(result)
 
+    @app.post("/api/qa/stream")
+    async def answer_stream(
+        payload: QaRequest,
+        request: Request,
+        x_session_id: Annotated[str | None, Header()] = None,
+        service: QaService = Depends(qa_service),
+    ) -> StreamingResponse:
+        normalized_question = normalize_question(payload.question)
+        client_key = _client_key(request, x_session_id)
+        limit = rate_limiter().check(client_key)
+        if not limit.allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="rate limit exceeded",
+                headers={"Retry-After": str(limit.retry_after_seconds)},
+            )
+        try:
+            answer_model = normalize_answer_model(payload.model)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+        def stream_events():
+            try:
+                for event in service.answer_stream(
+                    normalized_question,
+                    user_id=_hashed_user_id(client_key),
+                    model=answer_model,
+                ):
+                    yield _sse(event.event, event.payload)
+            except Exception as error:  # pragma: no cover - defensive stream boundary
+                LOGGER.exception("streaming QA failed: %s", error)
+                yield _sse(
+                    "error",
+                    {"detail": "QA stream failed"},
+                )
+
+        return StreamingResponse(
+            stream_events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.post("/api/questions/random", response_model=RandomQuestionPayload)
     def random_question(
         request: Request,
@@ -264,6 +314,7 @@ def _to_payload(response: QaResponse) -> QaResponsePayload:
         reason=response.reason,
         citations=response.citations,
         retrieved_sections=response.retrieved_sections,
+        rag_confidence=response.rag_confidence,
         usage=_usage_payload(response.usage),
         direct_answer=response.direct_answer,
         direct_usage=_usage_payload(response.direct_usage),
@@ -291,6 +342,10 @@ def _usage_payload(usage: ChatUsage | None) -> UsagePayload | None:
         completion_tokens=usage.completion_tokens,
         total_tokens=usage.total_tokens,
     )
+
+
+def _sse(event: str, payload: dict[str, object]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
 
 def _allowed_origins() -> list[str]:

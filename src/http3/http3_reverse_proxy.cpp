@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstddef>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -55,6 +56,13 @@ struct ParsedHttpResponse {
     std::uint16_t status = 502;
     Http3Headers headers;
     std::vector<std::byte> body;
+};
+
+struct ParsedHttpResponseHead {
+    std::uint16_t status = 502;
+    Http3Headers headers;
+    bool chunked = false;
+    std::optional<std::size_t> content_length;
 };
 
 enum class HttpResponseReadState : std::uint8_t {
@@ -353,6 +361,62 @@ bool is_head_request(const Http3Request &request) {
     return lowercase_ascii(request.head.method) == "head";
 }
 
+bool parse_http_response_head(std::string_view headers_text, ParsedHttpResponseHead &parsed) {
+    const auto status_line_end = headers_text.find("\r\n");
+    const auto status_line = status_line_end == std::string_view::npos
+                                 ? headers_text
+                                 : headers_text.substr(0, status_line_end);
+    if (!status_line.starts_with("HTTP/1.1 ") && !status_line.starts_with("HTTP/1.0 ")) {
+        return false;
+    }
+    if (status_line.size() < 12) {
+        return false;
+    }
+    const auto status = parse_size(status_line.substr(9, 3));
+    if (!status.has_value() || *status > std::numeric_limits<std::uint16_t>::max()) {
+        return false;
+    }
+
+    parsed.status = static_cast<std::uint16_t>(*status);
+    parsed.headers.clear();
+    parsed.chunked = false;
+    parsed.content_length.reset();
+
+    std::size_t line_begin =
+        status_line_end == std::string_view::npos ? headers_text.size() : status_line_end + 2;
+    while (line_begin < headers_text.size()) {
+        const auto line_end = headers_text.find("\r\n", line_begin);
+        const auto line = line_end == std::string_view::npos
+                              ? headers_text.substr(line_begin)
+                              : headers_text.substr(line_begin, line_end - line_begin);
+        const auto colon = line.find(':');
+        if (colon != std::string_view::npos && colon != 0) {
+            const auto name = lowercase_ascii(trim_ascii(line.substr(0, colon)));
+            const auto value = trim_ascii(line.substr(colon + 1));
+            if (name == "transfer-encoding" &&
+                lowercase_ascii(value).find("chunked") != std::string::npos) {
+                parsed.chunked = true;
+            } else if (name == "content-length") {
+                parsed.content_length = parse_size(value);
+                if (!parsed.content_length.has_value()) {
+                    return false;
+                }
+            }
+            if (!is_filtered_response_header(name)) {
+                parsed.headers.push_back(Http3Field{
+                    .name = name,
+                    .value = std::string(value),
+                });
+            }
+        }
+        if (line_end == std::string_view::npos) {
+            break;
+        }
+        line_begin = line_end + 2;
+    }
+    return true;
+}
+
 HttpResponseReadState response_read_state(std::string_view response_text, bool head_request) {
     const auto header_end = response_text.find("\r\n\r\n");
     if (header_end == std::string_view::npos) {
@@ -387,73 +451,29 @@ std::optional<ParsedHttpResponse> parse_http_response(std::string_view response_
 
     const auto headers_text = response_text.substr(0, header_end);
     const auto body_text = response_text.substr(header_end + 4);
-    const auto status_line_end = headers_text.find("\r\n");
-    const auto status_line = status_line_end == std::string_view::npos
-                                 ? headers_text
-                                 : headers_text.substr(0, status_line_end);
-    if (!status_line.starts_with("HTTP/1.1 ") && !status_line.starts_with("HTTP/1.0 ")) {
-        return std::nullopt;
-    }
-    if (status_line.size() < 12) {
-        return std::nullopt;
-    }
-    const auto status = parse_size(status_line.substr(9, 3));
-    if (!status.has_value() || *status > std::numeric_limits<std::uint16_t>::max()) {
+    ParsedHttpResponseHead head;
+    if (!parse_http_response_head(headers_text, head)) {
         return std::nullopt;
     }
 
     ParsedHttpResponse parsed{
-        .status = static_cast<std::uint16_t>(*status),
+        .status = head.status,
+        .headers = std::move(head.headers),
     };
-    bool chunked = false;
-    std::optional<std::size_t> content_length;
-
-    std::size_t line_begin =
-        status_line_end == std::string_view::npos ? headers_text.size() : status_line_end + 2;
-    while (line_begin < headers_text.size()) {
-        const auto line_end = headers_text.find("\r\n", line_begin);
-        const auto line = line_end == std::string_view::npos
-                              ? headers_text.substr(line_begin)
-                              : headers_text.substr(line_begin, line_end - line_begin);
-        const auto colon = line.find(':');
-        if (colon != std::string_view::npos && colon != 0) {
-            const auto name = lowercase_ascii(trim_ascii(line.substr(0, colon)));
-            const auto value = trim_ascii(line.substr(colon + 1));
-            if (name == "transfer-encoding" &&
-                lowercase_ascii(value).find("chunked") != std::string::npos) {
-                chunked = true;
-            } else if (name == "content-length") {
-                content_length = parse_size(value);
-                if (!content_length.has_value()) {
-                    return std::nullopt;
-                }
-            }
-            if (!is_filtered_response_header(name)) {
-                parsed.headers.push_back(Http3Field{
-                    .name = name,
-                    .value = std::string(value),
-                });
-            }
-        }
-        if (line_end == std::string_view::npos) {
-            break;
-        }
-        line_begin = line_end + 2;
-    }
 
     if (head_request) {
         parsed.body.clear();
-    } else if (chunked) {
+    } else if (head.chunked) {
         auto decoded = decode_chunked_body(body_text);
         if (!decoded.has_value()) {
             return std::nullopt;
         }
         parsed.body = std::move(*decoded);
-    } else if (content_length.has_value()) {
-        if (body_text.size() < *content_length) {
+    } else if (head.content_length.has_value()) {
+        if (body_text.size() < *head.content_length) {
             return std::nullopt;
         }
-        parsed.body = string_to_bytes(body_text.substr(0, *content_length));
+        parsed.body = string_to_bytes(body_text.substr(0, *head.content_length));
     } else {
         parsed.body = string_to_bytes(body_text);
     }
@@ -469,6 +489,108 @@ Http3Response bad_gateway_response() {
                 .headers = {{"cache-control", "no-store"}},
             },
     };
+}
+
+Http3ResponsePart bad_gateway_part() {
+    return Http3ResponsePart{
+        .head =
+            Http3ResponseHead{
+                .status = 502,
+                .content_length = 0,
+                .headers = {{"cache-control", "no-store"}},
+            },
+        .complete = true,
+    };
+}
+
+Http3ResponseHead response_head_from_proxy_head(const ParsedHttpResponseHead &head,
+                                                bool head_request) {
+    std::optional<std::uint64_t> content_length;
+    if (!head_request && !head.chunked && head.content_length.has_value()) {
+        content_length = static_cast<std::uint64_t>(*head.content_length);
+    }
+    return Http3ResponseHead{
+        .status = head.status,
+        .content_length = content_length,
+        .headers = head.headers,
+    };
+}
+
+bool emit_bad_gateway(const std::function<bool(Http3ResponsePart)> &emit) {
+    return emit(bad_gateway_part());
+}
+
+bool emit_chunked_proxy_body(std::string &encoded, bool upstream_closed, bool &complete,
+                             const std::function<bool(Http3ResponsePart)> &emit) {
+    std::vector<std::byte> out;
+    while (true) {
+        const auto line_end = encoded.find("\r\n");
+        if (line_end == std::string::npos) {
+            if (upstream_closed && !encoded.empty()) {
+                return false;
+            }
+            break;
+        }
+        auto size_text = std::string_view(encoded).substr(0, line_end);
+        const auto extension = size_text.find(';');
+        if (extension != std::string_view::npos) {
+            size_text = size_text.substr(0, extension);
+        }
+        size_text = trim_ascii(size_text);
+        const auto chunk_size = parse_size(size_text, 16);
+        if (!chunk_size.has_value()) {
+            return false;
+        }
+        const auto data_begin = line_end + 2;
+        if (*chunk_size == 0) {
+            const auto trailer_begin = data_begin;
+            const auto trailers_end = encoded.find("\r\n\r\n", trailer_begin);
+            if (encoded.size() < trailer_begin + 2) {
+                if (upstream_closed) {
+                    return false;
+                }
+                break;
+            }
+            if (encoded.substr(trailer_begin, 2) == "\r\n") {
+                encoded.erase(0, trailer_begin + 2);
+            } else if (trailers_end != std::string::npos) {
+                encoded.erase(0, trailers_end + 4);
+            } else {
+                if (upstream_closed) {
+                    return false;
+                }
+                break;
+            }
+            if (!out.empty() && !emit(Http3ResponsePart{.body = std::move(out)})) {
+                return true;
+            }
+            complete = true;
+            return emit(Http3ResponsePart{.complete = true});
+        }
+        if (encoded.size() < data_begin + *chunk_size + 2) {
+            if (upstream_closed) {
+                return false;
+            }
+            break;
+        }
+        if (encoded.substr(data_begin + *chunk_size, 2) != "\r\n") {
+            return false;
+        }
+        const auto chunk = std::string_view(encoded).substr(data_begin, *chunk_size);
+        out.insert(out.end(), reinterpret_cast<const std::byte *>(chunk.data()),
+                   reinterpret_cast<const std::byte *>(chunk.data()) + chunk.size());
+        encoded.erase(0, data_begin + *chunk_size + 2);
+        if (out.size() >= 8192u) {
+            if (!emit(Http3ResponsePart{.body = std::move(out)})) {
+                return true;
+            }
+            out.clear();
+        }
+    }
+    if (!out.empty()) {
+        return emit(Http3ResponsePart{.body = std::move(out)});
+    }
+    return true;
 }
 
 } // namespace
@@ -551,6 +673,150 @@ Http3Response fetch_http_reverse_proxy_response(const Http3ReverseProxyConfig &c
             },
         .body = std::move(parsed->body),
     };
+}
+
+void stream_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
+                                        const Http3Request &request,
+                                        const std::function<bool(Http3ResponsePart)> &emit) {
+    const auto fd = connect_to_upstream(config);
+    if (!fd.has_value()) {
+        static_cast<void>(emit_bad_gateway(emit));
+        return;
+    }
+    ScopedFd upstream(*fd);
+
+    const auto head_request = is_head_request(request);
+    const auto proxy_request = serialize_proxy_request(config, request);
+    if (!write_all(upstream.get(), proxy_request)) {
+        static_cast<void>(emit_bad_gateway(emit));
+        return;
+    }
+
+    std::array<char, 8192> buffer{};
+    std::string pending;
+    bool emitted_head = false;
+    bool chunked = false;
+    bool response_complete = false;
+    std::optional<std::size_t> remaining_content_length;
+    std::size_t total_received = 0;
+
+    auto emit_raw_body = [&](std::string_view bytes, bool complete) -> bool {
+        if (bytes.empty() && !complete) {
+            return true;
+        }
+        return emit(Http3ResponsePart{
+            .body = string_to_bytes(bytes),
+            .complete = complete,
+        });
+    };
+
+    while (total_received <= kProxyResponseLimitBytes) {
+        const auto result = ::recv(upstream.get(), buffer.data(), buffer.size(), 0);
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            static_cast<void>(emit_bad_gateway(emit));
+            return;
+        }
+
+        const bool upstream_closed = result == 0;
+        if (result > 0) {
+            total_received += static_cast<std::size_t>(result);
+            pending.append(buffer.data(), static_cast<std::size_t>(result));
+            if (total_received > kProxyResponseLimitBytes) {
+                static_cast<void>(emit_bad_gateway(emit));
+                return;
+            }
+        }
+
+        if (!emitted_head) {
+            const auto header_end = pending.find("\r\n\r\n");
+            if (header_end == std::string::npos) {
+                if (upstream_closed) {
+                    static_cast<void>(emit_bad_gateway(emit));
+                    return;
+                }
+                continue;
+            }
+
+            ParsedHttpResponseHead parsed_head;
+            if (!parse_http_response_head(std::string_view(pending).substr(0, header_end),
+                                          parsed_head)) {
+                static_cast<void>(emit_bad_gateway(emit));
+                return;
+            }
+            chunked = parsed_head.chunked;
+            remaining_content_length = parsed_head.content_length;
+            auto response_head = response_head_from_proxy_head(parsed_head, head_request);
+            const bool complete = head_request || (!chunked && remaining_content_length == 0u);
+            if (!emit(Http3ResponsePart{
+                    .head = std::move(response_head),
+                    .complete = complete,
+                })) {
+                return;
+            }
+            emitted_head = true;
+            pending.erase(0, header_end + 4);
+            if (complete) {
+                return;
+            }
+        }
+
+        if (head_request) {
+            return;
+        }
+
+        if (chunked) {
+            if (!emit_chunked_proxy_body(pending, upstream_closed, response_complete, emit)) {
+                static_cast<void>(emit_bad_gateway(emit));
+                return;
+            }
+            if (response_complete) {
+                return;
+            }
+            if (upstream_closed) {
+                if (!pending.empty()) {
+                    static_cast<void>(emit_bad_gateway(emit));
+                }
+                return;
+            }
+            continue;
+        }
+
+        if (remaining_content_length.has_value()) {
+            const auto to_emit = std::min(pending.size(), *remaining_content_length);
+            const bool complete = to_emit == *remaining_content_length;
+            if (to_emit > 0 || complete) {
+                if (!emit_raw_body(std::string_view(pending).substr(0, to_emit), complete)) {
+                    return;
+                }
+                pending.erase(0, to_emit);
+                *remaining_content_length -= to_emit;
+            }
+            if (complete) {
+                return;
+            }
+            if (upstream_closed) {
+                static_cast<void>(emit_bad_gateway(emit));
+                return;
+            }
+            continue;
+        }
+
+        if (!pending.empty()) {
+            if (!emit_raw_body(pending, false)) {
+                return;
+            }
+            pending.clear();
+        }
+        if (upstream_closed) {
+            static_cast<void>(emit(Http3ResponsePart{.complete = true}));
+            return;
+        }
+    }
+
+    static_cast<void>(emit_bad_gateway(emit));
 }
 
 } // namespace coquic::http3

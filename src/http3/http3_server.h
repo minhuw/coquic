@@ -19,6 +19,7 @@ struct Http3ServerConfig {
     std::function<Http3Response(const Http3Request &)> fallback_request_handler;
     std::function<bool(std::uint64_t, Http3Request)> deferred_request_handler;
     std::function<std::optional<Http3Response>(std::uint64_t)> deferred_response_handler;
+    std::function<std::optional<Http3ResponsePart>(std::uint64_t)> deferred_response_part_handler;
     std::function<void(std::uint64_t)> deferred_request_cancel_handler;
 };
 
@@ -62,6 +63,8 @@ class Http3ServerEndpoint {
 
     struct PendingDeferredResponse {
         Http3RequestHead head;
+        bool final_head_sent = false;
+        bool finished = false;
     };
 
     bool cancel_pending_deferred_response(std::uint64_t stream_id);

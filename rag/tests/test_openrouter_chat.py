@@ -4,7 +4,13 @@ import json
 
 import httpx
 
-from coquic_rag.qa.openrouter_chat import OpenRouterChatClient, normalize_answer_model, _system_prompt
+from coquic_rag.qa.openrouter_chat import (
+    ChatStreamChunk,
+    OpenRouterChatClient,
+    normalize_answer_model,
+    _direct_system_prompt,
+    _system_prompt,
+)
 
 
 def test_openrouter_chat_client_uses_free_model_and_tracks_response_model() -> None:
@@ -70,14 +76,52 @@ def test_openrouter_chat_client_direct_answer_omits_retrieved_context() -> None:
     result = chat.answer_direct(
         question="What's the difference between QUIC and TCP?",
         max_tokens=650,
-        model="moonshotai/kimi-k2.6:free",
+        model="google/gemma-4-31b-it:free",
     )
 
     payload = json.loads(requests[0].read())
-    assert payload["model"] == "moonshotai/kimi-k2.6:free"
+    assert payload["model"] == "google/gemma-4-31b-it:free"
     assert "retrieved context" not in payload["messages"][1]["content"].lower()
     assert "Do not use or refer to retrieved context" in payload["messages"][0]["content"]
     assert result.answer.startswith("QUIC runs")
+
+
+def test_openrouter_chat_client_streams_answer_chunks() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            content=(
+                'data: {"model":"openai/gpt-oss-120b:free","choices":[{"delta":{"content":"QUIC "}}]}\n\n'
+                'data: {"choices":[{"delta":{"content":"streams."}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}\n\n'
+                "data: [DONE]\n\n"
+            ),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    chat = OpenRouterChatClient(api_key="test-key", client=client)
+
+    chunks = list(
+        chat.stream_answer(
+            question="How does QUIC stream data?",
+            sections=[],
+            max_tokens=100,
+        )
+    )
+
+    payload = json.loads(requests[0].read())
+    assert payload["stream"] is True
+    assert "".join(chunk.delta for chunk in chunks) == "QUIC streams."
+    assert chunks[-1] == ChatStreamChunk(
+        usage=chunks[-1].usage,
+        model="openai/gpt-oss-120b:free",
+        done=True,
+    )
+    assert chunks[-1].usage is not None
+    assert chunks[-1].usage.total_tokens == 6
 
 
 def test_system_prompt_uses_retrieved_context_as_supporting_evidence() -> None:
@@ -86,12 +130,17 @@ def test_system_prompt_uses_retrieved_context_as_supporting_evidence() -> None:
     assert "supporting evidence" in prompt
     assert "general networking and protocol knowledge" in prompt
     assert "Do not cite a section for claims it does not support" in prompt
+    assert "same natural language as the user's question" in prompt
     assert "using only the supplied" not in prompt
+
+
+def test_direct_prompt_matches_user_question_language() -> None:
+    assert "same natural language as the user's question" in _direct_system_prompt()
 
 
 def test_normalize_answer_model_rejects_non_allowlisted_models() -> None:
     assert normalize_answer_model(None) == "openai/gpt-oss-120b:free"
-    assert normalize_answer_model(" qwen/qwen3-coder:free ") == "qwen/qwen3-coder:free"
+    assert normalize_answer_model(" google/gemma-4-31b-it:free ") == "google/gemma-4-31b-it:free"
 
     try:
         normalize_answer_model("openrouter/free")

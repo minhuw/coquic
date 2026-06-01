@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <poll.h>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -102,6 +103,10 @@ struct BootstrapResponse {
     std::uintmax_t content_length = 0;
     std::string body;
 };
+
+bool bootstrap_method_is_allowed(std::string_view method, bool reverse_proxy_enabled) {
+    return method == "GET" || method == "HEAD" || (reverse_proxy_enabled && method == "POST");
+}
 
 bool is_stop_requested(const std::atomic<bool> *stop_requested) {
     return stop_requested != nullptr && stop_requested->load(std::memory_order_relaxed);
@@ -606,11 +611,25 @@ std::optional<BootstrapRequest> parse_bootstrap_request(std::string_view request
     };
 }
 
+Http3Request make_proxy_request(const BootstrapRequest &request) {
+    return Http3Request{
+        .head =
+            {
+                .method = request.method,
+                .scheme = "https",
+                .authority = authority_from_headers(request.headers),
+                .path = request.target,
+                .content_length = request.content_length,
+                .headers = request.headers,
+            },
+        .body = request.body,
+    };
+}
+
 BootstrapResponse make_bootstrap_response(const Http3BootstrapConfig &config,
                                           const BootstrapRequest &request) {
     const auto reverse_proxy_enabled = config.reverse_proxy.has_value();
-    if (request.method != "GET" && request.method != "HEAD" &&
-        !(reverse_proxy_enabled && request.method == "POST")) {
+    if (!bootstrap_method_is_allowed(request.method, reverse_proxy_enabled)) {
         return BootstrapResponse{
             .status_code = 405,
             .allow =
@@ -619,18 +638,7 @@ BootstrapResponse make_bootstrap_response(const Http3BootstrapConfig &config,
     }
 
     if (reverse_proxy_enabled) {
-        Http3Request proxy_request{
-            .head =
-                {
-                    .method = request.method,
-                    .scheme = "https",
-                    .authority = authority_from_headers(request.headers),
-                    .path = request.target,
-                    .content_length = request.content_length,
-                    .headers = request.headers,
-                },
-            .body = request.body,
-        };
+        auto proxy_request = make_proxy_request(request);
         auto proxied = fetch_http_reverse_proxy_response(*config.reverse_proxy, proxy_request);
         BootstrapResponse response{
             .status_code = proxied.head.status,
@@ -712,6 +720,11 @@ bool write_all_ssl(SSL *ssl, std::string_view bytes) {
         written += static_cast<std::size_t>(result);
     }
     return true;
+}
+
+bool write_all_ssl(SSL *ssl, std::span<const std::byte> bytes) {
+    return write_all_ssl(
+        ssl, std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size()));
 }
 
 enum class HttpRequestReadProgress : std::uint8_t {
@@ -842,6 +855,111 @@ std::string serialize_response(const Http3BootstrapConfig &config,
     return output;
 }
 
+bool write_bootstrap_response(SSL *ssl, const Http3BootstrapConfig &config,
+                              const BootstrapResponse &response) {
+    return write_all_ssl(ssl, serialize_response(config, response));
+}
+
+bool write_bootstrap_proxy_head(SSL *ssl, const Http3BootstrapConfig &config,
+                                const Http3ResponseHead &head, bool chunked_body) {
+    std::string output = "HTTP/1.1 ";
+    output += std::to_string(head.status);
+    output.push_back(' ');
+    output += reason_phrase_for_status(head.status);
+    output += "\r\nAlt-Svc: ";
+    output += make_http3_alt_svc_value(config);
+    output += "\r\nConnection: close\r\n";
+    if (chunked_body) {
+        output += "Transfer-Encoding: chunked\r\n";
+    } else {
+        output += "Content-Length: ";
+        output += std::to_string(head.content_length.value_or(0));
+        output += "\r\n";
+    }
+    for (const auto &header : head.headers) {
+        output += header.name;
+        output += ": ";
+        output += header.value;
+        output += "\r\n";
+    }
+    output += "\r\n";
+    return write_all_ssl(ssl, output);
+}
+
+bool write_bootstrap_chunk(SSL *ssl, std::span<const std::byte> body) {
+    if (body.empty()) {
+        return true;
+    }
+    std::string prefix = std::to_string(body.size());
+    static constexpr char kHexDigits[] = "0123456789abcdef";
+    prefix.clear();
+    auto value = body.size();
+    do {
+        prefix.push_back(kHexDigits[value & 0xfu]);
+        value >>= 4u;
+    } while (value != 0);
+    std::reverse(prefix.begin(), prefix.end());
+    prefix += "\r\n";
+    return write_all_ssl(ssl, prefix) && write_all_ssl(ssl, body) && write_all_ssl(ssl, "\r\n");
+}
+
+bool stream_bootstrap_proxy_response(SSL *ssl, const Http3BootstrapConfig &config,
+                                     const BootstrapRequest &request) {
+    if (!bootstrap_method_is_allowed(request.method, /*reverse_proxy_enabled=*/true)) {
+        return write_bootstrap_response(
+            ssl, config,
+            BootstrapResponse{.status_code = 405, .allow = std::string("GET, HEAD, POST")});
+    }
+
+    bool head_sent = false;
+    bool chunked_body = false;
+    bool ok = true;
+    auto proxy_request = make_proxy_request(request);
+
+    const Http3ReverseProxyConfig *reverse_proxy = nullptr;
+    if (config.reverse_proxy.has_value()) {
+        reverse_proxy = &(*config.reverse_proxy);
+    }
+    if (reverse_proxy == nullptr) {
+        return write_bootstrap_response(ssl, config, BootstrapResponse{.status_code = 502});
+    }
+
+    stream_http_reverse_proxy_response(*reverse_proxy, proxy_request, [&](Http3ResponsePart part) {
+        if (!ok) {
+            return false;
+        }
+        if (!head_sent) {
+            if (!part.head.has_value()) {
+                ok = false;
+                return false;
+            }
+            chunked_body = request.method != "HEAD" && !part.head->content_length.has_value() &&
+                           !part.complete;
+            ok = write_bootstrap_proxy_head(ssl, config, *part.head, chunked_body);
+            head_sent = ok;
+            if (!ok) {
+                return false;
+            }
+        }
+        if (request.method != "HEAD") {
+            if (chunked_body) {
+                ok = write_bootstrap_chunk(ssl, part.body);
+            } else if (!part.body.empty()) {
+                ok = write_all_ssl(ssl, part.body);
+            }
+        }
+        if (ok && part.complete && chunked_body) {
+            ok = write_all_ssl(ssl, "0\r\n\r\n");
+        }
+        return ok;
+    });
+
+    if (!head_sent && ok) {
+        return write_bootstrap_response(ssl, config, BootstrapResponse{.status_code = 502});
+    }
+    return ok;
+}
+
 void serve_bootstrap_connection(const Http3BootstrapConfig &config, SSL_CTX *ssl_context,
                                 int client_fd) {
     if (!set_bootstrap_connection_timeouts(client_fd)) {
@@ -860,21 +978,22 @@ void serve_bootstrap_connection(const Http3BootstrapConfig &config, SSL_CTX *ssl
         return;
     }
 
-    BootstrapResponse response;
     const auto request_text = read_http_request(ssl.get());
     if (!request_text.has_value()) {
-        response.status_code = 400;
+        (void)write_bootstrap_response(ssl.get(), config, BootstrapResponse{.status_code = 400});
     } else {
         const auto request = parse_bootstrap_request(*request_text);
         if (!request.has_value()) {
-            response.status_code = 400;
+            (void)write_bootstrap_response(ssl.get(), config,
+                                           BootstrapResponse{.status_code = 400});
+        } else if (config.reverse_proxy.has_value()) {
+            (void)stream_bootstrap_proxy_response(ssl.get(), config, *request);
         } else {
-            response = make_bootstrap_response(config, *request);
+            (void)write_bootstrap_response(ssl.get(), config,
+                                           make_bootstrap_response(config, *request));
         }
     }
 
-    const auto response_text = serialize_response(config, response);
-    (void)write_all_ssl(ssl.get(), response_text);
     (void)SSL_shutdown(ssl.get());
 }
 

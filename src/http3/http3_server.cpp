@@ -183,6 +183,69 @@ Http3Result<bool> submit_response(Http3Connection &connection, std::uint64_t str
     return Http3Result<bool>::success(true);
 }
 
+Http3Result<bool> submit_response_part(Http3Connection &connection, std::uint64_t stream_id,
+                                       const Http3RequestHead &request_head,
+                                       const Http3ResponsePart &part, bool &final_head_sent) {
+    for (const auto &interim : part.interim_heads) {
+        const auto submitted = connection.submit_response_head(stream_id, interim);
+        if (!submitted.has_value()) {
+            return submitted;
+        }
+    }
+
+    const bool head_request = request_head.method == "HEAD";
+    if (part.head.has_value()) {
+        if (final_head_sent) {
+            return Http3Result<bool>::failure(Http3Error{
+                .code = Http3ErrorCode::frame_unexpected,
+                .detail = "streamed response final headers were already sent",
+                .stream_id = stream_id,
+            });
+        }
+        auto head_submit = connection.submit_response_head(stream_id, part.head.value());
+        if (!head_submit.has_value()) {
+            return head_submit;
+        }
+        final_head_sent = true;
+    }
+
+    if (!final_head_sent) {
+        if (!part.body.empty() || !part.trailers.empty() || part.complete) {
+            return Http3Result<bool>::failure(Http3Error{
+                .code = Http3ErrorCode::frame_unexpected,
+                .detail = "streamed response data before final headers",
+                .stream_id = stream_id,
+            });
+        }
+        return Http3Result<bool>::success(true);
+    }
+
+    if (head_request) {
+        if (part.complete) {
+            return connection.finish_response(stream_id, /*enforce_content_length=*/false);
+        }
+        return Http3Result<bool>::success(true);
+    }
+
+    if (!part.body.empty()) {
+        const auto body_submit = connection.submit_response_body(
+            stream_id, part.body, part.complete && part.trailers.empty());
+        if (!body_submit.has_value()) {
+            return body_submit;
+        }
+    }
+
+    if (!part.trailers.empty()) {
+        return connection.submit_response_trailers(stream_id, part.trailers, part.complete);
+    }
+
+    if (part.complete && part.body.empty()) {
+        return connection.finish_response(stream_id);
+    }
+
+    return Http3Result<bool>::success(true);
+}
+
 std::string_view request_path_without_query(std::string_view path) {
     const auto query = path.find('?');
     return query == std::string_view::npos ? path : path.substr(0, query);
@@ -512,6 +575,30 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::poll(quic::QuicCoreTimePoint now)
                 return make_failure_update();
             }
             it = pending_deferred_responses_.erase(it);
+        }
+    }
+    if (config_.deferred_response_part_handler) {
+        for (auto it = pending_deferred_responses_.begin();
+             it != pending_deferred_responses_.end();) {
+            auto part = config_.deferred_response_part_handler(it->first);
+            if (!part.has_value()) {
+                ++it;
+                continue;
+            }
+
+            const auto submitted = submit_response_part(connection_, it->first, it->second.head,
+                                                        part.value(), it->second.final_head_sent);
+            if (!submitted.has_value()) {
+                failed_ = true;
+                pending_requests_.clear();
+                cancel_pending_deferred_responses();
+                return make_failure_update();
+            }
+            if (part->complete) {
+                it = pending_deferred_responses_.erase(it);
+                continue;
+            }
+            ++it;
         }
     }
 

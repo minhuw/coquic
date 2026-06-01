@@ -14,8 +14,8 @@ import httpx
 
 MAX_QUESTION_CHARS = 1200
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
-RELEVANCE_FILTER_MODEL = "google/gemma-4-31b-it:free"
-QUESTION_GENERATOR_MODEL = "google/gemma-4-31b-it:free"
+RELEVANCE_FILTER_MODEL = "openai/gpt-oss-120b:free"
+QUESTION_GENERATOR_MODEL = "openrouter/free"
 RELEVANCE_FILTER_TIMEOUT_SECONDS = 8
 RELEVANCE_FILTER_MAX_RETRIES = 0
 QUESTION_GENERATOR_MAX_ATTEMPTS = 1
@@ -43,6 +43,13 @@ _BAD_RANDOM_QUESTION_MARKERS = (
     "return only",
     "do not include",
     "about this area",
+)
+_RANDOM_QUESTION_PREFIX_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:\d+[.)]\s*)?"
+    r"(?:(?:potential|example|suggested|random|generated|maybe\s+ask|possible(?:\s+angles?)?)"
+    r"(?:\s+(?:question|query|prompt|candidate))?"
+    r"|(?:question|query|prompt|candidate))\s*:\s*",
+    re.IGNORECASE,
 )
 
 
@@ -201,13 +208,10 @@ class OpenRouterQuestionGenerator:
                 },
             ],
             "temperature": 1.2,
-            "max_tokens": 80,
+            "max_tokens": 160,
         }
         body = self._post_with_retries(payload)
-        try:
-            generated_text = _first_choice_text(body)
-        except RelevanceClassifierError as error:
-            raise QuestionGenerationError(str(error)) from error
+        generated_text = _question_choice_text(body)
         question = _clean_generated_question(generated_text)
         if not is_valid_generated_question(question):
             raise QuestionGenerationError("OpenRouter question generator returned an invalid question")
@@ -311,10 +315,7 @@ def _clean_generated_question(text: str) -> str:
     question = selected.split("?", 1)[0]
     question = re.sub(r"^\s*[-*]\s*", "", question)
     question = re.sub(r"^\s*\d+[.)]\s*", "", question)
-    if ":" in question and "?" not in question:
-        prefix, suffix = question.split(":", 1)
-        if any(marker in prefix.lower() for marker in ("question", "example")):
-            question = suffix
+    question = _RANDOM_QUESTION_PREFIX_RE.sub("", question)
     question = question.strip().strip('"').strip("'").strip()
     if not question:
         return ""
@@ -335,6 +336,36 @@ def _first_choice_text(response: dict[str, Any]) -> str:
     if not isinstance(content, str):
         raise RelevanceClassifierError("OpenRouter relevance filter response was empty")
     return content
+
+
+def _question_choice_text(response: dict[str, Any]) -> str:
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise QuestionGenerationError("OpenRouter question generator response did not include choices")
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise QuestionGenerationError("OpenRouter question generator response choice was invalid")
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        raise QuestionGenerationError("OpenRouter question generator response did not include a message")
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+
+    reasoning_candidates: list[str] = []
+    reasoning = message.get("reasoning")
+    if isinstance(reasoning, str):
+        reasoning_candidates.append(reasoning)
+    reasoning_details = message.get("reasoning_details")
+    if isinstance(reasoning_details, list):
+        for detail in reasoning_details:
+            if isinstance(detail, dict) and isinstance(detail.get("text"), str):
+                reasoning_candidates.append(detail["text"])
+    for candidate in reasoning_candidates:
+        question = _clean_generated_question(candidate)
+        if is_valid_generated_question(question):
+            return question
+    raise QuestionGenerationError("OpenRouter question generator response was empty")
 
 
 @dataclass

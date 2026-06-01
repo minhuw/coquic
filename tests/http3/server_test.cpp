@@ -279,6 +279,20 @@ std::vector<std::byte> data_frame_bytes(std::string_view payload_text) {
     return frame.has_value() ? frame.value() : std::vector<std::byte>{};
 }
 
+std::string data_frame_payload_text(const std::vector<std::byte> &bytes) {
+    const auto decoded = coquic::http3::parse_http3_frame(bytes);
+    EXPECT_TRUE(decoded.has_value());
+    if (!decoded.has_value()) {
+        return {};
+    }
+    const auto *data = std::get_if<coquic::http3::Http3DataFrame>(&decoded.value().frame);
+    EXPECT_NE(data, nullptr);
+    if (data == nullptr) {
+        return {};
+    }
+    return std::string(reinterpret_cast<const char *>(data->payload.data()), data->payload.size());
+}
+
 void prime_server_transport(coquic::http3::Http3ServerEndpoint &endpoint) {
     const auto update =
         endpoint.on_core_result(handshake_ready_result(), coquic::quic::QuicCoreTimePoint{});
@@ -1389,6 +1403,83 @@ TEST(QuicHttp3ServerTest, DeferredHandlerRespondsFromPollWithoutBlockingCompleti
     EXPECT_FALSE(sends[0].fin);
     EXPECT_EQ(sends[1].bytes, expected_body);
     EXPECT_TRUE(sends[1].fin);
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
+              0u);
+}
+
+TEST(QuicHttp3ServerTest, DeferredResponsePartsStreamAcrossPolls) {
+    bool deferred_request_called = false;
+    int poll_count = 0;
+    http3::Http3ServerEndpoint endpoint(http3::Http3ServerConfig{
+        .deferred_request_handler =
+            [&](std::uint64_t stream_id, const http3::Http3Request &request) {
+                deferred_request_called = true;
+                EXPECT_EQ(stream_id, 0u);
+                EXPECT_EQ(request.head.path, "/stream");
+                return true;
+            },
+        .deferred_response_part_handler =
+            [&](std::uint64_t stream_id) -> std::optional<http3::Http3ResponsePart> {
+            EXPECT_EQ(stream_id, 0u);
+            ++poll_count;
+            if (poll_count == 1) {
+                return http3::Http3ResponsePart{
+                    .head =
+                        http3::Http3ResponseHead{
+                            .status = 200,
+                            .headers = {{"content-type", "text/event-stream"}},
+                        },
+                };
+            }
+            if (poll_count == 2) {
+                return http3::Http3ResponsePart{.body = bytes_from_text("data: one\n\n")};
+            }
+            if (poll_count == 3) {
+                return http3::Http3ResponsePart{
+                    .body = bytes_from_text("data: two\n\n"),
+                    .complete = true,
+                };
+            }
+            return std::nullopt;
+        },
+    });
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        http3::Http3Field{":method", "GET"},
+        http3::Http3Field{":scheme", "https"},
+        http3::Http3Field{":authority", "example.test"},
+        http3::Http3Field{":path", "/stream"},
+    };
+    const auto completion_update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields), true),
+                                coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(completion_update.terminal_failure);
+    EXPECT_TRUE(deferred_request_called);
+    EXPECT_TRUE(send_stream_inputs_from(completion_update).empty());
+
+    http3::Http3QpackEncoderContext encoder;
+    const auto expected_headers = headers_frame_bytes(
+        encoder, 0,
+        response_fields(200, std::array{http3::Http3Field{"content-type", "text/event-stream"}}));
+    const auto head_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    const auto head_sends = send_stream_inputs_from(head_update);
+    ASSERT_EQ(head_sends.size(), 1u);
+    EXPECT_EQ(head_sends[0].bytes, expected_headers);
+    EXPECT_FALSE(head_sends[0].fin);
+
+    const auto first_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    const auto first_sends = send_stream_inputs_from(first_update);
+    ASSERT_EQ(first_sends.size(), 1u);
+    EXPECT_EQ(data_frame_payload_text(first_sends[0].bytes), "data: one\n\n");
+    EXPECT_FALSE(first_sends[0].fin);
+
+    const auto second_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    const auto second_sends = send_stream_inputs_from(second_update);
+    ASSERT_EQ(second_sends.size(), 1u);
+    EXPECT_EQ(data_frame_payload_text(second_sends[0].bytes), "data: two\n\n");
+    EXPECT_TRUE(second_sends[0].fin);
     EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
               0u);
 }

@@ -72,6 +72,7 @@ function responseHeaders(upstream: Headers) {
   copyResponseHeader(upstream, headers, 'cache-control');
   copyResponseHeader(upstream, headers, 'content-type');
   copyResponseHeader(upstream, headers, 'retry-after');
+  copyResponseHeader(upstream, headers, 'x-accel-buffering');
   return headers;
 }
 

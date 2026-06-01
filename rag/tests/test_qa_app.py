@@ -4,9 +4,10 @@ from fastapi.testclient import TestClient
 
 from coquic_rag.qa.app import create_app
 from coquic_rag.qa.filters import RelevanceDecision
+from coquic_rag.qa.filters import QUESTION_GENERATOR_MODEL
 from coquic_rag.qa.openrouter_chat import FREE_ANSWER_MODELS
 from coquic_rag.qa.openrouter_chat import ChatUsage
-from coquic_rag.qa.service import QaResponse
+from coquic_rag.qa.service import QaResponse, QaStreamEvent
 
 
 class FakeQaService:
@@ -37,13 +38,38 @@ class FakeQaService:
                 }
             ],
             retrieved_sections=[],
+            rag_confidence=0.88,
             usage=ChatUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
             direct_answer="direct answer",
             direct_usage=ChatUsage(prompt_tokens=4, completion_tokens=2, total_tokens=6),
-            direct_model="moonshotai/kimi-k2.6:free",
+            direct_model="openai/gpt-oss-120b:free",
             rag_answer=f"answer for {question}",
             rag_usage=ChatUsage(prompt_tokens=6, completion_tokens=3, total_tokens=9),
-            rag_model="qwen/qwen3-coder:free",
+            rag_model="z-ai/glm-4.5-air:free",
+        )
+
+    def answer_stream(
+        self,
+        question: str,
+        *,
+        user_id: str | None = None,
+        model: str | None = None,
+    ):
+        self.calls.append({"question": question, "user_id": user_id, "model": model, "stream": True})
+        yield QaStreamEvent("metadata", {"citations": [], "rag_confidence": 0.5})
+        yield QaStreamEvent("direct", {"delta": "direct", "done": True})
+        yield QaStreamEvent("rag", {"delta": "rag ", "done": False})
+        yield QaStreamEvent("rag", {"delta": "answer", "done": True})
+        yield QaStreamEvent(
+            "done",
+            {
+                "answer": "rag answer",
+                "accepted": True,
+                "reason": "answered",
+                "direct_answer": "direct",
+                "rag_answer": "rag answer",
+                "citations": [],
+            },
         )
 
 
@@ -81,7 +107,7 @@ def test_qa_endpoint_returns_answer_payload(monkeypatch) -> None:
         "/api/qa",
         json={
             "question": "How does QUIC ACK delay work?",
-            "model": "moonshotai/kimi-k2.6:free",
+            "model": "openai/gpt-oss-120b:free",
         },
         headers={"X-Session-Id": "test-session"},
     )
@@ -90,16 +116,17 @@ def test_qa_endpoint_returns_answer_payload(monkeypatch) -> None:
     payload = response.json()
     assert payload["accepted"] is True
     assert payload["reason"] == "answered"
+    assert payload["rag_confidence"] == 0.88
     assert payload["usage"]["total_tokens"] == 15
     assert payload["citations"][0]["text"] == "Full RFC section text."
     assert payload["citations"][0]["url"] == "https://www.rfc-editor.org/rfc/rfc9000.html#section-1"
     assert payload["direct_answer"] == "direct answer"
     assert payload["direct_usage"]["total_tokens"] == 6
-    assert payload["direct_model"] == "moonshotai/kimi-k2.6:free"
+    assert payload["direct_model"] == "openai/gpt-oss-120b:free"
     assert payload["rag_answer"] == "answer for How does QUIC ACK delay work?"
     assert payload["rag_usage"]["total_tokens"] == 9
-    assert payload["rag_model"] == "qwen/qwen3-coder:free"
-    assert fake_service.calls[0]["model"] == "moonshotai/kimi-k2.6:free"
+    assert payload["rag_model"] == "z-ai/glm-4.5-air:free"
+    assert fake_service.calls[0]["model"] == "openai/gpt-oss-120b:free"
 
 
 def test_qa_endpoint_enforces_rate_limit(monkeypatch) -> None:
@@ -127,6 +154,33 @@ def test_qa_endpoint_enforces_rate_limit(monkeypatch) -> None:
     assert first.status_code == 200
     assert second.status_code == 429
     assert "Retry-After" in second.headers
+
+
+def test_qa_stream_endpoint_returns_sse(monkeypatch) -> None:
+    import coquic_rag.qa.app as qa_app
+
+    qa_app.qa_service.cache_clear()
+    qa_app.rate_limiter.cache_clear()
+    fake_service = FakeQaService()
+    monkeypatch.setattr(qa_app, "qa_service", lambda: fake_service)
+    app = create_app()
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/qa/stream",
+        json={
+            "question": "How does QUIC ACK delay work?",
+            "model": "openai/gpt-oss-120b:free",
+        },
+        headers={"X-Session-Id": "test-stream-session"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: metadata" in response.text
+    assert 'data: {"delta":"rag ","done":false}' in response.text
+    assert "event: done" in response.text
+    assert fake_service.calls[0]["stream"] is True
 
 
 def test_qa_endpoint_rejects_non_free_answer_model(monkeypatch) -> None:
@@ -213,7 +267,7 @@ def test_random_question_endpoint_returns_validated_question(monkeypatch) -> Non
     assert classifier.calls == []
 
 
-def test_default_random_question_generator_uses_free_model_pool(monkeypatch) -> None:
+def test_default_random_question_generator_uses_openrouter_free_router(monkeypatch) -> None:
     import coquic_rag.qa.app as qa_app
 
     qa_app.question_generator.cache_clear()
@@ -221,8 +275,8 @@ def test_default_random_question_generator_uses_free_model_pool(monkeypatch) -> 
 
     generator = qa_app.question_generator()
 
-    assert set(generator.models) == {model_id for model_id, _label in FREE_ANSWER_MODELS}
-    assert generator.max_generation_attempts == len(FREE_ANSWER_MODELS)
+    assert generator.models == (QUESTION_GENERATOR_MODEL,)
+    assert generator.max_generation_attempts == 5
 
 
 def test_random_question_endpoint_rejects_invalid_generated_questions(monkeypatch) -> None:

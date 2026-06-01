@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <memory>
 #include <optional>
@@ -32,6 +33,9 @@ Http3Response runtime_server_response_for_test(const std::filesystem::path &docu
                                                const Http3Request &request);
 Http3Response runtime_server_response_for_test(const Http3RuntimeConfig &config,
                                                const Http3Request &request);
+void stream_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
+                                        const Http3Request &request,
+                                        const std::function<bool(Http3ResponsePart)> &emit);
 void runtime_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path);
 void runtime_clear_forced_file_read_failure_path_for_test();
 std::optional<std::vector<std::byte>>
@@ -2416,6 +2420,57 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyToHttpUpstream) {
     EXPECT_NE(upstream_request.find("Host: demo.test\r\n"), std::string::npos);
     EXPECT_NE(upstream_request.find("x-demo: 1\r\n"), std::string::npos);
     EXPECT_NE(upstream_request.find("X-Forwarded-Proto: https\r\n"), std::string::npos);
+}
+
+TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingEmitsChunkedBodyPartsBeforeCompletion) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    ScopedHttpProxyUpstream upstream(port, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                                           "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                                           "b\r\ndata: one\n\n\r\n"
+                                           "b\r\ndata: two\n\n\r\n"
+                                           "0\r\n\r\n");
+    for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    ASSERT_TRUE(upstream.ready());
+
+    std::vector<coquic::http3::Http3ResponsePart> parts;
+    coquic::http3::stream_http_reverse_proxy_response(
+        coquic::http3::Http3ReverseProxyConfig{
+            .host = "127.0.0.1",
+            .port = port,
+        },
+        coquic::http3::Http3Request{
+            .head =
+                {
+                    .method = "GET",
+                    .authority = "demo.test",
+                    .path = "/events",
+                },
+        },
+        [&](coquic::http3::Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return true;
+        });
+
+    ASSERT_GE(parts.size(), 3u);
+    ASSERT_TRUE(parts[0].head.has_value());
+    const auto &head = optional_ref_or_terminate(parts[0].head);
+    EXPECT_EQ(head.status, 200);
+    EXPECT_FALSE(head.content_length.has_value());
+    expect_header_value(head, {"content-type", "text/event-stream"});
+
+    std::string streamed_body;
+    bool saw_complete = false;
+    for (std::size_t index = 1; index < parts.size(); ++index) {
+        streamed_body.append(reinterpret_cast<const char *>(parts[index].body.data()),
+                             parts[index].body.size());
+        saw_complete = saw_complete || parts[index].complete;
+    }
+    EXPECT_EQ(streamed_body, "data: one\n\ndata: two\n\n");
+    EXPECT_TRUE(saw_complete);
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyHeadWithContentLength) {

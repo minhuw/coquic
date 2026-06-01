@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronDown } from 'lucide-react';
+import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
+import { Check, ChevronDown, Copy, TriangleAlert } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -30,12 +31,33 @@ type QaPayload = {
   reason: string;
   citations?: Citation[];
   usage?: Usage | null;
+  rag_confidence?: number | null;
   direct_answer?: string | null;
   direct_usage?: Usage | null;
   direct_model?: string | null;
   rag_answer?: string | null;
   rag_usage?: Usage | null;
   rag_model?: string | null;
+};
+
+type StreamHandlers = {
+  onMetadata: (payload: Partial<QaPayload>) => void;
+  onDirect: (payload: StreamChunkPayload) => void;
+  onRag: (payload: StreamChunkPayload) => void;
+  onDone: (payload: QaPayload) => void;
+};
+
+type StreamChunkPayload = {
+  delta?: string;
+  usage?: Usage | null;
+  model?: string | null;
+  done?: boolean;
+};
+
+type StreamMetrics = {
+  firstTokenMs: number | null;
+  lastTokenMs: number | null;
+  completionTokens: number | null;
 };
 
 type ModelOption = {
@@ -59,9 +81,8 @@ type HealthPayload = {
 const fallbackModelOptions: ModelOption[] = [
   { id: 'openai/gpt-oss-120b:free', label: 'OpenAI: gpt-oss-120b (free)' },
   { id: 'nvidia/nemotron-3-super-120b-a12b:free', label: 'NVIDIA: Nemotron 3 Super (free)' },
-  { id: 'moonshotai/kimi-k2.6:free', label: 'MoonshotAI: Kimi K2.6 (free)' },
-  { id: 'qwen/qwen3-coder:free', label: 'Qwen: Qwen3 Coder 480B A35B (free)' },
-  { id: 'meta-llama/llama-3.3-70b-instruct:free', label: 'Meta: Llama 3.3 70B Instruct (free)' },
+  { id: 'z-ai/glm-4.5-air:free', label: 'Z.AI: GLM 4.5 Air (free)' },
+  { id: 'google/gemma-4-31b-it:free', label: 'Google: Gemma 4 31B IT (free)' },
 ];
 
 const apiBase = '/rag-api';
@@ -74,16 +95,23 @@ export function QaClient() {
   const [suggesting, setSuggesting] = useState(false);
   const [directAnswer, setDirectAnswer] = useState('');
   const [ragAnswer, setRagAnswer] = useState('');
+  const [directUsage, setDirectUsage] = useState<Usage | null>(null);
+  const [ragUsage, setRagUsage] = useState<Usage | null>(null);
+  const [directMetrics, setDirectMetrics] = useState<StreamMetrics>(emptyStreamMetrics);
+  const [ragMetrics, setRagMetrics] = useState<StreamMetrics>(emptyStreamMetrics);
   const [directModel, setDirectModel] = useState('');
   const [ragModel, setRagModel] = useState('');
   const [queryStartedAt, setQueryStartedAt] = useState<number | null>(null);
   const [queryElapsedMs, setQueryElapsedMs] = useState<number | null>(null);
+  const [ragConfidence, setRagConfidence] = useState<number | null>(null);
   const [citations, setCitations] = useState<Citation[]>([]);
   const [questionError, setQuestionError] = useState('');
   const [selectedModel, setSelectedModel] = useState(fallbackModelOptions[0].id);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(fallbackModelOptions);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const suggestRequestId = useRef(0);
+  const directMetricsRef = useRef<StreamMetrics>(emptyStreamMetrics());
+  const ragMetricsRef = useRef<StreamMetrics>(emptyStreamMetrics());
 
   const hasResults = directAnswer.length > 0 || ragAnswer.length > 0;
   const hasCitations = citations.length > 0;
@@ -152,24 +180,70 @@ export function QaClient() {
     setQueryElapsedMs(0);
     setDirectAnswer('Asking the selected free model directly...');
     setRagAnswer('Retrieving QUIC context...');
+    setDirectUsage(null);
+    setRagUsage(null);
+    directMetricsRef.current = emptyStreamMetrics();
+    ragMetricsRef.current = emptyStreamMetrics();
+    setDirectMetrics(directMetricsRef.current);
+    setRagMetrics(ragMetricsRef.current);
     setDirectModel(selectedModel);
     setRagModel(selectedModel);
+    setRagConfidence(null);
     setCitations([]);
 
     try {
-      const payload = await ask(trimmed, sessionId, selectedModel);
-      setDirectAnswer(payload.direct_answer || payload.answer || 'No direct answer returned.');
-      setRagAnswer(payload.rag_answer || payload.answer || 'No RAG answer returned.');
-      setDirectModel(payload.direct_model || selectedModel);
-      setRagModel(payload.rag_model || selectedModel);
-      setCitations(payload.citations || []);
-      setStatus(publicStatus(payload));
+      await askStream(trimmed, sessionId, selectedModel, {
+        onMetadata: (payload) => {
+          setCitations(payload.citations || []);
+          setRagConfidence(typeof payload.rag_confidence === 'number' ? payload.rag_confidence : null);
+        },
+        onDirect: (payload) => {
+          recordStreamMetrics(payload, startedAt, directMetricsRef, setDirectMetrics);
+          setDirectAnswer((current) => appendStreamText(current, payload.delta || ''));
+          if (payload.usage) {
+            setDirectUsage(payload.usage);
+          }
+          if (payload.model) {
+            setDirectModel(payload.model);
+          }
+        },
+        onRag: (payload) => {
+          recordStreamMetrics(payload, startedAt, ragMetricsRef, setRagMetrics);
+          setRagAnswer((current) => appendStreamText(current, payload.delta || ''));
+          if (payload.usage) {
+            setRagUsage(payload.usage);
+          }
+          if (payload.model) {
+            setRagModel(payload.model);
+          }
+        },
+        onDone: (payload) => {
+          recordStreamUsage(payload.direct_usage || null, startedAt, directMetricsRef, setDirectMetrics);
+          recordStreamUsage(payload.rag_usage || payload.usage || null, startedAt, ragMetricsRef, setRagMetrics);
+          setDirectAnswer(payload.direct_answer || payload.answer || 'No direct answer returned.');
+          setRagAnswer(payload.rag_answer || payload.answer || 'No RAG answer returned.');
+          setDirectUsage(payload.direct_usage || null);
+          setRagUsage(payload.rag_usage || payload.usage || null);
+          setDirectModel(payload.direct_model || selectedModel);
+          setRagModel(payload.rag_model || selectedModel);
+          setRagConfidence(typeof payload.rag_confidence === 'number' ? payload.rag_confidence : null);
+          setCitations(payload.citations || []);
+          setStatus(publicStatus(payload));
+        },
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'request failed';
       setDirectAnswer(message);
       setRagAnswer(message);
+      setDirectUsage(null);
+      setRagUsage(null);
+      directMetricsRef.current = emptyStreamMetrics();
+      ragMetricsRef.current = emptyStreamMetrics();
+      setDirectMetrics(directMetricsRef.current);
+      setRagMetrics(ragMetricsRef.current);
       setDirectModel(selectedModel);
       setRagModel(selectedModel);
+      setRagConfidence(null);
       setCitations([]);
       setStatus('error');
     } finally {
@@ -247,6 +321,7 @@ export function QaClient() {
                   value={selectedModel}
                 />
                 <span className="inline-flex h-9 shrink-0 items-center gap-1.5 text-xs font-medium text-[var(--muted)]">
+                  <PrivacyNotice />
                   <span>Powered by OpenRouter</span>
                   <img className="size-[18px]" src="/openrouter-favicon.ico" alt="" aria-hidden="true" />
                 </span>
@@ -273,29 +348,36 @@ export function QaClient() {
       </Card>
 
       {hasResults ? (
-        <div className="grid gap-3 lg:grid-cols-2">
-          <Card className="min-h-[280px]">
-            <CardHeader className="flex flex-row items-center justify-between gap-3">
-              <CardTitle>Direct</CardTitle>
-              <span className="flex min-w-0 max-w-[72%] items-center justify-end gap-2">
-                <ElapsedBadge elapsedMs={queryElapsedMs} />
-                <ModelBadge model={directModel || selectedModel} />
-              </span>
-            </CardHeader>
-            <CardContent>
+        <div className="grid min-w-0 gap-3 lg:grid-cols-2">
+          <Card className="min-w-0 min-h-[280px]">
+            <AnswerHeader
+              answer={directAnswer}
+              busy={busy}
+              copyLabel="direct answer"
+              elapsedMs={queryElapsedMs}
+              metrics={directMetrics}
+              model={directModel || selectedModel}
+              title="Direct"
+              usage={directUsage}
+            />
+            <CardContent className="min-w-0">
               <MarkdownAnswer>{directAnswer}</MarkdownAnswer>
             </CardContent>
           </Card>
 
-          <Card className="min-h-[280px]">
-            <CardHeader className="flex flex-row items-center justify-between gap-3">
-              <CardTitle>With RAG</CardTitle>
-              <span className="flex min-w-0 max-w-[72%] items-center justify-end gap-2">
-                <ElapsedBadge elapsedMs={queryElapsedMs} />
-                <ModelBadge model={ragModel || selectedModel} />
-              </span>
-            </CardHeader>
-            <CardContent className="grid gap-4">
+          <Card className="min-w-0 min-h-[280px]">
+            <AnswerHeader
+              answer={ragAnswer}
+              busy={busy}
+              confidence={ragConfidence}
+              copyLabel="RAG answer"
+              elapsedMs={queryElapsedMs}
+              metrics={ragMetrics}
+              model={ragModel || selectedModel}
+              title="With RAG"
+              usage={ragUsage}
+            />
+            <CardContent className="grid min-w-0 gap-4">
               <MarkdownAnswer>{ragAnswer}</MarkdownAnswer>
               {hasCitations ? <Citations citations={citations} /> : null}
             </CardContent>
@@ -303,6 +385,52 @@ export function QaClient() {
         </div>
       ) : null}
     </section>
+  );
+}
+
+function AnswerHeader({
+  answer,
+  busy,
+  confidence,
+  copyLabel,
+  elapsedMs,
+  metrics,
+  model,
+  title,
+  usage,
+}: {
+  answer: string;
+  busy: boolean;
+  confidence?: number | null;
+  copyLabel: string;
+  elapsedMs: number | null;
+  metrics: StreamMetrics;
+  model: string;
+  title: string;
+  usage: Usage | null;
+}) {
+  return (
+    <CardHeader className="grid gap-2">
+      <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
+        <span className="flex min-w-0 items-center gap-2">
+          <CardTitle>{title}</CardTitle>
+          <CopyAnswerButton answer={answer} disabled={busy} label={copyLabel} />
+        </span>
+        <span className="flex min-w-0 justify-end">
+          <ModelBadge model={model} />
+        </span>
+      </div>
+      <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
+        <span aria-hidden="true" className="min-h-[22px]" />
+        <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+          <FirstTokenBadge metrics={metrics} />
+          <TokenSpeedBadge answer={answer} metrics={metrics} />
+          <ElapsedBadge elapsedMs={elapsedMs} />
+          <UsageBadge usage={usage} />
+          <ConfidenceBadge confidence={confidence ?? null} />
+        </span>
+      </div>
+    </CardHeader>
   );
 }
 
@@ -386,6 +514,28 @@ function ModelPicker({
   );
 }
 
+function PrivacyNotice() {
+  return (
+    <span className="group relative inline-flex items-center">
+      <button
+        aria-label="Privacy notice"
+        className="inline-flex size-5 items-center justify-center rounded-full text-[var(--muted)] transition-colors duration-200 hover:bg-[#fff4df] hover:text-[#8d6d00] focus-visible:bg-[#fff4df] focus-visible:text-[#8d6d00] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgba(141,109,0,0.32)]"
+        type="button"
+      >
+        <TriangleAlert aria-hidden="true" className="size-3.5" />
+      </button>
+      <span
+        className="pointer-events-none absolute bottom-[calc(100%+10px)] right-0 z-40 w-[min(82vw,340px)] rounded-[var(--radius)] border border-[rgba(141,109,0,0.22)] bg-[#fffaf0] p-3 text-left text-xs font-normal leading-relaxed text-[var(--ink)] opacity-0 shadow-[0_18px_48px_rgba(22,22,22,0.14)] transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100"
+        role="tooltip"
+      >
+        CoQUIC does not store your questions or generated answers. Requests are sent through OpenRouter, and free-model
+        providers may retain or process them under their own policies. Avoid entering secrets, private code, or sensitive
+        operational data.
+      </span>
+    </span>
+  );
+}
+
 function ModelAvatar({ meta }: { meta: ModelMeta }) {
   if (meta.iconSrc) {
     return (
@@ -428,6 +578,110 @@ function ElapsedBadge({ elapsedMs }: { elapsedMs: number | null }) {
   );
 }
 
+function FirstTokenBadge({ metrics }: { metrics: StreamMetrics }) {
+  if (metrics.firstTokenMs === null) {
+    return null;
+  }
+
+  return (
+    <span
+      aria-label={`Time to first token ${formatElapsed(metrics.firstTokenMs)}`}
+      className="shrink-0 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-2 py-1 font-mono text-[11px] leading-none text-[var(--muted)]"
+      title="Time from request submission to the first streamed answer token"
+    >
+      TTFT {formatElapsed(metrics.firstTokenMs)}
+    </span>
+  );
+}
+
+function TokenSpeedBadge({ answer, metrics }: { answer: string; metrics: StreamMetrics }) {
+  const speed = tokenSpeed(metrics, answer);
+  if (speed === null) {
+    return null;
+  }
+
+  const label = `${speed.estimated ? '~' : ''}${formatTokenSpeed(speed.tokensPerSecond)}`;
+  return (
+    <span
+      aria-label={`Token speed ${label}`}
+      className="shrink-0 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-2 py-1 font-mono text-[11px] leading-none text-[var(--muted)]"
+      title={
+        speed.estimated
+          ? 'Estimated from streamed text because provider usage is not available yet'
+          : 'Completion tokens divided by streamed generation time'
+      }
+    >
+      {label}
+    </span>
+  );
+}
+
+function UsageBadge({ usage }: { usage: Usage | null }) {
+  if (!usage) {
+    return null;
+  }
+
+  const tokens = usage?.total_tokens;
+  if (typeof tokens !== 'number') {
+    return null;
+  }
+
+  return (
+    <span
+      aria-label={`Token usage ${formatTokens(tokens)}`}
+      className="shrink-0 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-2 py-1 font-mono text-[11px] leading-none text-[var(--muted)]"
+      title={formatUsageTitle(usage)}
+    >
+      {formatTokens(tokens)}
+    </span>
+  );
+}
+
+function ConfidenceBadge({ confidence }: { confidence: number | null }) {
+  if (confidence === null) {
+    return null;
+  }
+
+  const bounded = Math.max(0, Math.min(1, confidence));
+  const label = confidenceLabel(bounded);
+  return (
+    <span
+      aria-label={`RAG confidence ${Math.round(bounded * 100)} percent, ${label}`}
+      className={`shrink-0 rounded-[var(--radius)] border px-2 py-1 font-mono text-[11px] leading-none ${confidenceClassName(bounded)}`}
+      title="RAG confidence is based on retrieved section similarity scores after low-score results are filtered."
+    >
+      {label} {Math.round(bounded * 100)}%
+    </span>
+  );
+}
+
+function CopyAnswerButton({ answer, disabled, label }: { answer: string; disabled: boolean; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const copyDisabled = disabled || !answer.trim();
+
+  async function copyAnswer() {
+    if (copyDisabled) {
+      return;
+    }
+    await window.navigator.clipboard.writeText(answer);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  return (
+    <button
+      aria-label={copied ? `Copied ${label}` : `Copy ${label}`}
+      className="inline-flex size-[22px] shrink-0 items-center justify-center rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-0 text-[var(--muted)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[#edf5ff] hover:text-[var(--primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgba(15,98,254,0.48)] disabled:pointer-events-none disabled:opacity-55"
+      disabled={copyDisabled}
+      onClick={copyAnswer}
+      title={copied ? 'Copied' : 'Copy answer'}
+      type="button"
+    >
+      {copied ? <Check aria-hidden="true" className="size-3.5" /> : <Copy aria-hidden="true" className="size-3.5" />}
+    </button>
+  );
+}
+
 function MarkdownAnswer({ children }: { children: string }) {
   return (
     <div className="qa-markdown">
@@ -442,30 +696,37 @@ function Citations({ citations }: { citations: Citation[] }) {
       <h3 className="text-sm font-semibold leading-tight text-[var(--ink)]">Citations</h3>
       <ol className="mt-3 grid list-none gap-2 p-0">
         {citations.map((citation, index) => {
-          const score = typeof citation.score === 'number' ? ` · ${citation.score.toFixed(3)}` : '';
+          const score = typeof citation.score === 'number' ? citation.score : null;
           return (
             <li
               className="rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-3"
               key={`${citation.doc_id || 'doc'}-${citation.section_id || index}`}
             >
-              {citation.url ? (
-                <a
-                  className="block text-sm font-semibold text-[var(--primary)] underline decoration-[rgba(15,98,254,0.32)] underline-offset-4 transition-colors duration-200 hover:text-[var(--primary-hover)] hover:decoration-[var(--primary-hover)]"
-                  href={citation.url}
-                  rel="noopener noreferrer"
-                  target="_blank"
-                >
-                  {citation.citation || 'unknown section'}
-                </a>
-              ) : (
-                <strong className="block text-sm font-semibold text-[var(--ink)]">
-                  {citation.citation || 'unknown section'}
-                </strong>
-              )}
-              <span className="mt-1 block font-mono text-[11px] text-[var(--muted)]">
-                {citation.doc_id || 'doc'} §{citation.section_id || '?'}
-                {score}
-              </span>
+              <div className="flex items-start justify-between gap-3">
+                {citation.url ? (
+                  <a
+                    className="min-w-0 text-sm font-semibold text-[var(--primary)] underline decoration-[rgba(15,98,254,0.32)] underline-offset-4 transition-colors duration-200 hover:text-[var(--primary-hover)] hover:decoration-[var(--primary-hover)]"
+                    href={citation.url}
+                    rel="noopener noreferrer"
+                    target="_blank"
+                  >
+                    {citation.citation || 'unknown section'}
+                  </a>
+                ) : (
+                  <strong className="min-w-0 text-sm font-semibold text-[var(--ink)]">
+                    {citation.citation || 'unknown section'}
+                  </strong>
+                )}
+                {score === null ? null : (
+                  <span
+                    aria-label={`Retrieval score ${score.toFixed(3)}`}
+                    className="shrink-0 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] px-2 py-1 font-mono text-[11px] leading-none text-[var(--muted)]"
+                    title="Vector retrieval similarity score"
+                  >
+                    {score.toFixed(3)}
+                  </span>
+                )}
+              </div>
               {citation.title ? (
                 <p className="mt-2 text-[13px] leading-relaxed text-[var(--soft)]">{citation.title}</p>
               ) : null}
@@ -508,11 +769,12 @@ async function loadHealth(): Promise<HealthPayload | null> {
   }
 }
 
-async function ask(question: string, sessionId: string, model: string): Promise<QaPayload> {
-  const response = await fetch(`${apiBase}/api/qa`, {
+async function askStream(question: string, sessionId: string, model: string, handlers: StreamHandlers): Promise<void> {
+  const response = await fetch(`${apiBase}/api/qa/stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
       'X-Session-Id': sessionId,
     },
     body: JSON.stringify({ question, model }),
@@ -523,7 +785,31 @@ async function ask(question: string, sessionId: string, model: string): Promise<
   if (!response.ok) {
     throw new Error(`request failed: ${response.status}`);
   }
-  return response.json();
+  if (!response.body) {
+    throw new Error('stream unavailable');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (value) {
+      buffer += decoder.decode(value, { stream: !done });
+      const events = buffer.split(/\n\n/);
+      buffer = events.pop() || '';
+      for (const eventText of events) {
+        handleStreamEvent(parseSseEvent(eventText), handlers);
+      }
+    }
+    if (done) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        handleStreamEvent(parseSseEvent(buffer), handlers);
+      }
+      return;
+    }
+  }
 }
 
 async function randomQuestion(sessionId: string): Promise<{ question: string }> {
@@ -541,6 +827,134 @@ async function randomQuestion(sessionId: string): Promise<{ question: string }> 
     throw new Error(`request failed: ${response.status}`);
   }
   return response.json();
+}
+
+function parseSseEvent(eventText: string): { event: string; data: unknown } | null {
+  let event = 'message';
+  const dataLines: string[] = [];
+  for (const line of eventText.split(/\r?\n/)) {
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim();
+      continue;
+    }
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+  if (!dataLines.length) {
+    return null;
+  }
+  try {
+    return { event, data: JSON.parse(dataLines.join('\n')) };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function handleStreamEvent(parsed: { event: string; data: unknown } | null, handlers: StreamHandlers) {
+  if (!parsed || !isRecord(parsed.data)) {
+    return;
+  }
+  if (parsed.event === 'metadata') {
+    handlers.onMetadata(parsed.data as Partial<QaPayload>);
+    return;
+  }
+  if (parsed.event === 'direct') {
+    handlers.onDirect(parsed.data as StreamChunkPayload);
+    return;
+  }
+  if (parsed.event === 'rag') {
+    handlers.onRag(parsed.data as StreamChunkPayload);
+    return;
+  }
+  if (parsed.event === 'done') {
+    handlers.onDone(parsed.data as QaPayload);
+    return;
+  }
+  if (parsed.event === 'error') {
+    throw new Error('request failed: stream');
+  }
+}
+
+function appendStreamText(current: string, delta: string) {
+  if (!delta) {
+    return current;
+  }
+  if (current === 'Asking the selected free model directly...' || current === 'Retrieving QUIC context...') {
+    return delta;
+  }
+  return `${current}${delta}`;
+}
+
+function emptyStreamMetrics(): StreamMetrics {
+  return {
+    firstTokenMs: null,
+    lastTokenMs: null,
+    completionTokens: null,
+  };
+}
+
+function recordStreamMetrics(
+  payload: StreamChunkPayload,
+  startedAt: number,
+  metricsRef: MutableRefObject<StreamMetrics>,
+  setMetrics: Dispatch<SetStateAction<StreamMetrics>>,
+) {
+  const elapsedMs = Date.now() - startedAt;
+  const hasDelta = Boolean(payload.delta);
+  const completionTokens = payload.usage?.completion_tokens;
+  let next = metricsRef.current;
+  let changed = false;
+
+  if (hasDelta) {
+    next = { ...next };
+    if (next.firstTokenMs === null) {
+      next.firstTokenMs = elapsedMs;
+    }
+    next.lastTokenMs = elapsedMs;
+    changed = true;
+  }
+
+  if (typeof completionTokens === 'number') {
+    if (!changed) {
+      next = { ...next };
+    }
+    next.completionTokens = completionTokens;
+    if (next.lastTokenMs === null) {
+      next.lastTokenMs = elapsedMs;
+    }
+    changed = true;
+  }
+
+  if (changed) {
+    metricsRef.current = next;
+    setMetrics(next);
+  }
+}
+
+function recordStreamUsage(
+  usage: Usage | null,
+  startedAt: number,
+  metricsRef: MutableRefObject<StreamMetrics>,
+  setMetrics: Dispatch<SetStateAction<StreamMetrics>>,
+) {
+  const completionTokens = usage?.completion_tokens;
+  if (typeof completionTokens !== 'number') {
+    return;
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  const next = {
+    ...metricsRef.current,
+    completionTokens,
+    lastTokenMs: metricsRef.current.lastTokenMs ?? elapsedMs,
+  };
+  metricsRef.current = next;
+  setMetrics(next);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 function publicStatus(payload: QaPayload) {
@@ -571,6 +985,82 @@ function formatElapsed(ms: number) {
   return `${(elapsed / 1000).toFixed(elapsed < 10_000 ? 1 : 0)} s`;
 }
 
+function formatTokens(tokens: number) {
+  const safeTokens = Math.max(0, tokens);
+  if (safeTokens < 1000) {
+    return `${safeTokens} tok`;
+  }
+  return `${(safeTokens / 1000).toFixed(safeTokens < 10_000 ? 1 : 0)}k tok`;
+}
+
+function tokenSpeed(metrics: StreamMetrics, answer: string) {
+  if (metrics.firstTokenMs === null || metrics.lastTokenMs === null) {
+    return null;
+  }
+
+  const exactTokens = metrics.completionTokens;
+  const tokens = exactTokens ?? estimateCompletionTokens(answer);
+  if (tokens <= 0) {
+    return null;
+  }
+
+  const streamedMs = Math.max(500, metrics.lastTokenMs - metrics.firstTokenMs);
+  return {
+    estimated: exactTokens === null,
+    tokensPerSecond: tokens / (streamedMs / 1000),
+  };
+}
+
+function estimateCompletionTokens(answer: string) {
+  const text = answer.trim();
+  if (!text) {
+    return 0;
+  }
+  return Math.max(1, Math.round(text.length / 4));
+}
+
+function formatTokenSpeed(tokensPerSecond: number) {
+  const safeRate = Math.max(0, tokensPerSecond);
+  if (safeRate < 10) {
+    return `${safeRate.toFixed(1)} tok/s`;
+  }
+  return `${Math.round(safeRate)} tok/s`;
+}
+
+function formatUsageTitle(usage: Usage) {
+  const parts = [];
+  if (typeof usage.prompt_tokens === 'number') {
+    parts.push(`prompt ${usage.prompt_tokens}`);
+  }
+  if (typeof usage.completion_tokens === 'number') {
+    parts.push(`completion ${usage.completion_tokens}`);
+  }
+  if (typeof usage.total_tokens === 'number') {
+    parts.push(`total ${usage.total_tokens}`);
+  }
+  return parts.length ? parts.join(' · ') : 'Token usage';
+}
+
+function confidenceLabel(confidence: number) {
+  if (confidence >= 0.72) {
+    return 'High';
+  }
+  if (confidence >= 0.45) {
+    return 'Med';
+  }
+  return 'Low';
+}
+
+function confidenceClassName(confidence: number) {
+  if (confidence >= 0.72) {
+    return 'border-[rgba(31,138,101,0.28)] bg-[#edf8f4] text-[var(--ok)]';
+  }
+  if (confidence >= 0.45) {
+    return 'border-[rgba(141,109,0,0.28)] bg-[#fff4df] text-[#8d6d00]';
+  }
+  return 'border-[rgba(207,45,86,0.28)] bg-[#fff1f1] text-[var(--danger)]';
+}
+
 function modelMeta(model: string): ModelMeta {
   if (model === 'openrouter/free') {
     return {
@@ -588,8 +1078,18 @@ function modelMeta(model: string): ModelMeta {
       size: '31B',
       avatar: 'G',
       swatch: '#1f8a65',
-      label: 'Google: Gemma 4 31B (free)',
+      label: 'Google: Gemma 4 31B IT (free)',
       iconSrc: '/google-favicon.ico',
+    };
+  }
+  if (model.startsWith('z-ai/glm-4.5-air')) {
+    return {
+      provider: 'Z.AI',
+      size: 'Air',
+      avatar: 'Z',
+      swatch: '#b83280',
+      label: 'Z.AI: GLM 4.5 Air (free)',
+      iconSrc: '/z-ai-logo.svg',
     };
   }
   if (model.startsWith('google/gemma-4-26b')) {
@@ -600,36 +1100,6 @@ function modelMeta(model: string): ModelMeta {
       swatch: '#1f8a65',
       label: 'Google: Gemma 4 26B A4B (free)',
       iconSrc: '/google-favicon.ico',
-    };
-  }
-  if (model.startsWith('qwen/qwen3-next-80b')) {
-    return {
-      provider: 'Qwen',
-      size: '80B A3B',
-      avatar: 'Q',
-      swatch: '#8d6d00',
-      label: 'Qwen: Qwen3 Next 80B A3B Instruct (free)',
-      iconSrc: '/qwen-favicon.ico',
-    };
-  }
-  if (model.startsWith('qwen/qwen3-coder')) {
-    return {
-      provider: 'Qwen',
-      size: '480B A35B',
-      avatar: 'Q',
-      swatch: '#8d6d00',
-      label: 'Qwen: Qwen3 Coder 480B A35B (free)',
-      iconSrc: '/qwen-favicon.ico',
-    };
-  }
-  if (model.startsWith('moonshotai/kimi-k2.6')) {
-    return {
-      provider: 'MoonshotAI',
-      size: 'K2.6',
-      avatar: 'K',
-      swatch: '#161616',
-      label: 'MoonshotAI: Kimi K2.6 (free)',
-      iconSrc: '/moonshot-favicon.ico',
     };
   }
   if (model.startsWith('openai/gpt-oss-120b')) {
@@ -650,16 +1120,6 @@ function modelMeta(model: string): ModelMeta {
       swatch: '#393939',
       label: 'OpenAI: gpt-oss-20b (free)',
       iconSrc: '/openai-favicon.ico',
-    };
-  }
-  if (model.startsWith('meta-llama/llama-3.3-70b')) {
-    return {
-      provider: 'Meta',
-      size: '70B',
-      avatar: 'M',
-      swatch: '#0043ce',
-      label: 'Meta: Llama 3.3 70B Instruct (free)',
-      iconSrc: '/meta-favicon.svg',
     };
   }
   if (model.startsWith('nvidia/nemotron-3-nano-30b-a3b')) {

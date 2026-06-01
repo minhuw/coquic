@@ -355,6 +355,35 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
     return response;
 }
 
+std::string decode_chunked_body(std::string_view encoded) {
+    std::string decoded;
+    std::size_t offset = 0;
+    while (offset < encoded.size()) {
+        const auto line_end = encoded.find("\r\n", offset);
+        if (line_end == std::string_view::npos) {
+            return decoded;
+        }
+        std::size_t chunk_size = 0;
+        const auto size_text = encoded.substr(offset, line_end - offset);
+        const auto *begin = size_text.data();
+        const auto *end = size_text.data() + size_text.size();
+        const auto parsed = std::from_chars(begin, end, chunk_size, 16);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+            return decoded;
+        }
+        offset = line_end + 2;
+        if (chunk_size == 0) {
+            return decoded;
+        }
+        if (offset + chunk_size > encoded.size()) {
+            return decoded;
+        }
+        decoded.append(encoded.substr(offset, chunk_size));
+        offset += chunk_size + 2;
+    }
+    return decoded;
+}
+
 std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uint16_t port,
                                                  std::string_view method, std::string_view target) {
     const std::string request = std::string(method) + " " + std::string(target) +
@@ -993,8 +1022,8 @@ TEST(QuicHttp3BootstrapTest, HttpsPostReverseProxyForwardsBodyAndHeaders) {
     const auto &received = response.value();
     EXPECT_EQ(received.status_code, 200);
     EXPECT_EQ(received.body, "{\"ok\":true}");
-    ASSERT_TRUE(received.headers.contains("Content-Type"));
-    EXPECT_EQ(received.headers.at("Content-Type"), "application/json");
+    ASSERT_TRUE(received.headers.contains("content-type"));
+    EXPECT_EQ(received.headers.at("content-type"), "application/json");
 
     const auto upstream_request = upstream.request_text();
     EXPECT_NE(upstream_request.find("POST /rag-api/api/questions/random HTTP/1.1\r\n"),
@@ -1003,6 +1032,48 @@ TEST(QuicHttp3BootstrapTest, HttpsPostReverseProxyForwardsBodyAndHeaders) {
     EXPECT_NE(upstream_request.find("content-type: application/json\r\n"), std::string::npos);
     EXPECT_NE(upstream_request.find("Content-Length: 2\r\n"), std::string::npos);
     EXPECT_EQ(upstream_request.substr(upstream_request.size() - 2), "{}");
+}
+
+TEST(QuicHttp3BootstrapTest, HttpsReverseProxyStreamsChunkedResponse) {
+    coquic::quic::test::ScopedTempDir document_root;
+
+    const auto upstream_port = allocate_tcp_loopback_port();
+    ASSERT_NE(upstream_port, 0);
+    ScopedHttpProxyUpstream upstream(upstream_port,
+                                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                                     "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                                     "b\r\ndata: one\n\n\r\n"
+                                     "b\r\ndata: two\n\n\r\n"
+                                     "0\r\n\r\n");
+    for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    ASSERT_TRUE(upstream.ready());
+
+    const auto bootstrap_port = allocate_tcp_loopback_port();
+    ASSERT_NE(bootstrap_port, 0);
+
+    auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
+    config.reverse_proxy = coquic::http3::Http3ReverseProxyConfig{
+        .host = "127.0.0.1",
+        .port = upstream_port,
+    };
+    ScopedBootstrapProcess server(config);
+
+    const auto response =
+        https_request("127.0.0.1", bootstrap_port, "GET", "/rag-api/api/qa/stream");
+
+    ASSERT_TRUE(response.has_value());
+    if (!response.has_value()) {
+        return;
+    }
+    const auto &received = response.value();
+    EXPECT_EQ(received.status_code, 200);
+    ASSERT_TRUE(received.headers.contains("Transfer-Encoding"));
+    EXPECT_EQ(received.headers.at("Transfer-Encoding"), "chunked");
+    ASSERT_TRUE(received.headers.contains("content-type"));
+    EXPECT_EQ(received.headers.at("content-type"), "text/event-stream");
+    EXPECT_EQ(decode_chunked_body(received.body), "data: one\n\ndata: two\n\n");
 }
 
 TEST(QuicHttp3BootstrapTest, HttpsMalformedRequestsReturnBadRequest) {

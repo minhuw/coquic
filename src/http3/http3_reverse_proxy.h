@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -17,5 +18,8 @@ struct Http3ReverseProxyConfig {
 std::optional<Http3ReverseProxyConfig> parse_http_reverse_proxy_target(std::string_view target);
 Http3Response fetch_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
                                                 const Http3Request &request);
+void stream_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
+                                        const Http3Request &request,
+                                        const std::function<bool(Http3ResponsePart)> &emit);
 
 } // namespace coquic::http3

@@ -156,6 +156,34 @@ void prime_client_transport(coquic::http3::Http3ClientEndpoint &endpoint) {
     EXPECT_EQ(send_stream_inputs_from(transport_update).size(), 3u);
 }
 
+std::vector<std::byte> completed_echo_response_payload() {
+    std::array response_headers{
+        coquic::http3::Http3Field{":status", "200"},
+        coquic::http3::Http3Field{"content-length", "4"},
+        coquic::http3::Http3Field{"content-type", "application/octet-stream"},
+    };
+    std::array response_trailers{
+        coquic::http3::Http3Field{"etag", "done"},
+    };
+    auto response_payload = headers_frame_bytes(0, response_headers);
+    const auto body_frame = data_frame_bytes("ping");
+    response_payload.insert(response_payload.end(), body_frame.begin(), body_frame.end());
+    const auto trailers_frame = headers_frame_bytes(0, response_trailers);
+    response_payload.insert(response_payload.end(), trailers_frame.begin(), trailers_frame.end());
+    return response_payload;
+}
+
+bool completed_echo_response_update_matches(
+    const coquic::http3::Http3ClientEndpointUpdate &response_update) {
+    if (response_update.events.size() != 1u) {
+        return false;
+    }
+    const auto &event = response_update.events.front();
+    return event.stream_id == 0u && event.request.head.path == "/_coquic/echo" &&
+           event.response.head.status == 200u && event.response.body == bytes_from_text("ping") &&
+           event.response.trailers == coquic::http3::Http3Headers{{"etag", "done"}};
+}
+
 } // namespace
 
 namespace coquic::http3 {
@@ -203,30 +231,11 @@ TEST(QuicHttp3ClientTest, SubmitRequestEmitsCompletedResponseAfterFinalFin) {
     const auto request_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
     EXPECT_FALSE(send_stream_inputs_from(request_update).empty());
 
-    std::array response_headers{
-        coquic::http3::Http3Field{":status", "200"},
-        coquic::http3::Http3Field{"content-length", "4"},
-        coquic::http3::Http3Field{"content-type", "application/octet-stream"},
-    };
-    std::array response_trailers{
-        coquic::http3::Http3Field{"etag", "done"},
-    };
-    auto response_payload = headers_frame_bytes(0, response_headers);
-    const auto body_frame = data_frame_bytes("ping");
-    response_payload.insert(response_payload.end(), body_frame.begin(), body_frame.end());
-    const auto trailers_frame = headers_frame_bytes(0, response_trailers);
-    response_payload.insert(response_payload.end(), trailers_frame.begin(), trailers_frame.end());
-
+    const auto response_payload = completed_echo_response_payload();
     auto response_update = endpoint.on_core_result(receive_result(0, response_payload, true),
                                                    coquic::quic::QuicCoreTimePoint{});
 
-    ASSERT_EQ(response_update.events.size(), 1u);
-    EXPECT_EQ(response_update.events[0].stream_id, 0u);
-    EXPECT_EQ(response_update.events[0].request.head.path, "/_coquic/echo");
-    EXPECT_EQ(response_update.events[0].response.head.status, 200u);
-    EXPECT_EQ(response_update.events[0].response.body, bytes_from_text("ping"));
-    EXPECT_EQ(response_update.events[0].response.trailers,
-              (coquic::http3::Http3Headers{{"etag", "done"}}));
+    EXPECT_TRUE(completed_echo_response_update_matches(response_update));
 }
 
 TEST(QuicHttp3ClientTest, HeadRequestCollectsHeadersOnlyFinalResponse) {

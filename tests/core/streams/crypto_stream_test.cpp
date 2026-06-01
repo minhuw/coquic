@@ -55,7 +55,7 @@ TEST(QuicCryptoStreamTest, SendBufferSegmentStateCountsTrackTransitions) {
             .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)],
         0u);
 
-    const auto initial = buffer.take_ranges(2);
+    auto initial = buffer.take_ranges(2);
     ASSERT_EQ(initial.size(), 1u);
     EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
                   ReliableSendBuffer::SegmentState::unsent)],
@@ -127,20 +127,20 @@ TEST(QuicCryptoStreamTest, TransitionSegmentStateNoOpKeepsStateCountsStable) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("ab"));
 
-    const auto before_unsent = buffer.segment_state_counts_[send_buffer_state_index(
+    auto before_unsent = buffer.segment_state_counts_[send_buffer_state_index(
         ReliableSendBuffer::SegmentState::unsent)];
-    const auto before_sent =
+    auto before_sent =
         buffer
             .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)];
-    const auto before_lost =
+    auto before_lost =
         buffer
             .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)];
 
-    auto it = buffer.segments_.begin();
-    ASSERT_NE(it, buffer.segments_.end());
-    buffer.transition_segment_state(it->second, ReliableSendBuffer::SegmentState::unsent);
+    auto segment_it = buffer.segments_.begin();
+    ASSERT_NE(segment_it, buffer.segments_.end());
+    buffer.transition_segment_state(segment_it->second, ReliableSendBuffer::SegmentState::unsent);
 
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::unsent);
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::unsent);
     EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
                   ReliableSendBuffer::SegmentState::unsent)],
               before_unsent);
@@ -157,7 +157,7 @@ TEST(QuicCryptoStreamTest, TransitionSegmentStateNoOpKeepsStateCountsStable) {
 TEST(QuicCryptoStreamTest, AppendCollisionSkipsDuplicateInsertionAccounting) {
     ReliableSendBuffer buffer;
     auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("ab"));
-    auto [it, inserted] =
+    auto [segment_it, inserted] =
         buffer.segments_.emplace(0, ReliableSendBuffer::Segment{
                                         .state = ReliableSendBuffer::SegmentState::unsent,
                                         .storage = storage,
@@ -165,10 +165,10 @@ TEST(QuicCryptoStreamTest, AppendCollisionSkipsDuplicateInsertionAccounting) {
                                         .end = 1,
                                     });
     ASSERT_TRUE(inserted);
-    buffer.note_segment_inserted(it->second);
+    buffer.note_segment_inserted(segment_it->second);
     buffer.next_append_offset_ = 0;
 
-    const auto before_unsent = buffer.segment_state_counts_[send_buffer_state_index(
+    auto before_unsent = buffer.segment_state_counts_[send_buffer_state_index(
         ReliableSendBuffer::SegmentState::unsent)];
     buffer.append(SharedBytes(storage, 1, 2));
 
@@ -201,7 +201,7 @@ TEST(QuicCryptoStreamTest, TakeRangesSplitCollisionSkipsDuplicateTailInsertion) 
     ASSERT_TRUE(tail_inserted);
     buffer.note_segment_inserted(tail_it->second);
 
-    const auto ranges = buffer.take_ranges(2);
+    auto ranges = buffer.take_ranges(2);
 
     ASSERT_EQ(ranges.size(), 1u);
     EXPECT_EQ(buffer.segments_.size(), 2u);
@@ -231,7 +231,7 @@ TEST(QuicCryptoStreamTest, SplitAtAddsTailSegmentAndAccountsForItsState) {
 
     EXPECT_EQ(buffer.segments_.size(), 2u);
     EXPECT_EQ(buffer.segments_.begin()->second.end, 2u);
-    const auto tail_it = std::next(buffer.segments_.begin());
+    auto tail_it = std::next(buffer.segments_.begin());
     EXPECT_EQ(tail_it->first, 2u);
     EXPECT_EQ(tail_it->second.begin, 2u);
     EXPECT_EQ(tail_it->second.end, 4u);
@@ -244,7 +244,7 @@ TEST(QuicCryptoStreamTest, SplitAtAddsTailSegmentAndAccountsForItsState) {
 TEST(QuicCryptoStreamTest, FirstOffsetByStateReturnsEmptyWhenStateCountIsStale) {
     ReliableSendBuffer buffer;
     auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcd"));
-    auto [it, inserted] =
+    auto [segment_it, inserted] =
         buffer.segments_.emplace(0, ReliableSendBuffer::Segment{
                                         .state = ReliableSendBuffer::SegmentState::sent,
                                         .storage = storage,
@@ -252,7 +252,7 @@ TEST(QuicCryptoStreamTest, FirstOffsetByStateReturnsEmptyWhenStateCountIsStale) 
                                         .end = 4,
                                     });
     ASSERT_TRUE(inserted);
-    buffer.note_segment_inserted(it->second);
+    buffer.note_segment_inserted(segment_it->second);
     buffer.segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::lost)] =
         1;
 
@@ -267,7 +267,7 @@ bool crypto_stream_internal_coverage_for_tests() {
     receive_buffer.buffered_bytes_.emplace(0, SharedBytes(storage, 0, 2));
     receive_buffer.buffered_bytes_.emplace(2, SharedBytes(storage, 2, 4));
 
-    const auto contiguous = receive_buffer.take_contiguous_buffered_bytes({});
+    auto contiguous = receive_buffer.take_contiguous_buffered_bytes({});
     if (contiguous.owned.size() != 0 || contiguous.shared.storage().get() != storage.get() ||
         contiguous.shared.begin_offset() != 0 || contiguous.shared.end_offset() != 4 ||
         contiguous.to_vector() != bytes_from_string("abcd") ||
@@ -278,7 +278,7 @@ bool crypto_stream_internal_coverage_for_tests() {
     ReliableReceiveBuffer gapped_receive_buffer;
     gapped_receive_buffer.buffered_bytes_.emplace(0, SharedBytes(storage, 0, 2));
     gapped_receive_buffer.buffered_bytes_.emplace(2, SharedBytes(storage, 3, 4));
-    const auto gapped = gapped_receive_buffer.take_contiguous_buffered_bytes({});
+    auto gapped = gapped_receive_buffer.take_contiguous_buffered_bytes({});
     if (!gapped.shared.empty() || gapped.owned != bytes_from_string("abd") ||
         !gapped_receive_buffer.buffered_bytes_.empty() ||
         gapped_receive_buffer.next_contiguous_offset_ != 3) {
@@ -299,7 +299,7 @@ TEST(QuicCryptoStreamTest, SendBufferProducesIncreasingOffsets) {
         std::byte{0x04},
     });
 
-    const auto frames = buffer.take_frames(3);
+    auto frames = buffer.take_frames(3);
     ASSERT_EQ(frames.size(), 2u);
     EXPECT_EQ(frames[0].offset, 0u);
     EXPECT_EQ(frames[1].offset, 3u);
@@ -308,7 +308,7 @@ TEST(QuicCryptoStreamTest, SendBufferProducesIncreasingOffsets) {
 TEST(QuicCryptoStreamTest, EmptySendBufferProducesNoFrames) {
     CryptoSendBuffer buffer;
 
-    const auto frames = buffer.take_frames(8);
+    auto frames = buffer.take_frames(8);
 
     EXPECT_TRUE(frames.empty());
 }
@@ -317,7 +317,7 @@ TEST(QuicCryptoStreamTest, ZeroFrameBudgetProducesNoFramesAndKeepsBufferNonEmpty
     CryptoSendBuffer buffer;
     buffer.append(std::vector<std::byte>{std::byte{0x01}});
 
-    const auto frames = buffer.take_frames(0);
+    auto frames = buffer.take_frames(0);
 
     EXPECT_TRUE(frames.empty());
     EXPECT_FALSE(buffer.empty());
@@ -345,7 +345,7 @@ TEST(QuicCryptoStreamTest, SharedBytesEmptyAndSubviewBehaveLikeSpanViews) {
     EXPECT_EQ(empty.begin(), empty.end());
     EXPECT_TRUE(empty.subspan(1).empty());
 
-    const std::vector<std::byte> empty_bytes;
+    std::vector<std::byte> empty_bytes;
     EXPECT_TRUE(empty == empty_bytes);
     EXPECT_TRUE(empty_bytes == empty);
     EXPECT_TRUE(std::span<const std::byte>(empty_bytes) == empty);
@@ -361,7 +361,7 @@ TEST(QuicCryptoStreamTest, SharedBytesEmptyAndSubviewBehaveLikeSpanViews) {
     EXPECT_EQ(view.data(), storage->data() + 2);
     EXPECT_EQ(empty_view.data(), nullptr);
     EXPECT_TRUE(empty_view.span().empty());
-    const auto view_span = view.span();
+    auto view_span = view.span();
     EXPECT_EQ(std::vector<std::byte>(view_span.begin(), view_span.end()), bytes_from_string("cd"));
     EXPECT_EQ(view.to_vector(), bytes_from_string("cd"));
     EXPECT_EQ(view.begin_offset(), 2u);
@@ -379,8 +379,8 @@ TEST(QuicCryptoStreamTest, SharedBytesEqualityRejectsMismatchedViews) {
     const SharedBytes bytes(bytes_from_string("abcd"));
     const SharedBytes shorter(bytes_from_string("abc"));
     const SharedBytes different(bytes_from_string("abce"));
-    const auto short_bytes = bytes_from_string("abc");
-    const auto different_bytes = bytes_from_string("abce");
+    auto short_bytes = bytes_from_string("abc");
+    auto different_bytes = bytes_from_string("abce");
 
     EXPECT_EQ(bytes.subspan(1, 2), bytes_from_string("bc"));
     EXPECT_FALSE(bytes == different);
@@ -395,7 +395,7 @@ TEST(QuicCryptoStreamTest, SendBufferRetainsBytesUntilAcknowledged) {
     ReliableSendBuffer buffer;
     buffer.append(std::vector<std::byte>{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}});
 
-    const auto first = buffer.take_ranges(2);
+    auto first = buffer.take_ranges(2);
     ASSERT_EQ(first.size(), 1u);
     EXPECT_EQ(first[0].offset, 0u);
     EXPECT_EQ(first[0].bytes.size(), 2u);
@@ -410,11 +410,11 @@ TEST(QuicCryptoStreamTest, TakeRangesReusesUnderlyingSegmentStorage) {
     buffer.append(bytes_from_string("abcdef"));
 
     ASSERT_EQ(buffer.segments_.size(), 1u);
-    const auto source_storage = buffer.segments_.begin()->second.storage;
+    auto source_storage = buffer.segments_.begin()->second.storage;
     ASSERT_NE(source_storage, nullptr);
-    const auto *source_bytes = source_storage->data();
+    auto *source_bytes = source_storage->data();
 
-    const auto ranges = buffer.take_ranges(2);
+    auto ranges = buffer.take_ranges(2);
 
     ASSERT_EQ(ranges.size(), 1u);
     EXPECT_EQ(ranges[0].offset, 0u);
@@ -433,9 +433,9 @@ TEST(QuicCryptoStreamTest, BytesForRangeCoversSharedOwnedAndMissingRanges) {
     buffer.mark_lost(0, 2);
     ASSERT_EQ(buffer.take_ranges(4).size(), 2u);
 
-    const auto first_slice = buffer.bytes_for_range(0, 4);
+    auto first_slice = buffer.bytes_for_range(0, 4);
     ASSERT_TRUE(first_slice.has_value());
-    const auto &first_slice_value = optional_ref_or_terminate(first_slice);
+    auto &first_slice_value = optional_ref_or_terminate(first_slice);
     EXPECT_EQ(first_slice_value.storage().get(), first.get());
     EXPECT_EQ(first_slice_value.to_vector(), bytes_from_string("abcd"));
 
@@ -443,16 +443,16 @@ TEST(QuicCryptoStreamTest, BytesForRangeCoversSharedOwnedAndMissingRanges) {
     EXPECT_FALSE(buffer.bytes_for_range(0, 8).has_value());
     ASSERT_FALSE(buffer.take_ranges(8).empty());
 
-    const auto joined = buffer.bytes_for_range(0, 8);
+    auto joined = buffer.bytes_for_range(0, 8);
     ASSERT_TRUE(joined.has_value());
-    const auto &joined_value = optional_ref_or_terminate(joined);
+    auto &joined_value = optional_ref_or_terminate(joined);
     EXPECT_NE(joined_value.storage().get(), first.get());
     EXPECT_NE(joined_value.storage().get(), second.get());
     EXPECT_EQ(joined_value.to_vector(), bytes_from_string("abcdefgh"));
 
-    const auto empty_slice = buffer.bytes_for_range(0, 0);
+    auto empty_slice = buffer.bytes_for_range(0, 0);
     ASSERT_TRUE(empty_slice.has_value());
-    const auto &empty_slice_value = optional_ref_or_terminate(empty_slice);
+    auto &empty_slice_value = optional_ref_or_terminate(empty_slice);
     EXPECT_TRUE(empty_slice_value.empty());
     EXPECT_FALSE(buffer.bytes_for_range(10, 1).has_value());
 
@@ -484,9 +484,9 @@ TEST(QuicCryptoStreamTest, BytesForRangeCoalescesAdjacentSharedSegmentsAndReject
     ASSERT_TRUE(second_inserted);
     coalesced_buffer.note_segment_inserted(second_it->second);
 
-    const auto coalesced = coalesced_buffer.bytes_for_range(0, 4);
+    auto coalesced = coalesced_buffer.bytes_for_range(0, 4);
     ASSERT_TRUE(coalesced.has_value());
-    const auto &coalesced_value = optional_ref_or_terminate(coalesced);
+    auto &coalesced_value = optional_ref_or_terminate(coalesced);
     EXPECT_EQ(coalesced_value.storage().get(), storage.get());
     EXPECT_EQ(coalesced_value.begin_offset(), 0u);
     EXPECT_EQ(coalesced_value.end_offset(), 4u);
@@ -668,9 +668,9 @@ TEST(QuicCryptoStreamTest, SendBufferColdBranchEdgesUseDirectSegments) {
            });
     ASSERT_TRUE(right_slice_inserted);
     non_adjacent_storage_offsets.note_segment_inserted(right_slice_it->second);
-    const auto discontiguous = non_adjacent_storage_offsets.bytes_for_range(0, 4);
+    auto discontiguous = non_adjacent_storage_offsets.bytes_for_range(0, 4);
     ASSERT_TRUE(discontiguous.has_value());
-    const auto &discontiguous_value = optional_ref_or_terminate(discontiguous);
+    auto &discontiguous_value = optional_ref_or_terminate(discontiguous);
     EXPECT_EQ(discontiguous_value.to_vector(), bytes_from_string("abde"));
 
     ReliableSendBuffer owned_already;
@@ -703,9 +703,9 @@ TEST(QuicCryptoStreamTest, SendBufferColdBranchEdgesUseDirectSegments) {
                                            });
     ASSERT_TRUE(owned_third_inserted);
     owned_already.note_segment_inserted(owned_third_it->second);
-    const auto owned = owned_already.bytes_for_range(0, 6);
+    auto owned = owned_already.bytes_for_range(0, 6);
     ASSERT_TRUE(owned.has_value());
-    const auto &owned_value = optional_ref_or_terminate(owned);
+    auto &owned_value = optional_ref_or_terminate(owned);
     EXPECT_EQ(owned_value.to_vector(), bytes_from_string("abghij"));
 }
 
@@ -717,13 +717,13 @@ TEST(QuicCryptoStreamTest, SharedAppendReusesCallerStorageWithoutCloning) {
     buffer.append(shared);
 
     ASSERT_EQ(buffer.segments_.size(), 1u);
-    const auto &segment = buffer.segments_.begin()->second;
+    auto &segment = buffer.segments_.begin()->second;
     EXPECT_EQ(buffer.segments_.begin()->first, 0u);
     EXPECT_EQ(segment.storage, storage);
     EXPECT_EQ(segment.begin, 1u);
     EXPECT_EQ(segment.end, 5u);
 
-    const auto ranges = buffer.take_ranges(4);
+    auto ranges = buffer.take_ranges(4);
     ASSERT_EQ(ranges.size(), 1u);
     EXPECT_EQ(ranges[0].offset, 0u);
     EXPECT_EQ(ranges[0].bytes, bytes_from_string("bcde"));
@@ -738,14 +738,14 @@ TEST(QuicCryptoStreamTest, SharedAppendPreservesAckAndLossBookkeeping) {
 
     buffer.append(SharedBytes(storage, 0, 6));
 
-    const auto sent = buffer.take_ranges(4);
+    auto sent = buffer.take_ranges(4);
     ASSERT_EQ(sent.size(), 1u);
     EXPECT_EQ(sent[0].bytes.storage().get(), storage.get());
 
     buffer.acknowledge(1, 2);
     buffer.mark_lost(0, 4);
 
-    const auto retransmit = buffer.take_ranges(2);
+    auto retransmit = buffer.take_ranges(2);
     ASSERT_EQ(retransmit.size(), 2u);
     EXPECT_EQ(retransmit[0].offset, 0u);
     EXPECT_EQ(retransmit[0].bytes, bytes_from_string("a"));
@@ -759,7 +759,7 @@ TEST(QuicCryptoStreamTest, TakeRangesWithZeroBudgetPreservesPendingBytes) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("ab"));
 
-    const auto ranges = buffer.take_ranges(0);
+    auto ranges = buffer.take_ranges(0);
 
     EXPECT_TRUE(ranges.empty());
     EXPECT_TRUE(buffer.has_pending_data());
@@ -772,12 +772,12 @@ TEST(QuicCryptoStreamTest, AdjacentSegmentsFromDifferentStorageDoNotMerge) {
     buffer.append(bytes_from_string("cd"));
 
     ASSERT_EQ(buffer.segments_.size(), 2u);
-    auto it = buffer.segments_.begin();
-    const auto first_storage = it->second.storage;
-    EXPECT_EQ(it->first, 0u);
-    ++it;
-    EXPECT_EQ(it->first, 2u);
-    EXPECT_NE(first_storage, it->second.storage);
+    auto segment_it = buffer.segments_.begin();
+    auto first_storage = segment_it->second.storage;
+    EXPECT_EQ(segment_it->first, 0u);
+    ++segment_it;
+    EXPECT_EQ(segment_it->first, 2u);
+    EXPECT_NE(first_storage, segment_it->second.storage);
 }
 
 TEST(QuicCryptoStreamTest, AdjacentSegmentsWithStorageGapDoNotMerge) {
@@ -803,13 +803,13 @@ TEST(QuicCryptoStreamTest, AdjacentSegmentsWithStorageGapDoNotMerge) {
 
 TEST(QuicCryptoStreamTest, LostRangesBecomeSendableBeforeNewRanges) {
     ReliableSendBuffer buffer;
-    const auto bytes = bytes_from_string("abcdef");
+    auto bytes = bytes_from_string("abcdef");
     buffer.append(bytes);
-    const auto first = buffer.take_ranges(2);
+    auto first = buffer.take_ranges(2);
     ASSERT_EQ(first.size(), 1u);
     buffer.mark_lost(first[0].offset, first[0].bytes.size());
 
-    const auto retry = buffer.take_ranges(2);
+    auto retry = buffer.take_ranges(2);
     ASSERT_EQ(retry.size(), 1u);
     EXPECT_EQ(retry[0].offset, first[0].offset);
 }
@@ -818,7 +818,7 @@ TEST(QuicCryptoStreamTest, PartialAcksRetireOnlyAcknowledgedSubrange) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("abcdef"));
 
-    const auto sent = buffer.take_ranges(4);
+    auto sent = buffer.take_ranges(4);
     ASSERT_EQ(sent.size(), 1u);
     EXPECT_EQ(sent[0].offset, 0u);
     EXPECT_EQ(sent[0].bytes, bytes_from_string("abcd"));
@@ -826,14 +826,14 @@ TEST(QuicCryptoStreamTest, PartialAcksRetireOnlyAcknowledgedSubrange) {
     buffer.acknowledge(1, 2);
     buffer.mark_lost(0, 4);
 
-    const auto retransmit = buffer.take_ranges(2);
+    auto retransmit = buffer.take_ranges(2);
     ASSERT_EQ(retransmit.size(), 2u);
     EXPECT_EQ(retransmit[0].offset, 0u);
     EXPECT_EQ(retransmit[0].bytes, bytes_from_string("a"));
     EXPECT_EQ(retransmit[1].offset, 3u);
     EXPECT_EQ(retransmit[1].bytes, bytes_from_string("d"));
 
-    const auto unsent = buffer.take_ranges(2);
+    auto unsent = buffer.take_ranges(2);
     ASSERT_EQ(unsent.size(), 1u);
     EXPECT_EQ(unsent[0].offset, 4u);
     EXPECT_EQ(unsent[0].bytes, bytes_from_string("ef"));
@@ -843,20 +843,20 @@ TEST(QuicCryptoStreamTest, LeadingSentAckUsesDirectEraseFastPath) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("abcdef"));
 
-    const auto sent = buffer.take_ranges(4);
+    auto sent = buffer.take_ranges(4);
     ASSERT_EQ(sent.size(), 1u);
 
     EXPECT_TRUE(buffer.acknowledge_leading_sent_range(0, 2));
 
     ASSERT_EQ(buffer.segments_.size(), 2u);
-    auto it = buffer.segments_.begin();
-    EXPECT_EQ(it->first, 2u);
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::sent);
-    EXPECT_EQ(it->second.begin, 2u);
-    EXPECT_EQ(it->second.end, 4u);
-    ++it;
-    EXPECT_EQ(it->first, 4u);
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::unsent);
+    auto segment_it = buffer.segments_.begin();
+    EXPECT_EQ(segment_it->first, 2u);
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::sent);
+    EXPECT_EQ(segment_it->second.begin, 2u);
+    EXPECT_EQ(segment_it->second.end, 4u);
+    ++segment_it;
+    EXPECT_EQ(segment_it->first, 4u);
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::unsent);
     EXPECT_EQ(
         buffer
             .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
@@ -882,28 +882,28 @@ TEST(QuicCryptoStreamTest, LeadingSentAckFastPathRejectsNonLeadingOrOversizedRan
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("abcdef"));
 
-    const auto sent = buffer.take_ranges(4);
+    auto sent = buffer.take_ranges(4);
     ASSERT_EQ(sent.size(), 1u);
 
     EXPECT_FALSE(buffer.acknowledge_leading_sent_range(1, 2));
     EXPECT_FALSE(buffer.acknowledge_leading_sent_range(0, 5));
 
     ASSERT_EQ(buffer.segments_.size(), 2u);
-    auto it = buffer.segments_.begin();
-    EXPECT_EQ(it->first, 0u);
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::sent);
-    EXPECT_EQ(it->second.begin, 0u);
-    EXPECT_EQ(it->second.end, 4u);
-    ++it;
-    EXPECT_EQ(it->first, 4u);
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::unsent);
+    auto segment_it = buffer.segments_.begin();
+    EXPECT_EQ(segment_it->first, 0u);
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::sent);
+    EXPECT_EQ(segment_it->second.begin, 0u);
+    EXPECT_EQ(segment_it->second.end, 4u);
+    ++segment_it;
+    EXPECT_EQ(segment_it->first, 4u);
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::unsent);
 }
 
 TEST(QuicCryptoStreamTest, OutstandingRangeRequiresFullCoverageOfRequestedRange) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("abcdef"));
 
-    const auto sent = buffer.take_ranges(4);
+    auto sent = buffer.take_ranges(4);
     ASSERT_EQ(sent.size(), 1u);
     EXPECT_EQ(sent[0].offset, 0u);
     EXPECT_EQ(sent[0].bytes, bytes_from_string("abcd"));
@@ -946,27 +946,27 @@ TEST(QuicCryptoStreamTest, MarkUnsentAndMarkSentOnlyUpdateEligibleSegments) {
     buffer.mark_unsent(1, 2);
 
     ASSERT_EQ(buffer.segments_.size(), 3u);
-    auto it = buffer.segments_.begin();
-    EXPECT_EQ(it->first, 0u);
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::sent);
-    ++it;
-    EXPECT_EQ(it->first, 1u);
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::unsent);
-    ++it;
-    EXPECT_EQ(it->first, 3u);
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::sent);
+    auto segment_it = buffer.segments_.begin();
+    EXPECT_EQ(segment_it->first, 0u);
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::sent);
+    ++segment_it;
+    EXPECT_EQ(segment_it->first, 1u);
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::unsent);
+    ++segment_it;
+    EXPECT_EQ(segment_it->first, 3u);
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::sent);
     EXPECT_FALSE(buffer.has_outstanding_range(1, 2));
 
     buffer.mark_lost(0, 4);
     buffer.mark_sent(0, 4);
 
     ASSERT_EQ(buffer.segments_.size(), 3u);
-    it = buffer.segments_.begin();
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::sent);
-    ++it;
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::unsent);
-    ++it;
-    EXPECT_EQ(it->second.state, ReliableSendBuffer::SegmentState::sent);
+    segment_it = buffer.segments_.begin();
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::sent);
+    ++segment_it;
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::unsent);
+    ++segment_it;
+    EXPECT_EQ(segment_it->second.state, ReliableSendBuffer::SegmentState::sent);
     EXPECT_TRUE(buffer.has_outstanding_range(0, 1));
     EXPECT_FALSE(buffer.has_outstanding_range(0, 0));
     EXPECT_FALSE(buffer.has_outstanding_range(1, 2));
@@ -980,7 +980,7 @@ TEST(QuicCryptoStreamTest, MarkUnsentEarlierRangeIsTakenBeforeLaterFreshTail) {
 
     buffer.mark_unsent(1, 2);
 
-    const auto unsent = buffer.take_unsent_ranges(4);
+    auto unsent = buffer.take_unsent_ranges(4);
     ASSERT_EQ(unsent.size(), 2u);
     EXPECT_EQ(unsent[0].offset, 1u);
     EXPECT_EQ(unsent[0].bytes, bytes_from_string("bc"));
@@ -996,7 +996,7 @@ TEST(QuicCryptoStreamTest, MarkLostEarlierRangeIsTakenBeforeLaterLostTail) {
     buffer.mark_lost(4, 2);
     buffer.mark_lost(1, 2);
 
-    const auto lost = buffer.take_lost_ranges(4);
+    auto lost = buffer.take_lost_ranges(4);
     ASSERT_EQ(lost.size(), 2u);
     EXPECT_EQ(lost[0].offset, 1u);
     EXPECT_EQ(lost[0].bytes, bytes_from_string("bc"));
@@ -1008,16 +1008,16 @@ TEST(QuicCryptoStreamTest, TakeRangesHonorsMaxOffsetWhenSplittingLostAndUnsentSe
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("abcdefgh"));
 
-    const auto sent = buffer.take_ranges(4);
+    auto sent = buffer.take_ranges(4);
     ASSERT_EQ(sent.size(), 1u);
     buffer.mark_lost(0, 4);
 
-    const auto lost = buffer.take_lost_ranges(/*max_bytes=*/8, /*max_offset=*/2);
+    auto lost = buffer.take_lost_ranges(/*max_bytes=*/8, /*max_offset=*/2);
     ASSERT_EQ(lost.size(), 1u);
     EXPECT_EQ(lost[0].offset, 0u);
     EXPECT_EQ(lost[0].bytes, bytes_from_string("ab"));
 
-    const auto unsent = buffer.take_unsent_ranges(/*max_bytes=*/8, /*max_offset=*/6);
+    auto unsent = buffer.take_unsent_ranges(/*max_bytes=*/8, /*max_offset=*/6);
     ASSERT_EQ(unsent.size(), 1u);
     EXPECT_EQ(unsent[0].offset, 4u);
     EXPECT_EQ(unsent[0].bytes, bytes_from_string("ef"));
@@ -1027,14 +1027,12 @@ TEST(QuicCryptoStreamTest, ConsumeRangesHonorsMaxOffsetAndStopsAtSplitBoundary) 
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("abcdefgh"));
 
-    const auto sent = buffer.take_ranges(4);
+    auto sent = buffer.take_ranges(4);
     ASSERT_EQ(sent.size(), 1u);
     buffer.mark_lost(0, 4);
 
     std::vector<coquic::quic::ByteRange> lost;
-    const auto remember_lost = [&](coquic::quic::ByteRange range) {
-        lost.push_back(std::move(range));
-    };
+    auto remember_lost = [&](coquic::quic::ByteRange range) { lost.push_back(std::move(range)); };
 
     std::size_t empty_lost_budget = 0;
     buffer.consume_lost_ranges(empty_lost_budget, std::nullopt, remember_lost);
@@ -1056,7 +1054,7 @@ TEST(QuicCryptoStreamTest, ConsumeRangesHonorsMaxOffsetAndStopsAtSplitBoundary) 
     EXPECT_EQ(lost_budget, 7u);
 
     std::vector<coquic::quic::ByteRange> unsent;
-    const auto remember_unsent = [&](coquic::quic::ByteRange range) {
+    auto remember_unsent = [&](coquic::quic::ByteRange range) {
         unsent.push_back(std::move(range));
     };
 
@@ -1084,14 +1082,12 @@ TEST(QuicCryptoStreamTest, ConsumeRangesCanRunWithoutMaxOffset) {
     ReliableSendBuffer buffer;
     buffer.append(bytes_from_string("abcdef"));
 
-    const auto sent = buffer.take_ranges(3);
+    auto sent = buffer.take_ranges(3);
     ASSERT_EQ(sent.size(), 1u);
     buffer.mark_lost(0, 3);
 
     std::vector<coquic::quic::ByteRange> lost;
-    const auto remember_lost = [&](coquic::quic::ByteRange range) {
-        lost.push_back(std::move(range));
-    };
+    auto remember_lost = [&](coquic::quic::ByteRange range) { lost.push_back(std::move(range)); };
     std::size_t empty_lost_budget = 0;
     buffer.consume_lost_ranges(empty_lost_budget, std::nullopt, remember_lost);
     EXPECT_TRUE(lost.empty());
@@ -1104,7 +1100,7 @@ TEST(QuicCryptoStreamTest, ConsumeRangesCanRunWithoutMaxOffset) {
     EXPECT_EQ(lost_budget, 5u);
 
     std::vector<coquic::quic::ByteRange> unsent;
-    const auto remember_unsent = [&](coquic::quic::ByteRange range) {
+    auto remember_unsent = [&](coquic::quic::ByteRange range) {
         unsent.push_back(std::move(range));
     };
     std::size_t empty_unsent_budget = 0;
@@ -1245,7 +1241,7 @@ TEST(QuicCryptoStreamTest, MarkLostOnlyRetiresSentSegmentsInsideRange) {
 
     buffer.mark_lost(0, 4);
 
-    const auto retransmit = buffer.take_ranges(4);
+    auto retransmit = buffer.take_ranges(4);
     ASSERT_EQ(retransmit.size(), 2u);
     EXPECT_EQ(retransmit[0].offset, 0u);
     EXPECT_EQ(retransmit[0].bytes, bytes_from_string("ab"));
@@ -1311,21 +1307,21 @@ TEST(QuicCryptoStreamTest, LostOnlySegmentsRemainOutstandingAfterRemovingUnsentT
 TEST(QuicCryptoStreamTest, ReceiveBufferReleasesReorderedApplicationBytesContiguously) {
     ReliableReceiveBuffer buffer;
     ASSERT_TRUE(buffer.push(4, bytes_from_string("ef")).has_value());
-    const auto first_release = buffer.push(0, bytes_from_string("abcd"));
+    auto first_release = buffer.push(0, bytes_from_string("abcd"));
     ASSERT_TRUE(first_release.has_value());
     EXPECT_EQ(first_release.value(), bytes_from_string("abcdef"));
-    const auto released = buffer.push(6, bytes_from_string("gh"));
+    auto released = buffer.push(6, bytes_from_string("gh"));
     ASSERT_TRUE(released.has_value());
     EXPECT_EQ(released.value(), bytes_from_string("gh"));
 }
 
 TEST(QuicCryptoStreamTest, ReceiveBufferReturnsOnlyUndeliveredTailOfOverlappingWrite) {
     ReliableReceiveBuffer buffer;
-    const auto first = buffer.push(0, bytes_from_string("abcd"));
+    auto first = buffer.push(0, bytes_from_string("abcd"));
     ASSERT_TRUE(first.has_value());
     EXPECT_EQ(first.value(), bytes_from_string("abcd"));
 
-    const auto second = buffer.push(2, bytes_from_string("cdef"));
+    auto second = buffer.push(2, bytes_from_string("cdef"));
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(second.value(), bytes_from_string("ef"));
 }
@@ -1334,7 +1330,7 @@ TEST(QuicCryptoStreamTest, ReceiveBufferSharedPushReturnsAliasedInOrderStorage) 
     ReliableReceiveBuffer buffer;
     auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcd"));
 
-    const auto released = buffer.push_shared(0, SharedBytes(storage, 0, 4));
+    auto released = buffer.push_shared(0, SharedBytes(storage, 0, 4));
 
     ASSERT_TRUE(released.has_value());
     EXPECT_EQ(
@@ -1363,7 +1359,7 @@ TEST(QuicCryptoStreamTest, ReceiveBufferSharedPushCoalescesSeparateStorageOnlyAt
     auto late = std::make_shared<std::vector<std::byte>>(bytes_from_string("ef"));
 
     ASSERT_TRUE(buffer.push_shared(4, SharedBytes(late, 0, 2)).has_value());
-    const auto released = buffer.push_shared(0, SharedBytes(early, 0, 4));
+    auto released = buffer.push_shared(0, SharedBytes(early, 0, 4));
 
     ASSERT_TRUE(released.has_value());
     EXPECT_TRUE(released.value().shared.empty());
@@ -1377,11 +1373,11 @@ TEST(QuicCryptoStreamTest, InternalCoverageHelperExercisesSharedCoalescingAndEmp
 TEST(QuicCryptoStreamTest, ReceiveBufferReleasesOnlyContiguousBytes) {
     CryptoReceiveBuffer buffer;
 
-    const auto first = buffer.push(2, std::vector<std::byte>{std::byte{0xcc}, std::byte{0xdd}});
+    auto first = buffer.push(2, std::vector<std::byte>{std::byte{0xcc}, std::byte{0xdd}});
     ASSERT_TRUE(first.has_value());
     EXPECT_TRUE(first.value().empty());
 
-    const auto second = buffer.push(0, std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}});
+    auto second = buffer.push(0, std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}});
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(second.value(), (std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb},
                                                       std::byte{0xcc}, std::byte{0xdd}}));
@@ -1390,7 +1386,7 @@ TEST(QuicCryptoStreamTest, ReceiveBufferReleasesOnlyContiguousBytes) {
 TEST(QuicCryptoStreamTest, EmptyReceivePushReturnsNoBytes) {
     CryptoReceiveBuffer buffer;
 
-    const auto pushed = buffer.push(0, {});
+    auto pushed = buffer.push(0, {});
 
     ASSERT_TRUE(pushed.has_value());
     EXPECT_TRUE(pushed.value().empty());
@@ -1399,8 +1395,8 @@ TEST(QuicCryptoStreamTest, EmptyReceivePushReturnsNoBytes) {
 TEST(QuicCryptoStreamTest, RejectsReceiveRangePastMaximumOffset) {
     CryptoReceiveBuffer buffer;
 
-    const auto pushed = buffer.push((std::uint64_t{1} << 62) - 1,
-                                    std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}});
+    auto pushed = buffer.push((std::uint64_t{1} << 62) - 1,
+                              std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}});
 
     ASSERT_FALSE(pushed.has_value());
     EXPECT_EQ(pushed.error().code, coquic::quic::CodecErrorCode::invalid_varint);
@@ -1409,8 +1405,7 @@ TEST(QuicCryptoStreamTest, RejectsReceiveRangePastMaximumOffset) {
 TEST(QuicCryptoStreamTest, RejectsReceiveOffsetAboveMaximumOffset) {
     CryptoReceiveBuffer buffer;
 
-    const auto pushed =
-        buffer.push((std::uint64_t{1} << 62), std::vector<std::byte>{std::byte{0xaa}});
+    auto pushed = buffer.push((std::uint64_t{1} << 62), std::vector<std::byte>{std::byte{0xaa}});
 
     ASSERT_FALSE(pushed.has_value());
     EXPECT_EQ(pushed.error().code, coquic::quic::CodecErrorCode::invalid_varint);
@@ -1422,8 +1417,7 @@ TEST(QuicCryptoStreamTest, OverlappingReceiveBytesDoNotDuplicateOutput) {
     ASSERT_TRUE(
         buffer.push(0, std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}}).has_value());
 
-    const auto overlapping =
-        buffer.push(1, std::vector<std::byte>{std::byte{0xbb}, std::byte{0xcc}});
+    auto overlapping = buffer.push(1, std::vector<std::byte>{std::byte{0xbb}, std::byte{0xcc}});
 
     ASSERT_TRUE(overlapping.has_value());
     EXPECT_EQ(overlapping.value(), (std::vector<std::byte>{std::byte{0xcc}}));

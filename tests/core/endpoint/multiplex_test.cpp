@@ -40,7 +40,7 @@ TEST(QuicCoreEndpointTest, ConnectionCommandsOnlyAdvanceTheSelectedHandle) {
     core.connections_.at(2).route_handle_by_path_id.emplace(0, 22);
     core.connections_.at(2).path_id_by_route_handle.emplace(22, 0);
 
-    const auto result = core.advance_endpoint(
+    auto result = core.advance_endpoint(
         coquic::quic::QuicCoreConnectionCommand{
             .connection = 2,
             .input =
@@ -52,7 +52,7 @@ TEST(QuicCoreEndpointTest, ConnectionCommandsOnlyAdvanceTheSelectedHandle) {
         },
         coquic::quic::test::test_time(2));
 
-    const auto sends = send_effects_from(result);
+    auto sends = send_effects_from(result);
     ASSERT_FALSE(sends.empty());
     for (const auto &send : sends) {
         EXPECT_EQ(send.connection, 2u);
@@ -85,7 +85,7 @@ TEST(QuicCoreEndpointTest, EndpointConnectionCommandSendsDatagramOnSelectedConne
     core.connections_.at(2).route_handle_by_path_id.emplace(0, 22);
     core.connections_.at(2).path_id_by_route_handle.emplace(22, 0);
 
-    const auto result = core.advance_endpoint(
+    auto result = core.advance_endpoint(
         coquic::quic::QuicCoreConnectionCommand{
             .connection = 2,
             .input =
@@ -95,14 +95,14 @@ TEST(QuicCoreEndpointTest, EndpointConnectionCommandSendsDatagramOnSelectedConne
         },
         coquic::quic::test::test_time(2));
 
-    const auto sends = send_effects_from(result);
+    auto sends = send_effects_from(result);
     ASSERT_EQ(sends.size(), 1u);
     EXPECT_EQ(sends.front().connection, 2u);
     ASSERT_TRUE(sends.front().route_handle.has_value());
     EXPECT_EQ(sends.front().route_handle.value_or(0), 22u);
 
-    const auto payloads = application_datagram_payloads_from_datagram(
-        *core.connections_.at(2).connection, sends.front().bytes.span());
+    auto payloads = application_datagram_payloads_from_datagram(*core.connections_.at(2).connection,
+                                                                sends.front().bytes.span());
     ASSERT_EQ(payloads.size(), 1u);
     EXPECT_EQ(payloads.front(), bytes_from_ints({0x64}));
 }
@@ -141,7 +141,7 @@ TEST(QuicCoreEndpointTest, EndpointConnectionCommandReportsDatagramLocalErrors) 
     EXPECT_FALSE(optional_ref_or_terminate(unsupported.local_error).stream_id.has_value());
     EXPECT_TRUE(send_effects_from(unsupported).empty());
 
-    const auto shared_unsupported = core.advance_endpoint(
+    auto shared_unsupported = core.advance_endpoint(
         coquic::quic::QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -159,7 +159,7 @@ TEST(QuicCoreEndpointTest, EndpointConnectionCommandReportsDatagramLocalErrors) 
     EXPECT_TRUE(send_effects_from(shared_unsupported).empty());
 
     peer_transport.max_datagram_frame_size = 2;
-    const auto too_large = core.advance_endpoint(
+    auto too_large = core.advance_endpoint(
         coquic::quic::QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -202,7 +202,7 @@ TEST(QuicCoreEndpointTest, ConnectionCommandStillDrainsEachStreamSend) {
                 },
         },
         coquic::quic::test::test_time(1));
-    const auto second = core.advance_endpoint(
+    auto second = core.advance_endpoint(
         coquic::quic::QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -248,7 +248,7 @@ TEST(QuicCoreEndpointTest, SharedSendCommandProducesSameDatagramAsOwnedSendComma
                 },
         },
         coquic::quic::test::test_time(1));
-    const auto shared = shared_core.advance_endpoint(
+    auto shared = shared_core.advance_endpoint(
         coquic::quic::QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -260,8 +260,8 @@ TEST(QuicCoreEndpointTest, SharedSendCommandProducesSameDatagramAsOwnedSendComma
         },
         coquic::quic::test::test_time(1));
 
-    const auto owned_sends = send_effects_from(owned);
-    const auto shared_sends = send_effects_from(shared);
+    auto owned_sends = send_effects_from(owned);
+    auto shared_sends = send_effects_from(shared);
     ASSERT_EQ(owned_sends.size(), shared_sends.size());
     ASSERT_FALSE(owned_sends.empty());
     EXPECT_EQ(shared_sends.front().route_handle, owned_sends.front().route_handle);
@@ -291,7 +291,7 @@ TEST(QuicCoreEndpointTest, EndpointConnectionCommandSendsSharedDatagramOnSelecte
     core.connections_.at(2).route_handle_by_path_id.emplace(0, 22);
     core.connections_.at(2).path_id_by_route_handle.emplace(22, 0);
 
-    const auto result = core.advance_endpoint(
+    auto result = core.advance_endpoint(
         coquic::quic::QuicCoreConnectionCommand{
             .connection = 2,
             .input =
@@ -302,14 +302,14 @@ TEST(QuicCoreEndpointTest, EndpointConnectionCommandSendsSharedDatagramOnSelecte
         coquic::quic::test::test_time(2));
 
     EXPECT_FALSE(result.local_error.has_value());
-    const auto sends = send_effects_from(result);
+    auto sends = send_effects_from(result);
     ASSERT_EQ(sends.size(), 1u);
     EXPECT_EQ(sends.front().connection, 2u);
     ASSERT_TRUE(sends.front().route_handle.has_value());
     EXPECT_EQ(sends.front().route_handle.value_or(0), 22u);
 
-    const auto payloads = application_datagram_payloads_from_datagram(
-        *core.connections_.at(2).connection, sends.front().bytes.span());
+    auto payloads = application_datagram_payloads_from_datagram(*core.connections_.at(2).connection,
+                                                                sends.front().bytes.span());
     ASSERT_EQ(payloads.size(), 1u);
     EXPECT_EQ(payloads.front(), bytes_from_ints({0x73, 0x68}));
 }
@@ -332,8 +332,8 @@ TEST(QuicCoreEndpointTest, EndpointTimerExpiredWalksAllDueConnections) {
 
     const auto wakeup = core.next_wakeup();
     ASSERT_TRUE(wakeup.has_value());
-    const auto result = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{},
-                                              wakeup.value_or(coquic::quic::test::test_time(0)));
+    auto result = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{},
+                                        wakeup.value_or(coquic::quic::test::test_time(0)));
 
     EXPECT_EQ(core.connection_count(), 2u);
     EXPECT_EQ(result.next_wakeup, core.next_wakeup());
@@ -360,11 +360,11 @@ TEST(QuicCoreEndpointTest, IdleTimeoutRemovesConnectionWithClosedLifecycleEvent)
     const auto deadline = connection.idle_timeout_deadline();
     ASSERT_TRUE(deadline.has_value());
 
-    const auto result = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{},
-                                              optional_value_or_terminate(deadline));
+    auto result = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{},
+                                        optional_value_or_terminate(deadline));
 
     EXPECT_EQ(core.connection_count(), 0u);
-    const auto lifecycle = lifecycle_events_from(result);
+    auto lifecycle = lifecycle_events_from(result);
     ASSERT_EQ(lifecycle.size(), 1u);
     EXPECT_EQ(lifecycle.front().connection, 1u);
     EXPECT_EQ(lifecycle.front().event, coquic::quic::QuicCoreConnectionLifecycle::closed);
@@ -400,7 +400,7 @@ TEST(QuicCoreEndpointTest, RouteHandleMigrationCommandTargetsSelectedConnection)
         (std::is_same_v<route_handle_member_type<coquic::quic::QuicCoreRequestConnectionMigration>,
                         coquic::quic::QuicRouteHandle>));
 
-    const auto result = core.advance_endpoint(
+    auto result = core.advance_endpoint(
         coquic::quic::QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -440,11 +440,11 @@ TEST(QuicCoreEndpointTest, AddressChangePolicyRejectsNewInboundRoutesAndMigratio
                 },
         },
         coquic::quic::test::test_time(1));
-    const auto migration_error = optional_value_or_terminate(migration.local_error);
+    auto migration_error = optional_value_or_terminate(migration.local_error);
     EXPECT_EQ(migration_error.code, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation);
     EXPECT_FALSE(core.connections_.at(1).path_id_by_route_handle.contains(29));
 
-    const auto inbound = core.advance_endpoint(
+    auto inbound = core.advance_endpoint(
         coquic::quic::QuicCoreInboundDatagram{
             .bytes = bytes_from_ints({0x40, 0xa1, 0xb2, 0x00, 0x00}),
             .route_handle = 29,
@@ -468,7 +468,7 @@ TEST(QuicCoreEndpointTest, CloseConnectionCommandRetainsStateUntilCloseDeadline)
     core.connections_.at(1).route_handle_by_path_id.emplace(0, 11);
     core.connections_.at(1).path_id_by_route_handle.emplace(11, 0);
 
-    const auto result = core.advance_endpoint(
+    auto result = core.advance_endpoint(
         coquic::quic::QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -487,9 +487,9 @@ TEST(QuicCoreEndpointTest, CloseConnectionCommandRetainsStateUntilCloseDeadline)
               1u);
     EXPECT_FALSE(send_effects_from(result).empty());
 
-    const auto next_wakeup = optional_value_or_terminate(result.next_wakeup);
-    const auto expired = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{}, next_wakeup);
-    const auto lifecycle = lifecycle_events_from(expired);
+    auto next_wakeup = optional_value_or_terminate(result.next_wakeup);
+    auto expired = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{}, next_wakeup);
+    auto lifecycle = lifecycle_events_from(expired);
     ASSERT_EQ(lifecycle.size(), 1u);
     EXPECT_EQ(lifecycle.front().connection, 1u);
     EXPECT_EQ(lifecycle.front().event, coquic::quic::QuicCoreConnectionLifecycle::closed);

@@ -83,6 +83,11 @@ template <typename T> void expect_codec_success(const coquic::quic::CodecResult<
     ASSERT_TRUE(result.has_value());
 }
 
+inline void expect_codec_true(const coquic::quic::CodecResult<bool> &result) {
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result.value());
+}
+
 template <typename T>
 const T &codec_value_or_terminate(const coquic::quic::CodecResult<T> &result) {
     if (!result.has_value()) {

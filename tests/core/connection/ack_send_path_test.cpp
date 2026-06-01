@@ -2454,15 +2454,15 @@ TEST(QuicCoreTest, ClientReceiveKeepaliveSkipsPathChallengeOnUnvalidatedCurrentP
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
     ASSERT_NE(application, nullptr);
 
-    bool saw_ack = false;
+    bool ack_frame_seen = false;
     bool saw_path_challenge = false;
     for (const auto &frame : application->frames) {
-        saw_ack = saw_ack || std::holds_alternative<coquic::quic::AckFrame>(frame);
+        ack_frame_seen = ack_frame_seen || std::holds_alternative<coquic::quic::AckFrame>(frame);
         saw_path_challenge =
             saw_path_challenge || std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
     }
 
-    EXPECT_TRUE(saw_ack);
+    EXPECT_TRUE(ack_frame_seen);
     EXPECT_FALSE(saw_path_challenge);
 }
 
@@ -2655,7 +2655,7 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
 
     struct ClientAckObserver {
         static void note(const coquic::quic::QuicConnection &client_connection,
-                         const coquic::quic::QuicCoreResult &core_result, bool &saw_ack) {
+                         const coquic::quic::QuicCoreResult &core_result, bool &client_ack_seen) {
             for (const auto &outbound_datagram :
                  coquic::quic::test::send_datagrams_from(core_result)) {
                 for (const auto &decoded_packet :
@@ -2666,14 +2666,15 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
                         continue;
                     }
                     for (const auto &frame : one_rtt_packet->frames) {
-                        saw_ack = saw_ack || std::holds_alternative<coquic::quic::AckFrame>(frame);
+                        client_ack_seen = client_ack_seen ||
+                                          std::holds_alternative<coquic::quic::AckFrame>(frame);
                     }
                 }
             }
         }
     };
-    bool saw_ack = false;
-    ClientAckObserver::note(*client.connection_, response_delivered, saw_ack);
+    bool client_ack_seen = false;
+    ClientAckObserver::note(*client.connection_, response_delivered, client_ack_seen);
 
     ASSERT_TRUE(client.connection_->handshake_confirmed_);
     auto to_server = response_delivered;
@@ -2681,7 +2682,7 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
     auto step_now = coquic::quic::test::test_time(5);
     for (int i = 0; i < 64; ++i) {
         if (!coquic::quic::test::send_datagrams_from(to_server).empty()) {
-            ClientAckObserver::note(*client.connection_, to_server, saw_ack);
+            ClientAckObserver::note(*client.connection_, to_server, client_ack_seen);
             to_client =
                 coquic::quic::test::relay_send_datagrams_to_peer(to_server, server, step_now);
             to_server.effects.clear();
@@ -2716,9 +2717,9 @@ TEST(QuicCoreTest, ClientTimerAfterLargePartialResponseFlowSendsAckBeforeOrOnPro
         client.advance(coquic::quic::QuicCoreTimerExpired{}, optional_value_or_terminate(deadline));
     const auto timeout_datagrams = coquic::quic::test::send_datagrams_from(timeout_result);
     ASSERT_FALSE(timeout_datagrams.empty());
-    ClientAckObserver::note(*client.connection_, timeout_result, saw_ack);
+    ClientAckObserver::note(*client.connection_, timeout_result, client_ack_seen);
 
-    EXPECT_TRUE(saw_ack);
+    EXPECT_TRUE(client_ack_seen);
 }
 
 TEST(QuicCoreTest, SelectPtoProbePrefersRetransmittableCryptoOverPingFallback) {
@@ -2980,11 +2981,11 @@ TEST(QuicCoreTest, ReceivedAckFrameProcessingMatchesOwnedAckFrameProcessing) {
     auto received_connection = make_connected_client_connection();
 
     const auto configure_connection = [](coquic::quic::QuicConnection &connection) {
-        auto &rtt = connection.application_space_.recovery.rtt_state();
-        rtt.latest_rtt = std::chrono::milliseconds(10);
-        rtt.min_rtt = std::chrono::milliseconds(10);
-        rtt.smoothed_rtt = std::chrono::milliseconds(10);
-        rtt.rttvar = std::chrono::milliseconds(1);
+        auto &application_recovery_rtt = connection.application_space_.recovery.rtt_state();
+        application_recovery_rtt.latest_rtt = std::chrono::milliseconds(10);
+        application_recovery_rtt.min_rtt = std::chrono::milliseconds(10);
+        application_recovery_rtt.smoothed_rtt = std::chrono::milliseconds(10);
+        application_recovery_rtt.rttvar = std::chrono::milliseconds(1);
 
         connection.track_sent_packet(connection.application_space_,
                                      coquic::quic::SentPacketRecord{
@@ -3208,11 +3209,11 @@ TEST(QuicCoreTest, ReceivedAckFrameProcessingCoversTraceFormattingAndInvalidCurs
 
 TEST(QuicCoreTest, AckTriggeredLossUsesLossDetectionTimeForRecoveryBoundary) {
     auto connection = make_connected_client_connection();
-    auto &rtt = connection.application_space_.recovery.rtt_state();
-    rtt.latest_rtt = std::chrono::milliseconds(10);
-    rtt.min_rtt = std::chrono::milliseconds(10);
-    rtt.smoothed_rtt = std::chrono::milliseconds(10);
-    rtt.rttvar = std::chrono::milliseconds(1);
+    auto &application_recovery_rtt = connection.application_space_.recovery.rtt_state();
+    application_recovery_rtt.latest_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.min_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.smoothed_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.rttvar = std::chrono::milliseconds(1);
     ASSERT_TRUE(connection
                     .queue_stream_send(
                         0, coquic::quic::test::bytes_from_string(std::string(8192, 'r')), false)
@@ -3245,11 +3246,11 @@ TEST(QuicCoreTest, AckTriggeredLossUsesLossDetectionTimeForRecoveryBoundary) {
 
 TEST(QuicCoreTest, AckTriggeredLossDoesNotRestartRecoveryForOlderPackets) {
     auto connection = make_connected_client_connection();
-    auto &rtt = connection.application_space_.recovery.rtt_state();
-    rtt.latest_rtt = std::chrono::milliseconds(10);
-    rtt.min_rtt = std::chrono::milliseconds(10);
-    rtt.smoothed_rtt = std::chrono::milliseconds(10);
-    rtt.rttvar = std::chrono::milliseconds(1);
+    auto &application_recovery_rtt = connection.application_space_.recovery.rtt_state();
+    application_recovery_rtt.latest_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.min_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.smoothed_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.rttvar = std::chrono::milliseconds(1);
 
     for (std::uint64_t packet_number = 1; packet_number <= 12; ++packet_number) {
         connection.track_sent_packet(connection.application_space_,
@@ -3295,11 +3296,11 @@ TEST(QuicCoreTest, AckTriggeredLossDoesNotRestartRecoveryForOlderPackets) {
 
 TEST(QuicCoreTest, AckTriggeredTimeThresholdLossUsesLatestRttSample) {
     auto connection = make_connected_client_connection();
-    auto &rtt = connection.application_space_.recovery.rtt_state();
-    rtt.latest_rtt = std::chrono::milliseconds(10);
-    rtt.min_rtt = std::chrono::milliseconds(10);
-    rtt.smoothed_rtt = std::chrono::milliseconds(10);
-    rtt.rttvar = std::chrono::milliseconds(1);
+    auto &application_recovery_rtt = connection.application_space_.recovery.rtt_state();
+    application_recovery_rtt.latest_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.min_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.smoothed_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.rttvar = std::chrono::milliseconds(1);
     const auto initial_window = connection.congestion_controller_.congestion_window();
 
     connection.track_sent_packet(connection.application_space_,
@@ -3337,11 +3338,11 @@ TEST(QuicCoreTest, AckTriggeredTimeThresholdLossUsesLatestRttSample) {
 
 TEST(QuicCoreTest, StaleLargestAckDoesNotUpdateRttForSparseAckRanges) {
     auto connection = make_connected_client_connection();
-    auto &rtt = connection.application_space_.recovery.rtt_state();
-    rtt.latest_rtt = std::chrono::milliseconds(10);
-    rtt.min_rtt = std::chrono::milliseconds(10);
-    rtt.smoothed_rtt = std::chrono::milliseconds(10);
-    rtt.rttvar = std::chrono::milliseconds(1);
+    auto &application_recovery_rtt = connection.application_space_.recovery.rtt_state();
+    application_recovery_rtt.latest_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.min_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.smoothed_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.rttvar = std::chrono::milliseconds(1);
 
     connection.track_sent_packet(connection.application_space_,
                                  coquic::quic::SentPacketRecord{
@@ -3403,11 +3404,11 @@ TEST(QuicCoreTest, StaleLargestAckDoesNotUpdateRttForSparseAckRanges) {
 TEST(QuicCoreTest, LossDetectionSkipsCongestionResponseForNonAckElicitingLoss) {
     auto connection = make_connected_client_connection();
     connection.application_space_.recovery.largest_acked_packet_number_ = 5;
-    auto &rtt = connection.application_space_.recovery.rtt_state();
-    rtt.latest_rtt = std::chrono::milliseconds(10);
-    rtt.min_rtt = std::chrono::milliseconds(10);
-    rtt.smoothed_rtt = std::chrono::milliseconds(10);
-    rtt.rttvar = std::chrono::milliseconds(1);
+    auto &application_recovery_rtt = connection.application_space_.recovery.rtt_state();
+    application_recovery_rtt.latest_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.min_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.smoothed_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.rttvar = std::chrono::milliseconds(1);
     const auto initial_window = connection.congestion_controller_.congestion_window();
     connection.track_sent_packet(connection.application_space_,
                                  coquic::quic::SentPacketRecord{
@@ -3458,10 +3459,10 @@ TEST(QuicCoreTest, LossDetectionUsesDefaultAckDelayButRequiresRttSampleForPersis
     auto connection = make_connected_client_connection();
     connection.peer_transport_parameters_ = std::nullopt;
     connection.application_space_.recovery.largest_acked_packet_number_ = 5;
-    auto &rtt = connection.application_space_.recovery.rtt_state();
-    rtt.min_rtt = std::chrono::milliseconds(10);
-    rtt.smoothed_rtt = std::chrono::milliseconds(10);
-    rtt.rttvar = std::chrono::milliseconds(1);
+    auto &application_recovery_rtt = connection.application_space_.recovery.rtt_state();
+    application_recovery_rtt.min_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.smoothed_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.rttvar = std::chrono::milliseconds(1);
     const auto initial_window = connection.congestion_controller_.congestion_window();
     connection.track_sent_packet(connection.application_space_,
                                  coquic::quic::SentPacketRecord{
@@ -3491,11 +3492,11 @@ TEST(QuicCoreTest, LossDetectionUsesDefaultAckDelayButRequiresRttSampleForPersis
 TEST(QuicCoreTest, LossDetectionSkipsNonAckElicitingPacketsForPersistentCongestionWindow) {
     auto connection = make_connected_client_connection();
     connection.application_space_.recovery.largest_acked_packet_number_ = 5;
-    auto &rtt = connection.application_space_.recovery.rtt_state();
-    rtt.latest_rtt = std::chrono::milliseconds(10);
-    rtt.min_rtt = std::chrono::milliseconds(10);
-    rtt.smoothed_rtt = std::chrono::milliseconds(10);
-    rtt.rttvar = std::chrono::milliseconds(1);
+    auto &application_recovery_rtt = connection.application_space_.recovery.rtt_state();
+    application_recovery_rtt.latest_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.min_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.smoothed_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.rttvar = std::chrono::milliseconds(1);
     const auto initial_window = connection.congestion_controller_.congestion_window();
     connection.track_sent_packet(connection.application_space_,
                                  coquic::quic::SentPacketRecord{
@@ -3542,11 +3543,11 @@ TEST(QuicCoreTest, LateAckOfDeclaredLostRetransmissionRetiresApplicationFragment
     const auto tracked_offset = first_stream_frame_offset_for_tests(first_packet);
     const auto tracked_length = first_stream_frame_length_for_tests(first_packet);
 
-    auto &rtt = connection.application_space_.recovery.rtt_state();
-    rtt.latest_rtt = std::chrono::milliseconds(10);
-    rtt.min_rtt = std::chrono::milliseconds(10);
-    rtt.smoothed_rtt = std::chrono::milliseconds(10);
-    rtt.rttvar = std::chrono::milliseconds(1);
+    auto &application_recovery_rtt = connection.application_space_.recovery.rtt_state();
+    application_recovery_rtt.latest_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.min_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.smoothed_rtt = std::chrono::milliseconds(10);
+    application_recovery_rtt.rttvar = std::chrono::milliseconds(1);
 
     connection.application_space_.recovery.largest_acked_packet_number_ = first_packet_number + 5;
     connection.detect_lost_packets(connection.application_space_,

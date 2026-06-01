@@ -486,51 +486,30 @@ sudo install -m 755 "${remote_upload_dir}/run-demo.sh" "${remote_release_dir}/ru
 sudo rm -rf "${remote_release_dir}/app"
 sudo install -d -m 755 "${remote_release_dir}/app"
 sudo tar -xf "${remote_upload_dir}/app.tar" -C "${remote_release_dir}/app"
-previous_public_dirs=(
-  "/opt/coquic-demo/current/app/public"
-  "/opt/coquic-demo/current/site"
-)
+previous_app_public_dir="/opt/coquic-demo/current/app/public"
 if [[ "${same_release_repair_mode}" == "1" ]]; then
-  previous_public_dirs=(
-    "${remote_upload_dir}/current.app.bak/public"
-    "/opt/coquic-demo/current/site"
-  )
+  previous_app_public_dir="${remote_upload_dir}/current.app.bak/public"
 fi
-copy_previous_public_file_if_missing() {
-  local file_name="$1"
-  local destination="${remote_release_dir}/app/public/${file_name}"
-
-  if sudo test -f "${destination}"; then
-    return
-  fi
-  for source_dir in "${previous_public_dirs[@]}"; do
-    if sudo test -f "${source_dir}/${file_name}"; then
-      sudo install -m 644 "${source_dir}/${file_name}" "${destination}"
-      return
-    fi
-  done
-}
-
-copy_previous_public_dir_if_missing() {
-  local dir_name="$1"
-  local destination="${remote_release_dir}/app/public/${dir_name}"
-
-  if sudo test -d "${destination}"; then
-    return
-  fi
-  for source_dir in "${previous_public_dirs[@]}"; do
-    if sudo test -d "${source_dir}/${dir_name}"; then
-      sudo cp -a "${source_dir}/${dir_name}" "${destination}"
-      return
-    fi
-  done
-}
-
-copy_previous_public_file_if_missing "perf-results.json"
-copy_previous_public_file_if_missing "perf-history.json"
-copy_previous_public_file_if_missing "interop-results.json"
-copy_previous_public_file_if_missing "coverage-results.json"
-copy_previous_public_dir_if_missing "coverage"
+if sudo test -f "${previous_app_public_dir}/perf-results.json" &&
+   ! sudo test -f "${remote_release_dir}/app/public/perf-results.json"; then
+  sudo install -m 644 "${previous_app_public_dir}/perf-results.json" "${remote_release_dir}/app/public/perf-results.json"
+fi
+if sudo test -f "${previous_app_public_dir}/perf-history.json" &&
+   ! sudo test -f "${remote_release_dir}/app/public/perf-history.json"; then
+  sudo install -m 644 "${previous_app_public_dir}/perf-history.json" "${remote_release_dir}/app/public/perf-history.json"
+fi
+if sudo test -f "${previous_app_public_dir}/interop-results.json" &&
+   ! sudo test -f "${remote_release_dir}/app/public/interop-results.json"; then
+  sudo install -m 644 "${previous_app_public_dir}/interop-results.json" "${remote_release_dir}/app/public/interop-results.json"
+fi
+if sudo test -f "${previous_app_public_dir}/coverage-results.json" &&
+   ! sudo test -f "${remote_release_dir}/app/public/coverage-results.json"; then
+  sudo install -m 644 "${previous_app_public_dir}/coverage-results.json" "${remote_release_dir}/app/public/coverage-results.json"
+fi
+if sudo test -d "${previous_app_public_dir}/coverage" &&
+   ! sudo test -d "${remote_release_dir}/app/public/coverage"; then
+  sudo cp -a "${previous_app_public_dir}/coverage" "${remote_release_dir}/app/public/coverage"
+fi
 
 sudo install -m 644 "${remote_upload_dir}/coquic-demo.service" /etc/systemd/system/coquic-demo.service
 sudo install -m 644 "${remote_upload_dir}/fullchain.pem" /etc/coquic-demo/tls/fullchain.pem

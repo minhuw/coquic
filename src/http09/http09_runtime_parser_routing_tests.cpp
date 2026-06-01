@@ -18,6 +18,128 @@ bool runtime_parser_routing_coverage_check(bool &ok, std::string_view label, boo
     return condition;
 }
 
+struct RuntimeTestLongHeaderSpec {
+    std::uint8_t first_byte = 0;
+    std::uint32_t version = 0;
+    std::span<const std::byte> destination_connection_id;
+    std::span<const std::byte> source_connection_id;
+    std::span<const std::byte> tail = {};
+};
+
+std::vector<std::byte> make_runtime_test_long_header(const RuntimeTestLongHeaderSpec &spec) {
+    std::vector<std::byte> bytes;
+    bytes.push_back(static_cast<std::byte>(spec.first_byte));
+    bytes.push_back(static_cast<std::byte>((spec.version >> 24) & 0xffu));
+    bytes.push_back(static_cast<std::byte>((spec.version >> 16) & 0xffu));
+    bytes.push_back(static_cast<std::byte>((spec.version >> 8) & 0xffu));
+    bytes.push_back(static_cast<std::byte>(spec.version & 0xffu));
+    bytes.push_back(static_cast<std::byte>(spec.destination_connection_id.size()));
+    bytes.insert(bytes.end(), spec.destination_connection_id.begin(),
+                 spec.destination_connection_id.end());
+    bytes.push_back(static_cast<std::byte>(spec.source_connection_id.size()));
+    bytes.insert(bytes.end(), spec.source_connection_id.begin(), spec.source_connection_id.end());
+    bytes.insert(bytes.end(), spec.tail.begin(), spec.tail.end());
+    return bytes;
+}
+
+ParsedServerDatagram
+parsed_short_header_for_routing_test(std::span<const std::byte> destination_connection_id) {
+    return ParsedServerDatagram{
+        .kind = ParsedServerDatagram::Kind::short_header,
+        .destination_connection_id =
+            ConnectionId(destination_connection_id.begin(), destination_connection_id.end()),
+    };
+}
+
+ParsedServerDatagram parsed_short_header_for_routing_test(std::byte prefix,
+                                                          std::uint64_t sequence) {
+    return ParsedServerDatagram{
+        .kind = ParsedServerDatagram::Kind::short_header,
+        .destination_connection_id = make_runtime_connection_id(prefix, sequence),
+    };
+}
+
+ParsedServerDatagram
+parsed_supported_initial_for_routing_test(std::span<const std::byte> destination_connection_id) {
+    return ParsedServerDatagram{
+        .kind = ParsedServerDatagram::Kind::supported_initial,
+        .version = kQuicVersion1,
+        .destination_connection_id =
+            ConnectionId(destination_connection_id.begin(), destination_connection_id.end()),
+    };
+}
+
+ParsedServerDatagram parsed_supported_initial_for_routing_test(std::byte prefix,
+                                                               std::uint64_t sequence) {
+    return ParsedServerDatagram{
+        .kind = ParsedServerDatagram::Kind::supported_initial,
+        .version = kQuicVersion1,
+        .destination_connection_id = make_runtime_connection_id(prefix, sequence),
+    };
+}
+
+ParsedServerDatagram parsed_supported_long_header_for_routing_test(
+    std::span<const std::byte> destination_connection_id) {
+    return ParsedServerDatagram{
+        .kind = ParsedServerDatagram::Kind::supported_long_header,
+        .version = kQuicVersion1,
+        .destination_connection_id =
+            ConnectionId(destination_connection_id.begin(), destination_connection_id.end()),
+    };
+}
+
+bool assigned_inbound_step_has_runtime_route(EndpointDriveState &state, RuntimeWaitStep &step) {
+    const auto path_id = assign_runtime_path_for_inbound_step(state, step);
+    const auto *inbound =
+        step.input.has_value() ? std::get_if<QuicCoreInboundDatagram>(&*step.input) : nullptr;
+    return path_id.has_value() && path_id.value() == 1 && inbound != nullptr &&
+           inbound->route_handle.has_value() && inbound->route_handle.value() == 1 &&
+           state.path_routes.contains(1) && state.route_routes.contains(1);
+}
+
+bool assigned_inbound_step_preserves_identity(EndpointDriveState &state, RuntimeWaitStep &step) {
+    const auto path_id = assign_runtime_path_for_inbound_step(state, step);
+    const auto *inbound =
+        step.input.has_value() ? std::get_if<QuicCoreInboundDatagram>(&*step.input) : nullptr;
+    return path_id.has_value() && inbound != nullptr &&
+           inbound->address_validation_identity.size() == 7;
+}
+
+bool io_event_translation_preserves_route_and_ecn() {
+    const auto translated = make_inbound_datagram_from_io_event(QuicIoRxDatagram{
+        .route_handle = 7,
+        .bytes =
+            {
+                std::byte{0x10},
+                std::byte{0x20},
+            },
+        .ecn = QuicEcnCodepoint::ect1,
+    });
+    return translated.route_handle == 7 && translated.bytes.size() == 2 &&
+           translated.ecn == QuicEcnCodepoint::ect1;
+}
+
+bool server_session_lookup_matches(
+    ServerSessionMap &sessions, const ServerConnectionIdRouteMap &connection_id_routes,
+    const std::unordered_map<std::string, std::string> &initial_destination_routes,
+    const ParsedServerDatagram &parsed, bool expected_found) {
+    const bool found =
+        find_server_session_for_datagram(sessions, connection_id_routes, initial_destination_routes,
+                                         parsed) != sessions.end();
+    return found == expected_found;
+}
+
+bool initial_destination_route_predicates_match(
+    std::span<const std::byte> initial_destination_connection_id,
+    std::span<const std::byte> short_header_connection_id) {
+    return datagram_routes_via_initial_destination(
+               parsed_supported_initial_for_routing_test(initial_destination_connection_id)) &&
+           datagram_routes_via_initial_destination(
+               parsed_supported_long_header_for_routing_test(initial_destination_connection_id)) &&
+           !datagram_routes_via_initial_destination(
+               parsed_short_header_for_routing_test(short_header_connection_id));
+}
+
 } // namespace
 
 bool runtime_parser_and_utility_coverage_for_tests() {
@@ -96,30 +218,6 @@ bool runtime_parser_and_utility_coverage_for_tests() {
                                               },
                                               0) == 0x01234567u);
 
-    struct LongHeaderSpec {
-        std::uint8_t first_byte = 0;
-        std::uint32_t version = 0;
-        std::span<const std::byte> destination_connection_id;
-        std::span<const std::byte> source_connection_id;
-        std::span<const std::byte> tail = {};
-    };
-    const auto make_long_header = [](const LongHeaderSpec &spec) {
-        std::vector<std::byte> bytes;
-        bytes.push_back(static_cast<std::byte>(spec.first_byte));
-        bytes.push_back(static_cast<std::byte>((spec.version >> 24) & 0xffu));
-        bytes.push_back(static_cast<std::byte>((spec.version >> 16) & 0xffu));
-        bytes.push_back(static_cast<std::byte>((spec.version >> 8) & 0xffu));
-        bytes.push_back(static_cast<std::byte>(spec.version & 0xffu));
-        bytes.push_back(static_cast<std::byte>(spec.destination_connection_id.size()));
-        bytes.insert(bytes.end(), spec.destination_connection_id.begin(),
-                     spec.destination_connection_id.end());
-        bytes.push_back(static_cast<std::byte>(spec.source_connection_id.size()));
-        bytes.insert(bytes.end(), spec.source_connection_id.begin(),
-                     spec.source_connection_id.end());
-        bytes.insert(bytes.end(), spec.tail.begin(), spec.tail.end());
-        return bytes;
-    };
-
     const auto destination_connection_id = make_runtime_connection_id(std::byte{0x41}, 1);
     const auto source_connection_id = make_runtime_connection_id(std::byte{0x42}, 2);
 
@@ -160,7 +258,7 @@ bool runtime_parser_and_utility_coverage_for_tests() {
     runtime_parser_routing_coverage_check(
         ok, "version negotiation packets are ignored",
         !parse_server_datagram_for_routing(
-             make_long_header(LongHeaderSpec{
+             make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
                  .first_byte = 0xc0u,
                  .version = kVersionNegotiationVersion,
                  .destination_connection_id = destination_connection_id,
@@ -184,12 +282,13 @@ bool runtime_parser_and_utility_coverage_for_tests() {
 
     {
         constexpr std::uint32_t kUnsupportedVersion = 0xfaceb00cu;
-        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
-            .first_byte = 0xc0u,
-            .version = kUnsupportedVersion,
-            .destination_connection_id = destination_connection_id,
-            .source_connection_id = source_connection_id,
-        }));
+        const auto parsed = parse_server_datagram_for_routing(
+            make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
+                .first_byte = 0xc0u,
+                .version = kUnsupportedVersion,
+                .destination_connection_id = destination_connection_id,
+                .source_connection_id = source_connection_id,
+            }));
         runtime_parser_routing_coverage_check(ok, "unsupported versions parse as probes",
                                               parsed.has_value());
         runtime_parser_routing_coverage_check(
@@ -199,38 +298,41 @@ bool runtime_parser_and_utility_coverage_for_tests() {
     }
 
     {
-        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
-            .first_byte = 0xc0u,
-            .version = kQuicVersion1,
-            .destination_connection_id = destination_connection_id,
-            .source_connection_id = source_connection_id,
-        }));
+        const auto parsed = parse_server_datagram_for_routing(
+            make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
+                .first_byte = 0xc0u,
+                .version = kQuicVersion1,
+                .destination_connection_id = destination_connection_id,
+                .source_connection_id = source_connection_id,
+            }));
         runtime_parser_routing_coverage_check(
             ok, "initial headers with truncated token varints are rejected", !parsed.has_value());
     }
 
     {
         const auto oversized_token_length = encode_varint(2).value();
-        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
-            .first_byte = 0xc0u,
-            .version = kQuicVersion1,
-            .destination_connection_id = destination_connection_id,
-            .source_connection_id = source_connection_id,
-            .tail = oversized_token_length,
-        }));
+        const auto parsed = parse_server_datagram_for_routing(
+            make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
+                .first_byte = 0xc0u,
+                .version = kQuicVersion1,
+                .destination_connection_id = destination_connection_id,
+                .source_connection_id = source_connection_id,
+                .tail = oversized_token_length,
+            }));
         runtime_parser_routing_coverage_check(
             ok, "initial headers with oversized tokens are rejected", !parsed.has_value());
     }
 
     {
         const auto zero_token_length = encode_varint(0).value();
-        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
-            .first_byte = 0xe0u,
-            .version = kQuicVersion1,
-            .destination_connection_id = destination_connection_id,
-            .source_connection_id = source_connection_id,
-            .tail = zero_token_length,
-        }));
+        const auto parsed = parse_server_datagram_for_routing(
+            make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
+                .first_byte = 0xe0u,
+                .version = kQuicVersion1,
+                .destination_connection_id = destination_connection_id,
+                .source_connection_id = source_connection_id,
+                .tail = zero_token_length,
+            }));
         runtime_parser_routing_coverage_check(ok, "supported non-initial long headers parse",
                                               parsed.has_value());
         runtime_parser_routing_coverage_check(
@@ -242,13 +344,14 @@ bool runtime_parser_and_utility_coverage_for_tests() {
     {
         auto token = encode_varint(1).value();
         token.push_back(std::byte{0xaa});
-        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
-            .first_byte = 0xc0u,
-            .version = kQuicVersion1,
-            .destination_connection_id = destination_connection_id,
-            .source_connection_id = source_connection_id,
-            .tail = token,
-        }));
+        const auto parsed = parse_server_datagram_for_routing(
+            make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
+                .first_byte = 0xc0u,
+                .version = kQuicVersion1,
+                .destination_connection_id = destination_connection_id,
+                .source_connection_id = source_connection_id,
+                .tail = token,
+            }));
         runtime_parser_routing_coverage_check(ok, "supported initial long headers parse",
                                               parsed.has_value());
         runtime_parser_routing_coverage_check(
@@ -259,13 +362,14 @@ bool runtime_parser_and_utility_coverage_for_tests() {
 
     {
         const auto zero_token_length = encode_varint(0).value();
-        const auto parsed = parse_server_datagram_for_routing(make_long_header(LongHeaderSpec{
-            .first_byte = 0xd0u,
-            .version = kQuicVersion2,
-            .destination_connection_id = destination_connection_id,
-            .source_connection_id = source_connection_id,
-            .tail = zero_token_length,
-        }));
+        const auto parsed = parse_server_datagram_for_routing(
+            make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
+                .first_byte = 0xd0u,
+                .version = kQuicVersion2,
+                .destination_connection_id = destination_connection_id,
+                .source_connection_id = source_connection_id,
+                .tail = zero_token_length,
+            }));
         runtime_parser_routing_coverage_check(ok, "v2 initial long headers parse",
                                               parsed.has_value());
         runtime_parser_routing_coverage_check(
@@ -619,7 +723,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         }
     };
 
-    bool ok = true;
+    bool routing_coverage_ok = true;
     const auto make_loopback_peer = [](std::uint16_t port) {
         sockaddr_storage peer{};
         auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
@@ -643,10 +747,11 @@ bool runtime_routing_and_driver_coverage_for_tests() {
                 },
         };
         runtime_parser_routing_coverage_check(
-            ok, "active_client_socket_fds includes secondary sockets when present",
+            routing_coverage_ok, "active_client_socket_fds includes secondary sockets when present",
             active_client_socket_fds(sockets) == std::array<int, 2>{11, 12});
         runtime_parser_routing_coverage_check(
-            ok, "active_client_socket_count includes secondary sockets when present",
+            routing_coverage_ok,
+            "active_client_socket_count includes secondary sockets when present",
             active_client_socket_count(sockets) == 2u);
     }
 
@@ -682,13 +787,14 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             .has_source = true,
         };
         runtime_parser_routing_coverage_check(
-            ok, "assign_runtime_path_for_inbound_step ignores steps without inputs",
+            routing_coverage_ok,
+            "assign_runtime_path_for_inbound_step ignores steps without inputs",
             !assign_runtime_path_for_inbound_step(state, missing_input_step).has_value());
 
         RuntimeWaitStep timer_step = missing_input_step;
         timer_step.input = QuicCoreTimerExpired{};
         runtime_parser_routing_coverage_check(
-            ok, "assign_runtime_path_for_inbound_step ignores timer inputs",
+            routing_coverage_ok, "assign_runtime_path_for_inbound_step ignores timer inputs",
             !assign_runtime_path_for_inbound_step(state, timer_step).has_value());
 
         RuntimeWaitStep inbound_step{
@@ -706,15 +812,10 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             .source_len = sizeof(sockaddr_in),
             .has_source = true,
         };
-        const auto path_id = assign_runtime_path_for_inbound_step(state, inbound_step);
-        const auto *inbound = inbound_step.input.has_value()
-                                  ? std::get_if<QuicCoreInboundDatagram>(&*inbound_step.input)
-                                  : nullptr;
         runtime_parser_routing_coverage_check(
-            ok, "assign_runtime_path_for_inbound_step assigns stable path and route handles",
-            path_id.has_value() && path_id.value() == 1 && inbound != nullptr &&
-                inbound->route_handle.has_value() && inbound->route_handle.value() == 1 &&
-                state.path_routes.contains(1) && state.route_routes.contains(1));
+            routing_coverage_ok,
+            "assign_runtime_path_for_inbound_step assigns stable path and route handles",
+            assigned_inbound_step_has_runtime_route(state, inbound_step));
 
         RuntimeWaitStep identified_inbound_step = inbound_step;
         identified_inbound_step.input = QuicCoreInboundDatagram{
@@ -733,30 +834,15 @@ bool runtime_routing_and_driver_coverage_for_tests() {
                     std::byte{0x90},
                 },
         };
-        const auto identified_path_id =
-            assign_runtime_path_for_inbound_step(state, identified_inbound_step);
-        const auto *identified_inbound =
-            identified_inbound_step.input.has_value()
-                ? std::get_if<QuicCoreInboundDatagram>(&*identified_inbound_step.input)
-                : nullptr;
         runtime_parser_routing_coverage_check(
-            ok, "assign_runtime_path_for_inbound_step preserves supplied identities",
-            identified_path_id.has_value() && identified_inbound != nullptr &&
-                identified_inbound->address_validation_identity.size() == 7);
+            routing_coverage_ok,
+            "assign_runtime_path_for_inbound_step preserves supplied identities",
+            assigned_inbound_step_preserves_identity(state, identified_inbound_step));
 
-        const auto translated = make_inbound_datagram_from_io_event(QuicIoRxDatagram{
-            .route_handle = 7,
-            .bytes =
-                {
-                    std::byte{0x10},
-                    std::byte{0x20},
-                },
-            .ecn = QuicEcnCodepoint::ect1,
-        });
         runtime_parser_routing_coverage_check(
-            ok, "make_inbound_datagram_from_io_event preserves route handles and ecn",
-            translated.route_handle == 7 && translated.bytes.size() == 2 &&
-                translated.ecn == QuicEcnCodepoint::ect1);
+            routing_coverage_ok,
+            "make_inbound_datagram_from_io_event preserves route handles and ecn",
+            io_event_translation_preserves_route_and_ecn());
     }
 
     {
@@ -769,10 +855,11 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             .ecn = QuicEcnCodepoint::ect0,
         });
         runtime_parser_routing_coverage_check(
-            ok, "handle_core_effects rejects missing fallback routes",
+            routing_coverage_ok, "handle_core_effects rejects missing fallback routes",
             !handle_core_effects(/*fallback_socket_fd=*/-1, result, nullptr, 0, {}, "client"));
         runtime_parser_routing_coverage_check(
-            ok, "handle_core_effects rejects missing peers even with valid fallback sockets",
+            routing_coverage_ok,
+            "handle_core_effects rejects missing peers even with valid fallback sockets",
             !handle_core_effects(/*fallback_socket_fd=*/17, result, nullptr, 0, {}, "client"));
     }
 
@@ -797,7 +884,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             },
         };
         runtime_parser_routing_coverage_check(
-            ok, "handle_core_effects propagates sendto failures",
+            routing_coverage_ok, "handle_core_effects propagates sendto failures",
             !handle_core_effects(/*fallback_socket_fd=*/17, result, &peer, sizeof(sockaddr_in), {},
                                  "client"));
     }
@@ -805,7 +892,8 @@ bool runtime_routing_and_driver_coverage_for_tests() {
     {
         const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
         runtime_parser_routing_coverage_check(
-            ok, "handle_core_effects traces route-handle sends when a routed send succeeds",
+            routing_coverage_ok,
+            "handle_core_effects traces route-handle sends when a routed send succeeds",
             runtime_server_send_effect_uses_route_handle_for_tests());
     }
 
@@ -820,7 +908,8 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         });
         ScriptedIoBackendForTests backend;
         runtime_parser_routing_coverage_check(
-            ok, "handle_core_effects_with_backend rejects missing fallback route handles",
+            routing_coverage_ok,
+            "handle_core_effects_with_backend rejects missing fallback route handles",
             !handle_core_effects_with_backend(std::nullopt, backend, result, "client"));
     }
 
@@ -836,10 +925,11 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         const ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
         FailingSendBackendForTests backend;
         runtime_parser_routing_coverage_check(
-            ok, "handle_core_effects_with_backend propagates backend send failures",
+            routing_coverage_ok,
+            "handle_core_effects_with_backend propagates backend send failures",
             !handle_core_effects_with_backend(9, backend, result, "client"));
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "handle_core_effects_with_backend passes the fallback route handle to the "
             "backend",
             backend.sent_datagrams.size() == 1 &&
@@ -871,13 +961,14 @@ bool runtime_routing_and_driver_coverage_for_tests() {
                 },
         };
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "observe_client_runtime_policy_effects tracks preferred-address routes without "
             "opening sockets",
             observe_client_runtime_policy_effects(preferred_address_result, state, policy, sockets,
                                                   "client"));
         runtime_parser_routing_coverage_check(
-            ok, "observe_client_runtime_policy_effects records handshake and routing state",
+            routing_coverage_ok,
+            "observe_client_runtime_policy_effects records handshake and routing state",
             policy.handshake_ready_seen && policy.handshake_confirmed_seen &&
                 policy.preferred_address_route_handle.has_value() &&
                 state.path_routes.size() == 1 && state.route_routes.size() == 1);
@@ -889,11 +980,12 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         ClientRuntimePolicyState policy;
         ClientIoContext io_context;
         runtime_parser_routing_coverage_check(
-            ok, "observe_client_runtime_policy_effects_with_backend rejects missing backends",
+            routing_coverage_ok,
+            "observe_client_runtime_policy_effects_with_backend rejects missing backends",
             !observe_client_runtime_policy_effects_with_backend(preferred_address_result, state,
                                                                 policy, io_context, "client"));
         runtime_parser_routing_coverage_check(
-            ok, "missing backend still records handshake state before failing",
+            routing_coverage_ok, "missing backend still records handshake state before failing",
             policy.handshake_ready_seen && policy.handshake_confirmed_seen);
     }
 
@@ -905,7 +997,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         backend->ensure_route_results.push_back(std::nullopt);
         io_context.backend = std::move(backend);
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "observe_client_runtime_policy_effects_with_backend rejects "
             "preferred-address route "
             "failures",
@@ -923,13 +1015,13 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         backend->ensure_route_results.push_back(77);
         io_context.backend = std::move(backend);
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "observe_client_runtime_policy_effects_with_backend records successful "
             "preferred-address routes",
             observe_client_runtime_policy_effects_with_backend(preferred_address_result, state,
                                                                policy, io_context, "client"));
         runtime_parser_routing_coverage_check(
-            ok, "preferred-address route creation stores the chosen route handle",
+            routing_coverage_ok, "preferred-address route creation stores the chosen route handle",
             io_context.preferred_route_handle == std::optional<QuicRouteHandle>(77) &&
                 policy.preferred_address_route_handle == std::optional<QuicRouteHandle>(77) &&
                 backend_ptr->ensure_route_calls.size() == 1 &&
@@ -954,77 +1046,54 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             {connection_id_key(initial_destination_connection_id), session_key},
         };
 
-        const ParsedServerDatagram direct_parsed{
-            .kind = ParsedServerDatagram::Kind::short_header,
-            .destination_connection_id = direct_connection_id,
-        };
-        const ParsedServerDatagram routed_parsed{
-            .kind = ParsedServerDatagram::Kind::short_header,
-            .destination_connection_id = routed_connection_id,
-        };
-        const ParsedServerDatagram initial_parsed{
-            .kind = ParsedServerDatagram::Kind::supported_initial,
-            .version = kQuicVersion1,
-            .destination_connection_id = initial_destination_connection_id,
-        };
-        const ParsedServerDatagram supported_long_header_parsed{
-            .kind = ParsedServerDatagram::Kind::supported_long_header,
-            .version = kQuicVersion1,
-            .destination_connection_id = initial_destination_connection_id,
-        };
-        const ParsedServerDatagram missing_initial_route{
-            .kind = ParsedServerDatagram::Kind::supported_initial,
-            .version = kQuicVersion1,
-            .destination_connection_id = make_runtime_connection_id(std::byte{0x94}, 4),
-        };
-        const ParsedServerDatagram short_header_without_route{
-            .kind = ParsedServerDatagram::Kind::short_header,
-            .destination_connection_id = make_runtime_connection_id(std::byte{0x95}, 5),
-        };
-
         runtime_parser_routing_coverage_check(
-            ok, "find_server_session_for_datagram matches direct destination connection ids",
-            find_server_session_for_datagram(sessions, connection_id_routes,
-                                             initial_destination_routes,
-                                             direct_parsed) != sessions.end());
+            routing_coverage_ok,
+            "find_server_session_for_datagram matches direct destination connection ids",
+            server_session_lookup_matches(
+                sessions, connection_id_routes, initial_destination_routes,
+                parsed_short_header_for_routing_test(direct_connection_id), true));
         runtime_parser_routing_coverage_check(
-            ok, "find_server_session_for_datagram matches routed destination connection ids",
-            find_server_session_for_datagram(sessions, connection_id_routes,
-                                             initial_destination_routes,
-                                             routed_parsed) != sessions.end());
+            routing_coverage_ok,
+            "find_server_session_for_datagram matches routed destination connection ids",
+            server_session_lookup_matches(
+                sessions, connection_id_routes, initial_destination_routes,
+                parsed_short_header_for_routing_test(routed_connection_id), true));
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "find_server_session_for_datagram falls back to initial destination routes for "
             "initials",
-            find_server_session_for_datagram(sessions, connection_id_routes,
-                                             initial_destination_routes,
-                                             initial_parsed) != sessions.end());
+            server_session_lookup_matches(
+                sessions, connection_id_routes, initial_destination_routes,
+                parsed_supported_initial_for_routing_test(initial_destination_connection_id),
+                true));
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "find_server_session_for_datagram falls back to initial destination routes "
             "for long "
             "headers",
-            find_server_session_for_datagram(sessions, connection_id_routes,
-                                             initial_destination_routes,
-                                             supported_long_header_parsed) != sessions.end());
+            server_session_lookup_matches(
+                sessions, connection_id_routes, initial_destination_routes,
+                parsed_supported_long_header_for_routing_test(initial_destination_connection_id),
+                true));
         runtime_parser_routing_coverage_check(
-            ok, "find_server_session_for_datagram returns end when initial routes miss",
-            find_server_session_for_datagram(sessions, connection_id_routes,
-                                             initial_destination_routes,
-                                             missing_initial_route) == sessions.end());
+            routing_coverage_ok,
+            "find_server_session_for_datagram returns end when initial routes miss",
+            server_session_lookup_matches(
+                sessions, connection_id_routes, initial_destination_routes,
+                parsed_supported_initial_for_routing_test(std::byte{0x94}, 4), false));
         runtime_parser_routing_coverage_check(
-            ok, "find_server_session_for_datagram returns end for unrouted short headers",
-            find_server_session_for_datagram(sessions, connection_id_routes,
-                                             initial_destination_routes,
-                                             short_header_without_route) == sessions.end());
+            routing_coverage_ok,
+            "find_server_session_for_datagram returns end for unrouted short headers",
+            server_session_lookup_matches(
+                sessions, connection_id_routes, initial_destination_routes,
+                parsed_short_header_for_routing_test(std::byte{0x95}, 5), false));
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "datagram_routes_via_initial_destination only accepts supported long-header "
             "client "
             "opens",
-            datagram_routes_via_initial_destination(initial_parsed) &&
-                datagram_routes_via_initial_destination(supported_long_header_parsed) &&
-                !datagram_routes_via_initial_destination(short_header_without_route));
+            initial_destination_route_predicates_match(
+                initial_destination_connection_id, make_runtime_connection_id(std::byte{0x95}, 5)));
     }
 
     {
@@ -1038,7 +1107,8 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             },
             19);
         runtime_parser_routing_coverage_check(
-            ok, "make_runtime_server_core_config assigns runtime source connection ids",
+            routing_coverage_ok,
+            "make_runtime_server_core_config assigns runtime source connection ids",
             runtime_server_core.source_connection_id ==
                 make_runtime_connection_id(std::byte{0x53}, 19));
 
@@ -1058,7 +1128,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
                                              make_runtime_connection_id(std::byte{0xb3}, 3),
                                              std::nullopt, false));
         runtime_parser_routing_coverage_check(
-            ok, "earliest_server_session_wakeup picks the minimum wakeup",
+            routing_coverage_ok, "earliest_server_session_wakeup picks the minimum wakeup",
             earliest_server_session_wakeup(sessions) == std::optional<QuicCoreTimePoint>(wakeup_b));
     }
 
@@ -1086,12 +1156,14 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         EndpointDriveState state;
         bool observed_send_effects = false;
         runtime_parser_routing_coverage_check(
-            ok, "drive_endpoint_until_blocked records send effects before terminal success",
+            routing_coverage_ok,
+            "drive_endpoint_until_blocked records send effects before terminal success",
             drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, 33, &peer,
                                          sizeof(sockaddr_in), initial_result, state, "client",
                                          nullptr, nullptr, nullptr, &observed_send_effects));
         runtime_parser_routing_coverage_check(
-            ok, "drive_endpoint_until_blocked marks terminal success and observed sends",
+            routing_coverage_ok,
+            "drive_endpoint_until_blocked marks terminal success and observed sends",
             state.terminal_success && observed_send_effects &&
                 g_recorded_sendto_for_tests.calls == 1);
     }
@@ -1106,15 +1178,16 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         };
         ScriptedIoBackendForTests backend;
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "drive_endpoint_until_blocked_with_backend rejects missing client io context "
             "when "
             "policy observation is requested",
             !drive_endpoint_until_blocked_with_backend(make_endpoint_driver(endpoint), core, 5,
                                                        backend, QuicCoreResult{}, state, "client",
                                                        &config, &policy, nullptr));
-        runtime_parser_routing_coverage_check(
-            ok, "missing client io context marks terminal failure", state.terminal_failure);
+        runtime_parser_routing_coverage_check(routing_coverage_ok,
+                                              "missing client io context marks terminal failure",
+                                              state.terminal_failure);
     }
 
     {
@@ -1128,7 +1201,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         ScriptedIoBackendForTests backend;
         ClientIoContext io_context;
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "drive_endpoint_until_blocked_with_backend propagates preferred-address "
             "observation "
             "failures from client io state",
@@ -1136,7 +1209,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
                                                        backend, preferred_address_result, state,
                                                        "client", &config, &policy, &io_context));
         runtime_parser_routing_coverage_check(
-            ok, "preferred-address observation failures mark terminal failure",
+            routing_coverage_ok, "preferred-address observation failures mark terminal failure",
             state.terminal_failure);
     }
 
@@ -1152,14 +1225,15 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             .stream_id = std::nullopt,
         };
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "drive_endpoint_until_blocked_with_backend treats unhandled local errors as "
             "terminal "
             "failures",
             !drive_endpoint_until_blocked_with_backend(make_endpoint_driver(endpoint), core, 6,
                                                        backend, local_error_result, state,
                                                        "client"));
-        runtime_parser_routing_coverage_check(ok, "unhandled local errors mark terminal failure",
+        runtime_parser_routing_coverage_check(routing_coverage_ok,
+                                              "unhandled local errors mark terminal failure",
                                               state.terminal_failure);
     }
 
@@ -1179,14 +1253,15 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             .stream_id = std::nullopt,
         };
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "drive_endpoint_until_blocked_with_backend keeps handled local errors "
             "non-terminal",
             drive_endpoint_until_blocked_with_backend(
                 make_endpoint_driver(endpoint), core, 6, backend, local_error_result, state,
                 "client", nullptr, nullptr, nullptr, &observed_send_effects));
         runtime_parser_routing_coverage_check(
-            ok, "handled local errors do not record send effects or terminal failures",
+            routing_coverage_ok,
+            "handled local errors do not record send effects or terminal failures",
             !state.terminal_failure && !observed_send_effects);
     }
 
@@ -1209,14 +1284,15 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             .ecn = QuicEcnCodepoint::ect0,
         });
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "drive_endpoint_until_blocked_with_backend records sends before terminal "
             "success",
             drive_endpoint_until_blocked_with_backend(
                 make_endpoint_driver(endpoint), core, 7, backend, initial_result, state, "client",
                 nullptr, nullptr, nullptr, &observed_send_effects));
         runtime_parser_routing_coverage_check(
-            ok, "backend drive path marks terminal success and records the sent datagram",
+            routing_coverage_ok,
+            "backend drive path marks terminal success and records the sent datagram",
             state.terminal_success && observed_send_effects && backend.sent_datagrams.size() == 1 &&
                 backend.sent_datagrams.front().route_handle == 7);
     }
@@ -1228,7 +1304,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         ClientRuntimePolicyState policy;
         ClientIoContext io_context;
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "run_http09_client_connection_backend_loop rejects missing backend bootstrap "
             "state",
             run_http09_client_connection_backend_loop(
@@ -1247,7 +1323,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         ClientIoContext io_context;
         io_context.backend = std::make_unique<ScriptedIoBackendForTests>();
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "run_http09_client_connection_backend_loop rejects missing primary route "
             "handles even "
             "when a backend exists",
@@ -1279,7 +1355,8 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             .stream_id = std::nullopt,
         };
         runtime_parser_routing_coverage_check(
-            ok, "run_http09_client_connection_loop exits when the initial drive fails",
+            routing_coverage_ok,
+            "run_http09_client_connection_loop exits when the initial drive fails",
             run_http09_client_connection_loop(
                 Http09RuntimeConfig{
                     .mode = Http09RuntimeMode::client,
@@ -1310,7 +1387,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         };
         ScriptedClientLoopIoForTests io_script;
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "run_http09_client_connection_loop traces pending endpoint polls before "
             "terminal "
             "failures",
@@ -1322,7 +1399,8 @@ bool runtime_routing_and_driver_coverage_for_tests() {
                 sizeof(sockaddr_in), state, policy,
                 make_scripted_client_loop_io_for_tests(io_script), QuicCoreResult{}) == 1);
         runtime_parser_routing_coverage_check(
-            ok, "pending endpoint poll failures mark terminal failure", state.terminal_failure);
+            routing_coverage_ok, "pending endpoint poll failures mark terminal failure",
+            state.terminal_failure);
     }
 
     {
@@ -1345,7 +1423,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
             },
             processed_any);
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "process_expired_server_sessions skips sessions whose wakeup is still in the "
             "future",
             !processed_any && erased_keys.empty());
@@ -1360,7 +1438,7 @@ bool runtime_routing_and_driver_coverage_for_tests() {
                                              std::nullopt, false));
         ServerConnectionIdRouteMap connection_id_routes;
         runtime_parser_routing_coverage_check(
-            ok,
+            routing_coverage_ok,
             "pump_server_pending_endpoint_work skips sessions without pending endpoint "
             "work",
             !pump_server_pending_endpoint_work(sessions, connection_id_routes,
@@ -1368,11 +1446,13 @@ bool runtime_routing_and_driver_coverage_for_tests() {
                                                    erased_keys.push_back(local_connection_id_key);
                                                }));
         runtime_parser_routing_coverage_check(
-            ok, "has_pending_server_endpoint_work reports false when no session is pending",
+            routing_coverage_ok,
+            "has_pending_server_endpoint_work reports false when no session is pending",
             !has_pending_server_endpoint_work(sessions));
         sessions.begin()->second->state.endpoint_has_pending_work = true;
         runtime_parser_routing_coverage_check(
-            ok, "has_pending_server_endpoint_work reports true when a session is pending",
+            routing_coverage_ok,
+            "has_pending_server_endpoint_work reports true when a session is pending",
             has_pending_server_endpoint_work(sessions));
     }
 
@@ -1391,13 +1471,13 @@ bool runtime_routing_and_driver_coverage_for_tests() {
         });
         erase_closed_server_connection_endpoints(endpoints, closed_result);
         runtime_parser_routing_coverage_check(
-            ok, "erase_closed_server_connection_endpoints removes closed endpoints",
-            endpoints.empty());
+            routing_coverage_ok,
+            "erase_closed_server_connection_endpoints removes closed endpoints", endpoints.empty());
     }
 
     {
         runtime_parser_routing_coverage_check(
-            ok, "to_connection_command_input preserves supported stream commands",
+            routing_coverage_ok, "to_connection_command_input preserves supported stream commands",
             to_connection_command_input(QuicCoreSendStreamData{
                                             .stream_id = 3,
                                             .bytes =
@@ -1407,11 +1487,12 @@ bool runtime_routing_and_driver_coverage_for_tests() {
                                         })
                 .has_value());
         runtime_parser_routing_coverage_check(
-            ok, "to_connection_command_input rejects unsupported endpoint-level inputs",
+            routing_coverage_ok,
+            "to_connection_command_input rejects unsupported endpoint-level inputs",
             !to_connection_command_input(QuicCoreStart{}).has_value());
     }
 
-    return ok;
+    return routing_coverage_ok;
 }
 
 } // namespace test

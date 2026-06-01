@@ -37,6 +37,7 @@ remote_user="minhuw"
 remote_host="coquic.minhuw.dev"
 public_host="coquic.minhuw.dev"
 public_port="443"
+public_alt_svc_max_age="86400"
 ssh_key_path="${COQUIC_DEMO_REMOTE_SSH_KEY_PATH:-${RUNNER_TEMP:-/tmp}/coquic-demo.key}"
 release_id_source="${GITHUB_SHA:-$(git -C "${repo_root}" rev-parse --short=12 HEAD)}"
 release_id="${release_id_source:0:12}"
@@ -563,7 +564,7 @@ for attempt in $(seq 1 "${verification_attempts}"); do
     last_headers="${normalized_headers}"
     last_headers_error=""
     if grep -Fq 'HTTP/1.1 200 OK' <<<"${normalized_headers}" &&
-       grep -Eiq '^alt-svc:[[:space:]].*h3=":'"${public_port}"'".*ma=60' <<<"${normalized_headers}"; then
+       grep -Eiq '^alt-svc:[[:space:]].*h3=":'"${public_port}"'".*ma='"${public_alt_svc_max_age}" <<<"${normalized_headers}"; then
       headers_verified=1
       break
     fi

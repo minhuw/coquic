@@ -12,7 +12,7 @@ fi
 host="${COQUIC_DEMO_HOST:-0.0.0.0}"
 port="${COQUIC_DEMO_PORT:-443}"
 bootstrap_port="${COQUIC_DEMO_BOOTSTRAP_PORT:-443}"
-alt_svc_max_age="${COQUIC_DEMO_ALT_SVC_MAX_AGE:-60}"
+alt_svc_max_age="${COQUIC_DEMO_ALT_SVC_MAX_AGE:-86400}"
 next_host="${COQUIC_DEMO_NEXT_HOST:-127.0.0.1}"
 next_port="${COQUIC_DEMO_NEXT_PORT:-3001}"
 qa_host="${COQUIC_QA_HOST:-127.0.0.1}"

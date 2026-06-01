@@ -446,11 +446,11 @@ TEST(QuicFrameTest, AckRangeHelpersRejectMalformedOwnedRanges) {
     ASSERT_FALSE(invalid_gap_ranges.has_value());
     EXPECT_EQ(invalid_gap_ranges.error().code, CodecErrorCode::invalid_varint);
 
-    const auto invalid_gap_cursor = coquic::quic::make_ack_range_cursor(invalid_gap_range);
+    auto invalid_gap_cursor = coquic::quic::make_ack_range_cursor(invalid_gap_range);
     ASSERT_FALSE(invalid_gap_cursor.has_value());
     EXPECT_EQ(invalid_gap_cursor.error().code, CodecErrorCode::invalid_varint);
 
-    const AckFrame invalid_range_length{
+    AckFrame invalid_range_length{
         .largest_acknowledged = 4,
         .first_ack_range = 0,
         .additional_ranges =
@@ -461,12 +461,11 @@ TEST(QuicFrameTest, AckRangeHelpersRejectMalformedOwnedRanges) {
                 },
             },
     };
-    const auto invalid_length_ranges =
-        coquic::quic::ack_frame_packet_number_ranges(invalid_range_length);
+    auto invalid_length_ranges = coquic::quic::ack_frame_packet_number_ranges(invalid_range_length);
     ASSERT_FALSE(invalid_length_ranges.has_value());
     EXPECT_EQ(invalid_length_ranges.error().code, CodecErrorCode::invalid_varint);
 
-    const auto invalid_length_cursor = coquic::quic::make_ack_range_cursor(invalid_range_length);
+    auto invalid_length_cursor = coquic::quic::make_ack_range_cursor(invalid_range_length);
     ASSERT_FALSE(invalid_length_cursor.has_value());
     EXPECT_EQ(invalid_length_cursor.error().code, CodecErrorCode::invalid_varint);
 }
@@ -555,7 +554,7 @@ TEST(QuicFrameTest, NextAckRangeStopsWhenEncodedOrOwnedRangesAreMalformed) {
     };
     EXPECT_FALSE(coquic::quic::next_ack_range(encoded_length_cursor).has_value());
 
-    const std::array owned_gap_ranges = {
+    std::array owned_gap_ranges = {
         AckRange{
             .gap = 0,
             .range_length = 0,
@@ -570,7 +569,7 @@ TEST(QuicFrameTest, NextAckRangeStopsWhenEncodedOrOwnedRangesAreMalformed) {
     };
     EXPECT_FALSE(coquic::quic::next_ack_range(owned_gap_cursor).has_value());
 
-    const std::array owned_length_ranges = {
+    std::array owned_length_ranges = {
         AckRange{
             .gap = 0,
             .range_length = 3,
@@ -622,7 +621,7 @@ TEST(QuicFrameTest, DeserializeReceivedAckRejectsMalformedAdditionalRangesAndTru
             std::byte{0x80},
             std::byte{0x00},
         });
-    const auto truncated_gap = coquic::quic::deserialize_received_frame(
+    auto truncated_gap = coquic::quic::deserialize_received_frame(
         SharedBytes(truncated_gap_storage, 0, truncated_gap_storage->size()));
     ASSERT_FALSE(truncated_gap.has_value());
     EXPECT_EQ(truncated_gap.error().code, CodecErrorCode::truncated_input);
@@ -637,7 +636,7 @@ TEST(QuicFrameTest, DeserializeReceivedAckRejectsMalformedAdditionalRangesAndTru
             std::byte{0x00},
             std::byte{0x40},
         });
-    const auto truncated_range_length = coquic::quic::deserialize_received_frame(
+    auto truncated_range_length = coquic::quic::deserialize_received_frame(
         SharedBytes(truncated_range_length_storage, 0, truncated_range_length_storage->size()));
     ASSERT_FALSE(truncated_range_length.has_value());
     EXPECT_EQ(truncated_range_length.error().code, CodecErrorCode::truncated_input);
@@ -652,7 +651,7 @@ TEST(QuicFrameTest, DeserializeReceivedAckRejectsMalformedAdditionalRangesAndTru
             std::byte{0x00},
             std::byte{0x00},
         });
-    const auto invalid_gap = coquic::quic::deserialize_received_frame(
+    auto invalid_gap = coquic::quic::deserialize_received_frame(
         SharedBytes(invalid_gap_storage, 0, invalid_gap_storage->size()));
     ASSERT_FALSE(invalid_gap.has_value());
     EXPECT_EQ(invalid_gap.error().code, CodecErrorCode::invalid_varint);
@@ -667,7 +666,7 @@ TEST(QuicFrameTest, DeserializeReceivedAckRejectsMalformedAdditionalRangesAndTru
             std::byte{0x00},
             std::byte{0x02},
         });
-    const auto invalid_range_length = coquic::quic::deserialize_received_frame(
+    auto invalid_range_length = coquic::quic::deserialize_received_frame(
         SharedBytes(invalid_range_length_storage, 0, invalid_range_length_storage->size()));
     ASSERT_FALSE(invalid_range_length.has_value());
     EXPECT_EQ(invalid_range_length.error().code, CodecErrorCode::invalid_varint);
@@ -682,7 +681,7 @@ TEST(QuicFrameTest, DeserializeReceivedAckRejectsMalformedAdditionalRangesAndTru
             std::byte{0x01},
             std::byte{0x02},
         });
-    const auto truncated_ecn = coquic::quic::deserialize_received_frame(
+    auto truncated_ecn = coquic::quic::deserialize_received_frame(
         SharedBytes(truncated_ecn_storage, 0, truncated_ecn_storage->size()));
     ASSERT_FALSE(truncated_ecn.has_value());
     EXPECT_EQ(truncated_ecn.error().code, CodecErrorCode::truncated_input);
@@ -756,7 +755,7 @@ TEST(QuicFrameTest, OutboundAckWireHelpersPropagateAckValidationErrors) {
     EXPECT_FALSE(
         coquic::quic::write_frame_wire_bytes(output, invalid_additional_range).has_value());
 
-    const std::array invalid_ecn_cases = {
+    std::array invalid_ecn_cases = {
         OutboundAckFrame{
             .header =
                 coquic::quic::OutboundAckHeader{
@@ -1161,7 +1160,7 @@ TEST(QuicFrameTest, RoundTripsResetAndStopSendingFrames) {
         const auto encoded = coquic::quic::serialize_frame(frame);
         ASSERT_TRUE(encoded.has_value());
 
-        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        auto decoded = coquic::quic::deserialize_frame(encoded.value());
         ASSERT_TRUE(decoded.has_value());
 
         const auto *reset_stream = std::get_if<ResetStreamFrame>(&decoded.value().frame);
@@ -1180,7 +1179,7 @@ TEST(QuicFrameTest, RoundTripsResetAndStopSendingFrames) {
         const auto encoded = coquic::quic::serialize_frame(frame);
         ASSERT_TRUE(encoded.has_value());
 
-        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        auto decoded = coquic::quic::deserialize_frame(encoded.value());
         ASSERT_TRUE(decoded.has_value());
 
         const auto *stop_sending = std::get_if<StopSendingFrame>(&decoded.value().frame);
@@ -1199,7 +1198,7 @@ TEST(QuicFrameTest, RoundTripsTokenAndFlowControlFrames) {
         const auto encoded = coquic::quic::serialize_frame(frame);
         ASSERT_TRUE(encoded.has_value());
 
-        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        auto decoded = coquic::quic::deserialize_frame(encoded.value());
         ASSERT_TRUE(decoded.has_value());
 
         const auto *new_token = std::get_if<NewTokenFrame>(&decoded.value().frame);
@@ -1215,7 +1214,7 @@ TEST(QuicFrameTest, RoundTripsTokenAndFlowControlFrames) {
         const auto encoded = coquic::quic::serialize_frame(frame);
         ASSERT_TRUE(encoded.has_value());
 
-        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        auto decoded = coquic::quic::deserialize_frame(encoded.value());
         ASSERT_TRUE(decoded.has_value());
 
         const auto *max_data = std::get_if<MaxDataFrame>(&decoded.value().frame);
@@ -1232,7 +1231,7 @@ TEST(QuicFrameTest, RoundTripsTokenAndFlowControlFrames) {
         const auto encoded = coquic::quic::serialize_frame(frame);
         ASSERT_TRUE(encoded.has_value());
 
-        const auto decoded = coquic::quic::deserialize_frame(encoded.value());
+        auto decoded = coquic::quic::deserialize_frame(encoded.value());
         ASSERT_TRUE(decoded.has_value());
 
         const auto *max_stream_data = std::get_if<MaxStreamDataFrame>(&decoded.value().frame);
@@ -2149,7 +2148,7 @@ TEST(QuicFrameTest, OutboundAckFrameWireHelpersMatchMaterializedAckFrame) {
     ASSERT_TRUE(encoded_materialized.has_value());
 
     std::vector<std::byte> output(encoded_materialized.value().size());
-    const auto written = coquic::quic::write_frame_wire_bytes(
+    auto written = coquic::quic::write_frame_wire_bytes(
         std::span<std::byte>(output), coquic::quic::Frame{coquic::quic::OutboundAckFrame{
                                           .history = &history,
                                           .header = ack_header,

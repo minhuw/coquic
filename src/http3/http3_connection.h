@@ -149,6 +149,7 @@ class Http3Connection {
     void handle_control_frame(std::uint64_t stream_id, const Http3Frame &frame);
     void apply_remote_settings(const Http3SettingsFrame &frame);
     void queue_send(std::uint64_t stream_id, std::span<const std::byte> bytes, bool fin = false);
+    void queue_serialized_frame(std::uint64_t stream_id, const Http3Frame &frame, bool fin = false);
     std::uint64_t next_local_uni_stream_id() const;
     bool is_remote_critical_stream(std::uint64_t stream_id) const;
     bool is_local_critical_stream(std::uint64_t stream_id) const;

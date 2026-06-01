@@ -53,7 +53,6 @@ BufferedInstructionProgress parse_prefixed_integer_progress(std::span<const std:
         }
 
         const auto byte = std::to_integer<std::uint8_t>(bytes[bytes_consumed++]);
-        const auto chunk = static_cast<std::uint64_t>(byte & 0x7fu);
         // The HTTP/3/QPACK prefixes used here are 5-8 bits wide, so the 7-bit continuation
         // chunks cannot overflow std::uint64_t before the shift itself reaches 63.
         if (shift >= 63) {
@@ -62,7 +61,7 @@ BufferedInstructionProgress parse_prefixed_integer_progress(std::span<const std:
             };
         }
 
-        value += chunk << shift;
+        value += static_cast<std::uint64_t>(byte & 0x7fu) << shift;
         if ((byte & 0x80u) == 0u) {
             return {
                 .status = BufferedInstructionStatus::complete,
@@ -416,8 +415,7 @@ Http3Result<bool> Http3Connection::submit_request_head(std::uint64_t stream_id,
     }
 
     auto fields = request_fields_from_head(head);
-    const auto validated = validate_http3_request_headers(fields);
-    if (!validated.has_value()) {
+    if (const auto validated = validate_http3_request_headers(fields); !validated.has_value()) {
         return Http3Result<bool>::failure(validated.error());
     }
 
@@ -433,14 +431,11 @@ Http3Result<bool> Http3Connection::submit_request_head(std::uint64_t stream_id,
 
     auto field_section = encoded.prefix;
     field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
-    const auto frame = serialize_http3_frame(Http3Frame{
-                                                 Http3HeadersFrame{
-                                                     .field_section = std::move(field_section),
-                                                 },
-                                             })
-                           .value();
-
-    queue_send(stream_id, frame);
+    queue_serialized_frame(stream_id, Http3Frame{
+                                          Http3HeadersFrame{
+                                              .field_section = std::move(field_section),
+                                          },
+                                      });
     request.head_request = head.method == "HEAD";
     request.final_request_headers_sent = true;
     request.expected_request_content_length = head.content_length;
@@ -572,14 +567,13 @@ Http3Result<bool> Http3Connection::submit_request_trailers(std::uint64_t stream_
 
     auto field_section = encoded.prefix;
     field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
-    const auto frame = serialize_http3_frame(Http3Frame{
-                                                 Http3HeadersFrame{
-                                                     .field_section = std::move(field_section),
-                                                 },
-                                             })
-                           .value();
-
-    queue_send(stream_id, frame, fin);
+    queue_serialized_frame(stream_id,
+                           Http3Frame{
+                               Http3HeadersFrame{
+                                   .field_section = std::move(field_section),
+                               },
+                           },
+                           fin);
     request.request_trailers_sent = true;
     request.request_finished = fin;
     return Http3Result<bool>::success(true);
@@ -701,8 +695,7 @@ Http3Result<bool> Http3Connection::submit_response_head(std::uint64_t stream_id,
     }
 
     auto fields = response_fields_from_head(head);
-    const auto validated = validate_http3_response_headers(fields);
-    if (!validated.has_value()) {
+    if (const auto validated = validate_http3_response_headers(fields); !validated.has_value()) {
         return Http3Result<bool>::failure(validated.error());
     }
 
@@ -718,14 +711,11 @@ Http3Result<bool> Http3Connection::submit_response_head(std::uint64_t stream_id,
 
     auto field_section = encoded.prefix;
     field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
-    const auto frame = serialize_http3_frame(Http3Frame{
-                                                 Http3HeadersFrame{
-                                                     .field_section = std::move(field_section),
-                                                 },
-                                             })
-                           .value();
-
-    queue_send(stream_id, frame);
+    queue_serialized_frame(stream_id, Http3Frame{
+                                          Http3HeadersFrame{
+                                              .field_section = std::move(field_section),
+                                          },
+                                      });
     if (!informational) {
         response.final_response_started = true;
         response.expected_content_length = head.content_length;
@@ -859,14 +849,13 @@ Http3Result<bool> Http3Connection::submit_response_trailers(std::uint64_t stream
 
     auto field_section = encoded.prefix;
     field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
-    const auto frame = serialize_http3_frame(Http3Frame{
-                                                 Http3HeadersFrame{
-                                                     .field_section = std::move(field_section),
-                                                 },
-                                             })
-                           .value();
-
-    queue_send(stream_id, frame, fin);
+    queue_serialized_frame(stream_id,
+                           Http3Frame{
+                               Http3HeadersFrame{
+                                   .field_section = std::move(field_section),
+                               },
+                           },
+                           fin);
     response.trailers_sent = true;
     response.finished = fin;
     return Http3Result<bool>::success(true);
@@ -1891,6 +1880,11 @@ void Http3Connection::queue_send(std::uint64_t stream_id, std::span<const std::b
         .bytes = std::vector<std::byte>(bytes.begin(), bytes.end()),
         .fin = fin,
     });
+}
+
+void Http3Connection::queue_serialized_frame(std::uint64_t stream_id, const Http3Frame &frame,
+                                             bool fin) {
+    queue_send(stream_id, serialize_http3_frame(frame).value(), fin);
 }
 
 std::uint64_t Http3Connection::next_local_uni_stream_id() const {

@@ -106,7 +106,7 @@ CodecResult<bool> QuicConnection::sync_tls_state() {
     update_handshake_status();
     maybe_emit_qlog_alpn_information(last_peer_activity_time_.value_or(QuicCoreTimePoint{}));
     auto *tls_adapter = tls_.has_value() ? &*tls_ : nullptr;
-    const bool tls_handshake_complete =
+    bool tls_handshake_complete =
         tls_adapter != nullptr ? tls_adapter->handshake_complete() : false;
     if (resumption_state_emitted_) {
         return CodecResult<bool>::success(true);
@@ -185,7 +185,7 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
 
     const auto peer_transport_parameters =
         peer_transport_parameters_.value_or(TransportParameters{});
-    const auto validation = validate_peer_transport_parameters(
+    auto validation = validate_peer_transport_parameters(
         opposite_role(config_.role), peer_transport_parameters, validation_context.value());
     if (!validation.has_value()) {
         log_codec_failure("validate_peer_transport_parameters", validation.error());
@@ -203,8 +203,8 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
     peer_transport_parameters_validated_ = true;
     reset_current_short_header_deserialize_context_cache();
     initialize_peer_flow_control_from_transport_parameters();
-    const auto peer_preferred_address = peer_transport_parameters.preferred_address;
-    const auto emitted_preferred_address = peer_preferred_address.value_or(PreferredAddress{});
+    auto peer_preferred_address = peer_transport_parameters.preferred_address;
+    auto emitted_preferred_address = peer_preferred_address.value_or(PreferredAddress{});
     if (!peer_preferred_address_emitted_ & peer_preferred_address.has_value()) {
         pending_preferred_address_effect_ = QuicCorePeerPreferredAddressAvailable{
             .preferred_address = emitted_preferred_address,
@@ -452,7 +452,7 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
     }
     largest_peer_retire_prior_to_ = frame.retire_prior_to;
 
-    const auto duplicate_sequence = peer_connection_ids_.find(frame.sequence_number);
+    auto duplicate_sequence = peer_connection_ids_.find(frame.sequence_number);
     if (duplicate_sequence != peer_connection_ids_.end()) {
         const bool mismatched_duplicate =
             duplicate_sequence->second.connection_id != frame.connection_id |
@@ -496,7 +496,7 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
         active_peer_connection_id_sequence_ = frame.sequence_number;
     }
 
-    const auto active_peer_connection_ids = static_cast<std::size_t>(
+    auto active_peer_connection_ids = static_cast<std::size_t>(
         std::count_if(peer_connection_ids_.begin(), peer_connection_ids_.end(),
                       [](const auto &entry) { return !entry.second.locally_retired; }));
     if (active_peer_connection_ids > local_transport_parameters_.active_connection_id_limit) {
@@ -712,11 +712,10 @@ void QuicConnection::issue_path_probe_replacement_connection_id() {
             return !entry.second.retired && !entry.second.retirement_requested;
         });
 
-    const auto retire_prior_to = oldest_reusable->first + 1;
-    const auto sequence_number = next_local_connection_id_sequence_++;
-    const auto connection_id =
-        make_issued_connection_id(config_.source_connection_id, sequence_number);
-    const auto stateless_reset_token =
+    auto retire_prior_to = oldest_reusable->first + 1;
+    auto sequence_number = next_local_connection_id_sequence_++;
+    auto connection_id = make_issued_connection_id(config_.source_connection_id, sequence_number);
+    auto stateless_reset_token =
         make_stateless_reset_token(connection_id, sequence_number, config_.stateless_reset_secret);
     local_connection_ids_[sequence_number] = LocalConnectionIdRecord{
         .sequence_number = sequence_number,
@@ -1692,21 +1691,21 @@ std::optional<std::size_t> QuicConnection::application_stream_pacing_deadline_by
     }
 
     const auto send_quantum = congestion_controller_.pacing_send_quantum();
-    const auto deadline_bytes =
+    auto deadline_bytes =
         std::max(max_datagram_size, std::min(send_quantum, congestion_window_available));
     if (deadline_bytes == max_datagram_size) {
         return deadline_bytes;
     }
 
     const auto destination_connection_id_size = outbound_destination_connection_id().size();
-    const auto stream_budget =
+    auto stream_budget =
         application_stream_frame_budget(max_datagram_size, destination_connection_id_size);
     if (stream_budget == 0) {
         return max_datagram_size;
     }
     const auto datagrams_for_deadline =
         (deadline_bytes + max_datagram_size - std::size_t{1}) / max_datagram_size;
-    const auto queued_stream_payload =
+    auto queued_stream_payload =
         connection_flow_control_.sendable_bytes(cached_total_queued_stream_bytes());
     if (queued_stream_payload <=
         static_cast<std::uint64_t>(datagrams_for_deadline - std::size_t{1}) * stream_budget) {
@@ -2275,7 +2274,7 @@ void QuicConnection::note_inbound_datagram_bytes(std::size_t bytes) {
     if (status_ == HandshakeStatus::connected && peer_address_validated_) {
         auto &path = ensure_path_state(last_inbound_path_id_);
         const auto received = path.anti_amplification_received_bytes;
-        const auto increment = static_cast<std::uint64_t>(bytes);
+        auto increment = static_cast<std::uint64_t>(bytes);
         path.anti_amplification_received_bytes =
             received > std::numeric_limits<std::uint64_t>::max() - increment
                 ? std::numeric_limits<std::uint64_t>::max()
@@ -2290,7 +2289,7 @@ void QuicConnection::note_inbound_datagram_bytes(std::size_t bytes) {
     }
 
     const auto received = anti_amplification_received_bytes_;
-    const auto increment = static_cast<std::uint64_t>(bytes);
+    auto increment = static_cast<std::uint64_t>(bytes);
     anti_amplification_received_bytes_ =
         received > std::numeric_limits<std::uint64_t>::max() - increment
             ? std::numeric_limits<std::uint64_t>::max()
@@ -2320,7 +2319,7 @@ void QuicConnection::note_outbound_datagram_bytes(std::size_t bytes,
         anti_amplification_applies(*effective_path_id)) {
         auto &path = ensure_path_state(*effective_path_id);
         const auto sent = path.anti_amplification_sent_bytes;
-        const auto increment = static_cast<std::uint64_t>(bytes);
+        auto increment = static_cast<std::uint64_t>(bytes);
         path.anti_amplification_sent_bytes =
             sent > std::numeric_limits<std::uint64_t>::max() - increment
                 ? std::numeric_limits<std::uint64_t>::max()
@@ -2332,7 +2331,7 @@ void QuicConnection::note_outbound_datagram_bytes(std::size_t bytes,
     }
 
     const auto sent = anti_amplification_sent_bytes_;
-    const auto increment = static_cast<std::uint64_t>(bytes);
+    auto increment = static_cast<std::uint64_t>(bytes);
     anti_amplification_sent_bytes_ = sent > std::numeric_limits<std::uint64_t>::max() - increment
                                          ? std::numeric_limits<std::uint64_t>::max()
                                          : sent + increment;

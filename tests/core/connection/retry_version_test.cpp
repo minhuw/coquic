@@ -86,7 +86,7 @@ TEST(QuicCoreTest, ApplicationProbePathFailsWhenRetryWithoutAckCannotSerialize) 
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
         coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 5);
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_TRUE(datagram.empty());
     EXPECT_TRUE(connection.has_failed());
@@ -115,7 +115,7 @@ TEST(QuicCoreTest, ApplicationSendFailsWhenRetryWithoutAckCannotSerialize) {
     coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
         coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 5);
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_TRUE(datagram.empty());
     EXPECT_TRUE(connection.has_failed());
@@ -133,7 +133,7 @@ TEST(QuicCoreTest, ApplicationSendReturnsEmptyWhenRetryWithoutAckTrimsAwayAllStr
     ASSERT_TRUE(connection.queue_stream_send(0, std::vector<std::byte>(128, std::byte{0x54}), false)
                     .has_value());
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_TRUE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
@@ -148,8 +148,7 @@ TEST(QuicCoreTest, ClientRestartsHandshakeAfterValidVersionNegotiation) {
     client_config.supported_versions = {0x6b3343cfu, 0x00000001u};
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
 
     const auto version_negotiation =
@@ -179,8 +178,7 @@ TEST(QuicCoreTest, ClientIgnoresVersionNegotiationThatEchoesOriginalVersion) {
     client_config.supported_versions = {0x6b3343cfu, 0x00000001u};
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
 
     const auto version_negotiation =
@@ -207,8 +205,7 @@ TEST(QuicCoreTest, ClientIgnoresMalformedVersionNegotiationDatagram) {
     client_config.supported_versions = {0x6b3343cfu, 0x00000001u};
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
 
     const auto malformed_version_negotiation =
@@ -227,8 +224,7 @@ TEST(QuicCoreTest, ClientIgnoresVersionNegotiationWithUnexpectedDestinationConne
     client_config.supported_versions = {0x6b3343cfu, 0x00000001u};
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
 
     const auto version_negotiation =
@@ -255,8 +251,7 @@ TEST(QuicCoreTest, ClientIgnoresVersionNegotiationWithUnexpectedSourceConnection
     client_config.supported_versions = {0x6b3343cfu, 0x00000001u};
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
 
     const auto version_negotiation =
@@ -282,8 +277,7 @@ TEST(QuicCoreTest, ClientRestartsHandshakeAfterVersionNegotiationSkipsUnsupporte
     client_config.supported_versions = {0xa1b2c3d4u, 0x6b3343cfu, 0x00000001u};
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
 
     const auto version_negotiation =
@@ -313,8 +307,7 @@ TEST(QuicCoreTest, ClientIgnoresVersionNegotiationWithoutVersionOverlap) {
     client_config.supported_versions = {0xa1b2c3d4u, 0x00000001u};
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
 
     const auto version_negotiation =
@@ -340,8 +333,7 @@ TEST(QuicCoreTest, ClientRestartsHandshakeAfterValidRetry) {
     const auto original_version = client_config.original_version;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(initial_datagrams.empty());
 
@@ -354,30 +346,29 @@ TEST(QuicCoreTest, ClientRestartsHandshakeAfterValidRetry) {
         client.connection_->initial_space_.next_send_packet_number;
     ASSERT_GT(next_initial_send_packet_number, 0u);
 
-    const auto retry_source_connection_id = bytes_from_ints({0x55, 0x66, 0x77, 0x88});
-    const auto retry_token = bytes_from_ints({0xaa, 0xbb, 0xcc});
-    const auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
+    auto retry_source_connection_id = bytes_from_ints({0x55, 0x66, 0x77, 0x88});
+    auto retry_token = bytes_from_ints({0xaa, 0xbb, 0xcc});
+    auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
         client_source_connection_id, retry_source_connection_id, retry_token,
         original_destination_connection_id_value, original_version);
     ASSERT_TRUE(retry_datagram.has_value());
 
-    const auto after_retry =
+    auto after_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(1));
     const auto restarted_datagrams = coquic::quic::test::send_datagrams_from(after_retry);
     ASSERT_FALSE(restarted_datagrams.empty());
 
-    const auto restarted_destination_connection_id =
+    auto restarted_destination_connection_id =
         coquic::quic::test::long_header_destination_connection_id(restarted_datagrams.front());
     ASSERT_TRUE(restarted_destination_connection_id.has_value());
-    const auto restarted_destination_connection_id_value =
+    auto restarted_destination_connection_id_value =
         restarted_destination_connection_id.value_or(coquic::quic::ConnectionId{});
     EXPECT_EQ(restarted_destination_connection_id_value, retry_source_connection_id);
-    const auto restarted_initial_token =
+    auto restarted_initial_token =
         coquic::quic::test::client_initial_datagram_token(restarted_datagrams.front());
     ASSERT_TRUE(restarted_initial_token.has_value());
-    const auto restarted_initial_token_value =
-        restarted_initial_token.value_or(std::vector<std::byte>{});
+    auto restarted_initial_token_value = restarted_initial_token.value_or(std::vector<std::byte>{});
     EXPECT_EQ(restarted_initial_token_value, retry_token);
     EXPECT_NE(
         tracked_packet_or_null(client.connection_->initial_space_, next_initial_send_packet_number),
@@ -393,8 +384,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryWithInvalidIntegrityTag) {
     const auto original_version = client_config.original_version;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(initial_datagrams.empty());
 
@@ -404,9 +394,9 @@ TEST(QuicCoreTest, ClientIgnoresRetryWithInvalidIntegrityTag) {
     const auto original_destination_connection_id_value =
         original_destination_connection_id.value_or(coquic::quic::ConnectionId{});
 
-    const auto retry_source_connection_id = bytes_from_ints({0x44, 0x33, 0x22, 0x11});
-    const auto retry_token = bytes_from_ints({0xda, 0x7a});
-    const auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
+    auto retry_source_connection_id = bytes_from_ints({0x44, 0x33, 0x22, 0x11});
+    auto retry_token = bytes_from_ints({0xda, 0x7a});
+    auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
         client_source_connection_id, retry_source_connection_id, retry_token,
         original_destination_connection_id_value, original_version);
     ASSERT_TRUE(retry_datagram.has_value());
@@ -415,7 +405,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryWithInvalidIntegrityTag) {
     ASSERT_FALSE(retry_with_invalid_tag.empty());
     retry_with_invalid_tag.back() = retry_with_invalid_tag.back() ^ std::byte{0x01};
 
-    const auto after_invalid_retry =
+    auto after_invalid_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_with_invalid_tag},
                        coquic::quic::test::test_time(1));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_invalid_retry).empty());
@@ -428,8 +418,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryWithEmptyToken) {
     const auto original_version = client_config.original_version;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(initial_datagrams.empty());
 
@@ -439,13 +428,13 @@ TEST(QuicCoreTest, ClientIgnoresRetryWithEmptyToken) {
     const auto original_destination_connection_id_value =
         original_destination_connection_id.value_or(coquic::quic::ConnectionId{});
 
-    const auto retry_source_connection_id = bytes_from_ints({0x41, 0x42, 0x43, 0x44});
-    const auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
+    auto retry_source_connection_id = bytes_from_ints({0x41, 0x42, 0x43, 0x44});
+    auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
         client_source_connection_id, retry_source_connection_id, {},
         original_destination_connection_id_value, original_version);
     ASSERT_TRUE(retry_datagram.has_value());
 
-    const auto after_empty_token_retry =
+    auto after_empty_token_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(1));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_empty_token_retry).empty());
@@ -458,8 +447,7 @@ TEST(QuicCoreTest, ClientIgnoresSecondRetry) {
     const auto original_version = client_config.original_version;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(initial_datagrams.empty());
 
@@ -476,19 +464,19 @@ TEST(QuicCoreTest, ClientIgnoresSecondRetry) {
         original_destination_connection_id_value, original_version);
     ASSERT_TRUE(first_retry_datagram.has_value());
 
-    const auto after_first_retry =
+    auto after_first_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = first_retry_datagram.value()},
                        coquic::quic::test::test_time(1));
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(after_first_retry).empty());
 
-    const auto second_retry_source_connection_id = bytes_from_ints({0x61, 0x62, 0x63, 0x64});
-    const auto second_retry_token = bytes_from_ints({0xb1, 0xb2, 0xb3});
-    const auto second_retry_datagram = coquic::quic::test::make_valid_retry_datagram(
+    auto second_retry_source_connection_id = bytes_from_ints({0x61, 0x62, 0x63, 0x64});
+    auto second_retry_token = bytes_from_ints({0xb1, 0xb2, 0xb3});
+    auto second_retry_datagram = coquic::quic::test::make_valid_retry_datagram(
         client_source_connection_id, second_retry_source_connection_id, second_retry_token,
         original_destination_connection_id_value, original_version);
     ASSERT_TRUE(second_retry_datagram.has_value());
 
-    const auto after_second_retry = client.advance(
+    auto after_second_retry = client.advance(
         coquic::quic::QuicCoreInboundDatagram{.bytes = second_retry_datagram.value()},
         coquic::quic::test::test_time(2));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_second_retry).empty());
@@ -504,8 +492,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryAfterProcessingServerInitial) {
     auto server_config = coquic::quic::test::make_server_core_config();
     coquic::quic::QuicCore server(std::move(server_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(initial_datagrams.empty());
 
@@ -523,14 +510,14 @@ TEST(QuicCoreTest, ClientIgnoresRetryAfterProcessingServerInitial) {
         server_first_flight, client, coquic::quic::test::test_time(2));
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(client_after_server_initial).empty());
 
-    const auto retry_source_connection_id = bytes_from_ints({0x71, 0x72, 0x73, 0x74});
-    const auto retry_token = bytes_from_ints({0xc1, 0xc2, 0xc3});
-    const auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
+    auto retry_source_connection_id = bytes_from_ints({0x71, 0x72, 0x73, 0x74});
+    auto retry_token = bytes_from_ints({0xc1, 0xc2, 0xc3});
+    auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
         client_source_connection_id, retry_source_connection_id, retry_token,
         original_destination_connection_id_value, original_version);
     ASSERT_TRUE(retry_datagram.has_value());
 
-    const auto after_late_retry =
+    auto after_late_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(3));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_late_retry).empty());
@@ -543,8 +530,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryAfterProcessingPeerPacketBeforeHandshakeCom
     const auto original_version = client_config.original_version;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(initial_datagrams.empty());
 
@@ -554,7 +540,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryAfterProcessingPeerPacketBeforeHandshakeCom
     const auto original_destination_connection_id_value =
         original_destination_connection_id.value_or(coquic::quic::ConnectionId{});
 
-    const auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
+    auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
         client_source_connection_id, bytes_from_ints({0x55, 0x66, 0x77, 0x88}),
         bytes_from_ints({0xaa, 0xbb}), original_destination_connection_id_value, original_version);
     ASSERT_TRUE(retry_datagram.has_value());
@@ -563,7 +549,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryAfterProcessingPeerPacketBeforeHandshakeCom
     client.connection_->processed_peer_packet_ = true;
     ASSERT_FALSE(client.is_handshake_complete());
 
-    const auto after_retry =
+    auto after_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(1));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_retry).empty());
@@ -575,8 +561,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryWithUnexpectedDestinationConnectionId) {
     const auto original_version = client_config.original_version;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(initial_datagrams.empty());
 
@@ -586,12 +571,12 @@ TEST(QuicCoreTest, ClientIgnoresRetryWithUnexpectedDestinationConnectionId) {
     const auto original_destination_connection_id_value =
         original_destination_connection_id.value_or(coquic::quic::ConnectionId{});
 
-    const auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
+    auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
         bytes_from_ints({0x31, 0x32, 0x33, 0x34}), bytes_from_ints({0x55, 0x66, 0x77, 0x88}),
         bytes_from_ints({0xaa, 0xbb}), original_destination_connection_id_value, original_version);
     ASSERT_TRUE(retry_datagram.has_value());
 
-    const auto after_retry =
+    auto after_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(1));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_retry).empty());
@@ -603,8 +588,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryOnDifferentVersion) {
     const auto client_source_connection_id = client_config.source_connection_id;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(initial_datagrams.empty());
 
@@ -614,13 +598,13 @@ TEST(QuicCoreTest, ClientIgnoresRetryOnDifferentVersion) {
     const auto original_destination_connection_id_value =
         original_destination_connection_id.value_or(coquic::quic::ConnectionId{});
 
-    const auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
+    auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
         client_source_connection_id, bytes_from_ints({0x55, 0x66, 0x77, 0x88}),
         bytes_from_ints({0xaa, 0xbb}), original_destination_connection_id_value,
         coquic::quic::kQuicVersion2);
     ASSERT_TRUE(retry_datagram.has_value());
 
-    const auto after_retry =
+    auto after_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(1));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_retry).empty());
@@ -632,8 +616,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryWhenIntegrityValidationCannotRun) {
     const auto client_source_connection_id = client_config.source_connection_id;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(initial_datagrams.empty());
 
@@ -641,7 +624,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryWhenIntegrityValidationCannotRun) {
         coquic::quic::test::long_header_destination_connection_id(initial_datagrams.front());
     ASSERT_TRUE(original_destination_connection_id.has_value());
 
-    const auto retry_datagram = coquic::quic::serialize_packet(coquic::quic::RetryPacket{
+    auto retry_datagram = coquic::quic::serialize_packet(coquic::quic::RetryPacket{
         .version = 0xf1f2f3f4u,
         .retry_unused_bits = 0,
         .destination_connection_id = client_source_connection_id,
@@ -651,7 +634,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryWhenIntegrityValidationCannotRun) {
     });
     ASSERT_TRUE(retry_datagram.has_value());
 
-    const auto after_retry =
+    auto after_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(1));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_retry).empty());
@@ -664,8 +647,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryDatagramWithTrailingBytes) {
     const auto original_version = client_config.original_version;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(initial_datagrams.empty());
 
@@ -681,7 +663,7 @@ TEST(QuicCoreTest, ClientIgnoresRetryDatagramWithTrailingBytes) {
     ASSERT_TRUE(retry_datagram.has_value());
     retry_datagram.value().push_back(std::byte{0x00});
 
-    const auto after_retry =
+    auto after_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(1));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_retry).empty());
@@ -695,8 +677,7 @@ TEST(QuicCoreTest, ClientFailsOnNonRetryLongHeaderDatagramAfterRetryParserReject
     const auto original_version = client_config.original_version;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
 
     const auto initial_datagram = coquic::quic::serialize_packet(coquic::quic::InitialPacket{
@@ -710,11 +691,11 @@ TEST(QuicCoreTest, ClientFailsOnNonRetryLongHeaderDatagramAfterRetryParserReject
     });
     ASSERT_TRUE(initial_datagram.has_value());
 
-    const auto after_initial =
+    auto after_initial =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = initial_datagram.value()},
                        coquic::quic::test::test_time(1));
     EXPECT_EQ(coquic::quic::test::send_datagrams_from(after_initial).size(), 1u);
-    const auto later =
+    auto later =
         client.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(2));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(later).empty());
     EXPECT_TRUE(client.has_failed());
@@ -727,8 +708,7 @@ TEST(QuicCoreTest, ClientFailsOnNonRetryLongHeaderDatagramWithTrailingBytes) {
     const auto original_version = client_config.original_version;
     coquic::quic::QuicCore client(std::move(client_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
 
     auto initial_datagram = coquic::quic::serialize_packet(coquic::quic::InitialPacket{
@@ -743,11 +723,11 @@ TEST(QuicCoreTest, ClientFailsOnNonRetryLongHeaderDatagramWithTrailingBytes) {
     ASSERT_TRUE(initial_datagram.has_value());
     initial_datagram.value().push_back(std::byte{0x00});
 
-    const auto after_initial =
+    auto after_initial =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = initial_datagram.value()},
                        coquic::quic::test::test_time(1));
     EXPECT_EQ(coquic::quic::test::send_datagrams_from(after_initial).size(), 1u);
-    const auto later =
+    auto later =
         client.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(2));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(later).empty());
     EXPECT_TRUE(client.has_failed());
@@ -777,10 +757,10 @@ TEST(QuicCoreTest,
         /*packet_number=*/0, /*ack_eliciting=*/true, coquic::quic::test::test_time(1));
     connection.anti_amplification_received_bytes_ = 1200;
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
 
-    const auto packets = decode_sender_datagram(connection, datagram);
+    auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets.front());
     ASSERT_NE(initial, nullptr);
@@ -813,10 +793,10 @@ TEST(QuicCoreTest,
         /*packet_number=*/0, /*ack_eliciting=*/true, coquic::quic::test::test_time(1));
     connection.anti_amplification_received_bytes_ = 1200;
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
 
-    const auto packets = decode_sender_datagram(connection, datagram);
+    auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front());
     ASSERT_NE(handshake, nullptr);
@@ -868,8 +848,7 @@ TEST(QuicCoreTest, CompatibleNegotiationUpgradesV1HandshakeToV2) {
         EXPECT_TRUE(saw_long_header);
     };
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto client_start_datagrams = coquic::quic::test::send_datagrams_from(start);
     ASSERT_FALSE(client_start_datagrams.empty());
     EXPECT_EQ(read_u32_be_at(client_start_datagrams.front(), 1), coquic::quic::kQuicVersion1);
@@ -927,7 +906,7 @@ TEST(QuicCoreTest, ConnectionConstructorSeedsSupportedVersionsWhenUnset) {
 
 TEST(QuicCoreTest, ServerCreatedFromRetriedInitialExportsRetryTransportParameters) {
     auto server_config = coquic::quic::test::make_server_core_config();
-    const auto retry_source_connection_id = bytes_from_hex("5300000000000001");
+    auto retry_source_connection_id = bytes_from_hex("5300000000000001");
     const auto original_destination_connection_id = bytes_from_hex("8394c8f03e515708");
     server_config.initial_destination_connection_id = retry_source_connection_id;
     server_config.original_destination_connection_id = original_destination_connection_id;
@@ -962,8 +941,7 @@ TEST(QuicCoreTest, CompatibleNegotiationServerFirstFlightEmitsV2InitialCrypto) {
     server_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
     coquic::quic::QuicCore server(std::move(server_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto server_first_flight = coquic::quic::test::relay_send_datagrams_to_peer(
         start, server, coquic::quic::test::test_time(1));
     const auto server_first_flight_datagrams =
@@ -971,12 +949,11 @@ TEST(QuicCoreTest, CompatibleNegotiationServerFirstFlightEmitsV2InitialCrypto) {
     ASSERT_NE(server.connection_, nullptr);
     ASSERT_FALSE(server_first_flight_datagrams.empty());
 
-    const auto packets =
+    auto packets =
         decode_sender_datagram(*server.connection_, server_first_flight_datagrams.front());
-    const auto initial_packet =
-        std::find_if(packets.begin(), packets.end(), [](const auto &packet) {
-            return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packet);
-        });
+    auto initial_packet = std::find_if(packets.begin(), packets.end(), [](const auto &packet) {
+        return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packet);
+    });
     ASSERT_NE(initial_packet, packets.end());
 
     const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&*initial_packet);
@@ -1005,8 +982,7 @@ TEST(QuicCoreTest, CompatibleNegotiationServerFirstFlightDuplicatesV2InitialCryp
     server_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
     coquic::quic::QuicCore server(std::move(server_config));
 
-    const auto start =
-        client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
     const auto server_first_flight = coquic::quic::test::relay_send_datagrams_to_peer(
         start, server, coquic::quic::test::test_time(1));
     const auto server_first_flight_datagrams =
@@ -1014,7 +990,7 @@ TEST(QuicCoreTest, CompatibleNegotiationServerFirstFlightDuplicatesV2InitialCryp
     ASSERT_NE(server.connection_, nullptr);
     ASSERT_FALSE(server_first_flight_datagrams.empty());
 
-    const auto packets =
+    auto packets =
         decode_sender_datagram(*server.connection_, server_first_flight_datagrams.front());
     std::vector<const coquic::quic::ProtectedInitialPacket *> initial_packets;
     for (const auto &packet : packets) {
@@ -1025,9 +1001,8 @@ TEST(QuicCoreTest, CompatibleNegotiationServerFirstFlightDuplicatesV2InitialCryp
 
     ASSERT_GE(initial_packets.size(), 2u);
 
-    const auto first_crypto =
-        std::get_if<coquic::quic::CryptoFrame>(&initial_packets[0]->frames.front());
-    const auto second_crypto =
+    auto first_crypto = std::get_if<coquic::quic::CryptoFrame>(&initial_packets[0]->frames.front());
+    auto second_crypto =
         std::get_if<coquic::quic::CryptoFrame>(&initial_packets[1]->frames.front());
     ASSERT_NE(first_crypto, nullptr);
     ASSERT_NE(second_crypto, nullptr);
@@ -1081,7 +1056,7 @@ TEST(
         const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
             coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, occurrence);
 
-        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
         if (!connection.has_failed() || tracked_packet_count(connection.initial_space_) != 1u) {
             continue;
@@ -1115,16 +1090,15 @@ TEST(QuicCoreTest,
         connection.initial_space_.send_crypto.append(
             std::vector<std::byte>(crypto_size, std::byte{0x6a}));
 
-        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
         if (datagram.empty() || connection.has_failed()) {
             continue;
         }
 
-        const auto packets = decode_sender_datagram(connection, datagram);
-        const auto initial_count =
-            std::count_if(packets.begin(), packets.end(), [](const auto &packet) {
-                return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packet);
-            });
+        auto packets = decode_sender_datagram(connection, datagram);
+        auto initial_count = std::count_if(packets.begin(), packets.end(), [](const auto &packet) {
+            return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packet);
+        });
         if (initial_count != 1u || tracked_packet_count(connection.initial_space_) != 1u) {
             continue;
         }
@@ -1158,12 +1132,12 @@ TEST(QuicCoreTest,
             std::vector<std::byte>(crypto_size, std::byte{0x6a}));
         connection.congestion_controller_.congestion_window_ = 1200;
 
-        const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+        auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
         if (datagram.empty() || connection.has_failed()) {
             continue;
         }
 
-        const auto packets = decode_sender_datagram(connection, datagram);
+        auto packets = decode_sender_datagram(connection, datagram);
         if (packets.size() != 1u) {
             continue;
         }
@@ -1217,7 +1191,7 @@ TEST(QuicCoreTest, ClientProcessInboundPacketAdoptsSupportedVersionFromInitialAn
 TEST(QuicCoreTest, ClientRequiresRetrySourceConnectionIdAfterRetry) {
     coquic::quic::QuicConnection client(coquic::quic::test::make_client_core_config());
     const auto original_destination_connection_id = bytes_from_hex("8394c8f03e515708");
-    const auto retry_source_connection_id = bytes_from_hex("5300000000000001");
+    auto retry_source_connection_id = bytes_from_hex("5300000000000001");
     client.config_.original_destination_connection_id = original_destination_connection_id;
     client.config_.retry_source_connection_id = retry_source_connection_id;
     client.peer_source_connection_id_ = retry_source_connection_id;
@@ -1238,7 +1212,7 @@ TEST(QuicCoreTest, ClientRetryOnOriginalVersionDoesNotRequireVersionInformation)
     client_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
     coquic::quic::QuicConnection client(std::move(client_config));
     const auto original_destination_connection_id = bytes_from_hex("8394c8f03e515708");
-    const auto retry_source_connection_id = bytes_from_hex("5300000000000001");
+    auto retry_source_connection_id = bytes_from_hex("5300000000000001");
     client.config_.original_destination_connection_id = original_destination_connection_id;
     client.config_.retry_source_connection_id = retry_source_connection_id;
     client.peer_source_connection_id_ = retry_source_connection_id;

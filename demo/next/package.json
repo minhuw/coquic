@@ -12,7 +12,7 @@
     "build:wasm": "npm run build:wasm-deps && npm run compile:wasm && npm run smoke:wasm",
     "build:demo": "npm run build:wasm && npm run build",
     "package:demo": "cd ../.. && demo/deploy/package-demo.sh",
-    "start": "next start --hostname 127.0.0.1 --port 3001"
+    "start": "node .next/standalone/server.js"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",

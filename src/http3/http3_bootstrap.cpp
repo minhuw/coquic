@@ -6,6 +6,7 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -89,6 +90,9 @@ using AddrInfo = std::unique_ptr<addrinfo, decltype(&freeaddrinfo)>;
 struct BootstrapRequest {
     std::string method;
     std::string target;
+    Http3Headers headers;
+    std::vector<std::byte> body;
+    std::optional<std::uint64_t> content_length;
 };
 
 struct BootstrapResponse {
@@ -120,6 +124,38 @@ std::string lowercase_ascii(std::string_view value) {
     std::transform(out.begin(), out.end(), out.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return out;
+}
+
+std::string_view trim_ascii(std::string_view value) {
+    std::size_t begin = 0;
+    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+        ++begin;
+    }
+    std::size_t end = value.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+std::optional<std::uint64_t> parse_size(std::string_view value) {
+    std::uint64_t parsed = 0;
+    const auto *begin = value.data();
+    const auto *end = value.data() + value.size();
+    const auto result = std::from_chars(begin, end, parsed);
+    if (result.ec != std::errc{} || result.ptr != end) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+std::string authority_from_headers(const Http3Headers &headers) {
+    for (const auto &header : headers) {
+        if (lowercase_ascii(header.name) == "host") {
+            return header.value;
+        }
+    }
+    return {};
 }
 
 bool path_has_prefix(const std::filesystem::path &path, const std::filesystem::path &prefix) {
@@ -509,29 +545,91 @@ std::optional<BootstrapRequest> parse_bootstrap_request(std::string_view request
         return std::nullopt;
     }
 
+    const auto header_end = request_text.find("\r\n\r\n");
+    if (header_end == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    Http3Headers headers;
+    std::optional<std::uint64_t> content_length;
+    std::size_t line_begin = request_line_end + 2;
+    while (line_begin < header_end) {
+        const auto line_end = request_text.find("\r\n", line_begin);
+        if (line_end == std::string_view::npos || line_end > header_end) {
+            return std::nullopt;
+        }
+        const auto line = request_text.substr(line_begin, line_end - line_begin);
+        const auto colon = line.find(':');
+        if (colon != std::string_view::npos && colon != 0) {
+            const auto raw_name = trim_ascii(line.substr(0, colon));
+            if (raw_name.empty()) {
+                return std::nullopt;
+            }
+            const auto value = trim_ascii(line.substr(colon + 1));
+            headers.push_back(Http3Field{
+                .name = std::string(raw_name),
+                .value = std::string(value),
+            });
+            const auto name = lowercase_ascii(raw_name);
+            if (name == "content-length") {
+                const auto length = parse_size(value);
+                if (!length.has_value()) {
+                    return std::nullopt;
+                }
+                if (content_length.has_value() && *content_length != *length) {
+                    return std::nullopt;
+                }
+                content_length = length;
+            }
+        }
+        line_begin = line_end + 2;
+    }
+
+    const auto body_text = request_text.substr(header_end + 4);
+    if (content_length.has_value()) {
+        if (*content_length > kBootstrapRequestLimitBytes ||
+            body_text.size() != static_cast<std::size_t>(*content_length)) {
+            return std::nullopt;
+        }
+    } else if (!body_text.empty()) {
+        return std::nullopt;
+    }
+
     return BootstrapRequest{
         .method = std::string(method),
         .target = std::string(target),
+        .headers = std::move(headers),
+        .body = std::vector<std::byte>(reinterpret_cast<const std::byte *>(body_text.data()),
+                                       reinterpret_cast<const std::byte *>(body_text.data()) +
+                                           body_text.size()),
+        .content_length = content_length,
     };
 }
 
 BootstrapResponse make_bootstrap_response(const Http3BootstrapConfig &config,
                                           const BootstrapRequest &request) {
-    if (request.method != "GET" && request.method != "HEAD") {
+    const auto reverse_proxy_enabled = config.reverse_proxy.has_value();
+    if (request.method != "GET" && request.method != "HEAD" &&
+        !(reverse_proxy_enabled && request.method == "POST")) {
         return BootstrapResponse{
             .status_code = 405,
-            .allow = std::string("GET, HEAD"),
+            .allow =
+                reverse_proxy_enabled ? std::string("GET, HEAD, POST") : std::string("GET, HEAD"),
         };
     }
 
-    if (config.reverse_proxy.has_value()) {
+    if (reverse_proxy_enabled) {
         Http3Request proxy_request{
             .head =
                 {
                     .method = request.method,
                     .scheme = "https",
+                    .authority = authority_from_headers(request.headers),
                     .path = request.target,
+                    .content_length = request.content_length,
+                    .headers = request.headers,
                 },
+            .body = request.body,
         };
         auto proxied = fetch_http_reverse_proxy_response(*config.reverse_proxy, proxy_request);
         BootstrapResponse response{
@@ -625,11 +723,57 @@ enum class HttpRequestReadProgress : std::uint8_t {
 HttpRequestReadProgress append_http_request_bytes(std::string &request_text,
                                                   std::string_view bytes) {
     request_text.append(bytes);
-    if (request_text.find("\r\n\r\n") != std::string::npos) {
-        return HttpRequestReadProgress::complete;
-    }
     if (request_text.size() >= kBootstrapRequestLimitBytes) {
         return HttpRequestReadProgress::invalid;
+    }
+    const auto header_end = request_text.find("\r\n\r\n");
+    if (header_end == std::string::npos) {
+        return HttpRequestReadProgress::incomplete;
+    }
+
+    std::optional<std::uint64_t> content_length;
+    std::size_t line_begin = request_text.find("\r\n");
+    if (line_begin == std::string::npos) {
+        return HttpRequestReadProgress::invalid;
+    }
+    line_begin += 2;
+    while (line_begin < header_end) {
+        const auto line_end = request_text.find("\r\n", line_begin);
+        if (line_end == std::string::npos || line_end > header_end) {
+            return HttpRequestReadProgress::invalid;
+        }
+        const auto line = std::string_view(request_text).substr(line_begin, line_end - line_begin);
+        const auto colon = line.find(':');
+        if (colon != std::string_view::npos && colon != 0) {
+            const auto name = lowercase_ascii(trim_ascii(line.substr(0, colon)));
+            const auto value = trim_ascii(line.substr(colon + 1));
+            if (name == "content-length") {
+                const auto length = parse_size(value);
+                if (!length.has_value()) {
+                    return HttpRequestReadProgress::invalid;
+                }
+                if (content_length.has_value() && *content_length != *length) {
+                    return HttpRequestReadProgress::invalid;
+                }
+                content_length = length;
+            }
+        }
+        line_begin = line_end + 2;
+    }
+
+    const auto body_size = request_text.size() - (header_end + 4);
+    if (!content_length.has_value()) {
+        return body_size == 0 ? HttpRequestReadProgress::complete
+                              : HttpRequestReadProgress::invalid;
+    }
+    if (*content_length > kBootstrapRequestLimitBytes) {
+        return HttpRequestReadProgress::invalid;
+    }
+    if (body_size > *content_length) {
+        return HttpRequestReadProgress::invalid;
+    }
+    if (body_size == *content_length) {
+        return HttpRequestReadProgress::complete;
     }
     return HttpRequestReadProgress::incomplete;
 }
@@ -805,6 +949,9 @@ int make_listen_socket(const Http3BootstrapConfig &config) {
 } // namespace
 
 std::string make_http3_alt_svc_value(const Http3BootstrapConfig &config) {
+    if (config.alt_svc_max_age == 0) {
+        return "clear";
+    }
     return std::string("h3=\":") + std::to_string(config.h3_port) +
            "\"; ma=" + std::to_string(config.alt_svc_max_age);
 }

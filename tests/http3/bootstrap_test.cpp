@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
+#include <charconv>
 #include <chrono>
 #include <csignal>
-#include <array>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -13,8 +16,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -512,6 +517,142 @@ class ScopedForcedFileSizeFailure {
     ScopedForcedFileSizeFailure &operator=(const ScopedForcedFileSizeFailure &) = delete;
 };
 
+std::string_view trim_ascii(std::string_view value) {
+    std::size_t begin = 0;
+    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+        ++begin;
+    }
+    std::size_t end = value.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+std::optional<std::size_t> parse_size(std::string_view value) {
+    std::size_t parsed = 0;
+    const auto *begin = value.data();
+    const auto *end = value.data() + value.size();
+    const auto result = std::from_chars(begin, end, parsed);
+    if (result.ec != std::errc{} || result.ptr != end) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+class ScopedHttpProxyUpstream {
+  public:
+    ScopedHttpProxyUpstream(std::uint16_t port, std::string response)
+        : response_(std::move(response)), thread_([this, port] { run(port); }) {
+    }
+
+    ~ScopedHttpProxyUpstream() {
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    ScopedHttpProxyUpstream(const ScopedHttpProxyUpstream &) = delete;
+    ScopedHttpProxyUpstream &operator=(const ScopedHttpProxyUpstream &) = delete;
+
+    bool ready() const {
+        return ready_.load(std::memory_order_acquire);
+    }
+
+    std::string request_text() const {
+        return request_text_;
+    }
+
+  private:
+    void run(std::uint16_t port) {
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            return;
+        }
+        ScopedFd listen_fd(fd);
+
+        const int enable = 1;
+        if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) != 0) {
+            return;
+        }
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(port);
+        if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+            return;
+        }
+        if (::listen(fd, 1) != 0) {
+            return;
+        }
+        ready_.store(true, std::memory_order_release);
+
+        const int client_fd = ::accept(fd, nullptr, nullptr);
+        if (client_fd < 0) {
+            return;
+        }
+        ScopedFd client(client_fd);
+
+        std::array<char, 4096> buffer{};
+        while (!request_complete()) {
+            const auto received = ::recv(client_fd, buffer.data(), buffer.size(), 0);
+            if (received <= 0) {
+                break;
+            }
+            request_text_.append(buffer.data(), static_cast<std::size_t>(received));
+        }
+
+        std::size_t written = 0;
+        while (written < response_.size()) {
+            const auto result = ::send(client_fd, response_.data() + written,
+                                       response_.size() - written, MSG_NOSIGNAL);
+            if (result <= 0) {
+                break;
+            }
+            written += static_cast<std::size_t>(result);
+        }
+    }
+
+    bool request_complete() const {
+        const auto header_end = request_text_.find("\r\n\r\n");
+        if (header_end == std::string::npos) {
+            return false;
+        }
+        std::optional<std::size_t> content_length;
+        std::size_t line_begin = request_text_.find("\r\n");
+        if (line_begin == std::string::npos) {
+            return true;
+        }
+        line_begin += 2;
+        while (line_begin < header_end) {
+            const auto line_end = request_text_.find("\r\n", line_begin);
+            if (line_end == std::string::npos || line_end > header_end) {
+                return true;
+            }
+            const auto line =
+                std::string_view(request_text_).substr(line_begin, line_end - line_begin);
+            const auto colon = line.find(':');
+            if (colon != std::string_view::npos) {
+                const auto name = trim_ascii(line.substr(0, colon));
+                if (name == "Content-Length" || name == "content-length") {
+                    content_length = parse_size(trim_ascii(line.substr(colon + 1)));
+                }
+            }
+            line_begin = line_end + 2;
+        }
+        if (!content_length.has_value()) {
+            return true;
+        }
+        return request_text_.size() >= header_end + 4 + *content_length;
+    }
+
+    std::string response_;
+    std::thread thread_;
+    std::atomic<bool> ready_ = false;
+    std::string request_text_;
+};
+
 constexpr std::string_view kMismatchedPrivateKeyPem = R"(-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCtHe/u9TNfeq+J
 lQIG5uv3uD7X6kGo1FvI2NNAMWfhdihmNIuSxWKwXxBy+Z6iZtFXMq4jG0gEXtOH
@@ -550,6 +691,16 @@ TEST(QuicHttp3BootstrapTest, FormatsAltSvcValueFromBootstrapConfig) {
     };
 
     EXPECT_EQ(coquic::http3::make_http3_alt_svc_value(config), "h3=\":4433\"; ma=60");
+}
+
+TEST(QuicHttp3BootstrapTest, FormatsAltSvcClearWhenMaxAgeIsZero) {
+    const auto config = coquic::http3::Http3BootstrapConfig{
+        .port = 4433,
+        .h3_port = 4433,
+        .alt_svc_max_age = 0,
+    };
+
+    EXPECT_EQ(coquic::http3::make_http3_alt_svc_value(config), "clear");
 }
 
 TEST(QuicHttp3BootstrapTest, HttpsGetServesStaticFileAndAdvertisesAltSvc) {
@@ -805,6 +956,53 @@ TEST(QuicHttp3BootstrapTest, HttpsPostReturnsMethodNotAllowedAndAllowHeader) {
     EXPECT_TRUE(received.body.empty());
     ASSERT_TRUE(received.headers.contains("Allow"));
     EXPECT_EQ(received.headers.at("Allow"), "GET, HEAD");
+}
+
+TEST(QuicHttp3BootstrapTest, HttpsPostReverseProxyForwardsBodyAndHeaders) {
+    coquic::quic::test::ScopedTempDir document_root;
+
+    const auto upstream_port = allocate_tcp_loopback_port();
+    ASSERT_NE(upstream_port, 0);
+    ScopedHttpProxyUpstream upstream(
+        upstream_port, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n"
+                       "Connection: close\r\n\r\n{\"ok\":true}");
+    for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    ASSERT_TRUE(upstream.ready());
+
+    const auto bootstrap_port = allocate_tcp_loopback_port();
+    ASSERT_NE(bootstrap_port, 0);
+
+    auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
+    config.reverse_proxy = coquic::http3::Http3ReverseProxyConfig{
+        .host = "127.0.0.1",
+        .port = upstream_port,
+    };
+    ScopedBootstrapProcess server(config);
+
+    const auto response = https_request(
+        "127.0.0.1", bootstrap_port,
+        "POST /rag-api/api/questions/random HTTP/1.1\r\nHost: coquic.test\r\n"
+        "Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+
+    ASSERT_TRUE(response.has_value());
+    if (!response.has_value()) {
+        return;
+    }
+    const auto &received = response.value();
+    EXPECT_EQ(received.status_code, 200);
+    EXPECT_EQ(received.body, "{\"ok\":true}");
+    ASSERT_TRUE(received.headers.contains("Content-Type"));
+    EXPECT_EQ(received.headers.at("Content-Type"), "application/json");
+
+    const auto upstream_request = upstream.request_text();
+    EXPECT_NE(upstream_request.find("POST /rag-api/api/questions/random HTTP/1.1\r\n"),
+              std::string::npos);
+    EXPECT_NE(upstream_request.find("Host: coquic.test\r\n"), std::string::npos);
+    EXPECT_NE(upstream_request.find("content-type: application/json\r\n"), std::string::npos);
+    EXPECT_NE(upstream_request.find("Content-Length: 2\r\n"), std::string::npos);
+    EXPECT_EQ(upstream_request.substr(upstream_request.size() - 2), "{}");
 }
 
 TEST(QuicHttp3BootstrapTest, HttpsMalformedRequestsReturnBadRequest) {
@@ -1117,12 +1315,29 @@ TEST(QuicHttp3BootstrapTest, TestHookReadsChunkedRequestsAndRejectsInvalidInput)
     const auto &complete_request = *complete;
     EXPECT_NE(complete_request.find("GET / HTTP/1.1"), std::string::npos);
 
+    const auto post_body_split =
+        coquic::http3::bootstrap_read_http_request_chunks_for_test(std::vector<std::string>{
+            "POST /rag-api/api/questions/random HTTP/1.1\r\nHost: example.test\r\n"
+            "Content-Length: 2\r\n\r\n",
+            "{}"});
+    ASSERT_TRUE(post_body_split.has_value());
+    if (!post_body_split.has_value()) {
+        return;
+    }
+    EXPECT_NE(post_body_split->find("POST /rag-api/api/questions/random HTTP/1.1"),
+              std::string::npos);
+    EXPECT_EQ(post_body_split->substr(post_body_split->size() - 2), "{}");
+
     std::string oversized((static_cast<std::size_t>(16) * 1024u) + 1u, 'a');
     EXPECT_FALSE(coquic::http3::bootstrap_read_http_request_chunks_for_test(
                      std::vector<std::string>{oversized})
                      .has_value());
     EXPECT_FALSE(coquic::http3::bootstrap_read_http_request_chunks_for_test(
                      std::vector<std::string>{"GET / HTTP/1.1\r\nHost: example.test\r\n"})
+                     .has_value());
+    EXPECT_FALSE(coquic::http3::bootstrap_read_http_request_chunks_for_test(
+                     std::vector<std::string>{
+                         "POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 2\r\n\r\n{"})
                      .has_value());
 }
 

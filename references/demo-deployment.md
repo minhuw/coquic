@@ -9,18 +9,20 @@ This document covers the remote continuous deployment flow for the public
   homepage, workbench, performance, interop, and coverage HTML routes, plus the
   browser runtime assets in `demo/next/public/`.
 - `demo/h3-server/Dockerfile` is the optional container wrapper for serving
-  the built `h3-server` binary and packaged demo assets.
+  the built `h3-server` binary and packaged demo app.
 - `npm --prefix demo/next run build:wasm` builds the WASM dependencies,
   compiles the Zig WASM module, and smoke-tests the result. The generated
   module is written to
   `zig-out/share/wasm-quic/coquic-wasm-quic.wasm`.
-- `npm --prefix demo/next run build:demo` runs `build:wasm`, then writes the
-  Next.js static export to `demo/next/out/`.
-- `demo/deploy/package-demo.sh` packages the Next.js static export and overlays
-  the generated WASM module. `npm --prefix demo/next run package:demo` is the
-  Next.js project wrapper for this packaging step.
-- `demo/deploy/deploy-remote.sh` uploads the built binary, prepared site
-  directory, and TLS material to the remote host.
+- `npm --prefix demo/next run build:demo` runs `build:wasm`, then writes a
+  standalone Next.js server bundle under `demo/next/.next/standalone/`.
+- `demo/deploy/package-demo.sh` packages the standalone Next.js server bundle
+  and overlays the generated WASM module. `npm --prefix demo/next run
+  package:demo` is the Next.js project wrapper for this packaging step.
+- `demo/deploy/run-demo.sh` starts the packaged Next.js server on loopback and
+  starts `h3-server` as the public HTTP/3 reverse proxy.
+- `demo/deploy/deploy-remote.sh` uploads the built binary, prepared app
+  directory, runner script, and TLS material to the remote host.
 - `demo/deploy/coquic-demo.service` is the systemd unit installed on the
   remote host.
 - `.github/workflows/deploy-demo.yml` is the GitHub Actions entrypoint.
@@ -35,10 +37,9 @@ This document covers the remote continuous deployment flow for the public
 
 The current workflow builds `h3-server`, then uses the Next.js project scripts
 to build the WASM dependencies, compile and smoke-test the WASM module, build
-the static export, and package `demo/next/out/` as the document root with
+the standalone Next.js server, and package the app with
 `coquic-wasm-quic.wasm` copied in from `zig-out/share/wasm-quic/`. The deploy
-script accepts any prepared document-root directory as its second argument, so
-the remote release layout stays stable.
+script accepts any prepared app directory as its second argument.
 
 ## GitHub Actions Inputs
 
@@ -47,6 +48,9 @@ GitHub Actions secrets:
 - `COQUIC_DEMO_REMOTE_SSH_KEY`
 - `COQUIC_DEMO_CERT_CHAIN_PEM`
 - `COQUIC_DEMO_PRIVATE_KEY_PEM`
+- `OPENROUTER_API_KEY`
+- `COQUIC_QDRANT_URL`
+- `COQUIC_QDRANT_API_KEY`
 
 GitHub Actions variables:
 
@@ -60,24 +64,26 @@ default. The workflow also writes a pinned `known_hosts` file for
 `ssh-ed25519` host keys.
 
 The workflow runs on pushes to `main` that touch the demo deployment surface,
-and it also supports manual `workflow_dispatch` runs.
+and it also supports manual `workflow_dispatch` runs. The OpenRouter and
+Qdrant secrets enable the `/qa` Ask page; if all three are omitted, the app
+still deploys but the private RAG API is not started.
 
 The perf workflow reuses `COQUIC_DEMO_REMOTE_SSH_KEY` to upload
 `.bench-results/perf-results.json` and `.bench-results/perf-history.json` to:
 
-- `/opt/coquic-demo/current/site/perf-results.json`
-- `/opt/coquic-demo/current/site/perf-history.json`
+- `/opt/coquic-demo/current/app/public/perf-results.json`
+- `/opt/coquic-demo/current/app/public/perf-history.json`
 
 The interop workflow reuses the same secret to upload
 `.interop-results/interop-results.json` to:
 
-- `/opt/coquic-demo/current/site/interop-results.json`
+- `/opt/coquic-demo/current/app/public/interop-results.json`
 
 The test workflow reuses the same secret to upload `coverage/coverage-results.json`
 and `coverage/html/` to:
 
-- `/opt/coquic-demo/current/site/coverage-results.json`
-- `/opt/coquic-demo/current/site/coverage/`
+- `/opt/coquic-demo/current/app/public/coverage-results.json`
+- `/opt/coquic-demo/current/app/public/coverage/`
 
 Those files are read by the public performance, interop, and coverage
 dashboards. The performance dashboard uses `perf-results.json` for the latest
@@ -92,6 +98,9 @@ the `main` branch publish snapshots to the demo machine.
 The remote machine must provide:
 
 - Linux with `systemd`
+- Node.js 20 or newer
+- `curl`
+- `uv` when the Ask/RAG API is enabled
 - a deploy user reachable over SSH
 - non-interactive `sudo` for `/opt/coquic-demo`, `/etc/coquic-demo/tls`,
   `/etc/systemd/system/coquic-demo.service`, and the required `systemctl`
@@ -106,7 +115,8 @@ state before the temporary upload directory is removed.
 Each deployment writes a versioned release under:
 
 - `/opt/coquic-demo/releases/<git-sha>/h3-server`
-- `/opt/coquic-demo/releases/<git-sha>/site/`
+- `/opt/coquic-demo/releases/<git-sha>/run-demo.sh`
+- `/opt/coquic-demo/releases/<git-sha>/app/`
 
 The live release is selected through:
 
@@ -116,6 +126,13 @@ TLS material is installed at:
 
 - `/etc/coquic-demo/tls/fullchain.pem`
 - `/etc/coquic-demo/tls/privkey.pem`
+
+When Ask/RAG credentials are provided, deploy writes them to:
+
+- `/etc/coquic-demo/rag.env`
+
+The file is mode `600` and is sourced by `run-demo.sh` before starting the
+loopback FastAPI service.
 
 ## Verification
 
@@ -127,6 +144,7 @@ TLS material is installed at:
 - the fetched HTML still contains the stable `coquic-wasm-demo-v1` marker
 - the wasm module is served from `coquic-wasm-quic.wasm` with
   `application/wasm`
+- when Ask/RAG secrets are configured, `/rag-api/api/health` returns ready
 
 ## Manual Operation
 
@@ -135,19 +153,20 @@ Local packaging:
 ```bash
 npm --prefix demo/next install
 npm --prefix demo/next run build:demo
-npm --prefix demo/next run package:demo -- "${RUNNER_TEMP:-/tmp}/demo-site"
+npm --prefix demo/next run package:demo -- "${RUNNER_TEMP:-/tmp}/demo-app"
 ```
 
 Manual CI-style deployment from a prepared workspace:
 
 ```bash
-demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "/path/to/site-dir"
+demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "/path/to/app-dir"
 ```
 
 ## Next.js Reverse Proxy Mode
 
-`h3-server` can also serve as an HTTP/3 edge in front of a running Next.js
-server:
+Production uses `h3-server` as an HTTP/3 edge in front of a loopback Next.js
+server. The Next.js server handles application routing and forwards `/rag-api/*`
+to the loopback FastAPI service when that service is running.
 
 ```bash
 npm --prefix demo/next run build:wasm
@@ -156,15 +175,14 @@ npm --prefix demo/next run dev
   --host 127.0.0.1 \
   --port 4433 \
   --bootstrap-port 4433 \
-  --reverse-proxy http://127.0.0.1:3000 \
+  --reverse-proxy http://127.0.0.1:3001 \
   --certificate-chain tests/fixtures/quic-server-cert.pem \
   --private-key tests/fixtures/quic-server-key.pem
 ```
 
 The proxy target must currently be an `http://HOST:PORT` origin. CoQUIC
 terminates TLS and HTTP/3, forwards requests to the upstream over HTTP/1.1, and
-returns buffered upstream responses to the QUIC client. The static export path
-remains the production deploy path.
+returns buffered upstream responses to the QUIC client.
 
 ## Manual Certificate Refresh
 

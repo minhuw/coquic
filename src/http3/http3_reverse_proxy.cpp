@@ -349,7 +349,11 @@ std::optional<HttpResponseFraming> response_framing(std::string_view headers_tex
     return framing;
 }
 
-HttpResponseReadState response_read_state(std::string_view response_text) {
+bool is_head_request(const Http3Request &request) {
+    return lowercase_ascii(request.head.method) == "head";
+}
+
+HttpResponseReadState response_read_state(std::string_view response_text, bool head_request) {
     const auto header_end = response_text.find("\r\n\r\n");
     if (header_end == std::string_view::npos) {
         return HttpResponseReadState::incomplete;
@@ -361,6 +365,9 @@ HttpResponseReadState response_read_state(std::string_view response_text) {
     if (!framing.has_value()) {
         return HttpResponseReadState::invalid;
     }
+    if (head_request) {
+        return HttpResponseReadState::complete;
+    }
     if (framing->chunked) {
         return chunked_body_read_state(body_text);
     }
@@ -371,7 +378,8 @@ HttpResponseReadState response_read_state(std::string_view response_text) {
     return HttpResponseReadState::incomplete;
 }
 
-std::optional<ParsedHttpResponse> parse_http_response(std::string_view response_text) {
+std::optional<ParsedHttpResponse> parse_http_response(std::string_view response_text,
+                                                      bool head_request) {
     const auto header_end = response_text.find("\r\n\r\n");
     if (header_end == std::string_view::npos) {
         return std::nullopt;
@@ -433,7 +441,9 @@ std::optional<ParsedHttpResponse> parse_http_response(std::string_view response_
         line_begin = line_end + 2;
     }
 
-    if (chunked) {
+    if (head_request) {
+        parsed.body.clear();
+    } else if (chunked) {
         auto decoded = decode_chunked_body(body_text);
         if (!decoded.has_value()) {
             return std::nullopt;
@@ -496,6 +506,7 @@ Http3Response fetch_http_reverse_proxy_response(const Http3ReverseProxyConfig &c
     }
     ScopedFd upstream(*fd);
 
+    const auto head_request = is_head_request(request);
     const auto proxy_request = serialize_proxy_request(config, request);
     if (!write_all(upstream.get(), proxy_request)) {
         return bad_gateway_response();
@@ -503,7 +514,7 @@ Http3Response fetch_http_reverse_proxy_response(const Http3ReverseProxyConfig &c
     std::string response_text;
     std::array<char, 8192> buffer{};
     while (response_text.size() <= kProxyResponseLimitBytes) {
-        const auto state = response_read_state(response_text);
+        const auto state = response_read_state(response_text, head_request);
         if (state == HttpResponseReadState::complete) {
             break;
         }
@@ -526,7 +537,7 @@ Http3Response fetch_http_reverse_proxy_response(const Http3ReverseProxyConfig &c
     if (response_text.size() > kProxyResponseLimitBytes) {
         return bad_gateway_response();
     }
-    auto parsed = parse_http_response(response_text);
+    auto parsed = parse_http_response(response_text, head_request);
     if (!parsed.has_value()) {
         return bad_gateway_response();
     }

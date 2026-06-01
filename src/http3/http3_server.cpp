@@ -121,6 +121,14 @@ Http3Response built_in_or_buffered_handler_response(const Http3ServerConfig &con
     };
 }
 
+bool try_dispatch_deferred_request(const Http3ServerConfig &config, std::uint64_t stream_id,
+                                   Http3Request request) {
+    if (!config.deferred_request_handler) {
+        return false;
+    }
+    return config.deferred_request_handler(stream_id, std::move(request));
+}
+
 Http3Result<bool> submit_response(Http3Connection &connection, std::uint64_t stream_id,
                                   const Http3RequestHead &request_head,
                                   const Http3Response &response) {
@@ -270,6 +278,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
     if (result.local_error.has_value()) {
         failed_ = true;
         pending_requests_.clear();
+        cancel_pending_deferred_responses();
         return make_failure_update(/*handled_local_error=*/true);
     }
 
@@ -278,6 +287,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
     if (!merge_connection_update(update, connection_update)) {
         failed_ = true;
         pending_requests_.clear();
+        cancel_pending_deferred_responses();
         return update;
     }
 
@@ -311,6 +321,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
                                        ignored_request_streams, dispatched_response)) {
                 failed_ = true;
                 pending_requests_.clear();
+                cancel_pending_deferred_responses();
                 return make_failure_update();
             }
 
@@ -342,6 +353,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
                                                ignored_request_streams, dispatched_response)) {
                         failed_ = true;
                         pending_requests_.clear();
+                        cancel_pending_deferred_responses();
                         return make_failure_update();
                     }
 
@@ -371,6 +383,10 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
         }
 
         if (const auto *reset = std::get_if<Http3PeerRequestResetEvent>(&event)) {
+            if (cancel_pending_deferred_response(reset->stream_id)) {
+                continue;
+            }
+
             const auto pending_it = pending_requests_.find(reset->stream_id);
             if (ignored_request_streams.contains(reset->stream_id)) {
                 pending_requests_.erase(reset->stream_id);
@@ -408,18 +424,33 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
         if (pending_it == pending_requests_.end() || !pending_it->second.head.has_value()) {
             failed_ = true;
             pending_requests_.clear();
+            cancel_pending_deferred_responses();
             return make_failure_update();
         }
-        if (pending_it->second.early_response_committed) {
+        auto &pending_request = pending_it->second;
+        const auto request_head = pending_request.head.value_or(Http3RequestHead{});
+        if (pending_request.early_response_committed) {
             pending_requests_.erase(pending_it);
             continue;
         }
 
-        const auto &request_head = pending_it->second.head.value();
         auto request = Http3Request{
             .head = request_head,
-            .body = pending_it->second.body,
-            .trailers = pending_it->second.trailers,
+            .body = pending_request.body,
+            .trailers = pending_request.trailers,
+        };
+        if (!try_demo_route_response(request).has_value() &&
+            try_dispatch_deferred_request(config_, complete->stream_id, std::move(request))) {
+            pending_deferred_responses_.insert_or_assign(
+                complete->stream_id, PendingDeferredResponse{.head = request_head});
+            pending_requests_.erase(pending_it);
+            continue;
+        }
+
+        request = Http3Request{
+            .head = request_head,
+            .body = pending_request.body,
+            .trailers = pending_request.trailers,
         };
         auto response = built_in_or_buffered_handler_response(config_, request);
 
@@ -428,12 +459,15 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
         if (!submitted.has_value()) {
             failed_ = true;
             pending_requests_.clear();
+            cancel_pending_deferred_responses();
             return make_failure_update();
         }
 
         pending_requests_.erase(pending_it);
         dispatched_response = true;
     }
+
+    cancel_deferred_responses_interrupted_by_peer(result);
 
     for (const auto stream_id : ignored_request_streams) {
         pending_requests_.erase(stream_id);
@@ -446,6 +480,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
         if (!merge_connection_update(update, follow_up)) {
             failed_ = true;
             pending_requests_.clear();
+            cancel_pending_deferred_responses();
             return update;
         }
     }
@@ -459,16 +494,76 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::poll(quic::QuicCoreTimePoint now)
     }
 
     Http3ServerEndpointUpdate update;
+    if (config_.deferred_response_handler) {
+        for (auto it = pending_deferred_responses_.begin();
+             it != pending_deferred_responses_.end();) {
+            auto response = config_.deferred_response_handler(it->first);
+            if (!response.has_value()) {
+                ++it;
+                continue;
+            }
+
+            const auto submitted =
+                submit_response(connection_, it->first, it->second.head, response.value());
+            if (!submitted.has_value()) {
+                failed_ = true;
+                pending_requests_.clear();
+                cancel_pending_deferred_responses();
+                return make_failure_update();
+            }
+            it = pending_deferred_responses_.erase(it);
+        }
+    }
+
     auto connection_update = connection_.poll(now);
     if (!merge_connection_update(update, connection_update)) {
         failed_ = true;
         pending_requests_.clear();
+        cancel_pending_deferred_responses();
     }
     return update;
 }
 
 bool Http3ServerEndpoint::has_failed() const {
     return failed_;
+}
+
+bool Http3ServerEndpoint::has_pending_deferred_responses() const {
+    return !pending_deferred_responses_.empty();
+}
+
+bool Http3ServerEndpoint::cancel_pending_deferred_response(std::uint64_t stream_id) {
+    const auto deferred_it = pending_deferred_responses_.find(stream_id);
+    if (deferred_it == pending_deferred_responses_.end()) {
+        return false;
+    }
+    if (config_.deferred_request_cancel_handler) {
+        config_.deferred_request_cancel_handler(stream_id);
+    }
+    pending_deferred_responses_.erase(deferred_it);
+    return true;
+}
+
+void Http3ServerEndpoint::cancel_deferred_responses_interrupted_by_peer(
+    const quic::QuicCoreResult &result) {
+    for (const auto &effect : result.effects) {
+        if (const auto *reset = std::get_if<quic::QuicCorePeerResetStream>(&effect)) {
+            cancel_pending_deferred_response(reset->stream_id);
+            continue;
+        }
+        if (const auto *stop = std::get_if<quic::QuicCorePeerStopSending>(&effect)) {
+            cancel_pending_deferred_response(stop->stream_id);
+        }
+    }
+}
+
+void Http3ServerEndpoint::cancel_pending_deferred_responses() {
+    if (config_.deferred_request_cancel_handler) {
+        for (const auto &[stream_id, _] : pending_deferred_responses_) {
+            config_.deferred_request_cancel_handler(stream_id);
+        }
+    }
+    pending_deferred_responses_.clear();
 }
 
 Http3ServerEndpointUpdate server_make_failure_update_for_test(bool handled_local_error) {

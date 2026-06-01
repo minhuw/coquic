@@ -115,4 +115,4 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
             minhuw@coquic.minhuw.dev \
-            "sudo install -m 644 /tmp/coquic-coverage-results.json /opt/coquic-demo/current/site/coverage-results.json && sudo rm -rf /opt/coquic-demo/current/site/coverage && sudo install -d -m 755 /opt/coquic-demo/current/site/coverage && sudo tar --no-same-owner -xzf /tmp/coquic-coverage-html.tar.gz -C /opt/coquic-demo/current/site/coverage && rm -f /tmp/coquic-coverage-results.json /tmp/coquic-coverage-html.tar.gz"
+            "sudo install -m 644 /tmp/coquic-coverage-results.json /opt/coquic-demo/current/app/public/coverage-results.json && sudo rm -rf /opt/coquic-demo/current/app/public/coverage && sudo install -d -m 755 /opt/coquic-demo/current/app/public/coverage && sudo tar --no-same-owner -xzf /tmp/coquic-coverage-html.tar.gz -C /opt/coquic-demo/current/app/public/coverage && rm -f /tmp/coquic-coverage-results.json /tmp/coquic-coverage-html.tar.gz"

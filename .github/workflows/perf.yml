@@ -295,7 +295,7 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
             minhuw@coquic.minhuw.dev \
-            "if sudo test -f /opt/coquic-demo/current/site/perf-history.json; then sudo cat /opt/coquic-demo/current/site/perf-history.json; fi" \
+            "if sudo test -f /opt/coquic-demo/current/app/public/perf-history.json; then sudo cat /opt/coquic-demo/current/app/public/perf-history.json; fi" \
             > .bench-results/history/perf-history.json
           python3 scripts/update-perf-history.py \
             --snapshot .bench-results/perf-results.json \
@@ -333,7 +333,7 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
             minhuw@coquic.minhuw.dev \
-            "sudo install -m 644 /tmp/coquic-perf-results.json /opt/coquic-demo/current/site/perf-results.json && sudo install -m 644 /tmp/coquic-perf-history.json /opt/coquic-demo/current/site/perf-history.json && rm -f /tmp/coquic-perf-results.json /tmp/coquic-perf-history.json"
+            "sudo install -m 644 /tmp/coquic-perf-results.json /opt/coquic-demo/current/app/public/perf-results.json && sudo install -m 644 /tmp/coquic-perf-history.json /opt/coquic-demo/current/app/public/perf-history.json && rm -f /tmp/coquic-perf-results.json /tmp/coquic-perf-history.json"
 
       - name: Fail On Perf Job Errors
         if: always()

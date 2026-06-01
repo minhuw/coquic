@@ -1,5 +1,10 @@
-FROM alpine:3.21
-COPY zig-out/bin/h3-server /usr/local/bin/h3-server
-COPY zig-out/demo-site /app/www
-ENTRYPOINT ["/usr/local/bin/h3-server"]
-CMD ["--host","0.0.0.0","--port","4433","--bootstrap-port","4433","--document-root","/app/www","--certificate-chain","/run/certs/cert.pem","--private-key","/run/certs/key.pem"]
+FROM node:22-alpine
+RUN apk add --no-cache bash curl
+COPY zig-out/bin/h3-server /opt/coquic-demo/current/h3-server
+COPY zig-out/demo-app /opt/coquic-demo/current/app
+COPY demo/deploy/run-demo.sh /opt/coquic-demo/current/run-demo.sh
+ENV COQUIC_DEMO_CERTIFICATE_CHAIN=/run/certs/cert.pem
+ENV COQUIC_DEMO_PRIVATE_KEY=/run/certs/key.pem
+ENV COQUIC_DEMO_PORT=4433
+ENV COQUIC_DEMO_BOOTSTRAP_PORT=4433
+ENTRYPOINT ["/opt/coquic-demo/current/run-demo.sh"]

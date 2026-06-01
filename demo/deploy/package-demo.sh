@@ -2,20 +2,44 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-requested_output_dir="${1:-${repo_root}/zig-out/demo-site}"
-requested_next_dir="${2:-${repo_root}/demo/next/out}"
+requested_output_dir="${1:-${repo_root}/zig-out/demo-app}"
+requested_next_dir="${2:-${repo_root}/demo/next}"
 requested_wasm_module="${3:-${repo_root}/zig-out/share/wasm-quic/coquic-wasm-quic.wasm}"
 output_dir="$(realpath -m -- "${requested_output_dir}")"
 next_dir="$(realpath -m -- "${requested_next_dir}")"
 wasm_module="$(realpath -m -- "${requested_wasm_module}")"
 
-if [[ ! -d "${next_dir}" ]]; then
-  echo "missing Next.js demo export directory: ${next_dir}" >&2
+standalone_dir="${next_dir}/.next/standalone"
+static_dir="${next_dir}/.next/static"
+public_dir="${next_dir}/public"
+rag_dir="${repo_root}/rag"
+rfc_dir="${repo_root}/references/rfc"
+rag_artifacts_dir="${repo_root}/.rag/artifacts"
+server_js="${standalone_dir}/server.js"
+
+if [[ ! -f "${server_js}" ]]; then
+  echo "missing Next.js standalone server: ${server_js}" >&2
+  echo "run: npm --prefix demo/next run build" >&2
   exit 1
 fi
-
+if [[ ! -d "${static_dir}" ]]; then
+  echo "missing Next.js static assets: ${static_dir}" >&2
+  exit 1
+fi
+if [[ ! -d "${public_dir}" ]]; then
+  echo "missing Next.js public directory: ${public_dir}" >&2
+  exit 1
+fi
 if [[ ! -f "${wasm_module}" ]]; then
   echo "missing wasm demo module: ${wasm_module}" >&2
+  exit 1
+fi
+if [[ ! -f "${rag_dir}/src/coquic_rag/qa/app.py" ]]; then
+  echo "missing RAG QA API source: ${rag_dir}/src/coquic_rag/qa/app.py" >&2
+  exit 1
+fi
+if [[ ! -d "${rfc_dir}" ]]; then
+  echo "missing RFC source directory: ${rfc_dir}" >&2
   exit 1
 fi
 
@@ -30,17 +54,26 @@ if is_same_or_descendant "${output_dir}" "${next_dir}" || is_same_or_descendant 
   exit 1
 fi
 
-for required_next_file in index.html docs.html workbench.html perf-comparison.html interop-results.html coverage-results.html performance.html interop.html coverage.html coquic-logo.svg quic-demo.js perf-comparison.js interop-results.js coverage-results.js; do
-  if [[ ! -f "${next_dir}/${required_next_file}" ]]; then
-    echo "next demo export is missing ${required_next_file}: ${next_dir}" >&2
-    exit 1
-  fi
-done
-
 rm -rf -- "${output_dir}"
 install -d -m 755 -- "${output_dir}"
-cp -R -- "${next_dir}/." "${output_dir}/"
-rm -f -- "${output_dir}/coquic-wasm-quic.wasm"
-install -m 644 -- "${wasm_module}" "${output_dir}/coquic-wasm-quic.wasm"
+cp -R -- "${standalone_dir}/." "${output_dir}/"
+install -d -m 755 -- "${output_dir}/.next"
+cp -R -- "${static_dir}" "${output_dir}/.next/static"
+cp -R -- "${public_dir}" "${output_dir}/public"
+rm -f -- "${output_dir}/public/coquic-wasm-quic.wasm"
+install -m 644 -- "${wasm_module}" "${output_dir}/public/coquic-wasm-quic.wasm"
+install -d -m 755 -- "${output_dir}/rag"
+install -m 644 -- "${rag_dir}/pyproject.toml" "${output_dir}/rag/pyproject.toml"
+install -m 644 -- "${rag_dir}/uv.lock" "${output_dir}/rag/uv.lock"
+tar -C "${rag_dir}" \
+  --exclude='*/__pycache__' \
+  --exclude='*.egg-info' \
+  -cf - src | tar -C "${output_dir}/rag" -xf -
+install -d -m 755 -- "${output_dir}/references"
+cp -R -- "${rfc_dir}" "${output_dir}/references/rfc"
+if [[ -d "${rag_artifacts_dir}" ]]; then
+  install -d -m 755 -- "${output_dir}/.rag"
+  cp -R -- "${rag_artifacts_dir}" "${output_dir}/.rag/artifacts"
+fi
 
 printf '%s\n' "${output_dir}"

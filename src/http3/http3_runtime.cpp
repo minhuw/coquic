@@ -18,6 +18,7 @@
 #include <iterator>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string_view>
 #include <system_error>
@@ -1052,6 +1053,144 @@ class RuntimeScopedTempDir {
     std::filesystem::path path_;
 };
 
+class AsyncReverseProxyDispatcher {
+  public:
+    static constexpr std::size_t kMaxJobsPerConnection = 16;
+
+    explicit AsyncReverseProxyDispatcher(Http3ReverseProxyConfig config)
+        : config_(std::move(config)) {
+    }
+
+    ~AsyncReverseProxyDispatcher() {
+        cancel_all();
+        wait_for_all();
+    }
+
+    AsyncReverseProxyDispatcher(const AsyncReverseProxyDispatcher &) = delete;
+    AsyncReverseProxyDispatcher &operator=(const AsyncReverseProxyDispatcher &) = delete;
+
+    bool start(std::uint64_t stream_id, Http3Request request) {
+        drain_finished();
+        if (jobs_.contains(stream_id)) {
+            return true;
+        }
+        if (jobs_.size() >= kMaxJobsPerConnection) {
+            return store_ready_response(stream_id, reverse_proxy_unavailable_response());
+        }
+
+        auto [job_it, inserted] = jobs_.try_emplace(stream_id);
+        if (!inserted) {
+            return true;
+        }
+
+        try {
+            auto task = std::packaged_task<Http3Response()>(
+                [config = config_, request = std::move(request)]() mutable {
+                    return fetch_http_reverse_proxy_response(config, request);
+                });
+            job_it->second.result = task.get_future();
+            job_it->second.worker = std::thread(std::move(task));
+        } catch (...) {
+            job_it->second.result = ready_response_future(reverse_proxy_unavailable_response());
+        }
+        return true;
+    }
+
+    std::optional<Http3Response> take_response(std::uint64_t stream_id) {
+        const auto job_it = jobs_.find(stream_id);
+        if (job_it == jobs_.end() || job_it->second.cancelled ||
+            job_it->second.result.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
+            return std::nullopt;
+        }
+        auto response = job_it->second.result.get();
+        if (job_it->second.worker.joinable()) {
+            job_it->second.worker.join();
+        }
+        jobs_.erase(job_it);
+        return response;
+    }
+
+    void cancel(std::uint64_t stream_id) {
+        const auto job_it = jobs_.find(stream_id);
+        if (job_it != jobs_.end()) {
+            job_it->second.cancelled = true;
+        }
+        drain_finished();
+    }
+
+    void cancel_all() {
+        for (auto &[_, job] : jobs_) {
+            job.cancelled = true;
+        }
+        drain_finished();
+    }
+
+    void drain_finished() {
+        for (auto it = jobs_.begin(); it != jobs_.end();) {
+            if (it->second.result.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
+                ++it;
+                continue;
+            }
+            static_cast<void>(it->second.result.get());
+            if (it->second.worker.joinable()) {
+                it->second.worker.join();
+            }
+            it = jobs_.erase(it);
+        }
+    }
+
+    void wait_for_all() {
+        for (auto &[_, job] : jobs_) {
+            if (job.result.valid()) {
+                static_cast<void>(job.result.get());
+            }
+            if (job.worker.joinable()) {
+                job.worker.join();
+            }
+        }
+        jobs_.clear();
+    }
+
+  private:
+    struct Job {
+        std::future<Http3Response> result;
+        std::thread worker;
+        bool cancelled = false;
+    };
+
+    static Http3Response reverse_proxy_unavailable_response() {
+        return Http3Response{
+            .head =
+                {
+                    .status = 503,
+                    .content_length = 0,
+                    .headers = {{"cache-control", "no-store"}},
+                },
+        };
+    }
+
+    static std::future<Http3Response> ready_response_future(Http3Response response) {
+        std::promise<Http3Response> promise;
+        promise.set_value(std::move(response));
+        return promise.get_future();
+    }
+
+    bool store_ready_response(std::uint64_t stream_id, Http3Response response) {
+        try {
+            jobs_.insert_or_assign(stream_id,
+                                   Job{
+                                       .result = ready_response_future(std::move(response)),
+                                   });
+        } catch (...) {
+            return false;
+        }
+        return true;
+    }
+
+    Http3ReverseProxyConfig config_;
+    std::unordered_map<std::uint64_t, Job> jobs_;
+};
+
 bool runtime_internal_check(bool condition, std::string_view hook, std::string_view label) {
     if (!condition) {
         std::cerr << hook << " failed: " << label << '\n';
@@ -1077,6 +1216,7 @@ constexpr std::uint64_t kRuntimeLoopExpectedCoverageMask =
     kRuntimeLoopMaskClientShutdown | kRuntimeLoopMaskClientTimerExpired |
     kRuntimeLoopMaskClientRxDatagramWithoutPayload | kRuntimeLoopMaskServerRxDatagramWithPayload |
     kRuntimeLoopMaskClientPollResponseWrite;
+constexpr auto kAsyncReverseProxyPollInterval = std::chrono::milliseconds{25};
 
 Http3RuntimeConfig make_runtime_server_config_for_test(const std::filesystem::path &document_root) {
     return Http3RuntimeConfig{
@@ -1106,10 +1246,14 @@ class Http3ServerRuntime {
 
     int run() {
         for (;;) {
+            const auto poll_now = quic::QuicCoreClock::now();
+            if (!poll_endpoints(poll_now)) {
+                return 1;
+            }
             const auto current = quic::QuicCoreClock::now();
-            const auto next_wakeup = core_.next_wakeup();
+            const auto core_next_wakeup = core_.next_wakeup();
             if (consume_forced_count(force_server_due_timer_count_for_test()) ||
-                (next_wakeup.has_value() && *next_wakeup <= current)) {
+                (core_next_wakeup.has_value() && *core_next_wakeup <= current)) {
                 if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, current),
                                    current)) {
                     return 1;
@@ -1117,6 +1261,7 @@ class Http3ServerRuntime {
                 continue;
             }
 
+            const auto next_wakeup = next_wait_wakeup(current, core_next_wakeup);
             const auto event = backend_->wait(next_wakeup);
             if (!event.has_value()) {
                 return 1;
@@ -1129,6 +1274,9 @@ class Http3ServerRuntime {
                 return 1;
             }
             if (event->kind == io::QuicIoEvent::Kind::timer_expired) {
+                if (!core_next_wakeup.has_value() || *core_next_wakeup > event->now) {
+                    continue;
+                }
                 if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
                                    event->now)) {
                     return 1;
@@ -1172,8 +1320,33 @@ class Http3ServerRuntime {
                 continue;
             }
             if (lifecycle->event == quic::QuicCoreConnectionLifecycle::accepted) {
+                auto async_proxy =
+                    config_.reverse_proxy.has_value()
+                        ? std::make_shared<AsyncReverseProxyDispatcher>(*config_.reverse_proxy)
+                        : nullptr;
                 endpoints_.try_emplace(lifecycle->connection,
                                        Http3ServerEndpoint(Http3ServerConfig{
+                                           .deferred_request_handler =
+                                               async_proxy == nullptr
+                                                   ? std::function<bool(std::uint64_t, Http3Request)>()
+                                                   : [async_proxy](std::uint64_t stream_id,
+                                                                   Http3Request request) {
+                                                         return async_proxy->start(
+                                                             stream_id, std::move(request));
+                                                     },
+                                           .deferred_response_handler =
+                                               async_proxy == nullptr
+                                                   ? std::function<std::optional<Http3Response>(
+                                                         std::uint64_t)>()
+                                                   : [async_proxy](std::uint64_t stream_id) {
+                                                         return async_proxy->take_response(stream_id);
+                                                     },
+                                           .deferred_request_cancel_handler =
+                                               async_proxy == nullptr
+                                                   ? std::function<void(std::uint64_t)>()
+                                                   : [async_proxy](std::uint64_t stream_id) {
+                                                         async_proxy->cancel(stream_id);
+                                                     },
                                            .fallback_request_handler =
                                                [config = config_](const Http3Request &request) {
                                                    return runtime_server_response(config, request);
@@ -1265,6 +1438,45 @@ class Http3ServerRuntime {
                 endpoints_.erase(connection);
                 return true;
             }
+        }
+        return true;
+    }
+
+    bool has_pending_deferred_responses() const {
+        return std::any_of(endpoints_.begin(), endpoints_.end(), [](const auto &entry) {
+            return entry.second.has_pending_deferred_responses();
+        });
+    }
+
+    std::optional<quic::QuicCoreTimePoint>
+    next_wait_wakeup(quic::QuicCoreTimePoint now,
+                     std::optional<quic::QuicCoreTimePoint> core_next_wakeup) const {
+        if (!has_pending_deferred_responses()) {
+            return core_next_wakeup;
+        }
+        const auto proxy_poll_wakeup = now + kAsyncReverseProxyPollInterval;
+        if (!core_next_wakeup.has_value() || proxy_poll_wakeup < *core_next_wakeup) {
+            return proxy_poll_wakeup;
+        }
+        return core_next_wakeup;
+    }
+
+    bool poll_endpoints(quic::QuicCoreTimePoint now) {
+        for (auto it = endpoints_.begin(); it != endpoints_.end();) {
+            const auto connection = it->first;
+            auto update = it->second.poll(now);
+            if (!server_update_has_immediate_work(update)) {
+                ++it;
+                continue;
+            }
+            if (!drain_endpoint(connection, std::move(update), now)) {
+                return false;
+            }
+            it = endpoints_.find(connection);
+            if (it == endpoints_.end()) {
+                continue;
+            }
+            ++it;
         }
         return true;
     }

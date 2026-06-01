@@ -2418,6 +2418,42 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyToHttpUpstream) {
     EXPECT_NE(upstream_request.find("X-Forwarded-Proto: https\r\n"), std::string::npos);
 }
 
+TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyHeadWithContentLength) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    ScopedHttpProxyUpstream upstream(port,
+                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                                     "Content-Length: 14775\r\nConnection: close\r\n\r\n");
+    for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    ASSERT_TRUE(upstream.ready());
+
+    const auto response = coquic::http3::runtime_server_response_for_test(
+        coquic::http3::Http3RuntimeConfig{
+            .reverse_proxy =
+                coquic::http3::Http3ReverseProxyConfig{
+                    .host = "127.0.0.1",
+                    .port = port,
+                },
+        },
+        coquic::http3::Http3Request{
+            .head =
+                {
+                    .method = "HEAD",
+                    .authority = "demo.test",
+                    .path = "/",
+                },
+        });
+
+    EXPECT_EQ(response.head.status, 200);
+    EXPECT_TRUE(response.body.empty());
+    expect_header_value(response.head, {"content-type", "text/html; charset=utf-8"});
+    const auto upstream_request = upstream.request_text();
+    EXPECT_NE(upstream_request.find("HEAD / HTTP/1.1\r\n"), std::string::npos);
+}
+
 TEST(QuicHttp3RuntimeTest, RuntimeServerResponseReturnsBadGatewayForMissingProxy) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);

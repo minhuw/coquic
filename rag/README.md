@@ -163,10 +163,10 @@ Useful environment variables:
 | `COQUIC_QA_MAX_OUTPUT_TOKENS` | `650` | Generation cap |
 | `COQUIC_QA_ALLOWED_ORIGINS` | local Next origins | CORS origin allowlist |
 
-The static demo page is available at `/qa` in `demo/next`. Browser code calls
-same-origin `/rag-api/*`; Next handles that path in local development, and the
-public web server handles it after static export. Both should forward to this
-FastAPI service on `127.0.0.1:8787`. Do not expose FastAPI directly to browsers.
+The demo page is available at `/qa` in `demo/next`. Browser code calls
+same-origin `/rag-api/*`; the Next.js server forwards that path to this FastAPI
+service on `127.0.0.1:8787` in local development and in production. Do not
+expose FastAPI directly to browsers.
 
 Codex integration is repo-local through `.agents/skills/quic-rag`. Codex can
 discover repo skills automatically when launched from this repository or a

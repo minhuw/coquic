@@ -76,6 +76,8 @@ export function QaClient() {
   const [ragAnswer, setRagAnswer] = useState('');
   const [directModel, setDirectModel] = useState('');
   const [ragModel, setRagModel] = useState('');
+  const [queryStartedAt, setQueryStartedAt] = useState<number | null>(null);
+  const [queryElapsedMs, setQueryElapsedMs] = useState<number | null>(null);
   const [citations, setCitations] = useState<Citation[]>([]);
   const [questionError, setQuestionError] = useState('');
   const [selectedModel, setSelectedModel] = useState(fallbackModelOptions[0].id);
@@ -98,6 +100,17 @@ export function QaClient() {
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (!busy || queryStartedAt === null) {
+      return;
+    }
+
+    const updateElapsed = () => setQueryElapsedMs(Date.now() - queryStartedAt);
+    updateElapsed();
+    const intervalId = window.setInterval(updateElapsed, 250);
+    return () => window.clearInterval(intervalId);
+  }, [busy, queryStartedAt]);
 
   useEffect(() => {
     if (!modelMenuOpen) {
@@ -132,8 +145,11 @@ export function QaClient() {
       return;
     }
 
+    const startedAt = Date.now();
     setBusy(true);
     setStatus('asking');
+    setQueryStartedAt(startedAt);
+    setQueryElapsedMs(0);
     setDirectAnswer('Asking the selected free model directly...');
     setRagAnswer('Retrieving QUIC context...');
     setDirectModel(selectedModel);
@@ -157,6 +173,8 @@ export function QaClient() {
       setCitations([]);
       setStatus('error');
     } finally {
+      setQueryElapsedMs(Date.now() - startedAt);
+      setQueryStartedAt(null);
       setBusy(false);
     }
   }
@@ -259,7 +277,10 @@ export function QaClient() {
           <Card className="min-h-[280px]">
             <CardHeader className="flex flex-row items-center justify-between gap-3">
               <CardTitle>Direct</CardTitle>
-              <ModelBadge model={directModel || selectedModel} />
+              <span className="flex min-w-0 max-w-[72%] items-center justify-end gap-2">
+                <ElapsedBadge elapsedMs={queryElapsedMs} />
+                <ModelBadge model={directModel || selectedModel} />
+              </span>
             </CardHeader>
             <CardContent>
               <MarkdownAnswer>{directAnswer}</MarkdownAnswer>
@@ -269,7 +290,10 @@ export function QaClient() {
           <Card className="min-h-[280px]">
             <CardHeader className="flex flex-row items-center justify-between gap-3">
               <CardTitle>With RAG</CardTitle>
-              <ModelBadge model={ragModel || selectedModel} />
+              <span className="flex min-w-0 max-w-[72%] items-center justify-end gap-2">
+                <ElapsedBadge elapsedMs={queryElapsedMs} />
+                <ModelBadge model={ragModel || selectedModel} />
+              </span>
             </CardHeader>
             <CardContent className="grid gap-4">
               <MarkdownAnswer>{ragAnswer}</MarkdownAnswer>
@@ -383,8 +407,23 @@ function ModelAvatar({ meta }: { meta: ModelMeta }) {
 
 function ModelBadge({ model }: { model: string }) {
   return (
-    <span className="max-w-[60%] truncate rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-2 py-1 font-mono text-[11px] leading-none text-[var(--muted)]">
+    <span className="min-w-0 truncate rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-2 py-1 font-mono text-[11px] leading-none text-[var(--muted)]">
       {displayModel(model)}
+    </span>
+  );
+}
+
+function ElapsedBadge({ elapsedMs }: { elapsedMs: number | null }) {
+  if (elapsedMs === null) {
+    return null;
+  }
+
+  return (
+    <span
+      aria-label={`Query elapsed time ${formatElapsed(elapsedMs)}`}
+      className="shrink-0 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-2 py-1 font-mono text-[11px] leading-none text-[var(--muted)]"
+    >
+      {formatElapsed(elapsedMs)}
     </span>
   );
 }
@@ -522,6 +561,14 @@ function publicStatus(payload: QaPayload) {
 
 function displayModel(model: string) {
   return modelMeta(model).label || model.replace(/:free$/, '');
+}
+
+function formatElapsed(ms: number) {
+  const elapsed = Math.max(0, ms);
+  if (elapsed < 1000) {
+    return `${Math.round(elapsed)} ms`;
+  }
+  return `${(elapsed / 1000).toFixed(elapsed < 10_000 ? 1 : 0)} s`;
 }
 
 function modelMeta(model: string): ModelMeta {

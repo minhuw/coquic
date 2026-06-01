@@ -5,19 +5,19 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
 if [[ $# -ne 2 ]]; then
-  echo "usage: $0 <binary-path> <site-dir>" >&2
+  echo "usage: $0 <binary-path> <app-dir>" >&2
   exit 1
 fi
 
 binary_path="$1"
-site_dir="$2"
+app_dir="$2"
 
 if [[ ! -f "${binary_path}" ]]; then
   echo "missing binary path: ${binary_path}" >&2
   exit 1
 fi
-if [[ ! -d "${site_dir}" ]]; then
-  echo "missing site dir: ${site_dir}" >&2
+if [[ ! -d "${app_dir}" ]]; then
+  echo "missing app dir: ${app_dir}" >&2
   exit 1
 fi
 
@@ -47,6 +47,28 @@ fi
 if [[ ! -f "${ssh_key_path}" ]]; then
   echo "missing SSH key path: ${ssh_key_path}" >&2
   exit 1
+fi
+
+rag_env_vars=(
+  OPENROUTER_API_KEY
+  COQUIC_QDRANT_URL
+  COQUIC_QDRANT_API_KEY
+)
+rag_env_present=0
+rag_env_missing=()
+for env_var in "${rag_env_vars[@]}"; do
+  if [[ -n "${!env_var:-}" ]]; then
+    rag_env_present=$((rag_env_present + 1))
+  else
+    rag_env_missing+=("${env_var}")
+  fi
+done
+rag_env_configured=0
+if [[ ${rag_env_present} -gt 0 && ${rag_env_present} -lt ${#rag_env_vars[@]} ]]; then
+  echo "partial RAG QA environment provided; missing: ${rag_env_missing[*]}" >&2
+  exit 1
+elif [[ ${rag_env_present} -eq ${#rag_env_vars[@]} ]]; then
+  rag_env_configured=1
 fi
 
 remote_releases_root="/opt/coquic-demo/releases"
@@ -162,11 +184,17 @@ if [[ "${same_release_repair_mode}" == "1" ]]; then
     "${remote_upload_dir}/current.h3-server.bak" \
     "${remote_upload_dir}/current.h3-server.absent" \
     "755"
-  # rollback: restore same-release /opt/coquic-demo/current/site
+  # rollback: restore same-release /opt/coquic-demo/current/app
   restore_dir_or_remove \
-    "/opt/coquic-demo/current/site" \
-    "${remote_upload_dir}/current.site.bak" \
-    "${remote_upload_dir}/current.site.absent"
+    "/opt/coquic-demo/current/app" \
+    "${remote_upload_dir}/current.app.bak" \
+    "${remote_upload_dir}/current.app.absent"
+  # rollback: restore same-release /opt/coquic-demo/current/run-demo.sh
+  restore_or_remove \
+    "/opt/coquic-demo/current/run-demo.sh" \
+    "${remote_upload_dir}/current.run-demo.sh.bak" \
+    "${remote_upload_dir}/current.run-demo.sh.absent" \
+    "755"
 fi
 
 # rollback: cleanup failed ${remote_release_dir}
@@ -192,6 +220,11 @@ restore_or_remove \
   "/etc/coquic-demo/tls/privkey.pem" \
   "${remote_upload_dir}/privkey.pem.bak" \
   "${remote_upload_dir}/privkey.pem.absent" \
+  "600"
+restore_or_remove \
+  "/etc/coquic-demo/rag.env" \
+  "${remote_upload_dir}/rag.env.bak" \
+  "${remote_upload_dir}/rag.env.absent" \
   "600"
 
 sudo systemctl daemon-reload
@@ -257,10 +290,19 @@ on_exit() {
 trap on_exit EXIT
 
 install -m 755 "${binary_path}" "${staging_dir}/h3-server"
-tar -C "${site_dir}" -cf "${staging_dir}/site.tar" .
+tar -C "${app_dir}" -cf "${staging_dir}/app.tar" .
+install -m 755 "${script_dir}/run-demo.sh" "${staging_dir}/run-demo.sh"
 install -m 644 "${script_dir}/coquic-demo.service" "${staging_dir}/coquic-demo.service"
 printf '%s' "${COQUIC_DEMO_CERT_CHAIN_PEM}" > "${staging_dir}/fullchain.pem"
 printf '%s' "${COQUIC_DEMO_PRIVATE_KEY_PEM}" > "${staging_dir}/privkey.pem"
+if [[ ${rag_env_configured} -eq 1 ]]; then
+  {
+    printf 'export COQUIC_DEMO_QA_ENABLED=true\n'
+    for env_var in "${rag_env_vars[@]}"; do
+      printf 'export %s=%q\n' "${env_var}" "${!env_var}"
+    done
+  } > "${staging_dir}/rag.env"
+fi
 
 previous_release_target="$(
   ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_current_link}" "${remote_releases_root}" <<'EOF'
@@ -298,6 +340,31 @@ printf '%s\n' "${canonical_target}"
 EOF
 )"
 
+ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${rag_env_configured}" <<'EOF'
+set -euo pipefail
+rag_env_configured="$1"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "remote preflight failed: node is required to run the Next.js demo server" >&2
+  exit 1
+fi
+node_major="$(node -p 'Number(process.versions.node.split(".")[0])')"
+if [[ "${node_major}" -lt 20 ]]; then
+  echo "remote preflight failed: Node.js >=20 is required, found $(node --version)" >&2
+  exit 1
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  echo "remote preflight failed: curl is required for local Next.js startup checks" >&2
+  exit 1
+fi
+if [[ "${rag_env_configured}" == "1" ]] || sudo test -f /etc/coquic-demo/rag.env; then
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "remote preflight failed: uv is required to run the RAG QA API" >&2
+    exit 1
+  fi
+fi
+EOF
+
 if [[ "${previous_release_target}" == "${remote_release_dir}" ]]; then
   # same-release repair mode
   same_release_repair_mode=1
@@ -309,10 +376,14 @@ remote_upload_dir="$(
 )"
 
 scp "${scp_opts[@]}" "${staging_dir}/h3-server" "${remote_target}:${remote_upload_dir}/h3-server"
-scp "${scp_opts[@]}" "${staging_dir}/site.tar" "${remote_target}:${remote_upload_dir}/site.tar"
+scp "${scp_opts[@]}" "${staging_dir}/app.tar" "${remote_target}:${remote_upload_dir}/app.tar"
+scp "${scp_opts[@]}" "${staging_dir}/run-demo.sh" "${remote_target}:${remote_upload_dir}/run-demo.sh"
 scp "${scp_opts[@]}" "${staging_dir}/coquic-demo.service" "${remote_target}:${remote_upload_dir}/coquic-demo.service"
 scp "${scp_opts[@]}" "${staging_dir}/fullchain.pem" "${remote_target}:${remote_upload_dir}/fullchain.pem"
 scp "${scp_opts[@]}" "${staging_dir}/privkey.pem" "${remote_target}:${remote_upload_dir}/privkey.pem"
+if [[ ${rag_env_configured} -eq 1 ]]; then
+  scp "${scp_opts[@]}" "${staging_dir}/rag.env" "${remote_target}:${remote_upload_dir}/rag.env"
+fi
 
 rollback_armed=1
 
@@ -348,6 +419,7 @@ if sudo systemctl is-enabled --quiet coquic-demo.service; then
 fi
 
 sudo install -d -m 755 /opt/coquic-demo/releases
+sudo install -d -m 755 /etc/coquic-demo
 sudo install -d -m 755 /etc/coquic-demo/tls
 
 if [[ "${service_was_active}" == "1" ]]; then
@@ -373,6 +445,10 @@ backup_or_mark_absent \
   "/etc/coquic-demo/tls/privkey.pem" \
   "${remote_upload_dir}/privkey.pem.bak" \
   "${remote_upload_dir}/privkey.pem.absent"
+backup_or_mark_absent \
+  "/etc/coquic-demo/rag.env" \
+  "${remote_upload_dir}/rag.env.bak" \
+  "${remote_upload_dir}/rag.env.absent"
 
 if [[ "${same_release_repair_mode}" != "1" ]]; then
   sudo rm -rf "${remote_release_dir}"
@@ -383,11 +459,16 @@ else
     "/opt/coquic-demo/current/h3-server" \
     "${remote_upload_dir}/current.h3-server.bak" \
     "${remote_upload_dir}/current.h3-server.absent"
-  # same-release backup /opt/coquic-demo/current/site
+  # same-release backup /opt/coquic-demo/current/app
   backup_or_mark_absent \
-    "/opt/coquic-demo/current/site" \
-    "${remote_upload_dir}/current.site.bak" \
-    "${remote_upload_dir}/current.site.absent"
+    "/opt/coquic-demo/current/app" \
+    "${remote_upload_dir}/current.app.bak" \
+    "${remote_upload_dir}/current.app.absent"
+  # same-release backup /opt/coquic-demo/current/run-demo.sh
+  backup_or_mark_absent \
+    "/opt/coquic-demo/current/run-demo.sh" \
+    "${remote_upload_dir}/current.run-demo.sh.bak" \
+    "${remote_upload_dir}/current.run-demo.sh.absent"
   # same-release gate: stop active service before in-place mutation
   if [[ "${service_was_active}" == "1" ]]; then
     sudo systemctl stop coquic-demo.service
@@ -401,33 +482,41 @@ else
 fi
 
 sudo install -m 755 "${remote_upload_dir}/h3-server" "${remote_release_dir}/h3-server"
-sudo rm -rf "${remote_release_dir}/site"
-sudo install -d -m 755 "${remote_release_dir}/site"
-sudo tar -xf "${remote_upload_dir}/site.tar" -C "${remote_release_dir}/site"
-if sudo test -f /opt/coquic-demo/current/site/perf-results.json &&
-   ! sudo test -f "${remote_release_dir}/site/perf-results.json"; then
-  sudo install -m 644 /opt/coquic-demo/current/site/perf-results.json "${remote_release_dir}/site/perf-results.json"
+sudo install -m 755 "${remote_upload_dir}/run-demo.sh" "${remote_release_dir}/run-demo.sh"
+sudo rm -rf "${remote_release_dir}/app"
+sudo install -d -m 755 "${remote_release_dir}/app"
+sudo tar -xf "${remote_upload_dir}/app.tar" -C "${remote_release_dir}/app"
+previous_app_public_dir="/opt/coquic-demo/current/app/public"
+if [[ "${same_release_repair_mode}" == "1" ]]; then
+  previous_app_public_dir="${remote_upload_dir}/current.app.bak/public"
 fi
-if sudo test -f /opt/coquic-demo/current/site/perf-history.json &&
-   ! sudo test -f "${remote_release_dir}/site/perf-history.json"; then
-  sudo install -m 644 /opt/coquic-demo/current/site/perf-history.json "${remote_release_dir}/site/perf-history.json"
+if sudo test -f "${previous_app_public_dir}/perf-results.json" &&
+   ! sudo test -f "${remote_release_dir}/app/public/perf-results.json"; then
+  sudo install -m 644 "${previous_app_public_dir}/perf-results.json" "${remote_release_dir}/app/public/perf-results.json"
 fi
-if sudo test -f /opt/coquic-demo/current/site/interop-results.json &&
-   ! sudo test -f "${remote_release_dir}/site/interop-results.json"; then
-  sudo install -m 644 /opt/coquic-demo/current/site/interop-results.json "${remote_release_dir}/site/interop-results.json"
+if sudo test -f "${previous_app_public_dir}/perf-history.json" &&
+   ! sudo test -f "${remote_release_dir}/app/public/perf-history.json"; then
+  sudo install -m 644 "${previous_app_public_dir}/perf-history.json" "${remote_release_dir}/app/public/perf-history.json"
 fi
-if sudo test -f /opt/coquic-demo/current/site/coverage-results.json &&
-   ! sudo test -f "${remote_release_dir}/site/coverage-results.json"; then
-  sudo install -m 644 /opt/coquic-demo/current/site/coverage-results.json "${remote_release_dir}/site/coverage-results.json"
+if sudo test -f "${previous_app_public_dir}/interop-results.json" &&
+   ! sudo test -f "${remote_release_dir}/app/public/interop-results.json"; then
+  sudo install -m 644 "${previous_app_public_dir}/interop-results.json" "${remote_release_dir}/app/public/interop-results.json"
 fi
-if sudo test -d /opt/coquic-demo/current/site/coverage &&
-   ! sudo test -d "${remote_release_dir}/site/coverage"; then
-  sudo cp -a /opt/coquic-demo/current/site/coverage "${remote_release_dir}/site/coverage"
+if sudo test -f "${previous_app_public_dir}/coverage-results.json" &&
+   ! sudo test -f "${remote_release_dir}/app/public/coverage-results.json"; then
+  sudo install -m 644 "${previous_app_public_dir}/coverage-results.json" "${remote_release_dir}/app/public/coverage-results.json"
+fi
+if sudo test -d "${previous_app_public_dir}/coverage" &&
+   ! sudo test -d "${remote_release_dir}/app/public/coverage"; then
+  sudo cp -a "${previous_app_public_dir}/coverage" "${remote_release_dir}/app/public/coverage"
 fi
 
 sudo install -m 644 "${remote_upload_dir}/coquic-demo.service" /etc/systemd/system/coquic-demo.service
 sudo install -m 644 "${remote_upload_dir}/fullchain.pem" /etc/coquic-demo/tls/fullchain.pem
 sudo install -m 600 "${remote_upload_dir}/privkey.pem" /etc/coquic-demo/tls/privkey.pem
+if sudo test -f "${remote_upload_dir}/rag.env"; then
+  sudo install -m 600 "${remote_upload_dir}/rag.env" /etc/coquic-demo/rag.env
+fi
 
 sudo ln -sfnT "${remote_release_dir}" "${remote_current_link}"
 sudo systemctl daemon-reload
@@ -536,6 +625,26 @@ for attempt in $(seq 1 "${verification_attempts}"); do
 done
 if [[ ${wasm_mime_verified} -ne 1 ]]; then
   fail_with_rollback "deployment verification failed: wasm MIME type did not converge after retries"
+fi
+
+if [[ ${rag_env_configured} -eq 1 ]]; then
+  qa_verified=0
+  for attempt in $(seq 1 "${verification_attempts}"); do
+    # verification retry loop: RAG QA health through Next rewrite
+    qa_health=""
+    if qa_health="$(timeout 20s "${curl_http3_bin}" --http3-only -sS "${url}rag-api/api/health" 2>/dev/null)"; then
+      if grep -Fq '"ready":true' <<<"${qa_health}"; then
+        qa_verified=1
+        break
+      fi
+    fi
+    if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
+      sleep "${attempt}"
+    fi
+  done
+  if [[ ${qa_verified} -ne 1 ]]; then
+    fail_with_rollback "deployment verification failed: RAG QA health did not converge after retries"
+  fi
 fi
 
 rollback_armed=0

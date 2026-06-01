@@ -10,6 +10,9 @@ on:
       - main
     paths:
       - demo/**
+      - rag/**
+      - references/rfc/**
+      - references/demo-deployment.md
       - docs/**
       - src/**
       - build.zig
@@ -46,9 +49,9 @@ jobs:
           npm install
           npm run build:demo
 
-      - name: Package demo site
+      - name: Package demo app
         working-directory: demo/next
-        run: npm run package:demo -- "${RUNNER_TEMP}/demo-site"
+        run: npm run package:demo -- "${RUNNER_TEMP}/demo-app"
 
       - name: Configure SSH
         env:
@@ -67,4 +70,7 @@ jobs:
         env:
           COQUIC_DEMO_CERT_CHAIN_PEM: ${{ secrets.COQUIC_DEMO_CERT_CHAIN_PEM }}
           COQUIC_DEMO_PRIVATE_KEY_PEM: ${{ secrets.COQUIC_DEMO_PRIVATE_KEY_PEM }}
-        run: demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-site"
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          COQUIC_QDRANT_URL: ${{ secrets.COQUIC_QDRANT_URL }}
+          COQUIC_QDRANT_API_KEY: ${{ secrets.COQUIC_QDRANT_API_KEY }}
+        run: demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-app"

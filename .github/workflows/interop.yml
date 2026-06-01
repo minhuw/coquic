@@ -292,7 +292,7 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
             minhuw@coquic.minhuw.dev \
-            "sudo install -m 644 /tmp/coquic-interop-results.json /opt/coquic-demo/current/site/interop-results.json && rm -f /tmp/coquic-interop-results.json"
+            "sudo install -m 644 /tmp/coquic-interop-results.json /opt/coquic-demo/current/app/public/interop-results.json && rm -f /tmp/coquic-interop-results.json"
 
       - name: Fail On Interop Job Errors
         if: always()

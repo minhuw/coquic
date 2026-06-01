@@ -1557,7 +1557,7 @@ EOF
           search_dir="$PWD"
           while true; do
             if [ -f "$search_dir/build.zig" ] && [ -d "$search_dir/references/rfc" ]; then
-              exec "$search_dir/tools/rag/scripts/qdrant-dev" "$@"
+              exec "$search_dir/rag/scripts/qdrant-dev" "$@"
             fi
             if [ "$search_dir" = "/" ]; then
               echo "Unable to find repository root from $PWD" >&2

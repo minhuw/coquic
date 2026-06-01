@@ -466,76 +466,6 @@ CodecResult<PacketDecodeResult> decode_retry_packet(BufferReader &reader, std::u
     });
 }
 
-CodecResult<PacketDecodeResult> decode_short_header_packet(std::span<const std::byte> bytes,
-                                                           BufferReader &reader,
-                                                           std::uint8_t first_byte,
-                                                           const DeserializeOptions &options) {
-    if ((first_byte & 0x40u) == 0 && !options.accept_greased_quic_bit) {
-        return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_fixed_bit, 0);
-    }
-    if ((first_byte & 0x18u) != 0) {
-        return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_reserved_bits, 0);
-    }
-
-    if (!options.one_rtt_destination_connection_id_length.has_value()) {
-        return CodecResult<PacketDecodeResult>::failure(
-            CodecErrorCode::malformed_short_header_context, 0);
-    }
-
-    const auto destination_connection_id_length =
-        options.one_rtt_destination_connection_id_length.value();
-    if (destination_connection_id_length > reader.remaining()) {
-        return CodecResult<PacketDecodeResult>::failure(
-            CodecErrorCode::malformed_short_header_context, reader.offset());
-    }
-
-    const auto destination_connection_id_bytes =
-        reader.read_exact(destination_connection_id_length).value();
-
-    OneRttPacket packet;
-    packet.spin_bit = (first_byte & 0x20u) != 0;
-    packet.key_phase = (first_byte & 0x04u) != 0;
-    packet.destination_connection_id = ConnectionId{
-        destination_connection_id_bytes.begin(),
-        destination_connection_id_bytes.end(),
-    };
-    packet.packet_number_length = static_cast<std::uint8_t>((first_byte & 0x03u) + 1);
-
-    auto packet_number = read_packet_number(reader, packet.packet_number_length);
-    if (!packet_number.has_value()) {
-        return CodecResult<PacketDecodeResult>::failure(packet_number.error().code,
-                                                        packet_number.error().offset);
-    }
-    packet.truncated_packet_number = packet_number.value();
-
-    if (reader.remaining() == 0) {
-        return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::empty_packet_payload,
-                                                        reader.offset());
-    }
-
-    const auto payload = reader.read_exact(reader.remaining()).value();
-    std::size_t payload_offset = 0;
-    while (payload_offset < payload.size()) {
-        const auto decoded = deserialize_frame(payload.subspan(payload_offset));
-        if (!decoded.has_value()) {
-            return CodecResult<PacketDecodeResult>::failure(
-                decoded.error().code, reader.offset() + payload_offset + decoded.error().offset);
-        }
-        if (!frame_allowed_in_packet_type(decoded.value().frame, ProtectedPacketType::one_rtt)) {
-            return CodecResult<PacketDecodeResult>::failure(
-                CodecErrorCode::frame_not_allowed_in_packet_type, reader.offset() + payload_offset);
-        }
-
-        packet.frames.push_back(decoded.value().frame);
-        payload_offset += decoded.value().bytes_consumed;
-    }
-
-    return CodecResult<PacketDecodeResult>::success(PacketDecodeResult{
-        .packet = std::move(packet),
-        .bytes_consumed = bytes.size(),
-    });
-}
-
 CodecResult<std::vector<std::byte>> serialize_long_header_fields(
     std::uint32_t version, const ConnectionId &destination_connection_id,
     const ConnectionId &source_connection_id, const std::vector<std::byte> *initial_token,
@@ -702,7 +632,76 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
     const auto first_byte = static_cast<std::uint8_t>(reader.read_byte().value());
 
     if ((first_byte & 0x80u) == 0) {
-        return decode_short_header_packet(bytes, reader, first_byte, options);
+        if ((first_byte & 0x40u) == 0 && !options.accept_greased_quic_bit) {
+            return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_fixed_bit, 0);
+        }
+        if ((first_byte & 0x18u) != 0) {
+            return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_reserved_bits,
+                                                            0);
+        }
+
+        if (!options.one_rtt_destination_connection_id_length.has_value()) {
+            return CodecResult<PacketDecodeResult>::failure(
+                CodecErrorCode::malformed_short_header_context, 0);
+        }
+
+        const auto destination_connection_id_length =
+            options.one_rtt_destination_connection_id_length.value();
+        if (destination_connection_id_length > reader.remaining()) {
+            return CodecResult<PacketDecodeResult>::failure(
+                CodecErrorCode::malformed_short_header_context, reader.offset());
+        }
+
+        const auto destination_connection_id_bytes =
+            reader.read_exact(destination_connection_id_length).value();
+        const auto packet_number_length = static_cast<std::uint8_t>((first_byte & 0x03u) + 1);
+        auto decoded_packet_number = read_packet_number(reader, packet_number_length);
+        if (!decoded_packet_number.has_value()) {
+            return CodecResult<PacketDecodeResult>::failure(decoded_packet_number.error().code,
+                                                            decoded_packet_number.error().offset);
+        }
+
+        if (reader.remaining() == 0) {
+            return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::empty_packet_payload,
+                                                            reader.offset());
+        }
+
+        const auto payload = reader.read_exact(reader.remaining()).value();
+        std::vector<Frame> frames;
+        for (std::size_t payload_offset = 0; payload_offset < payload.size();) {
+            const auto decoded = deserialize_frame(payload.subspan(payload_offset));
+            if (!decoded.has_value()) {
+                return CodecResult<PacketDecodeResult>::failure(decoded.error().code,
+                                                                reader.offset() + payload_offset +
+                                                                    decoded.error().offset);
+            }
+            if (!frame_allowed_in_packet_type(decoded.value().frame,
+                                              ProtectedPacketType::one_rtt)) {
+                return CodecResult<PacketDecodeResult>::failure(
+                    CodecErrorCode::frame_not_allowed_in_packet_type,
+                    reader.offset() + payload_offset);
+            }
+
+            frames.push_back(decoded.value().frame);
+            payload_offset += decoded.value().bytes_consumed;
+        }
+
+        return CodecResult<PacketDecodeResult>::success(PacketDecodeResult{
+            .packet =
+                OneRttPacket{
+                    .spin_bit = (first_byte & 0x20u) != 0,
+                    .key_phase = (first_byte & 0x04u) != 0,
+                    .destination_connection_id =
+                        ConnectionId{
+                            destination_connection_id_bytes.begin(),
+                            destination_connection_id_bytes.end(),
+                        },
+                    .packet_number_length = packet_number_length,
+                    .truncated_packet_number = decoded_packet_number.value(),
+                    .frames = std::move(frames),
+                },
+            .bytes_consumed = bytes.size(),
+        });
     }
 
     const auto version_bytes = reader.read_exact(4);

@@ -118,24 +118,6 @@ bool protocol_version_uses_legacy_duration_units(std::uint32_t protocol_version)
            protocol_version == kQuicPerfProtocolVersionMilliseconds;
 }
 
-bool take_required_u32(std::span<const std::byte> &in, std::uint32_t &out) {
-    std::optional<std::uint32_t> value = take_u32(in);
-    if (!value.has_value()) {
-        return false;
-    }
-    out = value.value();
-    return true;
-}
-
-bool take_required_u64(std::span<const std::byte> &in, std::uint64_t &out) {
-    std::optional<std::uint64_t> value = take_u64(in);
-    if (!value.has_value()) {
-        return false;
-    }
-    out = value.value();
-    return true;
-}
-
 std::uint64_t duration_to_u64(quic::QuicCoreDuration duration) {
     return static_cast<std::uint64_t>(duration.count());
 }
@@ -166,18 +148,24 @@ std::uint8_t session_start_optional_field_flags(const QuicPerfSessionStart &star
 }
 
 bool take_session_start_header(std::span<const std::byte> &in, RawSessionStartFields &fields) {
+    std::optional<std::uint32_t> protocol_version = take_u32(in);
     std::optional<std::uint8_t> mode_raw = std::nullopt;
     std::optional<std::uint8_t> direction_raw = std::nullopt;
-    if (!take_required_u32(in, fields.protocol_version)) {
+    if (!protocol_version.has_value()) {
         return false;
     }
+    fields.protocol_version = protocol_version.value();
+
     mode_raw = take_u8(in);
     direction_raw = take_u8(in);
-    if (!mode_raw.has_value() || !direction_raw.has_value() ||
-        !take_required_u64(in, fields.request_bytes) ||
-        !take_required_u64(in, fields.response_bytes)) {
+    std::optional<std::uint64_t> request_bytes = take_u64(in);
+    std::optional<std::uint64_t> response_bytes = take_u64(in);
+    if (!mode_raw.has_value() || !direction_raw.has_value() || !request_bytes.has_value() ||
+        !response_bytes.has_value()) {
         return false;
     }
+    fields.request_bytes = request_bytes.value();
+    fields.response_bytes = response_bytes.value();
 
     std::optional<QuicPerfMode> mode = parse_mode(mode_raw.value());
     std::optional<QuicPerfDirection> direction = parse_direction(direction_raw.value());
@@ -204,13 +192,29 @@ bool take_session_start_optional_flags(std::span<const std::byte> &in,
 
 std::optional<RawSessionStartFields> take_session_start_fields(std::span<const std::byte> &in) {
     RawSessionStartFields fields;
-    if (!take_session_start_header(in, fields) || !take_session_start_optional_flags(in, fields) ||
-        !take_required_u64(in, fields.total_bytes) || !take_required_u64(in, fields.requests) ||
-        !take_required_u64(in, fields.warmup) || !take_required_u64(in, fields.duration) ||
-        !take_required_u64(in, fields.streams) || !take_required_u64(in, fields.connections) ||
-        !take_required_u64(in, fields.requests_in_flight)) {
+    if (!take_session_start_header(in, fields) || !take_session_start_optional_flags(in, fields)) {
         return std::nullopt;
     }
+
+    std::optional<std::uint64_t> total_bytes = take_u64(in);
+    std::optional<std::uint64_t> requests = take_u64(in);
+    std::optional<std::uint64_t> warmup = take_u64(in);
+    std::optional<std::uint64_t> duration = take_u64(in);
+    std::optional<std::uint64_t> streams = take_u64(in);
+    std::optional<std::uint64_t> connections = take_u64(in);
+    std::optional<std::uint64_t> requests_in_flight = take_u64(in);
+    if (!total_bytes.has_value() || !requests.has_value() || !warmup.has_value() ||
+        !duration.has_value() || !streams.has_value() || !connections.has_value() ||
+        !requests_in_flight.has_value()) {
+        return std::nullopt;
+    }
+    fields.total_bytes = total_bytes.value();
+    fields.requests = requests.value();
+    fields.warmup = warmup.value();
+    fields.duration = duration.value();
+    fields.streams = streams.value();
+    fields.connections = connections.value();
+    fields.requests_in_flight = requests_in_flight.value();
     return fields;
 }
 

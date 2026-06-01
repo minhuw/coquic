@@ -118,15 +118,6 @@ bool protocol_version_uses_legacy_duration_units(std::uint32_t protocol_version)
            protocol_version == kQuicPerfProtocolVersionMilliseconds;
 }
 
-bool take_required_u8(std::span<const std::byte> &in, std::uint8_t &out) {
-    std::optional<std::uint8_t> value = take_u8(in);
-    if (!value.has_value()) {
-        return false;
-    }
-    out = value.value();
-    return true;
-}
-
 bool take_required_u32(std::span<const std::byte> &in, std::uint32_t &out) {
     std::optional<std::uint32_t> value = take_u32(in);
     if (!value.has_value()) {
@@ -175,16 +166,21 @@ std::uint8_t session_start_optional_field_flags(const QuicPerfSessionStart &star
 }
 
 bool take_session_start_header(std::span<const std::byte> &in, RawSessionStartFields &fields) {
-    std::uint8_t mode_raw = 0;
-    std::uint8_t direction_raw = 0;
-    if (!take_required_u32(in, fields.protocol_version) || !take_required_u8(in, mode_raw) ||
-        !take_required_u8(in, direction_raw) || !take_required_u64(in, fields.request_bytes) ||
+    std::optional<std::uint8_t> mode_raw = std::nullopt;
+    std::optional<std::uint8_t> direction_raw = std::nullopt;
+    if (!take_required_u32(in, fields.protocol_version)) {
+        return false;
+    }
+    mode_raw = take_u8(in);
+    direction_raw = take_u8(in);
+    if (!mode_raw.has_value() || !direction_raw.has_value() ||
+        !take_required_u64(in, fields.request_bytes) ||
         !take_required_u64(in, fields.response_bytes)) {
         return false;
     }
 
-    std::optional<QuicPerfMode> mode = parse_mode(mode_raw);
-    std::optional<QuicPerfDirection> direction = parse_direction(direction_raw);
+    std::optional<QuicPerfMode> mode = parse_mode(mode_raw.value());
+    std::optional<QuicPerfDirection> direction = parse_direction(direction_raw.value());
     if (!mode.has_value() || !direction.has_value()) {
         return false;
     }
@@ -196,7 +192,12 @@ bool take_session_start_header(std::span<const std::byte> &in, RawSessionStartFi
 bool take_session_start_optional_flags(std::span<const std::byte> &in,
                                        RawSessionStartFields &fields) {
     if (protocol_version_has_session_start_flags(fields.protocol_version)) {
-        return take_required_u8(in, fields.optional_flags);
+        std::optional<std::uint8_t> optional_flags = take_u8(in);
+        if (!optional_flags.has_value()) {
+            return false;
+        }
+        fields.optional_flags = optional_flags.value();
+        return true;
     }
     return fields.protocol_version == kQuicPerfProtocolVersionLegacy;
 }

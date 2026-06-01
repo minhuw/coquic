@@ -76,6 +76,7 @@ remote_releases_root="/opt/coquic-demo/releases"
 remote_release_dir="${remote_releases_root}/${release_id}"
 remote_current_link="/opt/coquic-demo/current"
 remote_target="minhuw@coquic.minhuw.dev"
+remote_release_retention="${COQUIC_DEMO_RELEASE_RETENTION:-3}"
 
 ssh_opts=(
   -p "${ssh_port}"
@@ -341,6 +342,48 @@ esac
 printf '%s\n' "${canonical_target}"
 EOF
 )"
+
+ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_releases_root}" "${previous_release_target}" "${remote_release_retention}" <<'EOF'
+set -euo pipefail
+remote_releases_root="$1"
+previous_release_target="$2"
+remote_release_retention="$3"
+
+if [[ ! "${remote_release_retention}" =~ ^[0-9]+$ || "${remote_release_retention}" -lt 1 ]]; then
+  echo "remote preflight failed: invalid release retention: ${remote_release_retention}" >&2
+  exit 1
+fi
+if ! sudo test -d "${remote_releases_root}"; then
+  exit 0
+fi
+if [[ -n "${previous_release_target}" ]]; then
+  case "${previous_release_target}" in
+    "${remote_releases_root}/"*) ;;
+    *)
+      echo "remote preflight failed: previous release is outside ${remote_releases_root}: ${previous_release_target}" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+kept_non_current=0
+mapfile -t release_paths < <(
+  sudo find "${remote_releases_root}" -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p\n' |
+    sort -nr |
+    awk '{print $2}'
+)
+for release_path in "${release_paths[@]}"; do
+  canonical_release_path="$(readlink -f "${release_path}" || true)"
+  if [[ -n "${previous_release_target}" && "${canonical_release_path}" == "${previous_release_target}" ]]; then
+    continue
+  fi
+  if [[ "${kept_non_current}" -lt $((remote_release_retention - 1)) ]]; then
+    kept_non_current=$((kept_non_current + 1))
+    continue
+  fi
+  sudo rm -rf -- "${release_path}"
+done
+EOF
 
 ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${rag_env_configured}" <<'EOF'
 set -euo pipefail

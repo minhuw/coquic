@@ -1,14 +1,16 @@
+#include <gtest/gtest.h>
+
 #include "tests/support/http3/connection_test_support.h"
 
 namespace {
 
-void expect_get_request_head(const coquic::http3::Http3PeerRequestHeadEvent &head) {
-    EXPECT_EQ(head.stream_id, 0u);
-    EXPECT_EQ(head.head.method, "GET");
-    EXPECT_EQ(head.head.scheme, "https");
-    EXPECT_EQ(head.head.authority, "example.test");
-    EXPECT_EQ(head.head.path, "/hello");
-    EXPECT_EQ(head.head.content_length, std::optional<std::uint64_t>(0u));
+void expect_get_request_head(const coquic::http3::Http3PeerRequestHeadEvent &request_head_event) {
+    EXPECT_EQ(request_head_event.stream_id, 0u);
+    EXPECT_EQ(request_head_event.head.method, "GET");
+    EXPECT_EQ(request_head_event.head.scheme, "https");
+    EXPECT_EQ(request_head_event.head.authority, "example.test");
+    EXPECT_EQ(request_head_event.head.path, "/hello");
+    EXPECT_EQ(request_head_event.head.content_length, std::optional<std::uint64_t>(0u));
 }
 
 TEST(QuicHttp3ConnectionTest, ServerRoleRequestHeadersEmitPeerRequestHeadEvent) {
@@ -29,9 +31,10 @@ TEST(QuicHttp3ConnectionTest, ServerRoleRequestHeadersEmitPeerRequestHeadEvent) 
 
     EXPECT_FALSE(close_input_from(update).has_value());
     ASSERT_EQ(update.events.size(), 1u);
-    auto *head = std::get_if<coquic::http3::Http3PeerRequestHeadEvent>(&update.events[0]);
-    ASSERT_NE(head, nullptr);
-    expect_get_request_head(*head);
+    auto *request_head_event =
+        std::get_if<coquic::http3::Http3PeerRequestHeadEvent>(&update.events[0]);
+    ASSERT_NE(request_head_event, nullptr);
+    expect_get_request_head(*request_head_event);
 }
 
 TEST(QuicHttp3ConnectionTest, DataBeforeHeadersClosesConnectionWithFrameUnexpected) {
@@ -75,16 +78,18 @@ TEST(QuicHttp3ConnectionTest, RequestTrailersEmitEventsAndCompleteOnFin) {
     EXPECT_FALSE(close_input_from(update).has_value());
     ASSERT_EQ(update.events.size(), 4u);
 
-    auto *head = std::get_if<coquic::http3::Http3PeerRequestHeadEvent>(&update.events[0]);
-    ASSERT_NE(head, nullptr);
-    EXPECT_EQ(head->head.method, "POST");
-    EXPECT_EQ(head->head.path, "/upload");
-    EXPECT_EQ(head->head.content_length, std::optional<std::uint64_t>(4u));
+    auto *request_head_event =
+        std::get_if<coquic::http3::Http3PeerRequestHeadEvent>(&update.events[0]);
+    ASSERT_NE(request_head_event, nullptr);
+    EXPECT_EQ(request_head_event->head.method, "POST");
+    EXPECT_EQ(request_head_event->head.path, "/upload");
+    EXPECT_EQ(request_head_event->head.content_length, std::optional<std::uint64_t>(4u));
 
-    auto *body = std::get_if<coquic::http3::Http3PeerRequestBodyEvent>(&update.events[1]);
-    ASSERT_NE(body, nullptr);
-    EXPECT_EQ(body->stream_id, 0u);
-    EXPECT_EQ(body->body, bytes_from_text("ping"));
+    auto *request_body_event =
+        std::get_if<coquic::http3::Http3PeerRequestBodyEvent>(&update.events[1]);
+    ASSERT_NE(request_body_event, nullptr);
+    EXPECT_EQ(request_body_event->stream_id, 0u);
+    EXPECT_EQ(request_body_event->body, bytes_from_text("ping"));
 
     auto *trailers_event =
         std::get_if<coquic::http3::Http3PeerRequestTrailersEvent>(&update.events[2]);
@@ -92,9 +97,10 @@ TEST(QuicHttp3ConnectionTest, RequestTrailersEmitEventsAndCompleteOnFin) {
     EXPECT_EQ(trailers_event->stream_id, 0u);
     EXPECT_EQ(trailers_event->trailers, (coquic::http3::Http3Headers{{"etag", "done"}}));
 
-    auto *complete = std::get_if<coquic::http3::Http3PeerRequestCompleteEvent>(&update.events[3]);
-    ASSERT_NE(complete, nullptr);
-    EXPECT_EQ(complete->stream_id, 0u);
+    auto *complete_event =
+        std::get_if<coquic::http3::Http3PeerRequestCompleteEvent>(&update.events[3]);
+    ASSERT_NE(complete_event, nullptr);
+    EXPECT_EQ(complete_event->stream_id, 0u);
 }
 
 TEST(QuicHttp3ConnectionTest, DataAfterTrailingHeadersClosesConnectionWithFrameUnexpected) {
@@ -183,9 +189,10 @@ TEST(QuicHttp3ConnectionTest, ContentLengthMismatchResetsRequestStreamWithMessag
 
     EXPECT_FALSE(close_input_from(body_update).has_value());
     ASSERT_EQ(body_update.events.size(), 1u);
-    auto *body = std::get_if<coquic::http3::Http3PeerRequestBodyEvent>(&body_update.events[0]);
-    ASSERT_NE(body, nullptr);
-    EXPECT_EQ(body->body, bytes_from_text("abc"));
+    auto *request_body_event =
+        std::get_if<coquic::http3::Http3PeerRequestBodyEvent>(&body_update.events[0]);
+    ASSERT_NE(request_body_event, nullptr);
+    EXPECT_EQ(request_body_event->body, bytes_from_text("abc"));
 
     auto resets = reset_stream_inputs_from(body_update);
     ASSERT_EQ(resets.size(), 1u);
@@ -240,11 +247,12 @@ TEST(QuicHttp3ConnectionTest, BlockedRequestHeadersEmitEventOnlyAfterQpackUnbloc
         coquic::quic::QuicCoreTimePoint{});
     EXPECT_FALSE(close_input_from(unblocked_update).has_value());
     ASSERT_EQ(unblocked_update.events.size(), 1u);
-    auto *head = std::get_if<coquic::http3::Http3PeerRequestHeadEvent>(&unblocked_update.events[0]);
-    ASSERT_NE(head, nullptr);
-    EXPECT_EQ(head->stream_id, 0u);
-    EXPECT_EQ(head->head.authority, "www.example.com");
-    EXPECT_EQ(head->head.path, "/sample/path");
+    auto *request_head_event =
+        std::get_if<coquic::http3::Http3PeerRequestHeadEvent>(&unblocked_update.events[0]);
+    ASSERT_NE(request_head_event, nullptr);
+    EXPECT_EQ(request_head_event->stream_id, 0u);
+    EXPECT_EQ(request_head_event->head.authority, "www.example.com");
+    EXPECT_EQ(request_head_event->head.path, "/sample/path");
 }
 
 TEST(QuicHttp3ConnectionTest, CompletedRequestStreamsAreCleanedUp) {

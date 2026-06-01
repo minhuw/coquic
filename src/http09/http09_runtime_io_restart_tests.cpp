@@ -1223,30 +1223,31 @@ struct ServerBackendLoopInitialStateForTests {
     std::size_t send_calls = 0;
 };
 
-ServerBackendLoopInitialStateForTests
-capture_server_backend_loop_initial_state_for_tests(const ServerConnectionEndpointMap &endpoint_map,
-                                                    const ScriptedIoBackendForTests &backend) {
+ServerBackendLoopInitialStateForTests capture_server_backend_loop_initial_state_for_tests(
+    const ServerConnectionEndpointMap &tracked_endpoint_states,
+    const ScriptedIoBackendForTests &backend) {
     return ServerBackendLoopInitialStateForTests{
-        .endpoints = endpoint_map.size(),
-        .pending_endpoints = count_pending_server_endpoints_for_tests(endpoint_map),
+        .endpoints = tracked_endpoint_states.size(),
+        .pending_endpoints = count_pending_server_endpoints_for_tests(tracked_endpoint_states),
         .send_calls = backend.sent_datagrams.size(),
     };
 }
 
 ServerLoopResultForTests collect_server_backend_loop_result_for_tests(
     const Http09RuntimeConfig &config, QuicCore &server_core, EndpointDriveState &transport_state,
-    ServerConnectionEndpointMap &endpoint_map, ScriptedIoBackendForTests &backend,
+    ServerConnectionEndpointMap &tracked_endpoint_states, ScriptedIoBackendForTests &backend,
     const ServerBackendLoopInitialStateForTests &initial_state) {
     return ServerLoopResultForTests{
         .exit_code = run_http09_server_backend_loop(config, server_core, transport_state,
-                                                    endpoint_map, backend),
+                                                    tracked_endpoint_states, backend),
         .wait_calls = backend.wait_requests.size(),
         .initial_send_calls = initial_state.send_calls,
         .send_calls = backend.sent_datagrams.size(),
         .initial_endpoints = initial_state.endpoints,
         .initial_pending_endpoints = initial_state.pending_endpoints,
-        .remaining_endpoints = endpoint_map.size(),
-        .remaining_pending_endpoints = count_pending_server_endpoints_for_tests(endpoint_map),
+        .remaining_endpoints = tracked_endpoint_states.size(),
+        .remaining_pending_endpoints =
+            count_pending_server_endpoints_for_tests(tracked_endpoint_states),
     };
 }
 

@@ -228,11 +228,6 @@ std::optional<QuicPerfControlMessage> decode_perf_control_message(std::span<cons
             return std::nullopt;
         }
 
-        const auto decoded_total_bytes = total_bytes.value();
-        const auto decoded_requests = requests.value();
-        const auto decoded_warmup = warmup.value();
-        const auto decoded_duration = duration.value();
-
         QuicPerfSessionStart start;
         start.protocol_version = protocol_version.value();
         start.mode = mode.value();
@@ -240,27 +235,27 @@ std::optional<QuicPerfControlMessage> decode_perf_control_message(std::span<cons
         start.request_bytes = request_bytes.value();
         start.response_bytes = response_bytes.value();
         if (start.protocol_version == kQuicPerfProtocolVersionLegacy) {
-            if (decoded_total_bytes != 0) {
-                start.total_bytes = decoded_total_bytes;
+            if (total_bytes.value() != 0) {
+                start.total_bytes = total_bytes;
             }
-            if (decoded_requests != 0) {
-                start.requests = decoded_requests;
+            if (requests.value() != 0) {
+                start.requests = requests;
             }
         } else {
             if ((optional_flags & kSessionStartOptionalTotalBytesFlag) != 0) {
-                start.total_bytes = decoded_total_bytes;
+                start.total_bytes = total_bytes;
             }
             if ((optional_flags & kSessionStartOptionalRequestsFlag) != 0) {
-                start.requests = decoded_requests;
+                start.requests = requests;
             }
         }
         if (start.protocol_version == kQuicPerfProtocolVersionLegacy ||
             start.protocol_version == kQuicPerfProtocolVersionMilliseconds) {
-            start.warmup = legacy_milliseconds_from_u64(decoded_warmup);
-            start.duration = legacy_milliseconds_from_u64(decoded_duration);
+            start.warmup = legacy_milliseconds_from_u64(warmup.value());
+            start.duration = legacy_milliseconds_from_u64(duration.value());
         } else {
-            start.warmup = duration_from_u64(decoded_warmup);
-            start.duration = duration_from_u64(decoded_duration);
+            start.warmup = duration_from_u64(warmup.value());
+            start.duration = duration_from_u64(duration.value());
         }
         start.streams = streams.value();
         start.connections = connections.value();

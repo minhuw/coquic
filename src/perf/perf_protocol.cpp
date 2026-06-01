@@ -92,32 +92,6 @@ std::optional<QuicPerfDirection> parse_direction(std::uint8_t value) {
 constexpr std::uint8_t kSessionStartOptionalTotalBytesFlag = 0x01;
 constexpr std::uint8_t kSessionStartOptionalRequestsFlag = 0x02;
 
-struct RawSessionStartFields {
-    std::uint32_t protocol_version = 0;
-    QuicPerfMode mode = QuicPerfMode::bulk;
-    QuicPerfDirection direction = QuicPerfDirection::download;
-    std::uint64_t request_bytes = 0;
-    std::uint64_t response_bytes = 0;
-    std::uint64_t total_bytes = 0;
-    std::uint64_t requests = 0;
-    std::uint64_t warmup = 0;
-    std::uint64_t duration = 0;
-    std::uint64_t streams = 0;
-    std::uint64_t connections = 0;
-    std::uint64_t requests_in_flight = 0;
-    std::uint8_t optional_flags = 0;
-};
-
-bool protocol_version_has_session_start_flags(std::uint32_t protocol_version) {
-    return protocol_version == kQuicPerfProtocolVersion ||
-           protocol_version == kQuicPerfProtocolVersionMilliseconds;
-}
-
-bool protocol_version_uses_legacy_duration_units(std::uint32_t protocol_version) {
-    return protocol_version == kQuicPerfProtocolVersionLegacy ||
-           protocol_version == kQuicPerfProtocolVersionMilliseconds;
-}
-
 std::uint64_t duration_to_u64(quic::QuicCoreDuration duration) {
     return static_cast<std::uint64_t>(duration.count());
 }
@@ -145,118 +119,6 @@ std::uint8_t session_start_optional_field_flags(const QuicPerfSessionStart &star
         flags |= kSessionStartOptionalRequestsFlag;
     }
     return flags;
-}
-
-bool take_session_start_header(std::span<const std::byte> &in, RawSessionStartFields &fields) {
-    std::optional<std::uint32_t> protocol_version = take_u32(in);
-    std::optional<std::uint8_t> mode_raw = std::nullopt;
-    std::optional<std::uint8_t> direction_raw = std::nullopt;
-    if (!protocol_version.has_value()) {
-        return false;
-    }
-    fields.protocol_version = protocol_version.value();
-
-    mode_raw = take_u8(in);
-    direction_raw = take_u8(in);
-    std::optional<std::uint64_t> request_bytes = take_u64(in);
-    std::optional<std::uint64_t> response_bytes = take_u64(in);
-    if (!mode_raw.has_value() || !direction_raw.has_value() || !request_bytes.has_value() ||
-        !response_bytes.has_value()) {
-        return false;
-    }
-    fields.request_bytes = request_bytes.value();
-    fields.response_bytes = response_bytes.value();
-
-    std::optional<QuicPerfMode> mode = parse_mode(mode_raw.value());
-    std::optional<QuicPerfDirection> direction = parse_direction(direction_raw.value());
-    if (!mode.has_value() || !direction.has_value()) {
-        return false;
-    }
-    fields.mode = mode.value();
-    fields.direction = direction.value();
-    return true;
-}
-
-bool take_session_start_optional_flags(std::span<const std::byte> &in,
-                                       RawSessionStartFields &fields) {
-    if (protocol_version_has_session_start_flags(fields.protocol_version)) {
-        std::optional<std::uint8_t> optional_flags = take_u8(in);
-        if (!optional_flags.has_value()) {
-            return false;
-        }
-        fields.optional_flags = optional_flags.value();
-        return true;
-    }
-    return fields.protocol_version == kQuicPerfProtocolVersionLegacy;
-}
-
-std::optional<RawSessionStartFields> take_session_start_fields(std::span<const std::byte> &in) {
-    RawSessionStartFields fields;
-    if (!take_session_start_header(in, fields) || !take_session_start_optional_flags(in, fields)) {
-        return std::nullopt;
-    }
-
-    std::optional<std::uint64_t> total_bytes = take_u64(in);
-    std::optional<std::uint64_t> requests = take_u64(in);
-    std::optional<std::uint64_t> warmup = take_u64(in);
-    std::optional<std::uint64_t> duration = take_u64(in);
-    std::optional<std::uint64_t> streams = take_u64(in);
-    std::optional<std::uint64_t> connections = take_u64(in);
-    std::optional<std::uint64_t> requests_in_flight = take_u64(in);
-    if (!total_bytes.has_value() || !requests.has_value() || !warmup.has_value() ||
-        !duration.has_value() || !streams.has_value() || !connections.has_value() ||
-        !requests_in_flight.has_value()) {
-        return std::nullopt;
-    }
-    fields.total_bytes = total_bytes.value();
-    fields.requests = requests.value();
-    fields.warmup = warmup.value();
-    fields.duration = duration.value();
-    fields.streams = streams.value();
-    fields.connections = connections.value();
-    fields.requests_in_flight = requests_in_flight.value();
-    return fields;
-}
-
-void apply_session_start_optional_values(const RawSessionStartFields &fields,
-                                         QuicPerfSessionStart &start) {
-    if (fields.protocol_version == kQuicPerfProtocolVersionLegacy) {
-        if (fields.total_bytes != 0) {
-            start.total_bytes = fields.total_bytes;
-        }
-        if (fields.requests != 0) {
-            start.requests = fields.requests;
-        }
-        return;
-    }
-
-    if ((fields.optional_flags & kSessionStartOptionalTotalBytesFlag) != 0) {
-        start.total_bytes = fields.total_bytes;
-    }
-    if ((fields.optional_flags & kSessionStartOptionalRequestsFlag) != 0) {
-        start.requests = fields.requests;
-    }
-}
-
-QuicPerfSessionStart make_session_start(const RawSessionStartFields &fields) {
-    QuicPerfSessionStart start;
-    start.protocol_version = fields.protocol_version;
-    start.mode = fields.mode;
-    start.direction = fields.direction;
-    start.request_bytes = fields.request_bytes;
-    start.response_bytes = fields.response_bytes;
-    apply_session_start_optional_values(fields, start);
-    if (protocol_version_uses_legacy_duration_units(fields.protocol_version)) {
-        start.warmup = legacy_milliseconds_from_u64(fields.warmup);
-        start.duration = legacy_milliseconds_from_u64(fields.duration);
-    } else {
-        start.warmup = duration_from_u64(fields.warmup);
-        start.duration = duration_from_u64(fields.duration);
-    }
-    start.streams = fields.streams;
-    start.connections = fields.connections;
-    start.requests_in_flight = fields.requests_in_flight;
-    return start;
 }
 
 } // namespace
@@ -325,11 +187,85 @@ std::optional<QuicPerfControlMessage> decode_perf_control_message(std::span<cons
     const auto message_type = static_cast<QuicPerfMessageType>(type.value());
     switch (message_type) {
     case QuicPerfMessageType::session_start: {
-        std::optional<RawSessionStartFields> fields = take_session_start_fields(in);
-        if (!fields.has_value() || !in.empty()) {
+        auto protocol_version = take_u32(in);
+        auto mode_raw = take_u8(in);
+        auto direction_raw = take_u8(in);
+        auto request_bytes = take_u64(in);
+        auto response_bytes = take_u64(in);
+        if (!protocol_version.has_value() || !mode_raw.has_value() || !direction_raw.has_value() ||
+            !request_bytes.has_value() || !response_bytes.has_value()) {
             return std::nullopt;
         }
-        return QuicPerfControlMessage{make_session_start(fields.value())};
+
+        std::uint8_t optional_flags = 0;
+        if (protocol_version.value() == kQuicPerfProtocolVersion ||
+            protocol_version.value() == kQuicPerfProtocolVersionMilliseconds) {
+            const auto decoded_optional_flags = take_u8(in);
+            if (!decoded_optional_flags.has_value()) {
+                return std::nullopt;
+            }
+            optional_flags = decoded_optional_flags.value();
+        } else if (protocol_version.value() != kQuicPerfProtocolVersionLegacy) {
+            return std::nullopt;
+        }
+
+        auto total_bytes = take_u64(in);
+        auto requests = take_u64(in);
+        auto warmup = take_u64(in);
+        auto duration = take_u64(in);
+        auto streams = take_u64(in);
+        auto connections = take_u64(in);
+        auto requests_in_flight = take_u64(in);
+        if (!total_bytes.has_value() || !requests.has_value() || !warmup.has_value() ||
+            !duration.has_value() || !streams.has_value() || !connections.has_value() ||
+            !requests_in_flight.has_value()) {
+            return std::nullopt;
+        }
+
+        auto mode = parse_mode(mode_raw.value());
+        auto direction = parse_direction(direction_raw.value());
+        if (!mode.has_value() || !direction.has_value() || !in.empty()) {
+            return std::nullopt;
+        }
+
+        const auto decoded_total_bytes = total_bytes.value();
+        const auto decoded_requests = requests.value();
+        const auto decoded_warmup = warmup.value();
+        const auto decoded_duration = duration.value();
+
+        QuicPerfSessionStart start;
+        start.protocol_version = protocol_version.value();
+        start.mode = mode.value();
+        start.direction = direction.value();
+        start.request_bytes = request_bytes.value();
+        start.response_bytes = response_bytes.value();
+        if (start.protocol_version == kQuicPerfProtocolVersionLegacy) {
+            if (decoded_total_bytes != 0) {
+                start.total_bytes = decoded_total_bytes;
+            }
+            if (decoded_requests != 0) {
+                start.requests = decoded_requests;
+            }
+        } else {
+            if ((optional_flags & kSessionStartOptionalTotalBytesFlag) != 0) {
+                start.total_bytes = decoded_total_bytes;
+            }
+            if ((optional_flags & kSessionStartOptionalRequestsFlag) != 0) {
+                start.requests = decoded_requests;
+            }
+        }
+        if (start.protocol_version == kQuicPerfProtocolVersionLegacy ||
+            start.protocol_version == kQuicPerfProtocolVersionMilliseconds) {
+            start.warmup = legacy_milliseconds_from_u64(decoded_warmup);
+            start.duration = legacy_milliseconds_from_u64(decoded_duration);
+        } else {
+            start.warmup = duration_from_u64(decoded_warmup);
+            start.duration = duration_from_u64(decoded_duration);
+        }
+        start.streams = streams.value();
+        start.connections = connections.value();
+        start.requests_in_flight = requests_in_flight.value();
+        return QuicPerfControlMessage{start};
     }
     case QuicPerfMessageType::session_ready: {
         const auto protocol_version = take_u32(in);

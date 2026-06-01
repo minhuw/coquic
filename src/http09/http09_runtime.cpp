@@ -599,29 +599,25 @@ parse_server_datagram_for_routing(std::span<const std::byte> bytes) {
     }
 
     std::size_t offset = 5;
-    const std::size_t destination_connection_id_start = offset + 1;
-    const std::size_t destination_connection_id_end =
-        destination_connection_id_start +
+    const std::size_t destination_connection_id_size =
         static_cast<std::size_t>(std::to_integer<std::uint8_t>(bytes[offset]));
-    if (destination_connection_id_end + 1 > bytes.size()) {
+    if (offset + destination_connection_id_size + 2 > bytes.size()) {
         return std::nullopt;
     }
     ConnectionId destination_connection_id(
-        bytes.begin() + static_cast<std::ptrdiff_t>(destination_connection_id_start),
-        bytes.begin() + static_cast<std::ptrdiff_t>(destination_connection_id_end));
-    offset = destination_connection_id_end;
+        bytes.begin() + static_cast<std::ptrdiff_t>(offset + 1),
+        bytes.begin() + static_cast<std::ptrdiff_t>(offset + 1 + destination_connection_id_size));
+    offset += destination_connection_id_size + 1;
 
-    const std::size_t source_connection_id_start = offset + 1;
-    const std::size_t source_connection_id_end =
-        source_connection_id_start +
+    const std::size_t source_connection_id_size =
         static_cast<std::size_t>(std::to_integer<std::uint8_t>(bytes[offset]));
-    if (source_connection_id_end > bytes.size()) {
+    if (offset + source_connection_id_size + 1 > bytes.size()) {
         return std::nullopt;
     }
     ConnectionId source_connection_id(
-        bytes.begin() + static_cast<std::ptrdiff_t>(source_connection_id_start),
-        bytes.begin() + static_cast<std::ptrdiff_t>(source_connection_id_end));
-    offset = source_connection_id_end;
+        bytes.begin() + static_cast<std::ptrdiff_t>(offset + 1),
+        bytes.begin() + static_cast<std::ptrdiff_t>(offset + 1 + source_connection_id_size));
+    offset += source_connection_id_size + 1;
 
     if (!is_supported_quic_version(version)) {
         return ParsedServerDatagram{
@@ -703,6 +699,16 @@ std::optional<PendingRetryToken> lookup_retry_context(const ParsedServerDatagram
     return retry_context;
 }
 
+bool assign_retry_integrity_tag(RetryPacket &packet,
+                                const ConnectionId &original_destination_connection_id) {
+    const auto tag = compute_retry_integrity_tag(packet, original_destination_connection_id);
+    if (!tag.has_value()) {
+        return false;
+    }
+    packet.retry_integrity_tag = tag.value();
+    return true;
+}
+
 bool send_retry_for_initial(int fd, const ParsedServerDatagram &parsed,
                             const sockaddr_storage &peer, socklen_t peer_len,
                             RetryTokenStore &retry_tokens, std::uint64_t connection_index) {
@@ -730,12 +736,9 @@ bool send_retry_for_initial(int fd, const ParsedServerDatagram &parsed,
         .source_connection_id = retry_source_connection_id,
         .retry_token = token,
     };
-    const auto computed_integrity_tag =
-        compute_retry_integrity_tag(packet, parsed.destination_connection_id);
-    if (!computed_integrity_tag.has_value()) {
+    if (!assign_retry_integrity_tag(packet, parsed.destination_connection_id)) {
         return false;
     }
-    packet.retry_integrity_tag = computed_integrity_tag.value();
 
     // compute_retry_integrity_tag serializes the same validated RetryPacket image.
     return send_datagram(fd, serialize_packet(packet).value(), peer, peer_len, "server");
@@ -1416,25 +1419,24 @@ bool observe_client_runtime_policy_effects_with_backend(const QuicCoreResult &re
 
             const auto peer = sockaddr_from_preferred_address(preferred->preferred_address);
             const auto peer_len = sockaddr_len_from_preferred_address(preferred->preferred_address);
-            const auto route_handle = io_context.backend->ensure_route(QuicIoRemote{
+            io_context.preferred_route_handle = io_context.backend->ensure_route(QuicIoRemote{
                 .peer = peer,
                 .peer_len = peer_len,
                 .family = peer.ss_family,
             });
-            if (!route_handle.has_value()) {
+            if (!io_context.preferred_route_handle.has_value()) {
                 std::cerr << "http09-" << role_name
                           << " failed: unable to create preferred-address route\n";
                 return false;
             }
 
-            io_context.preferred_route_handle = route_handle;
-            policy.preferred_address_route_handle = route_handle;
+            policy.preferred_address_route_handle = io_context.preferred_route_handle;
             policy.preferred_address_validation_identity =
                 test::socket_io_backend_address_validation_identity_for_runtime_tests(peer,
                                                                                       peer_len);
             with_runtime_trace([&](std::ostream &trace_stream) {
                 trace_stream << "http09-client trace: observed preferred_address route_handle="
-                             << route_handle.value()
+                             << io_context.preferred_route_handle.value()
                              << " ipv4_port=" << preferred->preferred_address.ipv4_port
                              << " ipv6_port=" << preferred->preferred_address.ipv6_port << '\n';
             });
@@ -2290,13 +2292,13 @@ ClientConnectionRunResult run_http09_client_connection_with_core_config(
             std::move(bootstrap->primary_address_validation_identity),
     };
 
-    const bool zero_rtt_requests_enabled = core_config.zero_rtt.attempt;
     core_config.server_name = remote->server_name;
     assign_runtime_client_connection_ids(core_config, connection_index);
+    const bool zero_rtt_requests_enabled = core_config.zero_rtt.attempt;
     QuicCore core(std::move(core_config));
     EndpointDriveState state;
     ClientRuntimePolicyState client_policy;
-    const auto start_result = core.advance(QuicCoreStart{}, now());
+    auto start_result = core.advance(QuicCoreStart{}, now());
     record_resumption_state(state, start_result);
 
     QuicHttp09ClientEndpoint endpoint(make_http09_client_endpoint_config(
@@ -3344,20 +3346,20 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
         return ok;
     };
     const auto process_path_mtu_update = [&](const QuicIoPathMtuUpdate &path_mtu_update,
-                                             QuicCoreTimePoint update_time) -> bool {
+                                             QuicCoreTimePoint path_mtu_update_time) -> bool {
         auto result = core.advance_endpoint(
             QuicCorePathMtuUpdate{
                 .route_handle = path_mtu_update.route_handle,
                 .max_udp_payload_size = path_mtu_update.max_udp_payload_size,
             },
-            update_time);
+            path_mtu_update_time);
         bool observed_early_stream_data = false;
         const bool ok = process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
             path_mtu_update.route_handle, backend, nullptr, &deferred_output,
             &observed_early_stream_data);
         maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data,
-                                                     defer_output_until, update_time);
+                                                     defer_output_until, path_mtu_update_time);
         return ok;
     };
 

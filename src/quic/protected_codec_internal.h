@@ -286,7 +286,7 @@ try_decode_received_short_header_stream_fast_packet_fields(
     bool accept_greased_quic_bit = false);
 
 CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
-    std::vector<std::byte> &datagram, LongHeaderPacketType packet_type, std::uint32_t version,
+    std::vector<std::byte> &out_datagram, LongHeaderPacketType packet_type, std::uint32_t version,
     const ConnectionId &destination_connection_id, const ConnectionId &source_connection_id,
     std::span<const std::byte> token, TruncatedPacketNumberEncoding packet_number,
     std::uint64_t full_packet_number, std::span<const Frame> frames, CipherSuite cipher_suite,
@@ -335,15 +335,15 @@ CodecResult<std::size_t>
 packet_stream_payload_wire_size(const ProtectedOneRttPacketFragmentView &packet,
                                 std::size_t frame_index_base = 0);
 CodecResult<std::size_t>
-append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
+append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
                                                  const ProtectedOneRttPacket &packet,
                                                  const SerializeProtectionContext &context);
 CodecResult<std::size_t>
-append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
+append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
                                                  const ProtectedOneRttPacketView &packet,
                                                  const SerializeProtectionContext &context);
 CodecResult<std::size_t>
-append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
+append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
                                                  const ProtectedOneRttPacketFragmentView &packet,
                                                  const SerializeProtectionContext &context);
 CodecResult<ProtectedPacketDecodeResult>

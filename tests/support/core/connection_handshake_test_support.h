@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <type_traits>
 
 #include "src/quic/connection_test_hooks.h"
@@ -76,6 +78,68 @@ concept has_take_received_application_data =
 static_assert(!has_receive<coquic::quic::QuicCore>);
 static_assert(!has_queue_application_data<coquic::quic::QuicCore>);
 static_assert(!has_take_received_application_data<coquic::quic::QuicCore>);
+
+template <typename T> void expect_codec_success(const coquic::quic::CodecResult<T> &result) {
+    ASSERT_TRUE(result.has_value());
+}
+
+template <typename T>
+const T &codec_value_or_terminate(const coquic::quic::CodecResult<T> &result) {
+    if (!result.has_value()) {
+        std::abort();
+    }
+    return result.value();
+}
+
+template <typename T>
+void expect_codec_failure(const coquic::quic::CodecResult<T> &result,
+                          coquic::quic::CodecErrorCode expected_code) {
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, expected_code);
+}
+
+inline void expect_protected_datagram_starts_with_handshake(
+    coquic::quic::CodecResult<std::vector<coquic::quic::ProtectedPacket>> result) {
+    ASSERT_TRUE(result.has_value());
+    ASSERT_FALSE(result.value().empty());
+    ASSERT_TRUE(
+        std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(result.value().front()));
+}
+
+inline void expect_single_packet_kind(const coquic::quic::DatagramBuffer &datagram,
+                                      ProtectedPacketKind expected_kind) {
+    const auto packet_kinds = protected_datagram_packet_kinds(datagram);
+    ASSERT_TRUE(packet_kinds.has_value());
+    const auto &packet_kind_values = optional_ref_or_terminate(packet_kinds);
+    ASSERT_EQ(packet_kind_values.size(), 1u);
+    EXPECT_EQ(packet_kind_values.front(), expected_kind);
+}
+
+inline void expect_blocked_drain_trace_contains(coquic::quic::QuicConnection &connection,
+                                                coquic::quic::QuicCoreTimePoint send_time,
+                                                std::string_view required_text) {
+    testing::internal::CaptureStderr();
+    const coquic::quic::DatagramBuffer drained_datagram =
+        connection.drain_outbound_datagram(send_time);
+    const std::string captured_stderr = testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(drained_datagram.empty());
+    EXPECT_NE(captured_stderr.find(required_text), std::string::npos);
+}
+
+inline void expect_blocked_drain_trace_contains(coquic::quic::QuicConnection &connection,
+                                                coquic::quic::QuicCoreTimePoint send_time,
+                                                std::string_view first_required_text,
+                                                std::string_view second_required_text) {
+    testing::internal::CaptureStderr();
+    const coquic::quic::DatagramBuffer drained_datagram =
+        connection.drain_outbound_datagram(send_time);
+    const std::string captured_stderr = testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(drained_datagram.empty());
+    EXPECT_NE(captured_stderr.find(first_required_text), std::string::npos);
+    EXPECT_NE(captured_stderr.find(second_required_text), std::string::npos);
+}
 
 std::vector<std::byte>
 serialize_one_rtt_ack_datagram_for_test(const coquic::quic::QuicConnection &connection,

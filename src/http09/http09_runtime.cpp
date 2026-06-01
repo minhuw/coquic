@@ -3348,20 +3348,20 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
         return ok;
     };
     const auto process_path_mtu_update = [&](const QuicIoPathMtuUpdate &path_mtu_update,
-                                             QuicCoreTimePoint update_time) -> bool {
+                                             QuicCoreTimePoint mtu_event_time) -> bool {
         auto result = core.advance_endpoint(
             QuicCorePathMtuUpdate{
                 .route_handle = path_mtu_update.route_handle,
                 .max_udp_payload_size = path_mtu_update.max_udp_payload_size,
             },
-            update_time);
+            mtu_event_time);
         bool observed_early_stream_data = false;
         const bool ok = process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
             path_mtu_update.route_handle, backend, nullptr, &deferred_output,
             &observed_early_stream_data);
         maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data,
-                                                     defer_output_until, update_time);
+                                                     defer_output_until, mtu_event_time);
         return ok;
     };
 

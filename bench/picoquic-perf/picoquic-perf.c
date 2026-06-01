@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -31,7 +33,7 @@ typedef struct optional_u64_t {
 } optional_u64_t;
 
 static FILE *open_json_output(const char *path) {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
     if (fd < 0) {
         return NULL;
     }

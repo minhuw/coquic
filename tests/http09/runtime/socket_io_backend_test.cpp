@@ -195,19 +195,19 @@ TEST(SocketIoBackendTest, PublicShellTypesCompileAndConstruct) {
         std::byte{0xbb},
         std::byte{0xcc},
     });
-    QuicIoRxDatagram rx{
+    QuicIoRxDatagram received_datagram{
         .route_handle = 7,
         .bytes = {std::byte{0x01}},
         .shared_bytes = shared_rx_bytes,
         .begin = 1,
         .end = 9,
     };
-    const auto rx_payload = rx.payload();
+    const auto rx_payload = received_datagram.payload();
     ASSERT_EQ(rx_payload.size(), 2u);
     EXPECT_EQ(rx_payload[0], std::byte{0xbb});
     EXPECT_EQ(rx_payload[1], std::byte{0xcc});
-    rx.shared_bytes.reset();
-    ASSERT_EQ(rx.payload().size(), 1u);
+    received_datagram.shared_bytes.reset();
+    ASSERT_EQ(received_datagram.payload().size(), 1u);
 
     QuicIoEngineRxCompletion completion{
         .bytes = {std::byte{0x02}},
@@ -222,7 +222,7 @@ TEST(SocketIoBackendTest, PublicShellTypesCompileAndConstruct) {
     QuicIoEvent event{
         .kind = QuicIoEvent::Kind::rx_datagram,
         .now = coquic::quic::test::test_time(0),
-        .datagram = rx,
+        .datagram = received_datagram,
     };
 
     EXPECT_TRUE(event.datagram.has_value());
@@ -378,7 +378,7 @@ TEST(SocketIoBackendTest, ConcreteSocketBackendSendManyDelegatesToPollEngine) {
         std::byte{0x03},
         std::byte{0x04},
     };
-    const std::array datagrams{
+    std::array datagrams{
         QuicIoTxDatagram{
             .route_handle = route_handle,
             .bytes_view = kFirstPayload,
@@ -421,28 +421,28 @@ TEST(SocketIoBackendTest, EnsureRouteOpensAdditionalSocketForIncompatibleFamily)
     ipv6.sin6_port = htons(4434);
     ipv6.sin6_addr = in6addr_loopback;
 
-    const auto first = backend.ensure_route(QuicIoRemote{
+    auto first = backend.ensure_route(QuicIoRemote{
         .peer = ipv4_peer,
         .peer_len = sizeof(sockaddr_in),
         .family = AF_INET,
     });
     ASSERT_TRUE(first.has_value());
 
-    const auto second = backend.ensure_route(QuicIoRemote{
+    auto second = backend.ensure_route(QuicIoRemote{
         .peer = ipv6_peer,
         .peer_len = sizeof(sockaddr_in6),
         .family = AF_INET6,
     });
     ASSERT_TRUE(second.has_value());
-    const auto first_handle = coquic::quic::test_support::optional_value_or_terminate(first);
-    const auto second_handle = coquic::quic::test_support::optional_value_or_terminate(second);
+    auto first_handle = coquic::quic::test_support::optional_value_or_terminate(first);
+    auto second_handle = coquic::quic::test_support::optional_value_or_terminate(second);
     EXPECT_NE(first_handle, second_handle);
 
     EXPECT_TRUE(backend.send(QuicIoTxDatagram{
         .route_handle = first_handle,
         .bytes = {std::byte{0x01}},
     }));
-    const int first_socket_fd = g_multi_socket_backend_test_trace.last_send_socket_fd;
+    int first_socket_fd = g_multi_socket_backend_test_trace.last_send_socket_fd;
     ASSERT_GE(first_socket_fd, 0);
 
     EXPECT_TRUE(backend.send(QuicIoTxDatagram{
@@ -483,20 +483,20 @@ TEST(SocketIoBackendTest, WaitPollsAllActiveRouteSocketsAndReturnsSecondRouteDat
     second_ipv6.sin6_port = htons(9443);
     second_ipv6.sin6_addr = in6addr_loopback;
 
-    const auto first = backend.ensure_route(QuicIoRemote{
+    auto first = backend.ensure_route(QuicIoRemote{
         .peer = first_peer,
         .peer_len = sizeof(sockaddr_in),
         .family = AF_INET,
     });
     ASSERT_TRUE(first.has_value());
 
-    const auto second = backend.ensure_route(QuicIoRemote{
+    auto second = backend.ensure_route(QuicIoRemote{
         .peer = second_peer,
         .peer_len = sizeof(sockaddr_in6),
         .family = AF_INET6,
     });
     ASSERT_TRUE(second.has_value());
-    const auto second_handle = coquic::quic::test_support::optional_value_or_terminate(second);
+    auto second_handle = coquic::quic::test_support::optional_value_or_terminate(second);
 
     ASSERT_GE(g_multi_socket_backend_test_trace.opened_fds.size(), 2u);
     g_multi_socket_backend_test_trace.readable_socket_fd =
@@ -644,7 +644,7 @@ TEST(SocketIoBackendTest, SharedUdpBackendCoreWaitTranslatesNonReceiveEvents) {
 
     ASSERT_TRUE(backend.open_listener("127.0.0.1", 0));
 
-    const auto timer_event = backend.wait(std::nullopt);
+    auto timer_event = backend.wait(std::nullopt);
     if (!timer_event.has_value()) {
         FAIL() << "expected timer event";
         return;
@@ -653,7 +653,7 @@ TEST(SocketIoBackendTest, SharedUdpBackendCoreWaitTranslatesNonReceiveEvents) {
     EXPECT_EQ(resolved_timer_event.kind, QuicIoEvent::Kind::timer_expired);
     EXPECT_EQ(resolved_timer_event.now, coquic::quic::test::test_time(11));
 
-    const auto idle_event = backend.wait(std::nullopt);
+    auto idle_event = backend.wait(std::nullopt);
     if (!idle_event.has_value()) {
         FAIL() << "expected idle event";
         return;
@@ -662,7 +662,7 @@ TEST(SocketIoBackendTest, SharedUdpBackendCoreWaitTranslatesNonReceiveEvents) {
     EXPECT_EQ(resolved_idle_event.kind, QuicIoEvent::Kind::idle_timeout);
     EXPECT_EQ(resolved_idle_event.now, coquic::quic::test::test_time(12));
 
-    const auto shutdown_event = backend.wait(std::nullopt);
+    auto shutdown_event = backend.wait(std::nullopt);
     if (!shutdown_event.has_value()) {
         FAIL() << "expected shutdown event";
         return;
@@ -743,14 +743,13 @@ TEST(SocketIoBackendTest, SharedUdpBackendCoreSendManyMapsRoutesIntoEngineBatch)
     });
     ASSERT_TRUE(first_route.has_value());
     ASSERT_TRUE(second_route.has_value());
-    const auto first_route_handle =
-        coquic::quic::test_support::optional_value_or_terminate(first_route);
-    const auto second_route_handle =
+    auto first_route_handle = coquic::quic::test_support::optional_value_or_terminate(first_route);
+    auto second_route_handle =
         coquic::quic::test_support::optional_value_or_terminate(second_route);
 
-    const std::array first_payload = {std::byte{0x01}, std::byte{0x02}};
-    const std::array second_payload = {std::byte{0x03}, std::byte{0x04}, std::byte{0x05}};
-    const std::array datagrams{
+    std::array first_payload = {std::byte{0x01}, std::byte{0x02}};
+    std::array second_payload = {std::byte{0x03}, std::byte{0x04}, std::byte{0x05}};
+    std::array datagrams{
         QuicIoTxDatagram{
             .route_handle = first_route_handle,
             .bytes_view = first_payload,

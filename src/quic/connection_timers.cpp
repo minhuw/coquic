@@ -138,15 +138,14 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
                                     effective_pto_count(packet_space));
     };
 
-    const auto regular_deadline =
+    auto regular_deadline =
         earliest_of({packet_space_pto_deadline(initial_space_, QuicCoreDuration{0}),
                      packet_space_pto_deadline(handshake_space_, QuicCoreDuration{0}),
                      allow_application_pto
                          ? packet_space_pto_deadline(application_space_, application_max_ack_delay)
                          : std::nullopt});
 
-    const auto client_handshake_keepalive_reference_time =
-        [this]() -> std::optional<QuicCoreTimePoint> {
+    auto client_handshake_keepalive_reference_time = [this]() -> std::optional<QuicCoreTimePoint> {
         const bool eligible = client_handshake_keepalive_is_eligible(
             config_.role, status_, handshake_confirmed_, last_peer_activity_time_,
             initial_packet_space_discarded_, initial_space_, handshake_packet_space_discarded_,
@@ -174,8 +173,7 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
                                  std::min(pto_count_, 2u));
     }
 
-    const auto client_receive_keepalive_reference_time =
-        [this]() -> std::optional<QuicCoreTimePoint> {
+    auto client_receive_keepalive_reference_time = [this]() -> std::optional<QuicCoreTimePoint> {
         const bool has_receive_interest = std::ranges::any_of(
             streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
         const bool eligible = client_receive_keepalive_is_eligible(
@@ -388,8 +386,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         }
         return std::min(pto_count_, 2u);
     };
-    const auto client_handshake_keepalive_reference_time =
-        [this]() -> std::optional<QuicCoreTimePoint> {
+    auto client_handshake_keepalive_reference_time = [this]() -> std::optional<QuicCoreTimePoint> {
         const bool eligible = (config_.role == EndpointRole::client) &
                               (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
                               last_peer_activity_time_.has_value() &
@@ -403,7 +400,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         }
 
         auto reference_time = last_peer_activity_time_;
-        const auto probe_time =
+        auto probe_time =
             last_client_handshake_keepalive_probe_time_.value_or(QuicCoreTimePoint::min());
         if (probe_time > *reference_time) {
             reference_time = probe_time;
@@ -423,8 +420,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     }
     const bool client_handshake_keepalive_due = client_handshake_keepalive_deadline.has_value() &&
                                                 now >= *client_handshake_keepalive_deadline;
-    const auto client_receive_keepalive_reference_time =
-        [this]() -> std::optional<QuicCoreTimePoint> {
+    auto client_receive_keepalive_reference_time = [this]() -> std::optional<QuicCoreTimePoint> {
         const bool has_receive_interest = std::ranges::any_of(
             streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
         const bool eligible = client_receive_keepalive_is_eligible(
@@ -438,8 +434,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         return make_client_receive_keepalive_reference_time(
             last_peer_activity_time_, last_client_receive_keepalive_probe_time_);
     }();
-    const bool client_receive_keepalive_eligible =
-        client_receive_keepalive_reference_time.has_value();
+    bool client_receive_keepalive_eligible = client_receive_keepalive_reference_time.has_value();
     PacketSpaceState *client_receive_keepalive_space =
         client_receive_keepalive_eligible ? &application_space_ : nullptr;
     auto client_receive_keepalive_deadline = std::optional<QuicCoreTimePoint>{};
@@ -450,8 +445,8 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     }
     const bool client_receive_keepalive_due =
         client_receive_keepalive_deadline.has_value() && now >= *client_receive_keepalive_deadline;
-    const auto consider_packet_space = [&](PacketSpaceState &packet_space,
-                                           QuicCoreDuration max_ack_delay) {
+    auto consider_packet_space = [&](PacketSpaceState &packet_space,
+                                     QuicCoreDuration max_ack_delay) {
         if (packet_space_discarded(packet_space)) {
             return;
         }
@@ -530,7 +525,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
 
     arm_packet_space_probe(*selected_packet_space);
 
-    const auto arm_coalesced_probe = [&](PacketSpaceState &packet_space) {
+    auto arm_coalesced_probe = [&](PacketSpaceState &packet_space) {
         if (&packet_space == selected_packet_space) {
             return;
         }
@@ -748,7 +743,7 @@ SentPacketRecord QuicConnection::select_pto_probe(const PacketSpaceState &packet
                                 });
         });
 
-        const auto frame_count = retransmittable_probe_frame_count(probe);
+        auto frame_count = retransmittable_probe_frame_count(probe);
         if (frame_count == 0 && !probe.has_ping) {
             continue;
         }
@@ -951,10 +946,10 @@ QuicConnection::make_current_short_header_deserialize_context() {
     }
 
     const auto *secret = &application_space_.read_secret.value();
-    const auto destination_connection_id_length = config_.source_connection_id.size();
-    const bool accept_greased_quic_bit = static_cast<bool>(
-        config_.transport.grease_quic_bit | local_transport_parameters_.grease_quic_bit);
-    const bool cache_matches =
+    auto destination_connection_id_length = config_.source_connection_id.size();
+    bool accept_greased_quic_bit = static_cast<bool>(config_.transport.grease_quic_bit |
+                                                     local_transport_parameters_.grease_quic_bit);
+    bool cache_matches =
         current_short_header_deserialize_cache_.has_value() &&
         current_short_header_deserialize_cache_->secret == secret &&
         current_short_header_deserialize_cache_->secret_generation ==
@@ -1100,7 +1095,7 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
     };
     initialize_local_flow_control();
 
-    const auto serialized_transport_parameters = serialize_locally_validated_transport_parameters(
+    auto serialized_transport_parameters = serialize_locally_validated_transport_parameters(
         config_.role, local_transport_parameters_,
         TransportParametersValidationContext{
             .expected_initial_source_connection_id = config_.source_connection_id,
@@ -1157,7 +1152,7 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
         .zero_rtt_context = config_.zero_rtt.application_context,
         .tls_keylog_path = config_.tls_keylog_path,
     });
-    const auto tls_started = tls_->start();
+    auto tls_started = tls_->start();
     if (!tls_started.has_value()) {
         log_codec_failure("tls_start", tls_started.error());
         queue_transport_close_for_error(now, tls_started.error());
@@ -1226,7 +1221,7 @@ void QuicConnection::start_server_if_needed(
     };
     initialize_local_flow_control();
 
-    const auto serialized_transport_parameters = serialize_locally_validated_transport_parameters(
+    auto serialized_transport_parameters = serialize_locally_validated_transport_parameters(
         config_.role, local_transport_parameters_,
         TransportParametersValidationContext{
             .expected_initial_source_connection_id = config_.source_connection_id,
@@ -1252,7 +1247,7 @@ void QuicConnection::start_server_if_needed(
         .zero_rtt_context = config_.zero_rtt.application_context,
         .tls_keylog_path = config_.tls_keylog_path,
     });
-    const auto tls_started = tls_->start();
+    auto tls_started = tls_->start();
     if (!tls_started.has_value()) {
         log_codec_failure("tls_start", tls_started.error());
         queue_transport_close_for_error(now, tls_started.error());

@@ -813,7 +813,7 @@ void cover_runtime_backend_loop_top_due_event_script_cases_for_tests(bool &cover
     }
 }
 
-void cover_runtime_backend_loop_top_due_timer_script_cases_for_tests(bool &coverage_ok) {
+void cover_runtime_backend_loop_top_due_timer_event_script_cases_for_tests(bool &coverage_ok) {
     {
         const auto base_time = now();
         server_loop_coverage_check(coverage_ok,
@@ -858,7 +858,12 @@ void cover_runtime_backend_loop_top_due_timer_script_cases_for_tests(bool &cover
                                            .wait_calls = 2,
                                            .process_expired_calls = 1,
                                        }));
+    }
+}
 
+void cover_runtime_backend_loop_top_due_buffer_script_cases_for_tests(bool &coverage_ok) {
+    {
+        const auto base_time = now();
         server_loop_coverage_check(
             coverage_ok, "backend loop buffers top-due shutdown events before consuming them",
             server_loop_result_matches_for_tests(
@@ -920,7 +925,7 @@ void cover_runtime_backend_loop_top_due_timer_script_cases_for_tests(bool &cover
     }
 }
 
-void cover_runtime_backend_loop_ready_probe_event_script_cases_for_tests(bool &coverage_ok) {
+void cover_runtime_backend_loop_ready_probe_wait_script_cases_for_tests(bool &coverage_ok) {
     {
         const auto base_time = now();
         server_loop_coverage_check(coverage_ok, "backend loop covers ready-probe wait failures",
@@ -967,7 +972,12 @@ void cover_runtime_backend_loop_ready_probe_event_script_cases_for_tests(bool &c
                     .wait_calls = 1,
                     .process_datagram_calls = 0,
                 }));
+    }
+}
 
+void cover_runtime_backend_loop_ready_probe_path_mtu_script_cases_for_tests(bool &coverage_ok) {
+    {
+        const auto base_time = now();
         server_loop_coverage_check(
             coverage_ok, "backend loop covers ready-probe path MTU events without payloads",
             server_loop_result_matches_for_tests(
@@ -1345,8 +1355,10 @@ void cover_runtime_backend_loop_main_wait_script_cases_for_tests(bool &coverage_
 
 void cover_runtime_backend_loop_script_cases_for_tests(bool &coverage_ok) {
     cover_runtime_backend_loop_top_due_event_script_cases_for_tests(coverage_ok);
-    cover_runtime_backend_loop_top_due_timer_script_cases_for_tests(coverage_ok);
-    cover_runtime_backend_loop_ready_probe_event_script_cases_for_tests(coverage_ok);
+    cover_runtime_backend_loop_top_due_timer_event_script_cases_for_tests(coverage_ok);
+    cover_runtime_backend_loop_top_due_buffer_script_cases_for_tests(coverage_ok);
+    cover_runtime_backend_loop_ready_probe_wait_script_cases_for_tests(coverage_ok);
+    cover_runtime_backend_loop_ready_probe_path_mtu_script_cases_for_tests(coverage_ok);
     cover_runtime_backend_loop_ready_probe_timer_script_cases_for_tests(coverage_ok);
     cover_runtime_backend_loop_main_wait_script_cases_for_tests(coverage_ok);
 }

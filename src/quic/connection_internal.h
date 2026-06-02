@@ -577,9 +577,12 @@ inline void print_send_profile() {
 
     const auto &c = send_profile_counters();
     std::cerr
+        // Overall send-loop counters stay first so log parsers can locate profile records.
         << "coquic-send-profile" << " drains=" << c.drain_calls << " datagrams=" << c.datagrams
         << " empty=" << c.empty_drains << " pmtu_probe=" << c.pmtu_probe_datagrams
-        << " congestion_blocks=" << c.congestion_blocks << " pacing_blocks=" << c.pacing_blocks
+        << " congestion_blocks=" << c.congestion_blocks << " pacing_blocks="
+        << c.pacing_blocks
+        // Sendability and application-selection counters explain why packets were not emitted.
         << " has_sendable_checks=" << c.has_sendable_checks
         << " has_sendable_false=" << c.has_sendable_false
         << " has_sendable_no_application_packets=" << c.has_sendable_no_application_packets
@@ -595,12 +598,16 @@ inline void print_send_profile() {
         << " continuation_allowed=" << c.continuation_allowed
         << " continuation_denied_no_stream=" << c.continuation_denied_no_stream
         << " continuation_denied_bypass=" << c.continuation_denied_bypass
-        << " continuation_denied_not_ack_eliciting=" << c.continuation_denied_not_ack_eliciting
+        << " continuation_denied_not_ack_eliciting="
+        << c.continuation_denied_not_ack_eliciting
+        // Byte and datagram-size counters summarize outbound and inbound traffic volume.
         << " bytes=" << c.bytes << " stream_bytes=" << c.stream_bytes
         << " inbound_calls=" << c.inbound_calls << " inbound_packets=" << c.inbound_packets
         << " inbound_bytes=" << c.inbound_bytes << " le1200=" << c.datagrams_le_1200
         << " le1434=" << c.datagrams_le_1434 << " le1472=" << c.datagrams_le_1472
-        << " gt1472=" << c.datagrams_gt_1472 << " max=" << c.max_datagram
+        << " gt1472=" << c.datagrams_gt_1472 << " max="
+        << c.max_datagram
+        // Timing counters expose hot serialize, trim, select, and inbound-processing paths.
         << " serialize_calls=" << c.serialize_calls << " serialize_ns=" << c.serialize_ns
         << " estimate_calls=" << c.estimate_calls << " estimate_ns=" << c.estimate_ns
         << " trim_ack_calls=" << c.trim_ack_calls << " trim_ack_ns=" << c.trim_ack_ns
@@ -630,7 +637,9 @@ inline void print_send_profile() {
         << " packet_storage_range_checks=" << c.packet_storage_range_checks
         << " packet_storage_range_ns=" << c.packet_storage_range_ns
         << " process_decoded_packet_calls=" << c.process_decoded_packet_calls
-        << " process_decoded_packet_ns=" << c.process_decoded_packet_ns
+        << " process_decoded_packet_ns="
+        << c.process_decoded_packet_ns
+        // Congestion and loss counters are grouped before RTT and congestion-controller samples.
         << " defer_decision_calls=" << c.defer_decision_calls
         << " defer_decision_ns=" << c.defer_decision_ns << " qlog_emit_calls=" << c.qlog_emit_calls
         << " qlog_emit_ns=" << c.qlog_emit_ns

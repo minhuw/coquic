@@ -180,10 +180,12 @@ CodecResult<std::vector<std::byte>>
 serialize_transport_parameters(const TransportParameters &parameters) {
     std::vector<std::byte> output;
 
+    // Connection identifiers and reset tokens are emitted before scalar transport limits.
     append_connection_id_parameter(output, original_destination_connection_id_parameter_id,
                                    parameters.original_destination_connection_id);
     append_stateless_reset_token_parameter(output, parameters.stateless_reset_token);
 
+    // Core idle, datagram-size, CID-limit, and ACK parameters are encoded as QUIC varints.
     auto encoded_max_idle_timeout = encode_varint(parameters.max_idle_timeout);
     if (!encoded_max_idle_timeout.has_value()) {
         return CodecResult<std::vector<std::byte>>::failure(
@@ -228,6 +230,7 @@ serialize_transport_parameters(const TransportParameters &parameters) {
 
     append_raw_parameter(output, max_ack_delay_parameter_id, encoded_max_ack_delay.value());
 
+    // Flow-control windows and stream-count limits are serialized as separate parameters.
     auto encoded_initial_max_data = encode_varint(parameters.initial_max_data);
     if (!encoded_initial_max_data.has_value()) {
         return CodecResult<std::vector<std::byte>>::failure(
@@ -303,6 +306,7 @@ serialize_transport_parameters(const TransportParameters &parameters) {
          parameters.preferred_address->connection_id.size() > maximum_connection_id_length)) {
         return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
     }
+    // Migration, preferred-address, version, datagram, and grease extensions are optional tails.
     append_preferred_address_parameter(output, parameters.preferred_address);
     append_version_information_parameter(output, parameters.version_information);
     if (parameters.max_datagram_frame_size > 0) {

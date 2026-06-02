@@ -1054,6 +1054,7 @@ bool bootstrap_internal_coverage_check(bool &ok, bool condition) {
 bool bootstrap_internal_coverage_for_test() {
     bool ok = true;
 
+    // Stop-state and move-only descriptor helpers are covered before socket scripts.
     reset_bootstrap_test_hooks();
     bootstrap_internal_coverage_check(ok, !is_stop_requested(nullptr));
     std::atomic<bool> stop_requested = false;
@@ -1083,6 +1084,7 @@ bool bootstrap_internal_coverage_for_test() {
     exercise_invalid_destination_move(false);
     exercise_invalid_destination_move(true);
 
+    // Forced poll and accept results cover bootstrap wrappers without real network events.
     {
         reset_bootstrap_test_hooks();
         bootstrap_test_hooks().forced_poll_results = {
@@ -1140,6 +1142,7 @@ bool bootstrap_internal_coverage_for_test() {
         bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_self_move_assignment_for_test());
     }
 
+    // TLS context and per-connection scripts exercise SSL setup, timeouts, and read/write guards.
     const Http3BootstrapConfig config{
         .host = "127.0.0.1",
         .port = 0,
@@ -1212,6 +1215,7 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_test_hooks().forced_ssl_read_chunks = {"GET / HTTP/1.1\r\nHost: example.test\r\n"};
     bootstrap_internal_coverage_check(ok, !read_http_request(nullptr).has_value());
 
+    // Listening and server-loop paths use forced sockets, poll results, and accept results.
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_listen_socket_failures = 1;
     bootstrap_internal_coverage_check(ok, make_listen_socket(config) < 0);
@@ -1272,6 +1276,7 @@ bool bootstrap_internal_coverage_for_test() {
     };
     bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 
+    // Reset hooks after the final scripted bootstrap-server case.
     reset_bootstrap_test_hooks();
     return ok;
 }

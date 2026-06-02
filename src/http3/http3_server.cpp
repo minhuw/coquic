@@ -264,6 +264,7 @@ Http3ServerEndpoint::Http3ServerEndpoint(Http3ServerConfig config)
 
 Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCoreResult &result,
                                                               quic::QuicCoreTimePoint now) {
+    // Terminal endpoint state and local QUIC errors short-circuit before HTTP/3 event handling.
     if (failed_) {
         return make_failure_update();
     }
@@ -274,6 +275,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
     }
 
     Http3ServerEndpointUpdate update;
+    // First fold the core result through the HTTP/3 connection so later branches see peer events.
     auto connection_update = connection_.on_core_result(result, now);
     if (!merge_connection_update(update, connection_update)) {
         failed_ = true;
@@ -288,6 +290,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
         }
     }
 
+    // Request-head events may commit an early response before the body has fully arrived.
     bool dispatched_response = false;
     std::unordered_set<std::uint64_t> ignored_request_streams;
     for (const auto &event : connection_update.events) {
@@ -318,6 +321,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             continue;
         }
 
+        // Body chunks are buffered unless an upload route crosses its configured byte limit.
         if (const auto *body = std::get_if<Http3PeerRequestBodyEvent>(&event)) {
             if (ignored_request_streams.contains(body->stream_id)) {
                 continue;
@@ -355,6 +359,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             continue;
         }
 
+        // Trailers remain attached to the pending request until completion dispatches a response.
         if (const auto *trailers = std::get_if<Http3PeerRequestTrailersEvent>(&event)) {
             if (ignored_request_streams.contains(trailers->stream_id)) {
                 continue;
@@ -370,6 +375,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             continue;
         }
 
+        // Reset events report application cancellation unless the stream was already ignored.
         if (const auto *reset = std::get_if<Http3PeerRequestResetEvent>(&event)) {
             const auto pending_it = pending_requests_.find(reset->stream_id);
             if (ignored_request_streams.contains(reset->stream_id)) {
@@ -395,6 +401,7 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
             continue;
         }
 
+        // Completion events are the normal buffered-response path after head/body/trailers arrive.
         const auto *complete = std::get_if<Http3PeerRequestCompleteEvent>(&event);
         if (complete == nullptr) {
             continue;
@@ -435,10 +442,12 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
         dispatched_response = true;
     }
 
+    // Early-response streams are removed after iteration to avoid invalidating event processing.
     for (const auto stream_id : ignored_request_streams) {
         pending_requests_.erase(stream_id);
     }
 
+    // A dispatched response may make control frames sendable, so poll once before returning.
     if (dispatched_response) {
         auto follow_up = server_test_hooks().force_follow_up_poll_terminal_failure
                              ? Http3EndpointUpdate{.terminal_failure = true}

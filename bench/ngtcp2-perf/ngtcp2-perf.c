@@ -1206,6 +1206,7 @@ static int open_batch_streams(perf_conn_t *pc, uint64_t count, uint64_t request_
 static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t request_bytes,
                              uint64_t response_bytes, counters_t *counters, int counts_latency,
                              char *failure_reason, size_t failure_reason_len) {
+    /* Empty or oversized batches are normalized before allocating the client connection. */
     if (count == 0) {
         return 0;
     }
@@ -1230,6 +1231,7 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t reque
         return -1;
     }
 
+    /* The batch loop opens streams after the handshake, drives I/O, and exits on timeout. */
     uint64_t started_at = now_us();
     int opened_streams = 0;
     while (!pc->failed && pc->completed_requests < count &&
@@ -1292,6 +1294,7 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t reque
         pc->failed = 1;
     }
 
+    /* Successful batches send CONNECTION_CLOSE so the peer can drain cleanly. */
     if (!pc->failed) {
         ngtcp2_path_storage ps;
         ngtcp2_path_storage_zero(&ps);

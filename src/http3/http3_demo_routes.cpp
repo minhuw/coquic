@@ -153,6 +153,7 @@ std::vector<std::byte> inspect_json_body(const Http3Request &request) {
 
 std::optional<Http3Response> try_demo_route_response(const Http3Request &request,
                                                      const Http3DemoRouteLimits &limits) {
+    // Echo accepts only POST and mirrors the request payload as an octet-stream response.
     if (request.head.path == "/_coquic/echo") {
         if (request.head.method != "POST") {
             return Http3Response{
@@ -176,6 +177,7 @@ std::optional<Http3Response> try_demo_route_response(const Http3Request &request
         };
     }
 
+    // Inspect accepts only POST and serializes request metadata as JSON.
     if (request.head.path == "/_coquic/inspect") {
         if (request.head.method != "POST") {
             return Http3Response{
@@ -201,6 +203,7 @@ std::optional<Http3Response> try_demo_route_response(const Http3Request &request
     }
 
     const auto path = request_path_without_query(request.head.path);
+    // Ping is a zero-body speed-test probe that permits GET and HEAD.
     if (path == "/_coquic/speed/ping") {
         if (request.head.method != "GET" && request.head.method != "HEAD") {
             return Http3Response{
@@ -222,6 +225,7 @@ std::optional<Http3Response> try_demo_route_response(const Http3Request &request
         };
     }
 
+    // Download validates the requested byte count before synthesizing a bounded payload.
     if (path == "/_coquic/speed/download") {
         if (request.head.method != "GET" && request.head.method != "HEAD") {
             return Http3Response{
@@ -260,6 +264,7 @@ std::optional<Http3Response> try_demo_route_response(const Http3Request &request
         };
     }
 
+    // Upload enforces method and body-size limits before returning a JSON byte summary.
     if (path == "/_coquic/speed/upload") {
         if (request.head.method != "POST") {
             return Http3Response{

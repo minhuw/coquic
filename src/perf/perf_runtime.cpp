@@ -109,6 +109,7 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
     QuicPerfConfig config;
     bool saw_direction = false;
 
+    // The first positional argument selects which side of the perf protocol to run.
     const std::string_view role = argv[1];
     if (role == "server") {
         config.role = QuicPerfRole::server;
@@ -121,6 +122,7 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
 
     int index = 2;
     while (index < argc) {
+        // Options below share this helper so missing values report usage consistently.
         const std::string_view arg = argv[index++];
         auto require_value = [&](std::string_view) -> std::optional<std::string_view> {
             if (index >= argc) {
@@ -160,6 +162,7 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
             if (!value.has_value()) {
                 return std::nullopt;
             }
+            // Backend names map to the portable socket path or the Linux io_uring path.
             if (*value == "socket") {
                 config.io_backend = io::QuicIoBackendKind::socket;
             } else if (*value == "io_uring") {
@@ -210,6 +213,7 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
             config.direction = *parsed;
             continue;
         }
+        // Payload, stream, connection, and request counts are parsed as byte-size style numbers.
         if (arg == "--request-bytes") {
             const auto value = require_value(arg);
             if (!value.has_value()) {
@@ -301,6 +305,7 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
             config.total_bytes = parsed;
             continue;
         }
+        // Warmup and duration accept the same duration suffixes used by perf reports.
         if (arg == "--warmup") {
             const auto value = require_value(arg);
             if (!value.has_value()) {
@@ -327,6 +332,7 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
             config.duration = *parsed;
             continue;
         }
+        // TLS identity and peer-name options are carried through to runtime setup unchanged.
         if (arg == "--certificate-chain") {
             const auto value = require_value(arg);
             if (!value.has_value()) {
@@ -364,6 +370,7 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
         return std::nullopt;
     }
 
+    // Final cross-option checks reject combinations that cannot run a valid perf session.
     if (config.mode != QuicPerfMode::bulk && saw_direction) {
         print_usage();
         return std::nullopt;

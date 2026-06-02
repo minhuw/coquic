@@ -5,6 +5,7 @@ import { ChevronDown } from 'lucide-react';
 import { useState } from 'react';
 
 import { CoquicLogoIcon, GitHubIcon, HomepageIcon } from './icons';
+import { SiteSearch } from './site-search';
 import { ThemeToggle } from './theme-toggle';
 
 export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'interop' | 'coverage' | 'qa';
@@ -52,6 +53,7 @@ export function DemoNav({ active }: DemoNavProps) {
       <Link className="top-nav-home" href="/" aria-label="Home" aria-current={active === 'home' ? 'page' : undefined}>
         <CoquicLogoIcon className="size-8" aria-hidden="true" />
       </Link>
+      <SiteSearch />
       <span className="top-nav-links">
         {primaryViews.map((view) => (
           <Link key={view.href} className="nav-link" href={view.href} aria-current={active === view.route ? 'page' : undefined}>
